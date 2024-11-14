@@ -530,7 +530,7 @@ This code implements a modified Newton method for solving a system of non-linear
 The code mostly inspired by sources listed below:
 -  Cantera MultiNewton solver (MultiNewton.cpp )
 - TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
-
+![alt text](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/main/BVP_DATA_FLOW.jpg)
 ```rust
     let eq1 = Expr::parse_expression("_y-z");
         let eq2 = Expr::parse_expression("-z^3");
