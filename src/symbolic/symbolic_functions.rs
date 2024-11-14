@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 /// calculate symbolic jacobian and evaluate it
 /// Example#
 /// ```
+/// use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 ///  let mut Jacobian_instance = Jacobian::new();
 ///       // function of 2 or more arguments
 ///       let vec_of_expressions = vec![ "2*x^3+y".to_string(), "1".to_string()];

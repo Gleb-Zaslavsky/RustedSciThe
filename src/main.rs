@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use std::collections::HashMap;
 pub mod symbolic;
-use crate::symbolic::parse_expr;
+
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 pub mod numerical;
@@ -18,7 +18,7 @@ pub mod somelinalg;
 
 
 fn main() {
-  let example = 3;
+  let example = 18;
    match example {
     
   0 => {
@@ -203,7 +203,7 @@ fn main() {
     7=>{
       //create instance of structure for symbolic equation system and Jacobian
 
-      // define argument andunknown variables
+      // define argument and unknown variables
  
       let y = Expr::Var("y".to_string());
       let z:Expr = Expr::Var("z".to_string());

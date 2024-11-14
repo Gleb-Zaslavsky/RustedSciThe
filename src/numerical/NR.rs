@@ -1,12 +1,13 @@
  ///  Example#1
  /// ```
+ ///  use RustedSciThe::numerical::NR::NR;
  /// //use the shortest way to solve system of equations
  ///    // first define system of equations and initial guess
  ///    let mut NR_instanse = NR::new();
  ///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()]; 
 ///   let initial_guess = vec![1.0, 1.0];
 ///    // solve
-///    NR_instanse.eq_generate_from_str(vec_of_expressions,initial_guess, 1e-6, 100, 1e-6);
+///    NR_instanse.eq_generate_from_str(vec_of_expressions,initial_guess, 1e-6, 100, );
 ///    NR_instanse.solve();
 ///    println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///  ```
@@ -14,7 +15,9 @@
 ///     ```
 ///    // or more verbose way...
 ///    // first define system of equations
-    
+///     use RustedSciThe::numerical::NR::NR;
+///     use RustedSciThe::symbolic::symbolic_engine::Expr;
+///     use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 ///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()]; 
 ///    let mut Jacobian_instance = Jacobian::new();
 ///     Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
@@ -33,7 +36,7 @@
 ///     println!("guess Jacobian = {:?} \n", guess_jacobian.try_inverse());
 ///     // defining NR method instance and solving
 ///     let mut NR_instanse = NR::new();
-///     NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100, 1e-6);
+///     NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100, );
 ///     NR_instanse.solve();
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///     ```

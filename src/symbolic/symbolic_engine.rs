@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]
-use crate::parse_expr::parse_expression_func;
+use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
@@ -584,10 +584,10 @@ impl Expr {
         vars.dedup(); // Remove duplicates
         vars
     } // end of all_arguments_are_variables
-    ///___________________________________________________________________________________________________________________
-    ///                     1D  function processing, like y = f(x)
-    /// _________________________________________________________________________________________________________________
-    /// function to calculate the symbolic expression for a vector of values
+    //___________________________________________________________________________________________________________________
+    //                    1D  function processing, like y = f(x)
+    // _________________________________________________________________________________________________________________
+    // function to calculate the symbolic expression for a vector of values
     pub fn calc_vector_lambdified1D(&self, x: &Vec<f64>) -> Vec<f64> {
         let mut result = Vec::new();
         for xi in x {
@@ -623,11 +623,11 @@ impl Expr {
             (norma_val, false)
         }
     }
-    ///___________________________________________________________________________________________________________________
-    ///                      processing functions of arbitrary dimension, like y = f(x1, x2, x3)
-    /// _________________________________________________________________________________________________________________
-    ///   evaluate the symbolic expression for a vector of vectors of values
-    ///        for example [[x1, x2, x3], [y1, y2, y3]] for y = f(x, y)
+    //___________________________________________________________________________________________________________________
+    //                     processing functions of arbitrary dimension, like y = f(x1, x2, x3)
+    // _________________________________________________________________________________________________________________
+    //   evaluate the symbolic expression for a vector of vectors of values
+    //       for example [[x1, x2, x3], [y1, y2, y3]] for y = f(x, y)
     pub fn evaluate_vector_lambdified(&self, x: &Vec<Vec<f64>>) -> Vec<f64> {
         // Vector passed in the form [[x1, x2, x3], [y1, y2, y3]], and we need for
         // our function f(x, y) to be passed in the form [[x1, y1], [x2, y2], [x3, y3]]

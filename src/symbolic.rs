@@ -1,11 +1,16 @@
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
 /// a module turns a String expression into a symbolic expression
+/// 
 ///# Example
 /// ```
+///  use RustedSciThe::symbolic::symbolic_functions::Jacobian;
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
 /// let parsed_expression = Expr::parse_expression(input);
 ///println!(" parsed_expression {}", parsed_expression);
-/// let parsed_function = parsed_expression.to_rust_function("x");
-/// println!("{}, Rust function: {}  \n",input,  parsed_function);
+/// let parsed_function = parsed_expression.lambdify( vec!["x","y"]);
+/// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0, 2.0]));
 ///  ```
 /// ________________________________________________________________________________________________________________________________
 pub mod parse_expr;
@@ -17,9 +22,9 @@ pub mod parse_expr;
 /// 3) turns a symbolic expression into a string expression for printing and control results
 ///# Example#
 /// ```
-/// pub mod symbolic;
-/// use crate::symbolic::parse_expr;
-/// use crate::symbolic::symbolic_engine::Expr;
+/// 
+/// use RustedSciThe::symbolic::parse_expr;
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
 /// let parsed_expression = Expr::parse_expression(input);
 ///println!(" parsed_expression {}", parsed_expression);
@@ -29,21 +34,21 @@ pub mod parse_expr;
 /// ```
 /// Example2#
 /// ```
-/// pub mod symbolic;
-/// use crate::symbolic::parse_expr;
-/// use crate::symbolic::symbolic_engine::Expr;
+/// 
+/// use RustedSciThe::symbolic::parse_expr;
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
 /// let input = "exp(x)+log(y)";   //log(x)/y-x^2.3 *log(x+y+y^2.6)-exp(x-y)/(x+y) +  (log((x-y)/(x+y)))^2
 ///      // here you've got symbolic expression
 ///   let parsed_expression = Expr::parse_expression(input);
 ///   println!(" parsed_expression {}", parsed_expression);
 ///   // turn symbolic expression to a pretty human-readable string
- //  let parsed_function = parsed_expression.sym_to_str("x");
+ ///  let parsed_function = parsed_expression.sym_to_str("x");
 ///   println!("{}, sym to string: {}  \n",input,  parsed_function);
 ///   // return vec of all arguments
 ///   let  all = parsed_expression.all_arguments_are_variables();
 ///   println!("all arguments are variables {:?}",all);
 ///   let variables = parsed_expression.extract_variables();
- //  println!("variables {:?}",variables);
+ ///  println!("variables {:?}",variables);
 ///    // differentiate with respect to x and y
 ///   let df_dx = parsed_expression.diff("x");
 ///   let df_dy = parsed_expression.diff("y");
@@ -51,11 +56,11 @@ pub mod parse_expr;
 ///  //convert symbolic expression to a Rust function and evaluate the function
 ///  let args = vec!["x","y"];
 ///  let function_of_x_and_y = parsed_expression.lambdify( args );
-///  let f_res = function_of_x_and_y( &[1.0, 2.0] );
+///  let f_res = function_of_x_and_y( (&[1.0, 2.0]).to_vec() );
 ///  println!("f_res = {}", f_res);
 ///  // or you dont want to pass arguments you can use lambdify_wrapped, arguments will be found inside function
 ///  let function_of_x_and_y = parsed_expression.lambdify_wrapped( );
-///  let f_res = function_of_x_and_y( &[1.0, 2.0] );
+///  let f_res = function_of_x_and_y( (&[1.0, 2.0]).to_vec() );
 ///  println!("f_res2 = {}", f_res);
 ///  let start = vec![ 1.0, 1.0];
 ///  let end = vec![ 2.0, 2.0];
@@ -72,6 +77,8 @@ pub mod parse_expr;
 /// ```
 /// Example3#
 /// ```
+/// use  RustedSciThe::symbolic::symbolic_engine::Expr;
+///  use  RustedSciThe::symbolic::symbolic_functions::Jacobian;
 ///    let input = "log(x)"; 
 ///   let f = Expr::parse_expression(input);
 ///   //convert symbolic expression to a Rust function and evaluate the function
@@ -103,6 +110,7 @@ pub mod utils;
 /// calculate symbolic jacobian and evaluate it 
 /// Example#
 /// ```
+///  use  RustedSciThe::symbolic::symbolic_functions::Jacobian;
 ///  let mut Jacobian_instance = Jacobian::new();
 ///       // function of 2 or more arguments 
 ///       let vec_of_expressions = vec![ "2*x^3+y".to_string(), "1".to_string()]; 

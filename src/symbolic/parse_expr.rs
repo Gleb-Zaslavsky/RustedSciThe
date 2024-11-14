@@ -4,14 +4,15 @@ use crate::symbolic::symbolic_engine::Expr;
 /// a module turns a String expression into a symbolic expression
 ///# Example
 /// ```
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
 /// let parsed_expression = Expr::parse_expression(input);
 ///println!(" parsed_expression {}", parsed_expression);
-/// let parsed_function = parsed_expression.to_rust_function("x");
-/// println!("{}, Rust function: {}  \n",input,  parsed_function);
+/// let parsed_function = parsed_expression.lambdify( vec!["x","y"]);
+/// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0,2.0])    );
 ///  
 /// ```
-///                  search recursion diagram
+//                  search recursion diagram
 //                "y^2+exp(x)+log(x)/y-x^2.3"       |  
 //                |       left  | right             |
 //                |_________________________________|

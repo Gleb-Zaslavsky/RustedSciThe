@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.2.3"
+version = "0.2.6"
 edition = "2021"
 description = "RustedSciThe is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic (analytical) derivatives and transform symbolic expressions into regular Rust functions, compute symbolic (analytical) jacobians and use it to solve nonlinear algebraic equations and ODE with IVP solvers: BDF (Backward Differentiation Formula), backward Euler and BVP with Newton-Raphson"
 author = "Gleb Zasllavsky"
@@ -29,3 +29,4 @@ rayon="1.10.0"
 regex = "1.11.1"
 strum = "0.26"
 strum_macros = "0.26"
+
