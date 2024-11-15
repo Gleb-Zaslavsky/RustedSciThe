@@ -5,7 +5,7 @@ extern crate nalgebra as na;
 use na::{DMatrix, DVector};
 use crate::numerical::BDF::common::NumberOrVec;
 use crate::numerical::NonStiff_api::{RK45, DormandPrince}; 
-use crate::numerical::plots::plots;
+use crate::Utils::plots::plots;
 use std::env;
 use std::path::Path;
 use crate::numerical::BE::BE;

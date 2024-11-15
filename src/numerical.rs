@@ -227,8 +227,6 @@ pub mod NonStiff_api;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
-/// tiny module to plot result of IVP computation
-pub mod plots;
 
 
 pub mod BVP_sci;
@@ -265,7 +263,7 @@ pub mod Examples_and_utils;
 ///        let arg = "x".to_string();
 ///        let tolerance = 1e-5;
 ///        let max_iterations = 1500;
-///        let max_error = 0.0;
+///       
 ///        let t0 = 0.0;
 ///        let t_end = 1.0;
 ///        let n_steps = 100; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -305,7 +303,7 @@ pub mod Examples_and_utils;
 ///             initial_guess, 
 ///             values, 
 ///             arg,
-///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations, max_error);
+///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations);
 
 ///        println!("solving system");
 ///        #[allow(unused_variables)]
@@ -338,7 +336,6 @@ The code mostly inspired by sources listed below:
 ///        let arg = "x".to_string();
 ///        let tolerance = 1e-5;
 ///        let max_iterations = 20;
-///        let max_error = 1e-6;
 ///        let t0 = 0.0;
 ///        let t_end = 1.0;
 ///        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -362,7 +359,7 @@ The code mostly inspired by sources listed below:
 ///             initial_guess, 
 ///             values, 
 ///             arg,
-///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
 ///        println!("solving system");
 ///        #[allow(unused_variables)]
@@ -370,5 +367,68 @@ The code mostly inspired by sources listed below:
 ///       // println!("result = {:?}", solution);
 ///        nr.plot_result();
 ///    ```
+
+/// Example#5
+/// ```
+///  use nalgebra::DMatrix;
+///  use nalgebra::DVector;
+///      use std::collections::HashMap;
+/// use RustedSciThe::numerical::BVP_Damp::BVP_api::BVP;
+///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
+///     let eq1 = Expr::parse_expression("y-z");
+///  let eq2 = Expr::parse_expression("-z^3");
+/// let eq_system = vec![eq1, eq2];
 /// 
+/// 
+/// let values = vec!["z".to_string(), "y".to_string()];
+/// let arg = "x".to_string();
+/// let tolerance = 1e-5;
+/// let max_iterations = 20;
+/// 
+/// let t0 = 0.0;
+/// let t_end = 1.0;
+/// let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
+///  let strategy =   "Damped".to_string();//
+/// 
+/// let  strategy_params =
+/// match strategy.as_str() {
+///     "Naive" => None,
+///     "Damped"=> Some(HashMap::from([("max_jac".to_string(), 
+///     None,    ), ("maxDampIter".to_string(), 
+ ///    None,    ), ("DampFacor".to_string(), 
+///     None,    )
+/// 
+///    ])),
+///    "Frozen" => Some(HashMap::from([("every_m".to_string(), 
+ ///   Some(Vec::from( [ 5 as f64]  ))
+///    )])),
+///     &_=>panic!("Invalid strategy!")
+/// 
+/// 
+/// };
+
+
+/// let method =   "Sparse".to_string();// or  "Dense"
+/// let linear_sys_method = None;
+/// let ones = vec![0.0; values.len()*n_steps];
+/// let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+/// let mut BorderConditions = HashMap::new();
+/// BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+/// BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+/// let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
+/// let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
+/// assert_eq!(&eq_system.len(), &2);
+/// let mut nr =  BVP::new(eq_system,
+///      initial_guess, 
+///      values, 
+///      arg,
+///      BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
+///        max_iterations,  Some(rel_tolerance),Some(Bounds));
+/// 
+/// println!("solving system");
+/// nr.solve();
+/// nr.plot_result();
+/// nr.save_to_file();
+///    ```
+
 pub mod BVP_Damp;

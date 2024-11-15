@@ -1,6 +1,7 @@
 
 #[cfg(test)]
 mod tests {
+    
     use crate::numerical::Examples_and_utils::NonlinEquation;
     use std::collections::HashMap;
     use crate::symbolic::symbolic_engine::Expr;
@@ -20,7 +21,7 @@ mod tests {
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 20;
-        let max_error = 1e-6;
+
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -46,7 +47,7 @@ mod tests {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");  
         nr.solve();
@@ -66,6 +67,7 @@ mod tests {
 /// norm is below a specified tolerance to ensure the accuracy of the solution.
     #[test]
     fn test_BVP_Damp2() {
+       
        // let ne=  (NonlinEquation::  Clairaut  ); //  Clairaut  LaneEmden5  ParachuteEquation
         for ne in NonlinEquation::iter()
         {
@@ -74,7 +76,6 @@ mod tests {
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 20;
-        let max_error = 1e-6;
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 200; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -98,7 +99,7 @@ mod tests {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         nr.solve();

@@ -5,6 +5,8 @@ use crate::numerical::BVP_Damp::BVP_traits::{
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
+use simplelog::*;
+use std::fs::File;
 // This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
 /*
 pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
@@ -42,7 +44,7 @@ pub fn jac_recalc(
         };
     // when jac is None it means this is first iteration
     if old_jac.is_none() || m > m_from_task {
-        println!(
+        log::info!(
             "\n number of iterations with old jac {} is higher then threshold {}",
             m, m_from_task
         );

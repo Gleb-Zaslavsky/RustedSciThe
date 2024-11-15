@@ -5,7 +5,7 @@ use crate::numerical::BDF::BDF_solver::BDF;
 extern crate nalgebra as na;
 use na::{DMatrix, DVector, };
 use crate::numerical::BDF::common::NumberOrVec; 
-use crate::numerical::plots::plots;
+use crate::Utils::plots::plots;
 
 use std::time::Instant;
 use csv::Writer;

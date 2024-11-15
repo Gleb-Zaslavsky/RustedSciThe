@@ -5,7 +5,7 @@ use core::fmt::Display;
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 use crate::numerical::NR_for_Euler::NRE;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::numerical::plots::plots;
+use crate::Utils::plots::plots;
 use nalgebra::{DMatrix, DVector, };
 //use ndarray_linalg::Norm;
 use std::time::Instant;

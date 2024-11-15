@@ -14,11 +14,12 @@ use nalgebra::{DMatrix, DVector, };
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::Examples_and_utils::NonlinEquation;
+use crate::numerical::BVP_Damp::BVP_api::BVP;
 pub mod somelinalg;
-
+pub mod Utils;
 
 fn main() {
-  let example = 18;
+  let example = 19;
    match example {
     
   0 => {
@@ -534,7 +535,7 @@ fn main() {
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 50;
-        let max_error = 0.0;
+      
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 200;
@@ -552,7 +553,7 @@ fn main() {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations, max_error);
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations);
 
         println!("solving system");
         #[allow(unused_variables)]
@@ -581,7 +582,7 @@ fn main() {
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 1500;
-        let max_error = 0.0;
+     
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 100; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -621,7 +622,7 @@ fn main() {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations, max_error);
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations);
 
         println!("solving system");
         #[allow(unused_variables)]
@@ -641,7 +642,7 @@ fn main() {
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 20;
-        let max_error = 1e-6;
+   
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
@@ -667,7 +668,7 @@ fn main() {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         #[allow(unused_variables)]
@@ -713,7 +714,7 @@ exact solution:
 y(x)=exp(-x^2/a)
 .
 */
-        let ne=  NonlinEquation:: TwoPointBVP; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
+        let ne=  NonlinEquation::   TwoPointBVP ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
         
         let eq_system =  ne.setup();
     
@@ -722,7 +723,6 @@ y(x)=exp(-x^2/a)
         let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 200;
-        let max_error = 1e-6;
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 100; // 
@@ -746,7 +746,7 @@ y(x)=exp(-x^2/a)
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         nr.solve();
@@ -769,9 +769,70 @@ y(x)=exp(-x^2/a)
       let relativ_residual = max_residual.abs()/y_exact[position];
        println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
        println!("norm = {}", norm);
+      nr.save_to_file()
+
+       //BVP is general api for all variants of BVP solvers
+
+  }
+  19=>{
+
+    let eq1 = Expr::parse_expression("y-z");
+        let eq2 = Expr::parse_expression("-z^3");
+        let eq_system = vec![eq1, eq2];
+    
+
+        let values = vec!["z".to_string(), "y".to_string()];
+        let arg = "x".to_string();
+        let tolerance = 1e-5;
+        let max_iterations = 20;
+   
+        let t0 = 0.0;
+        let t_end = 1.0;
+        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
+        let strategy =   "Damped".to_string();//
+
+        let  strategy_params =
+        match strategy.as_str() {
+            "Naive" => None,
+            "Damped"=> Some(HashMap::from([("max_jac".to_string(), 
+            None,    ), ("maxDampIter".to_string(), 
+            None,    ), ("DampFacor".to_string(), 
+            None,    )
+        
+           ])),
+           "Frozen" => Some(HashMap::from([("every_m".to_string(), 
+           Some(Vec::from( [ 5 as f64]  ))
+           )])),
+            &_=>panic!("Invalid strategy!")
 
 
+        };
+      
+    
+        let method =   "Sparse".to_string();// or  "Dense"
+        let linear_sys_method = None;
+        let ones = vec![0.0; values.len()*n_steps];
+        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+        let mut BorderConditions = HashMap::new();
+        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
+        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
+        assert_eq!(&eq_system.len(), &2);
+        let mut nr =  BVP::new(eq_system,
+             initial_guess, 
+             values, 
+             arg,
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
+               max_iterations,  Some(rel_tolerance),Some(Bounds));
+
+        println!("solving system");
+        #[allow(unused_variables)]
+       nr.solve();
+       // println!("result = {:?}", solution);
        
+        nr.plot_result();
+        nr.save_to_file();
 
   }
   /*

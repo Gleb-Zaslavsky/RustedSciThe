@@ -1,5 +1,5 @@
 use crate:: symbolic::symbolic_engine::Expr;
-use crate::numerical::plots::plots;
+use crate::Utils::plots::plots;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use strum_macros::EnumIter;
