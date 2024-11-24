@@ -104,9 +104,10 @@ impl BVP {
         else {panic!("Invalid structure!");}
         
      }
-     pub fn save_to_file(&mut self){
+     pub fn save_to_file(&mut self, filename:Option<String>) {
+
         if let Some(structure) = &mut self.structure {   structure.save_to_file(); }
-        if let Some(structure_damp) = &mut self.structure_damp { structure_damp.save_to_file(); }
+        if let Some(structure_damp) = &mut self.structure_damp { structure_damp.save_to_file(filename); }
      }
     
 }

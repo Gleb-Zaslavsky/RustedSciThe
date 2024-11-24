@@ -414,7 +414,7 @@ impl NRBVP {
        log::info!("Program ended");
         res
         }
-        Err(err) => {
+        Err(_) => {
             let res = self.solver();
             res
         }
@@ -480,7 +480,7 @@ mod tests {
         let arg = "x".to_string();
         let tolerance = 1e-2;
         let max_iterations = 100;
-        let max_error = 0.0;
+  
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 100;

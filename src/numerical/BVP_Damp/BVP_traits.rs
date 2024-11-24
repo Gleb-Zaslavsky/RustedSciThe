@@ -32,6 +32,7 @@ pub trait VectorType: Any {
     fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_>;
     fn get_val(&self, index: usize) -> f64;
     fn mul_float(&self, float: f64) -> Box<dyn VectorType>;
+    fn len(&self) -> usize;
 }
 
 impl Sub for &dyn VectorType {
@@ -148,6 +149,14 @@ impl VectorType for YEnum {
             YEnum::Sparse_3(vec) => Box::new(vec * float),
         }
     }
+    fn len(&self) -> usize {
+        match self {
+            YEnum::Dense(vec) => vec.len(),
+            YEnum::Sparse_1(vec) => vec.len(),
+            YEnum::Sparse_2(vec) => vec.len(),
+            YEnum::Sparse_3(vec) => vec.len(),
+        }
+    }
 }
 impl VectorType for DVector<f64> {
     fn as_any(&self) -> &dyn Any {
@@ -177,6 +186,9 @@ impl VectorType for DVector<f64> {
     }
     fn mul_float(&self, float: f64) -> Box<dyn VectorType> {
         Box::new(self * float)
+    }
+    fn len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -211,6 +223,9 @@ impl VectorType for CsVec<f64> {
     fn mul_float(&self, float: f64) -> Box<dyn VectorType> {
         Box::new(self.map(|x| x * (float)))
     }
+    fn len(&self) -> usize {
+        self.dim()
+    }
 }
 
 impl VectorType for faer_col {
@@ -244,6 +259,9 @@ impl VectorType for faer_col {
     }
     fn mul_float(&self, float: f64) -> Box<dyn VectorType> {
         Box::new(self * float)
+    }
+    fn len(&self) -> usize {
+        self.nrows()
     }
 }
 pub trait Fun {
@@ -351,6 +369,7 @@ pub trait MatrixType: Any {
         max_iter: usize,
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType>;
+    fn shape(&self) -> (usize, usize);
 }
 /*
 impl Clone for dyn MatrixType {
@@ -404,6 +423,10 @@ impl MatrixType for DMatrix<f64> {
             panic!("Type mismatch: expected DVector")
         }
     }
+
+    fn shape(&self) -> (usize, usize) {
+        self.shape()
+    }
 }
 
 impl MatrixType for CsMat<f64> {
@@ -447,6 +470,9 @@ impl MatrixType for CsMat<f64> {
             panic!("Type mismatch: expected DVector")
         }
     }
+    fn shape(&self) -> (usize, usize) {
+        self.shape()
+    }
 }
 
 impl MatrixType for CsMatrix<f64> {
@@ -476,6 +502,9 @@ impl MatrixType for CsMatrix<f64> {
     ) -> Box<dyn VectorType> {
         panic!("method not written yet")
     }
+    fn shape(&self) -> (usize, usize) {
+        self.shape()
+    }
 }
 impl MatrixType for faer_mat {
     fn as_any(&self) -> &dyn Any {
@@ -504,6 +533,7 @@ impl MatrixType for faer_mat {
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<faer_mat>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
+                assert_eq!(mat_.ncols(), d_vec.nrows(), " matrix {} and  vector {} have different sizes", mat_.ncols(), d_vec.nrows(),);
                 let d_vec: Mat<f64> =
                     from_column_major_slice::<f64>(d_vec.as_slice(), mat_.ncols(), 1).to_owned();
                 //let LU0 = lu_in_place( mat_);
@@ -543,6 +573,9 @@ impl MatrixType for faer_mat {
             panic!("Type mismatch: expected faer_mat")
         }
     } //solve_sys
+    fn shape(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
 } //impl
 
 impl Debug for dyn MatrixType {

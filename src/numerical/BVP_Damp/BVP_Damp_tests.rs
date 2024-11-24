@@ -29,6 +29,7 @@ mod tests {
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
        None,    ), ("DampFacor".to_string(), 
+       None,    )   , ("adaptive".to_string(), 
        None,    )
    
       ]));
@@ -83,6 +84,7 @@ mod tests {
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
        None,    ), ("DampFacor".to_string(), 
+       None,    )   , ("adaptive".to_string(), 
        None,    )
    
       ]));

@@ -7,7 +7,7 @@ use nalgebra::DMatrix;
 use std::collections::HashMap;
 use simplelog::*;
 use std::fs::File;
-// This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
+
 /*
 pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
     let mut fbound = 1.0;
@@ -88,7 +88,7 @@ pub fn if_initial_guess_inside_bounds(
         }
     }
 }
-
+// This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
 pub fn bound_step(y: &dyn VectorType, step: &dyn VectorType, bounds: &Vec<(f64, f64)>) -> f64 {
     // Initialize no damping
     let mut fbound = 1.0;
@@ -151,3 +151,11 @@ pub fn interchange_columns(
     };
     reordered_result
 }
+/*
+To avoid this difficulty, the solution of the problem is  carried out in E-steps.  The problem is first solved (via the above iterative process) for 
+a modest value of E (e.g.,  E  =  1e-1 or 1e-2), and then,  in turn,  for  values of  e smaller  than the preceding  value  of  E  by a 
+factor of about 3.  The mesh  point set used at the completion of  the preceding step forms the initial set for the new step
+ ON  A  DIFFERENTIAL  EQUATION  OF  BOUNDARY  LAYER  TYPE 
+By CARL  E.  PEARSON,
+p. 138 
+*/

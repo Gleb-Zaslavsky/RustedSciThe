@@ -1,16 +1,17 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
 use std::collections::HashMap;
 use std::time::Duration;
+use simplelog::*;
 pub fn elapsed_time(elapsed: Duration) {
     let time = elapsed.as_millis();
     if time < 1000 {
-        println!("Elapsed {} ms", time)
+        log::info!("\n \n Elapsed {} ms", time)
     } else if time >= 1000 && time < 60_000 {
-        println!("Elapsed {} s", elapsed.as_secs())
+        log::info!("\n \n Elapsed {} s", elapsed.as_secs())
     } else if time >= 60_000 && time < 3600_000 {
-        println!("Elapsed {} min", elapsed.as_secs() / 60)
+        log::info!("\n \n Elapsed {} min", elapsed.as_secs() / 60)
     } else {
-        println!("Elapsed {} h", elapsed.as_secs() / 3600)
+        log::info!("\n \n Elapsed {} h", elapsed.as_secs() / 3600)
     }
 }
 // FROZEN JACOBIAN TASK PARAMETERS CHECK

@@ -343,7 +343,8 @@ The code mostly inspired by sources listed below:
 ///        let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
 ///       None,    ), ("maxDampIter".to_string(), 
 ///       None,    ), ("DampFacor".to_string(), 
-///       None,    )
+///       None,    )    , ("adaptive".to_string(), 
+ ///           None,    )
 ///      ])); 
 ///        let method =   "Sparse".to_string();// or  "Dense"
 ///        let linear_sys_method = None;
@@ -396,7 +397,8 @@ The code mostly inspired by sources listed below:
 ///     "Damped"=> Some(HashMap::from([("max_jac".to_string(), 
 ///     None,    ), ("maxDampIter".to_string(), 
  ///    None,    ), ("DampFacor".to_string(), 
-///     None,    )
+///     None,    )   , ("adaptive".to_string(), 
+ ///           None,    )
 /// 
 ///    ])),
 ///    "Frozen" => Some(HashMap::from([("every_m".to_string(), 
@@ -428,7 +430,7 @@ The code mostly inspired by sources listed below:
 /// println!("solving system");
 /// nr.solve();
 /// nr.plot_result();
-/// nr.save_to_file();
+/// nr.save_to_file(None);
 ///    ```
 
 pub mod BVP_Damp;

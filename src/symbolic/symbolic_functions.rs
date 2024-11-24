@@ -934,7 +934,8 @@ impl Jacobian {
                 mesh.unwrap(),
             )
         };
-
+        log::info!("creating discretization equations with n_steps = {}, H = {:?} ({}), T_list = {:?} ({})", n_steps, H, H.len(),T_list, T_list.len());
+   
         let mut discreditized_system: Vec<Vec<Expr>> = Vec::new();
         // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
         let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());

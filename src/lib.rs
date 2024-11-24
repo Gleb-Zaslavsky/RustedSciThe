@@ -3,3 +3,4 @@
 pub mod symbolic;
 pub mod numerical;
 pub mod somelinalg;
+pub mod Utils;

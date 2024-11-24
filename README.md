@@ -530,49 +530,98 @@ This code implements a modified Newton method for solving a system of non-linear
 The code mostly inspired by sources listed below:
 -  Cantera MultiNewton solver (MultiNewton.cpp )
 - TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
+A pair of words how to solve BVP problems with the "Damped" feature flag. 
+This algorithm is often used to solve large nonlinear problems.
+Let us briefly discuss the "strategy_params" HashMap that defines the solver parameters.
+- "max_jac"  key:  maximum iterations with old Jacobian, None value means the default number is taken-3;
+- "maxDampIter" key:  maximum number of damped steps, None value means the default value of 5 is used;
+- "DampFacor" key: factor to decrease the damping coefficient, None value means the default value of 0.5 is used;
+- "adaptive" key: None means no grid refinement is used, if Some - grid refinement is enabled. The first parameter of value vec means what criteria to choose is refinement needed or not in the current iteration, second parameter means maximum number of refinments allowed 
+Next key-value is optoional and define the name of specific grid refinement algorithm and its parameters;
+  we recommend to use one of the following algorithms:
+   - key: "pearson", value: a f64 value less than 1, typically from 0.1 to 0.5;
+   - key "grcar_smooke" value: a pair of f64 values less than 1, typically first less than second;
+if the problem is large and highly nonlinear the best choise is to use the adaptive grid.
+"We have found that starting the itration on a coarse mesh has several important advntages. One is that the Newton iteration is more likely to 
+converge on a coarse mesh than on a fine mesh. Moreover, the number of variables is small on a coarse mesh and thus the cost per iteration is 
+relatively small. Since the iteration begins from a user-specfied “guess” at the solution, it is likly that many iterations will be required. 
+Ultimately, of course, to be accurate, the solution must be obtained on a fine mesh. However, as the solution is computed on each successively finer 
+mesh, the starting estimates are better, since they come from the converged solution on the previous coarse mesh. In general, the solution on one
+mesh lies within the domain of convergence of Newton’s method on the next finer mesh.Thus, even though the  cost per iteration is increasing, the 
+number of required iterations is decreasing. The adaptve placement of the mesh points to form the finer meshes is done in such a 
+way that the total number of mesh points needed to represent the solution accurately is minimized" Chemkin Theory Manual p.263 
+So if you choose to use adaptive grid, you should start with the low quantiy of steps (n_steps parameter), grid refinement algorithm will choose 
+the sufficient number of points.
+
 ![alt text](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/BVP_DATA_FLOW.jpg)
 ```rust
-    let eq1 = Expr::parse_expression("_y-z");
+     let eq1 = Expr::parse_expression("y-z");
         let eq2 = Expr::parse_expression("-z^3");
-        let eq_system = _vec![eq1, eq2];
+        let eq_system = vec![eq1, eq2];
     
 
-        let _values = _vec!["z".to_string(), "_y".to_string()];
-        let arg = "_x".to_string();
+        let values = vec!["z".to_string(), "y".to_string()];
+        let arg = "x".to_string();
         let tolerance = 1e-5;
         let max_iterations = 20;
-        let max_error = 1e-6;
+   
         let t0 = 0.0;
         let t_end = 1.0;
-        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
+        let n_steps = 10; //
         let strategy =   "Damped".to_string();//
-        let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
-       None,    ), ("maxDampIter".to_string(), 
-       None,    ), ("DampFacor".to_string(), 
-       None,    )
-   
-      ]));
+
+        let  strategy_params =
+        match strategy.as_str() {
+            "Naive" => None,
+            "Damped"=> Some(HashMap::from([("max_jac".to_string(),  // maximum iterations with old Jacobian, None means the default number is taken-3
+            None,    ), ("maxDampIter".to_string(), // maximum number of damped steps, None means the default value of 5 is used
+            None,    ), ("DampFacor".to_string(), // factor to decrease the damping coefficient, None means the default value of 0.5 is used
+            None,    )
+            , ("adaptive".to_string(), // adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
+            // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means 
+            // maximum number of refinments allowed 
+         Some(vec![1.0, 5.0])
+          // or  None
+              ),
+              // the name of grid refinement strategy, this key-value pair will be used only if "adaptive" is Some, in opposite case this pair
+              // will be ignored: vector of parametrs is used inside the grid refinement algorithm
+             ("pearson".to_string(), Some(vec![0.2] ) ) // or        ("grcar_smooke".to_string(), Some(vec![0.2, 0.5] ) )
+           ])),
+
+           "Frozen" => Some(HashMap::from([("every_m".to_string(), 
+           Some(Vec::from( [ 5 as f64]  ))
+           )])),
+            &_=>panic!("Invalid strategy!")
+
+
+        };
+      
     
         let method =   "Sparse".to_string();// or  "Dense"
-        let _linear_sys_method = None;
-        let ones = _vec![0.0; _values.len()*n_steps];
-        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(_values.len(), n_steps, DVector::from_vec(ones).as_slice());
+        let linear_sys_method = None;
+        let ones = vec![0.0; values.len()*n_steps];
+        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
         let mut BorderConditions = HashMap::new();
-        BorderConditions.insert("z".to_string(), (0 as usize, 1.0 as f64));
-        BorderConditions.insert("_y".to_string(), (1 as usize, 1.0 as f64));
-        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("_y".to_string(), (-7.0, 7.0),    ) ]);
-        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("_y".to_string(), 1e-4,    ) ]);
-        assert!(&eq_system.len() == &2);
-        let mut nr =  NRBDVPd::new(eq_system,
+        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
+        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
+        assert_eq!(&eq_system.len(), &2);
+        let mut nr =  BVP::new(eq_system,
              initial_guess, 
-             _values, 
+             values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, _linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations, max_error, Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
+               max_iterations,  Some(rel_tolerance),Some(Bounds));
 
         println!("solving system");
-        let solution = nr.solve().unwrap();
+        #[allow(unused_variables)]
+       nr.solve();
        // println!("result = {:?}", solution);
+       
         nr.plot_result();
+        nr.save_to_file(None);
+
 ```
 
 

@@ -650,6 +650,7 @@ fn main() {
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
        None,    ), ("DampFacor".to_string(), 
+       None,    )   , ("adaptive".to_string(), 
        None,    )
    
       ]));
@@ -730,6 +731,7 @@ y(x)=exp(-x^2/a)
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
        None,    ), ("DampFacor".to_string(), 
+       None,    )   , ("adaptive".to_string(), 
        None,    )
    
       ]));
@@ -769,7 +771,7 @@ y(x)=exp(-x^2/a)
       let relativ_residual = max_residual.abs()/y_exact[position];
        println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
        println!("norm = {}", norm);
-      nr.save_to_file()
+      nr.save_to_file(None)
 
        //BVP is general api for all variants of BVP solvers
 
@@ -788,7 +790,7 @@ y(x)=exp(-x^2/a)
    
         let t0 = 0.0;
         let t_end = 1.0;
-        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
+        let n_steps = 10; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
         let strategy =   "Damped".to_string();//
 
         let  strategy_params =
@@ -798,7 +800,12 @@ y(x)=exp(-x^2/a)
             None,    ), ("maxDampIter".to_string(), 
             None,    ), ("DampFacor".to_string(), 
             None,    )
-        
+            , ("adaptive".to_string(), 
+         Some(vec![1.0, 5.0])
+          //  None
+              ),
+     //  ("pearson".to_string(), Some(vec![0.2] ) )
+         ("grcar_smooke".to_string(), Some(vec![0.2, 0.5] ) )
            ])),
            "Frozen" => Some(HashMap::from([("every_m".to_string(), 
            Some(Vec::from( [ 5 as f64]  ))
@@ -832,7 +839,7 @@ y(x)=exp(-x^2/a)
        // println!("result = {:?}", solution);
        
         nr.plot_result();
-        nr.save_to_file();
+        nr.save_to_file(None);
 
   }
   /*

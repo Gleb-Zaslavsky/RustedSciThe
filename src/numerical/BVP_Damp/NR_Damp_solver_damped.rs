@@ -1,6 +1,5 @@
 /*
 Modified Newton method or Damped Newton method for solving a system of nonlinear equations.
-
 This code implements a modified Newton method for solving a system of non-linear boundary value problems..
 The code mostly inspired by sources listed below:
 -  Cantera MultiNewton solver (MultiNewton.cpp )
@@ -10,6 +9,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use chrono:: Local;
 use nalgebra::{DMatrix, DVector, };
+
 use std::collections::HashMap;
 use std::time::Instant;
 use simplelog::*;
@@ -19,6 +19,8 @@ use crate::Utils::logger::save_matrix_to_file;
 use crate::numerical::BVP_Damp::BVP_traits::{Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting};
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::numerical::BVP_Damp::BVP_utils_damped::{bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns, jac_recalc};
+
+use crate::numerical::BVP_Damp::grid_api::{GridRefinementMethod, new_grid};
 use faer::col::Col;
 use faer::sparse::SparseColMat;
 use nalgebra::sparse::CsMatrix;
@@ -60,6 +62,10 @@ pub struct NRBVP
     bounds_vec:Vec<(f64, f64)>,//vector of bounds for each of the unkown variables (discretized vector)
     rel_tolerance_vec:Vec<f64>,// vector of relative tolerance for each of the unkown variables
     variable_string: Vec<String>,// vector of indexed variable names
+    adaptive: bool,// flag indicating if adaptive grid should be used
+    new_grid_enabled:bool,//flag indicating if the grid should be refined
+    grid_refinemens:usize,//
+    number_of_refined_intervals:usize,//number of refined intervals
 }
 
 impl  NRBVP
@@ -92,6 +98,10 @@ impl  NRBVP
        let h = (t_end - t0)/(n_steps - 1) as f64;
        let T_list:Vec<f64> =  (0..n_steps).map(|i| t0 + (i as f64)*h).collect::<Vec<_>>();
        // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
+        let  new_grid_enabled_:bool
+        = if strategy_params.clone().unwrap().get("adaptive").is_some() {
+            log::info!("problem with adaptive grid");
+            true} else {false};
        NRBVP{
             eq_system,
             initial_guess: initial_guess.clone(),
@@ -124,12 +134,17 @@ impl  NRBVP
             bounds_vec: Vec::new(),
             rel_tolerance_vec: Vec::new(),
             variable_string: Vec::new(),
+            adaptive:false,
+            new_grid_enabled: new_grid_enabled_,
+            grid_refinemens: 0,
+            number_of_refined_intervals: 0,
         }
     }
     /// Basic methods to set the equation system
 
     // check if user specified task is correct
     pub fn task_check(&self) {
+        assert_eq!(self.initial_guess.len() ,self.n_steps*self.values.len(), "lenght of initial guess should be equal to n_steps*values");
         assert!(self.t_end>self.t0, "t_end must be greater than t0");
         assert!( self.n_steps>1 ,"n_steps must be greater than 1");
         assert!( self.max_iterations>1, "max_iterations must be greater than 1");
@@ -148,25 +163,43 @@ impl  NRBVP
         // check if initial guess values are inside bunds defined for certain values
         if_initial_guess_inside_bounds(&self.initial_guess, &self.Bounds, self.values.clone()) ;
         assert!(!self.rel_tolerance.is_none(), "rel_tolerance must be specified for each value");
-        let required_keys = vec!["max_jac", "maxDampIter", "DampFacor"];
+        let required_keys = vec!["max_jac", "maxDampIter", "DampFacor", "adaptive"];
         for key in required_keys {
             assert!(self.strategy_params.as_ref().unwrap().contains_key(key), "Key '{}' must be present in strategy_params", key);
         }
+        if self.strategy_params.as_ref().unwrap().get("adaptive").unwrap().is_some() {
+               // Check that exactly one of the required keys is present
+            let strategy_keys = vec!["easy".to_string(), "pearson".to_string(), "grcar_smooke".to_string()];
+            let present_keys: Vec<_> = strategy_keys.iter()
+            .filter(|&key| self.strategy_params.as_ref().unwrap().contains_key(key))
+            .collect();
+            assert_eq!(
+                present_keys.len(), 
+                1, 
+                "Exactly one of {:?} must be present in strategy_params when 'adaptive' is Some, found: {:?}", 
+                strategy_keys, 
+                present_keys
+                );
+            let vec_of_params_len = self.strategy_params.as_ref().unwrap().get("adaptive").unwrap().clone().unwrap().len();
+            assert_eq!(vec_of_params_len, 2, "vector of 2 elements must be present in  strategy_params when 'adaptive' is Some");
+        };
     }
         ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self,   mesh_:Option<Vec<f64>>  ) {
+   
         self.task_check();
        // strategy_check(&self.strategy, &self.strategy_params);
         let mut jacobian_instance = Jacobian::new();
-     // mesh of t's can be defined directly or by size of step -h, and number of steps
+     // mesh of t's can be defined directly or by size of step -h, and number of points
         let (h,n_steps, mesh) =if mesh_.is_none() {// case of mesh not defined directly
             let h  = Some( (self.t_end - self.t0)/self.n_steps as f64 ) ; 
             let n_steps = Some(self.n_steps);
             (h, n_steps, None)
         } else { // case of mesh defined directly 
+            self.x_mesh = DVector::from_vec(mesh_.clone().unwrap()); 
             (None, None, mesh_)
         };
-        
+
         match self.method.as_str() { 
          "Dense" =>  {
                     jacobian_instance.generate_BVP(
@@ -346,6 +379,9 @@ impl  NRBVP
         let fun = &self.fun;
         let F_k = fun.call(p, y);
         let J_k = self.old_jac.as_ref().unwrap().clone_box();
+        assert_eq!(F_k.len(), J_k.shape().0, "length of F_k {} and number of rows in J_k {} must be equal", F_k.len(), J_k.shape().0 );
+        let residual_norm = F_k.norm();
+        log::info!("\n \n residual norm = {:?} ", residual_norm);
        // jac_rowwise_printing(&J_k);
    //    println!(" \n \n F_k = {:?} \n \n", F_k.to_DVectorType());
         for el in F_k.iterate(){if el.is_nan(){log::error!("\n \n NaN in undamped step residual function \n \n"); panic!()  }}
@@ -371,7 +407,7 @@ impl  NRBVP
         if fbound.is_nan() {log::error!("\n \n fbound is NaN \n \n");    panic!()}
         if fbound.is_infinite() {log::error!("\n \n fbound is infinite \n \n"); panic!()}
         // let fbound =1.0;
-        log::info!("fboundary  = {}", fbound);
+        log::info!("\n \n fboundary  = {}", fbound);
         let mut lambda = 1.0*fbound;
         // if fbound is very small, then x0 is already close to the boundary and
         // step0 points out of the allowed domain. In this case, the Newton
@@ -399,7 +435,8 @@ impl  NRBVP
         // 
         for mut k in 0..maxDampIter
         {
-  
+        if k>1 {log::info!("\n \n damped_step number {} ", k);}   
+        log::info!("\n \n Damping coefficient = {}", lambda);
         let damped_step_k = undamped_step_k.mul_float(lambda);
         let S_k = & damped_step_k.norm();
 
@@ -410,6 +447,7 @@ impl  NRBVP
         let undamped_step_k_plus_1 = self.step(p, &*y_k_plus_1); //???????????????
         let error = &undamped_step_k_plus_1.norm();
         self.error_old = *error;
+        log::info!("\n \n L2 norm of undamped step = {}", error);
         let convergence_cond_for_step =convergence_condition(&*undamped_step_k_plus_1, &self.abs_tolerance, &self.rel_tolerance_vec);
         let S_k_plus_1_temp = & undamped_step_k_plus_1.norm();
         // If the norm of S_k_plus_1 is less than the norm of S_k, then accept this
@@ -439,22 +477,22 @@ impl  NRBVP
         
         if k_<maxDampIter { // if there is a damping coefficient found (so max damp steps not exceeded)
             if S_k_plus_1.unwrap() > conv { //found damping coefficient but not converged yet
-                    log::info!("\n  Damping coefficient found (solution has not converged yet)");
-                    log::info!("\n  step norm =  {}, weight norm = {}, convergence condition = {}", self.error_old, S_k_plus_1.unwrap(), conv);
+                    log::info!("\n \n  Damping coefficient found (solution has not converged yet)");
+                    log::info!("\n \n  step norm =  {}, weight norm = {}, convergence condition = {}", self.error_old, S_k_plus_1.unwrap(), conv);
                 (0,damped_step_result )
             } else {
-                log::info!("\n  Damping coefficient found (solution has converged)");
-                log::info!("\n  step norm =  {}, weight norm = {}, convergence condition = {}", self.error_old, S_k_plus_1.unwrap(), conv);
+                log::info!("\n \n  Damping coefficient found (solution has converged)");
+                log::info!("\n \n step norm =  {}, weight norm = {}, convergence condition = {}", self.error_old, S_k_plus_1.unwrap(), conv);
                 (1, damped_step_result )
             }
         } else {   //  if we have reached max damping iterations without finding a damping coefficient we must reject the step 
-                log::warn!("\n  No damping coefficient found (max damping iterations reached)");
+                log::warn!("\n \n  No damping coefficient found (max damping iterations reached)");
             (-2, None)
         }
 
     }// end of damped step
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
-        log::info!("solving system of equations with Newton-Raphson method! \n \n");
+        log::info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         let  y: DMatrix<f64> = self.initial_guess.clone();
         let y: Vec<f64>  =y.iter().cloned().collect();
         let  y:DVector<f64> = DVector::from_vec(y);
@@ -476,20 +514,24 @@ impl  NRBVP
                     let y_k_plus_1  = 
                     if let Some( y_k_plus_1) = damped_step_result {
                     y_k_plus_1
-                    } else {log::error!("y_k_plus_1 is None"); panic!()};
+                    } else {log::error!("\n \n y_k_plus_1 is None"); panic!()};
                     self.y = y_k_plus_1;
                     self.jac_recalc = false;
                    
                 }// status == 0
                 else if status == 1 { // status == 1 means convergence is reached, save the result
-                    log::info!("Solution has converged, breaking the loop!");
+                    log::info!("\n \n Solution has converged, breaking the loop!");
                     let y_k_plus_1  = 
                     if let Some( y_k_plus_1) = damped_step_result {
                         y_k_plus_1
-                    } else {panic!("y_k_plus_1 is None")};
+                    } else {panic!(" \n \n y_k_plus_1 is None")};
+                    // if flag for new grid is up we must call adaptive grid refinement
+                    if self.new_grid_enabled&& self.strategy_params.clone().unwrap().get("adaptive").unwrap().clone().is_some() {
+                        self.solve_with_new_grid()
+                    } else {// if adapive is None then we just return the result
                     let result = Some(y_k_plus_1.to_DVectorType());// save the result in the format of DVector
                     self.result = result.clone();
-                    return result;
+                    return result; };
                 //  self.max_error = error; // ???
                 
         
@@ -503,7 +545,7 @@ impl  NRBVP
                         }
                         nJacReeval += 1;
                     } else {
-                        log::info!("Jacobian age {} =<1 \n \n", self.m);
+                        log::info!("\n \n Jacobian age {} =<1 \n \n", self.m);
                         break
                         }
                 }// status <0
@@ -512,10 +554,101 @@ impl  NRBVP
         }
         None
     }
-    // main function to solve the system of equations  
-    ///Newton-Raphson method
-    /// realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                      functions to create a new grid and recalculate with new grid
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// 
+    // function to choose if we need to refine the grid in next iteration
+    pub fn we_need_refinement (&mut self) {
+        let vec_of_params = self.strategy_params.as_ref().unwrap().get("adaptive").unwrap().clone().unwrap();
+        let version = vec_of_params[0] as usize;
+        let mut res =
+        match version {
+            1 => if self.number_of_refined_intervals == 0 {
+                log::info!("\n \n number of marked intervals is 0, no new grid is needed \n \n");
+                false } else {
+                    log::info!("\n \n number of marked intervals is {}, new grid is needed \n \n", self.number_of_refined_intervals);
+                    true}, 
+                    
+            _ => { panic!() }
+        };
+         let max_grid_refinenents = vec_of_params[1] as usize;
+         if  max_grid_refinenents <=  self.grid_refinemens {
+            log::info!("maximum number of grid refinements {} reached  {} ", max_grid_refinenents,  self.grid_refinemens);
+            res = false;
+         }
+         self.new_grid_enabled = res;
+    }
+    fn create_new_grid(&mut self) -> (Vec<f64>,DMatrix<f64>, usize) {
+        log::info!("\n \n creating new grid \n \n");
+        let y =self.y.clone_box();
+        let y_DVector = y.to_DVectorType();
+        let nrows = self.values.len();
+        let ncols = self.n_steps;
+        let y_DMatrix = DMatrix::from_column_slice(nrows, ncols, y_DVector.as_slice());
+        // unpack the adaptive strategy parameters 
+        let params = self.strategy_params.clone().unwrap();
 
+        //there are several approaches to create a new grid, so we provide some of them for the user to choose from
+       let (vector_of_params, method) =
+       if params.contains_key("easy") {
+            let res = params.get("easy").clone().unwrap().clone().unwrap();
+            if res.len()!=2 {panic!("parameters for adaptive strategy not found")};
+            let method = GridRefinementMethod::Easiest;
+            (res, method) }
+        else if params.contains_key("pearson") { 
+            let res = params.get("pearson").clone().unwrap().clone().unwrap();
+            if res.len()!=1 {panic!("this strategy requires only one parameter")};
+            let method = GridRefinementMethod::Pearson;
+            (res, method)
+        }
+        else if params.contains_key("grcar_smooke") { 
+            let res = params.get("grcar_smooke").clone().unwrap().clone().unwrap();
+            if res.len()!=2 {panic!("this strategy requires two parameters")};
+            let method = GridRefinementMethod::GrcarSmooke;
+            (res, method)
+        }
+        else {panic!("parameters for adaptive strategy not found")};
+          //create a new mesh with a chosen algorithm a
+          // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
+          // if number_of_nonzero_keys==0 it means that no need to create a new grid
+        let (new_mesh , initial_guess,  number_of_nonzero_keys) = new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone());
+       
+        log::info!("\n \n new grid enabled! \n \n");
+        (new_mesh , initial_guess,  number_of_nonzero_keys)
+    }
+
+    fn solve_with_new_grid(&mut self){
+
+
+        let  (new_mesh , initial_guess,  number_of_nonzero_keys) = self.create_new_grid();
+        self. number_of_refined_intervals = number_of_nonzero_keys;
+        // mock data
+     //   self.initial_guess = DMatrix::from_column_slice(self.values.len(), self.n_steps, self.y.to_DVectorType().as_slice());
+     //  let binding = self.x_mesh.clone();
+      //  let new_mesh = binding.data.as_vec();
+     
+      self.jac_recalc = true; // to avoid using old (low dimension) jacobian with new data 
+      self.n_steps =  new_mesh.len();
+      self.initial_guess = initial_guess;
+      self.grid_refinemens+=1;
+      log::info!("\n \n grid refinement counter = {} \n \n", self.grid_refinemens);
+    
+       // here we go again... running the code wtih new grid
+       self.eq_generate(Some(new_mesh.clone() ));
+       self. we_need_refinement ();
+
+
+       self.main_loop_damped();
+ 
+    }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                       main functions to start the solver
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//    
+    //  // main function to solve the system of equations  
+    //Newton-Raphson method
+    // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn solver(&mut self)-> Option<DVector<f64>>
     {   // TODO! сравнить явный мэш с неявным
        // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
@@ -540,35 +673,28 @@ impl  NRBVP
         match logger_instance {
         Ok(()) =>{
        let res = self.solver();
-       log::info!("Program ended");
+       log::info!(" \n \n Program ended");
         res
         }
-        Err(err) => {
+        Err(_) => {
             let res = self.solver();
             res
         }
 
     }
    }
-   pub fn save_to_file(&self) {
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                     functions to return and save result in different formats
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+   pub fn save_to_file(&self, filename:Option<String>) {
        //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
+       let name = if let Some(name) = filename { format!("{}.txt", name)} else {"result.txt".to_string()};
        let result_DMatrix = self.get_result().unwrap();
-       let _=save_matrix_to_file(&result_DMatrix, &self.values, "result.txt");
+       let _=save_matrix_to_file(&result_DMatrix, &self.values,  &name);
 
    }
     // function creates a new instance of solver but with new mesh
-    pub fn new_mesh(&mut self, new_mesh:Option<Vec<f64>>) {
-        log::info!("\n \n new mesh enabled! \n \n");
-        self.eq_generate(new_mesh); // creating new jacobian instance with new mesh
-        //lets copy the result of calculating with previous mesh as the initial guess for calculation with new mesh
-        let y =self.y.clone_box();
-        let y_DVector = y.to_DVectorType();
-        let nrows = self.values.len();
-        let ncols = self.n_steps;
-        let y_DMatrix = DMatrix::from_column_slice(nrows, ncols, y_DVector.as_slice());
-        self.initial_guess = y_DMatrix;
-        self.main_loop_damped();
-}
+
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
