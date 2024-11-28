@@ -15,6 +15,7 @@ pub struct BVP {
     pub t0: f64,// initial value of argument
     pub t_end: f64,// end of argument
     pub n_steps: usize,//  number of  steps
+    pub scheme: String, // define crate using for matrices and vectors
     pub strategy: String,// name of the strategy
     pub strategy_params: Option<HashMap<String, Option<Vec<f64>>>>, // solver parameters
     pub linear_sys_method: Option<String>, // method for solving linear system
@@ -38,6 +39,7 @@ impl BVP {
          t0: f64,// initial value of argument
          t_end: f64,// end of argument
          n_steps: usize,//  number of  steps
+         scheme:String,
          strategy: String,// name of the strategy
          strategy_params: Option<HashMap<String, Option<Vec<f64>>>>, // solver parameters
          linear_sys_method: Option<String>, // method for solving linear system
@@ -68,7 +70,7 @@ impl BVP {
                 initial_guess.clone(), 
                 values.clone(), 
                 arg.clone(), 
-                BorderConditions.clone(), t0, t_end, n_steps,strategy.clone(), strategy_params.clone(), linear_sys_method.clone(), method.clone(), tolerance, rel_tolerance.clone(), max_iterations,  Bounds.clone());
+                BorderConditions.clone(), t0, t_end, n_steps,scheme.clone(), strategy.clone(), strategy_params.clone(), linear_sys_method.clone(), method.clone(), tolerance, rel_tolerance.clone(), max_iterations,  Bounds.clone());
                 let structure = None;
                 let structure_damp = Some(nrbvpd);
             
@@ -82,7 +84,7 @@ impl BVP {
             initial_guess, 
             values, 
             arg,
-            BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations,
+            BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations,
              rel_tolerance, Bounds, structure, structure_damp }
      }
      pub fn plot_result(&self) {

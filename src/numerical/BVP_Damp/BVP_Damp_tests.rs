@@ -33,7 +33,7 @@ mod tests {
        None,    )
    
       ]));
-    
+        let scheme = "forward".to_string(); 
         let method =   "Sparse".to_string();// or  "Dense"
         let linear_sys_method = None;
         let ones = vec![0.0; values.len()*n_steps];
@@ -48,7 +48,7 @@ mod tests {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");  
         nr.solve();
@@ -88,7 +88,7 @@ mod tests {
        None,    )
    
       ]));
-    
+      let scheme = "forward".to_string();
         let method =   "Sparse".to_string();// or  "Dense"
         let linear_sys_method = None;
         let ones = vec![0.99; values.len()*n_steps];
@@ -101,7 +101,7 @@ mod tests {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         nr.solve();

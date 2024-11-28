@@ -152,6 +152,7 @@ impl NRBVP {
         strategy_check(&self.strategy, &self.strategy_params);
         let mut jacobian_instance = Jacobian::new();
         let h = (self.t_end - self.t0) / self.n_steps as f64;
+        let scheme = "forward".to_string();
         match self.method.as_str() {
             "Dense" => {
                 jacobian_instance.generate_BVP(
@@ -166,6 +167,7 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
+                    scheme.clone()
                 );
 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
@@ -197,6 +199,7 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
+                    scheme.clone()
                 );
 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
@@ -237,6 +240,7 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
+                    scheme.clone()
                 );
 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
@@ -267,6 +271,7 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
+                    scheme.clone()
                 );
 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);

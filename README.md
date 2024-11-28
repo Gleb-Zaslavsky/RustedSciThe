@@ -530,8 +530,10 @@ This code implements a modified Newton method for solving a system of non-linear
 The code mostly inspired by sources listed below:
 -  Cantera MultiNewton solver (MultiNewton.cpp )
 - TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
+
 A pair of words how to solve BVP problems with the "Damped" feature flag. 
 This algorithm is often used to solve large nonlinear problems.
+
 Let us briefly discuss the "strategy_params" HashMap that defines the solver parameters.
 - "max_jac"  key:  maximum iterations with old Jacobian, None value means the default number is taken-3;
 - "maxDampIter" key:  maximum number of damped steps, None value means the default value of 5 is used;
@@ -541,6 +543,7 @@ Next key-value is optoional and define the name of specific grid refinement algo
   we recommend to use one of the following algorithms:
    - key: "pearson", value: a f64 value less than 1, typically from 0.1 to 0.5;
    - key "grcar_smooke" value: a pair of f64 values less than 1, typically first less than second;
+
 if the problem is large and highly nonlinear the best choise is to use the adaptive grid.
 "We have found that starting the itration on a coarse mesh has several important advntages. One is that the Newton iteration is more likely to 
 converge on a coarse mesh than on a fine mesh. Moreover, the number of variables is small on a coarse mesh and thus the cost per iteration is 

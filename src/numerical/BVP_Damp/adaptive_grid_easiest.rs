@@ -31,6 +31,8 @@ R_n = [Dy]_n -  y'(t_n)
   The Taylor series of y_(n+0.5)  at t_n is y_(n-0.5) =y(t_n - 0.5dt)= y(t_n) - 0.5 y'(t_n)*dt + y''(t_n)*(0.5*dt)^2/2 - y'''(t_n)*(0.5*dt)^3/6
   y_(n+0.5) - y_(n+0.5)  =  y'(t_n)*dt + 2* y'''(t_n)*(0.5*dt)^3/6 =  y'(t_n)*dt +  y'''(t_n)*(dt)^3/24 => [Dy]_n = y'(t_n) +  y'''(t_n)*(dt)^2/24 =>
   R_n =  y'''(t_n)*(dt)^2/24
+ based on book Truncation error analysis
+Hans Petter Langtangen
 dimension of R_n is always just the same as the dimension of derivative
 2. On the choise of mesh 
 "We have found that starting the itration on a coarse mesh has several important advntages. One is that the Newton iteration is more likely to 

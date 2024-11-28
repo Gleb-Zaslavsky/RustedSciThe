@@ -9,6 +9,19 @@ use faer_gmres::JacobiPreconLinOp;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
+// Filters out elements from a given matrix row that are below a specified tolerance.
+//
+// # Parameters
+//
+// * `mat`: A reference to a 2D matrix of type `Mat<f64>`.
+// * `i`: An index representing the row to be filtered.
+// * `tol`: A tolerance value. Elements with absolute values less than or equal to this value will be filtered out.
+//
+// # Returns
+//
+// A vector of tuples, where each tuple represents a non-zero element in the filtered row.
+// Each tuple contains three elements: the row index, the column index, and the value of the element.
+
 pub fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<(usize, usize, f64)> {
     let mut vec_of_triplets: Vec<(usize, usize, f64)> = Vec::new();
     for (j, row) in mat.row_iter().enumerate() {
@@ -18,6 +31,7 @@ pub fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<(usize, usize, f6
     }
     vec_of_triplets
 }
+
 #[allow(dead_code)]
 fn get_i_row_as_Mat(mat: &SparseColMat<usize, f64>, i: usize) -> Mat<f64> {
     let (_R, C) = mat.shape();

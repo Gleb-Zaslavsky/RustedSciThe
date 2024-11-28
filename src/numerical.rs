@@ -346,6 +346,7 @@ The code mostly inspired by sources listed below:
 ///       None,    )    , ("adaptive".to_string(), 
  ///           None,    )
 ///      ])); 
+/// let scheme = "forward".to_string();
 ///        let method =   "Sparse".to_string();// or  "Dense"
 ///        let linear_sys_method = None;
 ///        let ones = vec![0.0; values.len()*n_steps];
@@ -360,7 +361,7 @@ The code mostly inspired by sources listed below:
 ///             initial_guess, 
 ///             values, 
 ///             arg,
-///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
 ///        println!("solving system");
 ///        #[allow(unused_variables)]
@@ -408,8 +409,7 @@ The code mostly inspired by sources listed below:
 /// 
 /// 
 /// };
-
-
+/// let scheme = "forward".to_string();
 /// let method =   "Sparse".to_string();// or  "Dense"
 /// let linear_sys_method = None;
 /// let ones = vec![0.0; values.len()*n_steps];
@@ -424,7 +424,7 @@ The code mostly inspired by sources listed below:
 ///      initial_guess, 
 ///      values, 
 ///      arg,
-///      BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
+///      BorderConditions, t0, t_end, n_steps, scheme, strategy, strategy_params, linear_sys_method, method, tolerance,
 ///        max_iterations,  Some(rel_tolerance),Some(Bounds));
 /// 
 /// println!("solving system");

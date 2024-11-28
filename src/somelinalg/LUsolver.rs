@@ -7,7 +7,9 @@ use faer::col;
 
 use rayon::prelude::*;
 // Import rayon prelude for parallel iterators
-
+// Invertig of matrix is A*B = E where A is given matrix, E - is Unit matrix, and B is inverse matrix
+// The easiest way to do this is to solve n linear systems A*b = e where A is given matrix, and b is i-th column of inverse matrix 
+// e is i-th column of Unit matrix. This problem is good for parallel iterators
 pub fn invers_Mat_LU(
     mat: SparseColMat<usize, f64>,
     tol: f64,
@@ -22,12 +24,12 @@ pub fn invers_Mat_LU(
     let triplets: Vec<Vec<(usize, usize, f64)>> = (0..n)
         .into_par_iter()
         .map(|i| {
-            let _x: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
-            let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
-            b[(i, 0)] = 1.0;
+           // let _x: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
+            let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);// create vector of zeros
+            b[(i, 0)] = 1.0;// but set the i-th element to 1.0 - that is the i-th column of Unit vector
 
             let res = LU.solve(b);
-            filter_zeros(&res, i, tol)
+            filter_zeros(&res, i, tol) // returns a vector of tuples, where each tuple represents a non-zero element in the filtered row.
         })
         .collect();
 
@@ -35,7 +37,7 @@ pub fn invers_Mat_LU(
     for triplet in triplets {
         vec_of_triplets.extend(triplet);
     }
-
+    // a matrix is constructed from a vector of triplets each triplet is (i, j) position of non-zero element and the value of element
     let inverted_matrix: SparseColMat<usize, f64> =
         SparseColMat::<usize, f64>::try_new_from_triplets(n, m, &vec_of_triplets).unwrap();
     Some(inverted_matrix)

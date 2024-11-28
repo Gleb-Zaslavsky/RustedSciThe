@@ -1,3 +1,5 @@
+// Copyright (c)  by Gleb E. Zaslavkiy
+//MIT License
 #![allow(non_snake_case)]
 use std::collections::HashMap;
 pub mod symbolic;
@@ -458,6 +460,7 @@ fn main() {
   let values = vec![  "z".to_string(), "y".to_string()];
   let arg = "x".to_string();
   let n_steps = 3;
+  let scheme = "forward".to_string();
   let h = 1e-4;
   let BorderConditions = HashMap::from([
     ("z".to_string(), (0, 1000.0)),
@@ -468,7 +471,7 @@ fn main() {
   let mut Jacobian_instance = Jacobian::new();
   // creating analytic discretized algebraic system, its functional representation, analytic Jacobian matrix and its functional representation
   Jacobian_instance.generate_BVP(Equations.clone(), values.clone(), arg.clone(),0.0,None, Some( n_steps),
-  Some (h), None, BorderConditions.clone(), None, None );
+  Some (h), None, BorderConditions.clone(), None, None, scheme.clone(), );
 
   // analytic Jacobian matrix
   #[allow(unused_variables)]
@@ -489,14 +492,14 @@ fn main() {
 // SPARSE JACOBIAN MATRIX with nalgebra (+sparse feature) crate
  
   Jacobian_instance.generate_BVP_CsMatrix(Equations.clone(), values.clone(), arg.clone(),0.0,None, Some( n_steps),
-  Some (h), None, BorderConditions.clone(), None, None);
+  Some (h), None, BorderConditions.clone(), None, None,  scheme.clone());
   let J_func3 = &Jacobian_instance.function_jacobian_IVP_CsMatrix;
   let J_eval3 = J_func3(4.0, &Ys);
   println!("Jacobian Sparse with CsMatrix: J_eval = {:?} \n", J_eval3);
 
 // SPARSE JACOBIAN MATRIX with  crate
   Jacobian_instance.generate_BVP_CsMat(Equations.clone(), values.clone(), arg.clone(), 0.0, None,Some( n_steps),
-  Some (h), None, BorderConditions.clone(), None, None);
+  Some (h), None, BorderConditions.clone(), None, None,  scheme.clone());
   let J_func2:   &Box<dyn Fn(f64, &CsVec<f64>) -> CsMat<f64> >= &Jacobian_instance.function_jacobian_IVP_CsMat;
   let F_func2 = &Jacobian_instance.lambdified_functions_IVP_CsVec;
   let Ys2 = CsVec::new(Y.len(), vec![0, 1, 2, 3, 4, 5], Y.clone());
@@ -510,7 +513,7 @@ fn main() {
   // SPARSE JACOBIAN MATRIX with sprs crate
   let mut Jacobian_instance = Jacobian::new();
   Jacobian_instance.generate_BVP_SparseColMat(Equations.clone(), values.clone(), arg.clone(), 0.0, None,Some( n_steps),
-  Some (h), None, BorderConditions.clone(), None, None);
+  Some (h), None, BorderConditions.clone(), None, None,  scheme.clone());
   let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
   let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
   use faer::col::{Col, from_slice};
@@ -646,6 +649,7 @@ fn main() {
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min, 
+        let scheme = "forward".to_string();
         let strategy =   "Damped".to_string();//
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
@@ -669,7 +673,7 @@ fn main() {
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,scheme,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         #[allow(unused_variables)]
@@ -726,7 +730,7 @@ y(x)=exp(-x^2/a)
         let max_iterations = 200;
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
-        let n_steps = 100; // 
+        let n_steps = 10; // 
         let strategy =   "Damped".to_string();//
         let  strategy_params = Some(HashMap::from([("max_jac".to_string(), 
        None,    ), ("maxDampIter".to_string(), 
@@ -735,7 +739,7 @@ y(x)=exp(-x^2/a)
        None,    )
    
       ]));
-    
+      let scheme = "forward".to_string();
         let method =   "Sparse".to_string();// or  "Dense"
         let linear_sys_method = None;
         let ones = vec![0.99; values.len()*n_steps];
@@ -748,7 +752,7 @@ y(x)=exp(-x^2/a)
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+             BorderConditions, t0, t_end, n_steps,scheme,strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
 
         println!("solving system");
         nr.solve();
@@ -815,7 +819,7 @@ y(x)=exp(-x^2/a)
 
         };
       
-    
+        let scheme = "trapezoid".to_string();
         let method =   "Sparse".to_string();// or  "Dense"
         let linear_sys_method = None;
         let ones = vec![0.0; values.len()*n_steps];
@@ -830,7 +834,7 @@ y(x)=exp(-x^2/a)
              initial_guess, 
              values, 
              arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
+             BorderConditions, t0, t_end, n_steps,scheme,strategy, strategy_params, linear_sys_method, method, tolerance,
                max_iterations,  Some(rel_tolerance),Some(Bounds));
 
         println!("solving system");

@@ -883,7 +883,40 @@ impl Jacobian {
         let re = Regex::new(r"_\d+$").unwrap();
         re.replace(input, "").to_string()
     }
+    fn eq_step(matrix_of_names:&Vec<Vec<String>>, eq_i:&Expr,  values: &Vec<String>, arg:&String, j:usize, t:f64, scheme:&String  )->Expr {
+        // vector of variables of j-th time step
+        let vec_of_names_on_step = matrix_of_names[j].clone();
+        // for each time step rename the default variable name to a name of variable on j-th time step
+        // like x,y,z->  x_10, y_10, z_10, ...
+        let hashmap_for_rename: HashMap<String, String> = values
+                    .iter()
+                    .zip(vec_of_names_on_step.iter())
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+        let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
+                //set time value of j-th time step
+        let  eq_step_j_ = eq_step_j.set_variable(arg.as_str(), t);
+        let eq_step_j = match scheme.as_str() {
+            "forward" => eq_step_j_,
+            "trapezoid" =>  {
+                            let vec_of_names_on_step = matrix_of_names[j+1].clone();
+                            // for each time step rename the default variable name to a name of variable on j-th time step
+                            // like x,y,z->  x_10, y_10, z_10, ...
+                            let hashmap_for_rename: HashMap<String, String> = values
+                                        .iter()
+                                        .zip(vec_of_names_on_step.iter())
+                                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                                        .collect();
+                            let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
+                                    //set time value of j-th time step
+                            let  eq_step_j_plus_1 = eq_step_j.set_variable(arg.as_str(), t);
+                            Expr::Const(0.5)*(eq_step_j_ + eq_step_j_plus_1) 
+                            }
+            _ => panic!("Invalid scheme"),
+        };
+        eq_step_j
 
+    }
     pub fn discretization_system_BVP(
         &mut self,
         eq_system: Vec<Expr>,
@@ -896,6 +929,7 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
+        scheme:String,
     ) {
         let mut vec_of_bounds: Vec<(f64, f64)> = Vec::new();
         let _map_of_bounds: HashMap<String, (f64, f64)> = HashMap::new();
@@ -970,16 +1004,8 @@ impl Jacobian {
                 for j in 0..n_steps - 1 {
                     //currwbt time step
                     let t = T_list[j];
-                    // vector of variables of j-th time step
-                    let vec_of_names_on_step = matrix_of_names[j].clone();
-                    // for each time step rename the default variable name to a name of variable on j-th time step
-                    // like x,y,z->  x_10, y_10, z_10, ...
-                    let hashmap_for_rename: HashMap<String, String> = values
-                        .iter()
-                        .zip(vec_of_names_on_step.iter())
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
-                    let mut eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
+                  
+                    let mut eq_step_j =  Self:: eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme  );
                     //set time value of j-th time step
                     eq_step_j = eq_step_j.set_variable(arg.as_str(), t);
 
@@ -1119,12 +1145,14 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
+        scheme:String,
     ) {
         let param = if let Some(param) = param {
             param
         } else {
             arg.clone()
         };
+     
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1136,6 +1164,7 @@ impl Jacobian {
             BorderConditions,
             Bounds,
             rel_tolerance,
+            scheme,
         );
 
         let v = self.variable_string.clone();
@@ -1188,7 +1217,9 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
     ) {
+        
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1200,6 +1231,7 @@ impl Jacobian {
             BorderConditions,
             Bounds,
             rel_tolerance,
+            scheme,
         );
         println!("{:?}", &self.vector_of_functions);
         let  v = self.variable_string.clone();
@@ -1237,7 +1269,9 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
     ) {
+      
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1249,6 +1283,7 @@ impl Jacobian {
             BorderConditions,
             Bounds,
             rel_tolerance,
+            scheme,
         );
         println!("{:?}", &self.vector_of_functions);
         let v = self.variable_string.clone();
@@ -1290,7 +1325,9 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String
     ) {
+      
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1302,6 +1339,7 @@ impl Jacobian {
             BorderConditions,
             Bounds,
             rel_tolerance,
+            scheme,
         );
         println!(
             "\n \n vector of functions \n \n {:?} \n \n of lengh {}",
@@ -1322,7 +1360,7 @@ impl Jacobian {
             if n != &vec_s.len() {
                 println!("\n \n symbolic jacobian consists of {:?} vectors, each of length {}\n \n it means it is not square!", n, vec_s.len());
             }
-            assert_eq!(vec_s.len(), *n, "jacobian not square ");
+            assert_eq!(vec_s.len(), *n, "jacobian not square! symbolic jacobian consists of {:?} vectors, each of length {}",  n, vec_s.len());
         }
         self.jacobian_generate_IVP_SparseColMat(arg.as_str(), indexed_values.clone());
         self.lambdify_funcvector_IVP(arg.as_str(), indexed_values.clone());

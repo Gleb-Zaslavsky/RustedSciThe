@@ -37,6 +37,7 @@ pub struct NRBVP
     pub t0: f64, // initial value of argument
     pub t_end: f64,// end of argument
     pub n_steps: usize, // number of  steps
+    pub scheme: String, // name of the numerical scheme
     pub strategy: String, // name of the strategy
     pub strategy_params: Option<HashMap<String, Option<  Vec<f64>  >>  >, // solver parameters
     pub  linear_sys_method: Option<String>, // method for solving linear system
@@ -80,6 +81,7 @@ impl  NRBVP
         t0: f64,
         t_end: f64,
         n_steps: usize,
+        scheme:String,
         strategy: String,
         strategy_params: Option<HashMap<String, Option<  Vec<f64>  >>  >,
         linear_sys_method: Option<String>,
@@ -113,6 +115,7 @@ impl  NRBVP
             n_steps,
             abs_tolerance,
             rel_tolerance,
+            scheme,
             strategy,
             strategy_params,
             linear_sys_method,
@@ -199,7 +202,7 @@ impl  NRBVP
             self.x_mesh = DVector::from_vec(mesh_.clone().unwrap()); 
             (None, None, mesh_)
         };
-
+        let scheme = self.scheme.clone();
         match self.method.as_str() { 
          "Dense" =>  {
                     jacobian_instance.generate_BVP(
@@ -213,7 +216,7 @@ impl  NRBVP
                     mesh,
                     self.BorderConditions.clone(),
                     self.Bounds.clone(), 
-                    self.rel_tolerance.clone() );
+                    self.rel_tolerance.clone(), scheme.clone() );
             
             //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                     let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = jacobian_instance.lambdified_functions_IVP_DVector;
@@ -249,7 +252,7 @@ impl  NRBVP
                         mesh,
                         self.BorderConditions.clone(),
                     self.Bounds.clone(), 
-                        self.rel_tolerance.clone() );
+                        self.rel_tolerance.clone(), scheme.clone() );
                 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                         let fun: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>> = jacobian_instance.lambdified_functions_IVP_CsVec;
@@ -291,7 +294,7 @@ impl  NRBVP
                         mesh,
                         self.BorderConditions.clone(),
                     self.Bounds.clone(), 
-                self.rel_tolerance.clone() );
+                self.rel_tolerance.clone(), scheme.clone() );
                 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                         let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = jacobian_instance.lambdified_functions_IVP_DVector;
@@ -324,7 +327,7 @@ impl  NRBVP
                         mesh,
                         self.BorderConditions.clone(),
                         self.Bounds.clone(), 
-                        self.rel_tolerance.clone() );
+                        self.rel_tolerance.clone(),scheme.clone() );
                 
                 //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                         let fun:  Box<dyn Fn(f64, &Col<f64>) -> Col<f64>> = jacobian_instance. lambdified_functions_IVP_Col;
@@ -360,6 +363,29 @@ impl  NRBVP
     pub fn set_p(&mut self, p: f64) {
         self.p = p;
     }
+///////////////////// 
+pub fn step_with_inv_Jac(&self, p: f64, y: &dyn VectorType) ->Box<dyn VectorType> {
+    let fun = &self.fun;
+    let F_k = fun.call(p, y);
+    let inv_J_k = self.old_jac.as_ref().unwrap().clone_box();
+    let undamped_step_k:Box<dyn VectorType>  =  inv_J_k.mul( &*F_k);
+    undamped_step_k
+}
+pub fn recalc_and_inverse_Jac(&mut self) {
+    if self.jac_recalc {
+        let p = self.p;
+        let y = &*self.y;
+        log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");   
+        let jac_function = self.jac.as_mut().unwrap();
+        let jac_matrix = jac_function.call(p, y);
+        let inv_J_k = jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations);
+        self.old_jac = Some(inv_J_k);
+        self.m = 0;
+    }
+}  
+////////////////////////////////////////////////////////////////
+
+
     // jacobian recalculation
     fn recalc_jacobian(&mut self) {
       if self.jac_recalc {
@@ -374,11 +400,12 @@ impl  NRBVP
            
         } 
     }
+
     //undamped step without jacobian recalculation
     pub fn step(&self, p: f64, y: &dyn VectorType) ->Box<dyn VectorType> {
         let fun = &self.fun;
         let F_k = fun.call(p, y);
-        let J_k = self.old_jac.as_ref().unwrap().clone_box();
+        let J_k = self.old_jac.as_ref().unwrap();
         assert_eq!(F_k.len(), J_k.shape().0, "length of F_k {} and number of rows in J_k {} must be equal", F_k.len(), J_k.shape().0 );
         let residual_norm = F_k.norm();
         log::info!("\n \n residual norm = {:?} ", residual_norm);

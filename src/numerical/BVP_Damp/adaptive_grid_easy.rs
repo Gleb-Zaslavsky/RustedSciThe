@@ -49,14 +49,14 @@ For each interval i:
         mark[i] = REFINE
 */
 //use crate::numerical::BVP_Damp::BVP_traits::{Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting};
-use nalgebra::{DMatrix, DVector, };
+use nalgebra::{DMatrix, DVector, Matrix};
 
 struct Grid {
-    y_vector:DMatrix<f64>, 
-    x_vector:DVector<f64>,
-    toler0:f64,
-    toler1:f64,
-    toler2:f64,
+    y_DMatrix:DMatrix<f64>, 
+    x_mesh:DVector<f64>,
+    toler_0:f64,
+    toler_1:f64,
+    toler_2:f64,
     ratio1:DVector<f64>,
     vary1:DVector<f64>,
     ratio2:DVector<f64>,
@@ -66,91 +66,74 @@ struct Grid {
     level: DVector<usize>,
 }
 impl Grid {
-fn grad(&self, i:usize, j:usize) -> f64 {
-    let y_vector:&DMatrix<f64> = &self.y_vector;
-    let x_vector:&DVector<f64> = &self.x_vector;
-    let row_i = y_vector.row(i);
-    let dy = row_i[j+1]-row_i[j];
-    let dx = x_vector[j+1]-x_vector[j];
+fn grad(& self, y_j:DVector<f64>, i:usize) -> f64 {
+    let x_vector = &self.x_mesh;
+    let dy = y_j[i+1]-y_j[i];
+    let dx = x_vector[i+1]-x_vector[i];
     let grad = dy/dx;
     grad
 }
 
-// initialize lower and upper to the first value of the row.
-// Loop through all points of the row to find the minimum (lower) and maximum (upper) values.
-// Calculate the range (range) as the difference between upper and lower.
-// Calculate the maximum magnitude (maxmag) as the maximum of the absolute values of lower and upper.
-fn range(&mut self) {
+fn mark(&mut self) {
 //matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
-    let y_vector:&DMatrix<f64> = &self.y_vector;
+    let y_DMatrix:&DMatrix<f64> = &self.y_DMatrix;
+    let x_vector:&DVector<f64> = &self.x_mesh;
    // let x_vector:&DVector<f64> = &self.x_vector;
-    let toler0= self.toler0;
-    let toler1= self.toler1;
-    let toler2= self.toler2; 
+    let toler_0= self.toler_0;
+    let toler_1= self.toler_1;
+    let toler_2= self.toler_2; 
     let mut signif:usize = 0;
-    let mut ratio1:DVector<f64> = DVector::zeros(y_vector.ncols()); 
-    let mut vary1:DVector<f64>  = DVector::zeros(y_vector.ncols()); 
-    let mut ratio2:DVector<f64>  = DVector::zeros(y_vector.ncols()); 
-    let mut vary2:DVector<f64>  = DVector::zeros(y_vector.ncols()); 
-    for (i, row_i)  in y_vector.row_iter().enumerate() {
-        let mut lower = row_i[0];
-        let mut upper = row_i[0];
-        for  element_j in row_i.iter() {
-            lower=f64::min(lower, *element_j);
-            upper=f64::max(upper, *element_j);
-        }
-        let range_i = upper - lower;
-        let maxmag_i = f64::max(lower.abs(), upper.abs());
+    let mut ratio1:DVector<f64> = DVector::zeros(y_DMatrix.ncols()); 
+    let mut vary1:DVector<f64>  = DVector::zeros(y_DMatrix.ncols()); 
+    let mut ratio2:DVector<f64>  = DVector::zeros(y_DMatrix.ncols()); 
+    let mut vary2:DVector<f64>  = DVector::zeros(y_DMatrix.ncols()); 
+    for (j, y_j)  in y_DMatrix.row_iter().enumerate() {
+        let lower = y_j.min();
+        let upper = y_j.max();
+        let range_y_j = upper - lower;
+        let maxmag_j = f64::max(lower.abs(), upper.abs());
         // decide whether the component is significant. Check if the absolute range of the component is greater than 
         //a tolerance (toler0) times the maximum of 1 and maxmag. If not, skip the rest of the current iteration.
-         if !(range_i > toler0*f64::max(1.0, maxmag_i)) {continue;}
+         if !(range_y_j.abs() > toler_0*f64::max(1.0, maxmag_j)) {continue;}
         // this is a significant component.
         signif = signif + 1;
 
         // Calculate the difference (differ) between consecutive points.
-        for  k in 0..row_i.len()-1 {
-            let element_i = row_i[k];
-            let element_i_plus_1 = row_i[k+1];
-            let differ = (element_i_plus_1 - element_i).abs();
+        let mut list_dy_dx_i =Vec::new();
+        for  i in 0..y_j.len()-1 {
+            let dy_i= (y_j[i+1] - y_j[i]).abs();
+            let dx_i = x_vector[j+1]-x_vector[j];
+            let dy_dx_i = dy_i/dx_i;
+            list_dy_dx_i.push(dy_dx_i);
             //Update ratio1(k) with the maximum of its current value and the ratio of differ to range.
-            if 0.0<range_i {
-                let ratio1_k = f64::max(ratio1[k], differ/range_i);
-                ratio1[k] = ratio1_k;
+            if 0.0<range_y_j {
+
+                let ratio1_i = f64::max(ratio1[i], dy_i/range_y_j);
+                ratio1[i] = ratio1_i;
             }
-            if toler1*range_i<differ {
-                vary1[k] = vary1[k] + 1.0;
+            if toler_1*range_y_j<dy_i {
+                vary1[i] = vary1[i] + 1.0;
             } 
 
-        }// end for k in 0..row_i.len()-1
-
-        // Calculate the gradient (grad) of the component at the first point and initialize lower and upper with this value.
-        // Loop through the interior points to find the minimum and maximum gradient values.
-        // Calculate the range of the gradient.
-        let temp = self.grad( i, 1);  
-        let mut lower = temp;
-        let mut upper = temp;
-        for  k in 1..row_i.len()-1 {
-            let temp = self.grad( i, k);
-           let lower_ = f64::min(lower, temp);
-           lower = lower_;
-           let upper_ = f64::max(upper, temp);
-           upper = upper_;
-        }
-        let range_i = upper - lower;//???
+        }// end for k in 0..y_i.len()-1
+        let  list_dy_dx_i_min = list_dy_dx_i.iter().cloned().min_by(|a, b| a.total_cmp(b)).unwrap();
+        let  list_dy_dx_i_max = list_dy_dx_i.iter().cloned().max_by(|a, b| a.total_cmp(b)).unwrap();
+        let derivative_range_i = (list_dy_dx_i_max - list_dy_dx_i_min).abs();
 
       //  Calculate the gradient at the first point and store it in right.
       //  Loop through the interior points, updating left and right with consecutive gradient values.
       //  Calculate the difference (differ) between consecutive gradients.
       // Update ratio2 with the maximum of its current value and the ratio of differ to range.
       // Increment vary2 if differ exceeds toler2 times range.
+        let temp = self.grad(y_j.transpose(),0);
         let right = temp;
-        for k in 1..row_i.len()-1 {
+        for i in 1..y_j.len()-1 {
             let  left = right;
-            let right = self.grad( i, k);
+            let right =  self.grad(y_j.transpose(),i);
             let differ = (right - left).abs();
-            if 0.0 < range_i { let ratio2_k = f64::max(ratio2[k], differ/range_i); 
-                ratio2[k] = ratio2_k}
-            if toler2*range_i < differ { vary2[k] = vary2[k] + 1.0; } ;
+            if 0.0 < derivative_range_i{ let ratio2_i = f64::max(ratio2[i], differ/derivative_range_i); 
+                ratio2[i] = ratio2_i}
+            if toler_2*derivative_range_i < differ { vary2[i] = vary2[i] + 1.0; } ;
         }
         
     }//
@@ -160,24 +143,39 @@ fn range(&mut self) {
     self.vary2 = vary2;
 
 }
-fn refine_grid(&self){
-    let y_vector:&DMatrix<f64> = &self.y_vector;
-    for (i, row_i)  in y_vector.row_iter().enumerate() {
-    let mut most:usize =0;
-    let mut weight = DVector::zeros(y_vector.ncols()); 
-    let n_points = row_i.len()-1;
-    for k in 1..n_points {
-        weight[k] = self.vary1[k];
-        if 1<k {    weight[k] = weight[k] + self.vary2[k]}
-        if k<n_points {  weight[k] = weight[k] + self.vary2[k+1] }
-        if 0.0<weight[k] {  most =most+1}
-    }
+fn refine_grid(&mut self){
+    let y_DMatrix:&DMatrix<f64> = &self.y_DMatrix;
 
+    for (j, y_j)  in y_DMatrix.row_iter().enumerate() {
+            let mut most:usize =0;
+            let weights = &mut self.weights;   
+            for  i in 0..y_j.len()-1 {
+               
+                weights[i] = self.vary1[i];
+                if 1<i{    weights[i] = weights[i] + self.vary2[i]}
+                if i<y_j.len()-1 {  weights[i] = weights[i] + self.vary2[i+1] }
+                if 0.0<weights[i] {  most =most+1}
+                }   
+            for  i in 0..y_j.len()-1 {  
+                for k in i+1..y_j.len()-1 {
+                    if weights[k]>weights[i] {
+                            let itemp = weights[k];
+                            weights[k] = weights[i];
+                            weights[i] = itemp;
+                    }
+                
+                 }   
+                 if weights[i] == 0.0 {break;}
+        }
+         
 
     }// for (i, row_i) in y_vector
-}
+
 
 }
+}
+
+
 
 /* 
 pub fn truncation_error_vector(y_vector:DMatrix<f64>, x_vector:DVector<f64>) ->DVector<f64> {
