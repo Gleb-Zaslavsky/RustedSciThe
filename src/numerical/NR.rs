@@ -42,7 +42,7 @@
 ///     ```
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-
+use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
 pub struct NR {
     jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
@@ -209,7 +209,7 @@ impl NR {
             } else {
                 x = new_x;
                 i += 1;
-                println!("iteration = {}, error = {}", i, error)
+                info!("iteration = {}, error = {}", i, error)
             }
         }
         None
@@ -285,12 +285,12 @@ impl NR {
         let b: DVector<f64> = DVector::from_vec(constants);
         match a.lu().solve(&b) {
             Some(x) => {
-                println!("Solution: {}", x);
+                info!("Solution: {}", x);
                 res = x.data.into();
                 Ok(res)
             }
             None => {
-                println!("No solution found");
+                info!("No solution found");
                 Err("no solution")
             }
         }

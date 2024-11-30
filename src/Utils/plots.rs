@@ -1,6 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use plotters::prelude::*;
-
+use log::info;
 pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result: DMatrix<f64>) {
     // Example data
     let x = t_result;
@@ -9,7 +9,7 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
     let x_max = x[x.len() - 1];
     for col in 0..y.ncols() {
         let y_col = y.column(col);
-        // println!("{}" , y_col);
+        // info!("{}" , y_col);
         let y_min = y_col[0];
         let y_max = y_col[y_col.len() - 1];
         let varname = values[col].clone();

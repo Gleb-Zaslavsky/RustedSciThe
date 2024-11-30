@@ -6,6 +6,7 @@ use faer::prelude::*;
 use faer::sparse::SparseColMat;
 use faer_gmres::gmres;
 use nalgebra::DMatrix;
+use log::info;
 fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<(usize, usize, f64)> {
     let mut vec_of_triplets: Vec<(usize, usize, f64)> = Vec::new();
     for (j, row) in mat.row_iter().enumerate() {
@@ -31,7 +32,7 @@ pub fn invers_Mat(
     tol: f64,
     max_iter: usize,
 ) -> Option<SparseColMat<usize, f64>> {
-    //  println!("mat = {:?}", mat);
+    //  info("mat = {:?}", mat);
     //let t0 = Instant::now();
     let (n, m) = mat.shape();
     assert_eq!(n, m, "matrix must be square");
@@ -44,19 +45,19 @@ pub fn invers_Mat(
 
         let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
         b[(i, 0)] = 1.0;
-        //  println!("{}-th col {:?}",i, b);
+        //  info("{}-th col {:?}",i, b);
         let res = gmres(mat.as_ref(), b.as_ref(), x.as_mut(), max_iter, tol, None);
 
         match res {
             Ok(res) => {
                 let _err = res.0;
-                //  println!("{}-th col, _err = {:?}",i,  _err);
+                //  info("{}-th col, _err = {:?}",i,  _err);
                 let triplets_i = filter_zeros(&x, i, tol);
                 vec_of_triplets.extend(triplets_i);
                 //   inverted_matrix.append_outer(data, x, nonzero_indexes);
             }
             Err(e) => {
-                println!("Error: {:?}", e);
+                info!("Error: {:?}", e);
                 panic!("Error while solving linear system ",);
             }
         }
@@ -64,7 +65,7 @@ pub fn invers_Mat(
 
     let inverted_matrix: SparseColMat<usize, f64> =
         SparseColMat::<usize, f64>::try_new_from_triplets(n, m, &vec_of_triplets).unwrap();
-    //   println!("inverted matrix {:?}", inverted_matrix);
+    //   info!("inverted matrix {:?}", inverted_matrix);
     Some(inverted_matrix) //None
 }
 
@@ -109,9 +110,9 @@ mod tests {
 
         // the final None arg means do not apply left preconditioning
         let (err, iters) = gmres(a_test.as_ref(), b.as_ref(), x.as_mut(), 10, 1e-8, None).unwrap();
-        println!("Result x: {:?}", x);
-        println!("Error x: {:?}", err);
-        println!("Iters : {:?}", iters);
+        info!("Result x: {:?}", x);
+        info!("Error x: {:?}", err);
+        info!("Iters : {:?}", iters);
         assert_eq!(x.shape(), (3, 1));
     }
     #[test]
@@ -142,11 +143,11 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
-        println!("{}", test_jac.len());
+        info!("{}", test_jac.len());
         let jac_DM: DMatrix<f64> = DMatrix::from_row_slice(20, 20, &test_jac.as_slice());
-        //println!("JAC: {:?}", &jac_DM);
+        //info!("JAC: {:?}", &jac_DM);
         let sparse_jac = dense_to_sparse(jac_DM);
-        println!("JAC: {:?},{:?}", sparse_jac, sparse_jac.shape());
+        info!("JAC: {:?},{:?}", sparse_jac, sparse_jac.shape());
         let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(20, 1);
         b[(0, 0)] = 1.0;
         let mut x = Mat::<f64>::new_owned_zeros(20, 1);
@@ -154,20 +155,20 @@ mod tests {
         //   b[(0, 0)] = 1.0;
         //  let guess:Mat<f64> = Mat::<f64>::new_owned_zeros(20, 1 )
         //  .row_iter().map(|r|  r.iter().map(|mut x| x=&1e-5) ); // for_each(|r| { r.iter().map(|mut x| x=&1e-5);} ).collect();
-        // println!("B: {:?}", &b);
+        // info!("B: {:?}", &b);
         let (err, iters) =
             gmres(sparse_jac.as_ref(), b.as_ref(), x.as_mut(), 100, 1e-8, None).unwrap();
-        println!("Result x: {:?}", x);
-        println!("Error x: {:?}", err);
-        println!("Iters : {:?}", iters);
+        info!("Result x: {:?}", x);
+        info!("Error x: {:?}", err);
+        info!("Iters : {:?}", iters);
         assert_eq!(b.shape(), (20, 1));
 
         let inverted = invers_Mat(sparse_jac, 1e-13, 100).unwrap();
         for j in 0..inverted.shape().1 {
             let row = inverted.values_of_col(j);
-            println!("\n \n \n {:?}", row);
+            info!("\n {:?}", row);
         }
-        // println!("inverted: {:?}", inverted);
+        // info!("inverted: {:?}", inverted);
         assert_eq!(inverted.shape(), (20, 20));
     }
 }

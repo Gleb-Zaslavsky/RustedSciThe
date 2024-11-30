@@ -8,7 +8,7 @@ use faer_gmres::gmres;
 use faer_gmres::JacobiPreconLinOp;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
-
+use log::info;
 // Filters out elements from a given matrix row that are below a specified tolerance.
 //
 // # Parameters
@@ -76,7 +76,7 @@ pub fn invers_Mat(
                     filter_zeros(&x, i, tol)
                 }
                 Err(e) => {
-                    println!("Error: {:?}", e);
+                    info!("Error: {:?}", e);
                     panic!("Error while solving linear system");
                 }
             }
@@ -145,28 +145,28 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
-        println!("{}", test_jac.len());
+        info!("{}", test_jac.len());
 
         let jac_DM: DMatrix<f64> = DMatrix::from_row_slice(20, 20, &test_jac.as_slice());
         let sparse_jac = dense_to_sparse(jac_DM);
-        println!("len {}", test_jac.len());
-        println!("JAC: {:?},{:?}", sparse_jac, sparse_jac.shape());
+        info!("len {}", test_jac.len());
+        info!("JAC: {:?},{:?}", sparse_jac, sparse_jac.shape());
         let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(20, 1);
         b[(0, 0)] = 1.0;
         let mut x = Mat::<f64>::new_owned_zeros(20, 1);
-        println!("b={:?}", b);
+        info!("b={:?}", b);
 
         let (err, iters) =
             gmres(sparse_jac.as_ref(), b.as_ref(), x.as_mut(), 100, 1e-8, None).unwrap();
-        println!("Result x: {:?}", x);
-        println!("Error x: {:?}", err);
-        println!("Iters : {:?}", iters);
+            info!("Result x: {:?}", x);
+            info!("Error x: {:?}", err);
+            info!("Iters : {:?}", iters);
         assert_eq!(b.shape(), (20, 1));
 
         let inverted = invers_Mat(sparse_jac, 1e-13, 100).unwrap();
         for j in 0..inverted.shape().1 {
             let row = inverted.values_of_col(j);
-            println!("\n \n \n {:?}", row);
+            info!("\n {:?}", row);
         }
         assert_eq!(inverted.shape(), (20, 20));
     }

@@ -15,11 +15,11 @@ use crate::Utils::plots::plots;
 use chrono::Local;
 use faer::col::Col;
 use faer::sparse::SparseColMat;
+use log::info;
 use nalgebra::sparse::CsMatrix;
 use simplelog::*;
 use sprs::{CsMat, CsVec};
 use std::fs::File;
-
 pub struct NRBVP {
     pub eq_system: Vec<Expr>,
     pub initial_guess: DMatrix<f64>,
@@ -169,7 +169,7 @@ impl NRBVP {
                     scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
                     jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -201,7 +201,7 @@ impl NRBVP {
                     scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>> =
                     jacobian_instance.lambdified_functions_IVP_CsVec;
 
@@ -216,7 +216,7 @@ impl NRBVP {
                 let y_0 = Vectors_type_casting(&y.clone(), "Sparse 1".to_string());
                 let y_0 = y_0.as_any().downcast_ref::<CsVec<f64>>().unwrap();
                 let test = fun(self.p, &y_0.clone());
-                println!("test = {:?}", test);
+                info!("test = {:?}", test);
                 // panic!("test");
                 //
                 let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_1(fun));
@@ -242,7 +242,7 @@ impl NRBVP {
                     scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
                     jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -273,7 +273,7 @@ impl NRBVP {
                     scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &Col<f64>) -> Col<f64>> =
                     jacobian_instance.lambdified_functions_IVP_Col;
 
@@ -291,7 +291,7 @@ impl NRBVP {
                 self.variable_string = jacobian_instance.variable_string;
             }
             _ => {
-                println!("Method not implemented");
+                info!("Method not implemented");
                 std::process::exit(1);
             }
         } // end of match
@@ -316,9 +316,9 @@ impl NRBVP {
         let now = Instant::now();
 
         let new_j = if self.jac_recalc {
-            log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            log::info!("JACOBIAN (RE)CALCULATED! ");
             let new_j = jac.call(p, y);
-            // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
+            // info(" new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             self.old_jac = Some(new_j.clone_box());
             self.m = 0;
             new_j
@@ -327,7 +327,7 @@ impl NRBVP {
             self.old_jac.as_ref().unwrap().clone_box()
         };
 
-        //   println!("new fun = {:?}", &new_fun);
+        //   info("new fun = {:?}", &new_fun);
         let delta: Box<dyn VectorType> = new_j.solve_sys(
             &*new_fun,
             self.linear_sys_method.clone(),
@@ -337,7 +337,7 @@ impl NRBVP {
         );
         let elapsed = now.elapsed();
         elapsed_time(elapsed);
-        //  println!(" \n \n dy= {:?}", &delta);
+        //  info(" dy= {:?}", &delta);
         // element wise subtraction
         let new_y: Box<dyn VectorType> = y - &*delta;
 
@@ -346,7 +346,7 @@ impl NRBVP {
     // main function to solve the system of equations
 
     pub fn main_loop(&mut self) -> Option<DVector<f64>> {
-        log::info!("solving system of equations with Newton-Raphson method! \n \n");
+        log::info!("solving system of equations with Newton-Raphson method! ");
         let y: DMatrix<f64> = self.initial_guess.clone();
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
@@ -354,7 +354,7 @@ impl NRBVP {
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
 
         //self.y = Box::new(y_);
-        //  println!("y = {:?}", &y);
+        //  info("y = {:?}", &y);
         let mut i = 0;
 
         while i < self.max_iterations {
@@ -374,8 +374,8 @@ impl NRBVP {
                 self.error_old,
             );
             self.error_old = error;
-            //    println!("new_x = {:?} \n \n, x = {:?} \n \n ", &new_y.clone(), &_y );
-            log::info!(" \n \n error = {:?} \n \n", &error);
+            //    info("new_x = {:?} , x = {:?} ", &new_y.clone(), &_y );
+            log::info!(" error = {:?} ", &error);
             if error < self.tolerance {
                 log::info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
@@ -386,7 +386,7 @@ impl NRBVP {
                 let new_y: Box<dyn VectorType> = new_y.clone_box(); //Box::new(new_y);
                 self.y = new_y;
                 i += 1;
-                //   println!("iteration = {}, error = {}, tol = {} \n \n", i, error, self.tolerance );
+                //   info("iteration = {}, error = {}, tol = {} ", i, error, self.tolerance );
             }
         }
         None
@@ -459,21 +459,21 @@ impl NRBVP {
             DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
                 .transpose();
         for _col in matrix_of_results.column_iter() {
-            //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
+            //   info( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-        println!(
+        info!(
             "matrix of results has shape {:?}",
             matrix_of_results.shape()
         );
-        println!("length of x mesh : {:?}", n_steps);
-        println!("number of Ys: {:?}", number_of_Ys);
+        info!("length of x mesh : {:?}", n_steps);
+        info!("number of Ys: {:?}", number_of_Ys);
         plots(
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
             matrix_of_results,
         );
-        println!("result plotted");
+        info!("result plotted");
     }
 }
 

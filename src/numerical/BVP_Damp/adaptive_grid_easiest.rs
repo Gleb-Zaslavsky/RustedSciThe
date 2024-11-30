@@ -1,6 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
-
+use log::info;
 /*
 Some math considerations...
 1. truncation error analysis
@@ -55,7 +55,7 @@ pub fn easiest_grid_refinement(
     let (n_rows, _) = y_DMatrix.shape();
     let mut new_grid: Vec<f64> = Vec::new();
     let mut mark: DVector<i8> = DVector::zeros(x_mesh.len());
-    //println!("{} rows", n_rows);
+    //info!("{} rows", n_rows);
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.row_iter().enumerate() {
         // iterate through the the row (solution for one of the unknown variables) and find the corresponding truncation error that is
@@ -78,8 +78,8 @@ pub fn easiest_grid_refinement(
             } //i>0
               //for i==0 and i==-1 mark elements remain 0
         } // for i in 0..x_mesh.len()
-        println!(
-            "\n \n for row {} mark: {:?} len {} \n \n",
+        info!(
+            "for row {} mark: {:?} len {} ",
             j,
             mark,
             mark.len()
@@ -97,10 +97,10 @@ pub fn easiest_grid_refinement(
         }
     }
 
-    log::info!("\n \n new_grid: {:?}", new_grid);
+    log::info!("new_grid: {:?}", new_grid);
     log::info!("of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {:?} of length {}",
+        "new_initial_guess: {:?} of length {}",
         new_initial_guess,
         new_initial_guess.len()
     );
@@ -158,7 +158,7 @@ pub fn pearson_grid_refinement(
     // mark[i] = how many points to insert in i-th position
     let mut mark: HashMap<usize, i32> = HashMap::new();
 
-    //println!("{} rows", n_rows);
+    //info!("{} rows", n_rows);
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.row_iter().enumerate() {
         let y_j_max = y.max();
@@ -198,8 +198,8 @@ pub fn pearson_grid_refinement(
             .filter(|(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
-        println!(
-            "\n \n for row {} found intervals to be refined: {:?} of length {} \n \n",
+        info!(
+            "for row {} found intervals to be refined: {:?} of length {} ",
             j,
             non_zero_keys,
             non_zero_keys.len()
@@ -223,10 +223,10 @@ pub fn pearson_grid_refinement(
         }
     }
 
-    log::info!("\n \n new_grid: {:?}", new_grid);
+    log::info!("new_grid: {:?}", new_grid);
     log::info!("of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {:?} of length {}",
+        "new_initial_guess: {:?} of length {}",
         new_initial_guess,
         new_initial_guess.len()
     );
@@ -280,7 +280,7 @@ pub fn grcar_smooke_grid_refinement(
     // mark[i] = how many points to insert in i-th position
     let mut mark: HashMap<usize, i32> = HashMap::new();
 
-    //println!("{} rows", n_rows);
+    //info!("{} rows", n_rows);
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.row_iter().enumerate() {
         let y_j_max = y.max();
@@ -347,8 +347,8 @@ pub fn grcar_smooke_grid_refinement(
             .filter(|(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
-        println!(
-            "\n \n for row {} found intervals to be refined: {:?} of length {} \n \n",
+        info!(
+            "for row {} found intervals to be refined: {:?} of length {} ",
             j,
             non_zero_keys,
             non_zero_keys.len()
@@ -372,10 +372,10 @@ pub fn grcar_smooke_grid_refinement(
         }
     }
 
-    log::info!("\n \n new_grid: {:?}", new_grid);
+    log::info!("new_grid: {:?}", new_grid);
     log::info!("of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {:?} of length {}",
+        "new_initial_guess: {:?} of length {}",
         new_initial_guess,
         new_initial_guess.len()
     );

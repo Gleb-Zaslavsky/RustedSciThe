@@ -1,5 +1,5 @@
 #![allow(warnings)]
-
+use log::info;
 use splines::{Interpolation, Key, Spline};
 fn interpolate() {
     let keys = vec![
@@ -12,13 +12,13 @@ fn interpolate() {
 
     let interpolated_value = spline.clamped_sample(1.5);
     match interpolated_value {
-        Some(value) => println!("Interpolated value at 1.5: {}", value),
-        None => println!("Time is out of bounds"),
+        Some(value) => info!("Interpolated value at 1.5: {}", value),
+        None => info!("Time is out of bounds"),
     }
     let extrapolated_value = spline.sample(3.0);
     match extrapolated_value {
-        Some(value) => println!("Extrapolated value at 3.0: {}", value),
-        None => println!("Time is out of bounds"),
+        Some(value) => info!("Extrapolated value at 3.0: {}", value),
+        None => info!("Time is out of bounds"),
     }
 }
 
@@ -170,8 +170,8 @@ let spline = Spline::from_vec(keys);
 
 let interpolated_value = spline.clamped_sample(0.5);
 match interpolated_value {
-    Some(value) => println!("Interpolated value at 0.5: {}", value),
-    None => println!("Time is out of bounds"),
+    Some(value) => info!("Interpolated value at 0.5: {}", value),
+    None => info!("Time is out of bounds"),
 }
 
 /*
@@ -187,7 +187,7 @@ match interpolated_value {
     let x = 1.5;
     let y = evaluate_spline(&segments, x);
 
-    println!("Spline value at x = {}: y = {}", x, y);
+    info!("Spline value at x = {}: y = {}", x, y);
 */
 fn B() {
     let keys = vec![
@@ -200,8 +200,8 @@ fn B() {
 
     let interpolated_value = spline.clamped_sample(0.5);
     match interpolated_value {
-        Some(value) => println!("Interpolated value at 0.5: {}", value),
-        None => println!("Time is out of bounds"),
+        Some(value) => ("Interpolated value at 0.5: {}", value),
+        None => info!("Time is out of bounds"),
     }
 }
 

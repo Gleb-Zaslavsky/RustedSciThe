@@ -1,6 +1,7 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::{DMatrix, DVector, Matrix};
+use log::info;
 // solve algebraic nonlinear system with free parameter t
 pub struct NRODE {
     pub eq_system: Vec<Expr>,    //
@@ -55,7 +56,7 @@ impl NRODE {
             self.values.clone(),
             self.arg.clone(),
         );
-        //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+        //     ("Jacobian = {:?}", jacobian_instance.readable_jacobian);
         let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -82,9 +83,9 @@ impl NRODE {
     pub fn iteration(&mut self) -> DVector<f64> {
         let t = self.t;
         let y = &self.y;
-        println!("Newton-Raphson iteration {}", &y);
+        info!("Newton-Raphson iteration {}", &y);
         let new_f = (self.fun)(t, &y);
-        // println!("new_f = {:?}", &new_f);
+        // info!("new_f = {:?}", &new_f);
         let new_j = &self.jac.as_mut().unwrap()(t, &y);
 
         let _x = self.initial_guess.clone();
@@ -92,7 +93,7 @@ impl NRODE {
         let j_inverse = new_j.clone().try_inverse().unwrap();
 
         let delta: DVector<f64> = j_inverse * new_f;
-        //  println!("dx = {:?},new_j = {:?},", &delta, &new_j);
+        //  info!("dx = {:?},new_j = {:?},", &delta, &new_j);
         // element wise subtraction
         let new_y: DVector<f64> = y - delta;
 
@@ -101,7 +102,7 @@ impl NRODE {
     // main function to solve the system of equations
 
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        println!("solving system of equations with Newton-Raphson method");
+        info!("solving system of equations with Newton-Raphson method");
         let mut y: DVector<f64> = self.initial_guess.clone();
         let mut i = 0;
         while i < self.max_iterations {
@@ -110,7 +111,7 @@ impl NRODE {
             let dy = new_y.clone() - y.clone();
 
             let error = Matrix::norm(&dy);
-            // println!("new_x = {:?}, x = {:?}", &new_y, &y);
+            // info!("new_x = {:?}, x = {:?}", &new_y, &y);
             if error < self.tolerance {
                 self.result = Some(new_y.clone());
                 self.max_error = error;
@@ -119,7 +120,7 @@ impl NRODE {
                 y = new_y.clone();
                 self.y = new_y;
                 i += 1;
-                // println!("iteration = {}, error = {}", i, error)
+                // info!("iteration = {}, error = {}", i, error)
             }
         }
         None

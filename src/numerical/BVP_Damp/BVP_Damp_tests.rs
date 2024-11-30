@@ -9,6 +9,8 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use nalgebra::{DMatrix, DVector};
+
+    use log::info;
     #[test]
     fn test_BVP_Damp1() {
         let eq1 = Expr::parse_expression("y-z");
@@ -65,12 +67,12 @@ mod tests {
             Some(Bounds),
         );
 
-        println!("solving system");
+        info!("solving system");
         nr.solve();
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps);
-        // println!("result = {:?}", solution);
+        // info!("result = {:?}", solution);
         // nr.plot_result();
     }
     /// Tests the boundary value problem (BVP) solver for the Clairaut equation.
@@ -133,7 +135,7 @@ mod tests {
                 Some(Bounds),
             );
 
-            println!("solving system");
+            info!("solving system");
             nr.solve();
             let solution = nr.get_result().unwrap();
             let y_numer = solution.column(0);
@@ -143,9 +145,9 @@ mod tests {
             //compare with exact solution
             let y_exact = ne.exact_solution(None, None, Some(n_steps));
             let n = &y_exact.len();
-            // println!("numerical result = {:?}",  y_numer);
-            println!("\n \n y exact{:?}, {}", &y_exact, &y_exact.len());
-            println!("\n \n y numer{:?}, {}", &y_numer, &y_numer.len());
+            // info!("numerical result = {:?}",  y_numer);
+            info!("y exact{:?}, {}", &y_exact, &y_exact.len());
+            info!("y numer{:?}, {}", &y_numer, &y_numer.len());
             let comparsion: Vec<f64> = y_numer
                 .into_iter()
                 .zip(y_exact.clone())
@@ -158,11 +160,11 @@ mod tests {
                 .unwrap();
             let position = comparsion.iter().position(|&x| x == *max_residual).unwrap();
             let relativ_residual = max_residual.abs() / y_exact[position];
-            println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
+            info!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
 
             assert!(norm < 1e-2, "norm = {}", norm);
             assert!(relativ_residual < 1e-1, "norm = {}", norm);
-            println!("norm = {}", norm);
+            info!("norm = {}", norm);
         }
     }
 }

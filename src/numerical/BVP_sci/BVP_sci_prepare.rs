@@ -5,7 +5,7 @@ use na::{Complex, DMatrix, DVector};
 use sprs::{CsMat, CsVec};
 use std::f64::EPSILON;
 use std::ops::AddAssign;
-
+use log::info;
 use approx::relative_eq;
 pub fn task_check(
     x: DVector<f64>,
@@ -51,7 +51,7 @@ pub fn task_check(
     }
 
     let tol = if tol < 100.0 * EPSILON {
-        println!("`tol` is too low, setting to {:.2e}", 100.0 * EPSILON);
+        info!("`tol` is too low, setting to {:.2e}", 100.0 * EPSILON);
         100.0 * EPSILON
     } else {
         tol
@@ -150,7 +150,7 @@ pub fn wrap_functions(
 }
 
 pub fn print_iteration_header() {
-    println!(
+    info!(
         "{:^15}{:^15}{:^15}{:^15}{:^15}",
         "Iteration", "Max residual", "Max BC residual", "Total nodes", "Nodes added"
     );
@@ -163,7 +163,7 @@ pub fn print_iteration_progress(
     total_nodes: usize,
     nodes_added: usize,
 ) {
-    println!(
+    (
         "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
         iteration, residual, bc_residual, total_nodes, nodes_added
     );
@@ -211,11 +211,11 @@ pub fn estimate_fun_jac(
         y_new.column_mut(i).add_assign(&(h.column(i)));
         let hi = y_new.column(i) - y.column(i);
         let f_new = calc_F(&fun, x, &y_new);
-        // print!("\n \n {}, hi {:?},  \n \n f_new {:?}, \n \n f0 {:?} ", i, hi, f_new, f0);
+        // print!("{}, hi {:?},  f_new {:?}, f0 {:?} ", i, hi, f_new, f0);
         let dy_dx_j = (&f_new.column(i) - f0.clone().column(i)).component_div(&hi);
-        // println!("\n \n dy_dx_j {:?} \n \n",  dy_dx_j);
+        // info!("dy_dx_j {:?} ",  dy_dx_j);
         df_dy.set_column(i, &dy_dx_j);
-        // println!("dy_dx {:?},",  df_dy);
+        // info!("dy_dx {:?},",  df_dy);
 
         Jac.push(df_dy);
     }
@@ -368,9 +368,9 @@ pub fn estimate_rms_residuals(
           print!("\n J {:?}", J);
           for (i, matrix_i) in J.iter().enumerate() {
               let J_i:Vec<f64> = matrix_i.iter().cloned().collect();
-              println!("J_i {:?}", J_i);
+              info!("J_i {:?}", J_i);
               let expected_Ji:Vec<f64> = expected_J[i].clone();
-              println!("expected_Ji {:?}", expected_Ji);
+              info!("expected_Ji {:?}", expected_Ji);
               let epsilon = 1e-6;
               let are_equal = J_i.iter().zip(expected_Ji.iter()).all(|(a, b)| (a - b).abs() < epsilon);
               assert_eq!(are_equal, true, "Row {} is not equal.", i);

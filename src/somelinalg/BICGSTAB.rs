@@ -46,10 +46,10 @@
 //! ```
 //!
 
+use log::info;
 use num_traits::One;
 use sprs::indexing::SpIndex;
 use sprs::{CsMatViewI, CsVecI, CsVecViewI};
-
 /// Stabilized bi-conjugate gradient solver
 #[derive(Debug)]
 pub struct BiCGSTAB<'a, T, I: SpIndex, Iptr: SpIndex> {
@@ -130,11 +130,11 @@ macro_rules! bicgstab_impl {
                             //   filtered_x.map_inplace(|x| if x>=&tol { *x} else {}    );
 
                             for (i, value) in x.iter_mut() {
-                                //  println!("value {}", &value);
+                                //  info!("value {}", &value);
                                 if (*value).abs() >= tol {
                                     filtered_x.append(i, *value);
 
-                                    println!("Filtering {}", i);
+                                    info!("Filtering {}", i);
                                 }
                             }
 
@@ -317,11 +317,11 @@ mod test {
         let res =
             BiCGSTAB::<'_, f32, _, _>::solve(a.view(), x0.view(), b.view(), tol, max_iter).unwrap();
         let b_recovered = &a * &res.x();
-        println!("result = {:?}", res.x());
-        println!("nonzero = {:?}", res.nonzero_indexes);
-        println!("Iteration count {:?}", res.iteration_count());
-        println!("Soft restart count {:?}", res.soft_restart_count());
-        println!("Hard restart count {:?}", res.hard_restart_count());
+        info!("result = {:?}", res.x());
+        info!("nonzero = {:?}", res.nonzero_indexes);
+        info!("Iteration count {:?}", res.iteration_count());
+        info!("Soft restart count {:?}", res.soft_restart_count());
+        info!("Hard restart count {:?}", res.hard_restart_count());
 
         // Make sure the solved values match expectation
         for (input, output) in b.to_dense().iter().zip(b_recovered.to_dense().iter()) {
@@ -350,11 +350,11 @@ mod test {
         let res =
             BiCGSTAB::<'_, f64, _, _>::solve(a.view(), x0.view(), b.view(), tol, max_iter).unwrap();
         let b_recovered = &a * &res.x();
-        println!("result = {:?}", res.x());
-        println!("nonzero = {:?}", res.nonzero_indexes);
-        println!("Iteration count {:?}", res.iteration_count());
-        println!("Soft restart count {:?}", res.soft_restart_count());
-        println!("Hard restart count {:?}", res.hard_restart_count());
+        info!("result = {:?}", res.x());
+        info!("nonzero = {:?}", res.nonzero_indexes);
+        info!("Iteration count {:?}", res.iteration_count());
+        info!("Soft restart count {:?}", res.soft_restart_count());
+        info!("Hard restart count {:?}", res.hard_restart_count());
 
         // Make sure the solved values match expectation
         for (input, output) in b.to_dense().iter().zip(b_recovered.to_dense().iter()) {

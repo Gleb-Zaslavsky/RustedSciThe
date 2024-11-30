@@ -1,4 +1,5 @@
 // the collection of utility functions mainly for bracket parsing and proceeding
+use log::info;
 pub fn has_brackets(s: &str) -> bool {
     let mut stack = Vec::new();
     let mut has_brackets = false;
@@ -112,12 +113,12 @@ pub fn find_char_positions_outside_brackets(s: &str, c: char) -> Option<usize> {
         Some(pos)
     };
     res
-    //println!("+ at pos: {}", pos);
+    //info!("+ at pos: {}", pos);
     // Some(*pos)
 }
 // code finds the position of
 pub fn find_pair_to_this_bracket(input: &str, bracket_start: usize) -> usize {
-    println!("finding closing bracket of {}", input);
+    info!("finding closing bracket of {}", input);
     let mut stack = bracket_start;
     let mut bracket_end = None;
     //    let mut inner_expr: Option<Expr> = None;
@@ -241,6 +242,6 @@ for out_row in out.iter_mut() {
     }
 }
 
-println!("{:?}", out)
+info!("{:?}", out)
 
 */

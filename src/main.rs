@@ -942,8 +942,8 @@ fn main() {
             let y_exact = ne.exact_solution(None, None, Some(n_steps));
             let n = &y_exact.len();
             // println!("numerical result = {:?}",  y_numer);
-            println!("\n \n y exact{:?}, {}", &y_exact, &y_exact.len());
-            println!("\n \n y numer{:?}, {}", &y_numer, &y_numer.len());
+            println!("y exact{:?}, {}", &y_exact, &y_exact.len());
+            println!("y numer{:?}, {}", &y_numer, &y_numer.len());
             let comparsion: Vec<f64> = y_numer
                 .into_iter()
                 .zip(y_exact.clone())

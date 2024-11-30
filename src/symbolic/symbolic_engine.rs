@@ -3,6 +3,7 @@ use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
+use log::info;
 use std::collections::HashMap;
 use std::f64;
 use std::fmt;
@@ -516,15 +517,15 @@ impl Expr {
     pub fn parse_expression(input: &str) -> Expr {
         let expr = match parse_expression_func(0, input) {
             Ok(expr) => {
-                println!("\n \n found expression: {:?}", expr);
-                println!(
-                    "\n \n in human readable format {:?} \n \n ",
+                info!("found expression: {:?}", expr);
+                info!(
+                    "in human readable format {:?} ",
                     &expr.clone().sym_to_str("x")
                 );
                 Ok(expr)
             }
             Err(err) => {
-                println!("Error: {}", err);
+                info!("Error: {}", err);
                 Err(err)
             }
         };
@@ -536,15 +537,15 @@ impl Expr {
         for i in input {
             let expr = match parse_expression_func(0, i) {
                 Ok(expr) => {
-                    println!("\n \n found expression: {:?}", expr);
-                    println!(
-                        "\n \n in human readable format {:?} \n \n ",
+                    info!("found expression: {:?}", expr);
+                    info!(
+                        "in human readable format {:?} ",
                         &expr.clone().sym_to_str("x")
                     );
                     Ok(expr)
                 }
                 Err(err) => {
-                    println!("Error: {}", err);
+                    info!("Error: {}", err);
                     Err(err)
                 }
             };
@@ -676,7 +677,7 @@ impl Expr {
             .iter()
             .map(|expr| expr.evaluate_vector_lambdified(x))
             .collect();
-        println!(
+        info!(
             "{:?}, {:?}",
             diff_multi_expression_vec.len(),
             &vector_of_results.clone().len()
@@ -696,7 +697,7 @@ impl Expr {
             .iter()
             .map(|expr| expr.lamdified_from_linspace(start.clone(), end.clone(), num_values))
             .collect();
-        // println!("{}, {}",diff_multi_expression_vec.len(),  &vector_of_results.len());
+        // info!("{}, {}",diff_multi_expression_vec.len(),  &vector_of_results.len());
         vector_of_results
     }
 
@@ -711,7 +712,7 @@ impl Expr {
         // for each expression of partial derivative calculate result for vector of values
         let vector_of_vectors_of_dy_dx_analytical =
             self.evaluate_multi_diff_from_linspace(start.clone(), end.clone(), num_values);
-        //println!("vector_of_vectors_of_dy_dx_analytical  {:?}", vector_of_vectors_of_dy_dx_analytical);
+        //info!("vector_of_vectors_of_dy_dx_analytical  {:?}", vector_of_vectors_of_dy_dx_analytical);
         let analitical_function = &self.lambdify_wrapped(); // get the analtical function
                                                             // let's define step
         let max_end = end.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
@@ -790,7 +791,7 @@ impl Expr {
     ) -> Box<dyn Fn(f64, Vec<f64>) -> f64> {
         let mut x = vec![arg];
         x.extend(vars); // extend vars.clone();
-                        //  println!("x {:?}",&x);
+                        //  info!("x {:?}",&x);
         let f = self.lambdify_owned(x);
 
         let f_closure: Box<dyn Fn(f64, Vec<f64>) -> f64> = Box::new(move |x, y_vec| {
@@ -990,8 +991,8 @@ mod tests {
 
         let expected_result = C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
         //  Mul(Mul(Const(2.0), Pow(Var("x"), Sub(Const(2.0), Const(1.0)))), Const(1.0)) Box::new(Expr::Mul(Box::new(Expr::Const(2.0)), Box::new(x.clone())))
-        println!("df_dx {:?} ", df_dx);
-        println!("expected_result {:?} ", expected_result);
+        info!("df_dx {:?} ", df_dx);
+        info!("expected_result {:?} ", expected_result);
         assert_eq!(df_dx, expected_result);
     }
 
@@ -1132,7 +1133,7 @@ mod tests {
         let symbolic: Expr = z * x + Expr::exp(y);
         let func = symbolic.lambdify_IVP("x", vec!["y", "z"]);
         let result = func(1.0, vec![0.0, 1.0]);
-        println!("result {}", result);
+        info!("result {}", result);
         let expected_result: f64 = 2.0f64; // 2*2
 
         assert_eq!(result, expected_result);
@@ -1145,7 +1146,7 @@ mod tests {
         let symbolic: Expr = z * x + Expr::exp(y);
         let func = symbolic.lambdify_IVP_owned("x", vec!["y", "z"]);
         let result = func(1.0, vec![0.0, 1.0]);
-        println!("result {}", result);
+        info!("result {}", result);
         let expected_result: f64 = 2.0f64; // 2*2
 
         assert_eq!(result, expected_result);
