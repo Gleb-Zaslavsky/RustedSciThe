@@ -1,16 +1,16 @@
+use crate::numerical::BDF::BDF_solver::BDF;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use crate::numerical::BDF::BDF_solver::BDF;
 extern crate nalgebra as na;
-use na::{DMatrix, DVector};
+use crate::numerical::NonStiff_api::{DormandPrince, RK45};
 use crate::numerical::BDF::common::NumberOrVec;
-use crate::numerical::NonStiff_api::{RK45, DormandPrince}; 
+use crate::numerical::BE::BE;
 use crate::Utils::plots::plots;
+use csv::Writer;
+use na::{DMatrix, DVector};
 use std::env;
 use std::path::Path;
-use crate::numerical::BE::BE;
 use std::time::Instant;
-use csv::Writer;
 
 static COMPLEX: [&str; 1] = ["BDF"];
 
@@ -25,10 +25,10 @@ pub enum Solvers {
 impl Solvers {
     pub fn new(name: &str) -> Solvers {
         match name {
-        //    "BE" => Solvers::BE(BE::new()),
+            //    "BE" => Solvers::BE(BE::new()),
             "BDF" => Solvers::BDF(BDF::new()),
             "RK45" => Solvers::RK45(RK45::new()),
-            "DOPRI"=> Solvers::DOPRI(DormandPrince::new()),
+            "DOPRI" => Solvers::DOPRI(DormandPrince::new()),
             _ => panic!("Unknown solver name"),
         }
     }
@@ -68,16 +68,13 @@ impl Solver for RK45 {
     fn step(&mut self, t_bound: f64, status: &mut String, _message: &mut Option<String>) {
         let t = self.t;
         if t == t_bound {
-          
             *status = "finished".to_string();
         } else {
             let success = self._step_impl();
-  
 
             if !success {
                 *status = "failed".to_string();
             } else {
-              
                 *status = "running".to_string();
                 if (self.t - t_bound) >= 0.0 {
                     *status = "finished".to_string();
@@ -86,22 +83,18 @@ impl Solver for RK45 {
         }
     }
 }
-
 
 impl Solver for DormandPrince {
     fn step(&mut self, t_bound: f64, status: &mut String, _message: &mut Option<String>) {
         let t = self.t;
         if t == t_bound {
-          
             *status = "finished".to_string();
         } else {
             let success = self._step_impl();
-  
 
             if !success {
                 *status = "failed".to_string();
             } else {
-              
                 *status = "running".to_string();
                 if (self.t - t_bound) >= 0.0 {
                     *status = "finished".to_string();
@@ -110,7 +103,6 @@ impl Solver for DormandPrince {
         }
     }
 }
-
 
 pub struct ODEsolver {
     eq_system: Vec<Expr>,
@@ -149,7 +141,7 @@ impl ODEsolver {
         vectorized: bool,
         first_step: Option<f64>,
     ) -> Self {
-        if !COMPLEX.contains(&method.as_str()){
+        if !COMPLEX.contains(&method.as_str()) {
             panic!("new_complex not implemented, please, use new_easy")
         }
         let solver_instance = Solvers::new(&method);
@@ -174,7 +166,7 @@ impl ODEsolver {
             y_result: DMatrix::zeros(1, 1),
         }
     }
-    pub fn new_easy ( 
+    pub fn new_easy(
         eq_system: Vec<Expr>,
         values: Vec<String>,
         arg: String,
@@ -182,35 +174,40 @@ impl ODEsolver {
         t0: f64,
         y0: DVector<f64>,
         t_bound: f64,
-        max_step: f64) -> Self {
-            if !EASY.contains(&method.as_str()){
-                panic!("new_easy not implemented, please, use new_complex")
-            }
-            let solver_instance = Solvers::new(&method);
-            ODEsolver {
-                eq_system,
-                values,
-                arg,
-                method,
-                t0,
-                y0,
-                t_bound,
-                max_step,
-                rtol: 0.0,
-                atol: 0.0,
-                jac_sparsity: None,
-                vectorized:false,
-                first_step: None,
-                status: "running".to_string(),
-                solver_instance,
-                message: None,
-                t_result: DVector::zeros(1),
-                y_result: DMatrix::zeros(1, 1),
-            }
+        max_step: f64,
+    ) -> Self {
+        if !EASY.contains(&method.as_str()) {
+            panic!("new_easy not implemented, please, use new_complex")
         }
+        let solver_instance = Solvers::new(&method);
+        ODEsolver {
+            eq_system,
+            values,
+            arg,
+            method,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol: 0.0,
+            atol: 0.0,
+            jac_sparsity: None,
+            vectorized: false,
+            first_step: None,
+            status: "running".to_string(),
+            solver_instance,
+            message: None,
+            t_result: DVector::zeros(1),
+            y_result: DMatrix::zeros(1, 1),
+        }
+    }
     pub fn generate(&mut self) {
         let mut jacobian_instance = Jacobian::new();
-        jacobian_instance.generate_IVP_ODEsolver(self.eq_system.clone(), self.values.clone(), self.arg.clone());
+        jacobian_instance.generate_IVP_ODEsolver(
+            self.eq_system.clone(),
+            self.values.clone(),
+            self.arg.clone(),
+        );
         let fun = jacobian_instance.lambdified_functions_IVP_DVector;
         let jac = jacobian_instance.function_jacobian_IVP_DMatrix;
 
@@ -230,30 +227,26 @@ impl ODEsolver {
                 self.first_step,
             );
             self.solver_instance = Solvers::BDF(solver_instance);
-        }// BDF
+        }
+        // BDF
         else if self.method == "RK45" {
             let mut solver_instance = RK45::new();
-            solver_instance.set_initial(
-                fun, self.y0.clone(), self.t0, self.max_step)
-            }
-        else if self.method=="DOPRI"{
-
+            solver_instance.set_initial(fun, self.y0.clone(), self.t0, self.max_step)
+        } else if self.method == "DOPRI" {
             let mut solver_instance = DormandPrince::new();
-            solver_instance.set_initial(
-                fun, self.y0.clone(), self.t0, self.max_step)
+            solver_instance.set_initial(fun, self.y0.clone(), self.t0, self.max_step)
         }
-        /* 
+        /*
         else if self.method == "BE" {
             let mut solver_instance = BE::new();
             solver_instance.set_initial(
-   
+
             );
             self.solver_instance = Solvers::BE(solver_instance);
         }
 
         */
     }
-
 
     pub fn main_loop(&mut self) {
         let start = Instant::now();
@@ -328,7 +321,12 @@ impl ODEsolver {
     }
 
     pub fn plot_result(&self) {
-        plots(self.arg.clone(), self.values.clone(), self.t_result.clone(), self.y_result.clone());
+        plots(
+            self.arg.clone(),
+            self.values.clone(),
+            self.t_result.clone(),
+            self.y_result.clone(),
+        );
         println!("result plotted");
     }
 
@@ -338,7 +336,7 @@ impl ODEsolver {
 
     pub fn save_result(&self) -> Result<(), Box<dyn std::error::Error>> {
         let current_dir = env::current_dir().expect("Failed to get current directory");
-         let path = Path::new(&current_dir); //.join("f:\\RUST\\RustProjects_\\RustedSciThe3\\src\\numerical\\results\\");
+        let path = Path::new(&current_dir); //.join("f:\\RUST\\RustProjects_\\RustedSciThe3\\src\\numerical\\results\\");
         let file_name = format!("{}+{}.csv", self.arg, self.values.join("+"));
         let full_path = path.join(file_name);
 
@@ -353,7 +351,13 @@ impl ODEsolver {
         // Write y columns
         for (i, col) in self.y_result.column_iter().enumerate() {
             let col_name = format!("{}", &self.values[i]);
-            wtr.write_record(&[&col_name, &col.iter().map(|&x| x.to_string()).collect::<Vec<_>>().join(",")])?;
+            wtr.write_record(&[
+                &col_name,
+                &col.iter()
+                    .map(|&x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ])?;
         }
 
         println!("result saved");

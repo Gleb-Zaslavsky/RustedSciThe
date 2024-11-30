@@ -533,7 +533,13 @@ impl MatrixType for faer_mat {
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<faer_mat>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
-                assert_eq!(mat_.ncols(), d_vec.nrows(), " matrix {} and  vector {} have different sizes", mat_.ncols(), d_vec.nrows(),);
+                assert_eq!(
+                    mat_.ncols(),
+                    d_vec.nrows(),
+                    " matrix {} and  vector {} have different sizes",
+                    mat_.ncols(),
+                    d_vec.nrows(),
+                );
                 let d_vec: Mat<f64> =
                     from_column_major_slice::<f64>(d_vec.as_slice(), mat_.ncols(), 1).to_owned();
                 //let LU0 = lu_in_place( mat_);

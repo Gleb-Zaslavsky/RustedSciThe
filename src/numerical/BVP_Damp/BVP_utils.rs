@@ -1,7 +1,7 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
+use simplelog::*;
 use std::collections::HashMap;
 use std::time::Duration;
-use simplelog::*;
 pub fn elapsed_time(elapsed: Duration) {
     let time = elapsed.as_millis();
     if time < 1000 {

@@ -3,7 +3,7 @@ use crate::somelinalg::BICGSTAB::BiCGSTAB;
 use nalgebra::sparse::{CsCholesky, CsMatrix};
 use nalgebra::DMatrix;
 use sprs::linalg::bicgstab::BiCGSTAB as BiCGSTAB_sprs;
-use sprs::{CsMat,  CsVec, CsVecI};
+use sprs::{CsMat, CsVec, CsVecI};
 
 /*
 fn inverse_via_lapack(mat: &CsMatrix<f64>) -> Option<CsMatrix<f64>> {
@@ -198,7 +198,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sprs:: CsMatI;
+    use sprs::CsMatI;
     #[test]
     fn test_inverse_CsMatrix() {
         let mat = DMatrix::from_vec(3, 3, vec![4.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 0.0, 3.0]);
