@@ -1,18 +1,14 @@
-use crate::numerical::BVP_Damp::BVP_traits::{
-    MatrixType, VectorType
-    ,
-};
+use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-use simplelog::*;
-use std::fs::File;
+use log::info;
 
 /*
 pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
     let mut fbound = 1.0;
-    //println!("bounds = {:?}", bounds.len());
- //  println!("y_new = {:?}", y_new.to_DVectorType()  );
+    //info("bounds = {:?}", bounds.len());
+ //  info("y_new = {:?}", y_new.to_DVectorType()  );
 
     for (i, y_i) in y.iterate().enumerate() {
         let below = bounds[i].0;
@@ -45,8 +41,9 @@ pub fn jac_recalc(
     // when jac is None it means this is first iteration
     if old_jac.is_none() || m > m_from_task {
         log::info!(
-            "\n number of iterations with old jac {} is higher then threshold {}",
-            m, m_from_task
+            "number of iterations with old jac {} is higher then threshold {}",
+            m,
+            m_from_task
         );
         true
     } else {
@@ -139,7 +136,7 @@ pub fn interchange_columns(
 
     let reordered_result = if variables != unindexed_vars {
         // if they have the same oreder no permutation needed
-        println!("permutation needed");
+        info!("permutation needed");
         for var in &unindexed_vars {
             let index = variables.iter().position(|x| x == var).unwrap();
             reordering.push(index);
@@ -152,10 +149,10 @@ pub fn interchange_columns(
     reordered_result
 }
 /*
-To avoid this difficulty, the solution of the problem is  carried out in E-steps.  The problem is first solved (via the above iterative process) for 
-a modest value of E (e.g.,  E  =  1e-1 or 1e-2), and then,  in turn,  for  values of  e smaller  than the preceding  value  of  E  by a 
+To avoid this difficulty, the solution of the problem is  carried out in E-steps.  The problem is first solved (via the above iterative process) for
+a modest value of E (e.g.,  E  =  1e-1 or 1e-2), and then,  in turn,  for  values of  e smaller  than the preceding  value  of  E  by a
 factor of about 3.  The mesh  point set used at the completion of  the preceding step forms the initial set for the new step
- ON  A  DIFFERENTIAL  EQUATION  OF  BOUNDARY  LAYER  TYPE 
+ ON  A  DIFFERENTIAL  EQUATION  OF  BOUNDARY  LAYER  TYPE
 By CARL  E.  PEARSON,
-p. 138 
+p. 138
 */

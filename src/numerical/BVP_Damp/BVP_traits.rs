@@ -14,6 +14,7 @@ use faer::mat::Mat;
 use faer::prelude::*;
 use std::fmt::{self, Debug};
 use std::ops::Sub;
+use log::info;
 type faer_mat = SparseColMat<usize, f64>;
 type faer_col = Col<f64>; // Mat<f64>;
 pub enum YEnum {
@@ -533,7 +534,13 @@ impl MatrixType for faer_mat {
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<faer_mat>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
-                assert_eq!(mat_.ncols(), d_vec.nrows(), " matrix {} and  vector {} have different sizes", mat_.ncols(), d_vec.nrows(),);
+                assert_eq!(
+                    mat_.ncols(),
+                    d_vec.nrows(),
+                    " matrix {} and  vector {} have different sizes",
+                    mat_.ncols(),
+                    d_vec.nrows(),
+                );
                 let d_vec: Mat<f64> =
                     from_column_major_slice::<f64>(d_vec.as_slice(), mat_.ncols(), 1).to_owned();
                 //let LU0 = lu_in_place( mat_);
@@ -790,21 +797,21 @@ pub fn jac_rowwise_printing(jac: &Box<dyn MatrixType>) {
     if let Some(dense) = jac.as_any().downcast_ref::<DMatrix<f64>>() {
         dense.row_iter().enumerate().for_each(|(i, row)| {
             let row: Vec<&f64> = row.iter().collect();
-            println!("\n  {:?}-th row = {:?}", i, row);
+            info!("\n  {:?}-th row = {:?}", i, row);
         })
     } else if let Some(sparse) = jac.as_any().downcast_ref::<CsMat<f64>>() {
-        println!("{:?}", sparse)
+        info!("{:?}", sparse)
     } else if let Some(cs_matrix) = jac.as_any().downcast_ref::<CsMatrix<f64>>() {
-        println!("{:?}", cs_matrix)
+        info!("{:?}", cs_matrix)
     } else if let Some(faer_mat) = jac.as_any().downcast_ref::<faer_mat>() {
         for i in 0..faer_mat.nrows() {
             let mut row_data: Vec<&f64> = Vec::new();
             for j in 0..faer_mat.ncols() {
                 row_data.push(faer_mat.get(i, j).unwrap_or(&0.0));
             }
-            println!("\n \n{:?}-th row = {:?}", i, row_data);
+            info!("{:?}-th row = {:?}", i, row_data);
         }
     } else {
-        println!("Unknown MatrixType")
+        info!("Unknown MatrixType")
     }
 }

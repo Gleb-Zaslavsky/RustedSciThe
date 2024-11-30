@@ -3,8 +3,8 @@ use crate::somelinalg::BICGSTAB::BiCGSTAB;
 use nalgebra::sparse::{CsCholesky, CsMatrix};
 use nalgebra::DMatrix;
 use sprs::linalg::bicgstab::BiCGSTAB as BiCGSTAB_sprs;
-use sprs::{CsMat,  CsVec, CsVecI};
-
+use sprs::{CsMat, CsVec, CsVecI};
+use log::info;
 /*
 fn inverse_via_lapack(mat: &CsMatrix<f64>) -> Option<CsMatrix<f64>> {
     let (n ,m) = mat.shape();
@@ -16,7 +16,7 @@ fn inverse_via_lapack(mat: &CsMatrix<f64>) -> Option<CsMatrix<f64>> {
         ipiv,
         work,
         lwork,
-        info
+        info!
     )}
     Some(work)
 }
@@ -46,7 +46,7 @@ fn filter_csmat(mat: &CsMat<f64>, epsilon: f64) -> CsMat<f64> {
 }
 
 pub fn invers_csmat(mat: CsMat<f64>, tol: f64, max_iter: usize) -> Option<CsMat<f64>> {
-    println!("mat = {:?}", mat);
+    info!("mat = {:?}", mat);
     let mat = mat.to_csr();
     let mat = filter_csmat(&mat, tol);
 
@@ -69,18 +69,18 @@ pub fn invers_csmat(mat: CsMat<f64>, tol: f64, max_iter: usize) -> Option<CsMat<
         let mut data: Vec<f64> = vec![tol; n];
         data[i] = 1.0;
         let b: CsVec<f64> = CsVecI::new(n, indices, data);
-        println!("{}-th col {:?}", i, b);
+        info!("{}-th col {:?}", i, b);
         let res = BiCGSTAB::<'_, f64, _, _>::solve(mat.view(), x0.view(), b.view(), tol, max_iter);
 
         match res {
             Ok(res) => {
                 let x = res.x();
                 let nonzero_indexes = res.nonzero_indexes();
-                println!("\n \n  solution: {:?}, {}", x, x.dim());
-                println!("\n \n  nonzero indexes: {:?}", nonzero_indexes);
+                info!(" solution: {:?}, {}", x, x.dim());
+                info!(" nonzero indexes: {:?}", nonzero_indexes);
 
                 inverted_matrix = inverted_matrix.append_outer_csvec(x);
-                println!("inv mat {:?}", inverted_matrix.clone());
+                info!("inv mat {:?}", inverted_matrix.clone());
                 //   inverted_matrix.append_outer(data, x, nonzero_indexes);
             }
             Err(_e) => {
@@ -88,7 +88,7 @@ pub fn invers_csmat(mat: CsMat<f64>, tol: f64, max_iter: usize) -> Option<CsMat<
             }
         }
     }
-    println!("inverted matrix {:?}", inverted_matrix);
+    info!("inverted matrix {:?}", inverted_matrix);
     Some(inverted_matrix) //None
 }
 //_______________________CsMatrix_inverse____________________________
@@ -108,14 +108,14 @@ fn invers_csmat2(mat: CsMat<f64>, tol: f64, max_iter: usize) -> Option<CsMat<f64
         let indices: Vec<usize> = vec![i];
         let data: Vec<f64> = vec![1.0];
         let b: CsVec<f64> = CsVecI::new(n, indices, data);
-        println!("{}-th col {:?}", i, b);
+        info!("{}-th col {:?}", i, b);
         let res =
             BiCGSTAB_sprs::<'_, f64, _, _>::solve(mat.view(), x0.view(), b.view(), tol, max_iter);
 
         match res {
             Ok(res) => {
                 let x = res.x();
-                println!("\n \n  solution: {:?}", x);
+                info!(" solution: {:?}", x);
             }
             Err(_e) => {
                 panic!("Error while solving linear system ",);
@@ -132,14 +132,14 @@ fn inverse_via_cholesky(mat: &CsMatrix<f64>) -> Option<CsMatrix<f64>> {
     match sparse.l() {
         None => None,
         Some(l) => {
-            // println!("{:?}", eye);
+            // info!("{:?}", eye);
 
             for i in 0..eye.nrows() {
                 let b = eye.row(i).to_owned();
                 let col_of_invese = l
                     .tr_solve_lower_triangular(&l.solve_lower_triangular(&b).unwrap())
                     .unwrap();
-                println!("{:?}", col_of_invese);
+                info!("{:?}", col_of_invese);
             }
             Some(l.to_owned().into())
         }
@@ -154,7 +154,7 @@ pub fn inverse_CsMatrix(mat: &CsMatrix<f64>) -> Option<CsMatrix<f64>> {
     let L_ = cholesky.l().unwrap();
 
     let L_Dense: DMatrix<f64> = L_.to_owned().into();
-    println!("{:?}", L_Dense.transpose());
+    info!("{:?}", L_Dense.transpose());
     let inverse_L: DMatrix<f64> = L_Dense.try_inverse().unwrap();
     let L_transpose: DMatrix<f64> = L_.transpose().into();
     let inverse_L_transpose: DMatrix<f64> = L_transpose.try_inverse().unwrap();
@@ -186,10 +186,10 @@ fn main() {
 
     match result {
         Ok(_) => {
-            println!("Solution: {:?}", x);
+            info!("Solution: {:?}", x);
         }
         Err(e) => {
-            println!("Error: {:?}", e);
+            info!("Error: {:?}", e);
         }
     }
 }
@@ -198,15 +198,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sprs:: CsMatI;
+    use sprs::CsMatI;
     #[test]
     fn test_inverse_CsMatrix() {
         let mat = DMatrix::from_vec(3, 3, vec![4.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 0.0, 3.0]);
 
         let mat: CsMatrix<f64> = mat.into();
-        println!("{:?}", mat);
+        info!("{:?}", mat);
         let reult = inverse_CsMatrix(&mat);
-        println!("{:?}", reult);
+        info!("{:?}", reult);
     }
     #[test]
     fn test_inverse_csmat() {
@@ -217,7 +217,7 @@ mod tests {
             vec![1.0, 2., 21., 6., 6., 2., 2., 8.],
         );
 
-        println!("{:?} \n \n", mat);
+        info!("{:?} ", mat);
         let tol = 1e-8;
         let max_iter = 1000;
         let res = invers_csmat(mat, tol, max_iter).unwrap();
@@ -237,8 +237,8 @@ mod tests {
 
             let mat_DMatrix:DMatrix<f64> = DMatrix::from_column_slice(8, 8, data.as_slice());
             let inv_mat_DMatrix:DMatrix<f64> = mat_DMatrix.try_inverse().unwrap();
-            println!("inv DMatrix: {:?}", inv_mat_DMatrix);
-         //   println!("{:?} \n \n", mat);
+            info!("inv DMatrix: {:?}", inv_mat_DMatrix);
+         //   info!("{:?} ", mat);
             let tol = 1e-8;
             let max_iter = 1000;
             let res = invers_csmat(mat, tol, max_iter).unwrap();

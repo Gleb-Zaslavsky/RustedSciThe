@@ -2,6 +2,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
+use log::info;
 // solve algebraic nonlinear system with free parameter t
 //#[derive(Debug)]
 pub struct NRE {
@@ -74,14 +75,14 @@ impl NRE {
 
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self) {
-        println!("generating equations and jacobian");
+        info!("generating equations and jacobian");
         let mut jacobian_instance = Jacobian::new();
         jacobian_instance.generate_IVP_ODEsolver(
             self.eq_system.clone(),
             self.values.clone(),
             self.arg.clone(),
         );
-        // println!("Jacobian = {:?}", jacobian_instance.symbolic_jacobian);
+        // info!("Jacobian = {:?}", jacobian_instance.symbolic_jacobian);
         let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -139,19 +140,19 @@ impl NRE {
 
         let y_k_minus_1 = &self.initial_guess;
 
-        //   println!("Newton-Raphson iteration {}", &y);
+        //   info!("Newton-Raphson iteration {}", &y);
         let new_G = y - y_k_minus_1 - dt * f;
-        //   println!("new_f = {:?}", &new_G);
+        //   info!("new_f = {:?}", &new_G);
 
         let I = DMatrix::identity(self.n, self.n);
         // if new_j is jacobian of jacobian of f(t_k+1, y_k+1),  then jacobian of function G = y_k+1 - y_k - h*f(t_k+1, y_k+1) is
         let J = I - dt * new_j;
-        //    println!("J = {:?} /n", &J);
+        //    info!("J = {:?} /n", &J);
         //equation J*deltay  = -G
         let lu = J.lu();
         let neg_f = -1.0 * new_G;
         let delta_y = lu.solve(&neg_f).expect("The matrix should be invertible");
-        //    println!("delta_y = {:?},\n", &delta_y );
+        //    info!("delta_y = {:?},\n", &delta_y );
         let new_y: DVector<f64> = y + delta_y;
 
         new_y
@@ -159,7 +160,7 @@ impl NRE {
     // main function to solve the system of equations
 
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        //  println!("solving system of equations with Newton-Raphson method");
+        //  info!("solving system of equations with Newton-Raphson method");
         let mut y: DVector<f64> = self.initial_guess.clone();
         self.y = y.clone();
         let mut i = 0;
@@ -169,9 +170,9 @@ impl NRE {
             let dy = new_y.clone() - y.clone();
 
             let error = Matrix::norm(&dy);
-            //  println!("new_y = {:?}, dy = {:?}, error = {}", &new_y, &dy, error);
+            //  info!("new_y = {:?}, dy = {:?}, error = {}", &new_y, &dy, error);
             if error < self.tolerance {
-                //  println!("converged in {} iterations", i);
+                //  info!("converged in {} iterations", i);
                 self.result = Some(new_y.clone());
                 self.max_error = error;
                 return Some(new_y);
@@ -180,7 +181,7 @@ impl NRE {
                 self.y = new_y;
                 i += 1;
                 //  if i==5 {panic!("Too many iterations")}
-                //  println!("\n \n iteration = {}, error = {}", i, error)
+                //  ("iteration = {}, error = {}", i, error)
             }
         }
         None
@@ -201,7 +202,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -241,7 +242,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();

@@ -1,5 +1,5 @@
-
 // the collection of utility functions mainly for bracket parsing and proceeding
+use log::info;
 pub fn has_brackets(s: &str) -> bool {
     let mut stack = Vec::new();
     let mut has_brackets = false;
@@ -14,7 +14,8 @@ pub fn has_brackets(s: &str) -> bool {
                 if stack.pop() != Some('(') {
                     return false;
                 }
-                has_brackets = true            }
+                has_brackets = true
+            }
             '}' => {
                 if stack.pop() != Some('{') {
                     return false;
@@ -34,10 +35,9 @@ pub fn has_brackets(s: &str) -> bool {
     has_brackets && stack.is_empty()
 }
 
-
 pub fn any_brackets(s: &str) -> bool {
-
-    !s.chars().any(|c| c == '(' || c == '{' || c == '[' || c == ')' || c == '}' || c == ']') 
+    !s.chars()
+        .any(|c| c == '(' || c == '{' || c == '[' || c == ')' || c == '}' || c == ']')
 }
 
 pub fn find_char_positions(input: &str, target_char: char) -> Vec<usize> {
@@ -52,7 +52,6 @@ pub fn find_char_positions(input: &str, target_char: char) -> Vec<usize> {
     positions
 }
 
-
 pub fn find_char_positions_but_not_inside_brackets(input: &str, target_char: char) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut start_pos = 0;
@@ -62,11 +61,18 @@ pub fn find_char_positions_but_not_inside_brackets(input: &str, target_char: cha
         let char_index = start_pos + pos;
 
         if !inside_brackets {
-            if let Some(opening_bracket) = input[..char_index].chars().rfind(|c| c == &'(' || c == &'{' || c == &'[') {
-                if let Some(closing_bracket) = input[char_index..].chars().find(|c| c == &')' || c == &'}' || c == &']') {
-                    if opening_bracket == '(' && closing_bracket == ')' ||
-                       opening_bracket == '{' && closing_bracket == '}' ||
-                       opening_bracket == '[' && closing_bracket == ']' {
+            if let Some(opening_bracket) = input[..char_index]
+                .chars()
+                .rfind(|c| c == &'(' || c == &'{' || c == &'[')
+            {
+                if let Some(closing_bracket) = input[char_index..]
+                    .chars()
+                    .find(|c| c == &')' || c == &'}' || c == &']')
+                {
+                    if opening_bracket == '(' && closing_bracket == ')'
+                        || opening_bracket == '{' && closing_bracket == '}'
+                        || opening_bracket == '[' && closing_bracket == ']'
+                    {
                         inside_brackets = true;
                     }
                 }
@@ -80,7 +86,6 @@ pub fn find_char_positions_but_not_inside_brackets(input: &str, target_char: cha
 
     positions
 }
-
 
 // find positions of giving char that are  outside brackets only
 pub fn find_char_positions_outside_brackets(s: &str, c: char) -> Option<usize> {
@@ -99,27 +104,27 @@ pub fn find_char_positions_outside_brackets(s: &str, c: char) -> Option<usize> {
         }
     }
     //let pos =  positions.first().unwrap_or(&0);
- //  _positions_sorted = positions.clone().sort_unstable().cloned();
-   
-   let res = if  positions.is_empty(){
-         None
+    //  _positions_sorted = positions.clone().sort_unstable().cloned();
+
+    let res = if positions.is_empty() {
+        None
     } else {
         let pos = *positions.first().unwrap();
         Some(pos)
     };
     res
-    //println!("+ at pos: {}", pos);
-   // Some(*pos)
+    //info!("+ at pos: {}", pos);
+    // Some(*pos)
 }
-// code finds the position of 
-pub fn find_pair_to_this_bracket(input:&str, bracket_start:usize) -> usize {
-    println!("finding closing bracket of {}", input);
+// code finds the position of
+pub fn find_pair_to_this_bracket(input: &str, bracket_start: usize) -> usize {
+    info!("finding closing bracket of {}", input);
     let mut stack = bracket_start;
     let mut bracket_end = None;
-//    let mut inner_expr: Option<Expr> = None;
+    //    let mut inner_expr: Option<Expr> = None;
     for (i, c) in input.chars().enumerate() {
         // If a '(' is found, it initializes a stack variable to keep track of nested brackets. It also initializes an end_pos variable
-        // to store the position of the closing bracket. It then iterates through the characters of the input string, incrementing 
+        // to store the position of the closing bracket. It then iterates through the characters of the input string, incrementing
         //or decrementing the stack variable based on whether it encounters an opening or closing bracket.
         if c == '(' {
             stack += 1;
@@ -129,13 +134,11 @@ pub fn find_pair_to_this_bracket(input:&str, bracket_start:usize) -> usize {
                 bracket_end = Some(i);
                 break;
             }
-          //  break; // by adding this line, it will stop the loop when the first closing bracket is found, not the last one
+            //  break; // by adding this line, it will stop the loop when the first closing bracket is found, not the last one
         }
     } // end for
     bracket_end.unwrap()
-    
 }
-
 
 pub fn linspace(start: f64, end: f64, num_values: usize) -> Vec<f64> {
     let mut values = Vec::with_capacity(num_values);
@@ -198,21 +201,26 @@ where
     derivatives
 }
 
-
-
 // compute norm of two vectors
 pub fn norm(x: Vec<f64>, y: Vec<f64>) -> f64 {
     assert_eq!(x.len(), y.len());
-    let norm_res = (1.0 / x.len() as f64)* x.iter().zip(y.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() ;
+    let norm_res = (1.0 / x.len() as f64)
+        * x.iter()
+            .zip(y.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
     norm_res
 }
 
-
-// transpose a matrix  
+// transpose a matrix
 pub fn transpose<T>(v: Vec<Vec<T>>) -> Vec<Vec<T>> {
     assert!(!v.is_empty());
     let len = v[0].len();
-    let mut iters: Vec<_> = v.into_iter().map(std::iter::IntoIterator::into_iter).collect();
+    let mut iters: Vec<_> = v
+        .into_iter()
+        .map(std::iter::IntoIterator::into_iter)
+        .collect();
     (0..len)
         .map(|_| iters.iter_mut().map(|n| n.next().unwrap()).collect())
         .collect()
@@ -234,6 +242,6 @@ for out_row in out.iter_mut() {
     }
 }
 
-println!("{:?}", out)
+info!("{:?}", out)
 
 */

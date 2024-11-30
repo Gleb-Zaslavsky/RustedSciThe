@@ -7,7 +7,7 @@ use faer_gmres::restarted_gmres;
 use faer_gmres::JacobiPreconLinOp;
 use sprs::linalg::bicgstab::BiCGSTAB;
 use sprs::{CsMat, CsVec};
-
+use log::info;
 pub fn solve_csmat(
     A: &CsMat<f64>,
     b: &CsVec<f64>,
@@ -28,7 +28,7 @@ pub fn solve_csmat(
             Some(x.to_owned())
         }
         Err(e) => {
-            println!("Error: {:?}", e);
+            info!("Error: {:?}", e);
             panic!("Error while solving linear system ",);
         }
     }
@@ -47,7 +47,7 @@ pub fn solve_sys_SparseColMat(
     let _vec_of_triplets: Vec<(usize, usize, f64)> = Vec::new();
     let jacobi_pre = JacobiPreconLinOp::new(A.as_ref());
     let mut x: Mat<f64> = from_column_major_slice::<f64>(x_0.as_slice(), A.ncols(), 1).to_owned();
-    //    println!("A, {:?}", &A);
+    //    info("A, {:?}", &A);
     //    let mut x: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
 
     // let res = gmres(A.as_ref(), b.as_ref(), x.as_mut(), _max_iter, tol,  Some(&jacobi_pre) );
@@ -69,8 +69,8 @@ pub fn solve_sys_SparseColMat(
             Some(res)
         }
         Err(e) => {
-            println!("Error: {:?}", e);
-            println!("gmres not covered!");
+            info!("Error: {:?}", e);
+            info!("gmres not covered!");
             let lu = A.sp_lu().unwrap();
             let _res = lu.solve(b);
             let res_vec: Vec<f64> = x.row_iter().map(|x| x[0]).collect();

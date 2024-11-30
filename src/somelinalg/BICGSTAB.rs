@@ -46,10 +46,10 @@
 //! ```
 //!
 
+use log::info;
+use num_traits::One;
 use sprs::indexing::SpIndex;
 use sprs::{CsMatViewI, CsVecI, CsVecViewI};
-use num_traits::One;
-
 /// Stabilized bi-conjugate gradient solver
 #[derive(Debug)]
 pub struct BiCGSTAB<'a, T, I: SpIndex, Iptr: SpIndex> {
@@ -114,10 +114,7 @@ macro_rules! bicgstab_impl {
                 b: CsVecViewI<'a, $T, I>,
                 tol: $T,
                 max_iter: usize,
-            ) -> Result<
-                Box<BiCGSTAB<'a, $T, I, Iptr>>,
-                Box<BiCGSTAB<'a, $T, I, Iptr>>,
-            > {
+            ) -> Result<Box<BiCGSTAB<'a, $T, I, Iptr>>, Box<BiCGSTAB<'a, $T, I, Iptr>>> {
                 let mut solver = Self::new(a, x0, b);
                 for _ in 0..max_iter {
                     solver.step();
@@ -126,23 +123,22 @@ macro_rules! bicgstab_impl {
                         // and either continue iterations or return depending on result.
                         solver.hard_restart();
                         if solver.err() < tol {
-                            // filter 
-                          
+                            // filter
+
                             let mut x: CsVecI<$T, I> = solver.x().to_owned();
                             let mut filtered_x: CsVecI<$T, I> = CsVecI::empty(x.dim());
-                         //   filtered_x.map_inplace(|x| if x>=&tol { *x} else {}    );
-                            
-                            for (i, value) in x.iter_mut() {
-                              //  println!("value {}", &value);
-                                if (*value).abs() >= tol {
-                                  filtered_x.append(i, *value);
-                                
-                                    println!("Filtering {}", i);
-                                } 
+                            //   filtered_x.map_inplace(|x| if x>=&tol { *x} else {}    );
 
+                            for (i, value) in x.iter_mut() {
+                                //  info!("value {}", &value);
+                                if (*value).abs() >= tol {
+                                    filtered_x.append(i, *value);
+
+                                    info!("Filtering {}", i);
+                                }
                             }
-                        
-                            /* 
+
+                            /*
                             let mut filtered_x:  CsVecI<$T, I> = CsVecI::zero(solver.x().dim());
 
                             for (i, value) in solver.x().iter() {
@@ -152,12 +148,12 @@ macro_rules! bicgstab_impl {
                             }
                             let filtered_x: CsVecI<T, I> = CsVecI::from_vec(solver.x().dim(), filtered_x);
                             */
-                        // Save filtered x into the x field of the struct
-                        solver.x = filtered_x;
+                            // Save filtered x into the x field of the struct
+                            solver.x = filtered_x;
 
-                        // Save nonzero indexes of x
-                        solver.nonzero_indexes = solver.x.indices().iter().cloned().collect();
-                        return Ok(Box::new(solver));
+                            // Save nonzero indexes of x
+                            solver.nonzero_indexes = solver.x.indices().iter().cloned().collect();
+                            return Ok(Box::new(solver));
                         }
                     }
                 }
@@ -209,14 +205,11 @@ macro_rules! bicgstab_impl {
                 self.rho = (&self.rhat).dot(&self.r);
 
                 // Soft-restart if `rhat` is becoming perpendicular to `r`.
-                if self.rho.abs() / (self.err * self.err)
-                    < self.soft_restart_threshold
-                {
+                if self.rho.abs() / (self.err * self.err) < self.soft_restart_threshold {
                     self.soft_restart();
                 } else {
                     let beta = (self.rho / rho_prev) * (alpha / omega);
-                    self.p = &self.r
-                        + (&self.p - &v.map(|x| x * omega)).map(|x| x * beta);
+                    self.p = &self.r + (&self.p - &v.map(|x| x * omega)).map(|x| x * beta);
                 }
 
                 self.err
@@ -321,26 +314,17 @@ mod test {
         let b = CsVecI::new(4, vec![0, 1, 2, 3], vec![1.0; 4]);
         let x0 = CsVecI::new(4, vec![0, 1, 2, 3], vec![1.0, 1.0, 1.0, 1.0]);
 
-        let res = BiCGSTAB::<'_, f32, _, _>::solve(
-            a.view(),
-            x0.view(),
-            b.view(),
-            tol,
-            max_iter,
-        )
-        .unwrap();
+        let res =
+            BiCGSTAB::<'_, f32, _, _>::solve(a.view(), x0.view(), b.view(), tol, max_iter).unwrap();
         let b_recovered = &a * &res.x();
-        println!("result = {:?}", res.x());
-        println!("nonzero = {:?}", res.nonzero_indexes);
-        println!("Iteration count {:?}", res.iteration_count());
-        println!("Soft restart count {:?}", res.soft_restart_count());
-        println!("Hard restart count {:?}", res.hard_restart_count());
+        info!("result = {:?}", res.x());
+        info!("nonzero = {:?}", res.nonzero_indexes);
+        info!("Iteration count {:?}", res.iteration_count());
+        info!("Soft restart count {:?}", res.soft_restart_count());
+        info!("Hard restart count {:?}", res.hard_restart_count());
 
         // Make sure the solved values match expectation
-        for (input, output) in
-            b.to_dense().iter().zip(b_recovered.to_dense().iter())
-
-        {
+        for (input, output) in b.to_dense().iter().zip(b_recovered.to_dense().iter()) {
             assert!(
                 (1.0 - input / output).abs() < tol,
                 "Solved output did not match input"
@@ -363,25 +347,17 @@ mod test {
         let b = CsVecI::new(4, vec![0, 1, 2, 3], vec![1.0; 4]);
         let x0 = CsVecI::new(4, vec![0, 1, 2, 3], vec![1.0, 1.0, 1.0, 1.0]);
 
-        let res = BiCGSTAB::<'_, f64, _, _>::solve(
-            a.view(),
-            x0.view(),
-            b.view(),
-            tol,
-            max_iter,
-        )
-        .unwrap();
+        let res =
+            BiCGSTAB::<'_, f64, _, _>::solve(a.view(), x0.view(), b.view(), tol, max_iter).unwrap();
         let b_recovered = &a * &res.x();
-        println!("result = {:?}", res.x());
-        println!("nonzero = {:?}", res.nonzero_indexes);
-        println!("Iteration count {:?}", res.iteration_count());
-        println!("Soft restart count {:?}", res.soft_restart_count());
-        println!("Hard restart count {:?}", res.hard_restart_count());
+        info!("result = {:?}", res.x());
+        info!("nonzero = {:?}", res.nonzero_indexes);
+        info!("Iteration count {:?}", res.iteration_count());
+        info!("Soft restart count {:?}", res.soft_restart_count());
+        info!("Hard restart count {:?}", res.hard_restart_count());
 
         // Make sure the solved values match expectation
-        for (input, output) in
-            b.to_dense().iter().zip(b_recovered.to_dense().iter())
-        {
+        for (input, output) in b.to_dense().iter().zip(b_recovered.to_dense().iter()) {
             assert!(
                 (1.0 - input / output).abs() < tol,
                 "Solved output did not match input"

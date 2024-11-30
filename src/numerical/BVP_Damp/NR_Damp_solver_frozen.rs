@@ -5,21 +5,21 @@ use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::Utils::plots::plots;
-use crate::Utils::logger::save_matrix_to_file;
-use nalgebra::sparse::CsMatrix;
-use sprs::{CsMat, CsVec};
-use chrono:: Local;
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
-use crate::numerical::BVP_Damp::BVP_utils_damped:: interchange_columns;
-use faer::sparse::SparseColMat;
-use simplelog::*;
-use std::fs::File;
+use crate::numerical::BVP_Damp::BVP_utils_damped::interchange_columns;
+use crate::Utils::logger::save_matrix_to_file;
+use crate::Utils::plots::plots;
+use chrono::Local;
 use faer::col::Col;
-
+use faer::sparse::SparseColMat;
+use log::info;
+use nalgebra::sparse::CsMatrix;
+use simplelog::*;
+use sprs::{CsMat, CsVec};
+use std::fs::File;
 pub struct NRBVP {
     pub eq_system: Vec<Expr>,
     pub initial_guess: DMatrix<f64>,
@@ -47,7 +47,7 @@ pub struct NRBVP {
     old_jac: Option<Box<dyn MatrixType>>,
     jac_recalc: bool,
     error_old: f64,
-    variable_string: Vec<String>,// vector of indexed variable names
+    variable_string: Vec<String>, // vector of indexed variable names
 }
 
 impl NRBVP {
@@ -66,7 +66,6 @@ impl NRBVP {
         method: String,
         tolerance: f64,        // tolerance
         max_iterations: usize, // max number of iterations
-
     ) -> NRBVP {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
         let y0 = Box::new(DVector::from_vec(vec![0.0, 0.0]));
@@ -94,7 +93,7 @@ impl NRBVP {
             linear_sys_method,
             method,
             max_iterations,
-            max_error:0.0,
+            max_error: 0.0,
             result: None,
             x_mesh: DVector::from_vec(T_list),
             fun: boxed_fun,
@@ -105,7 +104,7 @@ impl NRBVP {
             old_jac: None,
             jac_recalc: true,
             error_old: 0.0,
-            variable_string: Vec::new(),// vector of indexed variable names
+            variable_string: Vec::new(), // vector of indexed variable names
         }
     }
     /// Basic methods to set the equation system
@@ -167,10 +166,10 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
-                    scheme.clone()
+                    scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
                     jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -199,10 +198,10 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
-                    scheme.clone()
+                    scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>> =
                     jacobian_instance.lambdified_functions_IVP_CsVec;
 
@@ -217,7 +216,7 @@ impl NRBVP {
                 let y_0 = Vectors_type_casting(&y.clone(), "Sparse 1".to_string());
                 let y_0 = y_0.as_any().downcast_ref::<CsVec<f64>>().unwrap();
                 let test = fun(self.p, &y_0.clone());
-                println!("test = {:?}", test);
+                info!("test = {:?}", test);
                 // panic!("test");
                 //
                 let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_1(fun));
@@ -240,10 +239,10 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
-                    scheme.clone()
+                    scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
                     jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -271,10 +270,10 @@ impl NRBVP {
                     self.BorderConditions.clone(),
                     None,
                     None,
-                    scheme.clone()
+                    scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &Col<f64>) -> Col<f64>> =
                     jacobian_instance.lambdified_functions_IVP_Col;
 
@@ -292,7 +291,7 @@ impl NRBVP {
                 self.variable_string = jacobian_instance.variable_string;
             }
             _ => {
-                println!("Method not implemented");
+                info!("Method not implemented");
                 std::process::exit(1);
             }
         } // end of match
@@ -317,9 +316,9 @@ impl NRBVP {
         let now = Instant::now();
 
         let new_j = if self.jac_recalc {
-            log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            log::info!("JACOBIAN (RE)CALCULATED! ");
             let new_j = jac.call(p, y);
-            // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
+            // info(" new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             self.old_jac = Some(new_j.clone_box());
             self.m = 0;
             new_j
@@ -328,7 +327,7 @@ impl NRBVP {
             self.old_jac.as_ref().unwrap().clone_box()
         };
 
-        //   println!("new fun = {:?}", &new_fun);
+        //   info("new fun = {:?}", &new_fun);
         let delta: Box<dyn VectorType> = new_j.solve_sys(
             &*new_fun,
             self.linear_sys_method.clone(),
@@ -338,7 +337,7 @@ impl NRBVP {
         );
         let elapsed = now.elapsed();
         elapsed_time(elapsed);
-        //  println!(" \n \n dy= {:?}", &delta);
+        //  info(" dy= {:?}", &delta);
         // element wise subtraction
         let new_y: Box<dyn VectorType> = y - &*delta;
 
@@ -347,7 +346,7 @@ impl NRBVP {
     // main function to solve the system of equations
 
     pub fn main_loop(&mut self) -> Option<DVector<f64>> {
-        log::info!("solving system of equations with Newton-Raphson method! \n \n");
+        log::info!("solving system of equations with Newton-Raphson method! ");
         let y: DMatrix<f64> = self.initial_guess.clone();
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
@@ -355,7 +354,7 @@ impl NRBVP {
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
 
         //self.y = Box::new(y_);
-        //  println!("y = {:?}", &y);
+        //  info("y = {:?}", &y);
         let mut i = 0;
 
         while i < self.max_iterations {
@@ -375,8 +374,8 @@ impl NRBVP {
                 self.error_old,
             );
             self.error_old = error;
-            //    println!("new_x = {:?} \n \n, x = {:?} \n \n ", &new_y.clone(), &_y );
-            log::info!(" \n \n error = {:?} \n \n", &error);
+            //    info("new_x = {:?} , x = {:?} ", &new_y.clone(), &_y );
+            log::info!(" error = {:?} ", &error);
             if error < self.tolerance {
                 log::info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
@@ -387,59 +386,70 @@ impl NRBVP {
                 let new_y: Box<dyn VectorType> = new_y.clone_box(); //Box::new(new_y);
                 self.y = new_y;
                 i += 1;
-                //   println!("iteration = {}, error = {}, tol = {} \n \n", i, error, self.tolerance );
+                //   info("iteration = {}, error = {}, tol = {} ", i, error, self.tolerance );
             }
         }
         None
     }
-    pub fn solver(&mut self)-> Option<DVector<f64>>
-    {   // TODO! сравнить явный мэш с неявным
-       // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
+    pub fn solver(&mut self) -> Option<DVector<f64>> {
+        // TODO! сравнить явный мэш с неявным
+        // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
         self.eq_generate();
         let begin = Instant::now();
-       let res =  self.main_loop();
-       let end = begin.elapsed();
-       elapsed_time(end);
-       
-       res
+        let res = self.main_loop();
+        let end = begin.elapsed();
+        elapsed_time(end);
+
+        res
     }
     // wrapper around solver function to implement logging
-   pub fn solve(&mut self) -> Option<DVector<f64>> {    
-       let date_and_time = Local::now().format("%Y-%m-%d_%H-%M");
-       let name = format!("log_{}.txt", date_and_time);
-       let logger_instance = CombinedLogger::init(
-            vec![
-                TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
-                WriteLogger::new(LevelFilter::Info, Config::default(), File::create(name).unwrap()),
-            ]
-        );
+    pub fn solve(&mut self) -> Option<DVector<f64>> {
+        let date_and_time = Local::now().format("%Y-%m-%d_%H-%M");
+        let name = format!("log_{}.txt", date_and_time);
+        let logger_instance = CombinedLogger::init(vec![
+            TermLogger::new(
+                LevelFilter::Info,
+                Config::default(),
+                TerminalMode::Mixed,
+                ColorChoice::Auto,
+            ),
+            WriteLogger::new(
+                LevelFilter::Info,
+                Config::default(),
+                File::create(name).unwrap(),
+            ),
+        ]);
         match logger_instance {
-        Ok(()) =>{
-       let res = self.solver();
-       log::info!("Program ended");
-        res
+            Ok(()) => {
+                let res = self.solver();
+                log::info!("Program ended");
+                res
+            }
+            Err(_) => {
+                let res = self.solver();
+                res
+            }
         }
-        Err(_) => {
-            let res = self.solver();
-            res
-        }
-
     }
-   }
     pub fn save_to_file(&self) {
         //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let result_DMatrix = self.get_result().unwrap();
-        let _=save_matrix_to_file(&result_DMatrix, &self.values, "result.txt");
- 
+        let _ = save_matrix_to_file(&result_DMatrix, &self.values, "result.txt");
     }
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
-        let matrix_of_results: DMatrix<f64> = DMatrix::from_column_slice(  number_of_Ys, n_steps, vector_of_results.clone().as_slice()).transpose();
-        let permutted_results = interchange_columns(matrix_of_results, self.values.clone(), self.variable_string.clone());
+        let matrix_of_results: DMatrix<f64> =
+            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
+                .transpose();
+        let permutted_results = interchange_columns(
+            matrix_of_results,
+            self.values.clone(),
+            self.variable_string.clone(),
+        );
         Some(permutted_results)
-        }
+    }
 
     pub fn plot_result(&self) {
         let number_of_Ys = self.values.len();
@@ -449,21 +459,21 @@ impl NRBVP {
             DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
                 .transpose();
         for _col in matrix_of_results.column_iter() {
-            //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
+            //   info( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-        println!(
+        info!(
             "matrix of results has shape {:?}",
             matrix_of_results.shape()
         );
-        println!("length of x mesh : {:?}", n_steps);
-        println!("number of Ys: {:?}", number_of_Ys);
+        info!("length of x mesh : {:?}", n_steps);
+        info!("number of Ys: {:?}", number_of_Ys);
         plots(
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
             matrix_of_results,
         );
-        println!("result plotted");
+        info!("result plotted");
     }
 }
 
@@ -485,7 +495,7 @@ mod tests {
         let arg = "x".to_string();
         let tolerance = 1e-2;
         let max_iterations = 100;
-  
+
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 100;
@@ -513,7 +523,6 @@ mod tests {
             method,
             tolerance,
             max_iterations,
-    
         );
         nr.eq_generate();
 
