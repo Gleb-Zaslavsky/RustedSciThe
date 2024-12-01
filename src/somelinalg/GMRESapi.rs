@@ -1,9 +1,9 @@
 use col::ColBatch;
 use faer;
+use faer::col;
 use faer::mat::Mat;
 use faer::prelude::*;
 use faer::sparse::SparseColMat;
-use faer::col;
 use faer_gmres::gmres;
 use nalgebra::DMatrix;
 fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<(usize, usize, f64)> {

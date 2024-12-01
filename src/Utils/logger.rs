@@ -2,7 +2,11 @@ use nalgebra::DMatrix;
 use std::fs::File;
 use std::io::{self, Write};
 
-pub fn save_matrix_to_file(matrix: &DMatrix<f64>, headers: &Vec<String>, filename: &str) -> io::Result<()> {
+pub fn save_matrix_to_file(
+    matrix: &DMatrix<f64>,
+    headers: &Vec<String>,
+    filename: &str,
+) -> io::Result<()> {
     let mut file = File::create(filename)?;
 
     // Write headers

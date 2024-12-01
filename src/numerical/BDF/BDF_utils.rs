@@ -1,11 +1,9 @@
-use nalgebra::{ DMatrix, DVector};
+use core::panic;
+use nalgebra::{DMatrix, DVector};
 use rand::prelude::SliceRandom;
 use rand::thread_rng;
-use core::panic;
 
-
-
-const SPARSE: f64 =0.01;   
+const SPARSE: f64 = 0.01;
 /*
 Group columns of a 2-D matrix for sparse finite differencing [1]_.
 
@@ -31,7 +29,6 @@ groups : ndarray of int, shape (n,)
     n_groups is significantly less than n.
     */
 
-
 extern crate nalgebra as na;
 extern crate rand;
 pub fn is_sparse_int(matrix: &DMatrix<i64>, threshold: f64) -> bool {
@@ -50,10 +47,10 @@ pub enum OrderEnum {
     Scalar(usize),
 }
 
-/// randomly shuffle columns 
+/// randomly shuffle columns
 pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
     //turn A into matrix of only ones and zeros
-    let A  = A.map(|x| if x != 0.0 { 1 } else { 0 }).cast::<i64>();
+    let A = A.map(|x| if x != 0.0 { 1 } else { 0 }).cast::<i64>();
 
     let (m, n) = A.shape();
     // order can be None, vector or scalar
@@ -63,32 +60,30 @@ pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
             let mut rng = thread_rng();
             let mut order = (0..n).collect::<Vec<_>>();
             order.shuffle(&mut rng);
-            order 
+            order
         }
-        OrderEnum::Vector(o) => {        
+        OrderEnum::Vector(o) => {
             if o.len() != n {
                 panic!("Vector must have the same length as the number of columns")
             }
-            o   
-        },
+            o
+        }
         OrderEnum::Scalar(_o) => {
-
             let mut rng = thread_rng();
             let mut order = (0..n).collect::<Vec<_>>();
             order.shuffle(&mut rng);
             order
-        
-        },
+        }
     };
     // reorder A according to new_order (random new order of columns)
-    let  A = A.clone();
-    let mut A_ = DMatrix::zeros( m, n);
+    let A = A.clone();
+    let mut A_ = DMatrix::zeros(m, n);
     for (i, &o) in new_order.iter().enumerate() {
         // iterate over columns and set to the i-th column - the random one
         A_.set_column(i, &A.column(o));
     }
 
-    let groups = if is_sparse_int(&A,  SPARSE) {
+    let groups = if is_sparse_int(&A, SPARSE) {
         group_sparse(m, n, &A_)
     } else {
         group_dense(m, n, &A_)
@@ -101,7 +96,6 @@ pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
 
     result
 }
-
 
 fn group_dense(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
     let mut groups = vec![-1; n];
@@ -190,7 +184,7 @@ fn group_sparse(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
     groups.iter().map(|&x| x as usize).collect()
 }
 
-    /* 
+/*
     fn is_sparse_dense(matrix: &DMatrix<i32>, threshold: f64) -> bool {
         let total_elements = matrix.len();
         let non_zero_elements = matrix.iter().filter(|&&x| x != 0).count();
@@ -199,10 +193,10 @@ fn group_sparse(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
     }
 
 pub fn group_columns(A: DMatrix<i32>, order: Option<&[usize]>) -> Result<DVector<usize>, Box<dyn std::error::Error>> {
-    if is_sparse_dense(&A, 0.5) {   
+    if is_sparse_dense(&A, 0.5) {
         println!("matrix is sparse");
-        
-        
+
+
     }
     let (m, n) = A.shape();
 

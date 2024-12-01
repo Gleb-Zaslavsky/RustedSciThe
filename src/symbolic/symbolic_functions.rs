@@ -133,8 +133,7 @@ impl Jacobian {
         let mut function_jacobian = Vec::new();
         let variable_string = Vec::new();
         let evaluated_jacobian = Vec::new();
-        let evaluated_jacobian_DMatrix =
-            DMatrix::from_row_slice(2, 2, &vec![0.0, 0.0, 0.0, 0.0]);
+        let evaluated_jacobian_DMatrix = DMatrix::from_row_slice(2, 2, &vec![0.0, 0.0, 0.0, 0.0]);
 
         let function_jacobian_IVP = Vec::new();
         let lambdified_functions_IVP = Vec::new();
@@ -143,10 +142,8 @@ impl Jacobian {
         let lambdified_functions_IVP_DVector =
             Box::new(|_xx: f64, _y: &DVector<f64>| DVector::from_element(2, 0.0));
 
-        let function_jacobian_IVP_CsMat =
-            Box::new(|_xx: f64, _y: &CsVec<f64>| CsMat::zero((1, 1)));
-        let lambdified_functions_IVP_CsVec =
-            Box::new(|_xx: f64, _y: &CsVec<f64>| CsVec::empty(1));
+        let function_jacobian_IVP_CsMat = Box::new(|_xx: f64, _y: &CsVec<f64>| CsMat::zero((1, 1)));
+        let lambdified_functions_IVP_CsVec = Box::new(|_xx: f64, _y: &CsVec<f64>| CsVec::empty(1));
         let function_jacobian_IVP_CsMatrix = Box::new(|_xx: f64, _y: &DVector<f64>| {
             CsMatrix::new_uninitialized_generic(Dyn(2), Dyn(2), 1)
         });
@@ -213,8 +210,7 @@ impl Jacobian {
         self.vector_of_functions = vec;
     }
     pub fn set_varvecor_from_str(&mut self, symbols: &str) {
-        let vec_trimmed: Vec<String> =
-            symbols.split(',').map(|s| s.trim().to_string()).collect();
+        let vec_trimmed: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
         self.variable_string = vec_trimmed;
         let enter = Expr::Symbols(symbols);
         self.vector_of_variables = enter;
@@ -256,13 +252,12 @@ impl Jacobian {
         for i in 0..self.vector_of_functions.len() {
             let mut vector_of_partial_derivatives = Vec::new();
             for j in 0..self.vector_of_variables.len() {
-                 let mut partial = Expr::diff(
+                let mut partial = Expr::diff(
                     &self.vector_of_functions[i].clone(),
                     &variable_string_vec[j],
-                ) ;
-                    partial = partial.symplify();
-                    vector_of_partial_derivatives.push(partial);
-                
+                );
+                partial = partial.symplify();
+                vector_of_partial_derivatives.push(partial);
             }
             new_jac.push(vector_of_partial_derivatives);
         }
@@ -305,11 +300,10 @@ impl Jacobian {
 
             for j in 0..vector_of_variables_len {
                 //  println!("i = {}, j = {}", i, j);
-                 let partial_func = Expr::lambdify_owned(jac[i][j].clone(), variable_str.clone());
-                
-                    //  println!("partial_func = {:?}", partial_func(vec![10.0,1.0]));
-                    vector_of_partial_derivatives_func.push(partial_func);
-              
+                let partial_func = Expr::lambdify_owned(jac[i][j].clone(), variable_str.clone());
+
+                //  println!("partial_func = {:?}", partial_func(vec![10.0,1.0]));
+                vector_of_partial_derivatives_func.push(partial_func);
             }
             // println!("vector_of_partial_derivatives_func = {:?}, {:?}", vector_of_partial_derivatives_func[0](vec![10.0,1.0]), vector_of_partial_derivatives_func[1](vec![10.0,1.0])   );
             new_function_jacobian.push(vector_of_partial_derivatives_func);
@@ -373,9 +367,8 @@ impl Jacobian {
     ) {
         let mut result: Vec<f64> = Vec::new();
         for func in &self.vector_of_functions {
-             let func = Expr::lambdify(func, variable_str.clone()) ;
-                result.push(func(arg_values.clone()));
-         
+            let func = Expr::lambdify(func, variable_str.clone());
+            result.push(func(arg_values.clone()));
         }
         self.evaluated_functions = result.clone();
         //result
@@ -384,9 +377,8 @@ impl Jacobian {
     pub fn lambdify_funcvector(&mut self, variable_str: Vec<&str>) {
         let mut result: Vec<Box<dyn Fn(Vec<f64>) -> f64>> = Vec::new();
         for func in self.vector_of_functions.clone() {
-            let func = Expr::lambdify_owned(func, variable_str.clone()) ;
-                result.push(func);
-           
+            let func = Expr::lambdify_owned(func, variable_str.clone());
+            result.push(func);
         }
         self.lambdified_functions = result;
         //result
@@ -427,12 +419,11 @@ impl Jacobian {
                 Vec::new();
             for j in 0..vector_of_variables_len {
                 //  println!("i = {}, j = {}", i, j);
-                 let partial_func =
+                let partial_func =
                     Expr::lambdify_IVP_owned(jac[i][j].clone(), arg, variable_str.clone());
-                
-                    //  println!("partial_func = {:?}", partial_func(vec![10.0,1.0]));
-                    vector_of_partial_derivatives_func.push(partial_func);
 
+                //  println!("partial_func = {:?}", partial_func(vec![10.0,1.0]));
+                vector_of_partial_derivatives_func.push(partial_func);
             }
             // println!("vector_of_partial_derivatives_func = {:?}, {:?}", vector_of_partial_derivatives_func[0](vec![10.0,1.0]), vector_of_partial_derivatives_func[1](vec![10.0,1.0])   );
             new_function_jacobian.push(vector_of_partial_derivatives_func);
@@ -486,17 +477,16 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        new_function_jacobian[(i, j)] = if jac[i][j].clone() == Expr::Const(0.0) {
-                            0.0
-                        } else {
-                            partial_func(x, v_vec.clone())
-                        };
+                    );
+                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    new_function_jacobian[(i, j)] = if jac[i][j].clone() == Expr::Const(0.0) {
+                        0.0
+                    } else {
+                        partial_func(x, v_vec.clone())
+                    };
 
                     //    let time_test = now.elapsed().as_micros();
                     //   if time_test > 100 {println!("Elapsed time: {:?} micrs, {:?} ", now.elapsed().as_micros(), jac[i][j].clone() );}
-                 
                 }
             }
             new_function_jacobian
@@ -544,9 +534,8 @@ impl Jacobian {
     pub fn lambdify_funcvector_IVP(&mut self, arg: &str, variable_str: Vec<&str>) {
         let mut result: Vec<Box<dyn Fn(f64, Vec<f64>) -> f64>> = Vec::new();
         for func in self.vector_of_functions.clone() {
-             let func = Expr::lambdify_IVP_owned(func, arg, variable_str.clone()); 
-                result.push(func);
-           
+            let func = Expr::lambdify_IVP_owned(func, arg, variable_str.clone());
+            result.push(func);
         }
         self.lambdified_functions_IVP = result;
         //result
@@ -561,7 +550,7 @@ impl Jacobian {
             Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
                 let mut result: DVector<f64> = DVector::zeros(vector_of_functions.len());
                 for (i, func) in vector_of_functions.iter().enumerate() {
-                     let func = Expr::lambdify_IVP_owned(
+                    let func = Expr::lambdify_IVP_owned(
                         func.to_owned(),
                         arg.as_str(),
                         variable_str
@@ -569,9 +558,8 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        result[i] = func(x, v.iter().cloned().collect());
-                 
+                    );
+                    result[i] = func(x, v.iter().cloned().collect());
                 }
                 result
             }) //enf of box
@@ -652,11 +640,10 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        //let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        let v_vec: Vec<f64> = v.to_dense().to_vec();
-                        new_function_jacobian.insert(j, i, partial_func(x, v_vec.clone()))
-     
+                    );
+                    //let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    let v_vec: Vec<f64> = v.to_dense().to_vec();
+                    new_function_jacobian.insert(j, i, partial_func(x, v_vec.clone()))
                 }
             }
             new_function_jacobian
@@ -694,7 +681,7 @@ impl Jacobian {
                 //  let mut result: CsVec<f64> = CsVec::new(n, indices, data);
                 let mut result: CsVec<f64> = CsVec::empty(vector_of_functions.len());
                 for (i, func) in vector_of_functions.iter().enumerate() {
-                     let func = Expr::lambdify_IVP_owned(
+                    let func = Expr::lambdify_IVP_owned(
                         func.to_owned(),
                         arg.as_str(),
                         variable_str
@@ -702,9 +689,8 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        result.append(i, func(x, v.to_dense().to_vec()));
-                  
+                    );
+                    result.append(i, func(x, v.to_dense().to_vec()));
                 }
                 result
             }) //enf of box
@@ -735,7 +721,7 @@ impl Jacobian {
             for i in 0..vector_of_functions_len {
                 for j in 0..vector_of_variables_len {
                     // println!("i = {}, j = {}", i, j);
-                     let partial_func = Expr::lambdify_IVP_owned(
+                    let partial_func = Expr::lambdify_IVP_owned(
                         jac[i][j].clone(),
                         arg.as_str(),
                         variable_str
@@ -743,13 +729,12 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        //let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
-                        // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                        new_function_jacobian[(i, j)] = partial_func(x, v_vec.clone());
-                 
+                    );
+                    //let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
+                    // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
+                    new_function_jacobian[(i, j)] = partial_func(x, v_vec.clone());
                 }
             }
             new_function_jacobian.into()
@@ -793,7 +778,7 @@ impl Jacobian {
             for i in 0..vector_of_functions_len {
                 for j in 0..vector_of_variables_len {
                     // println!("i = {}, j = {}", i, j);
-                     let partial_func = Expr::lambdify_IVP_owned(
+                    let partial_func = Expr::lambdify_IVP_owned(
                         jac[i][j].clone(),
                         arg.as_str(),
                         variable_str
@@ -801,17 +786,16 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        //let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
-                        // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                        let P = partial_func(x, v_vec.clone());
-                        if P.abs() > 1e-8 {
-                            let triplet = (i, j, P);
-                            vector_of_triplets.push(triplet);
-                        }
-                 
+                    );
+                    //let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
+                    // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
+                    let P = partial_func(x, v_vec.clone());
+                    if P.abs() > 1e-8 {
+                        let triplet = (i, j, P);
+                        vector_of_triplets.push(triplet);
+                    }
                 }
             }
             let new_function_jacobian: SparseColMat<usize, f64> =
@@ -854,7 +838,7 @@ impl Jacobian {
                 //  let mut result: Col<f64> = Col::with_capacity(vector_of_functions.len());
                 let mut result = Vec::new();
                 for (_i, func) in vector_of_functions.iter().enumerate() {
-                     let func = Expr::lambdify_IVP_owned(
+                    let func = Expr::lambdify_IVP_owned(
                         func.to_owned(),
                         arg.as_str(),
                         variable_str
@@ -862,10 +846,9 @@ impl Jacobian {
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
                             .clone(),
-                    ) ;
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        result.push(func(x, v_vec));
-                 
+                    );
+                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    result.push(func(x, v_vec));
                 }
                 let res = from_slice(result.as_slice()).to_owned();
                 res
@@ -883,39 +866,46 @@ impl Jacobian {
         let re = Regex::new(r"_\d+$").unwrap();
         re.replace(input, "").to_string()
     }
-    fn eq_step(matrix_of_names:&Vec<Vec<String>>, eq_i:&Expr,  values: &Vec<String>, arg:&String, j:usize, t:f64, scheme:&String  )->Expr {
+    fn eq_step(
+        matrix_of_names: &Vec<Vec<String>>,
+        eq_i: &Expr,
+        values: &Vec<String>,
+        arg: &String,
+        j: usize,
+        t: f64,
+        scheme: &String,
+    ) -> Expr {
         // vector of variables of j-th time step
         let vec_of_names_on_step = matrix_of_names[j].clone();
         // for each time step rename the default variable name to a name of variable on j-th time step
         // like x,y,z->  x_10, y_10, z_10, ...
         let hashmap_for_rename: HashMap<String, String> = values
+            .iter()
+            .zip(vec_of_names_on_step.iter())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
+        //set time value of j-th time step
+        let eq_step_j_ = eq_step_j.set_variable(arg.as_str(), t);
+        let eq_step_j = match scheme.as_str() {
+            "forward" => eq_step_j_,
+            "trapezoid" => {
+                let vec_of_names_on_step = matrix_of_names[j + 1].clone();
+                // for each time step rename the default variable name to a name of variable on j-th time step
+                // like x,y,z->  x_10, y_10, z_10, ...
+                let hashmap_for_rename: HashMap<String, String> = values
                     .iter()
                     .zip(vec_of_names_on_step.iter())
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
-        let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
+                let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
                 //set time value of j-th time step
-        let  eq_step_j_ = eq_step_j.set_variable(arg.as_str(), t);
-        let eq_step_j = match scheme.as_str() {
-            "forward" => eq_step_j_,
-            "trapezoid" =>  {
-                            let vec_of_names_on_step = matrix_of_names[j+1].clone();
-                            // for each time step rename the default variable name to a name of variable on j-th time step
-                            // like x,y,z->  x_10, y_10, z_10, ...
-                            let hashmap_for_rename: HashMap<String, String> = values
-                                        .iter()
-                                        .zip(vec_of_names_on_step.iter())
-                                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                                        .collect();
-                            let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
-                                    //set time value of j-th time step
-                            let  eq_step_j_plus_1 = eq_step_j.set_variable(arg.as_str(), t);
-                            Expr::Const(0.5)*(eq_step_j_ + eq_step_j_plus_1) 
-                            }
+                let eq_step_j_plus_1 = eq_step_j.set_variable(arg.as_str(), t);
+                Expr::Const(0.5) * (eq_step_j_ + eq_step_j_plus_1)
+            }
             _ => panic!("Invalid scheme"),
         };
         eq_step_j
-
     }
     pub fn discretization_system_BVP(
         &mut self,
@@ -929,7 +919,7 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
-        scheme:String,
+        scheme: String,
     ) {
         let mut vec_of_bounds: Vec<(f64, f64)> = Vec::new();
         let _map_of_bounds: HashMap<String, (f64, f64)> = HashMap::new();
@@ -969,7 +959,7 @@ impl Jacobian {
             )
         };
         log::info!("creating discretization equations with n_steps = {}, H = {:?} ({}), T_list = {:?} ({})", n_steps, H, H.len(),T_list, T_list.len());
-   
+
         let mut discreditized_system: Vec<Vec<Expr>> = Vec::new();
         // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
         let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());
@@ -1004,8 +994,9 @@ impl Jacobian {
                 for j in 0..n_steps - 1 {
                     //currwbt time step
                     let t = T_list[j];
-                  
-                    let mut eq_step_j =  Self:: eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme  );
+
+                    let mut eq_step_j =
+                        Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
                     //set time value of j-th time step
                     eq_step_j = eq_step_j.set_variable(arg.as_str(), t);
 
@@ -1145,14 +1136,14 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
-        scheme:String,
+        scheme: String,
     ) {
         let param = if let Some(param) = param {
             param
         } else {
             arg.clone()
         };
-     
+
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1219,7 +1210,6 @@ impl Jacobian {
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
     ) {
-        
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1234,7 +1224,7 @@ impl Jacobian {
             scheme,
         );
         println!("{:?}", &self.vector_of_functions);
-        let  v = self.variable_string.clone();
+        let v = self.variable_string.clone();
         let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
         self.calc_jacobian();
         self.jacobian_generate_IVP_CsMat(arg.as_str(), indexed_values.clone());
@@ -1271,7 +1261,6 @@ impl Jacobian {
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
     ) {
-      
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1325,9 +1314,8 @@ impl Jacobian {
         BorderConditions: HashMap<String, (usize, f64)>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
-        scheme: String
+        scheme: String,
     ) {
-      
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1346,7 +1334,7 @@ impl Jacobian {
             &self.vector_of_functions,
             &self.vector_of_functions.len()
         );
-        let  v = self.variable_string.clone();
+        let v = self.variable_string.clone();
         let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
         println!(
             "\n \n indexed values \n \n {:?} of length {}",

@@ -104,8 +104,7 @@ impl Expr {
     /// create new variables from string
     pub fn Symbols(symbols: &str) -> Vec<Expr> {
         let symbols = symbols.to_string();
-        let vec_trimmed: Vec<String> =
-            symbols.split(',').map(|s| s.trim().to_string()).collect();
+        let vec_trimmed: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
         let vector_of_symbolic_vars: Vec<Expr> = vec_trimmed
             .iter()
             .filter(|s| !s.is_empty())
@@ -584,10 +583,10 @@ impl Expr {
         vars.dedup(); // Remove duplicates
         vars
     } // end of all_arguments_are_variables
-    //___________________________________________________________________________________________________________________
-    //                    1D  function processing, like y = f(x)
-    // _________________________________________________________________________________________________________________
-    // function to calculate the symbolic expression for a vector of values
+      //___________________________________________________________________________________________________________________
+      //                    1D  function processing, like y = f(x)
+      // _________________________________________________________________________________________________________________
+      // function to calculate the symbolic expression for a vector of values
     pub fn calc_vector_lambdified1D(&self, x: &Vec<f64>) -> Vec<f64> {
         let mut result = Vec::new();
         for xi in x {
@@ -989,8 +988,7 @@ mod tests {
         let C = Expr::Const(2.0);
         let C1 = Expr::Const(1.0);
 
-        let expected_result =
-            C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
+        let expected_result = C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
         //  Mul(Mul(Const(2.0), Pow(Var("x"), Sub(Const(2.0), Const(1.0)))), Const(1.0)) Box::new(Expr::Mul(Box::new(Expr::Const(2.0)), Box::new(x.clone())))
         println!("df_dx {:?} ", df_dx);
         println!("expected_result {:?} ", expected_result);

@@ -1,7 +1,6 @@
 #![allow(warnings)]
 
-
-use splines::{Spline, Key, Interpolation};
+use splines::{Interpolation, Key, Spline};
 fn interpolate() {
     let keys = vec![
         Key::new(0.0, 0.0, Interpolation::Linear),
@@ -23,10 +22,10 @@ fn interpolate() {
     }
 }
 
-/* 
+/*
 impl Interpolate<f64> for Vec<f64> {
-   
-    
+
+
 }
 
 #[derive(Debug)]

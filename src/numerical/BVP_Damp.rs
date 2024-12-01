@@ -1,11 +1,10 @@
-
-mod BVP_utils_damped;
-mod BVP_utils;
-pub mod NR_Damp_solver_damped;
-pub mod NR_Damp_solver_frozen;
-mod BVP_traits;
 mod BVP_Damp_tests;
 pub mod BVP_api;
-mod adaptive_grid_easy;
+mod BVP_traits;
+mod BVP_utils;
+mod BVP_utils_damped;
+pub mod NR_Damp_solver_damped;
+pub mod NR_Damp_solver_frozen;
 mod adaptive_grid_easiest;
+mod adaptive_grid_easy;
 mod grid_api;

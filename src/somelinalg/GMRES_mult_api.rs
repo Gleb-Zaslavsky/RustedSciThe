@@ -1,9 +1,9 @@
 use col::ColBatch;
 use faer;
+use faer::col;
 use faer::mat::Mat;
 use faer::prelude::*;
 use faer::sparse::SparseColMat;
-use faer::col;
 use faer_gmres::gmres;
 use faer_gmres::JacobiPreconLinOp;
 use nalgebra::DMatrix;

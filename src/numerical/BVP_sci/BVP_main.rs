@@ -1,16 +1,17 @@
-
 #![allow(warnings)]
 extern crate nalgebra as na;
 extern crate sprs;
 
+use crate::numerical::BVP_sci::BVP_sci_prepare::{
+    calc_F, estimate_bc_jac, estimate_fun_jac, estimate_rms_residuals, print_iteration_header,
+    print_iteration_progress, task_check, wrap_functions,
+};
 use na::{DMatrix, DVector};
 use sprs::{CsMat, CsVec};
 use std::f64::EPSILON;
-use crate::numerical::BVP_sci::BVP_sci_prepare::{wrap_functions, print_iteration_header, task_check, 
-    estimate_bc_jac, estimate_fun_jac,  print_iteration_progress, estimate_rms_residuals, calc_F};
 
-/* 
- 
+/*
+
 
 fn compute_jac_indices(n: usize, m: usize, k: usize) -> (Vec<usize>, Vec<usize>) {
     let i_col: Vec<usize> = (0..(m - 1) * n).flat_map(|i| vec![i; n]).collect();
@@ -71,7 +72,7 @@ fn construct_global_jac(
 
     dbc_dya: &DMatrix<f64>,
     dbc_dyb: &DMatrix<f64>,
-  
+
 ) -> CsMat<f64> {
     let df_dy = df_dy.transpose();
     let df_dy_middle = df_dy_middle.transpose();
@@ -133,7 +134,7 @@ fn solve_newton(
     bc: BcFun,
     jac: JacFun,
     mut y: DMatrix<f64>,
- 
+
     B: Option<DMatrix<f64>>,
     bvp_tol: f64,
     bc_tol: f64,
@@ -166,7 +167,7 @@ fn solve_newton(
         }
 
         let y_step = DMatrix::from_iterator(n, m, step.iter().take(n * m).cloned());
-      
+
         let mut alpha = 1.0;
 
         for trial in 0..=n_trial {
@@ -174,7 +175,7 @@ fn solve_newton(
             if let Some(ref B) = B {
                 y_new.set_column(0, &(B * y_new.column(0)));
             }
-         
+
             let (col_res, y_middle, f, f_middle) = col_fun(&y_new);
             let bc_res = bc(&y_new.column(0), &y_new.column(m - 1));
             let res = DVector::from_iterator(col_res.len() + bc_res.len(), col_res.iter().chain(bc_res.iter()).cloned());
@@ -190,7 +191,7 @@ fn solve_newton(
         }
 
         y = y_new;
-     
+
 
         if njev == max_njev {
             break;
@@ -287,7 +288,7 @@ fn prepare_sys(
 
     (col_fun, sys_jac)
 }
- 
+
 struct BVPResult {
     sol: DMatrix<f64>,
     p: Option<DVector<f64>>,
@@ -306,7 +307,7 @@ fn solve_bvp(
     bc: Box<dyn Fn(&DVector<f64>, &DVector<f64>) ->   DVector<f64>> ,
     x: DVector<f64>,
     y: DMatrix<f64>,
- 
+
     S: Option<DMatrix<f64>>,
     fun_jac: Option < Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>  >,
     bc_jac: Option < Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DMatrix<f64>  >>,
@@ -351,7 +352,7 @@ fn solve_bvp(
         let (col_fun, jac_sys) = prepare_sys(n, m, k, fun_wrapped, bc_wrapped, fun_jac_wrapped, bc_jac_wrapped, x.clone(), h.clone());
         let (y_new, p_new, singular) = solve_newton(n, m, h.clone(), col_fun, bc_wrapped, jac_sys, y.clone(), B.clone(), tol, bc_tol);
         y = y_new;
-    
+
         iteration += 1;
 
         let (col_res, y_middle, f, f_middle) = colloction_fun(fun_wrapped, y.clone(),  x.clone(), h.clone());
@@ -410,7 +411,7 @@ fn solve_bvp(
 
     BVPResult {
         sol,
-   
+
         x,
         y,
         yp: f,
@@ -424,7 +425,7 @@ fn solve_bvp(
 
 */
 
-/* 
+/*
 
 fn main() {
     // Example usage of the functions
@@ -470,7 +471,7 @@ where
 
     let mut df_dy = DMatrix::zeros(n, n * m);
     let h = EPSILON.sqrt() * (1.0 + y.abs());
-    
+
     for i in 0..n {
         let mut y_new = y.clone();
         y_new.row_mut(i).add_assign(&h[i]);
@@ -514,7 +515,7 @@ where
 
     let mut dbc_dya = DMatrix::zeros(n, n + k);
     let h = EPSILON.sqrt() * (1.0 + ya.abs());
-    
+
     for i in 0..n {
         let mut ya_new = ya.clone();
         ya_new[i] += h[i];
@@ -525,7 +526,7 @@ where
 
     let mut dbc_dyb = DMatrix::zeros(n, n + k);
     let h = EPSILON.sqrt() * (1.0 + yb.abs());
-    
+
     for i in 0..n {
         let mut yb_new = yb.clone();
         yb_new[i] += h[i];
@@ -551,7 +552,7 @@ where
 
     (dbc_dya, dbc_dyb, dbc_dp)
 }
-    
+
 fn main() {
     // Example usage of the functions
     let x = DVector::from_vec(vec![0.0, 1.0, 2.0]);

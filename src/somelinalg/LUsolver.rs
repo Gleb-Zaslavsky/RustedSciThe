@@ -1,14 +1,14 @@
 use crate::somelinalg::GMRES_mult_api::{dense_to_sparse, filter_zeros};
 use col::ColBatch;
+use faer::col;
 use faer::mat::Mat;
 use faer::prelude::*;
 use faer::sparse::SparseColMat;
-use faer::col;
 
 use rayon::prelude::*;
 // Import rayon prelude for parallel iterators
 // Invertig of matrix is A*B = E where A is given matrix, E - is Unit matrix, and B is inverse matrix
-// The easiest way to do this is to solve n linear systems A*b = e where A is given matrix, and b is i-th column of inverse matrix 
+// The easiest way to do this is to solve n linear systems A*b = e where A is given matrix, and b is i-th column of inverse matrix
 // e is i-th column of Unit matrix. This problem is good for parallel iterators
 pub fn invers_Mat_LU(
     mat: SparseColMat<usize, f64>,
@@ -24,9 +24,9 @@ pub fn invers_Mat_LU(
     let triplets: Vec<Vec<(usize, usize, f64)>> = (0..n)
         .into_par_iter()
         .map(|i| {
-           // let _x: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
-            let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);// create vector of zeros
-            b[(i, 0)] = 1.0;// but set the i-th element to 1.0 - that is the i-th column of Unit vector
+            // let _x: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1);
+            let mut b: Mat<f64> = Mat::<f64>::new_owned_zeros(n, 1); // create vector of zeros
+            b[(i, 0)] = 1.0; // but set the i-th element to 1.0 - that is the i-th column of Unit vector
 
             let res = LU.solve(b);
             filter_zeros(&res, i, tol) // returns a vector of tuples, where each tuple represents a non-zero element in the filtered row.
@@ -96,7 +96,6 @@ mod tests {
     use nalgebra::DMatrix;
     #[test]
     fn test_Lusolver() {
-
         let test_jac = vec![
             -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 1.0, -0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0,
@@ -132,7 +131,7 @@ mod tests {
         b[(0, 0)] = 1.0;
         let mut x = Mat::<f64>::new_owned_zeros(20, 1);
 
-        let (_err,_iterss) =
+        let (_err, _iterss) =
             gmres(sparse_jac.as_ref(), b.as_ref(), x.as_mut(), 100, 1e-8, None).unwrap();
         //    println!("Result x: {:?}", x);
         //    println!("Error x: {:?}", err);
