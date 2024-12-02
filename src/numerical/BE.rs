@@ -7,6 +7,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::Utils::plots::plots;
 use nalgebra::{DMatrix, DVector};
 //use ndarray_linalg::Norm;
+use log::info;
 use std::time::Instant;
 pub enum Equation {
     LHS(Vec<Expr>),
@@ -94,7 +95,7 @@ impl BE {
                 None,
             )
         } else {
-            println!("global_timestepping = false");
+            info!("global_timestepping = false");
             self.global_timestepping = false;
             NRE::new(
                 eq_system,
@@ -146,12 +147,12 @@ impl BE {
         let guess_i = self.y.clone();
         let t_i = nr.dt + self.t;
         nr.set_t(t_i);
-        //  println!("guess = {:?}, t_i = {:?} ", &guess_i, t_i);
+        //  info("guess = {:?}, t_i = {:?} ", &guess_i, t_i);
         nr.set_initial_guess(guess_i);
         nr.solve();
         let result = nr.get_result();
         if result.is_none() {
-            println!("result is None");
+            info!("result is None");
             return (
                 false,
                 Some("maximum number of iterations reached".to_string()),
@@ -160,7 +161,7 @@ impl BE {
             self.y = nr.get_result().expect("REASON");
 
             self.t = t_i;
-            //   println!("y = {:?} ", &self.y);
+            //   info("y = {:?} ", &self.y);
             return (true, None);
         }
     }
@@ -208,7 +209,7 @@ impl BE {
         while integr_status.is_none() {
             self.step();
             let _status: i8 = 0;
-            //   println!("\n iteration: {}", i);
+            //   info("\n iteration: {}", i);
             //if i == 100 {panic!()}
             _i += 1;
             if self.status == "finished".to_string() {
@@ -217,10 +218,10 @@ impl BE {
                 integr_status = Some(-1);
                 break;
             }
-            //  println!("i: {}, t: {}, y: {:?}, _status: {}", i, self.Solver_instance.t, self.Solver_instance.y, _status);
+            //  info("i: {}, t: {}, y: {:?}, _status: {}", i, self.Solver_instance.t, self.Solver_instance.y, _status);
             t.push(self.t);
             y.push(self.y.clone());
-            // println!("time  {:?}, len {}", t, t.len())
+            // info("time  {:?}, len {}", t, t.len())
         }
 
         let rows = &y.len();
@@ -233,10 +234,10 @@ impl BE {
         let y_res: DMatrix<f64> = DMatrix::from_vec(*cols, *rows, flat_vec).transpose();
         let t_res = DVector::from_vec(t);
 
-        // println!("time  {:?}, len {}", &t_res, t_res.len());
-        //println!("y  {:?}, len {:?}", &y_res, y_res.shape());
+        // info("time  {:?}, len {}", &t_res, t_res.len());
+        //info("y  {:?}, len {:?}", &y_res, y_res.shape());
         let duration = start.elapsed();
-        println!("Program took {} milliseconds to run", duration.as_millis());
+        info!("Program took {} milliseconds to run", duration.as_millis());
         self.t_result = t_res.clone();
         self.y_result = y_res.clone();
     } //
@@ -252,7 +253,7 @@ impl BE {
             self.t_result.clone(),
             self.y_result.clone(),
         );
-        println!("result plotted");
+        info!("result plotted");
     }
 
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
@@ -268,7 +269,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let y0 = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -292,7 +293,7 @@ mod tests {
             t_bound,
             y0,
         );
-        println!(
+        info!(
             "y = {:?}, initial_guess = {:?}",
             solver.newton.y, solver.newton.initial_guess
         );
@@ -309,7 +310,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let y0 = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -333,7 +334,7 @@ mod tests {
             t_bound,
             y0,
         );
-        println!(
+        info!(
             "y = {:?}, initial_guess = {:?}",
             solver.newton.y, solver.newton.initial_guess
         );
@@ -348,7 +349,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let y0 = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -372,7 +373,7 @@ mod tests {
             t_bound,
             y0,
         );
-        println!(
+        info!(
             "y = {:?}, initial_guess = {:?}",
             solver.newton.y, solver.newton.initial_guess
         );
@@ -386,7 +387,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let y0 = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -410,7 +411,7 @@ mod tests {
             t_bound,
             y0,
         );
-        println!(
+        info!(
             "y = {:?}, initial_guess = {:?}",
             solver.newton.y, solver.newton.initial_guess
         );
@@ -462,7 +463,7 @@ mod tests {
         let mut equations: Vec<Expr> = Vec::new();
         for  i in 0..self.y.clone().iter().len() {
             let equation = y_k[i].clone() - y_k_min_1[i].clone()    - h.clone() *self.RHS[i].clone() ;
-            println!("equation {}: {}",i, equation);
+            info!("equation {}: {}",i, equation);
             equations.push(equation);
 
     }
@@ -480,7 +481,7 @@ fn main() {
     let result = backward_euler(f, y0, t0, tn, h);
 
     for (t, y) in result {
-        println!("t: {:.2}, y: {:.5}", t, y);
+        info!("t: {:.2}, y: {:.5}", t, y);
     }
 }
 
@@ -564,7 +565,7 @@ fn main() {
     let result = backward_euler(f, y0, t0, tn, h);
 
     for (t, y) in result {
-        println!("t: {:.2}, y: {:?}", t, y);
+        info!("t: {:.2}, y: {:?}", t, y);
     }
 }
 

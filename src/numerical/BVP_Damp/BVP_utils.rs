@@ -1,17 +1,17 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
-use simplelog::*;
+use log::info;
 use std::collections::HashMap;
 use std::time::Duration;
 pub fn elapsed_time(elapsed: Duration) {
     let time = elapsed.as_millis();
     if time < 1000 {
-        log::info!("\n \n Elapsed {} ms", time)
+        info!("Elapsed {} ms", time)
     } else if time >= 1000 && time < 60_000 {
-        log::info!("\n \n Elapsed {} s", elapsed.as_secs())
+        info!("Elapsed {} s", elapsed.as_secs())
     } else if time >= 60_000 && time < 3600_000 {
-        log::info!("\n \n Elapsed {} min", elapsed.as_secs() / 60)
+        info!("Elapsed {} min", elapsed.as_secs() / 60)
     } else {
-        log::info!("\n \n Elapsed {} h", elapsed.as_secs() / 3600)
+        info!("Elapsed {} h", elapsed.as_secs() / 3600)
     }
 }
 // FROZEN JACOBIAN TASK PARAMETERS CHECK
@@ -131,7 +131,7 @@ pub fn frozen_jac_recalc(
                     .unwrap()[0] as usize;
                 // when jac is None it means this is first iteration
                 if old_jac.is_none() || m > m_from_task {
-                    println!(
+                    info!(
                         "\n number of iterations with old jac {} is higher then threshold {}",
                         m, m_from_task
                     );
@@ -147,7 +147,7 @@ pub fn frozen_jac_recalc(
                     .clone()
                     .unwrap()[0];
                 if error > norm_from_task {
-                    println!(
+                    info!(
                         "\n norm {} is higher then threshold {}",
                         error, norm_from_task
                     );
@@ -164,7 +164,7 @@ pub fn frozen_jac_recalc(
                     .clone()
                     .unwrap()[0];
                 if speed_rate * error_old < error {
-                    println!("error of i-1 iter -({}) must be at least ({}) times less then of i- iter ({})",   error_old, speed_rate, error);
+                    info!("error of i-1 iter -({}) must be at least ({}) times less then of i- iter ({})",   error_old, speed_rate, error);
 
                     true
                 } else {
@@ -184,19 +184,19 @@ pub fn frozen_jac_recalc(
                 if (error > norm_from_task) || (m > m_from_task) || (speed_rate * error_old < error)
                 {
                     if error > norm_from_task {
-                        println!(
+                        info!(
                             "\n norm {} is higher then threshold {}",
                             error, norm_from_task
                         );
                     }
                     if m >= m_from_task {
-                        println!(
+                        info!(
                             "\n number of iterations with old jac {} is higher then threshold {}",
                             m, m_from_task
                         );
                     }
                     if speed_rate * error_old < error {
-                        println!("error of i-1 iter -({}) must be at least ({}) times less then of i- iter ({})",   error_old, speed_rate, error);
+                        info!("error of i-1 iter -({}) must be at least ({}) times less then of i- iter ({})",   error_old, speed_rate, error);
                     }
                     true
                 } else {
@@ -204,7 +204,7 @@ pub fn frozen_jac_recalc(
                 }
             }
             _ => {
-                println!("Method not implemented");
+                info!("Method not implemented");
                 std::process::exit(1);
             }
         }
@@ -212,7 +212,7 @@ pub fn frozen_jac_recalc(
         if strategy.as_str() == "Naive" {
             true
         } else {
-            println!("Method not implemented");
+            info!("Method not implemented");
             std::process::exit(1);
         }
     }

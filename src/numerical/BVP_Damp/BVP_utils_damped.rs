@@ -4,7 +4,7 @@ use nalgebra::DMatrix;
 use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
-
+use log::info;
 /*
 pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
     let mut fbound = 1.0;
@@ -137,7 +137,7 @@ pub fn interchange_columns(
 
     let reordered_result = if variables != unindexed_vars {
         // if they have the same oreder no permutation needed
-        println!("permutation needed");
+        info!("permutation needed");
         for var in &unindexed_vars {
             let index = variables.iter().position(|x| x == var).unwrap();
             reordering.push(index);

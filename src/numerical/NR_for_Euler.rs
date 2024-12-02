@@ -2,6 +2,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
+use log::info;
 // solve algebraic nonlinear system with free parameter t
 //#[derive(Debug)]
 pub struct NRE {
@@ -74,7 +75,7 @@ impl NRE {
 
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self) {
-        println!("generating equations and jacobian");
+        info!("generating equations and jacobian");
         let mut jacobian_instance = Jacobian::new();
         jacobian_instance.generate_IVP_ODEsolver(
             self.eq_system.clone(),
@@ -201,7 +202,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();
@@ -241,7 +242,7 @@ mod tests {
         let eq1 = Expr::parse_expression("z+y-10.0*x");
         let eq2 = Expr::parse_expression("z*y-4.0*x");
         let eq_system = vec![eq1, eq2];
-        println!("eq_system = {:?}", eq_system);
+        info!("eq_system = {:?}", eq_system);
         let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
         let values = vec!["z".to_string(), "y".to_string()];
         let arg = "x".to_string();

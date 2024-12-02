@@ -1,6 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
-
+use log::info;
 /*
 Some math considerations...
 1. truncation error analysis
@@ -55,7 +55,7 @@ pub fn easiest_grid_refinement(
     let (n_rows, _) = y_DMatrix.shape();
     let mut new_grid: Vec<f64> = Vec::new();
     let mut mark: DVector<i8> = DVector::zeros(x_mesh.len());
-    //println!("{} rows", n_rows);
+    //info!("{} rows", n_rows);
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.row_iter().enumerate() {
         // iterate through the the row (solution for one of the unknown variables) and find the corresponding truncation error that is
@@ -78,7 +78,7 @@ pub fn easiest_grid_refinement(
             } //i>0
               //for i==0 and i==-1 mark elements remain 0
         } // for i in 0..x_mesh.len()
-        println!(
+        info!(
             "\n \n for row {} mark: {:?} len {} \n \n",
             j,
             mark,
@@ -198,8 +198,8 @@ pub fn pearson_grid_refinement(
             .filter(|(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
-        println!(
-            "\n \n for row {} found intervals to be refined: {:?} of length {} \n \n",
+        info!(
+            "for row {} found intervals to be refined: {:?} of length {} ",
             j,
             non_zero_keys,
             non_zero_keys.len()
@@ -347,7 +347,7 @@ pub fn grcar_smooke_grid_refinement(
             .filter(|(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
-        println!(
+        info!(
             "\n \n for row {} found intervals to be refined: {:?} of length {} \n \n",
             j,
             non_zero_keys,

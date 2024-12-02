@@ -10,7 +10,7 @@ extern crate num;
 extern crate num_complex;
 use num::traits::Float;
 use std::fmt::Debug;
-
+use log::{info,error};
 use std::error::Error;
 
 pub fn newton_tol(rtol: NumberOrVec) -> f64 {
@@ -94,7 +94,7 @@ pub fn validate_first_step(first_step: f64, t0: f64, t_bound: f64) -> Result<f64
     if first_step > (t_bound - t0).abs() {
         return Err("`first_step` exceeds bounds.");
     }
-    println!("first step validation: done");
+    info!("first step validation: done");
     Ok(first_step)
 }
 
@@ -246,17 +246,17 @@ pub fn select_initial_step(
     let h0 = h0.min(interval_length);
     let y1 = y0 + h0 * direction * f0;
     let f1 = fun(t0 + h0 * direction, &y1);
-    //   println!("f {}, arg{}", f1.clone(), &y1);
+    //   info!("f {}, arg{}", f1.clone(), &y1);
     let d2 = norm(&((f1 - f0).component_div(&scale))) / h0;
-    //  println!("SCALE, {}, d2, {}, h0 {}", scale, d2.clone(), h0  );
+    //  info!("SCALE, {}, d2, {}, h0 {}", scale, d2.clone(), h0  );
     let h1 = if d1 <= 1e-15 && d2 <= 1e-15 {
         1e-6.max(h0 * 1e-3)
     } else {
         (0.01 / d1.max(d2)).powf(1.0 / (order + 1.0))
     };
-    //   println!("scale, {}, d2, {}, h1 {}", scale, d2.clone(), h1);
-    //  println!("select initial step: done" );
-    // println!("h0, {}, h1, {}, interval_length, {}, max_step, {}", h0, h1, interval_length, max_step);
+    //   info!("scale, {}, d2, {}, h1 {}", scale, d2.clone(), h1);
+    //  info!("select initial step: done" );
+    // info!("h0, {}, h1, {}, interval_length, {}, max_step, {}", h0, h1, interval_length, max_step);
     //let res = h0.min(h1).min(interval_length).min(max_step);
     let res = vec![100.0 * h0, h1, interval_length, max_step]
         .into_iter()
@@ -274,7 +274,7 @@ pub fn validate_tol(
         // rtol is a number
         NumberOrVec::Number(rtol_i) => {
             if rtol_i < 100.0 * f64::EPSILON {
-                eprintln!("At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`.");
+                error!("At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`.");
                 NumberOrVec::Number(f64::max(rtol_i, 100.0 * f64::EPSILON))
             } else {
                 NumberOrVec::Number(rtol_i)

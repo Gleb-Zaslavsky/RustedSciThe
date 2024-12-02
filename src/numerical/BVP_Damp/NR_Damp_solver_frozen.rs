@@ -15,6 +15,7 @@ use crate::Utils::plots::plots;
 use chrono::Local;
 use faer::col::Col;
 use faer::sparse::SparseColMat;
+use log::info;
 use nalgebra::sparse::CsMatrix;
 use simplelog::*;
 use sprs::{CsMat, CsVec};
@@ -316,7 +317,7 @@ impl NRBVP {
         let now = Instant::now();
 
         let new_j = if self.jac_recalc {
-            log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let new_j = jac.call(p, y);
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             self.old_jac = Some(new_j.clone_box());
@@ -346,7 +347,7 @@ impl NRBVP {
     // main function to solve the system of equations
 
     pub fn main_loop(&mut self) -> Option<DVector<f64>> {
-        log::info!("solving system of equations with Newton-Raphson method! \n \n");
+        info!("solving system of equations with Newton-Raphson method! \n \n");
         let y: DMatrix<f64> = self.initial_guess.clone();
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
@@ -375,7 +376,7 @@ impl NRBVP {
             );
             self.error_old = error;
             //    println!("new_x = {:?} \n \n, x = {:?} \n \n ", &new_y.clone(), &_y );
-            log::info!(" \n \n error = {:?} \n \n", &error);
+            info!(" \n \n error = {:?} \n \n", &error);
             if error < self.tolerance {
                 log::info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
@@ -461,19 +462,19 @@ impl NRBVP {
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-        println!(
+        info!(
             "matrix of results has shape {:?}",
             matrix_of_results.shape()
         );
-        println!("length of x mesh : {:?}", n_steps);
-        println!("number of Ys: {:?}", number_of_Ys);
+        info!("length of x mesh : {:?}", n_steps);
+        info!("number of Ys: {:?}", number_of_Ys);
         plots(
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
             matrix_of_results,
         );
-        println!("result plotted");
+        info!("result plotted");
     }
 }
 

@@ -28,6 +28,7 @@ use std::time::Instant;
 use crate::numerical::BVP_Damp::grid_api::{new_grid, GridRefinementMethod};
 use faer::col::Col;
 use faer::sparse::SparseColMat;
+use log::{info,warn,error};
 use nalgebra::sparse::CsMatrix;
 use sprs::{CsMat, CsVec};
 
@@ -106,7 +107,7 @@ impl NRBVP {
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         let new_grid_enabled_: bool = if strategy_params.clone().unwrap().get("adaptive").is_some()
         {
-            log::info!("problem with adaptive grid");
+            info!("problem with adaptive grid");
             true
         } else {
             false
@@ -292,7 +293,7 @@ impl NRBVP {
                     scheme.clone(),
                 );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
                 let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
                     jacobian_instance.lambdified_functions_IVP_DVector;
 
@@ -341,7 +342,7 @@ impl NRBVP {
                 let y_0 = Vectors_type_casting(&y.clone(), "Sparse 1".to_string());
                 let y_0 = y_0.as_any().downcast_ref::<CsVec<f64>>().unwrap();
                 let test = fun(self.p, &y_0.clone());
-                println!("test = {:?}", test);
+                info!("test = {:?}", test);
                 // panic!("test");
                 //
                 let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_1(fun));
@@ -422,7 +423,7 @@ impl NRBVP {
                 self.variable_string = jacobian_instance.variable_string;
             }
             _ => {
-                println!("Method not implemented");
+                info!("Method not implemented");
                 std::process::exit(1);
             } // assert_eq!(self.bo)
         } // end of match
@@ -462,7 +463,7 @@ impl NRBVP {
         if self.jac_recalc {
             let p = self.p;
             let y = &*self.y;
-            log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let jac_function = self.jac.as_mut().unwrap();
             let jac_matrix = jac_function.call(p, y);
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
@@ -484,12 +485,12 @@ impl NRBVP {
             J_k.shape().0
         );
         let residual_norm = F_k.norm();
-        log::info!("\n \n residual norm = {:?} ", residual_norm);
+        info!("\n \n residual norm = {:?} ", residual_norm);
         // jac_rowwise_printing(&J_k);
         //    println!(" \n \n F_k = {:?} \n \n", F_k.to_DVectorType());
         for el in F_k.iterate() {
             if el.is_nan() {
-                log::error!("\n \n NaN in undamped step residual function \n \n");
+                error!("\n \n NaN in undamped step residual function \n \n");
                 panic!()
             }
         }
@@ -519,15 +520,15 @@ impl NRBVP {
         let y_k = y_k_minus_1 - &*undamped_step_k_minus_1;
         let fbound = bound_step(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
-            log::error!("\n \n fbound is NaN \n \n");
+            error!("\n \n fbound is NaN \n \n");
             panic!()
         }
         if fbound.is_infinite() {
-            log::error!("\n \n fbound is infinite \n \n");
+            error!("\n \n fbound is infinite \n \n");
             panic!()
         }
         // let fbound =1.0;
-        log::info!("\n \n fboundary  = {}", fbound);
+        info!("\n \n fboundary  = {}", fbound);
         let mut lambda = 1.0 * fbound;
         // if fbound is very small, then x0 is already close to the boundary and
         // step0 points out of the allowed domain. In this case, the Newton
@@ -572,9 +573,9 @@ impl NRBVP {
         //
         for mut k in 0..maxDampIter {
             if k > 1 {
-                log::info!("\n \n damped_step number {} ", k);
+                info!("\n \n damped_step number {} ", k);
             }
-            log::info!("\n \n Damping coefficient = {}", lambda);
+            info!("\n \n Damping coefficient = {}", lambda);
             let damped_step_k = undamped_step_k.mul_float(lambda);
             let S_k = &damped_step_k.norm();
 
@@ -585,7 +586,7 @@ impl NRBVP {
             let undamped_step_k_plus_1 = self.step(p, &*y_k_plus_1); //???????????????
             let error = &undamped_step_k_plus_1.norm();
             self.error_old = *error;
-            log::info!("\n \n L2 norm of undamped step = {}", error);
+            info!("\n \n L2 norm of undamped step = {}", error);
             let convergence_cond_for_step = convergence_condition(
                 &*undamped_step_k_plus_1,
                 &self.abs_tolerance,
@@ -622,8 +623,8 @@ impl NRBVP {
             // if there is a damping coefficient found (so max damp steps not exceeded)
             if S_k_plus_1.unwrap() > conv {
                 //found damping coefficient but not converged yet
-                log::info!("\n \n  Damping coefficient found (solution has not converged yet)");
-                log::info!(
+                info!("\n \n  Damping coefficient found (solution has not converged yet)");
+                info!(
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old,
                     S_k_plus_1.unwrap(),
@@ -631,8 +632,8 @@ impl NRBVP {
                 );
                 (0, damped_step_result)
             } else {
-                log::info!("\n \n  Damping coefficient found (solution has converged)");
-                log::info!(
+                info!("\n \n  Damping coefficient found (solution has converged)");
+                info!(
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old,
                     S_k_plus_1.unwrap(),
@@ -642,12 +643,12 @@ impl NRBVP {
             }
         } else {
             //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
-            log::warn!("\n \n  No damping coefficient found (max damping iterations reached)");
+            warn!("\n \n  No damping coefficient found (max damping iterations reached)");
             (-2, None)
         }
     } // end of damped step
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
-        log::info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
+        info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         let y: DMatrix<f64> = self.initial_guess.clone();
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
@@ -674,7 +675,7 @@ impl NRBVP {
                 let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
                     y_k_plus_1
                 } else {
-                    log::error!("\n \n y_k_plus_1 is None");
+                    error!("\n \n y_k_plus_1 is None");
                     panic!()
                 };
                 self.y = y_k_plus_1;
@@ -683,7 +684,7 @@ impl NRBVP {
             // status == 0
             else if status == 1 {
                 // status == 1 means convergence is reached, save the result
-                log::info!("\n \n Solution has converged, breaking the loop!");
+                info!("\n \n Solution has converged, breaking the loop!");
                 let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
                     y_k_plus_1
                 } else {
@@ -715,7 +716,7 @@ impl NRBVP {
                 if self.m > 1 {
                     // if we have already tried 2 times with same Jacobian we must recalculate Jacobian
                     self.jac_recalc = true;
-                    log::info!(
+                    info!(
                         "\n \n status <0, recalculating Jacobian flag up! Jacobian age = {} \n \n",
                         self.m
                     );
@@ -724,12 +725,12 @@ impl NRBVP {
                     }
                     nJacReeval += 1;
                 } else {
-                    log::info!("\n \n Jacobian age {} =<1 \n \n", self.m);
+                    info!("\n \n Jacobian age {} =<1 \n \n", self.m);
                     break;
                 }
             } // status <0
 
-            log::info!("\n \n end of iteration {} with jac age {} \n \n", i, self.m);
+            info!("\n \n end of iteration {} with jac age {} \n \n", i, self.m);
         }
         None
     }
@@ -770,7 +771,7 @@ impl NRBVP {
         };
         let max_grid_refinenents = vec_of_params[1] as usize;
         if max_grid_refinenents <= self.grid_refinemens {
-            log::info!(
+            info!(
                 "maximum number of grid refinements {} reached  {} ",
                 max_grid_refinenents,
                 self.grid_refinemens
@@ -780,7 +781,7 @@ impl NRBVP {
         self.new_grid_enabled = res;
     }
     fn create_new_grid(&mut self) -> (Vec<f64>, DMatrix<f64>, usize) {
-        log::info!("\n \n creating new grid \n \n");
+        info!("\n \n creating new grid \n \n");
         let y = self.y.clone_box();
         let y_DVector = y.to_DVectorType();
         let nrows = self.values.len();
@@ -820,7 +821,7 @@ impl NRBVP {
         let (new_mesh, initial_guess, number_of_nonzero_keys) =
             new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone());
 
-        log::info!("\n \n new grid enabled! \n \n");
+        info!("\n \n new grid enabled! \n \n");
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -836,7 +837,7 @@ impl NRBVP {
         self.n_steps = new_mesh.len();
         self.initial_guess = initial_guess;
         self.grid_refinemens += 1;
-        log::info!(
+        info!(
             "\n \n grid refinement counter = {} \n \n",
             self.grid_refinemens
         );
@@ -885,7 +886,7 @@ impl NRBVP {
         match logger_instance {
             Ok(()) => {
                 let res = self.solver();
-                log::info!(" \n \n Program ended");
+                info!(" \n \n Program ended");
                 res
             }
             Err(_) => {
@@ -934,12 +935,12 @@ impl NRBVP {
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-        println!(
+        info!(
             "matrix of results has shape {:?}",
             matrix_of_results.shape()
         );
-        println!("length of x mesh : {:?}", n_steps);
-        println!("number of Ys: {:?}", number_of_Ys);
+        info!("length of x mesh : {:?}", n_steps);
+        info!("number of Ys: {:?}", number_of_Ys);
         let permutted_results = interchange_columns(
             matrix_of_results,
             self.values.clone(),
@@ -951,7 +952,7 @@ impl NRBVP {
             self.x_mesh.clone(),
             permutted_results,
         );
-        println!("result plotted");
+        info!("result plotted");
     }
 }
 

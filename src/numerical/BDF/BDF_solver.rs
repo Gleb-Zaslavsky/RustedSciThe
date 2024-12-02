@@ -6,6 +6,7 @@ use na::{DMatrix, DVector, Dyn, LU};
 
 use std::f64;
 use std::ops::AddAssign;
+use log::info;
 
 use crate::numerical::BDF::BDF_utils::{group_columns, OrderEnum};
 
@@ -51,7 +52,7 @@ fn compute_r(order: usize, factor: f64) -> DMatrix<f64> {
         }
     }
     m.row_mut(0).fill(1.0);
-    // println!("\n M= {}", m);
+    // info!("\n M= {}", m);
     let result = cumulative_product_along_columns(&m);
     result
 }
@@ -66,7 +67,7 @@ fn compute_r(order: usize, factor: f64) -> DMatrix<f64> {
 fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
     let r = compute_r(order, factor);
     let u = compute_r(order, 1.0);
-    //  println!("r={:?}, u={:?}", r, u);
+    //  info!("r={:?}, u={:?}", r, u);
     let ru = r * u;
     let temp = ru.transpose() * D.rows(0, order + 1);
     D.rows_mut(0, order + 1).copy_from(&temp);
@@ -111,18 +112,18 @@ where
     let mut converged = false;
     let mut k_: usize = 0;
     for k in 0..NEWTON_MAXITER {
-        //   println!("Newton iteration: {}", k);
+        //   info!("Newton iteration: {}", k);
         let f = fun(t_new, &y);
         // checks if all elements in the vector f are finite. If any element is not finite, the loop is broken.
         if !f.iter().all(|&x| x.is_finite()) {
             break;
         }
         //The dy vector represents the change in the solution vector y at each iteration of the Newton-Raphson method
-        // println!("DY c {:?},\n f = {:?}, \n {:?},\n {:?} \n", c, &f , psi, &d);
+        // info!("DY c {:?},\n f = {:?}, \n {:?},\n {:?} \n", c, &f , psi, &d);
         let dy = solve_lu(&lumatrx, &(c * &f - psi - &d));
         // let new_fun:f64 = (|x:&f64, y:&f64| -x - (-y).exp() )(&y[0], &y[1]);
         //  print!("new_fun {:?} ", new_fun);
-        //   println!("dy {:}, \n &(c * &f - psi - &d) {:?}", dy, &(c * &f - psi - &d));
+        //   info!("dy {:}, \n &(c * &f - psi - &d) {:?}", dy, &(c * &f - psi - &d));
         // The dy_norm value is then used to determine the convergence of the Newton-Raphson method and to adjust the step size in the BDF method
         let dy_norm = norm(&(dy.component_div(scale)));
         //  calculate the rate of convergence for the Newton-Raphson method used to solve the system of ODEs. The rate of convergence is calculated
@@ -133,7 +134,7 @@ where
         } else {
             None
         };
-        // println!("dy = {:?}, dy_norm = {:?}, rate = {:?}, {}", dy, dy_norm, rate, tol);
+        // info!("dy = {:?}, dy_norm = {:?}, rate = {:?}, {}", dy, dy_norm, rate, tol);
         // if the rate of convergence is greater than or equal to 1.0 or if the rate divided by (1.0 - rate) times the norm of the change in
         //the solution vector is greater than the specified tolerance (tol), the loop breaks, indicating that the Newton-Raphson method has
         //not converged.
@@ -153,7 +154,7 @@ where
             converged = true;
             break;
         }
-        // if let Some(rate) = rate { println!("condition {}", rate / (1.0 - rate) * dy_norm)};
+        // if let Some(rate) = rate { info!("condition {}", rate / (1.0 - rate) * dy_norm)};
         if let Some(rate) = rate {
             if rate / (1.0 - rate) * dy_norm < tol {
                 converged = true;
@@ -162,7 +163,7 @@ where
         }
         dy_norm_old = Some(dy_norm);
     } //for dy_norm
-      //  println!("{}, {}, {}, {}", converged, k_+1, y, d);
+      //  info!("{}, {}, {}, {}", converged, k_+1, y, d);
     (converged, k_ + 1, y, d)
 }
 
@@ -368,7 +369,7 @@ impl BDF {
     ) {
         // prelude imitates super class in python package
         self.prelude(fun, t0, y0, t_bound, vectorized);
-        println!("prelude done");
+        info!("prelude done");
         // initialize parameters, if some parameters are not provided by the user then we will use special functions
         let max_step = validate_max_step(self.max_step);
         self.max_step = max_step.unwrap();
@@ -376,7 +377,7 @@ impl BDF {
         let (rtol, atol) = validate_tol(rtol, atol, self.n).unwrap();
         self.rtol = rtol.clone();
         self.atol = atol.clone();
-        println!("tolerance validation: done");
+        info!("tolerance validation: done");
         let f = (&self.fun)(self.t, &self.y);
         let h_abs = match first_step {
             None => select_initial_step(
@@ -399,10 +400,10 @@ impl BDF {
         self.h_abs = h_abs;
         self.h_abs_old = None; // TODO: check this
         self.error_norm_old = None; //
-                                    //             println!("h_abs {}", h_abs);
+                                    //             info!("h_abs {}", h_abs);
                                     //  let newton_tol = f64::max(10.0 * std::f64::EPSILON / rtol, f64::min(0.03, rtol.powf(0.5)));
         self.newton_tol = newton_tol(rtol);
-        //  println!("newton_tol {}", self.newton_tol);
+        //  info!("newton_tol {}", self.newton_tol);
         self.jac_factor = None;
 
         // kappa: This array contains the coefficients for the BDF method. The values are specific to the BDF method and
@@ -440,19 +441,19 @@ impl BDF {
         );
         let error_const = kappa.component_mul(&gamma)
             + DVector::from_iterator(MAX_ORDER + 1, (1..=MAX_ORDER + 1).map(|i| 1.0 / i as f64));
-        //         println!("kappa {:?}, alpha {:?}, gamma {:?},  error_const {:?}", &kappa, &alpha, &gamma, &error_const );
+        //         info!("kappa {:?}, alpha {:?}, gamma {:?},  error_const {:?}", &kappa, &alpha, &gamma, &error_const );
         self.alpha = alpha;
         self.error_const = error_const;
         self.gamma = gamma;
 
         let mut D = DMatrix::zeros(MAX_ORDER + 3, self.y.len());
-        println!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
+        info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
         //  let row_vector = DVector::from_row_slice([(self.y)  );
         // D.row_mut(0).copy_from(  &DVector::from_row_slice( row_vector));
         D.set_row(0, &self.y.transpose());
-        //         println!("{:?}",  h_abs);
+        //         info!("{:?}",  h_abs);
         D.set_row(1, &(f * h_abs * self.direction).transpose());
-        //           println!("D = {:?},", &D);
+        //           info!("D = {:?},", &D);
         self.D = D;
 
         self.order = 1;
@@ -515,7 +516,7 @@ impl BDF {
             self.I = DMatrix::identity(self.n, self.n); // . An identity matrix is a square matrix with ones on the main diagonal
                                                         //(from the top left to the bottom right) and zeros elsewhere.
 
-            println!("functions creation: done");
+            info!("functions creation: done");
         };
     }
     fn prelude(
@@ -593,7 +594,7 @@ impl BDF {
         // at a given point
 
         if let Some(jac) = jac {
-            println!("analytical jacobian used");
+            info!("analytical jacobian used");
             let J = jac(t0, &y0);
             self.njev += 1;
 
@@ -681,21 +682,21 @@ impl BDF {
 
         // Ok((jac_wrapped, J))
 
-        println!("jac validation: done");
+        info!("jac validation: done");
     } // validate_jac
 
     //
 
     pub fn _step_impl(&mut self) -> (bool, Option<&'static str>) {
-        //    println!("\n start step: t {}, y {:?}, order {:?}", self.t, self.y, self.order);
+        //    info!("\n start step: t {}, y {:?}, order {:?}", self.t, self.y, self.order);
         let t = self.t;
         let mut D = self.D.clone();
-        //       println!("D0 {:?}", D.transpose(),);
+        //       info!("D0 {:?}", D.transpose(),);
         let max_step = self.max_step;
         let min_step = 10.0 * f64::MIN; //(t.next_after(self.direction * INFINITY) - t).abs();
 
         let mut h_abs = if self.h_abs > max_step {
-            //  println!("coind, {:?}, {:?}", self.order, max_step / self.h_abs);
+            //  info!("coind, {:?}, {:?}", self.order, max_step / self.h_abs);
             change_D(&mut D, self.order, max_step / self.h_abs);
             self.n_equal_steps = 0;
 
@@ -707,8 +708,8 @@ impl BDF {
         } else {
             self.h_abs
         };
-        //  println!("h_abs = {:?} \n", h_abs);
-        //   println!("D1 {:?}", D.transpose());
+        //  info!("h_abs = {:?} \n", h_abs);
+        //   info!("D1 {:?}", D.transpose());
 
         let order = self.order;
         let alpha = &self.alpha;
@@ -734,7 +735,7 @@ impl BDF {
         let mut error_norm = 0.0;
         // order preallocation
         let mut d = DVector::zeros(self.n);
-        //      println!("{}", &J);
+        //      info!("{}", &J);
         while !step_accepted {
             if h_abs < min_step {
                 return (false, "step size too small".into());
@@ -752,20 +753,20 @@ impl BDF {
                 self.n_equal_steps = 0;
                 LU = None;
             }
-            // println!("D cnanged {:?}", D);
+            // info!("D cnanged {:?}", D);
             t_new = t_new_;
 
             let h = t_new - t;
             h_abs = h.abs();
             //     thread::sleep(Duration::from_millis(100));
-            // println!("for pre {:?}, {:?}, ,", D.rows(0, order + 1).transpose(), order);
+            // info!("for pre {:?}, {:?}, ,", D.rows(0, order + 1).transpose(), order);
             let y_predict = D.rows(0, order + 1).row_sum().transpose();
-            //    println!("y_predict = {:?} \n", y_predict);
+            //    info!("y_predict = {:?} \n", y_predict);
             let y_predict_abs = y_predict.abs();
             let scale_ = scale_func(self.rtol.clone(), self.atol.clone(), &y_predict_abs); //  atol + rtol * y_predict.abs();
             let scale_: DVector<f64> = DVector::from_vec(scale_);
             scale = scale_;
-            //      println!("for psi {:?}, {:?}, {:?}, {:?}", D.rows(1, order).transpose(), gamma.rows(1, order).transpose(), alpha[order], order);
+            //      info!("for psi {:?}, {:?}, {:?}, {:?}", D.rows(1, order).transpose(), gamma.rows(1, order).transpose(), alpha[order], order);
             let psi = D.rows(1, order).transpose() * gamma.rows(1, order) / alpha[order]; //???
             let mut converged = false;
             let c = h / alpha[order];
@@ -776,7 +777,7 @@ impl BDF {
                     assert_eq!(eye.shape(), J.shape(), "J shape is not equal to eye shape");
                     let x = &(eye - c * J.clone());
                     LU = Some((self.lu)(x));
-                    // println!("LU = {:?} \n", LU);
+                    // info!("LU = {:?} \n", LU);
                 }
 
                 let (conv, n_iter_, y_new_, d_) = solve_bdf_system(
@@ -790,12 +791,12 @@ impl BDF {
                     &scale.clone(),
                     self.newton_tol,
                 );
-                // println!("y_new_ = {:?} \n, d_ = {:?}", y_new_, d_);
+                // info!("y_new_ = {:?} \n, d_ = {:?}", y_new_, d_);
                 n_iter = n_iter_;
                 y_new = y_new_;
                 d = d_;
                 converged = conv;
-                // println!("converged = {:?}, d = {:?}", converged, d);
+                // info!("converged = {:?}, d = {:?}", converged, d);
                 if !converged {
                     //?
                     if current_jac {
@@ -825,7 +826,7 @@ impl BDF {
             let error = error_const[order] * d.clone();
             let error_norm_ = norm(&(error.component_div(&scale)));
             error_norm = error_norm_;
-            //          println!("error_norm = {:?}, safety = {:?}, d = {:?}, order {}", error_norm, safety, d.clone(), order);
+            //          info!("error_norm = {:?}, safety = {:?}, d = {:?}, order {}", error_norm, safety, d.clone(), order);
             if error_norm > 1.0 {
                 //?
                 let factor =
@@ -846,7 +847,7 @@ impl BDF {
         self.LU = LU;
         let D_ = D.clone();
         //let row: DVector<f64> =  D_.row(2).transpose().clone();
-        //    println!("d= {:?},", &(d.clone())   );
+        //    info!("d= {:?},", &(d.clone())   );
         //D.row_mut(order + 2).copy_from(&(d.clone() - D_.row(order + 1).transpose()  )   );
         D.set_row(order + 2, &(d.clone().transpose() - D_.row(order + 1)));
 
@@ -864,9 +865,9 @@ impl BDF {
             D.row_mut(i).add_assign(D_.row(i + 1));
         }
 
-        //     println!("D1 = {:?} \n, {}", D.transpose(), order);
+        //     info!("D1 = {:?} \n, {}", D.transpose(), order);
         if self.n_equal_steps < order + 1 {
-            //          println!("end step exit_0: t {}, y {:?}", self.t, self.y);
+            //          info!("end step exit_0: t {}, y {:?}", self.t, self.y);
             self.D = D; // !!!
             return (true, None);
         }
@@ -895,7 +896,7 @@ impl BDF {
             .map(|(i, x)| x.powf(-1.0 / (order as f64 + i as f64)))
             .collect(); //?
         let factors: DVector<f64> = factors.into();
-        //        println!("factors = {:?}, error_norms = {:?}", factors, error_norms);
+        //        info!("factors = {:?}, error_norms = {:?}", factors, error_norms);
         // argmax returns ( index, value)
         let delta_order = factors.argmax().0 - 1;
         let new_order = order + delta_order;
@@ -903,13 +904,13 @@ impl BDF {
 
         let factor = (safety * factors.max()).min(MAX_FACTOR);
         self.h_abs *= factor;
-        //       println!("delta_order = {}, new_order = {}, factor = {}", delta_order, new_order, factor);
+        //       info!("delta_order = {}, new_order = {}, factor = {}", delta_order, new_order, factor);
 
         change_D(&mut D, self.order, factor);
         self.n_equal_steps = 0;
         self.LU = None;
-        //      println!("end step exit_1: t {}, y {:?}", self.t, self.y);
-        //    println!(" D end = {:?} \n", &D.transpose());
+        //      info!("end step exit_1: t {}, y {:?}", self.t, self.y);
+        //    info!(" D end = {:?} \n", &D.transpose());
         self.D = D; // !!!
 
         (true, None)
