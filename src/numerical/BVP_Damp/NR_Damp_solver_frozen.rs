@@ -49,6 +49,7 @@ pub struct NRBVP {
     jac_recalc: bool,
     error_old: f64,
     variable_string: Vec<String>, // vector of indexed variable names
+    bandwidth: (usize, usize),
 }
 
 impl NRBVP {
@@ -106,6 +107,7 @@ impl NRBVP {
             jac_recalc: true,
             error_old: 0.0,
             variable_string: Vec::new(), // vector of indexed variable names
+            bandwidth: (0, 0),
         }
     }
     /// Basic methods to set the equation system
@@ -184,6 +186,7 @@ impl NRBVP {
                 let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Dense(jac_wrapped));
                 self.jac = Some(boxed_jac);
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             } // end of method Dense
 
             "Sparse 1" => {
@@ -225,6 +228,7 @@ impl NRBVP {
                 let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_1(jac_wrapped));
                 self.jac = Some(boxed_jac);
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             "Sparse 2" => {
                 panic!("method not ready");
@@ -257,6 +261,7 @@ impl NRBVP {
                 let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_2(jac_wrapped));
                 self.jac = Some(boxed_jac);
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             "Sparse" => {
                 jacobian_instance.generate_BVP_SparseColMat(
@@ -290,6 +295,7 @@ impl NRBVP {
                 let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(jac_wrapped));
                 self.jac = Some(boxed_jac);
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             _ => {
                 println!("Method not implemented");
@@ -334,6 +340,7 @@ impl NRBVP {
             self.linear_sys_method.clone(),
             self.tolerance,
             self.max_iterations,
+            self.bandwidth,
             y,
         );
         let elapsed = now.elapsed();

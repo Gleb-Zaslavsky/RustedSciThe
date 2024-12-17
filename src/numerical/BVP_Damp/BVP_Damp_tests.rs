@@ -31,7 +31,7 @@ mod tests {
             ("adaptive".to_string(), None),
         ]));
         let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
+        let method = "Dense".to_string(); // or  "Dense"
         let linear_sys_method = None;
         let ones = vec![0.0; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
@@ -101,7 +101,7 @@ mod tests {
                 ("adaptive".to_string(), None),
             ]));
             let scheme = "forward".to_string();
-            let method = "Sparse".to_string(); // or  "Dense"
+            let method = "Dense".to_string(); // or  "Dense"
             let linear_sys_method = None;
             let ones = vec![0.99; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(

@@ -5,7 +5,7 @@ use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Matrix};
 use sprs::{CsMat, CsVec};
 use std::any::Any;
-
+use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
 use crate::somelinalg::some_matrix_inv::invers_csmat;
 use crate::somelinalg::LUsolver::invers_Mat_LU;
 use crate::somelinalg::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
@@ -367,6 +367,7 @@ pub trait MatrixType: Any {
         linear_sys_method: Option<String>,
         tol: f64,
         max_iter: usize,
+        bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType>;
     fn shape(&self) -> (usize, usize);
@@ -405,13 +406,16 @@ impl MatrixType for DMatrix<f64> {
         linear_sys_method: Option<String>,
         _tol: f64,
         _max_iter: usize,
+        bandwidth: (usize, usize),
         _old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
+     
         if let Some(mat_) = self.as_any().downcast_ref::<DMatrix<f64>>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
                 if linear_sys_method.is_none() {
-                    let lu = mat_.to_owned().lu();
-                    let res = lu.solve(d_vec).unwrap();
+                    let res = nalgebra_solvers_depot(mat_, d_vec, linear_sys_method,bandwidth);
+                   // let lu = mat_.to_owned().lu();
+                  //  let res = lu.solve(d_vec).unwrap();
                     Box::new(res)
                 } else {
                     panic!("no such method for linear system")
@@ -453,6 +457,7 @@ impl MatrixType for CsMat<f64> {
         _linear_sys_method: Option<String>,
         tol: f64,
         max_iter: usize,
+        bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<CsMat<f64>>() {
@@ -498,6 +503,7 @@ impl MatrixType for CsMatrix<f64> {
         _linear_sys_method: Option<String>,
         _tol: f64,
         _max_iter: usize,
+        _bandwidth: (usize, usize),
         _old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
         panic!("method not written yet")
@@ -529,6 +535,7 @@ impl MatrixType for faer_mat {
         linear_sys_method: Option<String>,
         tol: f64,
         max_iter: usize,
+        bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<faer_mat>() {

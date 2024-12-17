@@ -71,6 +71,7 @@ pub struct NRBVP {
     new_grid_enabled: bool,      //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
+    bandwidth: (usize,usize), //bandwidth
 }
 
 impl NRBVP {
@@ -149,6 +150,7 @@ impl NRBVP {
             new_grid_enabled: new_grid_enabled_,
             grid_refinemens: 0,
             number_of_refined_intervals: 0,
+            bandwidth: (0,0),
         }
     }
     /// Basic methods to set the equation system
@@ -309,6 +311,7 @@ impl NRBVP {
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             } // end of method Dense
 
             "Sparse 1" => {
@@ -352,6 +355,7 @@ impl NRBVP {
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             "Sparse 2" => {
                 panic!("method not ready");
@@ -386,6 +390,7 @@ impl NRBVP {
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             "Sparse" => {
                 jacobian_instance.generate_BVP_SparseColMat(
@@ -421,6 +426,7 @@ impl NRBVP {
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
+                self.bandwidth = jacobian_instance.bandwidth;
             }
             _ => {
                 info!("Method not implemented");
@@ -500,6 +506,7 @@ impl NRBVP {
             self.linear_sys_method.clone(),
             self.abs_tolerance,
             self.max_iterations,
+            self.bandwidth,
             y,
         );
         for el in undamped_step_k.iterate() {

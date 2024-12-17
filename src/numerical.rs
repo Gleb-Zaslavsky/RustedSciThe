@@ -369,7 +369,7 @@ The code mostly inspired by sources listed below:
 ///  use nalgebra::DMatrix;
 ///  use nalgebra::DVector;
 ///      use std::collections::HashMap;
-/// use RustedSciThe::numerical::BVP_Damp::BVP_api::BVP;
+/// use RustedSciThe::numerical::BVP_api::BVP;
 ///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
 ///     let eq1 = Expr::parse_expression("y-z");
 ///  let eq2 = Expr::parse_expression("-z^3");
@@ -427,3 +427,5 @@ The code mostly inspired by sources listed below:
 /// nr.save_to_file(None);
 ///    ```
 pub mod BVP_Damp;
+
+pub mod BVP_api;

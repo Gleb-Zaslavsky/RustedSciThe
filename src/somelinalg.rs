@@ -6,3 +6,5 @@ pub mod GMRESapi;
 pub mod LUsolver;
 pub mod Lx_eq_b;
 pub mod some_matrix_inv;
+
+pub mod RustedLINPACK;

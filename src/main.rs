@@ -7,7 +7,7 @@ pub mod symbolic;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 pub mod numerical;
-use crate::numerical::BVP_Damp::BVP_api::BVP;
+use crate::numerical::BVP_api::BVP;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
@@ -789,7 +789,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+            let n_steps = 1600; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let scheme = "forward".to_string();
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
@@ -998,7 +998,7 @@ fn main() {
             };
 
             let scheme = "trapezoid".to_string();
-            let method = "Sparse".to_string(); // or  "Dense"
+            let method = "Dense".to_string(); // or  "Dense"
             let linear_sys_method = None;
             let ones = vec![0.0; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(

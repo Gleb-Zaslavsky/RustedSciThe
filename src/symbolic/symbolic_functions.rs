@@ -84,6 +84,7 @@ pub struct Jacobian {
     pub lambdified_functions_IVP_Col: Box<dyn Fn(f64, &Col<f64>) -> Col<f64>>,
     pub bounds: Option<Vec<(f64, f64)>>,
     pub rel_tolerance_vec: Option<Vec<f64>>,
+    pub bandwidth: (usize, usize)
 }
 
 impl Jacobian {
@@ -122,6 +123,7 @@ impl Jacobian {
             lambdified_functions_IVP_Col: Box::new(|_xx: f64, _y: &Col<f64>| Col::new()),
             bounds: None,
             rel_tolerance_vec: None,
+            bandwidth: (0, 0),
         }
     }
     pub fn from_vectors(vector_of_functions: Vec<Expr>, vector_of_variables: Vec<Expr>) -> Self {
@@ -181,6 +183,7 @@ impl Jacobian {
             lambdified_functions_IVP_Col,
             bounds,
             rel_tolerance_vec,
+            bandwidth: (0, 0),
         }
     }
     /// Basic functionality: setting, pushing, and getting variables and functions
@@ -983,72 +986,72 @@ impl Jacobian {
         let mut vars_for_boundary_conditions = HashMap::new();
 
         // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
+         for j in 0..n_steps - 1 {
+                for (i, eq_i) in eq_system.clone().into_iter().enumerate() {
+                    let Y_name = values[i].clone(); //y_i
+                                                    //  println!("eq_i = {:?}", eq_i);
+                                                    //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
+                    if let Some((initial_or_final, condition)) = BorderConditions.get(&Y_name) {
+                        let mut vec_of_res_for_each_eq = Vec::new();
 
-        for (i, eq_i) in eq_system.into_iter().enumerate() {
-            let Y_name = values[i].clone(); //y_i
-                                            //  println!("eq_i = {:?}", eq_i);
-                                            //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
-            if let Some((initial_or_final, condition)) = BorderConditions.get(&Y_name) {
-                let mut vec_of_res_for_each_eq = Vec::new();
+                    
+                            //currwbt time step
+                            let t = T_list[j];
 
-                for j in 0..n_steps - 1 {
-                    //currwbt time step
-                    let t = T_list[j];
+                            let mut eq_step_j =
+                                Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
+                            //set time value of j-th time step
+                            eq_step_j = eq_step_j.set_variable(arg.as_str(), t);
 
-                    let mut eq_step_j =
-                        Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
-                    //set time value of j-th time step
-                    eq_step_j = eq_step_j.set_variable(arg.as_str(), t);
+                            // defining residuals for each equation on each time step
 
-                    // defining residuals for each equation on each time step
+                            let Y_j_plus_1 = matrix_of_expr[j + 1][i].clone();
+                            let Y_j = matrix_of_expr[j][i].clone();
+                            let Y_j_plus_1_str = matrix_of_names[j + 1][i].clone();
+                            let Y_j_str = matrix_of_names[j][i].clone();
+                            let mut res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
+                            // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
 
-                    let Y_j_plus_1 = matrix_of_expr[j + 1][i].clone();
-                    let Y_j = matrix_of_expr[j][i].clone();
-                    let Y_j_plus_1_str = matrix_of_names[j + 1][i].clone();
-                    let Y_j_str = matrix_of_names[j][i].clone();
-                    let mut res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
-                    // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
+                            if j == 0 && initial_or_final.to_owned() == 0 {
+                                println!("found initial condition");
+                                res_ij = res_ij
+                                    .set_variable(Expr::to_string(&Y_j).as_str(), condition.to_owned());
+                                vars_for_boundary_conditions.insert(Y_j_str.clone(), condition);
+                                // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
+                                println!("variable {:?} deleted from list", Y_j_str);
+                                flat_list_of_names.retain(|name| *name != *Y_j_str);
+                                flat_list_of_expr.retain(|expr| *expr != Y_j);
+                            }
 
-                    if j == 0 && initial_or_final.to_owned() == 0 {
-                        println!("found initial condition");
-                        res_ij = res_ij
-                            .set_variable(Expr::to_string(&Y_j).as_str(), condition.to_owned());
-                        vars_for_boundary_conditions.insert(Y_j_str.clone(), condition);
-                        // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
-                        println!("variable {:?} deleted from list", Y_j_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j);
+                            if j == n_steps - 2 && initial_or_final.to_owned() == 1 {
+                                println!("found final condition");
+                                res_ij = res_ij.set_variable(
+                                    Expr::to_string(&Y_j_plus_1).as_str(),
+                                    condition.to_owned(),
+                                );
+                                vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), condition);
+                                println!("variable {:?} deleted from list", Y_j_plus_1_str);
+                                flat_list_of_names.retain(|name| *name != *Y_j_plus_1_str);
+                                flat_list_of_expr.retain(|expr| *expr != Y_j_plus_1);
+                            }
+                            //  println!("{:?}",vars_for_boundary_conditions);
+                            for (Y, k) in vars_for_boundary_conditions.iter() {
+                                res_ij = res_ij.set_variable(Y, **k);
+                                // println!(" boundary conditions {:?}",Expr::to_string( &res_ij));
+                            }
+                            //    vars_for_boundary_conditions.iter().map(|  (Y, condition)|res_ij.set_variable(Y, **condition)  );
+                            res_ij = res_ij.symplify();
+                            vec_of_res_for_each_eq.push(res_ij);
+                    
+
+                        discreditized_system.push(vec_of_res_for_each_eq);
                     }
-
-                    if j == n_steps - 2 && initial_or_final.to_owned() == 1 {
-                        println!("found final condition");
-                        res_ij = res_ij.set_variable(
-                            Expr::to_string(&Y_j_plus_1).as_str(),
-                            condition.to_owned(),
-                        );
-                        vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), condition);
-                        println!("variable {:?} deleted from list", Y_j_plus_1_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_plus_1_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j_plus_1);
+                    // end of if let Some BorderCondition
+                    else {
+                        panic!("Border condition for variable {Y_name} not found")
                     }
-                    //  println!("{:?}",vars_for_boundary_conditions);
-                    for (Y, k) in vars_for_boundary_conditions.iter() {
-                        res_ij = res_ij.set_variable(Y, **k);
-                        // println!(" boundary conditions {:?}",Expr::to_string( &res_ij));
-                    }
-                    //    vars_for_boundary_conditions.iter().map(|  (Y, condition)|res_ij.set_variable(Y, **condition)  );
-                    res_ij = res_ij.symplify();
-                    vec_of_res_for_each_eq.push(res_ij);
-                } // end of for j in 0..n_steps
-
-                discreditized_system.push(vec_of_res_for_each_eq);
-            }
-            // end of if let Some BorderCondition
-            else {
-                panic!("Border condition for variable {Y_name} not found")
-            }
-        } // end of for loop eq_i
-
+                } // end of for loop eq_i
+         } // end of for j in 0..n_steps
         let discreditized_system_flat = discreditized_system
             .into_iter()
             .flatten()
@@ -1123,6 +1126,33 @@ impl Jacobian {
         }
     } // end of discretization_system
 
+    fn find_bandwidths(&mut self)  {
+        let A = &self.symbolic_jacobian;
+        let n = A.len();
+        let mut kl = 0; // Number of subdiagonals
+        let mut ku = 0; // Number of superdiagonals
+                        /*
+                            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
+                        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
+                        kl if this distance is greater than the current value of kl.
+                        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
+                         and updates ku if this distance is greater than the current value of ku.
+                             */
+        for i in 0..n {
+            for j in 0..n {
+                if A[i][j] != Expr::Const(0.0) {
+                    if j > i {
+                        ku = std::cmp::max(ku, j - i);
+                    } else if i > j {
+                        kl = std::cmp::max(kl, i - j);
+                    }
+                }
+            }
+        }
+    
+        self.bandwidth = (kl, ku);
+    }
+
     pub fn generate_BVP(
         &mut self,
         eq_system: Vec<Expr>,
@@ -1167,7 +1197,8 @@ impl Jacobian {
         println!("INDEXED VARIABLES {:?}, length:  {} \n \n", &v, &v.len());
         let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
         self.calc_jacobian();
-
+        self.find_bandwidths();
+        println!("kl, ku {:?}", self.bandwidth);
         //  println!("symbolic Jacbian created {:?}", &self.symbolic_jacobian);
         self.jacobian_generate_IVP_DMatrix(param.as_str(), indexed_values.clone());
         let n = &self.symbolic_jacobian.len();
@@ -1227,6 +1258,7 @@ impl Jacobian {
         let v = self.variable_string.clone();
         let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
         self.calc_jacobian();
+        self.find_bandwidths();
         self.jacobian_generate_IVP_CsMat(arg.as_str(), indexed_values.clone());
         self.lambdify_funcvector_IVP(arg.as_str(), indexed_values.clone());
         self.vector_funvector_IVP_CsVec(arg.as_str(), indexed_values);
@@ -1282,6 +1314,7 @@ impl Jacobian {
         for (_i, vec_s) in self.symbolic_jacobian.iter().enumerate() {
             assert_eq!(vec_s.len(), *n, "jacobian not square ");
         }
+        self.find_bandwidths();
         self.jacobian_generate_IVP_CsMatrix(arg.as_str(), indexed_values.clone());
         self.lambdify_funcvector_IVP(arg.as_str(), indexed_values.clone());
         self.vector_funvector_IVP_DVector(arg.as_str(), indexed_values);
@@ -1350,6 +1383,8 @@ impl Jacobian {
             }
             assert_eq!(vec_s.len(), *n, "jacobian not square! symbolic jacobian consists of {:?} vectors, each of length {}",  n, vec_s.len());
         }
+        self.find_bandwidths();
+        println!("kl, ku {:?}", self.bandwidth);
         self.jacobian_generate_IVP_SparseColMat(arg.as_str(), indexed_values.clone());
         self.lambdify_funcvector_IVP(arg.as_str(), indexed_values.clone());
         self.vector_funvector_IVP_Col(arg.as_str(), indexed_values);
