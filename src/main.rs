@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 use std::collections::HashMap;
 pub mod symbolic;
-
+pub mod Examples;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 pub mod numerical;
