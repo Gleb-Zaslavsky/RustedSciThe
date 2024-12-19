@@ -2,12 +2,15 @@
 
 # RustedSciThe
 is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations
+NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
 
-
+PROJECT NEWS: added banded matrix solver for linear systems in BVP solver (option "Damped"), that causes calculation speed up to x100.
+ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
 ## Content
 - [Motivation](#motivation)
 - [Features](#features)
+- [Project Documentation and Navigation](#project_documentation)
 - [Usage](#usage)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -21,7 +24,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - parsing string expressions in symbolic to a symbolic expression/function
 - symbolic/analytical differentiation of symbolic expressions/functions
 - compare analytical derivative to a numerical one
-- calculate _vector of partial derivatives
+- calculate vector of partial derivatives
 - transform symbolic expressions/functions (also derivatives) into regular Rust functions
 - calculate symbolic/analytical Jacobian and transform it into functional form
 - Newton-Raphson method with analytical Jacobian
@@ -29,6 +32,13 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
 - classical methods for non-stiff equations RK45 and DP
 - Boundary Value Problem for ODE with Newton-Raphson method (several versions available)
+
+## project_documentation
+
+In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.
+
+The project folder ‘Examples’ contains working examples of code usage.
+
 ## Usage
 - parse string expression of multiple arguments to a symbolic representation/function and then differentiate it and "lamdufy" it (transform it into a regular rust function). Compare analytical derivative to a numerical one. Calculate the vector of partials derivatives. Solve IVP and BVP problems.
 ```rust
