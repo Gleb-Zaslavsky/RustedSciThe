@@ -1,7 +1,8 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::time::Duration;
+use sysinfo::System;
 pub fn elapsed_time(elapsed: Duration) {
     let time = elapsed.as_millis();
     if time < 1000 {
@@ -217,3 +218,49 @@ pub fn frozen_jac_recalc(
         }
     }
 }
+
+pub fn task_check_mem(n_steps: usize, number_of_y:usize, method: &String) {
+    let required_matrix_memory = ( (n_steps*number_of_y).pow(2) * std::mem::size_of::<f64>()) as f64 / (1024.0 * 1024.0); // Convert bytes to megabyte
+    info!("Required matrix memory: {:.2} MB", required_matrix_memory);
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let free_memory = sys.free_memory() as f64/(1024.0*1024.0);
+    if required_matrix_memory > 0.8*free_memory {
+        warn!("Matrix requires  {:.2} MB, which is higher than 70% of free memory.", required_matrix_memory);
+    }
+    if method.starts_with("Dense") {
+            info!("it is strongly recommended to use sparse matrices!");
+    }
+}
+
+//calculates and logs the memory usage of a given matrix (mat) and compares it to the total system memory.
+// If the matrix memory usage exceeds 80% of the total system memory, it issues a warning.
+
+
+pub fn checkmem(mat: &dyn MatrixType) -> f64 {
+ let (nrows, ncols) = mat.shape();
+ // Assuming each element of the matrix takes 8 bytes of memory (size of f64)
+let matrix_memory = (nrows * ncols * std::mem::size_of::<f64>()) as f64 / (1024.0 * 1024.0); // Convert bytes to megabytes
+info!("Matrix memory usage: {:.2} MB", matrix_memory);
+    // Create a System object
+// CPUs and processes are filled!
+let mut sys = System::new_all();
+
+// First we update all information of our `System` struct.
+sys.refresh_all();
+let total_memory = sys.total_memory() as f64/(1024.0*1024.0);
+let used_memory = sys.used_memory() as f64/(1024.0*1024.0);
+let total_swap = sys.total_swap() as f64/(1024.0*1024.0);
+let used_swap = sys.used_swap() as f64/(1024.0*1024.0);
+let free_memory = sys.free_memory() as f64/(1024.0*1024.0);
+if matrix_memory > 0.8* free_memory{
+    warn!("Matrix memory usage is {:.2} MB, which is higher than 70% of total memory.", matrix_memory);
+}
+// RAM and swap information:
+println!("total memory: {} bytes", total_memory );
+println!("used memory : {} bytes", used_memory  );
+println!("total swap  : {} bytes", total_swap  );
+println!("used swap   : {} bytes", used_swap );
+matrix_memory
+} 

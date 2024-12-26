@@ -1,10 +1,10 @@
 [TOC]
 
 # RustedSciThe
-is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations
+is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations. 
 NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
 
-PROJECT NEWS: added banded matrix solver for linear systems in BVP solver (option "Damped"), that causes calculation speed up to x100.
+PROJECT NEWS: added parallel computation of Jacobian matrix.
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
 ## Content

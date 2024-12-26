@@ -16,23 +16,47 @@ use std::fmt::{self, Debug};
 use std::ops::Sub;
 type faer_mat = SparseColMat<usize, f64>;
 type faer_col = Col<f64>; // Mat<f64>;
+/*
+In RST BDF solvers there is an option to use different linear algebra crates
+- Nalgebra 
+- SPRS 
+- FAER 
+- Nalgebra SPARSE 
+Generics in rust allow us to replace specific types with a placeholder that represents multiple types to remove code duplication. 
+So there are generic types:
+ - VectorType (generic type that represents vectors of residuals and Newton steps)
+ - MatrixType (generic type that represents matrices of jacobian)
+ - Jac (generic type that represents functions for jacobian)
+ - Fun (generic type that represents functions for vector)
+ "method" variable (from the BVP task) is a keyword that is used to specify the crate that will be used for linear algebra operations
+ "Dense" - nalgebra crate
+ "Sparse" - faer crate
+"Sparse_1" - sprs crate
+"Sparse_2" - nalgebra sprs crate
+ 
+*/
+////////////////////////////////////////////////////////////////
+//  VECTORTYPE - geneic type to store vectors of residuals and Newton steps
+////////////////////////////////////////////////////////////////
 pub enum YEnum {
-    Dense(DVector<f64>),
-    Sparse_1(CsVec<f64>),
-    Sparse_2(DVector<f64>),
-    Sparse_3(faer_col),
+    Dense(DVector<f64>),// dense vector NALGEBRA CRATE
+    Sparse_1(CsVec<f64>),// sparse vector SPRS CRATE
+    Sparse_2(DVector<f64>), // dense vector NALGEBRA SPARSE CRATE
+    Sparse_3(faer_col), // sparse vector  FAER CRATE
 }
-
+// basic funcionality for vectors
 pub trait VectorType: Any {
     fn as_any(&self) -> &dyn Any;
-    fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType>;
-    fn norm(&self) -> f64;
-    fn to_DVectorType(&self) -> DVector<f64>;
-    fn clone_box(&self) -> Box<dyn VectorType>;
-    fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_>;
-    fn get_val(&self, index: usize) -> f64;
-    fn mul_float(&self, float: f64) -> Box<dyn VectorType>;
-    fn len(&self) -> usize;
+    fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType>; //   
+    fn norm(&self) -> f64; // norm of vector
+    fn to_DVectorType(&self) -> DVector<f64>; // convert to dense vector
+    fn clone_box(&self) -> Box<dyn VectorType>; // cloning the vector into box
+    fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_>; // iterating over vector
+    fn get_val(&self, index: usize) -> f64; // get the value by index
+    fn mul_float(&self, float: f64) -> Box<dyn VectorType>; // float multiplication
+    fn len(&self) -> usize; // vector length
+    fn zeros(&self, len:usize) -> Box<dyn VectorType>; // creating zero vector of length len
+    fn assign_value(&self, index:usize, value:f64) -> Box<dyn VectorType>; // assign value to index
 }
 
 impl Sub for &dyn VectorType {
@@ -157,7 +181,42 @@ impl VectorType for YEnum {
             YEnum::Sparse_3(vec) => vec.len(),
         }
     }
+    fn zeros(&self, len: usize) -> Box<dyn VectorType> {
+        match self {
+            YEnum::Dense(_) => Box::new(DVector::zeros(len)),
+            YEnum::Sparse_1(_) => Box::new(CsVec::empty(len)),
+            YEnum::Sparse_2(_) => Box::new(DVector::zeros(len)),
+            YEnum::Sparse_3(_) => Box::new(faer_col::zeros(len)), // faer_col::zeros(len)
+        }
+    }
+    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
+        match self {
+            YEnum::Dense(vec) => {
+                let mut new_vec = vec.clone();
+                new_vec[index] = value;
+                Box::new(new_vec)
+            },
+            YEnum::Sparse_1(vec) => {
+                let mut new_vec = vec.clone(); 
+                new_vec.append(index, value);
+                 Box::new(new_vec)
+            },
+            YEnum::Sparse_2(vec) => {
+                let mut new_vec = vec.clone();
+                new_vec[index] = value;
+                Box::new(new_vec)
+             },
+             YEnum::Sparse_3(vec) => {
+                let mut new_vec = vec.clone(); 
+            new_vec[index] = value;
+            Box::new(new_vec)
+            }
+        }
+    }
 }
+////////////////////////////////////////////////////////////////
+//           NALGEBRA CRATE
+////////////////////////////////////////////////////////////////
 impl VectorType for DVector<f64> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -190,8 +249,20 @@ impl VectorType for DVector<f64> {
     fn len(&self) -> usize {
         self.len()
     }
+    fn zeros(&self, len: usize) -> Box<dyn VectorType> {
+        Box::new(DVector::zeros(len))
+    }
+    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
+        Box::new({
+            let mut vec = self.clone();
+            vec[index] = value;
+            vec
+        })
+    }
 }
-
+////////////////////////////////
+//           SPRS CRATE
+////////////////////////////////
 impl VectorType for CsVec<f64> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -226,8 +297,19 @@ impl VectorType for CsVec<f64> {
     fn len(&self) -> usize {
         self.dim()
     }
-}
+    fn zeros(&self, len: usize) -> Box<dyn VectorType> {
+        Box::new(CsVec::empty(len))
+    }
+    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
+        Box::new({let mut new_vec = self.clone(); 
+            new_vec.append(index, value);
+            new_vec})
+    }
 
+}
+////////////////////////////////////////////////////////////////////////////
+//  FAER CRATE
+////////////////////////////////////////////////////////////////////////////
 impl VectorType for faer_col {
     fn as_any(&self) -> &dyn Any {
         self
@@ -263,7 +345,19 @@ impl VectorType for faer_col {
     fn len(&self) -> usize {
         self.nrows()
     }
+    fn zeros(&self, len: usize) -> Box<dyn VectorType> {
+        Box::new(faer_col::zeros(len)) //faer_col::zeros(len)
+    }
+    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
+        Box::new({let mut new_vec = self.clone(); 
+            new_vec[index] = value;
+            new_vec})
+    }
 }
+
+/////////////////////////////////////////////////////////////
+//      FUN - VECTOR-FUNCTION OF RESIDUALS
+///////////////////////////////////////////////////////////////
 pub trait Fun {
     fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType>;
 }
@@ -347,8 +441,10 @@ impl Debug for dyn VectorType {
         }
     }
 }
-
+////////////////////////////////////////////////////////////////////////////
 //_________________________________Jacobian______________________________
+////////////////////////////////////////////////////////////////////////////
+///  NUMERICAL REPRESENTATION OF JACOBIAN FOR DIFFERENT CRATES
 #[allow(dead_code)]
 pub enum JacTypes {
     Dense(DMatrix<f64>),
@@ -358,10 +454,10 @@ pub enum JacTypes {
 }
 pub trait MatrixType: Any {
     fn as_any(&self) -> &dyn Any;
-    fn inverse(self) -> Box<dyn MatrixType>;
-    fn mul(&self, vec: &dyn VectorType) -> Box<dyn VectorType>;
-    fn clone_box(&self) -> Box<dyn MatrixType>;
-    fn solve_sys(
+    fn inverse(self) -> Box<dyn MatrixType>; // inverse
+    fn mul(&self, vec: &dyn VectorType) -> Box<dyn VectorType>; // multiplication of matrix and vector
+    fn clone_box(&self) -> Box<dyn MatrixType>; // clone
+    fn solve_sys( // solve linear system
         &self,
         vec: &dyn VectorType,
         linear_sys_method: Option<String>,
@@ -370,7 +466,8 @@ pub trait MatrixType: Any {
         bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType>;
-    fn shape(&self) -> (usize, usize);
+    fn shape(&self) -> (usize, usize); // shape of the matrix
+    fn to_DMatrixType(&self)->DMatrix<f64>; // convert to DMatrix
 }
 /*
 impl Clone for dyn MatrixType {
@@ -380,6 +477,9 @@ impl Clone for dyn MatrixType {
     }
 }
 */
+////////////////////////////////////////////////////////////////
+//           NALGEBRA CRATE
+////////////////////////////////////////////////////////////////
 impl MatrixType for DMatrix<f64> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -431,8 +531,14 @@ impl MatrixType for DMatrix<f64> {
     fn shape(&self) -> (usize, usize) {
         self.shape()
     }
-}
 
+    fn to_DMatrixType(&self)->DMatrix<f64>{
+        self.to_owned()
+    }
+}
+////////////////////////////////////////////////////////////////////////////////////
+//      CRATE SPRS
+////////////////////////////////////////////////////////////////////////////////////
 impl MatrixType for CsMat<f64> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -478,8 +584,19 @@ impl MatrixType for CsMat<f64> {
     fn shape(&self) -> (usize, usize) {
         self.shape()
     }
-}
 
+    fn to_DMatrixType(&self)->DMatrix<f64>{
+        let (nrows, ncols) = self.shape();
+        let t = self.to_dense();
+        let csmat = t.as_slice().unwrap();
+        let dmatrix = DMatrix::from_row_slice(nrows, ncols, csmat);
+        dmatrix
+
+    }
+}
+////////////////////////////////////////////////////////////////
+//           NALGEBRA SPARCE CRATE
+////////////////////////////////////////////////////////////////
 impl MatrixType for CsMatrix<f64> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -511,7 +628,17 @@ impl MatrixType for CsMatrix<f64> {
     fn shape(&self) -> (usize, usize) {
         self.shape()
     }
+    fn to_DMatrixType(&self)->DMatrix<f64>{
+        let t = self.to_owned();
+        let dense:DMatrix<f64> = t.into();
+        dense
+    }
+
+       
 }
+////////////////////////////////////////////////////////////////
+//            FAER CRATE
+////////////////////////////////////////////////////////////////
 impl MatrixType for faer_mat {
     fn as_any(&self) -> &dyn Any {
         self
@@ -589,6 +716,18 @@ impl MatrixType for faer_mat {
     fn shape(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
+    fn to_DMatrixType(&self)->DMatrix<f64> {
+        let (nrows, ncols) = self.shape();
+        let dense = self.to_dense();
+        let mut dmatrix = DMatrix::zeros(nrows, ncols);
+        for (i,  col) in dense.col_iter().enumerate() {
+            let col = col.to_owned().iter().map(|x| *x).collect::<Vec<f64>>();
+            dmatrix.column_mut(i).copy_from(&DVector::from_vec(col));
+            
+        }
+       
+        dmatrix
+    }
 } //impl
 
 impl Debug for dyn MatrixType {
@@ -606,7 +745,9 @@ impl Debug for dyn MatrixType {
         }
     }
 }
-
+////////////////////////////////////////////////////////////////////////
+//  JACOBIAN MATRIX-FUNCTION
+////////////////////////////////////////////////////////////////
 pub trait Jac {
     fn call(&mut self, x: f64, vec: &dyn VectorType) -> Box<dyn MatrixType>;
     fn inv(&mut self, matix: &dyn MatrixType, tol: f64, max_iter: usize) -> Box<dyn MatrixType>;
@@ -771,12 +912,14 @@ impl Clone for Box<dyn Y> {
         self.clone()
     }
 }
-
+///////////////////////////////
+//     Miscellaneous
+/////////////////////////////// 
 //___________________________________________________________________
 pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn VectorType> {
     let res: Box<dyn VectorType> = if desired_type == "Dense".to_string() {
         Box::new(YEnum::Dense(vec.clone()))
-    } else if desired_type == "Sparse 1".to_string() {
+    } else if desired_type == "Sparse_1".to_string() {//sprs crate
         let mut ind = Vec::new();
         let mut val = Vec::new();
         vec.iter().enumerate().for_each(|(i, x)| {
@@ -788,11 +931,16 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         Box::new(YEnum::Sparse_1(
             CsVec::new_from_unsorted(vec.len(), ind, val).expect("trouble with initial vector!"),
         ))
-    } else if desired_type == "Sparse".to_string() {
+    } else if desired_type == "Sparse".to_string() {// faer crate
         let Mat_vec = from_slice(vec.as_slice()).to_owned();
 
         Box::new(YEnum::Sparse_3(Mat_vec))
-    } else {
+    } else if desired_type == "Sparse_2".to_string() {
+      
+       
+        Box::new(YEnum::Sparse_2(vec.to_owned()))
+    } 
+    else {
         panic!("Unsupported vector type: {}", desired_type);
     };
     res

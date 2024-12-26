@@ -6,14 +6,15 @@ The code mostly inspired by sources listed below:
 - TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
 */
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
+use faer::utils::vec;
 use nalgebra::{DMatrix, DVector};
-
+use tabled::{builder::Builder, settings::Style};
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting,
+    Fun, FunEnum, Jac,  MatrixType, VectorType, Vectors_type_casting,
 };
-use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
+use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, task_check_mem};
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
     jac_recalc,
@@ -26,11 +27,11 @@ use std::fs::File;
 use std::time::Instant;
 
 use crate::numerical::BVP_Damp::grid_api::{new_grid, GridRefinementMethod};
-use faer::col::Col;
-use faer::sparse::SparseColMat;
+
 use log::{info,warn,error};
-use nalgebra::sparse::CsMatrix;
-use sprs::{CsMat, CsVec};
+
+use super::BVP_utils::checkmem;
+
 
 pub struct NRBVP {
     pub eq_system: Vec<Expr>, // the system of ODEs defined in the symbolic format
@@ -72,6 +73,7 @@ pub struct NRBVP {
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize,usize), //bandwidth
+    calc_statistics:HashMap<String,usize>
 }
 
 impl NRBVP {
@@ -113,6 +115,9 @@ impl NRBVP {
         } else {
             false
         };
+        let vec_of_tuples = vec![("number of iterations".to_string(), 0), ("number of solving linear systems".to_string(), 0),
+        ("number of jacobians recalculations".to_string(), 0), ("number of grid refinements".to_string(), 0) ];
+        let Hashmap_statistics:HashMap<String,usize> = vec_of_tuples.into_iter().collect();
         NRBVP {
             eq_system,
             initial_guess: initial_guess.clone(),
@@ -151,6 +156,7 @@ impl NRBVP {
             grid_refinemens: 0,
             number_of_refined_intervals: 0,
             bandwidth: (0,0),
+            calc_statistics: Hashmap_statistics
         }
     }
     /// Basic methods to set the equation system
@@ -263,6 +269,9 @@ impl NRBVP {
     }
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>) {
+        // check if memory is enough for    
+        task_check_mem(self.n_steps, self.values.len(), &self.method);
+        // check if user specified task is correct
         self.task_check();
         // strategy_check(&self.strategy, &self.strategy_params);
         let mut jacobian_instance = Jacobian::new();
@@ -278,8 +287,8 @@ impl NRBVP {
             (None, None, mesh_)
         };
         let scheme = self.scheme.clone();
-        match self.method.as_str() {
-            "Dense" => {
+    
+        
                 jacobian_instance.generate_BVP(
                     self.eq_system.clone(),
                     self.values.clone(),
@@ -293,146 +302,27 @@ impl NRBVP {
                     self.Bounds.clone(),
                     self.rel_tolerance.clone(),
                     scheme.clone(),
+                    self.method.clone()
                 );
 
                 //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-                let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
-                    jacobian_instance.lambdified_functions_IVP_DVector;
+                let fun = jacobian_instance.residiual_function;
 
-                let jac = jacobian_instance.function_jacobian_IVP_DMatrix;
+                let jac = jacobian_instance.jac_function;
 
-                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
-                    Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> { jac(t, &y) });
+               
 
-                let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun));
-                self.fun = boxed_fun;
-                let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Dense(jac_wrapped));
-                self.jac = Some(boxed_jac);
+                self.fun = fun;
+           
+                self.jac = jac;
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
                 self.bandwidth = jacobian_instance.bandwidth;
-            } // end of method Dense
+       
 
-            "Sparse 1" => {
-                jacobian_instance.generate_BVP_CsMat(
-                    self.eq_system.clone(),
-                    self.values.clone(),
-                    self.arg.clone(),
-                    self.t0.clone(),
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    self.BorderConditions.clone(),
-                    self.Bounds.clone(),
-                    self.rel_tolerance.clone(),
-                    scheme.clone(),
-                );
 
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-                let fun: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>> =
-                    jacobian_instance.lambdified_functions_IVP_CsVec;
-
-                let jac = jacobian_instance.function_jacobian_IVP_CsMat;
-
-                let jac_wrapped: Box<dyn FnMut(f64, &CsVec<f64>) -> CsMat<f64>> =
-                    Box::new(move |t: f64, y: &CsVec<f64>| -> CsMat<f64> { jac(t, &y) });
-                // test
-                let y: DMatrix<f64> = self.initial_guess.clone();
-                let y: Vec<f64> = y.iter().cloned().collect();
-                let y: DVector<f64> = DVector::from_vec(y);
-                let y_0 = Vectors_type_casting(&y.clone(), "Sparse 1".to_string());
-                let y_0 = y_0.as_any().downcast_ref::<CsVec<f64>>().unwrap();
-                let test = fun(self.p, &y_0.clone());
-                info!("test = {:?}", test);
-                // panic!("test");
-                //
-                let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_1(fun));
-                self.fun = boxed_fun;
-                let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_1(jac_wrapped));
-                self.jac = Some(boxed_jac);
-                self.bounds_vec = jacobian_instance.bounds.unwrap();
-                self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
-                self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth;
-            }
-            "Sparse 2" => {
-                panic!("method not ready");
-                jacobian_instance.generate_BVP_CsMatrix(
-                    self.eq_system.clone(),
-                    self.values.clone(),
-                    self.arg.clone(),
-                    self.t0.clone(),
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    self.BorderConditions.clone(),
-                    self.Bounds.clone(),
-                    self.rel_tolerance.clone(),
-                    scheme.clone(),
-                );
-
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-                let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
-                    jacobian_instance.lambdified_functions_IVP_DVector;
-
-                let jac = jacobian_instance.function_jacobian_IVP_CsMatrix;
-
-                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> CsMatrix<f64>> =
-                    Box::new(move |t: f64, y: &DVector<f64>| -> CsMatrix<f64> { jac(t, &y) });
-
-                let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_2(fun));
-                self.fun = boxed_fun;
-                let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_2(jac_wrapped));
-                self.jac = Some(boxed_jac);
-                self.bounds_vec = jacobian_instance.bounds.unwrap();
-                self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
-                self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth;
-            }
-            "Sparse" => {
-                jacobian_instance.generate_BVP_SparseColMat(
-                    self.eq_system.clone(),
-                    self.values.clone(),
-                    self.arg.clone(),
-                    self.t0.clone(),
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    self.BorderConditions.clone(),
-                    self.Bounds.clone(),
-                    self.rel_tolerance.clone(),
-                    scheme.clone(),
-                );
-
-                //     println!("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-                let fun: Box<dyn Fn(f64, &Col<f64>) -> Col<f64>> =
-                    jacobian_instance.lambdified_functions_IVP_Col;
-
-                let jac = jacobian_instance.function_jacobian_IVP_SparseColMat;
-
-                let jac_wrapped: Box<dyn FnMut(f64, &Col<f64>) -> SparseColMat<usize, f64>> =
-                    Box::new(move |t: f64, y: &Col<f64>| -> SparseColMat<usize, f64> {
-                        jac(t, &y)
-                    });
-
-                let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
-                self.fun = boxed_fun;
-                let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(jac_wrapped));
-                self.jac = Some(boxed_jac);
-                self.bounds_vec = jacobian_instance.bounds.unwrap();
-                self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
-                self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth;
-            }
-            _ => {
-                info!("Method not implemented");
-                std::process::exit(1);
-            } // assert_eq!(self.bo)
-        } // end of match
+     
     } // end of method eq_generate
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
         self.p = p;
@@ -460,6 +350,7 @@ impl NRBVP {
             let inv_J_k = jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations);
             self.old_jac = Some(inv_J_k);
             self.m = 0;
+            *self.calc_statistics.entry("number of jacobians recalculations".to_string()).or_insert(0) += 1;
         }
     }
     ////////////////////////////////////////////////////////////////
@@ -470,11 +361,16 @@ impl NRBVP {
             let p = self.p;
             let y = &*self.y;
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            let begin = Instant::now();
             let jac_function = self.jac.as_mut().unwrap();
             let jac_matrix = jac_function.call(p, y);
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
+            info!("jacobian recalculation time: ");
+            let elapsed = begin.elapsed();
+            elapsed_time(elapsed);
             self.old_jac = Some(jac_matrix);
             self.m = 0;
+            *self.calc_statistics.entry("number of jacobians recalculations".to_string()).or_insert(0) += 1;
         }
     }
 
@@ -524,6 +420,7 @@ impl NRBVP {
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
         let undamped_step_k_minus_1 = self.step(p, y_k_minus_1);
+        *self.calc_statistics.entry("number of solving linear systems".to_string()).or_insert(0) += 1;
         let y_k = y_k_minus_1 - &*undamped_step_k_minus_1;
         let fbound = bound_step(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
@@ -577,6 +474,7 @@ impl NRBVP {
         //   let fun = &self.fun;
         // calculate damped step
         let undamped_step_k = self.step(p, &*y_k);
+        *self.calc_statistics.entry("number of solving linear systems".to_string()).or_insert(0) += 1;
         //
         for mut k in 0..maxDampIter {
             if k > 1 {
@@ -675,6 +573,7 @@ impl NRBVP {
             self.recalc_jacobian();
             self.m += 1;
             i += 1; // increment the number of iterations
+            *self.calc_statistics.entry("number of iterations".to_string()).or_insert(0) += 1;
             let (status, damped_step_result) = self.damped_step();
 
             if status == 0 {
@@ -848,7 +747,7 @@ impl NRBVP {
             "\n \n grid refinement counter = {} \n \n",
             self.grid_refinemens
         );
-
+        *self.calc_statistics.entry("number of grid refinements".to_string()).or_insert(0) += 1;
         // here we go again... running the code wtih new grid
         self.eq_generate(Some(new_mesh.clone()));
         self.we_need_refinement();
@@ -870,7 +769,9 @@ impl NRBVP {
         let res = self.main_loop_damped();
         let end = begin.elapsed();
         elapsed_time(end);
-
+        let time = end.as_secs_f64() as usize;
+        self.calc_statistics.insert("time elapsed, s".to_string(), time);
+        self.calc_statistics();
         res
     }
     // wrapper around solver function to implement logging
@@ -890,6 +791,7 @@ impl NRBVP {
                 File::create(name).unwrap(),
             ),
         ]);
+     
         match logger_instance {
             Ok(()) => {
                 let res = self.solver();
@@ -915,7 +817,7 @@ impl NRBVP {
         let result_DMatrix = self.get_result().unwrap();
         let _ = save_matrix_to_file(&result_DMatrix, &self.values, &name);
     }
-    // function creates a new instance of solver but with new mesh
+   
 
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();
@@ -960,6 +862,23 @@ impl NRBVP {
             permutted_results,
         );
         info!("result plotted");
+    }
+
+    fn calc_statistics(&self) {
+        let mut stats = self.calc_statistics.clone();
+        if let Some(jac) = &self.old_jac {
+        let jac_shape = self.old_jac.as_ref().unwrap().shape();
+        let matrix_weight = checkmem(&**jac); 
+        stats.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
+        stats.insert("number of jacobian elements".to_string(), jac_shape.0*jac_shape.1);
+    }
+        stats.insert("length of y vector".to_string(), self.y.len() as usize);
+        stats.insert("number of grid points".to_string(), self.x_mesh.len() as usize);
+        let mut table = Builder::from(stats).build();
+        table.with(Style::modern_rounded());
+        info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
+        
+
     }
 }
 

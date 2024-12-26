@@ -5,7 +5,7 @@ use faer::col::{from_slice, Col};
 use faer::sparse::SparseColMat;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Dyn};
-
+use log::{info,warn,error};
 use regex::Regex;
 use sprs::{CsMat, CsVec};
 use std::collections::{HashMap, HashSet};
@@ -461,15 +461,26 @@ impl Jacobian {
         vector_of_variables_len: usize,
         variable_str: Vec<String>,
         arg: String,
+        bandwidth: (usize, usize),
     ) -> Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> {
         //let arg = arg.as_str();
         //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
-
+        let (kl, ku) = bandwidth;
         Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
             let mut new_function_jacobian: DMatrix<f64> =
                 DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
             for i in 0..vector_of_functions_len {
-                for j in 0..vector_of_variables_len {
+                let (right_border, left_border) =
+                if kl==0&&ku==0 {
+                    let right_border = vector_of_variables_len;
+                    let left_border = 0;
+                    (right_border, left_border)
+                } else {
+                    let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
+                    let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
+                    (right_border, left_border)
+                } ;
+                for j in left_border.. right_border {
                     // println!("i = {}, j = {}", i, j);
                     //  let now = std::time::Instant::now();
                     let partial_func = Expr::lambdify_IVP_owned(
@@ -502,13 +513,14 @@ impl Jacobian {
 
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
-
+        let bandwidth = self.bandwidth;
         let new_jac = Jacobian::calc_jacobian_fun_IVP_DMatrix(
             symbolic_jacobian_rc,
             vector_of_functions_len,
             vector_of_variables_len,
             variable_str.iter().map(|s| s.to_string()).collect(),
             arg.to_string(),
+            bandwidth,
         );
         //  let mut boxed_jacobian: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = Box::new(|arg, variable_str_| {
         //    DMatrix::from_rows(&new_jac) }) ;
@@ -769,18 +781,30 @@ impl Jacobian {
         vector_of_variables_len: usize,
         variable_str: Vec<String>,
         arg: String,
+        bandwidth: (usize, usize),
     ) -> Box<dyn Fn(f64, &Col<f64>) -> SparseColMat<usize, f64>> {
         //let arg = arg.as_str();
         //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
 
         Box::new(move |x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
+            let (kl, ku) = bandwidth;
             let _number_of_possible_non_zero: usize = jac.len();
             //let mut new_function_jacobian: CsMatrix<f64> = CsMatrix::new_uninitialized_generic(Dyn(vector_of_functions_len),
             //Dyn(vector_of_variables_len), number_of_possible_non_zero);
             let mut vector_of_triplets = Vec::new();
             for i in 0..vector_of_functions_len {
-                for j in 0..vector_of_variables_len {
-                    // println!("i = {}, j = {}", i, j);
+                let (right_border, left_border) =
+                if kl==0&&ku==0 {
+                    let right_border = vector_of_variables_len;
+                    let left_border = 0;
+                    (right_border, left_border)
+                } else {
+                    let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
+                    let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
+                    (right_border, left_border)
+                } ;
+                for j in left_border.. right_border {
+                  // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
                     let partial_func = Expr::lambdify_IVP_owned(
                         jac[i][j].clone(),
                         arg.as_str(),
@@ -808,6 +832,7 @@ impl Jacobian {
                     vector_of_triplets.as_slice(),
                 )
                 .unwrap();
+         //  panic!("stop here");
             new_function_jacobian
         })
     } // end of function
@@ -825,6 +850,7 @@ impl Jacobian {
             vector_of_variables_len,
             variable_str.iter().map(|s| s.to_string()).collect(),
             arg.to_string(),
+            self.bandwidth
         );
         //  let mut boxed_jacobian: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = Box::new(|arg, variable_str_| {
         //    DMatrix::from_rows(&new_jac) }) ;
@@ -1362,6 +1388,7 @@ impl Jacobian {
             rel_tolerance,
             scheme,
         );
+        info!("system disretized");
         println!(
             "\n \n vector of functions \n \n {:?} \n \n of lengh {}",
             &self.vector_of_functions,
@@ -1375,6 +1402,7 @@ impl Jacobian {
             &self.variable_string.len()
         );
         self.calc_jacobian();
+        info!("jacobian calculated");
         // println!("\n \n symbolic jacobian \n \n{:?}", &self.symbolic_jacobian);
         let n = &self.symbolic_jacobian.len();
         for (_i, vec_s) in self.symbolic_jacobian.iter().enumerate() {
@@ -1383,7 +1411,9 @@ impl Jacobian {
             }
             assert_eq!(vec_s.len(), *n, "jacobian not square! symbolic jacobian consists of {:?} vectors, each of length {}",  n, vec_s.len());
         }
+
         self.find_bandwidths();
+        println!("bandwidths found");
         println!("kl, ku {:?}", self.bandwidth);
         self.jacobian_generate_IVP_SparseColMat(arg.as_str(), indexed_values.clone());
         self.lambdify_funcvector_IVP(arg.as_str(), indexed_values.clone());

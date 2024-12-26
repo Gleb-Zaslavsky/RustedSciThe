@@ -149,6 +149,8 @@ pub mod symbolic_engine;
 ///     println!("function vector after evaluate_funvector_lambdified_DMatrix = {:?} \n", Jacobian_instance.evaluated_functions_DVector);
 /// ```
 pub mod symbolic_functions;
+pub mod symbolic_functions_BVP;
+//pub mod symbolic_functions_BVP_;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________

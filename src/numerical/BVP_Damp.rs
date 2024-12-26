@@ -1,7 +1,7 @@
 mod BVP_Damp_tests;
 
-mod BVP_traits;
-mod BVP_utils;
+pub mod BVP_traits;
+pub mod BVP_utils;
 mod BVP_utils_damped;
 pub mod NR_Damp_solver_damped;
 pub mod NR_Damp_solver_frozen;

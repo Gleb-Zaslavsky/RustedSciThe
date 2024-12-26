@@ -716,7 +716,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 100; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+            let n_steps = 200; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let strategy = "Frozen".to_string(); //
             let strategy_params = Some(HashMap::from([(
                 "complex".to_string(),
@@ -889,7 +889,7 @@ fn main() {
             let max_iterations = 200;
             let t0 = ne.span(None, None).0;
             let t_end = ne.span(None, None).1;
-            let n_steps = 10; //
+            let n_steps = 100; //
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
                 ("max_jac".to_string(), None),
@@ -974,7 +974,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 10; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+            let n_steps = 750; //
             let strategy = "Damped".to_string(); //
 
             let strategy_params = match strategy.as_str() {
@@ -998,7 +998,7 @@ fn main() {
             };
 
             let scheme = "trapezoid".to_string();
-            let method = "Dense".to_string(); // or  "Dense"
+            let method = "Sparse".to_string(); // or  "Dense"
             let linear_sys_method = None;
             let ones = vec![0.0; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
@@ -1042,10 +1042,11 @@ fn main() {
 
             nr.plot_result();
             nr.save_to_file(None);
+           
         }
         /*
 
-
+        
         */
         _ => {
             println!("example not found");
