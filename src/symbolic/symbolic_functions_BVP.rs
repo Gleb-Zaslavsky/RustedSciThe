@@ -2,7 +2,7 @@
 
 use crate::symbolic::symbolic_engine::Expr;
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use faer::col::{from_slice, Col};
 use faer::sparse::SparseColMat;
 use nalgebra::sparse::CsMatrix;
@@ -42,7 +42,7 @@ pub struct Jacobian {
 
     pub bounds: Option<Vec<(f64, f64)>>,
     pub rel_tolerance_vec: Option<Vec<f64>>,
-    pub bandwidth: (usize, usize)
+    pub bandwidth: Option<(usize, usize)>
 }
 
 impl Jacobian {
@@ -62,7 +62,7 @@ impl Jacobian {
             residiual_function: boxed_fun,
             bounds: None,
             rel_tolerance_vec: None,
-            bandwidth: (0, 0),
+            bandwidth: None,
         }
     }
 
@@ -181,39 +181,38 @@ pub fn lambdify_residual_VectorType(&mut self, arg: &str, variable_str: Vec<&str
 ////////////////////////////////////////////////////////////////////////////////////
 ///                             NALGEBRA DENSE
 ////////////////////////////////////////////////////////////////////////////////////
-/*
-pub fn jacobian_generate_DMatrix_(
+
+pub fn jacobian_generate_DMatrix_par(
     jac: Vec<Vec<Expr>>,
     vector_of_functions_len: usize,
     vector_of_variables_len: usize,
     variable_str: Vec<String>,
     arg: String,
-    bandwidth: (usize, usize),
+    bandwidth:Option< (usize, usize)>,
 ) -> Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> {
     //let arg = arg.as_str();
     //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
-    let (kl, ku) = bandwidth;
+
+
     Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-   
-    let new_function_jacobian:Vec<DVector<f64>> =
-    jac.par_iter().enumerate().map(|(i, vec_of_derivs)| {
-            let mut vec_od_jac = DVector::zeros(vec_of_derivs.len());
+
+        let mut vector_of_derivatives = vec![0.0; (vector_of_functions_len* vector_of_variables_len)];
+        let vector_of_derivatives_mutex = std::sync::Mutex::new(&mut vector_of_derivatives);
+        (0..vector_of_functions_len).into_par_iter().for_each(|i| {
             let (right_border, left_border) =
-            if kl==0&&ku==0 {
-                let right_border = vector_of_variables_len;
-                let left_border = 0;
-                (right_border, left_border)
-            } else {
+          if let Some((kl, ku)) = bandwidth {
                 let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
                 let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
                 (right_border, left_border)
-            } ;
-
+            } else {
+                    let right_border = vector_of_variables_len;
+                    let left_border = 0;
+                    (right_border, left_border) 
+            };
             for j in left_border.. right_border {
-                // println!("i = {}, j = {}", i, j);
-                //  let now = std::time::Instant::now();
+              // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
                 let partial_func = Expr::lambdify_owned(
-                    vec_of_derivs[j].clone(),
+                    jac[i][j].clone(),
             
                     variable_str
                         .iter()
@@ -221,102 +220,48 @@ pub fn jacobian_generate_DMatrix_(
                         .collect::<Vec<_>>()
                         .clone(),
                 );
+       
                 let v_vec: Vec<f64> = v.iter().cloned().collect();
-                vec_od_jac[ j] = if vec_of_derivs[j].clone() == Expr::Const(0.0) {
-                    0.0
-                } else {
-                    partial_func( v_vec.clone())
-                };
-
-                //    let time_test = now.elapsed().as_micros();
-                //   if time_test > 100 {println!("Elapsed time: {:?} micrs, {:?} ", now.elapsed().as_micros(), jac[i][j].clone() );}
-            }// for j im left...
-            vec_od_jac
-        }).collect_into_vec();
+           
+                let P = partial_func( v_vec.clone());
+                if P.abs() > 1e-8 {
+                   
+                    vector_of_derivatives_mutex.lock().unwrap()[i * vector_of_functions_len + j] = P;
+                }
+            }
+        });//par_iter()
+ 
+        let mut new_function_jacobian: DMatrix<f64> = DMatrix::from_row_slice(vector_of_functions_len, vector_of_variables_len, &vector_of_derivatives);
+     //  panic!("stop here");
         new_function_jacobian
     })
 } // end of function
 
-
-pub fn jacobian_generate_DMatrix2(
-    jac: Vec<Vec<Expr>>,
-    vector_of_functions_len: usize,
-    vector_of_variables_len: usize,
-    variable_str: Vec<String>,
-    arg: String,
-    bandwidth: (usize, usize),
-) -> Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> {
-    let (kl, ku) = bandwidth;
-    Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-        let mut new_function_jacobian: DMatrix<f64> =
-            DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
-
-        new_function_jacobian
-            .into_iter()
-            .enumerate()
-            .par_bridge()
-            .for_each(|(i, mut row)| {
-                let (right_border, left_border) = if kl == 0 && ku == 0 {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                } else {
-                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                        0
-                    } else {
-                        i - kl - 1
-                    };
-                    (right_border, left_border)
-                };
-
-                for j in left_border..right_border {
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    row[j] = if jac[i][j].clone() == Expr::Const(0.0) {
-                        0.0
-                    } else {
-                        partial_func(v_vec.clone())
-                    };
-                }
-            });
-
-        new_function_jacobian
-    })
-}
-*/
     pub fn jacobian_generate_DMatrix(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
         vector_of_variables_len: usize,
         variable_str: Vec<String>,
         arg: String,
-        bandwidth: (usize, usize),
+        bandwidth:Option< (usize, usize)>,
     ) -> Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> {
         //let arg = arg.as_str();
         //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
-        let (kl, ku) = bandwidth;
+  
         Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
             let mut new_function_jacobian: DMatrix<f64> =
                 DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
             for i in 0..vector_of_functions_len {
                 let (right_border, left_border) =
-                if kl==0&&ku==0 {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                } else {
-                    let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
-                    let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
-                    (right_border, left_border)
-                } ;
+                if let Some((kl, ku)) = bandwidth {
+                        let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
+                        let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
+                        (right_border, left_border)
+                    } else {
+                            let right_border = vector_of_variables_len;
+                            let left_border = 0;
+                            (right_border, left_border) 
+                    };
                 for j in left_border.. right_border {
                     // println!("i = {}, j = {}", i, j);
                     //  let now = std::time::Instant::now();
@@ -351,7 +296,7 @@ pub fn jacobian_generate_DMatrix2(
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
         let bandwidth = self.bandwidth;
-        let new_jac = Jacobian::jacobian_generate_DMatrix(
+        let new_jac = Jacobian::jacobian_generate_DMatrix_par(
             symbolic_jacobian_rc,
             vector_of_functions_len,
             vector_of_variables_len,
@@ -375,19 +320,18 @@ pub fn jacobian_generate_DMatrix2(
             variable_str: Vec<String>,
         ) -> Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + 'static> {
             Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
-                let mut result: DVector<f64> = DVector::zeros(vector_of_functions.len());
-                for (i, func) in vector_of_functions.iter().enumerate() {
+                let result: Vec<_> = vector_of_functions.par_iter()
+                .map(|func| {
                     let func = Expr::lambdify_IVP_owned(
                         func.to_owned(),
                         arg.as_str(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
+                        variable_str.iter().map(|s| s.as_str()).collect::<Vec<_>>().clone(),
                     );
-                    result[i] = func(x, v.iter().cloned().collect());
-                }
+                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                    func(x, v_vec)
+                })
+                .collect();
+                let result = DVector::from_vec(result);
                 result
             }) //enf of box
         } // end of function
@@ -603,34 +547,100 @@ pub fn jacobian_generate_CsMatrix(
 ////////////////////////////////////////////////////////////////////////////////////////
 ///         FAER SPARCE CRATE
 ////////////////////////////////////////////////////////////////////////////////////////
-    pub fn jacobian_generate_SparseColMat(
+pub fn jacobian_generate_SparseColMat(
+    jac: Vec<Vec<Expr>>,
+    vector_of_functions_len: usize,
+    vector_of_variables_len: usize,
+    variable_str: Vec<String>,
+    arg: String,
+    bandwidth: Option<(usize, usize)>,
+) -> Box<dyn FnMut(f64, &Col<f64>) -> SparseColMat<usize, f64>> {
+    //let arg = arg.as_str();
+    //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
+
+    Box::new(move |x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
+        
+        let _number_of_possible_non_zero: usize = jac.len();
+        //let mut new_function_jacobian: CsMatrix<f64> = CsMatrix::new_uninitialized_generic(Dyn(vector_of_functions_len),
+        //Dyn(vector_of_variables_len), number_of_possible_non_zero);
+        let mut vector_of_triplets = Vec::new();
+        for i in 0..vector_of_functions_len {
+            let (right_border, left_border) =
+          if let Some((kl, ku)) = bandwidth {
+                let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
+                let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
+                (right_border, left_border)
+            } else {
+                    let right_border = vector_of_variables_len;
+                    let left_border = 0;
+                    (right_border, left_border) 
+            };
+            for j in left_border.. right_border {
+              // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
+                let partial_func = Expr::lambdify_owned(
+                    jac[i][j].clone(),
+            
+                    variable_str
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .clone(),
+                );
+                //let v_vec: Vec<f64> = v.iter().cloned().collect();
+                let v_vec: Vec<f64> = v.iter().cloned().collect();
+                //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
+                // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
+                let P = partial_func( v_vec.clone());
+                if P.abs() > 1e-8 {
+                    let triplet = (i, j, P);
+                    vector_of_triplets.push(triplet);
+                }
+            }
+        }
+        let new_function_jacobian: SparseColMat<usize, f64> =
+            SparseColMat::try_new_from_triplets(
+                vector_of_functions_len,
+                vector_of_variables_len,
+                vector_of_triplets.as_slice(),
+            )
+            .unwrap();
+     //  panic!("stop here");
+        new_function_jacobian
+    })
+} // end of function
+
+
+/// 
+/// 
+    pub fn jacobian_generate_SparseColMat_par(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
         vector_of_variables_len: usize,
         variable_str: Vec<String>,
         arg: String,
-        bandwidth: (usize, usize),
+        bandwidth: Option<(usize, usize)>,
     ) -> Box<dyn FnMut(f64, &Col<f64>) -> SparseColMat<usize, f64>> {
         //let arg = arg.as_str();
         //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
 
         Box::new(move |x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let (kl, ku) = bandwidth;
+            
             let _number_of_possible_non_zero: usize = jac.len();
             //let mut new_function_jacobian: CsMatrix<f64> = CsMatrix::new_uninitialized_generic(Dyn(vector_of_functions_len),
             //Dyn(vector_of_variables_len), number_of_possible_non_zero);
             let mut vector_of_triplets = Vec::new();
-            for i in 0..vector_of_functions_len {
+            let vector_of_triplets_mutex = std::sync::Mutex::new(&mut vector_of_triplets);
+            (0..vector_of_functions_len).into_par_iter().for_each(|i| {
                 let (right_border, left_border) =
-                if kl==0&&ku==0 {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                } else {
+              if let Some((kl, ku)) = bandwidth {
                     let right_border = std::cmp::min(i+ku+1, vector_of_variables_len );
                     let left_border =  if  i as i32 - (kl as i32) - 1  <0 {0} else { i - kl- 1} ;
                     (right_border, left_border)
-                } ;
+                } else {
+                        let right_border = vector_of_variables_len;
+                        let left_border = 0;
+                        (right_border, left_border) 
+                };
                 for j in left_border.. right_border {
                   // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
                     let partial_func = Expr::lambdify_owned(
@@ -649,10 +659,10 @@ pub fn jacobian_generate_CsMatrix(
                     let P = partial_func( v_vec.clone());
                     if P.abs() > 1e-8 {
                         let triplet = (i, j, P);
-                        vector_of_triplets.push(triplet);
+                        vector_of_triplets_mutex.lock().unwrap().push(triplet);
                     }
                 }
-            }
+            });
             let new_function_jacobian: SparseColMat<usize, f64> =
                 SparseColMat::try_new_from_triplets(
                     vector_of_functions_len,
@@ -672,7 +682,7 @@ pub fn jacobian_generate_CsMatrix(
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
 
-        let new_jac = Jacobian::jacobian_generate_SparseColMat(
+        let new_jac = Jacobian::jacobian_generate_SparseColMat_par(
             symbolic_jacobian_rc,
             vector_of_functions_len,
             vector_of_variables_len,
@@ -695,20 +705,17 @@ pub fn jacobian_generate_CsMatrix(
         ) -> Box<dyn Fn(f64, &Col<f64>) -> Col<f64> + 'static> {
             Box::new(move |x: f64, v: &Col<f64>| -> Col<f64> {
                 //  let mut result: Col<f64> = Col::with_capacity(vector_of_functions.len());
-                let mut result = Vec::new();
-                for (_i, func) in vector_of_functions.iter().enumerate() {
+                let result: Vec<_> = vector_of_functions.par_iter()
+                .map(|func| {
                     let func = Expr::lambdify_IVP_owned(
                         func.to_owned(),
                         arg.as_str(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
+                        variable_str.iter().map(|s| s.as_str()).collect::<Vec<_>>().clone(),
                     );
                     let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    result.push(func(x, v_vec));
-                }
+                    func(x, v_vec)
+                })
+                .collect();
                 let res = from_slice(result.as_slice()).to_owned();
                 res
             }) //enf of box
@@ -1010,7 +1017,7 @@ pub fn jacobian_generate_CsMatrix(
             }
         }
     
-        self.bandwidth = (kl, ku);
+        self.bandwidth = Some((kl, ku));
     }
 // main function of this module
 // This function essentially sets up all the necessary components for solving a Boundary Value Problem, including discretization,
@@ -1031,6 +1038,7 @@ pub fn jacobian_generate_CsMatrix(
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
         method: String
+        , bandwidth: Option<(usize, usize)>
     ) {
         let param = if let Some(param) = param {
             param
@@ -1050,6 +1058,7 @@ pub fn jacobian_generate_CsMatrix(
             Bounds,
             rel_tolerance,
             scheme,
+
         );
         info!("system discretized");
         let v = self.variable_string.clone();
@@ -1066,10 +1075,14 @@ pub fn jacobian_generate_CsMatrix(
         info!("Jacobian calculation time:");
         let elapsed = now.elapsed();
         info!("{:?}",  elapsed_time(elapsed) );
+        if let Some(bandwidth_) = bandwidth  {
+            self.bandwidth = Some(bandwidth_);
+            info!("Bandwidth provided: {:?}", self.bandwidth);
+        } else {
         self.find_bandwidths();//  determine the bandwidth of the Jacobian matrix.
         info!("Bandwidth calculated:");
         info!("(kl, ku) = {:?}", self.bandwidth);
- 
+        }
         //  println!("symbolic Jacbian created {:?}", &self.symbolic_jacobian);
         match method.as_str() { // transform the symbolic Jacobian into a numerical function
             "Dense" => self.lambdify_jacobian_DMatrix(param.as_str(), indexed_values.clone()),
@@ -1173,6 +1186,7 @@ mod tests {
       //  let arg = "x".to_string();
         Jacobian_instance.from_vectors(eq_system, values);
         Jacobian_instance.calc_jacobian();
+        
        // expecting Jac: | exp(y) ; 10.0  |
        //                 | 1     ;  1/z|
        let vect =&DVector::from_vec(vec![0.0, 1.0]);

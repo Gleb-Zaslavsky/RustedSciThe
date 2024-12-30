@@ -22,7 +22,7 @@ mod tests {
 
         let t0 = 0.0;
         let t_end = 1.0;
-        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+        let n_steps = 10; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
         let strategy = "Damped".to_string(); //
         let strategy_params = Some(HashMap::from([
             ("max_jac".to_string(), None),

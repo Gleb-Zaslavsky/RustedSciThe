@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "RustedSciThe"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "approx 0.5.1",
  "chrono",

@@ -1,9 +1,9 @@
 use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
 use crate::symbolic::symbolic_functions::Jacobian;
 use nalgebra::DMatrix;
-use simplelog::*;
+
 use std::collections::HashMap;
-use std::fs::File;
+
 use log::info;
 /*
 pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
@@ -59,7 +59,7 @@ pub fn convergence_condition(
 ) -> f64 {
     let mut sum = 0.0;
     for (i, y_i) in y.iterate().enumerate() {
-        sum += y_i * rel_tolerance_vec[i];
+        sum += (y_i).abs() * rel_tolerance_vec[i];
     }
     let conv = sum.max(*abs_tolerance);
 

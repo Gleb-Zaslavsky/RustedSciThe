@@ -8,7 +8,7 @@ The code mostly inspired by sources listed below:
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
-use faer::utils::vec;
+
 use nalgebra::{DMatrix, DVector};
 use tabled::{builder::Builder, settings::Style};
 use crate::numerical::BVP_Damp::BVP_traits::{
@@ -268,7 +268,7 @@ impl NRBVP {
         };
     }
     ///Set system of equations with vector of symbolic expressions
-    pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>) {
+    pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>, bandwidth: Option<(usize, usize)>) {
         // check if memory is enough for    
         task_check_mem(self.n_steps, self.values.len(), &self.method);
         // check if user specified task is correct
@@ -302,7 +302,8 @@ impl NRBVP {
                     self.Bounds.clone(),
                     self.rel_tolerance.clone(),
                     scheme.clone(),
-                    self.method.clone()
+                    self.method.clone(),
+                    bandwidth
                 );
 
                 //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
@@ -318,7 +319,7 @@ impl NRBVP {
                 self.bounds_vec = jacobian_instance.bounds.unwrap();
                 self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
                 self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth;
+                self.bandwidth = jacobian_instance.bandwidth.unwrap();
        
 
 
@@ -493,7 +494,7 @@ impl NRBVP {
             self.error_old = *error;
             info!("\n \n L2 norm of undamped step = {}", error);
             let convergence_cond_for_step = convergence_condition(
-                &*undamped_step_k_plus_1,
+                &*y_k_plus_1,
                 &self.abs_tolerance,
                 &self.rel_tolerance_vec,
             );
@@ -713,8 +714,8 @@ impl NRBVP {
             (res, method)
         } else if params.contains_key("grcar_smooke") {
             let res = params.get("grcar_smooke").clone().unwrap().clone().unwrap();
-            if res.len() != 2 {
-                panic!("this strategy requires two parameters")
+            if res.len() != 3 {
+                panic!("this strategy requires 3 parameters")
             };
             let method = GridRefinementMethod::GrcarSmooke;
             (res, method)
@@ -749,7 +750,9 @@ impl NRBVP {
         );
         *self.calc_statistics.entry("number of grid refinements".to_string()).or_insert(0) += 1;
         // here we go again... running the code wtih new grid
-        self.eq_generate(Some(new_mesh.clone()));
+        self.eq_generate(Some(new_mesh.clone()), Some(self.bandwidth) );
+                                                        //               bandwidth doesnt change with gerid recalc so we pass into function
+                                                        // previously calculated  bandwidth to avoid O(N^2) calculation of bandwidth 
         self.we_need_refinement();
 
         self.main_loop_damped();
@@ -764,7 +767,7 @@ impl NRBVP {
     pub fn solver(&mut self) -> Option<DVector<f64>> {
         // TODO! сравнить явный мэш с неявным
         // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
-        self.eq_generate(None);
+        self.eq_generate(None,None);
         let begin = Instant::now();
         let res = self.main_loop_damped();
         let end = begin.elapsed();

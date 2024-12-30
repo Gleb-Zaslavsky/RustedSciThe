@@ -55,7 +55,7 @@ impl GridRefinement for GrcarSmookeRefinement {
         params: Vec<f64>,
     ) -> (Vec<f64>, DMatrix<f64>, usize) {
         let (new_grid, new_solution, number_of_nonzero_keys) =
-            grcar_smooke_grid_refinement(y_DMatrix, x_mesh, params[0], params[1]);
+            grcar_smooke_grid_refinement(y_DMatrix, x_mesh, params[0], params[1], params[2]);
         (new_grid, new_solution, number_of_nonzero_keys)
     }
 }

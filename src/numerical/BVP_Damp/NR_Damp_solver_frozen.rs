@@ -169,6 +169,7 @@ impl NRBVP {
                     None,
                     scheme.clone(),
                     self.method.clone(),
+                    None
                 );
                 let fun = jacobian_instance.residiual_function;
 
@@ -181,7 +182,7 @@ impl NRBVP {
                 self.jac = jac;
    
                 self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth;
+                self.bandwidth = jacobian_instance.bandwidth.unwrap();
           
     } // end of method eq_generate
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {

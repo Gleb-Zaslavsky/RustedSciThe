@@ -889,7 +889,7 @@ fn main() {
             let max_iterations = 200;
             let t0 = ne.span(None, None).0;
             let t_end = ne.span(None, None).1;
-            let n_steps = 100; //
+            let n_steps = 10; //
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
                 ("max_jac".to_string(), None),
@@ -974,7 +974,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 750; //
+            let n_steps = 10; //
             let strategy = "Damped".to_string(); //
 
             let strategy_params = match strategy.as_str() {
@@ -988,7 +988,7 @@ fn main() {
                         Some(vec![1.0, 5.0]), //  None
                     ),
                     //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5])),
+                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 1.4])),
                 ])),
                 "Frozen" => Some(HashMap::from([(
                     "every_m".to_string(),
