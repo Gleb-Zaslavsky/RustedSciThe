@@ -1,4 +1,5 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
+use crate::symbolic::symbolic_functions::Jacobian;
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector, RawStorage};
 use std::collections::HashMap;
@@ -271,20 +272,33 @@ pub fn round_to_n_digits(value: f64, n: usize) -> f64 {
     let format_string = format!("{:.1$}", value, n);
     format_string.parse::<f64>().unwrap()
 }
+
+pub fn variables_order(variables: Vec<String>, indexed_variables: Vec<String>) -> Vec<String> {
+    // lets take the same quantity of indexed variables as the original variables
+    let indexed_vars_for_reordering: Vec<String> = indexed_variables[0..variables.len()].to_vec();
+    // remove numeric suffix from indexed variables and compare with original variables
+    let unindexed_vars = indexed_vars_for_reordering
+        .iter()
+        .map(|x| Jacobian::remove_numeric_suffix(&x.clone()))
+        .collect::<Vec<String>>();
+    unindexed_vars
+}
+
+
 // solution = values of unknown variable + boundary condition;
 // so we  get the values of the boundary condition and the calculated values of unknown variables and get the full solution
-pub fn construct_full_solution(solution:DMatrix<f64>, BorderConditions: &HashMap<String, (usize, f64)>, values: &Vec<String>) -> DMatrix<f64> {
+pub fn construct_full_solution(solution:DMatrix<f64>, BorderConditions: &HashMap<String, (usize, f64)>, indexed_variables: &Vec<String>, values: &Vec<String>) -> DMatrix<f64> {
         info!("Constructing full solution");
       //  println!("{:?}",  &solution.ncols());
         assert_eq!(solution.shape().0, values.len());
         let (n_rows, n_cols) = solution.shape();
-     
+        let real_order_of_variables = variables_order(values.clone().to_owned(), indexed_variables.to_owned()); 
         let mut constructed_solution = DMatrix::zeros(n_rows, n_cols+1);
         for (i, sol_i) in  solution.row_iter().enumerate() {
             let mut sol_i: Vec<f64>  = sol_i.iter().map(|x| *x).collect();
           //  println!("i {}", i);
            // println!("{:?}", values[i]);
-            let unknown_variable = values[i].clone();
+            let unknown_variable = real_order_of_variables[i].clone();
             if let Some(&(bc_type, bc_value)) = BorderConditions.get(&unknown_variable) {
                 match bc_type {
                     0  => {
@@ -317,15 +331,16 @@ pub fn construct_full_solution(solution:DMatrix<f64>, BorderConditions: &HashMap
 pub fn extract_unknown_variables(
     full_solution: DMatrix<f64>,
     border_conditions: &HashMap<String, (usize, f64)>,
+    indexed_variables: &Vec<String>,
     values: &Vec<String>,
 ) -> DMatrix<f64> {
     let (n_rows, n_cols) = full_solution.shape();
     let mut extracted_solution = DMatrix::zeros(n_rows, n_cols-1);
- 
+    let real_order_of_variables = variables_order(values.clone().to_owned(), indexed_variables.to_owned()); 
     for (i, full_sol_i) in full_solution.row_iter().enumerate() {
      //   print!("{:}", full_sol_i);
         let mut full_sol_i: Vec<f64> = full_sol_i.iter().map(|x| *x).collect();
-        let unknown_variable = values[i].clone();
+        let unknown_variable = real_order_of_variables[i].clone();
        
 
         if let Some(&(bc_type, _)) = border_conditions.get(&unknown_variable) {
@@ -371,9 +386,9 @@ mod tests {
         let mut border_conditions = HashMap::new();
         border_conditions.insert("x".to_string(), (0, 0.0));
         border_conditions.insert("y".to_string(), (1, 5.0));
-        let values = vec!["x".to_string(), "y".to_string()];
-
-        let constructed_solution = construct_full_solution(solution, &border_conditions, &values);
+        let values = vec!["y".to_string(), "x".to_string()];
+        let indexed_variables = vec!["x_1".to_string(), "y_1".to_string()];
+        let constructed_solution = construct_full_solution(solution, &border_conditions, &indexed_variables, &values);
 
         let expected_solution = 
         DMatrix::from_row_slice(n_rows, n_cols+1, &[0.0, 1.0, 3.0, 2.0, 4.0, 5.0]);
@@ -390,23 +405,25 @@ mod tests {
         let mut border_conditions = HashMap::new();
         border_conditions.insert("x".to_string(), (0, 0.0));
         border_conditions.insert("y".to_string(), (1, 5.0));
-        let values = vec!["x".to_string(), "y".to_string()];
+        let values = vec!["y".to_string(), "x".to_string()];
+        let indexed_variables = vec!["x_1".to_string(), "y_1".to_string()];
         let expected_solution = DMatrix::from_row_slice(2, 2, &[3.0, 4.0, 1.0, 2.0]);
+
        // println!("expected_solution {:?}, {:?}", expected_solution, expected_solution.shape());
-        let extracted_solution = extract_unknown_variables(full_solution, &border_conditions, &values);
+        let extracted_solution = extract_unknown_variables(full_solution, &border_conditions,  &indexed_variables, &values);
        assert_eq!(extracted_solution, expected_solution);
     }
     #[test]
     fn test_combine() {
         let solution = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
-        let (n_rows, n_cols) = solution.shape();
+       // let (n_rows, n_cols) = solution.shape();
         let mut border_conditions = HashMap::new();
         border_conditions.insert("x".to_string(), (0, 0.0));
         border_conditions.insert("y".to_string(), (1, 5.0));
-        let values = vec!["x".to_string(), "y".to_string()];
-
-        let constructed_solution = construct_full_solution(solution.clone(), &border_conditions, &values);
-        let extracted_solution = extract_unknown_variables(constructed_solution, &border_conditions, &values);
+        let values = vec!["y".to_string(), "x".to_string()];
+        let indexed_variables = vec!["x_1".to_string(), "y_1".to_string()];
+        let constructed_solution = construct_full_solution(solution.clone(), &border_conditions,&indexed_variables, &values);
+        let extracted_solution = extract_unknown_variables(constructed_solution, &border_conditions, &indexed_variables, &values);
         assert_eq!(solution, extracted_solution);
     }
 

@@ -879,7 +879,7 @@ fn main() {
             y(x)=exp(-x^2/a)
             .
             */
-            let ne = NonlinEquation:: Clairaut ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
+            let ne = NonlinEquation::TwoPointBVP ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
 
             let eq_system = ne.setup();
 
@@ -896,13 +896,13 @@ fn main() {
                 ("maxDampIter".to_string(),Some(vec![ 100.0])),
                 ("DampFacor".to_string(), None),
                 ("adaptive".to_string(),  Some(vec![1.0, 5.0])),
-              ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
+              ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
 
             ]));
             let scheme = "forward".to_string();
             let method = "Sparse".to_string(); // or  "Dense"
             let linear_sys_method = None;
-            let ones = vec![0.99; values.len() * n_steps];
+            let ones = vec![0.5; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
                 values.len(),
                 n_steps,

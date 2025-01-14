@@ -771,12 +771,12 @@ impl NRBVP {
         // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
         // if number_of_nonzero_keys==0 it means that no need to create a new grid
 
-        let y_DMatrix =  construct_full_solution(y_DMatrix, &self.BorderConditions, &self.values);
+        let y_DMatrix =  construct_full_solution(y_DMatrix, &self.BorderConditions,&self.variable_string, &self.values);
         let (new_mesh, initial_guess, number_of_nonzero_keys) =
             new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone(), self.abs_tolerance);
 
      //   info!("\n \n new grid enabled! \n \n");
-       let initial_guess = extract_unknown_variables(initial_guess, &self.BorderConditions, &self.values);
+       let initial_guess = extract_unknown_variables(initial_guess, &self.BorderConditions,&self.variable_string, &self.values);
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -875,15 +875,19 @@ impl NRBVP {
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
         let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
-                .transpose();
+            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
+
+
+        let full_results = construct_full_solution(matrix_of_results, &self.BorderConditions,&self.variable_string, &self.values.clone());
+                   
         let permutted_results = interchange_columns(
-            matrix_of_results,
+            full_results.transpose(),
             self.values.clone(),
             self.variable_string.clone(),
         );
-        let permutted_results = construct_full_solution(permutted_results.transpose(), &self.BorderConditions, &self.values.clone());
-        Some(permutted_results.transpose())
+     
+
+        Some(permutted_results)
     }
 
     pub fn plot_result(&self) {
@@ -891,19 +895,19 @@ impl NRBVP {
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
         let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
-                .transpose();
+            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
+     
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-
+       
+        let full_results = construct_full_solution(matrix_of_results, &self.BorderConditions,&self.variable_string, &self.values.clone()).transpose();
         let permutted_results = interchange_columns(
-            matrix_of_results,
+            full_results.transpose(),
             self.values.clone(),
             self.variable_string.clone(),
         );
-
-        let permutted_results = construct_full_solution(permutted_results.transpose(), &self.BorderConditions, &self.values.clone()).transpose();
+     
         info!(
             "matrix of results has shape {:?}",
             permutted_results.shape()
@@ -914,7 +918,7 @@ impl NRBVP {
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
-            permutted_results,
+            permutted_results.transpose(),
         );
         info!("result plotted");
     }

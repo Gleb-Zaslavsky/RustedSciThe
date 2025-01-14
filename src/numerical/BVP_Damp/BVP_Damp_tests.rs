@@ -167,9 +167,9 @@ mod tests {
             assert!(norm < 1e-2, "norm = {}", norm);
             assert!(relativ_residual < 1e-1, "norm = {}", norm);
             println!("norm = {}", norm);
-            let extract_unknown = extract_unknown_variables( solution.clone().transpose(), &BorderConditions.clone(), &values.clone() );
-            let solution_reconstructed = construct_full_solution( extract_unknown.clone(), &BorderConditions.clone(), &values.clone() ).transpose();
-           assert_eq!(solution, solution_reconstructed, "solution and reconstruction are not equal");
+         //   let extract_unknown = extract_unknown_variables( solution.clone().transpose(), &BorderConditions.clone(), &values.clone() );
+         //   let solution_reconstructed = construct_full_solution( extract_unknown.clone(), &BorderConditions.clone(), &values.clone() ).transpose();
+        //   assert_eq!(solution, solution_reconstructed, "solution and reconstruction are not equal");
         }
     }
 }

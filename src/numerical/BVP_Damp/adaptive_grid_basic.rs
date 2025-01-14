@@ -333,12 +333,13 @@ pub fn grcar_smooke_grid_refinement(
 
                 let both_ys_are_not_too_small = (y[i].abs() >threshold )&(y[i+1].abs() >threshold );
                 // eq 1, eq 2
-              //  info!("tau_i {}, criterion 1 {},  eta_i {}, criterion 2 {}, ctriterion 3 {}", tau_i, tau_i > delta && both_ys_are_not_too_small ,  eta_i, eta_i > gamma && both_ys_are_not_too_small,  both_ys_are_not_too_small);
+              // 
                 if (tau_i > delta && both_ys_are_not_too_small) || (eta_i > gamma && both_ys_are_not_too_small) {
-                   
+                  //  info!("tau_i {}, criterion 1 {},  eta_i {}, criterion 2 {}, ctriterion 3 {}", tau_i, tau_i > delta && both_ys_are_not_too_small ,  eta_i, eta_i > gamma && both_ys_are_not_too_small,  both_ys_are_not_too_small);
+                  info!("eta_i {}, criterion  {}, gamma {}",  eta_i, eta_i > gamma && both_ys_are_not_too_small,  gamma);
                     // how many new points should be added
                     let N =if (tau_i / delta) as i32 >=1 {(tau_i / delta) as i32} else {1};
-                    info!(" conditions vaiolation at index {}, N = {}", i, N);
+                    info!(" conditions vaiolation at index {}, => N = {}", i,  N);
                     mark.insert(i, N); // mark[i] = how many points to insert in i-th position
         
                 }
