@@ -1,5 +1,6 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
 use log::{info, warn};
+use nalgebra::{DMatrix, DVector, RawStorage};
 use std::collections::HashMap;
 use std::time::Duration;
 use sysinfo::System;
@@ -264,3 +265,149 @@ println!("total swap  : {} bytes", total_swap  );
 println!("used swap   : {} bytes", used_swap );
 matrix_memory
 } 
+
+
+pub fn round_to_n_digits(value: f64, n: usize) -> f64 {
+    let format_string = format!("{:.1$}", value, n);
+    format_string.parse::<f64>().unwrap()
+}
+// solution = values of unknown variable + boundary condition;
+// so we  get the values of the boundary condition and the calculated values of unknown variables and get the full solution
+pub fn construct_full_solution(solution:DMatrix<f64>, BorderConditions: &HashMap<String, (usize, f64)>, values: &Vec<String>) -> DMatrix<f64> {
+        info!("Constructing full solution");
+      //  println!("{:?}",  &solution.ncols());
+        assert_eq!(solution.shape().0, values.len());
+        let (n_rows, n_cols) = solution.shape();
+     
+        let mut constructed_solution = DMatrix::zeros(n_rows, n_cols+1);
+        for (i, sol_i) in  solution.row_iter().enumerate() {
+            let mut sol_i: Vec<f64>  = sol_i.iter().map(|x| *x).collect();
+          //  println!("i {}", i);
+           // println!("{:?}", values[i]);
+            let unknown_variable = values[i].clone();
+            if let Some(&(bc_type, bc_value)) = BorderConditions.get(&unknown_variable) {
+                match bc_type {
+                    0  => {
+                         sol_i.insert(0, bc_value);
+                         assert_eq!(sol_i.len(), n_cols+1);
+                        constructed_solution.row_mut(i).copy_from_slice(&sol_i);
+                       // println!("{:?}", constructed_solution);
+                    }
+                     1 => {
+                         sol_i.push(bc_value);
+                         assert_eq!(sol_i.len(), n_cols+1);
+                        constructed_solution.row_mut(i).copy_from_slice(&sol_i);
+                    //    println!("{:?}", constructed_solution);
+                    }
+                    _ => {
+                        panic!("Unsupported boundary condition type: {}", bc_type);
+                
+                    }
+                }
+            } else {
+        }
+        
+    }
+  // println!("constructed_solution {}", constructed_solution);
+    constructed_solution
+}
+
+
+
+pub fn extract_unknown_variables(
+    full_solution: DMatrix<f64>,
+    border_conditions: &HashMap<String, (usize, f64)>,
+    values: &Vec<String>,
+) -> DMatrix<f64> {
+    let (n_rows, n_cols) = full_solution.shape();
+    let mut extracted_solution = DMatrix::zeros(n_rows, n_cols-1);
+ 
+    for (i, full_sol_i) in full_solution.row_iter().enumerate() {
+     //   print!("{:}", full_sol_i);
+        let mut full_sol_i: Vec<f64> = full_sol_i.iter().map(|x| *x).collect();
+        let unknown_variable = values[i].clone();
+       
+
+        if let Some(&(bc_type, _)) = border_conditions.get(&unknown_variable) {
+            match bc_type {
+                0 => {
+                    // Remove the first element (boundary condition at the start)
+                    full_sol_i.remove(0);
+                    assert_eq!(full_sol_i.len(), n_cols - 1);
+                    extracted_solution.row_mut(i).copy_from_slice(&full_sol_i);
+                  //  println!("{:?}", extracted_solution);
+                }
+                1 => {
+                    // Remove the last element (boundary condition at the end)
+                    full_sol_i.pop();
+                    assert_eq!(full_sol_i.len(), n_cols - 1);
+                    extracted_solution.row_mut(i).copy_from_slice(&full_sol_i);
+                  //  println!("{:?}", extracted_solution);
+                }
+                _ => {
+                    panic!("Unsupported boundary condition type: {}", bc_type);
+                  
+                }
+            }
+        } else {
+            panic!("No boundary condition found for variable: {}", unknown_variable);
+            
+        }
+    }
+    //println!("extracted_solution {:?}", extracted_solution);
+    extracted_solution
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::DMatrix;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_construct_full_solution() {
+        let solution = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]).transpose();
+        let (n_rows, n_cols) = solution.shape();
+        let mut border_conditions = HashMap::new();
+        border_conditions.insert("x".to_string(), (0, 0.0));
+        border_conditions.insert("y".to_string(), (1, 5.0));
+        let values = vec!["x".to_string(), "y".to_string()];
+
+        let constructed_solution = construct_full_solution(solution, &border_conditions, &values);
+
+        let expected_solution = 
+        DMatrix::from_row_slice(n_rows, n_cols+1, &[0.0, 1.0, 3.0, 2.0, 4.0, 5.0]);
+        println!("{:}, {:}" , constructed_solution.column(0), expected_solution.column(0));
+        println!("constructed_solution {:?}, {:?}", constructed_solution, constructed_solution.shape());
+       // println!("expected {:?}", expected_solution);
+        assert_eq!(constructed_solution, expected_solution);
+    }
+
+    #[test]
+    fn test_extract_unknown_variables() {
+        let full_solution   = DMatrix::from_row_slice(3, 2, &[0.0, 1.0, 3.0, 2.0, 4.0, 5.0]).transpose();
+      //  println!("full_solution {:?}, {:?}", full_solution, full_solution.shape());
+        let mut border_conditions = HashMap::new();
+        border_conditions.insert("x".to_string(), (0, 0.0));
+        border_conditions.insert("y".to_string(), (1, 5.0));
+        let values = vec!["x".to_string(), "y".to_string()];
+        let expected_solution = DMatrix::from_row_slice(2, 2, &[3.0, 4.0, 1.0, 2.0]);
+       // println!("expected_solution {:?}, {:?}", expected_solution, expected_solution.shape());
+        let extracted_solution = extract_unknown_variables(full_solution, &border_conditions, &values);
+       assert_eq!(extracted_solution, expected_solution);
+    }
+    #[test]
+    fn test_combine() {
+        let solution = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+        let (n_rows, n_cols) = solution.shape();
+        let mut border_conditions = HashMap::new();
+        border_conditions.insert("x".to_string(), (0, 0.0));
+        border_conditions.insert("y".to_string(), (1, 5.0));
+        let values = vec!["x".to_string(), "y".to_string()];
+
+        let constructed_solution = construct_full_solution(solution.clone(), &border_conditions, &values);
+        let extracted_solution = extract_unknown_variables(constructed_solution, &border_conditions, &values);
+        assert_eq!(solution, extracted_solution);
+    }
+
+}

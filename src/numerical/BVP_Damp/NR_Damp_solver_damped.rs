@@ -14,7 +14,7 @@ use tabled::{builder::Builder, settings::Style};
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac,  MatrixType, VectorType, Vectors_type_casting,
 };
-use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, task_check_mem};
+use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, task_check_mem, construct_full_solution, extract_unknown_variables};
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
     jac_recalc,
@@ -103,10 +103,11 @@ impl NRBVP {
         let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             Box::new(|_x, y: &DVector<f64>| y.clone());
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun0));
-        let h = (t_end - t0) / (n_steps - 1) as f64;
-        let T_list: Vec<f64> = (0..n_steps)
+        let h = (t_end - t0) / n_steps as f64;
+        let T_list: Vec<f64> = (0..n_steps+1)
             .map(|i| t0 + (i as f64) * h)
             .collect::<Vec<_>>();
+      
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         let new_grid_enabled_: bool = if strategy_params.clone().unwrap().get("adaptive").is_some()
         {
@@ -164,9 +165,10 @@ impl NRBVP {
     // check if user specified task is correct
     pub fn task_check(&self) {
         assert_eq!(
-            self.initial_guess.len(),
+            self.initial_guess.len()  ,//grid length =  number of unknowns 
             self.n_steps * self.values.len(),
-            "lenght of initial guess should be equal to n_steps*values"
+            "lenght of initial guess {} should be equal to n_steps*values, {}, {} ", 
+            self.initial_guess.len(), self.x_mesh.len(), self.values.len()
         );
         assert!(self.t_end > self.t0, "t_end must be greater than t0");
         assert!(self.n_steps > 1, "n_steps must be greater than 1");
@@ -214,11 +216,15 @@ impl NRBVP {
             "Bounds must be specified for each value"
         );
         // check if initial guess values are inside bunds defined for certain values
-        if_initial_guess_inside_bounds(&self.initial_guess, &self.Bounds, self.values.clone());
+        if self.result.is_none() { // check of does the guess fits into bounds must be enable only at the beginning (at result == None)
+        // we will find ourselves in this place again when the command to recalculate the lattice is given, and the result of the previous 
+        //iteration may go beyond the boundaries and we must make sure that this fact does not stop the program, therefore
+        if_initial_guess_inside_bounds(&self.initial_guess, &self.Bounds, self.values.clone());  }
         assert!(
             !self.rel_tolerance.is_none(),
             "rel_tolerance must be specified for each value"
         );
+    
         let required_keys = vec!["max_jac", "maxDampIter", "DampFacor", "adaptive"];
         for key in required_keys {
             assert!(
@@ -240,6 +246,7 @@ impl NRBVP {
                 "easy".to_string(),
                 "pearson".to_string(),
                 "grcar_smooke".to_string(),
+                "two_point".to_string(),
             ];
             let present_keys: Vec<_> = strategy_keys
                 .iter()
@@ -556,11 +563,12 @@ impl NRBVP {
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         let y: DMatrix<f64> = self.initial_guess.clone();
+      //  println!("new y = {} \n \n", &y);
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
-
+        self. result = Some( y.clone()); // save into result in case the vary first iteration 
+        // with the current n_steps will go wrong and we shall need frid refinement
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
-
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
         let mut i = 0;
@@ -592,11 +600,18 @@ impl NRBVP {
             else if status == 1 {
                 // status == 1 means convergence is reached, save the result
                 info!("\n \n Solution has converged, breaking the loop!");
+            
                 let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
                     y_k_plus_1
                 } else {
                     panic!(" \n \n y_k_plus_1 is None")
                 };
+               
+                let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
+                // before refining in case it will go wrong
+                 self.result = result.clone();
+                 info!("\n \n solutioon found for the current grid {}", &self.result.clone().unwrap());
+                
                 // if flag for new grid is up we must call adaptive grid refinement
                 if self.new_grid_enabled
                     && self
@@ -607,13 +622,14 @@ impl NRBVP {
                         .unwrap()
                         .clone()
                         .is_some()
-                {
+                {   info!("solving with new grid!");
                     self.solve_with_new_grid()
                 } else {
                     // if adapive is None then we just return the result
-                    let result = Some(y_k_plus_1.to_DVectorType()); // save the result in the format of DVector
-                    self.result = result.clone();
+                    info!("returning the result");
+                  
                     return result;
+                    
                 };
             //  self.max_error = error; // ???
             }
@@ -633,13 +649,32 @@ impl NRBVP {
                     nJacReeval += 1;
                 } else {
                     info!("\n \n Jacobian age {} =<1 \n \n", self.m);
+                  //  self.new_grid_enabled = true;
                     break;
                 }
             } // status <0
 
             info!("\n \n end of iteration {} with jac age {} \n \n", i, self.m);
         }
-        None
+ 
+
+        // all iterations, recalculations of Jacobian were unsuccessful 
+        // only that can help - grid refinement
+        
+        if self.new_grid_enabled
+        && self
+            .strategy_params
+            .clone()
+            .unwrap()
+            .get("adaptive")
+            .unwrap()
+            .clone()
+            .is_some()
+    {   info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
+        self.solve_with_new_grid()
+    }
+    
+    None
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                      functions to create a new grid and recalculate with new grid
@@ -689,11 +724,12 @@ impl NRBVP {
     }
     fn create_new_grid(&mut self) -> (Vec<f64>, DMatrix<f64>, usize) {
         info!("\n \n creating new grid \n \n");
-        let y = self.y.clone_box();
+        let y = self.result.clone().unwrap().clone_box();
         let y_DVector = y.to_DVectorType();
         let nrows = self.values.len();
         let ncols = self.n_steps;
         let y_DMatrix = DMatrix::from_column_slice(nrows, ncols, y_DVector.as_slice());
+
         // unpack the adaptive strategy parameters
         let params = self.strategy_params.clone().unwrap();
 
@@ -719,16 +755,28 @@ impl NRBVP {
             };
             let method = GridRefinementMethod::GrcarSmooke;
             (res, method)
-        } else {
+        } else if params.contains_key("two_point") {
+      
+            let res = params.get("two_point").clone().unwrap().clone().unwrap();
+            if res.len() != 3 {
+                panic!("this strategy requires 3 parameters")
+            };
+
+            let method = GridRefinementMethod::TwoPoint;
+            (res, method)
+        }else {
             panic!("parameters for adaptive strategy not found")
         };
         //create a new mesh with a chosen algorithm a
         // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
         // if number_of_nonzero_keys==0 it means that no need to create a new grid
-        let (new_mesh, initial_guess, number_of_nonzero_keys) =
-            new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone());
 
-        info!("\n \n new grid enabled! \n \n");
+        let y_DMatrix =  construct_full_solution(y_DMatrix, &self.BorderConditions, &self.values);
+        let (new_mesh, initial_guess, number_of_nonzero_keys) =
+            new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone(), self.abs_tolerance);
+
+     //   info!("\n \n new grid enabled! \n \n");
+       let initial_guess = extract_unknown_variables(initial_guess, &self.BorderConditions, &self.values);
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -741,7 +789,7 @@ impl NRBVP {
         //  let new_mesh = binding.data.as_vec();
 
         self.jac_recalc = true; // to avoid using old (low dimension) jacobian with new data
-        self.n_steps = new_mesh.len();
+        self.n_steps = new_mesh.len()-1;
         self.initial_guess = initial_guess;
         self.grid_refinemens += 1;
         info!(
@@ -834,7 +882,8 @@ impl NRBVP {
             self.values.clone(),
             self.variable_string.clone(),
         );
-        Some(permutted_results)
+        let permutted_results = construct_full_solution(permutted_results.transpose(), &self.BorderConditions, &self.values.clone());
+        Some(permutted_results.transpose())
     }
 
     pub fn plot_result(&self) {
@@ -847,17 +896,20 @@ impl NRBVP {
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-        info!(
-            "matrix of results has shape {:?}",
-            matrix_of_results.shape()
-        );
-        info!("length of x mesh : {:?}", n_steps);
-        info!("number of Ys: {:?}", number_of_Ys);
+
         let permutted_results = interchange_columns(
             matrix_of_results,
             self.values.clone(),
             self.variable_string.clone(),
         );
+
+        let permutted_results = construct_full_solution(permutted_results.transpose(), &self.BorderConditions, &self.values.clone()).transpose();
+        info!(
+            "matrix of results has shape {:?}",
+            permutted_results.shape()
+        );
+        info!("length of x mesh : {:?}", n_steps);
+        info!("number of Ys: {:?}", number_of_Ys);
         plots(
             self.arg.clone(),
             self.values.clone(),

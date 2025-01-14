@@ -3,6 +3,8 @@ mod tests {
 
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
     use crate::numerical::Examples_and_utils::NonlinEquation;
+    use crate::numerical::BVP_Damp::BVP_utils::{
+        construct_full_solution, extract_unknown_variables};
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
 
@@ -69,7 +71,7 @@ mod tests {
         nr.solve();
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
-        assert_eq!(n, n_steps);
+        assert_eq!(n, n_steps+1);
         // println!("result = {:?}", solution);
         // nr.plot_result();
     }
@@ -85,6 +87,7 @@ mod tests {
     fn test_BVP_Damp2() {
         // let ne=  (NonlinEquation::  Clairaut  ); //  Clairaut  LaneEmden5  ParachuteEquation
         for ne in NonlinEquation::iter() {
+            println!("problem {:?}", ne);
             let eq_system = ne.setup();
             let values = ne.values();
             let arg = "x".to_string();
@@ -92,13 +95,14 @@ mod tests {
             let max_iterations = 20;
             let t0 = ne.span(None, None).0;
             let t_end = ne.span(None, None).1;
-            let n_steps = 200; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+            let n_steps = 180; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
                 ("max_jac".to_string(), None),
                 ("maxDampIter".to_string(), None),
                 ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
+                ("adaptive".to_string(), None),// None  Some(vec![1.0, 10.0])
+                ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
             ]));
             let scheme = "forward".to_string();
             let method = "Dense".to_string(); // or  "Dense"
@@ -116,9 +120,9 @@ mod tests {
             let mut nr = NRBDVPd::new(
                 eq_system,
                 initial_guess,
-                values,
+                values.clone(),
                 arg,
-                BorderConditions,
+                BorderConditions.clone(),
                 t0,
                 t_end,
                 n_steps,
@@ -135,7 +139,7 @@ mod tests {
 
             println!("solving system");
             nr.solve();
-            let solution = nr.get_result().unwrap();
+            let solution = nr.get_result().unwrap().clone();
             let y_numer = solution.column(0);
             let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
 
@@ -163,6 +167,9 @@ mod tests {
             assert!(norm < 1e-2, "norm = {}", norm);
             assert!(relativ_residual < 1e-1, "norm = {}", norm);
             println!("norm = {}", norm);
+            let extract_unknown = extract_unknown_variables( solution.clone().transpose(), &BorderConditions.clone(), &values.clone() );
+            let solution_reconstructed = construct_full_solution( extract_unknown.clone(), &BorderConditions.clone(), &values.clone() ).transpose();
+           assert_eq!(solution, solution_reconstructed, "solution and reconstruction are not equal");
         }
     }
 }

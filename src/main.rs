@@ -21,7 +21,7 @@ pub mod Utils;
 pub mod somelinalg;
 
 fn main() {
-    let example = 19;
+    let example = 18;
     match example {
         0 => {
             // FUNCTION OF MULTIPLE VARIABLES
@@ -879,7 +879,7 @@ fn main() {
             y(x)=exp(-x^2/a)
             .
             */
-            let ne = NonlinEquation::TwoPointBVP; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
+            let ne = NonlinEquation:: Clairaut ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
 
             let eq_system = ne.setup();
 
@@ -889,13 +889,15 @@ fn main() {
             let max_iterations = 200;
             let t0 = ne.span(None, None).0;
             let t_end = ne.span(None, None).1;
-            let n_steps = 10; //
+            let n_steps = 30; //
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
+                ("max_jac".to_string(), Some(vec![ 100.0])),
+                ("maxDampIter".to_string(),Some(vec![ 100.0])),
                 ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
+                ("adaptive".to_string(),  Some(vec![1.0, 5.0])),
+              ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
+
             ]));
             let scheme = "forward".to_string();
             let method = "Sparse".to_string(); // or  "Dense"
@@ -939,7 +941,7 @@ fn main() {
 
             nr.plot_result();
             //compare with exact solution
-            let y_exact = ne.exact_solution(None, None, Some(n_steps));
+            let y_exact = ne.exact_solution(None, None, Some(y_numer.len()));
             let n = &y_exact.len();
             // println!("numerical result = {:?}",  y_numer);
             println!("\n \n y exact{:?}, {}", &y_exact, &y_exact.len());
@@ -987,8 +989,8 @@ fn main() {
                         "adaptive".to_string(),
                         Some(vec![1.0, 5.0]), //  None
                     ),
-                    //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 1.4])),
+                    //  ("pearson".to_string(), Some(vec![0.2] ) ) (""two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
+                    ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
                 ])),
                 "Frozen" => Some(HashMap::from([(
                     "every_m".to_string(),

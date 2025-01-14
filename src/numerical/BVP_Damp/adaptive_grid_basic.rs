@@ -289,11 +289,12 @@ pub fn grcar_smooke_grid_refinement(
 
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.clone().row_iter().enumerate() {
-     
+        println!("y, {:}", y);
         let threshold = 1e-4;
         let y_j_max = y.max();
         let y_j_min = y.min();
         let delta = d * (y_j_max - y_j_min);
+        info!("delta {} for component j: {}", delta, j);
         let mut list_dy_dx_i = Vec::new();
 
         for i in 0..x_mesh.len() - 1 {
@@ -312,9 +313,9 @@ pub fn grcar_smooke_grid_refinement(
             .cloned()
             .max_by(|a, b| a.total_cmp(b))
             .unwrap();
-        let derivative_range = (list_dy_dx_i_max - list_dy_dx_i_min).abs();
+        let derivative_range = (list_dy_dx_i_max - list_dy_dx_i_min);
         let gamma = g * derivative_range;
-
+        info!("gamma {} for component j: {}", gamma, j);
         for i in 0..x_mesh.len() {
             mark.insert(i, 0); // default value 0 - no point inserted
   
@@ -332,13 +333,14 @@ pub fn grcar_smooke_grid_refinement(
 
                 let both_ys_are_not_too_small = (y[i].abs() >threshold )&(y[i+1].abs() >threshold );
                 // eq 1, eq 2
-                if (tau_i > delta || eta_i > gamma)&&both_ys_are_not_too_small {
-                  
+              //  info!("tau_i {}, criterion 1 {},  eta_i {}, criterion 2 {}, ctriterion 3 {}", tau_i, tau_i > delta && both_ys_are_not_too_small ,  eta_i, eta_i > gamma && both_ys_are_not_too_small,  both_ys_are_not_too_small);
+                if (tau_i > delta && both_ys_are_not_too_small) || (eta_i > gamma && both_ys_are_not_too_small) {
+                   
                     // how many new points should be added
-                    let N = (tau_i / delta) as i32;
-               
+                    let N =if (tau_i / delta) as i32 >=1 {(tau_i / delta) as i32} else {1};
+                    info!(" conditions vaiolation at index {}, N = {}", i, N);
                     mark.insert(i, N); // mark[i] = how many points to insert in i-th position
-       
+        
                 }
                 // if not mark element remains 0
 
@@ -347,7 +349,7 @@ pub fn grcar_smooke_grid_refinement(
 
 
         } // for i in 0..x_mesh.len()
-           
+  //  info!("mark {:?}", mark);      
     // find keys corresponding to non-zero values in the HashMap
     let non_zero_keys: Vec<usize> = mark
             .iter()

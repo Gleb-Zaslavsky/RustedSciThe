@@ -808,27 +808,48 @@ pub fn jacobian_generate_SparseColMat(
         } else {
             1.0 // its nothing
         };
+        // to have discretization of n_steps you actually need n_steps+1 variables for each differentual equation,
+        // as ODE are of the first order, and one variable needed to implement the boundary condition (last or first variable)
+        //
+        //
 
-        let n_steps = n_steps + 1;
         // if there are no mesh in the explicit form we construct evenly distributed H and list of times
-        let (H, T_list) = if mesh.clone().is_none() {
+        let (H, T_list, n_steps) = if mesh.clone().is_none() {
+            let n_steps = n_steps+1;
+            info!("mesh is not defined, creating evenly distributed mesh");
             let H_: Expr = Expr::Const(h);
-            let H: Vec<Expr> = vec![H_; n_steps]; // H_0, H_1, H_2>
+            let H: Vec<Expr> = vec![H_; n_steps-1]; // number of intervals = n_steps -1
             let T_list: Vec<f64> = (0..n_steps)
                 .map(|i| t0 + (i as f64) * h)
                 .collect::<Vec<_>>();
-            (H, T_list)
+            assert_eq!(T_list.len()-1, H.len());
+            (H, T_list,  n_steps)
         } else {
-            (
-                mesh.clone()
-                    .unwrap()
-                    .iter()
-                    .map(|x| Expr::Const(*x))
-                    .collect(),
-                mesh.unwrap(),
-            )
+            let n_steps = mesh.clone().unwrap().len();
+            info!("mesh with n_steps = {} is defined directly", n_steps);
+            
+            let mesh = mesh.unwrap();
+            let mut H = Vec::new();
+            let mut h_vec = Vec::new();
+            for i in 0..n_steps - 1 {
+                let h = mesh[i + 1] - mesh[i];
+                h_vec.push(h);
+                H.push( Expr::Const(h));
+            }
+
+            /* 
+           let H: Vec<Expr> = mesh.clone()//H
+            .unwrap()
+            .iter()
+            .map(|x| Expr::Const(*x))
+            .collect();
+        */
+           let  T_list =mesh;//T_list
+           assert_eq!(T_list.len()-1, H.len());
+         //  let n_steps = n_steps+1;
+          (H, T_list, n_steps)
         };
-        info!("creating discretization equations with n_steps = {}, H = {:?} ({}), T_list = {:?} ({})", n_steps, H, H.len(),T_list, T_list.len());
+        info!("creating discretization equations with n_steps = {}, H = {:?} \n ({}), \n T_list = {:?}, \n ({})", n_steps, H, H.len(),T_list, T_list.len());
 
         let mut discreditized_system: Vec<Vec<Expr>> = Vec::new();
         // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
@@ -1062,7 +1083,7 @@ pub fn jacobian_generate_SparseColMat(
         );
         info!("system discretized");
         let v = self.variable_string.clone();
-        println!(
+        info!(
             "VECTOR OF FUNCTIONS \n \n  {:?},  length: {} \n \n",
             &self.vector_of_functions,
             &self.vector_of_functions.len()
