@@ -23,7 +23,9 @@ pub struct BVP {
     pub max_iterations: usize, // maximum number of iterations
     // fields only for damped version of method
     pub rel_tolerance: Option<HashMap<String, f64>>, // absolute tolerance - hashmap of the var names and values of tolerance for them
+
     pub Bounds: Option<HashMap<String, (f64, f64)>>,
+    pub loglevel: Option<String>, //
     pub structure: Option<NRBVP>,
     pub structure_damp: Option<NRBDVPd>,
 }
@@ -48,6 +50,7 @@ impl BVP {
         // fields only for damped version of method
         rel_tolerance: Option<HashMap<String, f64>>, // absolute tolerance - hashmap of the var names and values of tolerance for them
         Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>, //
     ) -> BVP {
         let (structure, structure_damp, rel_tolerance, Bounds) =
             if strategy == "Frozen" || strategy == "Naive" {
@@ -68,6 +71,7 @@ impl BVP {
                     method.clone(),
                     tolerance,
                     max_iterations,
+
                 );
                 let structure = Some(nrbvp);
                 let structure_damp = None;
@@ -91,6 +95,7 @@ impl BVP {
                     rel_tolerance.clone(),
                     max_iterations,
                     Bounds.clone(),
+                    loglevel.clone(),
                 );
                 let structure = None;
                 let structure_damp = Some(nrbvpd);
@@ -117,6 +122,7 @@ impl BVP {
             max_iterations,
             rel_tolerance,
             Bounds,
+            loglevel,
             structure,
             structure_damp,
         }

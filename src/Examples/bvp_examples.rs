@@ -335,6 +335,7 @@ pub fn bvp_examples(example: usize) {
             Some(rel_tolerance),
             max_iterations,
             Some(Bounds),
+            None,
         );
 
         println!("solving system");
@@ -429,6 +430,7 @@ pub fn bvp_examples(example: usize) {
             Some(rel_tolerance),
             max_iterations,
             Some(Bounds),
+            None,
         );
 
         println!("solving system");
@@ -534,6 +536,7 @@ pub fn bvp_examples(example: usize) {
             max_iterations,
             Some(rel_tolerance),
             Some(Bounds),
+            None,
         );
 
         println!("solving system");

@@ -48,7 +48,7 @@ impl GridRefinement for PearsonGridRefinement {
 
     ) -> (Vec<f64>, DMatrix<f64>, usize) {
         let (new_grid, new_solution, number_of_nonzero_keys) =
-            pearson_grid_refinement(y_DMatrix, x_mesh, params[0]);
+            pearson_grid_refinement(y_DMatrix, x_mesh, params[0], params[1]);
         (new_grid, new_solution, number_of_nonzero_keys)
     }
 }

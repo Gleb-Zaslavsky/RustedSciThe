@@ -65,6 +65,7 @@ mod tests {
             Some(rel_tolerance),
             max_iterations,
             Some(Bounds),
+            None,
         );
 
         println!("solving system");
@@ -135,6 +136,7 @@ mod tests {
                 Some(rel_tolerance),
                 max_iterations,
                 Some(Bounds),
+                None,
             );
 
             println!("solving system");

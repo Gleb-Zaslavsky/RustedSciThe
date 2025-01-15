@@ -22,6 +22,7 @@ use crate::numerical::BVP_Damp::BVP_utils_damped::{
 use crate::Utils::logger::save_matrix_to_file;
 use crate::Utils::plots::plots;
 use simplelog::*;
+use simplelog::LevelFilter;
 use std::collections::HashMap;
 use std::fs::File;
 use std::time::Instant;
@@ -53,6 +54,7 @@ pub struct NRBVP {
     pub max_iterations: usize,                       // maximum number of iterations
     pub max_error: f64,
     pub Bounds: Option<HashMap<String, (f64, f64)>>, // hashmap where keys are variable names and values are tuples with lower and upper bounds.
+    pub loglevel: Option<String>,
     // thets all user defined  parameters
     //
     pub result: Option<DVector<f64>>, // result vector of calculation
@@ -96,6 +98,7 @@ impl NRBVP {
         max_iterations: usize, // max number of iterations
 
         Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
     ) -> NRBVP {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
         let y0 = Box::new(DVector::from_vec(vec![0.0, 0.0]));
@@ -138,6 +141,7 @@ impl NRBVP {
             max_iterations,
             max_error: 0.0,
             Bounds,
+            loglevel,
             result: None,
             x_mesh: DVector::from_vec(T_list),
             fun: boxed_fun,
@@ -158,6 +162,7 @@ impl NRBVP {
             number_of_refined_intervals: 0,
             bandwidth: (0,0),
             calc_statistics: Hashmap_statistics
+           
         }
     }
     /// Basic methods to set the equation system
@@ -813,8 +818,7 @@ impl NRBVP {
     //Newton-Raphson method
     // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn solver(&mut self) -> Option<DVector<f64>> {
-        // TODO! сравнить явный мэш с неявным
-        // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
+    
         self.eq_generate(None,None);
         let begin = Instant::now();
         let res = self.main_loop_damped();
@@ -827,17 +831,28 @@ impl NRBVP {
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
+        let loglevel =self.loglevel.clone();
+        let log_option = 
+        if let Some(level) = loglevel {
+             match level.as_str() {
+                "debug" => LevelFilter::Info,
+                "info" =>  LevelFilter::Info,
+                "warn" => LevelFilter::Warn,
+                "error" => LevelFilter::Error,
+                _ => panic!("loglevel must be debug, info, warn or error"),
+             }
+        } else {LevelFilter::Info};
         let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let name = format!("log_{}.txt", date_and_time);
         let logger_instance = CombinedLogger::init(vec![
             TermLogger::new(
-                LevelFilter::Info,
+                log_option,
                 Config::default(),
                 TerminalMode::Mixed,
                 ColorChoice::Auto,
             ),
             WriteLogger::new(
-                LevelFilter::Info,
+                log_option,
                 Config::default(),
                 File::create(name).unwrap(),
             ),

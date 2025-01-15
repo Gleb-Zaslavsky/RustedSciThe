@@ -21,7 +21,7 @@ pub mod Utils;
 pub mod somelinalg;
 
 fn main() {
-    let example = 18;
+    let example = 19;
     match example {
         0 => {
             // FUNCTION OF MULTIPLE VARIABLES
@@ -834,6 +834,7 @@ fn main() {
                 Some(rel_tolerance),
                 max_iterations,
                 Some(Bounds),
+                None,
             );
 
             println!("solving system");
@@ -879,7 +880,7 @@ fn main() {
             y(x)=exp(-x^2/a)
             .
             */
-            let ne = NonlinEquation::TwoPointBVP ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
+            let ne = NonlinEquation::ParachuteEquation  ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
 
             let eq_system = ne.setup();
 
@@ -896,7 +897,7 @@ fn main() {
                 ("maxDampIter".to_string(),Some(vec![ 100.0])),
                 ("DampFacor".to_string(), None),
                 ("adaptive".to_string(),  Some(vec![1.0, 5.0])),
-              ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
+              ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
 
             ]));
             let scheme = "forward".to_string();
@@ -930,6 +931,7 @@ fn main() {
                 Some(rel_tolerance),
                 max_iterations,
                 Some(Bounds),
+                None
             );
 
             println!("solving system");
@@ -1035,6 +1037,7 @@ fn main() {
                 max_iterations,
                 Some(rel_tolerance),
                 Some(Bounds),
+                None // Some("error".to_string()),Some("warn".to_string()),
             );
 
             println!("solving system");

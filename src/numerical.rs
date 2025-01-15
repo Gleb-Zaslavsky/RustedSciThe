@@ -355,7 +355,7 @@ The code mostly inspired by sources listed below:
 ///             initial_guess,
 ///             values,
 ///             arg,
-///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds));
+///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds),None);
 
 ///        println!("solving system");
 ///        #[allow(unused_variables)]
@@ -419,7 +419,7 @@ The code mostly inspired by sources listed below:
 ///      values,
 ///      arg,
 ///      BorderConditions, t0, t_end, n_steps, scheme, strategy, strategy_params, linear_sys_method, method, tolerance,
-///        max_iterations,  Some(rel_tolerance),Some(Bounds));
+///        max_iterations,  Some(rel_tolerance),Some(Bounds), None);
 ///
 /// println!("solving system");
 /// nr.solve();
