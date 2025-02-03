@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod tests {
 
+
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
     use crate::numerical::Examples_and_utils::NonlinEquation;
-    use crate::numerical::BVP_Damp::BVP_utils::{
-        construct_full_solution, extract_unknown_variables};
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
 
@@ -72,7 +71,7 @@ mod tests {
         nr.solve();
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
-        assert_eq!(n, n_steps+1);
+        assert_eq!(n, n_steps + 1);
         // println!("result = {:?}", solution);
         // nr.plot_result();
     }
@@ -102,7 +101,7 @@ mod tests {
                 ("max_jac".to_string(), None),
                 ("maxDampIter".to_string(), None),
                 ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),// None  Some(vec![1.0, 10.0])
+                ("adaptive".to_string(), None), // None  Some(vec![1.0, 10.0])
                 ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
             ]));
             let scheme = "forward".to_string();
@@ -169,9 +168,9 @@ mod tests {
             assert!(norm < 1e-2, "norm = {}", norm);
             assert!(relativ_residual < 1e-1, "norm = {}", norm);
             println!("norm = {}", norm);
-         //   let extract_unknown = extract_unknown_variables( solution.clone().transpose(), &BorderConditions.clone(), &values.clone() );
-         //   let solution_reconstructed = construct_full_solution( extract_unknown.clone(), &BorderConditions.clone(), &values.clone() ).transpose();
-        //   assert_eq!(solution, solution_reconstructed, "solution and reconstruction are not equal");
+            //   let extract_unknown = extract_unknown_variables( solution.clone().transpose(), &BorderConditions.clone(), &values.clone() );
+            //   let solution_reconstructed = construct_full_solution( extract_unknown.clone(), &BorderConditions.clone(), &values.clone() ).transpose();
+            //   assert_eq!(solution, solution_reconstructed, "solution and reconstruction are not equal");
         }
     }
 }

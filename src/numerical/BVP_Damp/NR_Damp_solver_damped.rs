@@ -9,30 +9,31 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
 
-use nalgebra::{DMatrix, DVector};
-use tabled::{builder::Builder, settings::Style};
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac,  MatrixType, VectorType, Vectors_type_casting,
+    Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
-use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, task_check_mem, construct_full_solution, extract_unknown_variables};
+use crate::numerical::BVP_Damp::BVP_utils::{
+    construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
+};
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
     jac_recalc,
 };
 use crate::Utils::logger::save_matrix_to_file;
 use crate::Utils::plots::plots;
-use simplelog::*;
+use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
+use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::time::Instant;
+use tabled::{builder::Builder, settings::Style};
 
 use crate::numerical::BVP_Damp::grid_api::{new_grid, GridRefinementMethod};
 
-use log::{info,warn,error};
+use log::{error, info, warn};
 
 use super::BVP_utils::checkmem;
-
 
 pub struct NRBVP {
     pub eq_system: Vec<Expr>, // the system of ODEs defined in the symbolic format
@@ -70,12 +71,13 @@ pub struct NRBVP {
     bounds_vec: Vec<(f64, f64)>, //vector of bounds for each of the unkown variables (discretized vector)
     rel_tolerance_vec: Vec<f64>, // vector of relative tolerance for each of the unkown variables
     variable_string: Vec<String>, // vector of indexed variable names
+    #[allow(dead_code)]
     adaptive: bool,              // flag indicating if adaptive grid should be used
     new_grid_enabled: bool,      //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
-    bandwidth: (usize,usize), //bandwidth
-    calc_statistics:HashMap<String,usize>
+    bandwidth: (usize, usize),   //bandwidth
+    calc_statistics: HashMap<String, usize>,
 }
 
 impl NRBVP {
@@ -107,10 +109,10 @@ impl NRBVP {
             Box::new(|_x, y: &DVector<f64>| y.clone());
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun0));
         let h = (t_end - t0) / n_steps as f64;
-        let T_list: Vec<f64> = (0..n_steps+1)
+        let T_list: Vec<f64> = (0..n_steps + 1)
             .map(|i| t0 + (i as f64) * h)
             .collect::<Vec<_>>();
-      
+
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         let new_grid_enabled_: bool = if strategy_params.clone().unwrap().get("adaptive").is_some()
         {
@@ -119,9 +121,13 @@ impl NRBVP {
         } else {
             false
         };
-        let vec_of_tuples = vec![("number of iterations".to_string(), 0), ("number of solving linear systems".to_string(), 0),
-        ("number of jacobians recalculations".to_string(), 0), ("number of grid refinements".to_string(), 0) ];
-        let Hashmap_statistics:HashMap<String,usize> = vec_of_tuples.into_iter().collect();
+        let vec_of_tuples = vec![
+            ("number of iterations".to_string(), 0),
+            ("number of solving linear systems".to_string(), 0),
+            ("number of jacobians recalculations".to_string(), 0),
+            ("number of grid refinements".to_string(), 0),
+        ];
+        let Hashmap_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
         NRBVP {
             eq_system,
             initial_guess: initial_guess.clone(),
@@ -160,9 +166,8 @@ impl NRBVP {
             new_grid_enabled: new_grid_enabled_,
             grid_refinemens: 0,
             number_of_refined_intervals: 0,
-            bandwidth: (0,0),
-            calc_statistics: Hashmap_statistics
-           
+            bandwidth: (0, 0),
+            calc_statistics: Hashmap_statistics,
         }
     }
     /// Basic methods to set the equation system
@@ -170,10 +175,12 @@ impl NRBVP {
     // check if user specified task is correct
     pub fn task_check(&self) {
         assert_eq!(
-            self.initial_guess.len()  ,//grid length =  number of unknowns 
+            self.initial_guess.len(), //grid length =  number of unknowns
             self.n_steps * self.values.len(),
-            "lenght of initial guess {} should be equal to n_steps*values, {}, {} ", 
-            self.initial_guess.len(), self.x_mesh.len(), self.values.len()
+            "lenght of initial guess {} should be equal to n_steps*values, {}, {} ",
+            self.initial_guess.len(),
+            self.x_mesh.len(),
+            self.values.len()
         );
         assert!(self.t_end > self.t0, "t_end must be greater than t0");
         assert!(self.n_steps > 1, "n_steps must be greater than 1");
@@ -221,15 +228,17 @@ impl NRBVP {
             "Bounds must be specified for each value"
         );
         // check if initial guess values are inside bunds defined for certain values
-        if self.result.is_none() { // check of does the guess fits into bounds must be enable only at the beginning (at result == None)
-        // we will find ourselves in this place again when the command to recalculate the lattice is given, and the result of the previous 
-        //iteration may go beyond the boundaries and we must make sure that this fact does not stop the program, therefore
-        if_initial_guess_inside_bounds(&self.initial_guess, &self.Bounds, self.values.clone());  }
+        if self.result.is_none() {
+            // check of does the guess fits into bounds must be enable only at the beginning (at result == None)
+            // we will find ourselves in this place again when the command to recalculate the lattice is given, and the result of the previous
+            //iteration may go beyond the boundaries and we must make sure that this fact does not stop the program, therefore
+            if_initial_guess_inside_bounds(&self.initial_guess, &self.Bounds, self.values.clone());
+        }
         assert!(
             !self.rel_tolerance.is_none(),
             "rel_tolerance must be specified for each value"
         );
-    
+
         let required_keys = vec!["max_jac", "maxDampIter", "DampFacor", "adaptive"];
         for key in required_keys {
             assert!(
@@ -281,7 +290,7 @@ impl NRBVP {
     }
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>, bandwidth: Option<(usize, usize)>) {
-        // check if memory is enough for    
+        // check if memory is enough for
         task_check_mem(self.n_steps, self.values.len(), &self.method);
         // check if user specified task is correct
         self.task_check();
@@ -299,43 +308,36 @@ impl NRBVP {
             (None, None, mesh_)
         };
         let scheme = self.scheme.clone();
-    
-        
-                jacobian_instance.generate_BVP(
-                    self.eq_system.clone(),
-                    self.values.clone(),
-                    self.arg.clone(),
-                    self.t0.clone(),
-                    None,
-                    n_steps.clone(),
-                    h,
-                    mesh,
-                    self.BorderConditions.clone(),
-                    self.Bounds.clone(),
-                    self.rel_tolerance.clone(),
-                    scheme.clone(),
-                    self.method.clone(),
-                    bandwidth
-                );
 
-                //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-                let fun = jacobian_instance.residiual_function;
+        jacobian_instance.generate_BVP(
+            self.eq_system.clone(),
+            self.values.clone(),
+            self.arg.clone(),
+            self.t0.clone(),
+            None,
+            n_steps.clone(),
+            h,
+            mesh,
+            self.BorderConditions.clone(),
+            self.Bounds.clone(),
+            self.rel_tolerance.clone(),
+            scheme.clone(),
+            self.method.clone(),
+            bandwidth,
+        );
 
-                let jac = jacobian_instance.jac_function;
+        //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
+        let fun = jacobian_instance.residiual_function;
 
-               
+        let jac = jacobian_instance.jac_function;
 
-                self.fun = fun;
-           
-                self.jac = jac;
-                self.bounds_vec = jacobian_instance.bounds.unwrap();
-                self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
-                self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth.unwrap();
-       
+        self.fun = fun;
 
-
-     
+        self.jac = jac;
+        self.bounds_vec = jacobian_instance.bounds.unwrap();
+        self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
+        self.variable_string = jacobian_instance.variable_string;
+        self.bandwidth = jacobian_instance.bandwidth.unwrap();
     } // end of method eq_generate
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
         self.p = p;
@@ -363,7 +365,10 @@ impl NRBVP {
             let inv_J_k = jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations);
             self.old_jac = Some(inv_J_k);
             self.m = 0;
-            *self.calc_statistics.entry("number of jacobians recalculations".to_string()).or_insert(0) += 1;
+            *self
+                .calc_statistics
+                .entry("number of jacobians recalculations".to_string())
+                .or_insert(0) += 1;
         }
     }
     ////////////////////////////////////////////////////////////////
@@ -383,7 +388,10 @@ impl NRBVP {
             elapsed_time(elapsed);
             self.old_jac = Some(jac_matrix);
             self.m = 0;
-            *self.calc_statistics.entry("number of jacobians recalculations".to_string()).or_insert(0) += 1;
+            *self
+                .calc_statistics
+                .entry("number of jacobians recalculations".to_string())
+                .or_insert(0) += 1;
         }
     }
 
@@ -433,7 +441,10 @@ impl NRBVP {
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
         let undamped_step_k_minus_1 = self.step(p, y_k_minus_1);
-        *self.calc_statistics.entry("number of solving linear systems".to_string()).or_insert(0) += 1;
+        *self
+            .calc_statistics
+            .entry("number of solving linear systems".to_string())
+            .or_insert(0) += 1;
         let y_k = y_k_minus_1 - &*undamped_step_k_minus_1;
         let fbound = bound_step(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
@@ -487,7 +498,10 @@ impl NRBVP {
         //   let fun = &self.fun;
         // calculate damped step
         let undamped_step_k = self.step(p, &*y_k);
-        *self.calc_statistics.entry("number of solving linear systems".to_string()).or_insert(0) += 1;
+        *self
+            .calc_statistics
+            .entry("number of solving linear systems".to_string())
+            .or_insert(0) += 1;
         //
         for mut k in 0..maxDampIter {
             if k > 1 {
@@ -505,11 +519,8 @@ impl NRBVP {
             let error = &undamped_step_k_plus_1.norm();
             self.error_old = *error;
             info!("\n \n L2 norm of undamped step = {}", error);
-            let convergence_cond_for_step = convergence_condition(
-                &*y_k_plus_1,
-                &self.abs_tolerance,
-                &self.rel_tolerance_vec,
-            );
+            let convergence_cond_for_step =
+                convergence_condition(&*y_k_plus_1, &self.abs_tolerance, &self.rel_tolerance_vec);
             let S_k_plus_1_temp = &undamped_step_k_plus_1.norm();
             // If the norm of S_k_plus_1 is less than the norm of S_k, then accept this
             // damping coefficient. Also accept it if this step would result in a
@@ -568,11 +579,11 @@ impl NRBVP {
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         let y: DMatrix<f64> = self.initial_guess.clone();
-      //  println!("new y = {} \n \n", &y);
+        //  println!("new y = {} \n \n", &y);
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
-        self. result = Some( y.clone()); // save into result in case the vary first iteration 
-        // with the current n_steps will go wrong and we shall need frid refinement
+        self.result = Some(y.clone()); // save into result in case the vary first iteration
+                                       // with the current n_steps will go wrong and we shall need frid refinement
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
@@ -587,7 +598,10 @@ impl NRBVP {
             self.recalc_jacobian();
             self.m += 1;
             i += 1; // increment the number of iterations
-            *self.calc_statistics.entry("number of iterations".to_string()).or_insert(0) += 1;
+            *self
+                .calc_statistics
+                .entry("number of iterations".to_string())
+                .or_insert(0) += 1;
             let (status, damped_step_result) = self.damped_step();
 
             if status == 0 {
@@ -605,18 +619,21 @@ impl NRBVP {
             else if status == 1 {
                 // status == 1 means convergence is reached, save the result
                 info!("\n \n Solution has converged, breaking the loop!");
-            
+
                 let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
                     y_k_plus_1
                 } else {
                     panic!(" \n \n y_k_plus_1 is None")
                 };
-               
+
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                // before refining in case it will go wrong
-                 self.result = result.clone();
-                 info!("\n \n solutioon found for the current grid {}", &self.result.clone().unwrap());
-                
+                                                                // before refining in case it will go wrong
+                self.result = result.clone();
+                info!(
+                    "\n \n solutioon found for the current grid {}",
+                    &self.result.clone().unwrap()
+                );
+
                 // if flag for new grid is up we must call adaptive grid refinement
                 if self.new_grid_enabled
                     && self
@@ -627,14 +644,14 @@ impl NRBVP {
                         .unwrap()
                         .clone()
                         .is_some()
-                {   info!("solving with new grid!");
+                {
+                    info!("solving with new grid!");
                     self.solve_with_new_grid()
                 } else {
                     // if adapive is None then we just return the result
                     info!("returning the result");
-                  
+
                     return result;
-                    
                 };
             //  self.max_error = error; // ???
             }
@@ -654,32 +671,32 @@ impl NRBVP {
                     nJacReeval += 1;
                 } else {
                     info!("\n \n Jacobian age {} =<1 \n \n", self.m);
-                  //  self.new_grid_enabled = true;
+                    //  self.new_grid_enabled = true;
                     break;
                 }
             } // status <0
 
             info!("\n \n end of iteration {} with jac age {} \n \n", i, self.m);
         }
- 
 
-        // all iterations, recalculations of Jacobian were unsuccessful 
+        // all iterations, recalculations of Jacobian were unsuccessful
         // only that can help - grid refinement
-        
+
         if self.new_grid_enabled
-        && self
-            .strategy_params
-            .clone()
-            .unwrap()
-            .get("adaptive")
-            .unwrap()
-            .clone()
-            .is_some()
-    {   info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
-        self.solve_with_new_grid()
-    }
-    
-    None
+            && self
+                .strategy_params
+                .clone()
+                .unwrap()
+                .get("adaptive")
+                .unwrap()
+                .clone()
+                .is_some()
+        {
+            info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
+            self.solve_with_new_grid()
+        }
+
+        None
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                      functions to create a new grid and recalculate with new grid
@@ -720,8 +737,7 @@ impl NRBVP {
         if max_grid_refinenents <= self.grid_refinemens {
             info!(
                 "maximum number of grid refinements {} reached  {} ",
-                max_grid_refinenents,
-                self.grid_refinemens
+                max_grid_refinenents, self.grid_refinemens
             );
             res = false;
         }
@@ -761,7 +777,6 @@ impl NRBVP {
             let method = GridRefinementMethod::GrcarSmooke;
             (res, method)
         } else if params.contains_key("two_point") {
-      
             let res = params.get("two_point").clone().unwrap().clone().unwrap();
             if res.len() != 3 {
                 panic!("this strategy requires 3 parameters")
@@ -769,19 +784,34 @@ impl NRBVP {
 
             let method = GridRefinementMethod::TwoPoint;
             (res, method)
-        }else {
+        } else {
             panic!("parameters for adaptive strategy not found")
         };
         //create a new mesh with a chosen algorithm a
         // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
         // if number_of_nonzero_keys==0 it means that no need to create a new grid
 
-        let y_DMatrix =  construct_full_solution(y_DMatrix, &self.BorderConditions,&self.variable_string, &self.values);
-        let (new_mesh, initial_guess, number_of_nonzero_keys) =
-            new_grid(method, &y_DMatrix, &self.x_mesh, vector_of_params.clone(), self.abs_tolerance);
+        let y_DMatrix = construct_full_solution(
+            y_DMatrix,
+            &self.BorderConditions,
+            &self.variable_string,
+            &self.values,
+        );
+        let (new_mesh, initial_guess, number_of_nonzero_keys) = new_grid(
+            method,
+            &y_DMatrix,
+            &self.x_mesh,
+            vector_of_params.clone(),
+            self.abs_tolerance,
+        );
 
-     //   info!("\n \n new grid enabled! \n \n");
-       let initial_guess = extract_unknown_variables(initial_guess, &self.BorderConditions,&self.variable_string, &self.values);
+        //   info!("\n \n new grid enabled! \n \n");
+        let initial_guess = extract_unknown_variables(
+            initial_guess,
+            &self.BorderConditions,
+            &self.variable_string,
+            &self.values,
+        );
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -794,18 +824,21 @@ impl NRBVP {
         //  let new_mesh = binding.data.as_vec();
 
         self.jac_recalc = true; // to avoid using old (low dimension) jacobian with new data
-        self.n_steps = new_mesh.len()-1;
+        self.n_steps = new_mesh.len() - 1;
         self.initial_guess = initial_guess;
         self.grid_refinemens += 1;
         info!(
             "\n \n grid refinement counter = {} \n \n",
             self.grid_refinemens
         );
-        *self.calc_statistics.entry("number of grid refinements".to_string()).or_insert(0) += 1;
+        *self
+            .calc_statistics
+            .entry("number of grid refinements".to_string())
+            .or_insert(0) += 1;
         // here we go again... running the code wtih new grid
-        self.eq_generate(Some(new_mesh.clone()), Some(self.bandwidth) );
-                                                        //               bandwidth doesnt change with gerid recalc so we pass into function
-                                                        // previously calculated  bandwidth to avoid O(N^2) calculation of bandwidth 
+        self.eq_generate(Some(new_mesh.clone()), Some(self.bandwidth));
+        //               bandwidth doesnt change with gerid recalc so we pass into function
+        // previously calculated  bandwidth to avoid O(N^2) calculation of bandwidth
         self.we_need_refinement();
 
         self.main_loop_damped();
@@ -818,30 +851,31 @@ impl NRBVP {
     //Newton-Raphson method
     // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn solver(&mut self) -> Option<DVector<f64>> {
-    
-        self.eq_generate(None,None);
+        self.eq_generate(None, None);
         let begin = Instant::now();
         let res = self.main_loop_damped();
         let end = begin.elapsed();
         elapsed_time(end);
         let time = end.as_secs_f64() as usize;
-        self.calc_statistics.insert("time elapsed, s".to_string(), time);
+        self.calc_statistics
+            .insert("time elapsed, s".to_string(), time);
         self.calc_statistics();
         res
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        let loglevel =self.loglevel.clone();
-        let log_option = 
-        if let Some(level) = loglevel {
-             match level.as_str() {
+        let loglevel = self.loglevel.clone();
+        let log_option = if let Some(level) = loglevel {
+            match level.as_str() {
                 "debug" => LevelFilter::Info,
-                "info" =>  LevelFilter::Info,
+                "info" => LevelFilter::Info,
                 "warn" => LevelFilter::Warn,
                 "error" => LevelFilter::Error,
                 _ => panic!("loglevel must be debug, info, warn or error"),
-             }
-        } else {LevelFilter::Info};
+            }
+        } else {
+            LevelFilter::Info
+        };
         let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let name = format!("log_{}.txt", date_and_time);
         let logger_instance = CombinedLogger::init(vec![
@@ -851,13 +885,9 @@ impl NRBVP {
                 TerminalMode::Mixed,
                 ColorChoice::Auto,
             ),
-            WriteLogger::new(
-                log_option,
-                Config::default(),
-                File::create(name).unwrap(),
-            ),
+            WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
         ]);
-     
+
         match logger_instance {
             Ok(()) => {
                 let res = self.solver();
@@ -883,7 +913,6 @@ impl NRBVP {
         let result_DMatrix = self.get_result().unwrap();
         let _ = save_matrix_to_file(&result_DMatrix, &self.values, &name);
     }
-   
 
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();
@@ -892,15 +921,18 @@ impl NRBVP {
         let matrix_of_results: DMatrix<f64> =
             DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
 
+        let full_results = construct_full_solution(
+            matrix_of_results,
+            &self.BorderConditions,
+            &self.variable_string,
+            &self.values.clone(),
+        );
 
-        let full_results = construct_full_solution(matrix_of_results, &self.BorderConditions,&self.variable_string, &self.values.clone());
-                   
         let permutted_results = interchange_columns(
             full_results.transpose(),
             self.values.clone(),
             self.variable_string.clone(),
         );
-     
 
         Some(permutted_results)
     }
@@ -911,18 +943,24 @@ impl NRBVP {
         let vector_of_results = self.result.clone().unwrap().clone();
         let matrix_of_results: DMatrix<f64> =
             DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
-     
+
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }
-       
-        let full_results = construct_full_solution(matrix_of_results, &self.BorderConditions,&self.variable_string, &self.values.clone()).transpose();
+
+        let full_results = construct_full_solution(
+            matrix_of_results,
+            &self.BorderConditions,
+            &self.variable_string,
+            &self.values.clone(),
+        )
+        .transpose();
         let permutted_results = interchange_columns(
             full_results.transpose(),
             self.values.clone(),
             self.variable_string.clone(),
         );
-     
+
         info!(
             "matrix of results has shape {:?}",
             permutted_results.shape()
@@ -941,18 +979,22 @@ impl NRBVP {
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         if let Some(jac) = &self.old_jac {
-        let jac_shape = self.old_jac.as_ref().unwrap().shape();
-        let matrix_weight = checkmem(&**jac); 
-        stats.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
-        stats.insert("number of jacobian elements".to_string(), jac_shape.0*jac_shape.1);
-    }
+            let jac_shape = self.old_jac.as_ref().unwrap().shape();
+            let matrix_weight = checkmem(&**jac);
+            stats.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
+            stats.insert(
+                "number of jacobian elements".to_string(),
+                jac_shape.0 * jac_shape.1,
+            );
+        }
         stats.insert("length of y vector".to_string(), self.y.len() as usize);
-        stats.insert("number of grid points".to_string(), self.x_mesh.len() as usize);
+        stats.insert(
+            "number of grid points".to_string(),
+            self.x_mesh.len() as usize,
+        );
         let mut table = Builder::from(stats).build();
         table.with(Style::modern_rounded());
         info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
-        
-
     }
 }
 

@@ -2,8 +2,7 @@
 #![allow(non_camel_case_types)]
 use nalgebra::{DMatrix, DVector};
 use rand::Rng;
-use rayon::prelude::*; //parallel processing library
-
+//use rayon::prelude::*; //parallel processing library
 
 ///////////////////////////////////////////////
 ///  A COLLECTION OF SOLVERS FOR BANDED LINEAR EQUATIONS
@@ -11,6 +10,7 @@ use rayon::prelude::*; //parallel processing library
 ///           LU decomposition
 ////////////////////////////////////////////////
 // basic easiest solver for LU decomposition: no banded structure, no pivoting
+#[allow(dead_code)]
 fn lu_decomposition(a: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
     let n = a.nrows();
     let mut l = DMatrix::zeros(n, n);
@@ -41,6 +41,7 @@ fn lu_decomposition(a: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
     (l, u)
 }
 // slightlu different version of easiest solver for LU decomposition: no banded structure, no pivoting
+#[allow(dead_code)]
 fn lu_decomposition2(A: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
     let n = A.nrows();
     let mut L = DMatrix::zeros(n, n);
@@ -60,6 +61,7 @@ fn lu_decomposition2(A: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
 }
 
 //CHECK!
+#[allow(dead_code)]
 fn banded_lu_decomposition(a: &DMatrix<f64>, kl: usize, ku: usize) -> (DMatrix<f64>, DMatrix<f64>) {
     let n = a.nrows();
     let mut l = DMatrix::zeros(n, kl + 1);
@@ -94,6 +96,7 @@ fn banded_lu_decomposition(a: &DMatrix<f64>, kl: usize, ku: usize) -> (DMatrix<f
     (l, u)
 }
 // easy solver for LU decomposition: no pivoting, but band structure has been taken into account
+#[allow(dead_code)]
 fn banded_lu_decomposition_no_pivoting(
     A: &DMatrix<f64>,
     kl: usize,
@@ -126,6 +129,7 @@ fn banded_lu_decomposition_no_pivoting(
     (L, U)
 }
 // more complex solver for LU decomposition:  pivoting + band structure has been taken into account
+#[allow(dead_code)]
 fn banded_lu_decomposition_with_pivoting(
     A: &DMatrix<f64>,
     kl: usize,
@@ -136,12 +140,9 @@ fn banded_lu_decomposition_with_pivoting(
     let mut U = A.clone();
     let mut P: Vec<usize> = (0..n).collect(); // Permutation vector
 
-
     for (k, _col_k) in A.column_iter().enumerate() {
-
-        
         let low_border = std::cmp::min(n, k + kl + 1);
-              //Find the pivot row by finding the maximum absolute value in the current row starting from the current column.
+        //Find the pivot row by finding the maximum absolute value in the current row starting from the current column.
         let piv = U.view_range(k..low_border, k).icamax() + k;
         //Extract the diagonal element diag from the pivot row and column.
         let diag = U[(piv, k)];
@@ -150,21 +151,20 @@ fn banded_lu_decomposition_with_pivoting(
             // No non-zero entries on this column.
             continue;
         }
-      //  println!("{} {}, {}", _col_k[piv], _col_k[k], _col_k);
+        //  println!("{} {}, {}", _col_k[piv], _col_k[k], _col_k);
 
         if piv != k {
-               
             //  p.append_permutation(i, piv);
             P.swap(k, piv);
-           // Do for all rows below pivot:
+            // Do for all rows below pivot:
             U.columns_range_mut(0..k).swap_rows(k, piv);
         }
 
-     //   println!("{} ", U);
+        //   println!("{} ", U);
         L[(k, k)] = 1.0;
         for i in k + 1..low_border {
             L[(i, k)] = U[(i, k)] / U[(k, k)];
-           // U[(i, k)]=0.0;
+            // U[(i, k)]=0.0;
             let border = std::cmp::min(n, k + ku + 1);
             for j in k..border {
                 U[(i, j)] = U[(i, j)] - L[(i, k)] * U[(k, j)];
@@ -172,10 +172,10 @@ fn banded_lu_decomposition_with_pivoting(
         }
     }
 
-
     (L, U, P)
 }
 // even more complex solver for LU decomposition:  pivoting + band structure + tiny element
+#[allow(dead_code)]
 fn banded_lu_decomposition_with_pivoting_and_tiny(
     A: &DMatrix<f64>,
     kl: usize,
@@ -223,6 +223,7 @@ fn banded_lu_decomposition_with_pivoting_and_tiny(
 //             LINEAR SYSTEM SOLUTION
 ////////////////////////////////
 // easiest solver of linear system: no banded structure, no pivoting
+#[allow(dead_code)]
 fn solve_lu(l: &DMatrix<f64>, u: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
     let n = l.nrows();
     let mut y = DVector::zeros(n);
@@ -249,12 +250,13 @@ fn solve_lu(l: &DMatrix<f64>, u: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64
 }
 
 // solver for solving a linear system for given L, U matrices, bandwidth and permutation
+#[allow(dead_code)]
 fn banded_solve_lu(
     l: &DMatrix<f64>,
     u: &DMatrix<f64>,
     b: &DVector<f64>,
-    kl: usize,
-    ku: usize,
+    _kl: usize,
+    _ku: usize,
     P: Vec<usize>,
 ) -> DVector<f64> {
     let n = b.len();
@@ -266,7 +268,7 @@ fn banded_solve_lu(
     for i in 0..n {
         Pb[i] = b[P[i]];
     }
- //   let lower_border = |i: usize| std::cmp::max(0, i as isize - kl as isize) as usize;
+    //   let lower_border = |i: usize| std::cmp::max(0, i as isize - kl as isize) as usize;
     // Forward substitution Ly = Pb
     for i in 0..n {
         y[i] = Pb[i];
@@ -274,7 +276,7 @@ fn banded_solve_lu(
             y[i] -= l[(i, j)] * y[j];
         }
     }
-   // let upper_border = |i: usize| std::cmp::min(n, i + kl + 1);
+    // let upper_border = |i: usize| std::cmp::min(n, i + kl + 1);
     // Backward substitution Ux = y
     for i in (0..n).rev() {
         x[i] = y[i];
@@ -291,6 +293,7 @@ fn banded_solve_lu(
 /// MISC
 /// //////////////////////////////////////////////
 /// finds the bandwidth of a matrix
+#[allow(dead_code)]
 fn find_bandwidths(A: &DMatrix<f64>) -> (usize, usize) {
     let n = A.nrows();
     let mut kl = 0; // Number of subdiagonals
@@ -319,6 +322,7 @@ fn find_bandwidths(A: &DMatrix<f64>) -> (usize, usize) {
 
 // for testng purposes function generate a banded matrix with random values. Function takes the size of the matrix,
 //the number of subdiagonals and the number of superdiagonals
+#[allow(dead_code)]
 fn generate_banded_matrix(n: usize, kl: usize, ku: usize) -> DMatrix<f64> {
     let mut rng = rand::thread_rng();
     let mut A = DMatrix::zeros(n, n);
@@ -331,6 +335,7 @@ fn generate_banded_matrix(n: usize, kl: usize, ku: usize) -> DMatrix<f64> {
 
     A
 }
+#[allow(dead_code)]
 fn how_many_zeros(matrix: &DMatrix<f64>) -> (usize, f64) {
     let (nrows, ncols) = matrix.shape();
     let mut count = 0;
@@ -347,6 +352,7 @@ fn how_many_zeros(matrix: &DMatrix<f64>) -> (usize, f64) {
     (count, proc_of_zero)
 }
 // how many columns and rows are filled with zeros
+#[allow(dead_code)]
 fn count_zeros(matrix: &DMatrix<f64>) -> (usize, usize) {
     let mut row_zeros = 0;
     let mut col_zeros = 0;
@@ -434,8 +440,7 @@ mod tests {
         ];
         let a = DMatrix::from_row_slice(n, n, &data);
         let b = DVector::from_iterator(n, (0..n).map(|i| i as f64));
-        let (l, u, p) = banded_lu_decomposition_with_pivoting(&a, kl, ku);
-       
+        let (l, u, _p) = banded_lu_decomposition_with_pivoting(&a, kl, ku);
 
         let assertion = &l * &u - &a;
         for num in assertion.iter() {
@@ -475,4 +480,3 @@ mod tests {
         assert_eq!(ku, 5);
     }
 }
-

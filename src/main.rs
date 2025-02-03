@@ -2,14 +2,14 @@
 //MIT License
 #![allow(non_snake_case)]
 use std::collections::HashMap;
-pub mod symbolic;
 pub mod Examples;
+pub mod symbolic;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 pub mod numerical;
-use crate::numerical::BVP_api::BVP;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
+use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
 use crate::numerical::NR_for_ODE::NRODE;
 use crate::numerical::ODE_api::ODEsolver;
@@ -880,7 +880,7 @@ fn main() {
             y(x)=exp(-x^2/a)
             .
             */
-            let ne = NonlinEquation::ParachuteEquation  ; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
+            let ne = NonlinEquation::ParachuteEquation; //  Clairaut   LaneEmden5  ParachuteEquation  TwoPointBVP
 
             let eq_system = ne.setup();
 
@@ -893,12 +893,11 @@ fn main() {
             let n_steps = 30; //
             let strategy = "Damped".to_string(); //
             let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), Some(vec![ 100.0])),
-                ("maxDampIter".to_string(),Some(vec![ 100.0])),
+                ("max_jac".to_string(), Some(vec![100.0])),
+                ("maxDampIter".to_string(), Some(vec![100.0])),
                 ("DampFacor".to_string(), None),
-                ("adaptive".to_string(),  Some(vec![1.0, 5.0])),
-              ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
-
+                ("adaptive".to_string(), Some(vec![1.0, 5.0])),
+                ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])), // grcar_smooke
             ]));
             let scheme = "forward".to_string();
             let method = "Sparse".to_string(); // or  "Dense"
@@ -931,7 +930,7 @@ fn main() {
                 Some(rel_tolerance),
                 max_iterations,
                 Some(Bounds),
-                None
+                None,
             );
 
             println!("solving system");
@@ -1037,7 +1036,7 @@ fn main() {
                 max_iterations,
                 Some(rel_tolerance),
                 Some(Bounds),
-                None // Some("error".to_string()),Some("warn".to_string()),
+                None, // Some("error".to_string()),Some("warn".to_string()),
             );
 
             println!("solving system");
@@ -1047,11 +1046,10 @@ fn main() {
 
             nr.plot_result();
             nr.save_to_file(None);
-           
         }
         /*
 
-        
+
         */
         _ => {
             println!("example not found");

@@ -7,7 +7,7 @@ use std::mem;
 /// the case of a banded matrix
 ///  non-parallel version
 /// faster than default lu() implementation by N/l, where N - is dimension of matrix ( nrows = ncols ), l - bandwidth
-/// 
+///
 
 /// Computes the LU decomposition with partial (row) pivoting of `matrix`.
 pub struct LU_nalgebra {
@@ -24,14 +24,16 @@ pub struct LU_nalgebra {
 }
 impl LU_nalgebra {
     pub fn new(matrix: DMatrix<f64>, bandwidth: Option<(usize, usize)>) -> LU_nalgebra {
-     
         let (nrows, ncols) = matrix.shape();
-   
-    
-        let (kl, ku) = if let Some((kl_, ku_)) = bandwidth { (kl_, ku_) } else { Self::find_bandwidths(&matrix) };
-     
+
+        let (kl, ku) = if let Some((kl_, ku_)) = bandwidth {
+            (kl_, ku_)
+        } else {
+            Self::find_bandwidths(&matrix)
+        };
+
         println!("kl: {}, ku: {}", kl, ku);
-       
+
         LU_nalgebra {
             A: matrix.clone(),
             lu: matrix,
@@ -44,10 +46,13 @@ impl LU_nalgebra {
             y: DVector::zeros(nrows),
             band: DMatrix::zeros(nrows, ncols),
         }
-       
     }
     pub fn new_matrix(&mut self, matrix: DMatrix<f64>, bandwidth: Option<(usize, usize)>) {
-        let (kl, ku) = if let Some((kl_, ku_)) = bandwidth { (kl_, ku_) } else { Self::find_bandwidths(&matrix) };
+        let (kl, ku) = if let Some((kl_, ku_)) = bandwidth {
+            (kl_, ku_)
+        } else {
+            Self::find_bandwidths(&matrix)
+        };
         self.kl = kl;
         self.ku = ku;
         self.A = matrix.clone();
@@ -58,9 +63,6 @@ impl LU_nalgebra {
     /// below it using the pivot element as a scaling factor. This process is repeated for all columns. The resulting matrix is stored in `lu`
     ///  and the permutation vector is stored in `p`.
     pub fn LU(&mut self) {
-
-        
-    
         let kl = self.kl.clone();
         let ku = self.ku.clone();
         let mut matrix = &mut self.A.clone();
@@ -69,14 +71,13 @@ impl LU_nalgebra {
         if !matrix.is_square() {
             panic!("Matrix must be square");
         }
-      
+
         // Create a permutation sequence p to represent the identity permutation.
         //  let mut p = PermutationSequence::identity(ncols);
         let mut p: Vec<usize> = (0..nrows).collect();
         // Start a loop that iterates over each column from 0 to the minimum number of rows and columns.
-     
+
         for i in 0..ncols {
-           
             let lower_border = std::cmp::min(ncols, i + kl + 1);
 
             //Find the pivot row by finding the maximum absolute value in the current row starting from the current column.
@@ -91,26 +92,20 @@ impl LU_nalgebra {
 
             //Check if the pivot row is different from the current row. If it is, append a permutation to the permutation sequence p to swap the
             // pivot row with the current row. Swap the pivot row with the current row in the matrix using
-            
+
             if piv != i {
-               
                 //  p.append_permutation(i, piv);
                 p.swap(i, piv);
                 matrix.columns_range_mut(0..i).swap_rows(i, piv);
                 Self::gauss_step_swap(&mut matrix, diag, i, piv, kl, ku, nrows);
             // Perform Gaussian elimination with swapping using the gauss_step_swap function.
-               
-                 
             } else {
                 //  If the pivot row is the same as the current row, perform Gaussian elimination without swapping using the gauss_step function.
-                
+
                 Self::gauss_step(&mut matrix, diag, i, kl, ku, nrows);
-               
             }
-           
         }
-       
-    
+
         self.lu = matrix.clone();
         self.p = p;
     }
@@ -126,7 +121,6 @@ impl LU_nalgebra {
         ku: usize,
         nrows: usize,
     ) {
-       
         // This line calculates the relative pivot row index by subtracting the current row index i from the pivot row index piv.
         let piv = piv - i;
         //creates a mutable view of the submatrix starting from row i and column i to the end of the matrix.
@@ -145,7 +139,7 @@ impl LU_nalgebra {
         let right_border = std::cmp::min(coeffs.nrows(), kl + 1);
 
         let mut coeffs = coeffs.rows_range_mut(1..right_border);
-      
+
         // multiplies all elements in coeffs by the inverse of the diagonal element inv_diag. This step calculates the multipliers for the Gaussian elimination.
         coeffs *= inv_diag;
         //splits the submatrix into two parts: pivot_row represents the first row (row i of the original matrix), and down represents the rest of the rows below
@@ -153,18 +147,15 @@ impl LU_nalgebra {
         let (mut pivot_row, mut down) = submat.rows_range_pair_mut(0, 1..right_border);
 
         // loop that iterates over each column in the pivot row.
-    
+
         for k in 0..pivot_row.ncols() {
-        
             //This line swaps the element at (k, k) in pivot_row with the element at (piv - 1, k) in down.
             mem::swap(&mut pivot_row[k], &mut down[(piv - 1, k)]);
             // performs an "axpy" operation on the corresponding column in down.
             down.column_mut(k) // The "axpy" operation is equivalent to down.column_mut(k) += -pivot_row[k] * coeffs.
                 // This step updates the elements in down based on the multipliers calculated earlier.
                 .axpy(-pivot_row[k], &coeffs, 1.0);
-       
         }
-
     }
 
     pub fn gauss_step(
@@ -175,13 +166,12 @@ impl LU_nalgebra {
         ku: usize,
         nrows: usize,
     ) {
-     
         // diag: The diagonal element at position (i, i) as an f64
         // Creates a mutable view of the submatrix starting from row i and column i to the end of the matrix.
         let lower_border = std::cmp::min(nrows, i + kl + 1);
         let right_border = std::cmp::min(nrows, i + ku + kl + 1);
         let mut submat = matrix.view_range_mut(i..lower_border, i..right_border); //
-                                                                      //  Calculates the inverse of the diagonal element.
+                                                                                  //  Calculates the inverse of the diagonal element.
         let inv_diag = 1.0 / diag;
         //Splits the submatrix into two parts: coeffs: The first column (column i of the original matrix) submat: The rest of the columns
         let (mut coeffs, mut submat) = submat.columns_range_pair_mut(0, 1..);
@@ -194,20 +184,16 @@ impl LU_nalgebra {
         let (pivot_row, mut down) = submat.rows_range_pair_mut(0, 1..right_border);
         //Starts a loop that iterates over each column in the pivot row
         for k in 0..pivot_row.ncols() {
-       
             down.column_mut(k) // Performs an "axpy" operation on the corresponding column in down.
                 .axpy(-pivot_row[k], &coeffs, 1.0); //
                                                     //"axpy" stands for "a * x plus y", where:
                                                     // a is -pivot_row[k] (negated value from the pivot row)
                                                     // x is coeffs (the multipliers calculated earlier)
                                                     // y is implicitly the column itself (modified in-place)
-                                                    
         }
     } // fn gauss_step
-    // more easy and faster LU decomposition solver
-   pub fn LU2(
-        &mut self
-    )  {
+      // more easy and faster LU decomposition solver
+    pub fn LU2(&mut self) {
         let kl = self.kl.clone();
         let ku = self.ku.clone();
         let A = self.A.clone();
@@ -215,13 +201,10 @@ impl LU_nalgebra {
         let mut L = DMatrix::zeros(n, n);
         let mut U = A.clone();
         let mut P: Vec<usize> = (0..n).collect(); // Permutation vector
-    
-    
+
         for (k, _col_k) in A.column_iter().enumerate() {
-    
-            
             let low_border = std::cmp::min(n, k + kl + 1);
-                  //Find the pivot row by finding the maximum absolute value in the current row starting from the current column.
+            //Find the pivot row by finding the maximum absolute value in the current row starting from the current column.
             let piv = U.view_range(k..low_border, k).icamax() + k;
             //Extract the diagonal element diag from the pivot row and column.
             let diag = U[(piv, k)];
@@ -230,29 +213,28 @@ impl LU_nalgebra {
                 // No non-zero entries on this column.
                 continue;
             }
-          //  println!("{} {}, {}", _col_k[piv], _col_k[k], _col_k);
-    
+            //  println!("{} {}, {}", _col_k[piv], _col_k[k], _col_k);
+
             if piv != k {
-                   
                 //  p.append_permutation(i, piv);
                 P.swap(k, piv);
-               // Do for all rows below pivot:
+                // Do for all rows below pivot:
                 U.columns_range_mut(0..k).swap_rows(k, piv);
             }
-    
-         //   println!("{} ", U);
+
+            //   println!("{} ", U);
             L[(k, k)] = 1.0;
             for i in k + 1..low_border {
                 L[(i, k)] = U[(i, k)] / U[(k, k)];
-               // U[(i, k)]=0.0;
+                // U[(i, k)]=0.0;
                 let border = std::cmp::min(n, k + ku + 1);
                 for j in k..border {
                     U[(i, j)] = U[(i, j)] - L[(i, k)] * U[(k, j)];
                 }
             }
         }
-                                        //unity matrix
-        let LU:DMatrix<f64> = &L + &U - DMatrix::from_diagonal_element(n, n, 1.0);
+        //unity matrix
+        let LU: DMatrix<f64> = &L + &U - DMatrix::from_diagonal_element(n, n, 1.0);
         self.lu = LU;
         self.u = U;
         self.l = L;
@@ -282,9 +264,9 @@ impl LU_nalgebra {
 
     pub fn solve_linear_system_easy(&mut self, b: &DVector<f64>) -> DVector<f64> {
         let P = self.p.clone();
-        let n = b.len();
-        let kl = self.kl;
-        let ku = self.ku;
+        let _n = b.len();
+        let _kl = self.kl;
+        let _ku = self.ku;
         let n = self.nrows;
         let l = self.l();
         let u = self.u();
@@ -297,7 +279,7 @@ impl LU_nalgebra {
         for i in 0..n {
             Pb[i] = b[P[i]];
         }
-     //   let lower_border = |i: usize| std::cmp::max(0, i as isize - kl as isize) as usize;
+        //   let lower_border = |i: usize| std::cmp::max(0, i as isize - kl as isize) as usize;
         // Forward substitution Ly = Pb
         for i in 0..n {
             y[i] = Pb[i];
@@ -305,7 +287,7 @@ impl LU_nalgebra {
                 y[i] -= l[(i, j)] * y[j];
             }
         }
-       // let upper_border = |i: usize| std::cmp::min(n, i + kl + 1);
+        // let upper_border = |i: usize| std::cmp::min(n, i + kl + 1);
         // Backward substitution Ux = y
         for i in (0..n).rev() {
             x[i] = y[i];
@@ -317,10 +299,10 @@ impl LU_nalgebra {
         self.y = x.clone();
         x
     }
-    pub fn solve (&self, b: &DVector<f64>) -> Option<DVector<f64>> {
+    pub fn solve(&self, b: &DVector<f64>) -> Option<DVector<f64>> {
         let mut res = b.clone_owned();
         let P = self.p.clone();
-       
+
         let n = b.len();
         let mut Pb = DVector::zeros(n);
         for i in 0..n {
@@ -335,11 +317,7 @@ impl LU_nalgebra {
         }
     }
 
-    
-    fn solve_mut(&self,  b: &mut DVector<f64>)-> bool {
-        
-
-     
+    fn solve_mut(&self, b: &mut DVector<f64>) -> bool {
         assert_eq!(
             self.lu.nrows(),
             b.nrows(),
@@ -349,14 +327,10 @@ impl LU_nalgebra {
             self.lu.is_square(),
             "LU solve: unable to solve a non-square system."
         );
-      
 
-      
-    
         let _ = self.lu.solve_lower_triangular_with_diag_mut(b, 1.0);
-     
+
         self.lu.solve_upper_triangular_mut(b)
-      
     }
     /*
     pub fn determinant(&self) -> T {
@@ -403,72 +377,70 @@ impl LU_nalgebra {
     pub fn extract_band(&mut self) {
         let matrix = &self.A;
         let (nrows, ncols) = matrix.shape();
-      //  println!("matrix shape: {}, {}", nrows, ncols);
+        //  println!("matrix shape: {}, {}", nrows, ncols);
         let mut subdiagonal_rows = 0;
         let mut superdiagonal_rows = 0;
         let mut band = Vec::new();
         let mut upper_diagonals = Vec::new();
         let mut lower_diagonals = Vec::new();
-   
-        for i in  0..nrows  {// iterating through diagonals
-            
-            let mut upper_diagonal:Vec<f64> = vec![0.0;nrows];
-            let mut lower_diagonal:Vec<f64> = vec![0.0;nrows];
-            let mut non_zero_element_upper_diagonal  = false;
-            let mut non_zero_element_under_diagonal  = false;
-          //  println!("i: {}", i);
-            if ncols as i32-i as i32 - 1 >0 { 
-               
-                for j in 0..ncols-i-1 {// main diagonal is the longest,the far we go - shorter diagonal we have 
-                     //  println!(" j: {}", i);
-                        if matrix[( j+i+1, j)].abs() > 0.0 { 
-                            non_zero_element_under_diagonal= true;
 
-                            lower_diagonal[j+i+1] = matrix[( j+i+1, j)];
-            
+        for i in 0..nrows {
+            // iterating through diagonals
 
-                        }
-                        if matrix[(j, j+i+1)].abs() > 0.0 { 
-                            non_zero_element_upper_diagonal= true;
-                            upper_diagonal[j] = matrix[(j, j+i+1)];
-                        }
-                           
-                }//for j in 0..ncols-i-2 {
-            }// if ncols
+            let mut upper_diagonal: Vec<f64> = vec![0.0; nrows];
+            let mut lower_diagonal: Vec<f64> = vec![0.0; nrows];
+            let mut non_zero_element_upper_diagonal = false;
+            let mut non_zero_element_under_diagonal = false;
+            //  println!("i: {}", i);
+            if ncols as i32 - i as i32 - 1 > 0 {
+                for j in 0..ncols - i - 1 {
+                    // main diagonal is the longest,the far we go - shorter diagonal we have
+                    //  println!(" j: {}", i);
+                    if matrix[(j + i + 1, j)].abs() > 0.0 {
+                        non_zero_element_under_diagonal = true;
 
-            if non_zero_element_under_diagonal{
+                        lower_diagonal[j + i + 1] = matrix[(j + i + 1, j)];
+                    }
+                    if matrix[(j, j + i + 1)].abs() > 0.0 {
+                        non_zero_element_upper_diagonal = true;
+                        upper_diagonal[j] = matrix[(j, j + i + 1)];
+                    }
+                } //for j in 0..ncols-i-2 {
+            } // if ncols
+
+            if non_zero_element_under_diagonal {
                 subdiagonal_rows += 1;
-            //    println!("lower_diagona: {:?}", lower_diagonal.clone());
+                //    println!("lower_diagona: {:?}", lower_diagonal.clone());
                 lower_diagonals.push(lower_diagonal.clone());
             }
-            
-          
-            if non_zero_element_upper_diagonal{
+
+            if non_zero_element_upper_diagonal {
                 superdiagonal_rows += 1;
-            //    println!("upper_diagona: {:?}", upper_diagonal.clone());
+                //    println!("upper_diagona: {:?}", upper_diagonal.clone());
                 upper_diagonals.push(upper_diagonal.clone());
             }
-           // println!("band matrix: {:?}", band);
+            // println!("band matrix: {:?}", band);
         }
-        
 
-   // println!("subdiagonal_rows: {}, superdiagonal_rows: {}", subdiagonal_rows, superdiagonal_rows);
-    let main_diagonal = matrix.row_iter().enumerate().map(|(i, row_i)| row_i[i]).collect::<Vec<f64>>();
-    
-     band.extend(lower_diagonals);
-     band.extend(vec![(main_diagonal)]);
-     band.extend(upper_diagonals);
-     
-     
-    let flat_band = band.clone().into_iter().flatten().collect::<Vec<f64>>();
-   // println!("band matrix: {:?}", flat_band);
-    let band = DMatrix::from_row_slice( band.len(), nrows, &flat_band).transpose();
+        // println!("subdiagonal_rows: {}, superdiagonal_rows: {}", subdiagonal_rows, superdiagonal_rows);
+        let main_diagonal = matrix
+            .row_iter()
+            .enumerate()
+            .map(|(i, row_i)| row_i[i])
+            .collect::<Vec<f64>>();
 
-    self.band = band;
-    self.kl = subdiagonal_rows;
-    self.ku = superdiagonal_rows;
+        band.extend(lower_diagonals);
+        band.extend(vec![(main_diagonal)]);
+        band.extend(upper_diagonals);
+
+        let flat_band = band.clone().into_iter().flatten().collect::<Vec<f64>>();
+        // println!("band matrix: {:?}", flat_band);
+        let band = DMatrix::from_row_slice(band.len(), nrows, &flat_band).transpose();
+
+        self.band = band;
+        self.kl = subdiagonal_rows;
+        self.ku = superdiagonal_rows;
     }
-   
 }
 
 #[cfg(test)]
@@ -536,8 +508,8 @@ mod tests {
            8.475699481745977,1.653584649820603,  0.0, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  3.604247613961981,  -2.3257850985546025,
            5.195182274462841,  0.09103197769932514,  4.925645800867194, 1.443285550654064, 6.141833267655457, -9.902404346186845,
        ];
-        let kl = 3;
-        let ku = 7;
+        let _kl = 3;
+        let _ku = 7;
         let matrix = DMatrix::from_vec(20, 20, big);
         let b = DVector::from_vec(vec![1.0; 20]);
         let mut lu = LU_nalgebra::new(matrix.clone(), None);
@@ -548,7 +520,11 @@ mod tests {
 
         let lu_standard = matrix.clone().lu();
         let x_standard = lu_standard.solve(&b).unwrap();
-        assert!(relative_eq!((x.clone() - x_standard).norm(), 0.0, epsilon = 1e-5));
+        assert!(relative_eq!(
+            (x.clone() - x_standard).norm(),
+            0.0,
+            epsilon = 1e-5
+        ));
         //  println!("L {:?}", l);
         //  println!("L standard: {:?}", lu_standard.l());
         let dl = &l - &lu_standard.l();
@@ -568,7 +544,7 @@ mod tests {
         assert!(relative_eq!((x - x_1.unwrap()).norm(), 0.0, epsilon = 1e-5));
     }
     #[test]
-    fn real_jac(){
+    fn real_jac() {
         #[rustfmt::skip]
         let vec = vec![-0.05, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.05, 0.0, 
         -0.95, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.05, 1.0, -0.05, -1.0, 0.0, 0.0, 0.0, 0.0, 
@@ -586,39 +562,44 @@ mod tests {
            0.0, 0.0, 0.0, -0.05, 1.0, -0.05, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
            1.05, 0.0, -0.95, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.05, 1.0, -0.05, -1.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.05, 0.0];
-            let matrix = DMatrix::from_vec(20, 20, vec.clone());
-            let mut lu = LU_nalgebra::new(matrix, None);
-            lu.LU();
-            let expected_lu = DMatrix::from_vec(20, 20, vec).lu();
-            assert_eq!(lu.l(), expected_lu.l(), );
-            assert_eq!(lu.u(), expected_lu.u());
-           // assert_eq!(lu.p(), expected_lu.p());
-            let b = vec![ -0.95, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.05, 1.0];
-            let b = DVector::from_vec(b);
-            let x = lu.solve(&b).unwrap();
-            let expected_x = expected_lu.solve(&b).unwrap();
-            assert_eq!(x, expected_x);
-           
+        let matrix = DMatrix::from_vec(20, 20, vec.clone());
+        let mut lu = LU_nalgebra::new(matrix, None);
+        lu.LU();
+        let expected_lu = DMatrix::from_vec(20, 20, vec).lu();
+        assert_eq!(lu.l(), expected_lu.l(),);
+        assert_eq!(lu.u(), expected_lu.u());
+        // assert_eq!(lu.p(), expected_lu.p());
+        let b = vec![
+            -0.95, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, -0.05, 1.0,
+        ];
+        let b = DVector::from_vec(b);
+        let x = lu.solve(&b).unwrap();
+        let expected_x = expected_lu.solve(&b).unwrap();
+        assert_eq!(x, expected_x);
     }
     #[test]
     fn test_extract_band() {
         // Test case 1: 5x5 banded matrix
-        let matrix = DMatrix::from_row_slice(5, 5, &[
-            1.0, 2.0, 0.0, 0.0, 0.0,
-            3.0, 4.0, 5.0, 0.0, 0.0,
-            0.0, 6.0, 7.0, 8.0, 0.0,
-            0.0, 0.0, 9.0, 10.0, 11.0,
-            0.0, 0.0, 0.0, 12.0, 13.0,
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let matrix = DMatrix::from_row_slice(
+            5,
+            5,
+            &[
+                1.0, 2.0, 0.0, 0.0, 0.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0, 6.0, 7.0, 8.0, 0.0, 0.0,
+                0.0, 9.0, 10.0, 11.0, 0.0, 0.0, 0.0, 12.0, 13.0,
+            ],
+        );
+        let _b = DVector::from_row_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         let mut bandec_instance = LU_nalgebra::new(matrix, None);
         bandec_instance.extract_band();
-        let expected_band = DMatrix::from_row_slice(3, 5, &[
-            0.0, 3.0, 6.0, 9.0, 12.0, 1.0, 4.0, 7.0, 10.0, 13.0, 2.0, 5.0, 8.0, 11.0, 0.
-        ]).transpose();
+        let expected_band = DMatrix::from_row_slice(
+            3,
+            5,
+            &[
+                0.0, 3.0, 6.0, 9.0, 12.0, 1.0, 4.0, 7.0, 10.0, 13.0, 2.0, 5.0, 8.0, 11.0, 0.,
+            ],
+        )
+        .transpose();
         assert_eq!(bandec_instance.band, expected_band);
-
-
     }
-
 }

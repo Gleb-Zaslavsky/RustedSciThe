@@ -8,10 +8,10 @@ use std::cmp::{PartialEq, PartialOrd};
 
 extern crate num;
 extern crate num_complex;
+use log::{error, info};
 use num::traits::Float;
-use std::fmt::Debug;
-use log::{info,error};
 use std::error::Error;
+use std::fmt::Debug;
 
 pub fn newton_tol(rtol: NumberOrVec) -> f64 {
     let newton_tol: f64 = match rtol {
@@ -415,7 +415,7 @@ pub fn num_jac(
 
     (J, factor)
 }
-
+#[allow(dead_code)]
 const NUM_JAC_DIFF_REJECT: f64 = 1e-6;
 const NUM_JAC_FACTOR_INCREASE: f64 = 10.0;
 const NUM_JAC_FACTOR_DECREASE: f64 = 0.1;

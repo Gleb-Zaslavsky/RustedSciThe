@@ -4,9 +4,9 @@ extern crate sprs;
 
 use na::{DMatrix, DVector, Dyn, LU};
 
+use log::info;
 use std::f64;
 use std::ops::AddAssign;
-use log::info;
 
 use crate::numerical::BDF::BDF_utils::{group_columns, OrderEnum};
 

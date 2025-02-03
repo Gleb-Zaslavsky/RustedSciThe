@@ -1,4 +1,4 @@
-/* 
+/*
 use faer::col::{from_slice, Col};
 use faer::mat::Mat;
 use faer::prelude::*;
@@ -21,5 +21,5 @@ impl bandec {
 
     }
 }
-   
+
     */

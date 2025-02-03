@@ -2,15 +2,10 @@
 //MIT License
 #![allow(non_snake_case)]
 
-
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-
-
-
-
+#[allow(dead_code)]
 fn sym_examples(example: usize) {
-    
     match example {
         0 => {
             // FUNCTION OF MULTIPLE VARIABLES
@@ -170,14 +165,14 @@ fn sym_examples(example: usize) {
                 Jacobian_instance.evaluated_functions_DVector
             );
         }
-      
+
         5 => {
             // INDEXED VARIABLES
             let (matrix_of_indexed, vec_of_names) = Expr::IndexedVars2D(1, 10, "x");
             println!("matrix_of_indexed = {:?} \n", matrix_of_indexed);
             println!("vec_of_names = {:?} \n", vec_of_names);
         }
-    
+
         _ => {
             println!("example not found");
         }

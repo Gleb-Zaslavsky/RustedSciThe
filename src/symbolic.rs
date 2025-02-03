@@ -151,6 +151,7 @@ pub mod symbolic_engine;
 pub mod symbolic_functions;
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
+pub mod symbolic_traits;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________

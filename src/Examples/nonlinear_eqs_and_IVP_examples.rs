@@ -2,24 +2,17 @@
 //MIT License
 #![allow(non_snake_case)]
 
-
-
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-
 
 use crate::numerical::NR_for_ODE::NRODE;
 use crate::numerical::ODE_api::ODEsolver;
 use crate::numerical::BE::BE;
 use crate::numerical::NR::NR;
-use nalgebra:: DVector;
-
-
-
+use nalgebra::DVector;
+#[allow(dead_code)]
 fn ivp_examples(example: usize) {
-    
     match example {
-   
         0 => {
             //use the shortest way to solve system of equations
             // first define system of equations and initial guess
@@ -352,9 +345,6 @@ fn ivp_examples(example: usize) {
             ODE_instance.plot_result();
         }
 
-
-
-       
         _ => {
             println!("example not found");
         }

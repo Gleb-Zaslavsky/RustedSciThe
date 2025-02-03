@@ -1,7 +1,7 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use nalgebra::{DMatrix, DVector, Matrix};
 use log::info;
+use nalgebra::{DMatrix, DVector, Matrix};
 // solve algebraic nonlinear system with free parameter t
 pub struct NRODE {
     pub eq_system: Vec<Expr>,    //

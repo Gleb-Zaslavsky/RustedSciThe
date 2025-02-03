@@ -28,6 +28,7 @@ impl Solvers {
         }
     }
 }
+
 pub struct ODEsolver {
     eq_system: Vec<Expr>,
     values: Vec<String>,
@@ -39,7 +40,7 @@ pub struct ODEsolver {
     max_step: f64,
     rtol: f64,
     atol: f64,
-
+    #[allow(dead_code)]
     jac_sparsity: Option<DMatrix<f64>>,
     vectorized: bool,
     first_step: Option<f64>,

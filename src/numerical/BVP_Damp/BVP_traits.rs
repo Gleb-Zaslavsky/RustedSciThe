@@ -1,53 +1,54 @@
 #![allow(non_camel_case_types)] //
-use faer::mat::from_column_major_slice;
-use faer::sparse::SparseColMat;
-use nalgebra::sparse::CsMatrix;
-use nalgebra::{DMatrix, DVector, Matrix};
-use sprs::{CsMat, CsVec};
-use std::any::Any;
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
 use crate::somelinalg::some_matrix_inv::invers_csmat;
 use crate::somelinalg::LUsolver::invers_Mat_LU;
 use crate::somelinalg::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
+
 use faer::col::{from_slice, Col};
+use faer::mat::from_column_major_slice;
 use faer::mat::Mat;
 use faer::prelude::*;
+use faer::sparse::SparseColMat;
+use nalgebra::sparse::CsMatrix;
+use nalgebra::{DMatrix, DVector, Matrix};
+use sprs::{CsMat, CsVec, TriMat};
+use std::any::Any;
 use std::fmt::{self, Debug};
 use std::ops::Sub;
 type faer_mat = SparseColMat<usize, f64>;
 type faer_col = Col<f64>; // Mat<f64>;
-/*
-In RST BDF solvers there is an option to use different linear algebra crates
-- Nalgebra 
-- SPRS 
-- FAER 
-- Nalgebra SPARSE 
-Generics in rust allow us to replace specific types with a placeholder that represents multiple types to remove code duplication. 
-So there are generic types:
- - VectorType (generic type that represents vectors of residuals and Newton steps)
- - MatrixType (generic type that represents matrices of jacobian)
- - Jac (generic type that represents functions for jacobian)
- - Fun (generic type that represents functions for vector)
- "method" variable (from the BVP task) is a keyword that is used to specify the crate that will be used for linear algebra operations
- "Dense" - nalgebra crate
- "Sparse" - faer crate
-"Sparse_1" - sprs crate
-"Sparse_2" - nalgebra sprs crate
- 
-*/
+                          /*
+                          In RST BVP solvers there is an option to use different linear algebra crates
+                          - Nalgebra
+                          - SPRS
+                          - FAER
+                          - Nalgebra SPARSE
+                          Generics in rust allow us to replace specific types with a placeholder that represents multiple types to remove code duplication.
+                          So there are generic types:
+                           - VectorType (generic type that represents vectors of residuals and Newton steps)
+                           - MatrixType (generic type that represents matrices of jacobian)
+                           - Jac (generic type that represents functions for jacobian)
+                           - Fun (generic type that represents functions for vector)
+                           "method" variable (from the BVP task) is a keyword that is used to specify the crate that will be used for linear algebra operations
+                           "Dense" - nalgebra crate
+                           "Sparse" - faer crate
+                          "Sparse_1" - sprs crate
+                          "Sparse_2" - nalgebra sprs crate
+
+                          */
 ////////////////////////////////////////////////////////////////
 //  VECTORTYPE - geneic type to store vectors of residuals and Newton steps
 ////////////////////////////////////////////////////////////////
 pub enum YEnum {
-    Dense(DVector<f64>),// dense vector NALGEBRA CRATE
-    Sparse_1(CsVec<f64>),// sparse vector SPRS CRATE
+    Dense(DVector<f64>),    // dense vector NALGEBRA CRATE
+    Sparse_1(CsVec<f64>),   // sparse vector SPRS CRATE
     Sparse_2(DVector<f64>), // dense vector NALGEBRA SPARSE CRATE
-    Sparse_3(faer_col), // sparse vector  FAER CRATE
+    Sparse_3(faer_col),     // sparse vector  FAER CRATE
 }
 // basic funcionality for vectors
 pub trait VectorType: Any {
     fn as_any(&self) -> &dyn Any;
-    fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType>; //   
+    fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType>; //
     fn norm(&self) -> f64; // norm of vector
     fn to_DVectorType(&self) -> DVector<f64>; // convert to dense vector
     fn clone_box(&self) -> Box<dyn VectorType>; // cloning the vector into box
@@ -55,8 +56,10 @@ pub trait VectorType: Any {
     fn get_val(&self, index: usize) -> f64; // get the value by index
     fn mul_float(&self, float: f64) -> Box<dyn VectorType>; // float multiplication
     fn len(&self) -> usize; // vector length
-    fn zeros(&self, len:usize) -> Box<dyn VectorType>; // creating zero vector of length len
-    fn assign_value(&self, index:usize, value:f64) -> Box<dyn VectorType>; // assign value to index
+    fn zeros(&self, len: usize) -> Box<dyn VectorType>; // creating zero vector of length len
+    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType>; // assign value to index
+    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>) -> Box<dyn MatrixType>; 
+    fn vec_type(&self)->String;
 }
 
 impl Sub for &dyn VectorType {
@@ -195,25 +198,59 @@ impl VectorType for YEnum {
                 let mut new_vec = vec.clone();
                 new_vec[index] = value;
                 Box::new(new_vec)
-            },
+            }
             YEnum::Sparse_1(vec) => {
-                let mut new_vec = vec.clone(); 
+                let mut new_vec = vec.clone();
                 new_vec.append(index, value);
-                 Box::new(new_vec)
-            },
+                Box::new(new_vec)
+            }
             YEnum::Sparse_2(vec) => {
                 let mut new_vec = vec.clone();
                 new_vec[index] = value;
                 Box::new(new_vec)
-             },
-             YEnum::Sparse_3(vec) => {
-                let mut new_vec = vec.clone(); 
-            new_vec[index] = value;
-            Box::new(new_vec)
+            }
+            YEnum::Sparse_3(vec) => {
+                let mut new_vec = vec.clone();
+                new_vec[index] = value;
+                Box::new(new_vec)
             }
         }
+    }// end assign
+    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+        match self {
+            YEnum::Dense(_) => { let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
+            Box::new(new_matrix)
+             }
+             YEnum::Sparse_1(_) => { 
+             let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
+            Box::new(new_matrix)
+             }
+             YEnum::Sparse_2(_) => { let new_matrix: CsMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
+            Box::new(new_matrix)
+            }
+            YEnum::Sparse_3(_) => { 
+                let new_matrix: SparseColMat<usize, f64> =
+                SparseColMat::try_new_from_triplets(
+                    nrows,
+                    ncols,
+                    non_zero_triplet.as_slice(),
+                )
+                .unwrap();
+            Box::new(new_matrix)
+            }
+            
+         }
+    }//from_vector
+    fn vec_type(&self) -> String {
+        match self {
+            YEnum::Dense(_) => "Dense".to_string(),
+            YEnum::Sparse_1(_) => "Sparse_1".to_string(),
+            YEnum::Sparse_2(_) => "Sparse_2".to_string(),
+            YEnum::Sparse_3(_) => "Sparse_3".to_string(),
+
+        }
     }
-}
+}//end impl
 ////////////////////////////////////////////////////////////////
 //           NALGEBRA CRATE
 ////////////////////////////////////////////////////////////////
@@ -259,6 +296,13 @@ impl VectorType for DVector<f64> {
             vec
         })
     }
+    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, _non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+        let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
+            Box::new(new_matrix)
+    }
+    fn vec_type(&self) -> String {
+        "Dense".to_string()
+    }
 }
 ////////////////////////////////
 //           SPRS CRATE
@@ -301,11 +345,20 @@ impl VectorType for CsVec<f64> {
         Box::new(CsVec::empty(len))
     }
     fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
-        Box::new({let mut new_vec = self.clone(); 
+        Box::new({
+            let mut new_vec = self.clone();
             new_vec.append(index, value);
-            new_vec})
+            new_vec
+        })
     }
-
+    fn from_vector(&self, nrows:usize, ncols: usize, _vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+        let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
+        Box::new(new_matrix)
+           
+    }
+    fn vec_type(&self) -> String {
+        "Sparse_1".to_string()
+    }
 }
 ////////////////////////////////////////////////////////////////////////////
 //  FAER CRATE
@@ -349,9 +402,24 @@ impl VectorType for faer_col {
         Box::new(faer_col::zeros(len)) //faer_col::zeros(len)
     }
     fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
-        Box::new({let mut new_vec = self.clone(); 
+        Box::new({
+            let mut new_vec = self.clone();
             new_vec[index] = value;
-            new_vec})
+            new_vec
+        })
+    }
+    fn from_vector(&self, nrows:usize, ncols: usize, _vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+    let new_matrix: SparseColMat<usize, f64> =
+                SparseColMat::try_new_from_triplets(
+                    nrows,
+                    ncols,
+                    non_zero_triplet.as_slice(),
+                )
+                .unwrap();
+            Box::new(new_matrix)
+    }
+    fn vec_type(&self) -> String {
+        "Sparse_3".to_string()
     }
 }
 
@@ -404,6 +472,55 @@ impl Fun for FunEnum {
     }
 }
 
+impl Fun for  dyn Fn(f64, &DVector<f64>) -> DVector<f64>{
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+
+        if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
+            Box::new(self(x, d_vec))
+        } else {
+            panic!("Type mismatch: expected DVector")
+        }
+
+    }
+}
+impl Fun for dyn Fn(f64, &faer_col) -> faer_col {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+        if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
+            Box::new(self(x, d_vec))
+        } else {
+            panic!("Type mismatch: expected faer_col")
+        }
+        }
+    
+}
+impl Fun for dyn Fn(f64, &CsVec<f64>) -> CsVec<f64> {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+        if let Some(d_vec) = vec.as_any().downcast_ref::<CsVec<f64>>() {
+            Box::new(self(x, d_vec))
+        } else {
+            panic!("Type mismatch: expected CsVec")
+        }
+    }
+}
+// First, create a wrapper struct for the function
+pub struct FunctionWrapper(Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType>>);
+
+// Implement Fun for the wrapper
+impl Fun for FunctionWrapper {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+        (self.0)(x, vec)
+    }
+}
+
+// Then create a conversion function
+pub fn convert_to_fun(
+    f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType>>
+) -> Box<dyn Fun> {
+    Box::new(FunctionWrapper(f))
+}
+
+
+
 impl fmt::Display for YEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -441,6 +558,9 @@ impl Debug for dyn VectorType {
         }
     }
 }
+
+
+
 ////////////////////////////////////////////////////////////////////////////
 //_________________________________Jacobian______________________________
 ////////////////////////////////////////////////////////////////////////////
@@ -457,7 +577,8 @@ pub trait MatrixType: Any {
     fn inverse(self) -> Box<dyn MatrixType>; // inverse
     fn mul(&self, vec: &dyn VectorType) -> Box<dyn VectorType>; // multiplication of matrix and vector
     fn clone_box(&self) -> Box<dyn MatrixType>; // clone
-    fn solve_sys( // solve linear system
+    fn solve_sys(
+        // solve linear system
         &self,
         vec: &dyn VectorType,
         linear_sys_method: Option<String>,
@@ -467,7 +588,8 @@ pub trait MatrixType: Any {
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType>;
     fn shape(&self) -> (usize, usize); // shape of the matrix
-    fn to_DMatrixType(&self)->DMatrix<f64>; // convert to DMatrix
+    fn to_DMatrixType(&self) -> DMatrix<f64>; // convert to DMatrix
+  
 }
 /*
 impl Clone for dyn MatrixType {
@@ -509,13 +631,12 @@ impl MatrixType for DMatrix<f64> {
         bandwidth: (usize, usize),
         _old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
-     
         if let Some(mat_) = self.as_any().downcast_ref::<DMatrix<f64>>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
                 if linear_sys_method.is_none() {
-                    let res = nalgebra_solvers_depot(mat_, d_vec, linear_sys_method,bandwidth);
-                   // let lu = mat_.to_owned().lu();
-                  //  let res = lu.solve(d_vec).unwrap();
+                    let res = nalgebra_solvers_depot(mat_, d_vec, linear_sys_method, bandwidth);
+                    // let lu = mat_.to_owned().lu();
+                    //  let res = lu.solve(d_vec).unwrap();
                     Box::new(res)
                 } else {
                     panic!("no such method for linear system")
@@ -532,7 +653,7 @@ impl MatrixType for DMatrix<f64> {
         self.shape()
     }
 
-    fn to_DMatrixType(&self)->DMatrix<f64>{
+    fn to_DMatrixType(&self) -> DMatrix<f64> {
         self.to_owned()
     }
 }
@@ -563,7 +684,7 @@ impl MatrixType for CsMat<f64> {
         _linear_sys_method: Option<String>,
         tol: f64,
         max_iter: usize,
-        bandwidth: (usize, usize),
+        _bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<CsMat<f64>>() {
@@ -585,13 +706,12 @@ impl MatrixType for CsMat<f64> {
         self.shape()
     }
 
-    fn to_DMatrixType(&self)->DMatrix<f64>{
+    fn to_DMatrixType(&self) -> DMatrix<f64> {
         let (nrows, ncols) = self.shape();
         let t = self.to_dense();
         let csmat = t.as_slice().unwrap();
         let dmatrix = DMatrix::from_row_slice(nrows, ncols, csmat);
         dmatrix
-
     }
 }
 ////////////////////////////////////////////////////////////////
@@ -628,13 +748,11 @@ impl MatrixType for CsMatrix<f64> {
     fn shape(&self) -> (usize, usize) {
         self.shape()
     }
-    fn to_DMatrixType(&self)->DMatrix<f64>{
+    fn to_DMatrixType(&self) -> DMatrix<f64> {
         let t = self.to_owned();
-        let dense:DMatrix<f64> = t.into();
+        let dense: DMatrix<f64> = t.into();
         dense
     }
-
-       
 }
 ////////////////////////////////////////////////////////////////
 //            FAER CRATE
@@ -662,7 +780,7 @@ impl MatrixType for faer_mat {
         linear_sys_method: Option<String>,
         tol: f64,
         max_iter: usize,
-        bandwidth: (usize, usize),
+        _bandwidth: (usize, usize),
         old_vec: &dyn VectorType,
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<faer_mat>() {
@@ -716,16 +834,15 @@ impl MatrixType for faer_mat {
     fn shape(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
-    fn to_DMatrixType(&self)->DMatrix<f64> {
+    fn to_DMatrixType(&self) -> DMatrix<f64> {
         let (nrows, ncols) = self.shape();
         let dense = self.to_dense();
         let mut dmatrix = DMatrix::zeros(nrows, ncols);
-        for (i,  col) in dense.col_iter().enumerate() {
+        for (i, col) in dense.col_iter().enumerate() {
             let col = col.to_owned().iter().map(|x| *x).collect::<Vec<f64>>();
             dmatrix.column_mut(i).copy_from(&DVector::from_vec(col));
-            
         }
-       
+
         dmatrix
     }
 } //impl
@@ -890,6 +1007,66 @@ impl Jac for JacEnum {
     }
 }
 
+
+pub struct JacWrapper(Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>>);
+
+// Implement Fun for the wrapper
+impl Jac for JacWrapper{
+    fn call(&mut self, x: f64, vec: &dyn VectorType) -> Box<dyn MatrixType> {
+        (self.0)(x, vec)
+    }
+    fn inv(&mut self, matrix: &dyn MatrixType, tol: f64, max_iter: usize) -> Box<dyn MatrixType> {
+        if let Some(mat) = matrix.as_any().downcast_ref::<DMatrix<f64>>() {
+            Box::new(mat.to_owned().try_inverse().unwrap())
+        } else if let Some(mat) = matrix.as_any().downcast_ref::<CsMat<f64>>() {
+            let inv_mat = invers_csmat(mat.to_owned(), tol, max_iter).unwrap();
+            Box::new(inv_mat)
+        } else if let Some(mat) = matrix.as_any().downcast_ref::<faer_mat>() {
+            let inv_mat = invers_Mat_LU(mat.to_owned().expect("REASON"), tol, max_iter).unwrap();
+            Box::new(inv_mat)
+        } else {
+            panic!("Unsupported matrix type for inversion")
+        }
+    }
+    fn solve_sys(
+        &mut self,
+        matrix: &dyn MatrixType,
+        vec: &dyn VectorType,
+        _tol: f64,
+        _max_iter: usize,
+    ) -> Box<dyn VectorType> {
+        if let Some(mat) = matrix.as_any().downcast_ref::<DMatrix<f64>>() {
+            if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
+                let lu = mat.to_owned().lu();
+                let res = lu.solve(d_vec).unwrap();
+                Box::new(res)
+            } else {
+                panic!("Vector type mismatch for solving system")
+            }
+        } else if let Some(mat) = matrix.as_any().downcast_ref::<faer_mat>() {
+            if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
+                let d_vec: Mat<f64> = from_column_major_slice::<f64>(d_vec.as_slice(), mat.ncols(), 1).to_owned();
+                let LU = mat.sp_lu().unwrap();
+                let res: Mat<f64> = LU.solve(d_vec);
+                let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
+                let res = from_slice(res_vec.as_slice()).to_owned();
+                Box::new(res)
+            } else {
+                panic!("Vector type mismatch for solving system")
+            }
+        } else {
+            panic!("Unsupported matrix type for solving system")
+        }
+    }
+}
+
+// Then create a conversion function
+pub fn convert_to_jac(
+    f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>>
+) -> Box<dyn Jac> {
+    Box::new(JacWrapper(f))
+}
+
 //_________________________________________________Y___________________________________________________________
 pub trait Y: Any {
     fn as_any(&self) -> Box<&dyn Any>;
@@ -914,12 +1091,13 @@ impl Clone for Box<dyn Y> {
 }
 ///////////////////////////////
 //     Miscellaneous
-/////////////////////////////// 
+///////////////////////////////
 //___________________________________________________________________
 pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn VectorType> {
     let res: Box<dyn VectorType> = if desired_type == "Dense".to_string() {
         Box::new(YEnum::Dense(vec.clone()))
-    } else if desired_type == "Sparse_1".to_string() {//sprs crate
+    } else if desired_type == "Sparse_1".to_string() {
+        //sprs crate
         let mut ind = Vec::new();
         let mut val = Vec::new();
         vec.iter().enumerate().for_each(|(i, x)| {
@@ -931,16 +1109,14 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         Box::new(YEnum::Sparse_1(
             CsVec::new_from_unsorted(vec.len(), ind, val).expect("trouble with initial vector!"),
         ))
-    } else if desired_type == "Sparse".to_string() {// faer crate
+    } else if desired_type == "Sparse".to_string() {
+        // faer crate
         let Mat_vec = from_slice(vec.as_slice()).to_owned();
 
         Box::new(YEnum::Sparse_3(Mat_vec))
     } else if desired_type == "Sparse_2".to_string() {
-      
-       
         Box::new(YEnum::Sparse_2(vec.to_owned()))
-    } 
-    else {
+    } else {
         panic!("Unsupported vector type: {}", desired_type);
     };
     res
@@ -968,4 +1144,43 @@ pub fn jac_rowwise_printing(jac: &Box<dyn MatrixType>) {
     } else {
         println!("Unknown MatrixType")
     }
+}
+
+pub fn from_vector_to_matrix(vec_type:String, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+    match vec_type.as_str() {
+        "Dense" => { let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
+        Box::new(new_matrix)
+         }
+         "Sparse_1" => {              
+            let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
+            Box::new(new_matrix)
+         }
+         "Sparse_2"  => { let new_matrix: CsMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
+        Box::new(new_matrix)
+        }
+        "Sparse_3" => { 
+            let new_matrix: SparseColMat<usize, f64> =
+            SparseColMat::try_new_from_triplets(
+                nrows,
+                ncols,
+                non_zero_triplet.as_slice(),
+            )
+            .unwrap();
+        Box::new(new_matrix)
+        }
+        _=> panic!("Unsupported matrix type: {}", vec_type)
+     }
+}//from_vecto
+
+
+fn sprs_triplet_to_csc(nrows:usize, ncols: usize, triplets: &Vec<(usize, usize, f64)>) ->CsMat<f64>{
+
+    let mut triplet_matrix = TriMat::new((nrows, ncols));
+    for (i, j, v) in triplets {
+        triplet_matrix.add_triplet(*i, *j, *v);
+    }
+
+    // Convert the triplet matrix to a CSC matrix
+    let csc_matrix: CsMat<f64> = triplet_matrix.to_csc();
+    csc_matrix
 }

@@ -4,6 +4,7 @@ pub struct RK45 {
     f: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     y0: DVector<f64>,
     t0: f64,
+    #[allow(dead_code)]
     t_end: f64,
     pub t: f64,
     pub y: DVector<f64>,

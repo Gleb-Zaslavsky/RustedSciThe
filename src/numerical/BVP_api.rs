@@ -71,7 +71,6 @@ impl BVP {
                     method.clone(),
                     tolerance,
                     max_iterations,
-
                 );
                 let structure = Some(nrbvp);
                 let structure_damp = None;

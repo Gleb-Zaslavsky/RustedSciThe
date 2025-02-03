@@ -41,6 +41,7 @@ pub fn is_sparse_int(matrix: &DMatrix<i64>, threshold: f64) -> bool {
 }
 
 // order can be None, vector or scalar
+#[allow(dead_code)]
 pub enum OrderEnum {
     None,
     Vector(Vec<usize>),

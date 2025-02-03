@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac,  MatrixType, VectorType, Vectors_type_casting,
+    Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
 use crate::numerical::BVP_Damp::BVP_utils_damped::interchange_columns;
@@ -154,36 +154,33 @@ impl NRBVP {
         let mut jacobian_instance = Jacobian::new();
         let h = (self.t_end - self.t0) / self.n_steps as f64;
         let scheme = "forward".to_string();
- 
-                jacobian_instance.generate_BVP(
-                    self.eq_system.clone(),
-                    self.values.clone(),
-                    self.arg.clone(),
-                    self.t0.clone(),
-                    None,
-                    Some(self.n_steps),
-                    Some(h),
-                    None,
-                    self.BorderConditions.clone(),
-                    None,
-                    None,
-                    scheme.clone(),
-                    self.method.clone(),
-                    None
-                );
-                let fun = jacobian_instance.residiual_function;
 
-                let jac = jacobian_instance.jac_function;
+        jacobian_instance.generate_BVP(
+            self.eq_system.clone(),
+            self.values.clone(),
+            self.arg.clone(),
+            self.t0.clone(),
+            None,
+            Some(self.n_steps),
+            Some(h),
+            None,
+            self.BorderConditions.clone(),
+            None,
+            None,
+            scheme.clone(),
+            self.method.clone(),
+            None,
+        );
+        let fun = jacobian_instance.residiual_function;
 
-               
+        let jac = jacobian_instance.jac_function;
 
-                self.fun = fun;
-           
-                self.jac = jac;
-   
-                self.variable_string = jacobian_instance.variable_string;
-                self.bandwidth = jacobian_instance.bandwidth.unwrap();
-          
+        self.fun = fun;
+
+        self.jac = jac;
+
+        self.variable_string = jacobian_instance.variable_string;
+        self.bandwidth = jacobian_instance.bandwidth.unwrap();
     } // end of method eq_generate
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
         self.p = p;

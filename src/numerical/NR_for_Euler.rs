@@ -1,8 +1,8 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
+use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
-use log::info;
 // solve algebraic nonlinear system with free parameter t
 //#[derive(Debug)]
 pub struct NRE {
