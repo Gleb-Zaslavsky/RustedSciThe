@@ -6,3 +6,4 @@ pub mod Utils;
 pub mod numerical;
 pub mod somelinalg;
 pub mod symbolic;
+pub mod Examples;

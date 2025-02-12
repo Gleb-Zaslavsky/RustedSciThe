@@ -1,3 +1,4 @@
+// a collection of test examples of exect solutions of BVPs for testing purposes
 use crate::symbolic::symbolic_engine::Expr;
 use crate::Utils::plots::plots;
 use nalgebra::{DMatrix, DVector};

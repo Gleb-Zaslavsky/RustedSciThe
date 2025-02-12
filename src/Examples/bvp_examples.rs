@@ -486,7 +486,7 @@ pub fn bvp_examples(example: usize) {
                         Some(vec![1.0, 5.0]), //  None
                     ),
                     //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5])),
+                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0] ) ),
                 ])),
                 "Frozen" => Some(HashMap::from([(
                     "every_m".to_string(),
@@ -531,7 +531,7 @@ pub fn bvp_examples(example: usize) {
                 max_iterations,
                 Some(rel_tolerance),
                 Some(Bounds),
-                None,
+                Some("warn".to_string()),
             );
 
             println!("solving system");

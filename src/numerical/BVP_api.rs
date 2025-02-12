@@ -1,6 +1,7 @@
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::symbolic::symbolic_engine::Expr;
+use std::any::Any;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
 //BVP is general api for all variants of BVP solvers
@@ -31,6 +32,50 @@ pub struct BVP {
 }
 
 impl BVP {
+    pub fn from_hashmap(hashmap: &HashMap<String,&dyn Any>) -> BVP {
+        let eq_system: Vec<Expr> = hashmap.get("eq_system").and_then(|v| v.downcast_ref::<Vec<Expr>>()).cloned().unwrap_or_default();
+        let initial_guess: DMatrix<f64> = hashmap.get("initial_guess").and_then(|v| v.downcast_ref::<DMatrix<f64>>()).cloned().unwrap_or_default();
+        let values: Vec<String> = hashmap.get("values").and_then(|v| v.downcast_ref::<Vec<String>>()).cloned().unwrap_or_default();
+        let arg: String = hashmap.get("arg").and_then(|v| v.downcast_ref::<String>()).cloned().unwrap_or_default();
+        let BorderConditions: HashMap<String, (usize, f64)> = hashmap.get("BorderConditions").and_then(|v| v.downcast_ref::<HashMap<String, (usize, f64)>>()).cloned().unwrap_or_default();
+        let t0: f64 = hashmap.get("t0").and_then(|v| v.downcast_ref::<f64>()).cloned().unwrap_or_default();
+        let t_end: f64 = hashmap.get("t_end").and_then(|v| v.downcast_ref::<f64>()).cloned().unwrap_or_default();
+        let n_steps: usize = hashmap.get("n_steps").and_then(|v| v.downcast_ref::<usize>()).cloned().unwrap_or_default();
+        let scheme: String = hashmap.get("scheme").and_then(|v| v.downcast_ref::<String>()).cloned().unwrap_or_default();
+        let strategy: String = hashmap.get("strategy").and_then(|v| v.downcast_ref::<String>()).cloned().unwrap_or_default();
+        let strategy_params: Option<HashMap<String, Option<Vec<f64>>>> = hashmap.get("strategy_params").and_then(|v| v.downcast_ref::<Option<HashMap<String, Option<Vec<f64>>>>>()).cloned().unwrap_or_default();
+        let linear_sys_method: Option<String> = hashmap.get("linear_sys_method").and_then(|v| v.downcast_ref::<Option<String>>()).cloned().unwrap_or_default();
+        let method: String = hashmap.get("method").and_then(|v| v.downcast_ref::<String>()).cloned().unwrap_or_default();
+        let tolerance: f64 = hashmap.get("tolerance").and_then(|v| v.downcast_ref::<f64>()).cloned().unwrap_or_default();
+        let max_iterations: usize = hashmap.get("max_iterations").and_then(|v| v.downcast_ref::<usize>()).cloned().unwrap_or_default();
+        let rel_tolerance: Option<HashMap<String, f64>> = hashmap.get("rel_tolerance").and_then(|v| v.downcast_ref::<Option<HashMap<String, f64>>>()).cloned().unwrap_or_default();
+        let Bounds: Option<HashMap<String, (f64, f64)>> = hashmap.get("Bounds").and_then(|v| v.downcast_ref::<Option<HashMap<String, (f64, f64)>>>()).cloned().unwrap_or_default();
+        let loglevel: Option<String> = hashmap.get("loglevel").and_then(|v| v.downcast_ref::<Option<String>>()).cloned().unwrap_or_default();
+
+        BVP {
+            eq_system,
+            initial_guess,
+            values,
+            arg,
+            BorderConditions,
+            t0,
+            t_end,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            tolerance,
+            max_iterations,
+            rel_tolerance,
+            Bounds,
+            loglevel,
+            structure: None,
+            structure_damp: None,
+        }
+        
+    }
     pub fn new(
         eq_system: Vec<Expr>,        // the system of ODEs defined in the symbolic format
         initial_guess: DMatrix<f64>, // initial guess s - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
