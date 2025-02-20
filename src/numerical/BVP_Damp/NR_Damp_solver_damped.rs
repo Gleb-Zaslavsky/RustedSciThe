@@ -448,7 +448,7 @@ impl NRBVP {
     pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
         // macro for saving times 
         macro_rules! save_operation_times {
-            ($self:expr, $pair_of_times:expr) => {
+            ($self:expr_2021, $pair_of_times:expr_2021) => {
                 let (fun_time, linear_sys_time) = $pair_of_times;
                 $self.custom_timer.append_to_fun_time(fun_time);
                 $self.custom_timer.append_to_linear_sys_time(linear_sys_time);
