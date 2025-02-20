@@ -902,6 +902,7 @@ impl Expr {
     //___________________________________SYMPLIFICATE____________________________________
     //  function to symplify the symbolic expression in sych way: if in expression there is a
     // subexpression Mul(Expr::Const(0.0), ...something ) the function turns all subexpression into Expr::Const(0.0)
+    #[allow(dead_code)]
     fn nozeros(&self) -> Expr {
         match self {
             Expr::Var(_) => self.clone(),

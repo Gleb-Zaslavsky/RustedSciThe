@@ -11,7 +11,7 @@ use crate::numerical::BE::BE;
 use crate::numerical::NR::NR;
 use nalgebra::DVector;
 #[allow(dead_code)]
-fn ivp_examples(example: usize) {
+pub fn ivp_examples(example: usize) {
     match example {
         0 => {
             //use the shortest way to solve system of equations

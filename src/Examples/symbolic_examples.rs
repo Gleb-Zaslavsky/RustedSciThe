@@ -5,7 +5,7 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 #[allow(dead_code)]
-fn sym_examples(example: usize) {
+pub fn sym_examples(example: usize) {
     match example {
         0 => {
             // FUNCTION OF MULTIPLE VARIABLES

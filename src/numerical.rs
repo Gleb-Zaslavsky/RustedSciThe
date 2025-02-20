@@ -39,7 +39,6 @@ pub mod BDF;
 ///          solver.plot_result();
 ///     ```
 pub mod BE;
-///  
 ///  Example#1
 /// ```
 ///
@@ -86,10 +85,10 @@ pub mod BE;
 pub mod NR;
 pub mod NR_for_Euler;
 pub mod NR_for_ODE;
-// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
+/// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
 pub mod NonStiff_api;
 /// usage of BDF solver
-///  general api for ODE solvers  (now written only BDF)
+///  general api for ODE solvers  (BDF, RK4, etc.)
 /// Example#1
 /// ```
 ///use RustedSciThe::symbolic::symbolic_engine::Expr;

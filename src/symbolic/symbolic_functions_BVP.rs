@@ -923,16 +923,20 @@ impl Jacobian {
     }
     //
     fn create_mesh(&self, n_steps: Option<usize>, h: Option<f64>, mesh: Option<Vec<f64>>, t0: f64) -> (Vec<Expr>, Vec<f64>, usize) {
+        // mesh of t's can be defined directly or by size of step -h, and number of steps
         if let Some(mesh) = mesh {
+            info!("mesh is not defined, creating evenly distributed mesh");
             let n_steps = mesh.len();
             let H: Vec<Expr> = mesh.windows(2)
                 .map(|window| Expr::Const(window[1] - window[0]))
                 .collect();
             (H, mesh, n_steps)
         } else {
+            
             let n_steps = n_steps.unwrap_or(100) + 1;
+            info!("mesh with n_steps = {} is defined directly", n_steps);
             let h = h.unwrap_or(1.0);
-            let H: Vec<Expr> = vec![Expr::Const(h); n_steps - 1];
+            let H: Vec<Expr> = vec![Expr::Const(h); n_steps - 1];  // number of intervals = n_steps -1
             let T_list: Vec<f64> = (0..n_steps).map(|i| t0 + (i as f64) * h).collect();
             (H, T_list, n_steps)
         }
@@ -1053,16 +1057,19 @@ impl Jacobian {
         } // end of for j in 0..n_steps
         */
       //  let now = Instant::now();
+      
+        // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
         let discreditized_system: Vec<Expr> = (0..n_steps - 1)
         .into_par_iter()
         .flat_map(|j| {
             eq_system.par_iter()
                 .enumerate()
                 .map(|(i, eq_i)| {
-                    let t = T_list[j];
+                    let t = T_list[j]; //set time value of j-th time step
+                      // defining residuals for each equation on each time step
                     let eq_step_j = Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
                     let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
-                    let Y_j = &matrix_of_expr[j][i].clone();
+                    let Y_j = &matrix_of_expr[j][i].clone();   
                     let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
                     res_ij.symplify()
                 })
@@ -1381,7 +1388,7 @@ mod tests {
 
         let variables = &*Vectors_type_casting(vect, "Sparse".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_SparseColMat = jac.call(1.0, variables.clone());
+        let result_SparseColMat = jac.call(1.0, variables);
         assert_eq!(result_SparseColMat.to_DMatrixType(), expexted_jac);
         // NALGEBRA CRATE
         Jacobian_instance.lambdify_jacobian_DMatrix("x", vec!["y", "z"]);
