@@ -3,3 +3,5 @@ pub mod logger;
 pub mod plots;
 
 pub mod sys_info;
+
+pub mod profiling;

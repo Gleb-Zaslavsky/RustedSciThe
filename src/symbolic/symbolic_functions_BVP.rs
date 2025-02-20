@@ -5,6 +5,7 @@ use crate::numerical::BVP_Damp::BVP_traits::{
 };
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::symbolic::symbolic_engine::Expr;
+//use crate::symbolic::symbolic_traits::SymbolicType;
 use faer::col::{from_slice, Col};
 use faer::sparse::SparseColMat;
 use log::info;
@@ -15,6 +16,8 @@ use regex::Regex;
 use sprs::{CsMat, CsVec};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+use tabled::{builder::Builder, settings::Style};
+
 /*
  * This struct represents a Jacobian for BVPs, which is a matrix of partial derivatives of a vector function.
  * It contains the symbolic and numerical representations of the jacobian, as well as the functions used to evaluate it.
@@ -44,6 +47,7 @@ pub struct Jacobian {
     pub bounds: Option<Vec<(f64, f64)>>,
     pub rel_tolerance_vec: Option<Vec<f64>>,
     pub bandwidth: Option<(usize, usize)>,
+    pub variables_for_all_disrete: Vec<Vec<String>>
 }
 
 impl Jacobian {
@@ -64,6 +68,7 @@ impl Jacobian {
             bounds: None,
             rel_tolerance_vec: None,
             bandwidth: None,
+            variables_for_all_disrete: Vec::new()
         }
     }
 
@@ -122,7 +127,7 @@ impl Jacobian {
             .par_iter()
             .map(|function| {
                 let mut vector_of_partial_derivatives = Vec::new();
-                let function = function.clone();
+               // let function = function.clone();
                 for j in 0..self.vector_of_variables.len() {
                     let mut partial = Expr::diff(&function, &variable_string_vec[j]);
                     partial = partial.symplify();
@@ -134,6 +139,43 @@ impl Jacobian {
 
         self.symbolic_jacobian = new_jac;
     }
+    //
+    pub fn calc_jacobian_parallel_smart(&mut self) {
+        assert!(
+            !self.vector_of_functions.is_empty(),
+            "vector_of_functions is empty"
+        );
+        assert!(
+            !self.vector_of_variables.is_empty(),
+            "vector_of_variables is empty"
+        );
+
+        let variable_string_vec = self.variable_string.clone();
+        let new_jac: Vec<Vec<Expr>> = self
+            .vector_of_functions
+            .par_iter().enumerate()
+            .map(|(i,function)| {
+                let mut vector_of_partial_derivatives = Vec::new();
+               // let function = function.clone();
+                for j in 0..self.vector_of_variables.len() {
+                    let variable = &variable_string_vec[j];// obviously if function does not contain variable its derivative should be 0
+                    let list_of_vaiables_for_this_eq = &self.variables_for_all_disrete[i];// so we can only calculate derivative for variables that are used in this equation
+                    if list_of_vaiables_for_this_eq.contains(variable) {
+                    let mut partial = Expr::diff(&function, variable);
+                    partial = partial.symplify();
+                    vector_of_partial_derivatives.push(partial);
+                    } else {
+                        vector_of_partial_derivatives.push(Expr::Const(0.0));
+                    }
+                   
+                }
+                vector_of_partial_derivatives
+            })
+            .collect();
+
+        self.symbolic_jacobian = new_jac;
+    }
+
 
     ////////////////////////////////////////////////////////////////////////////////////
     //  GENERIC FUNCTIONS
@@ -188,7 +230,7 @@ impl Jacobian {
 
         Box::new(move |_x: f64, v: &(dyn VectorType + Send + Sync) | -> Box<dyn MatrixType> {
             let mut vector_of_derivatives =
-                vec![0.0; (vector_of_functions_len * vector_of_variables_len)];
+                vec![0.0; vector_of_functions_len * vector_of_variables_len];
             let vector_of_derivatives_mutex = std::sync::Mutex::new(&mut vector_of_derivatives);
             
             let mut vector_of_triplets = Vec::new();
@@ -283,7 +325,7 @@ impl Jacobian {
 
         Box::new(move |_x: f64, v: &DVector<f64>| -> DMatrix<f64> {
             let mut vector_of_derivatives =
-                vec![0.0; (vector_of_functions_len * vector_of_variables_len)];
+                vec![0.0; vector_of_functions_len * vector_of_variables_len];
             let vector_of_derivatives_mutex = std::sync::Mutex::new(&mut vector_of_derivatives);
             (0..vector_of_functions_len).into_par_iter().for_each(|i| {
                 let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
@@ -301,26 +343,29 @@ impl Jacobian {
                 };
                 for j in left_border..right_border {
                     // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
+                    let symbolic_partoal_derivative = &jac[i][j];
+                    if !symbolic_partoal_derivative.is_zero() {
+                        let partial_func = Expr::lambdify(
+                            symbolic_partoal_derivative,
+                            variable_str
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .clone(),
+                        );
+                        let v_vec: Vec<f64> = v.iter().cloned().collect();
 
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
-
-                    let P = partial_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
-                        vector_of_derivatives_mutex.lock().unwrap()
-                            [i * vector_of_functions_len + j] = P;
+                        let P = partial_func(v_vec.clone());
+                        if P.abs() > 1e-8 {
+                            vector_of_derivatives_mutex.lock().unwrap()
+                                [i * vector_of_functions_len + j] = P;
+                        }// if P.abs() > 1e-8
                     }
+
                 }
             }); //par_iter()
 
-            let mut new_function_jacobian: DMatrix<f64> = DMatrix::from_row_slice(
+            let  new_function_jacobian: DMatrix<f64> = DMatrix::from_row_slice(
                 vector_of_functions_len,
                 vector_of_variables_len,
                 &vector_of_derivatives,
@@ -361,21 +406,22 @@ impl Jacobian {
                 for j in left_border..right_border {
                     // println!("i = {}, j = {}", i, j);
                     //  let now = std::time::Instant::now();
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    new_function_jacobian[(i, j)] = if jac[i][j].clone() == Expr::Const(0.0) {
-                        0.0
+                    let symbolic_partoal_derivative = &jac[i][j];
+                    if !symbolic_partoal_derivative.is_zero() {
+                        let partial_func = Expr::lambdify(
+                            symbolic_partoal_derivative,
+                            variable_str
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .clone(),
+                        );
+                        let v_vec: Vec<f64> = v.iter().cloned().collect();
+                        new_function_jacobian[(i, j)] = partial_func(v_vec.clone());
                     } else {
-                        partial_func(v_vec.clone())
-                    };
-
+                        new_function_jacobian[(i, j)] = 0.0;
+                       };
+             
                     //    let time_test = now.elapsed().as_micros();
                     //   if time_test > 100 {println!("Elapsed time: {:?} micrs, {:?} ", now.elapsed().as_micros(), jac[i][j].clone() );}
                 }
@@ -410,16 +456,15 @@ impl Jacobian {
         let vector_of_functions = &self.vector_of_functions;
         fn f(
             vector_of_functions: Vec<Expr>,
-            arg: String,
+            _arg: String,
             variable_str: Vec<String>,
         ) -> Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + 'static> {
-            Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
+            Box::new(move |_x: f64, v: &DVector<f64>| -> DVector<f64> {
                 let result: Vec<_> = vector_of_functions
                     .par_iter()
                     .map(|func| {
-                        let func = Expr::lambdify_IVP_owned(
-                            func.to_owned(),
-                            arg.as_str(),
+                        let func = Expr::lambdify(
+                            func,
                             variable_str
                                 .iter()
                                 .map(|s| s.as_str())
@@ -427,7 +472,7 @@ impl Jacobian {
                                 .clone(),
                         );
                         let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        func(x, v_vec)
+                        func( v_vec)
                     })
                     .collect();
                 let result = DVector::from_vec(result);
@@ -739,23 +784,29 @@ impl Jacobian {
                 };
                 for j in left_border..right_border {
                     // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
+                    let symbolic_partoal_derivative = &jac[i][j];
+                    if !symbolic_partoal_derivative.is_zero() {
+                        let partial_func = Expr::lambdify(
+                            symbolic_partoal_derivative,
+                            variable_str
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .clone(),
+                        );
+                        let v_vec: Vec<f64> = v.iter().cloned().collect();
+                        let P = partial_func(v_vec.clone());
+                        if P.abs() > 1e-8 {
+                            let triplet = (i, j, P);
+                            vector_of_triplets_mutex.lock().unwrap().push(triplet);
+                        }
+                    }
+                   
                     //let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
+                   
                     //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
                     // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                    let P = partial_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
-                        let triplet = (i, j, P);
-                        vector_of_triplets_mutex.lock().unwrap().push(triplet);
-                    }
+  
                 }
             });
             let new_function_jacobian: SparseColMat<usize, f64> =
@@ -795,17 +846,17 @@ impl Jacobian {
         let vector_of_functions = &self.vector_of_functions;
         fn f(
             vector_of_functions: Vec<Expr>,
-            arg: String,
+            _arg: String,
             variable_str: Vec<String>,
         ) -> Box<dyn Fn(f64, &Col<f64>) -> Col<f64> + 'static> {
-            Box::new(move |x: f64, v: &Col<f64>| -> Col<f64> {
+            Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
                 //  let mut result: Col<f64> = Col::with_capacity(vector_of_functions.len());
                 let result: Vec<_> = vector_of_functions
                     .par_iter()
                     .map(|func| {
-                        let func = Expr::lambdify_IVP_owned(
-                            func.to_owned(),
-                            arg.as_str(),
+                        let func = Expr::lambdify(
+                            func,
+                       
                             variable_str
                                 .iter()
                                 .map(|s| s.as_str())
@@ -813,7 +864,7 @@ impl Jacobian {
                                 .clone(),
                         );
                         let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        func(x, v_vec)
+                        func( v_vec)
                     })
                     .collect();
                 let res = from_slice(result.as_slice()).to_owned();
@@ -836,254 +887,63 @@ impl Jacobian {
         re.replace(input, "").to_string()
     }
     fn eq_step(
-        matrix_of_names: &Vec<Vec<String>>,
+        matrix_of_names: &[Vec<String>],
         eq_i: &Expr,
-        values: &Vec<String>,
-        arg: &String,
+        values: &[String],
+        arg: &str,
         j: usize,
         t: f64,
-        scheme: &String,
+        scheme: &str,
     ) -> Expr {
-        // vector of variables of j-th time step
-        let vec_of_names_on_step = matrix_of_names[j].clone();
-        // for each time step rename the default variable name to a name of variable on j-th time step
-        // like x,y,z->  x_10, y_10, z_10, ...
+        let vec_of_names_on_step = &matrix_of_names[j];
         let hashmap_for_rename: HashMap<String, String> = values
             .iter()
             .zip(vec_of_names_on_step.iter())
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+     //set time value of j-th time step
         let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
-        //set time value of j-th time step
-        let eq_step_j_ = eq_step_j.set_variable(arg.as_str(), t);
-        let eq_step_j = match scheme.as_str() {
-            "forward" => eq_step_j_,
+        let eq_step_j = eq_step_j.set_variable(arg, t);
+    
+        match scheme {
+            "forward" => eq_step_j,
             "trapezoid" => {
-                let vec_of_names_on_step = matrix_of_names[j + 1].clone();
-                // for each time step rename the default variable name to a name of variable on j-th time step
-                // like x,y,z->  x_10, y_10, z_10, ...
+                let vec_of_names_on_step = &matrix_of_names[j + 1];
                 let hashmap_for_rename: HashMap<String, String> = values
                     .iter()
                     .zip(vec_of_names_on_step.iter())
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
-                let eq_step_j = eq_i.rename_variables(&hashmap_for_rename);
-                //set time value of j-th time step
-                let eq_step_j_plus_1 = eq_step_j.set_variable(arg.as_str(), t);
-                Expr::Const(0.5) * (eq_step_j_ + eq_step_j_plus_1)
+    
+                let eq_step_j_plus_1 = eq_i.rename_variables(&hashmap_for_rename).set_variable(arg, t);
+                Expr::Const(0.5) * (eq_step_j + eq_step_j_plus_1)
             }
             _ => panic!("Invalid scheme"),
-        };
-        eq_step_j
+        }
     }
     //
-    pub fn discretization_system_BVP(
-        &mut self,
-        eq_system: Vec<Expr>,
-        values: Vec<String>,
-        arg: String,
-        t0: f64,
-        n_steps: Option<usize>,
-        h: Option<f64>,
-        mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
-        Bounds: Option<HashMap<String, (f64, f64)>>,
-        rel_tolerance: Option<HashMap<String, f64>>,
-        scheme: String,
-    ) {
-        let mut vec_of_bounds: Vec<(f64, f64)> = Vec::new();
-        let _map_of_bounds: HashMap<String, (f64, f64)> = HashMap::new();
-        let mut vec_of_rel_tolerance: Vec<f64> = Vec::new();
-        let _map_of_rel_tolerance: HashMap<String, f64> = HashMap::new();
-        // mesh of t's can be defined directly or by size of step -h, and number of steps
-
-        let n_steps = if let Some(n_steps) = n_steps {
-            n_steps
-        } else {
-            mesh.clone().unwrap().len()
-        };
-        // say mesh is defined  by size of step -h, and number of steps
-        let h = if let Some(h) = h {
-            h
-        } else {
-            1.0 // its nothing
-        };
-        // to have discretization of n_steps you actually need n_steps+1 variables for each differentual equation,
-        // as ODE are of the first order, and one variable needed to implement the boundary condition (last or first variable)
-        //
-        //
-
-        // if there are no mesh in the explicit form we construct evenly distributed H and list of times
-        let (H, T_list, n_steps) = if mesh.clone().is_none() {
-            let n_steps = n_steps + 1;
-            info!("mesh is not defined, creating evenly distributed mesh");
-            let H_: Expr = Expr::Const(h);
-            let H: Vec<Expr> = vec![H_; n_steps - 1]; // number of intervals = n_steps -1
-            let T_list: Vec<f64> = (0..n_steps)
-                .map(|i| t0 + (i as f64) * h)
-                .collect::<Vec<_>>();
-            assert_eq!(T_list.len() - 1, H.len());
-            (H, T_list, n_steps)
-        } else {
-            let n_steps = mesh.clone().unwrap().len();
-            info!("mesh with n_steps = {} is defined directly", n_steps);
-
-            let mesh = mesh.unwrap();
-            let mut H = Vec::new();
-            let mut h_vec = Vec::new();
-            for i in 0..n_steps - 1 {
-                let h = mesh[i + 1] - mesh[i];
-                h_vec.push(h);
-                H.push(Expr::Const(h));
-            }
-
-            /*
-               let H: Vec<Expr> = mesh.clone()//H
-                .unwrap()
-                .iter()
-                .map(|x| Expr::Const(*x))
+    fn create_mesh(&self, n_steps: Option<usize>, h: Option<f64>, mesh: Option<Vec<f64>>, t0: f64) -> (Vec<Expr>, Vec<f64>, usize) {
+        if let Some(mesh) = mesh {
+            let n_steps = mesh.len();
+            let H: Vec<Expr> = mesh.windows(2)
+                .map(|window| Expr::Const(window[1] - window[0]))
                 .collect();
-            */
-            let T_list = mesh; //T_list
-            assert_eq!(T_list.len() - 1, H.len());
-            //  let n_steps = n_steps+1;
+            (H, mesh, n_steps)
+        } else {
+            let n_steps = n_steps.unwrap_or(100) + 1;
+            let h = h.unwrap_or(1.0);
+            let H: Vec<Expr> = vec![Expr::Const(h); n_steps - 1];
+            let T_list: Vec<f64> = (0..n_steps).map(|i| t0 + (i as f64) * h).collect();
             (H, T_list, n_steps)
-        };
-        info!("creating discretization equations with n_steps = {}, H = {:?} \n ({}), \n T_list = {:?}, \n ({})", n_steps, H, H.len(),T_list, T_list.len());
-
-        let mut discreditized_system: Vec<Vec<Expr>> = Vec::new();
-        // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
-        let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());
-        println!(
-            "matrix of names = {:?}, matrix of expr = {:?}",
-            &matrix_of_names, &matrix_of_expr
-        );
-
-        let mut flat_list_of_names = matrix_of_names
-            .clone()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-
-        let mut flat_list_of_expr = matrix_of_expr
-            .clone()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        println!("creating discretization equations");
-        let mut vars_for_boundary_conditions = HashMap::new();
-
-        // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
-        for j in 0..n_steps - 1 {
-            for (i, eq_i) in eq_system.clone().into_iter().enumerate() {
-                let Y_name = values[i].clone(); //y_i
-                                                //  println!("eq_i = {:?}", eq_i);
-                                                //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
-                if let Some((initial_or_final, condition)) = BorderConditions.get(&Y_name) {
-                    let mut vec_of_res_for_each_eq = Vec::new();
-
-                    //currwbt time step
-                    let t = T_list[j];
-
-                    let mut eq_step_j =
-                        Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
-                    //set time value of j-th time step
-                    eq_step_j = eq_step_j.set_variable(arg.as_str(), t);
-
-                    // defining residuals for each equation on each time step
-
-                    let Y_j_plus_1 = matrix_of_expr[j + 1][i].clone();
-                    let Y_j = matrix_of_expr[j][i].clone();
-                    let Y_j_plus_1_str = matrix_of_names[j + 1][i].clone();
-                    let Y_j_str = matrix_of_names[j][i].clone();
-                    let mut res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
-                    // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
-
-                    if j == 0 && initial_or_final.to_owned() == 0 {
-                        println!("found initial condition");
-                        res_ij = res_ij
-                            .set_variable(Expr::to_string(&Y_j).as_str(), condition.to_owned());
-                        vars_for_boundary_conditions.insert(Y_j_str.clone(), condition);
-                        // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
-                        println!("variable {:?} deleted from list", Y_j_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j);
-                    }
-
-                    if j == n_steps - 2 && initial_or_final.to_owned() == 1 {
-                        println!("found final condition");
-                        res_ij = res_ij.set_variable(
-                            Expr::to_string(&Y_j_plus_1).as_str(),
-                            condition.to_owned(),
-                        );
-                        vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), condition);
-                        println!("variable {:?} deleted from list", Y_j_plus_1_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_plus_1_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j_plus_1);
-                    }
-                    //  println!("{:?}",vars_for_boundary_conditions);
-                    for (Y, k) in vars_for_boundary_conditions.iter() {
-                        res_ij = res_ij.set_variable(Y, **k);
-                        // println!(" boundary conditions {:?}",Expr::to_string( &res_ij));
-                    }
-                    //    vars_for_boundary_conditions.iter().map(|  (Y, condition)|res_ij.set_variable(Y, **condition)  );
-                    res_ij = res_ij.symplify();
-                    vec_of_res_for_each_eq.push(res_ij);
-
-                    discreditized_system.push(vec_of_res_for_each_eq);
-                }
-                // end of if let Some BorderCondition
-                else {
-                    panic!("Border condition for variable {Y_name} not found")
-                }
-            } // end of for loop eq_i
-        } // end of for j in 0..n_steps
-        let discreditized_system_flat = discreditized_system
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-
-        let mut discreditized_system_flat_filtered = Vec::new();
-        for mut eq_i in discreditized_system_flat {
-            for (Y, k) in vars_for_boundary_conditions.iter() {
-                //  println!("y= {}, eq_i = {:?}", Y,Expr::to_string( &eq_i));
-                eq_i = eq_i.set_variable(Y, **k);
-                eq_i = eq_i.symplify();
-            }
-            // println!(" \n eq_i+BC {:?}",Expr::to_string( &eq_i));
-            discreditized_system_flat_filtered.push(eq_i.clone());
         }
-        //
-        let discreditized_system_flat = discreditized_system_flat_filtered;
-
-        let vars_from_flat: Vec<Vec<String>> = discreditized_system_flat
-            .clone()
-            .iter()
-            .map(|exp_i| Expr::all_arguments_are_variables(exp_i))
-            .collect();
-        let flat_vec_of_vars_extracted: Vec<String> =
-            vars_from_flat.into_iter().flatten().collect();
-        let hashset_of_vars_extracted: HashSet<String> =
-            flat_vec_of_vars_extracted.into_iter().collect();
-        let hashset_of_vars: HashSet<String> = flat_list_of_names.clone().into_iter().collect();
-        let found_difference: HashSet<String> = hashset_of_vars_extracted
-            .difference(&hashset_of_vars)
-            .cloned()
-            .collect();
-        println!("hashset_of_vars_extracted: {:?}", hashset_of_vars_extracted);
-
-        if !found_difference.is_empty() {
-            println!("found error: {:?}", found_difference);
-            panic!(
-                "\n \n \n Some variables are not found in the system {:?} ! \n \n \n",
-                found_difference
-            );
-        }
-        //
-        self.vector_of_functions = discreditized_system_flat;
-        self.vector_of_variables = flat_list_of_expr;
-        self.variable_string = flat_list_of_names.clone();
-        //
+    }
+    
+    fn process_bounds_and_tolerances(&mut self, 
+    Bounds: Option<HashMap<String, (f64, f64)>>, 
+    rel_tolerance: Option<HashMap<String, f64>>, 
+    flat_list_of_names:Vec<String>) {
+        let mut vec_of_bounds: Vec<(f64, f64)> = Vec::new();
+        let mut vec_of_rel_tolerance: Vec<f64> = Vec::new();
         if let Some(ref Bounds_) = Bounds.clone() {
             for Y_i in flat_list_of_names.iter() {
                 let name_without_index = Self::remove_numeric_suffix(&Y_i);
@@ -1110,7 +970,184 @@ impl Jacobian {
         } else {
             self.rel_tolerance_vec = None
         }
+    }
+
+    fn consistency_test(&mut self, discreditized_system_flat: Vec<Expr>, flat_list_of_names:Vec<String> ) {
+        // varaibles from every expression in the system
+        let vars_from_flat: Vec<Vec<String>> = discreditized_system_flat
+        .clone()
+        .iter()
+        .map(|exp_i| Expr::all_arguments_are_variables(exp_i))
+        .collect(); 
+    self.variables_for_all_disrete = vars_from_flat.clone();
+    let flat_vec_of_vars_extracted: Vec<String> =
+        vars_from_flat.into_iter().flatten().collect();
+    let hashset_of_vars_extracted: HashSet<String> =
+        flat_vec_of_vars_extracted.into_iter().collect();
+    let hashset_of_vars: HashSet<String> = flat_list_of_names.clone().into_iter().collect();
+    let found_difference: HashSet<String> = hashset_of_vars_extracted
+        .difference(&hashset_of_vars)
+        .cloned()
+        .collect();
+  //  println!("hashset_of_vars_extracted: {:?}", hashset_of_vars_extracted);
+
+    if !found_difference.is_empty() {
+        println!("found error: {:?}", found_difference);
+        panic!(
+            "\n \n \n Some variables are not found in the system {:?} ! \n \n \n",
+            found_difference
+        );
+    }
+    }
+
+
+    pub fn discretization_system_BVP(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, (usize, f64)>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+    ) {
+      //  let total_time = Instant::now();
+        let (H, T_list, n_steps) = self.create_mesh(n_steps, h, mesh, t0);
+      
+     //   info!("creating discretization equations with n_steps = {}, H = {:?} \n ({}), \n T_list = {:?}, \n ({})", n_steps, H, H.len(),T_list, T_list.len());
+        // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
+        let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());
+        /* 
+        println!(
+            "matrix of names = {:?}, matrix of expr = {:?}",
+            &matrix_of_names, &matrix_of_expr
+        );
+            */
+        // DISCRETAZING EQUATIONS
+        println!("creating discretization equations");
+        /* non parallel version
+         let now = Instant::now();
+        let mut discreditized_system: Vec<Expr> = Vec::with_capacity(n_steps * eq_system.len());
+        // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
+        for j in 0..n_steps - 1 {
+            for (i, eq_i) in eq_system.iter().enumerate() {
+                    //  println!("eq_i = {:?}", eq_i);                    
+                    //current time step
+                    let t = T_list[j];
+                    let eq_step_j =Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
+                   
+                    // defining residuals for each equation on each time step
+                    let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
+                    let Y_j = &matrix_of_expr[j][i].clone();
+                    let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
+                    // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
+
+                    let res_ij = res_ij.symplify();
+                    discreditized_system.push( res_ij);
+           
+            } // end of for loop eq_i
+        } // end of for j in 0..n_steps
+        */
+      //  let now = Instant::now();
+        let discreditized_system: Vec<Expr> = (0..n_steps - 1)
+        .into_par_iter()
+        .flat_map(|j| {
+            eq_system.par_iter()
+                .enumerate()
+                .map(|(i, eq_i)| {
+                    let t = T_list[j];
+                    let eq_step_j = Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
+                    let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
+                    let Y_j = &matrix_of_expr[j][i].clone();
+                    let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
+                    res_ij.symplify()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();   
+     //   println!("discretization system created in {} seconds", now.elapsed().as_secs_f64());
+      
+    // SETTING UP BOUNDARY CONDITION
+    let mut flat_list_of_names = matrix_of_names
+    .clone()
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut flat_list_of_expr = matrix_of_expr
+        .clone()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut vars_for_boundary_conditions = HashMap::new();
+    for j in 0..n_steps - 1 {
+        for (i, _) in eq_system.iter().enumerate() {
+            let Y_name = &values[i]; //y_i
+                //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
+            if let Some((initial_or_final, condition)) = BorderConditions.get(Y_name) {
+                // defining residuals for each equation on each time step
+                let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
+                let Y_j = &matrix_of_expr[j][i].clone();
+                let Y_j_plus_1_str = &matrix_of_names[j + 1][i].clone();
+                let Y_j_str = &matrix_of_names[j][i].clone();
+                // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
+                if j == 0 && *initial_or_final == 0 {
+                    println!("found initial condition");
+                    vars_for_boundary_conditions.insert(Y_j_str.clone(), *condition);
+                    // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
+                    println!("variable {:?} deleted from list", Y_j_str);
+                    flat_list_of_names.retain(|name| *name != *Y_j_str);
+                    flat_list_of_expr.retain(|expr| expr != Y_j);
+                }
+
+                if j == n_steps - 2 && *initial_or_final == 1 {
+                    println!("found final condition");
+                    vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), *condition);
+                    println!("variable {:?} deleted from list", Y_j_plus_1_str);
+                    flat_list_of_names.retain(|name| name != Y_j_plus_1_str);
+                    flat_list_of_expr.retain(|expr| expr != Y_j_plus_1);
+                }
+                //  println!("{:?}",vars_for_boundary_conditions);
+            }
+            // end of if let Some BorderCondition
+            else {
+                panic!("Border condition for variable {Y_name} not found")
+            }
+        } // end of for loop eq_i
+    } // end of for j in 0..n_steps
+
+    let mut discreditized_system_with_BC = Vec::new();
+    for mut eq_i in discreditized_system {
+        for (Y, k) in vars_for_boundary_conditions.iter() {
+            //  println!("y= {}, eq_i = {:?}", Y,Expr::to_string( &eq_i));
+            eq_i = eq_i.set_variable(Y, *k);
+            eq_i = eq_i.symplify();
+        }
+        // println!(" \n eq_i+BC {:?}",Expr::to_string( &eq_i));
+        discreditized_system_with_BC.push(eq_i.clone());
+    }
+    //
+    let discreditized_system_flat = discreditized_system_with_BC;
+
+    self.consistency_test(discreditized_system_flat.clone(), flat_list_of_names.clone());
+    //
+    self.vector_of_functions = discreditized_system_flat;
+    self.vector_of_variables = flat_list_of_expr;
+    self.variable_string = flat_list_of_names.clone();
+        self.process_bounds_and_tolerances(
+            Bounds,
+            rel_tolerance,
+            flat_list_of_names );
+        //
+
+   // println!("total time _elapsed_ {}", total_time.elapsed().as_secs());
+
     } // end of discretization_system
+
+
 
     fn find_bandwidths(&mut self) {
         let A = &self.symbolic_jacobian;
@@ -1159,12 +1196,15 @@ impl Jacobian {
         method: String,
         bandwidth: Option<(usize, usize)>,
     ) {
+        let total_start = Instant::now();
+        let mut timer_hash: HashMap<String, f64> = HashMap::new();
         let param = if let Some(param) = param {
             param
         } else {
             arg.clone()
         };
         self.method = method.clone();
+        let begin = Instant::now();
         self.discretization_system_BVP(
             eq_system,
             values.clone(),
@@ -1178,21 +1218,26 @@ impl Jacobian {
             rel_tolerance,
             scheme,
         );
+        timer_hash.insert("discretization time".to_string(), begin.elapsed().as_secs_f64());
         info!("system discretized");
         let v = self.variable_string.clone();
+        /* 
         info!(
             "VECTOR OF FUNCTIONS \n \n  {:?},  length: {} \n \n",
             &self.vector_of_functions,
             &self.vector_of_functions.len()
         );
-        println!("INDEXED VARIABLES {:?}, length:  {} \n \n", &v, &v.len());
+        */
+       // println!("INDEXED VARIABLES {:?}, length:  {} \n \n", &v, &v.len());
         let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
         info!("Calculating jacobian");
         let now = Instant::now();
-        self.calc_jacobian_parallel(); //calculate the symbolic Jacobian matrix.
+        self.calc_jacobian_parallel_smart(); //calculate the symbolic Jacobian matrix.
         info!("Jacobian calculation time:");
         let elapsed = now.elapsed();
         info!("{:?}", elapsed_time(elapsed));
+        timer_hash.insert("symbolic jacobian time".to_string(), elapsed.as_secs_f64());
+        let now = Instant::now();
         if let Some(bandwidth_) = bandwidth {
             self.bandwidth = Some(bandwidth_);
             info!("Bandwidth provided: {:?}", self.bandwidth);
@@ -1201,7 +1246,9 @@ impl Jacobian {
             info!("Bandwidth calculated:");
             info!("(kl, ku) = {:?}", self.bandwidth);
         }
+        timer_hash.insert("find bandwidth time".to_string(), now.elapsed().as_secs_f64());
         //  println!("symbolic Jacbian created {:?}", &self.symbolic_jacobian);
+        let now = Instant::now();
         match method.as_str() {
             // transform the symbolic Jacobian into a numerical function
             "Dense" => self.lambdify_jacobian_DMatrix(param.as_str(), indexed_values.clone()),
@@ -1210,12 +1257,14 @@ impl Jacobian {
             "Sparse" => self.lambdify_jacobian_SparseColMat(param.as_str(), indexed_values.clone()),
             _ => panic!("unknown method: {}", method),
         }
+        timer_hash.insert("jacobian lambdify time".to_string(), now.elapsed().as_secs_f64());
         info!("Jacobian lambdified");
         let n = &self.symbolic_jacobian.len();
         for (_i, vec_s) in self.symbolic_jacobian.iter().enumerate() {
             assert_eq!(vec_s.len(), *n, "jacobian not square ");
         }
         // println!("functioon Jacobian created");
+        let now = Instant::now();
         match method.as_str() {
             // transform the symbolic residual vector-function into a numerical function
             "Dense" => self.lambdify_residual_DVector(param.as_str(), indexed_values.clone()),
@@ -1224,13 +1273,16 @@ impl Jacobian {
             "Sparse" => self.lambdify_residual_Col(param.as_str(), indexed_values.clone()),
             _ => panic!("unknown method: {}", method),
         }
+        timer_hash.insert("residual functions lambdify time".to_string(), now.elapsed().as_secs_f64());
         info!("Residuals vector lambdified");
+        /* 
         if let Some(bounds_) = self.bounds.clone() {
             println!(
                 "\n \n bounds vector {:?}, of lengh {}",
                 bounds_,
                 bounds_.len()
             )
+            
         }
         if let Some(rel_tolerance) = self.rel_tolerance_vec.clone() {
             println!(
@@ -1239,6 +1291,19 @@ impl Jacobian {
                 rel_tolerance.len()
             )
         }
+        */
+        let total_end = total_start.elapsed().as_secs_f64();
+        *timer_hash.get_mut("discretization time").unwrap() /= total_end/100.0;
+        *timer_hash.get_mut("symbolic jacobian time").unwrap() /= total_end/100.0;
+        *timer_hash.get_mut("jacobian lambdify time").unwrap() /= total_end/100.0;
+        *timer_hash.get_mut("residual functions lambdify time").unwrap() /= total_end/100.0;
+        *timer_hash.get_mut("find bandwidth time").unwrap() /= total_end/100.0;
+        timer_hash.insert("total time, sec".to_string(), total_end);
+
+        let mut table = Builder::from(timer_hash.clone()).build();
+        table.with(Style::modern_rounded());
+        println!("{}", table.to_string());
+     //   panic!("END OF GENERATE BVP");
         info!("\n \n ____________END OF GENERATE BVP ________________________________________________________________");
     }
 } // end of impl
@@ -1322,14 +1387,14 @@ mod tests {
         Jacobian_instance.lambdify_jacobian_DMatrix("x", vec!["y", "z"]);
         let variables = &*Vectors_type_casting(vect, "Dense".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_DMatrix = jac.call(1.0, variables.clone());
+        let result_DMatrix = jac.call(1.0, variables);
         assert_eq!(result_DMatrix.to_DMatrixType(), expexted_jac);
 
         // NALGEBRA SPARSE CRATE
         Jacobian_instance.lambdify_jacobian_CsMatrix("x", vec!["y", "z"]);
         let variables = &*Vectors_type_casting(vect, "Sparse_2".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_CsMatrix = jac.call(1.0, variables.clone());
+        let result_CsMatrix = jac.call(1.0, variables);
         assert_eq!(result_CsMatrix.to_DMatrixType(), expexted_jac);
         //SPRS CRATE
         /*

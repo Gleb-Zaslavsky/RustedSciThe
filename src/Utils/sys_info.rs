@@ -6,12 +6,12 @@ use sys_info;
 use tabled::{Table, Tabled};
 #[derive(PartialEq)]
 #[derive(Tabled)]
-struct SystemInfo {
+pub struct SystemInfo {
     key: &'static str,
     value: String,
 }
 #[allow(dead_code)]
-fn this_system_info() ->Vec< SystemInfo> {
+pub fn this_system_info() ->Vec< SystemInfo> {
     // Gather system information
     let cpu_num = sys_info::cpu_num().unwrap_or_default();
     let cpu_speed = sys_info::cpu_speed().unwrap_or_default();
@@ -43,6 +43,7 @@ fn this_system_info() ->Vec< SystemInfo> {
     table.with(Style::modern_rounded());
 
     // Print the table
+    println!("System Information\n\n");
     println!("{}", table);
     system_info
 }

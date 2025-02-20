@@ -3,8 +3,9 @@ use crate::symbolic::symbolic_functions::Jacobian;
 use log::{info, warn};
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::System;
+use tabled::{builder::Builder, settings::Style};
 pub fn elapsed_time(elapsed: Duration) {
     let time = elapsed.as_millis();
     if time < 1000 {
@@ -17,6 +18,119 @@ pub fn elapsed_time(elapsed: Duration) {
         info!("Elapsed {} h", elapsed.as_secs() / 3600)
     }
 }
+
+pub struct CustomTimer {
+  pub   start: Instant,
+  pub  jac_time: Instant,
+  pub   jac: Duration,
+  pub   fun_time: Instant,
+  pub   fun: Duration,
+  pub   linear_system_time: Instant,
+  pub   linear_system: Duration,
+  pub symbolic_operations_time: Instant,
+  pub symbolic_operations: Duration,
+
+  
+}
+
+impl CustomTimer {
+    pub fn new() -> CustomTimer {
+        CustomTimer {
+            start: Instant::now(),
+            jac_time: Instant::now(),
+            jac:Duration::from_secs(0),
+            fun_time: Instant::now(),
+            fun: Duration::from_secs(0),
+            linear_system_time: Instant::now(),
+            linear_system: Duration::from_secs(0),
+            symbolic_operations_time: Instant::now(),
+            symbolic_operations: Duration::from_secs(0),
+        }
+    }
+    pub fn jac_tic(&mut self) {
+        self.jac_time = Instant::now();
+    }
+
+    pub fn jac_tac(&mut self) {
+        let jac = self.jac_time.elapsed();
+        self.jac += jac; 
+    }
+
+    pub fn fun_tic(&mut self) {
+        self.fun_time = Instant::now();
+    }
+    pub fn fun_tac(&mut self) {
+        let fun = self.fun_time.elapsed();
+        self.fun += fun;
+    }
+    pub fn append_to_fun_time(&mut self, fun: Duration) {
+        self.fun += fun;
+    }
+    pub fn linear_system_tic(&mut self) {
+        self.linear_system_time = Instant::now();
+    }
+    pub fn linear_system_tac(&mut self) {
+        let linear_system = self.linear_system_time.elapsed();
+        self.linear_system += linear_system;
+    }
+    pub fn append_to_linear_sys_time(&mut self, linear_system: Duration) {
+        self.linear_system += linear_system;
+    }
+    pub fn symbolic_operations_tic(&mut self) {
+        self.symbolic_operations_time = Instant::now();
+    }
+    pub fn symbolic_operations_tac(&mut self) {
+        let symbolic_operations = self.symbolic_operations_time.elapsed();
+        self.symbolic_operations += symbolic_operations;
+    }
+    pub fn get_all(&self) ->HashMap<String, f64> {
+        let mut timer_data = HashMap::new();
+        let total_time =  self.start.elapsed().as_nanos() as f64;
+        let jac_total = self.jac.as_nanos() as f64;
+        let jac_time_percent =   100.0*jac_total/total_time;
+        let fun_total = self.fun.as_nanos() as f64;
+        let fun_time_percent =   100.0*fun_total/total_time;
+        let linear_system_total = self.linear_system.as_nanos() as f64;
+        let linear_system_time_percent =   100.0*linear_system_total/total_time;
+        let symbolic_operations_total = self.symbolic_operations.as_nanos()  as f64;
+        let symbolic_operations_time_percent =   100.0*symbolic_operations_total/total_time;
+        let other = total_time - jac_total - fun_total - linear_system_total - symbolic_operations_total;
+        let other_percent = 100.0*other/total_time;
+        if other_percent > 0.5 {
+        timer_data.insert("other %".to_string(), 
+        (other_percent*1000.0).round() / 1000.0);
+        }
+         timer_data.insert("time elapsed, s".to_string(), self.start.elapsed().as_secs_f64()); 
+ 
+        if jac_time_percent > 0.5 {
+            timer_data.insert(
+            "Jacobian %".to_string(),
+            (jac_time_percent*1000.0).round() / 1000.0,
+        ); }
+        if fun_time_percent > 0.5 {
+        timer_data.insert(
+            "Function %".to_string(),
+            (fun_time_percent*1000.0).round() / 1000.0,
+        ); }
+        if linear_system_time_percent > 0.5 {
+        timer_data.insert(
+            "Linear System %".to_string(),
+            (linear_system_time_percent*1000.0).round() / 1000.0,
+            );
+        }
+        if symbolic_operations_time_percent > 0.5 {
+        timer_data.insert(
+                "Symbolic Operations %".to_string(),
+                (symbolic_operations_time_percent*1000.0).round() / 1000.0,
+                );
+        }
+        let mut table = Builder::from(timer_data.clone()).build();
+        table.with(Style::modern_rounded());
+        println!("{}", table.to_string());
+        timer_data
+    }
+}
+
 // FROZEN JACOBIAN TASK PARAMETERS CHECK
 pub fn strategy_check(
     strategy: &String,

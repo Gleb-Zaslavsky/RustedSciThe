@@ -7,13 +7,13 @@ The code mostly inspired by sources listed below:
 */
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
-use chrono::Local;
+use chrono:: Local;
 
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::{
-    construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
+    construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem, CustomTimer
 };
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
@@ -78,6 +78,7 @@ pub struct NRBVP {
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
     calc_statistics: HashMap<String, usize>,
+    custom_timer: CustomTimer,
 }
 
 impl NRBVP {
@@ -168,6 +169,7 @@ impl NRBVP {
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             calc_statistics: Hashmap_statistics,
+            custom_timer: CustomTimer::new(),
         }
     }
     /// Basic methods to set the equation system
@@ -380,12 +382,14 @@ impl NRBVP {
             let y = &*self.y;
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let begin = Instant::now();
+            self.custom_timer.jac_tic();
             let jac_function = self.jac.as_mut().unwrap();
             let jac_matrix = jac_function.call(p, y);
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
+            self.custom_timer.jac_tac();
             self.old_jac = Some(jac_matrix);
             self.m = 0;
             *self
@@ -396,9 +400,12 @@ impl NRBVP {
     }
 
     //undamped step without jacobian recalculation
-    pub fn step(&self, p: f64, y: &dyn VectorType) -> Box<dyn VectorType> {
+    pub fn step(&self, p: f64, y: &dyn VectorType) ->( Box<dyn VectorType>, (std::time::Duration, std::time::Duration)) {
+        
+        let fun_time_start = Instant::now();
         let fun = &self.fun;
         let F_k = fun.call(p, y);
+        let fun_time_end = fun_time_start.elapsed();
         let J_k = self.old_jac.as_ref().unwrap();
         assert_eq!(
             F_k.len(),
@@ -418,6 +425,7 @@ impl NRBVP {
             }
         }
         // solving equation J_k*dy_k=-F_k for undamped dy_k, but Lambda*dy_k - is dumped step
+        let linear_sys_time_start = Instant::now();
         let undamped_step_k: Box<dyn VectorType> = J_k.solve_sys(
             &*F_k,
             self.linear_sys_method.clone(),
@@ -426,21 +434,34 @@ impl NRBVP {
             self.bandwidth,
             y,
         );
+        let linear_sys_time_end = linear_sys_time_start.elapsed();
         for el in undamped_step_k.iterate() {
             if el.is_nan() {
                 log::error!("\n \n NaN in damped step deltaY \n \n");
                 panic!()
             }
         }
-        undamped_step_k
+        let pair_of_times= (fun_time_end, linear_sys_time_end);
+        (undamped_step_k, pair_of_times)
     }
 
     pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
+        // macro for saving times 
+        macro_rules! save_operation_times {
+            ($self:expr, $pair_of_times:expr) => {
+                let (fun_time, linear_sys_time) = $pair_of_times;
+                $self.custom_timer.append_to_fun_time(fun_time);
+                $self.custom_timer.append_to_linear_sys_time(linear_sys_time);
+            };
+        }
+    //_________________________________________________________________
         let p = self.p;
         let now = Instant::now();
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
-        let undamped_step_k_minus_1 = self.step(p, y_k_minus_1);
+        let (undamped_step_k_minus_1, pair_of_times) = self.step(p, y_k_minus_1);
+           // saving times of corresponding operations 
+            save_operation_times!(self, pair_of_times);
         *self
             .calc_statistics
             .entry("number of solving linear systems".to_string())
@@ -497,7 +518,9 @@ impl NRBVP {
         let mut conv: f64 = 0.0;
         //   let fun = &self.fun;
         // calculate damped step
-        let undamped_step_k = self.step(p, &*y_k);
+        let (undamped_step_k, pair_of_times) = self.step(p, &*y_k);
+             // saving times of corresponding operations 
+             save_operation_times!(self, pair_of_times);
         *self
             .calc_statistics
             .entry("number of solving linear systems".to_string())
@@ -515,7 +538,9 @@ impl NRBVP {
 
             // / compute the next undamped step that would result if x1 is accepted
             // J(x_k)^-1 F(x_k+1)
-            let undamped_step_k_plus_1 = self.step(p, &*y_k_plus_1); //???????????????
+            let (undamped_step_k_plus_1, pair_of_times) = self.step(p, &*y_k_plus_1); //???????????????
+                  // saving times of corresponding operations 
+                  save_operation_times!(self, pair_of_times);
             let error = &undamped_step_k_plus_1.norm();
             self.error_old = *error;
             info!("\n \n L2 norm of undamped step = {}", error);
@@ -835,10 +860,12 @@ impl NRBVP {
             .calc_statistics
             .entry("number of grid refinements".to_string())
             .or_insert(0) += 1;
+        self.custom_timer.symbolic_operations_tic();
         // here we go again... running the code wtih new grid
         self.eq_generate(Some(new_mesh.clone()), Some(self.bandwidth));
         //               bandwidth doesnt change with gerid recalc so we pass into function
         // previously calculated  bandwidth to avoid O(N^2) calculation of bandwidth
+        self.custom_timer.symbolic_operations_tac();
         self.we_need_refinement();
 
         self.main_loop_damped();
@@ -851,7 +878,9 @@ impl NRBVP {
     //Newton-Raphson method
     // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn solver(&mut self) -> Option<DVector<f64>> {
+        self.custom_timer.symbolic_operations_tic();
         self.eq_generate(None, None);
+        self.custom_timer.symbolic_operations_tac();
         let begin = Instant::now();
         let res = self.main_loop_damped();
         let end = begin.elapsed();
@@ -860,10 +889,21 @@ impl NRBVP {
         self.calc_statistics
             .insert("time elapsed, s".to_string(), time);
         self.calc_statistics();
+        self.custom_timer.get_all();
         res
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
+        let is_logging_disabled = self.loglevel
+        .as_ref()
+        .map(|level| level == "off" || level == "none")
+        .unwrap_or(false);
+
+        if is_logging_disabled {
+            let res = self.solver();
+            res
+        } else
+        {
         let loglevel = self.loglevel.clone();
         let log_option = if let Some(level) = loglevel {
             match level.as_str() {
@@ -897,8 +937,10 @@ impl NRBVP {
             Err(_) => {
                 let res = self.solver();
                 res
-            }
-        }
+            } //end Error
+        }// end mat 
+
+       } 
     }
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                     functions to return and save result in different formats
@@ -996,6 +1038,15 @@ impl NRBVP {
         table.with(Style::modern_rounded());
         info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
     }
+
+    ////////////////////////////////////////////////////////////
+    // misc
+    pub fn step_with_timer(&mut self, pair_of_times: (std::time::Duration, std::time::Duration) ) {
+        let (fun_time, linear_sys_time) = pair_of_times;
+        self.custom_timer.append_to_fun_time(fun_time);
+        self.custom_timer.append_to_linear_sys_time(linear_sys_time);
+
+    } 
 }
 
 /* */

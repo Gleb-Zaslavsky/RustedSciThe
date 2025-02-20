@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.2.20"
+version = "0.2.21"
 edition = "2021"
 description = "RustedSciThe is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic (analytical) derivatives and transform symbolic expressions into regular Rust functions, compute symbolic (analytical) jacobians and use it to solve nonlinear algebraic equations and ODE with IVP solvers: BDF (Backward Differentiation Formula), backward Euler and BVP with Newton-Raphson"
 author = "Gleb Zasllavsky"
@@ -8,10 +8,22 @@ license = "MIT"
 keywords = [ "mathematics", "science", "ODE", "symbolic"]
 repository = "https://github.com/Gleb-Zaslavsky/RustedSciThe"
 
+[profile.release]
+debug = true
 
 [[bench]]
 name = "bvp_benches"
 harness = false
+
+[profile.bench]
+opt-level = 3
+inherits = "release"
+debug = false
+strip = "none"
+lto = true
+codegen-units = 1
+incremental = false
+panic = "abort"
 
 [dependencies]
 itertools = "0.13.0"
@@ -43,3 +55,5 @@ sysinfo = "0.33.0"
 tabled = "0.17.0"
 sys-info = "0.9.1"
 criterion = "0.5.1"
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.14", features = ["flamegraph", "criterion"] }

@@ -290,7 +290,7 @@ impl Grid {
         let x = self.x_mesh.clone();
         let n_former = self.x_mesh.len();
         let more = self.more;
-        let mut mark = self.mark.clone();
+        let mark = self.mark.clone();
         let y = self.y_DMatrix.clone();
         let n_rows = y.nrows();
         // Check this interval is not degenerate

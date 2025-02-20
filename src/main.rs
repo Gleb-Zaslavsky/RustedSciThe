@@ -977,7 +977,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 10; //
+            let n_steps = 2000; //
             let strategy = "Damped".to_string(); //
 
             let strategy_params = match strategy.as_str() {
@@ -1047,10 +1047,12 @@ fn main() {
             nr.plot_result();
             nr.save_to_file(None);
         }
-        /*
-
-
-        */
+        
+        20 => {
+            //Utils::profiling::pprof_profiling();
+            Utils::sys_info::this_system_info();
+        }
+        /**/
         _ => {
             println!("example not found");
         }

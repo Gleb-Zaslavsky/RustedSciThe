@@ -256,7 +256,12 @@ impl Expr {
         self = Expr::Pow(self.boxed(), rhs.boxed());
         self
     }
-
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Expr::Const(val) => val == &0.0,
+            _ => false,
+        }
+    }
     /// DIFFERENTIATION
 
     // differentiate with respect to a variable - partial derivative in case of a function of many variables,
@@ -365,49 +370,69 @@ impl Expr {
     /// function to lambdify the symbolic function of multiple variables = convert it into a rust function
 
     pub fn lambdify(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_> {
+        /* 
+        let var_indices: std::collections::HashMap<&str, usize> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| (name, i))
+        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
+    //variable names to indices at the start, avoiding repeated lookups during evaluation.
+    */
+       
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
                 Box::new(move |args| args[index])
             }
-            Expr::Const(val) => Box::new(move |_| *val),
+            Expr::Const(val) => {
+                let val = *val;
+                Box::new(move |_| val)
+            }
             Expr::Add(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
                 Box::new(move |args| lhs_fn(args.clone()) + rhs_fn(args))
             }
             Expr::Sub(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
                 Box::new(move |args| lhs_fn(args.clone()) - rhs_fn(args))
             }
             Expr::Mul(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
                 Box::new(move |args| lhs_fn(args.clone()) * rhs_fn(args))
             }
             Expr::Div(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
                 Box::new(move |args| lhs_fn(args.clone()) / rhs_fn(args))
             }
             Expr::Pow(base, exp) => {
                 let base_fn = base.lambdify(vars.clone());
-                let exp_fn = exp.lambdify(vars.clone());
+                let exp_fn = exp.lambdify(vars);
                 Box::new(move |args| base_fn(args.clone()).powf(exp_fn(args)))
             }
             Expr::Exp(expr) => {
-                let expr_fn = expr.lambdify(vars.clone());
+                let expr_fn = expr.lambdify(vars);
                 Box::new(move |args| expr_fn(args).exp())
             }
             Expr::Ln(expr) => {
-                let expr_fn = expr.lambdify(vars.clone());
+                let expr_fn = expr.lambdify(vars);
                 Box::new(move |args| expr_fn(args).ln())
             }
         }
     } // end of lambdify
 
     pub fn lambdify_owned(self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64> {
+        /* 
+        let var_indices: std::collections::HashMap<&str, usize> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| (name, i))
+        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
+    //variable names to indices at the start, avoiding repeated lookups during evaluation.
+    */
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -423,35 +448,35 @@ impl Expr {
             */
             Expr::Add(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify_owned(vars.clone());
-                let rhs_fn = rhs.lambdify_owned(vars.clone());
+                let rhs_fn = rhs.lambdify_owned(vars);
                 Box::new(move |args| lhs_fn(args.clone()) + rhs_fn(args))
             }
             Expr::Sub(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify_owned(vars.clone());
-                let rhs_fn = rhs.lambdify_owned(vars.clone());
+                let rhs_fn = rhs.lambdify_owned(vars);
                 Box::new(move |args| lhs_fn(args.clone()) - rhs_fn(args))
             }
             Expr::Mul(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify_owned(vars.clone());
-                let rhs_fn = rhs.lambdify_owned(vars.clone());
+                let rhs_fn = rhs.lambdify_owned(vars);
                 Box::new(move |args| lhs_fn(args.clone()) * rhs_fn(args))
             }
             Expr::Div(lhs, rhs) => {
                 let lhs_fn = lhs.lambdify_owned(vars.clone());
-                let rhs_fn = rhs.lambdify_owned(vars.clone());
+                let rhs_fn = rhs.lambdify_owned(vars);
                 Box::new(move |args| lhs_fn(args.clone()) / rhs_fn(args))
             }
             Expr::Pow(base, exp) => {
                 let base_fn = base.lambdify_owned(vars.clone());
-                let exp_fn = exp.lambdify_owned(vars.clone());
+                let exp_fn = exp.lambdify_owned(vars);
                 Box::new(move |args| base_fn(args.clone()).powf(exp_fn(args)))
             }
             Expr::Exp(expr) => {
-                let expr_fn = expr.lambdify_owned(vars.clone());
+                let expr_fn = expr.lambdify_owned(vars);
                 Box::new(move |args| expr_fn(args).exp())
             }
             Expr::Ln(expr) => {
-                let expr_fn = expr.lambdify_owned(vars.clone());
+                let expr_fn = expr.lambdify_owned(vars);
                 Box::new(move |args| expr_fn(args).ln())
             }
         }
@@ -967,10 +992,87 @@ impl Expr {
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.simplify_numbers())),
         }
     }
+    pub fn simplify_(&self) -> Expr {
+        match self {
+            Expr::Var(_) => self.clone(),
+            Expr::Const(_) => self.clone(),
+            Expr::Add(lhs, rhs) => {
+                let lhs = lhs.simplify_();
+                let rhs = rhs.simplify_();
+                match (&lhs, &rhs) {
+                    (Expr::Const(a), Expr::Const(b)) =>Expr::Const(a + b),// (a) + (b) = (a + b) 
+                    (Expr::Const(0.0), _) => rhs, // x + 0 = x
+                    (_, Expr::Const(0.0)) => lhs,//  0 + x = x
+                    _ => Expr::Add(Box::new(lhs), Box::new(rhs) ),
+                }
+            }
+            Expr::Sub(lhs, rhs) => {
+                let lhs = lhs.simplify_();
+                let rhs = rhs.simplify_();
+                match (&lhs, &rhs) {
+                    (Expr::Const(a), Expr::Const(b)) =>Expr::Const(a - b),// (a) - (b) = (a - b)
+                    (_, Expr::Const(0.0)) => lhs, // x - 0 = x
+                    _ =>Expr::Sub(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+            Expr::Mul(lhs, rhs) => {
+                let lhs = lhs.simplify_();
+                let rhs = rhs.simplify_();
+                match (&lhs, &rhs) {
+                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b),// (a) * (b) = (a * b)
+                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) =>Expr::Const(0.0), // 0 * x = 0 or 0*x = 0
+                    (Expr::Const(1.0), _) => rhs, // 1 * x = x
+                    (_, Expr::Const(1.0)) => lhs, // x * 1 = x
+                    _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+            Expr::Div(lhs, rhs) => {
+                let lhs = lhs.simplify_();
+                let rhs = rhs.simplify_();
+                match (&lhs, &rhs) {
+                    (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b),// (a) / (b) = (a / b)
+                    (Expr::Const(0.0), _) => Expr::Const(0.0),// (0.0) / x = 0.0
+                    (_, Expr::Const(1.0)) => lhs,// x / 1.0 = x
+                    _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+            Expr::Pow(base, exp) => {
+                let base = base.simplify_();
+                let exp = exp.simplify_();
+                match (&base, &exp) {
+                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a.powf(*b)), // (a) ^ (b) = (a ^ b)
+                    (_, Expr::Const(0.0)) => Expr::Const(1.0), // x ^ 0 = 1
+                    (_, Expr::Const(1.0)) => base, // x ^ 1 = x
+                    (Expr::Const(0.0), _) => Expr::Const(0.0), // 0 ^ x = 0
+                    (Expr::Const(1.0), _) => Expr::Const(1.0), // 1 ^ x = 1
+                    _ => Expr::Pow(Box::new(base), Box::new(exp)),
+                }
+            }
+            Expr::Exp(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) if a!=&0.0 =>Expr::Const(a.exp()),
+                    Expr::Const(0.0) => Expr::Const(1.0),
+                    _ => Expr::Exp(Box::new(expr)),
+                }
+            }
+            Expr::Ln(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(1.0) => Expr::Const(0.0),
+                    Expr::Const(a) if *a > 0.0 => Expr::Const(a.ln()),
+                    _ => Expr::Ln(Box::new(expr)),
+                }
+            }
+        }
+    }
     pub fn symplify(&self) -> Expr {
-        let zeros_proceeded = self.nozeros().simplify_numbers();
+        //let zeros_proceeded = self.nozeros().simplify_numbers();
+        let zeros_proceeded = self.simplify_();
         zeros_proceeded
     }
+
+
 }
 
 //___________________________________TESTS____________________________________
