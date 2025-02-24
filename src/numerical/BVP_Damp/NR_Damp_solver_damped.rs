@@ -19,8 +19,8 @@ use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
     jac_recalc,
 };
-use crate::Utils::logger::save_matrix_to_file;
-use crate::Utils::plots::plots;
+use crate::Utils::logger::{save_matrix_to_file, save_matrix_to_csv};
+use crate::Utils::plots::{plots, plots_gnulot};
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
 use simplelog::*;
@@ -59,6 +59,7 @@ pub struct NRBVP {
     // thets all user defined  parameters
     //
     pub result: Option<DVector<f64>>, // result vector of calculation
+    pub full_result: Option<DMatrix<f64>>,
     pub x_mesh: DVector<f64>,
     pub fun: Box<dyn Fun>, // vector representing the discretized sysytem
     pub jac: Option<Box<dyn Jac>>, // matrix function of Jacobian
@@ -150,6 +151,7 @@ impl NRBVP {
             Bounds,
             loglevel,
             result: None,
+            full_result:None,
             x_mesh: DVector::from_vec(T_list),
             fun: boxed_fun,
             jac: None,
@@ -448,7 +450,7 @@ impl NRBVP {
     pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
         // macro for saving times 
         macro_rules! save_operation_times {
-            ($self:expr_2021, $pair_of_times:expr_2021) => {
+            ($self:expr, $pair_of_times:expr) => {
                 let (fun_time, linear_sys_time) = $pair_of_times;
                 $self.custom_timer.append_to_fun_time(fun_time);
                 $self.custom_timer.append_to_linear_sys_time(linear_sys_time);
@@ -631,12 +633,12 @@ impl NRBVP {
 
             if status == 0 {
                 // status == 0 means convergence is not reached yet we're going to another iteration
-                let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
+                let y_k_plus_1 = match damped_step_result { Some(y_k_plus_1) => {
                     y_k_plus_1
-                } else {
+                } _ => {
                     error!("\n \n y_k_plus_1 is None");
                     panic!()
-                };
+                }};
                 self.y = y_k_plus_1;
                 self.jac_recalc = false;
             }
@@ -645,11 +647,11 @@ impl NRBVP {
                 // status == 1 means convergence is reached, save the result
                 info!("\n \n Solution has converged, breaking the loop!");
 
-                let y_k_plus_1 = if let Some(y_k_plus_1) = damped_step_result {
+                let y_k_plus_1 = match damped_step_result { Some(y_k_plus_1) => {
                     y_k_plus_1
-                } else {
+                } _ => {
                     panic!(" \n \n y_k_plus_1 is None")
-                };
+                }};
 
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
                                                                 // before refining in case it will go wrong
@@ -815,7 +817,7 @@ impl NRBVP {
         //create a new mesh with a chosen algorithm a
         // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
         // if number_of_nonzero_keys==0 it means that no need to create a new grid
-
+        self.custom_timer.grid_refinement_tic();
         let y_DMatrix = construct_full_solution(
             y_DMatrix,
             &self.BorderConditions,
@@ -837,6 +839,7 @@ impl NRBVP {
             &self.variable_string,
             &self.values,
         );
+        self.custom_timer.grid_refinement_tac();
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -878,6 +881,7 @@ impl NRBVP {
     //Newton-Raphson method
     // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn solver(&mut self) -> Option<DVector<f64>> {
+        self.custom_timer.start();
         self.custom_timer.symbolic_operations_tic();
         self.eq_generate(None, None);
         self.custom_timer.symbolic_operations_tac();
@@ -886,6 +890,7 @@ impl NRBVP {
         let end = begin.elapsed();
         elapsed_time(end);
         let time = end.as_secs_f64() as usize;
+        self.handle_result();
         self.calc_statistics
             .insert("time elapsed, s".to_string(), time);
         self.calc_statistics();
@@ -953,33 +958,22 @@ impl NRBVP {
             "result.txt".to_string()
         };
         let result_DMatrix = self.get_result().unwrap();
-        let _ = save_matrix_to_file(&result_DMatrix, &self.values, &name);
+        let _ = save_matrix_to_file(&result_DMatrix, &self.values, &name, &self.x_mesh, &self.arg);
+    }
+  pub fn save_to_csv(&self, filename: Option<String>) {
+    let name = if let Some(name) = filename {
+            name
+    } else {
+        "result_table".to_string()
+    };
+    let result_DMatrix = self.get_result().unwrap();
+    let _ = save_matrix_to_csv(&result_DMatrix, &self.values, &name, &self.x_mesh, &self.arg);
+  }
+    pub fn get_result(&self) -> Option<DMatrix<f64>> { 
+                self.full_result.clone()
     }
 
-    pub fn get_result(&self) -> Option<DMatrix<f64>> {
-        let number_of_Ys = self.values.len();
-        let n_steps = self.n_steps;
-        let vector_of_results = self.result.clone().unwrap().clone();
-        let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
-
-        let full_results = construct_full_solution(
-            matrix_of_results,
-            &self.BorderConditions,
-            &self.variable_string,
-            &self.values.clone(),
-        );
-
-        let permutted_results = interchange_columns(
-            full_results.transpose(),
-            self.values.clone(),
-            self.variable_string.clone(),
-        );
-
-        Some(permutted_results)
-    }
-
-    pub fn plot_result(&self) {
+    pub fn handle_result(&mut self) { 
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
@@ -996,12 +990,12 @@ impl NRBVP {
             &self.variable_string,
             &self.values.clone(),
         )
-        .transpose();
+        ;
         let permutted_results = interchange_columns(
-            full_results.transpose(),
+            full_results,
             self.values.clone(),
             self.variable_string.clone(),
-        );
+        ).transpose();
 
         info!(
             "matrix of results has shape {:?}",
@@ -1009,15 +1003,28 @@ impl NRBVP {
         );
         info!("length of x mesh : {:?}", n_steps);
         info!("number of Ys: {:?}", number_of_Ys);
-        plots(
+        self.full_result = Some(permutted_results.clone());
+    }
+    pub fn gnuplot_result(&self) {
+       let permutted_results = self.full_result.clone().unwrap();
+        plots_gnulot(
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
-            permutted_results.transpose(),
+            permutted_results
         );
         info!("result plotted");
     }
-
+    pub fn plot_result(&self) {
+        let permutted_results = self.full_result.clone().unwrap();
+         plots(
+             self.arg.clone(),
+             self.values.clone(),
+             self.x_mesh.clone(),
+             permutted_results
+         );
+         info!("result plotted");
+     }
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         if let Some(jac) = &self.old_jac {

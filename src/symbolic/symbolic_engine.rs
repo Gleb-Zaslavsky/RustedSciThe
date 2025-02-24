@@ -423,7 +423,62 @@ impl Expr {
             }
         }
     } // end of lambdify
-
+    /* 
+    pub fn lambdify_slice(&self, vars: Vec<&str>) -> Box<dyn Fn(&[f64]) -> f64 + '_> {
+        /* 
+        let var_indices: std::collections::HashMap<&str, usize> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| (name, i))
+        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
+    //variable names to indices at the start, avoiding repeated lookups during evaluation.
+    */
+       
+        match self {
+            Expr::Var(name) => {
+                let index = vars.iter().position(|&x| x == name).unwrap();
+                Box::new(move |args| args[index])
+            }
+            Expr::Const(val) => {
+                let val = *val;
+                Box::new(move |_| val)
+            }
+            Expr::Add(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
+                Box::new(move |args| lhs_fn(args.clone()) + rhs_fn(args))
+            }
+            Expr::Sub(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
+                Box::new(move |args| lhs_fn(args.clone()) - rhs_fn(args))
+            }
+            Expr::Mul(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
+                Box::new(move |args| lhs_fn(args.clone()) * rhs_fn(args))
+            }
+            Expr::Div(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify(vars.clone());
+                let rhs_fn = rhs.lambdify(vars);
+                Box::new(move |args| lhs_fn(args.clone()) / rhs_fn(args))
+            }
+            Expr::Pow(base, exp) => {
+                let base_fn = base.lambdify(vars.clone());
+                let exp_fn = exp.lambdify(vars);
+                Box::new(move |args| base_fn(args.clone()).powf(exp_fn(args)))
+            }
+            Expr::Exp(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).exp())
+            }
+            Expr::Ln(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).ln())
+            }
+        }
+    } // end of lambdify
+    */
     pub fn lambdify_owned(self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64> {
         /* 
         let var_indices: std::collections::HashMap<&str, usize> = vars

@@ -243,7 +243,7 @@ impl Grid {
             weights
                 .iter()
                 .enumerate()
-                .filter(|(_, &x)| x != 0)
+                .filter(|&(_, &x)| x != 0)
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>()
         );

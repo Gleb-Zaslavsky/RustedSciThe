@@ -142,7 +142,7 @@ pub fn interchange_columns(
             let index = variables.iter().position(|x| x == var).unwrap();
             reordering.push(index);
         }
-        let reordered_result = y_DMatrix.select_columns(&reordering);
+        let reordered_result = y_DMatrix.select_rows(&reordering);
         reordered_result
     } else {
         y_DMatrix

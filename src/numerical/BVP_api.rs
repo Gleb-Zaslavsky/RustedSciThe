@@ -179,6 +179,14 @@ impl BVP {
             structure_damp.plot_result();
         }
     }
+    pub fn gnuplot_result(&self) {
+        if let Some(ref structure) = self.structure {
+            structure.plot_result();
+        }
+        if let Some(ref structure_damp) = self.structure_damp {
+            structure_damp.gnuplot_result();
+        }
+    }
     pub fn solve(&mut self) {
         if let Some(ref mut structure) = self.structure {
             structure.solve();
@@ -187,17 +195,17 @@ impl BVP {
             structure_damp.solve();
         }
     }
-    pub fn get_result(&self) -> Option<DMatrix<f64>> {
+    pub fn get_result(& self) -> Option<DMatrix<f64>> {
         if let Some(structure) = &self.structure {
             let res = structure.get_result();
             return res;
         }
-        if let Some(structure_damp) = &self.structure_damp {
+        match &self.structure_damp { Some(structure_damp) => {
             let res = structure_damp.get_result();
             return res;
-        } else {
+        } _ => {
             panic!("Invalid structure!");
-        }
+        }}
     }
     pub fn save_to_file(&mut self, filename: Option<String>) {
         if let Some(structure) = &mut self.structure {
@@ -205,6 +213,14 @@ impl BVP {
         }
         if let Some(structure_damp) = &mut self.structure_damp {
             structure_damp.save_to_file(filename);
+        }
+    }
+    pub fn save_to_csv(&mut self, filename: Option<String>) {
+        if let Some(structure) = &mut self.structure {
+            structure.save_to_file();
+        }
+        if let Some(structure_damp) = &mut self.structure_damp {
+            structure_damp.save_to_csv(filename);
         }
     }
 }

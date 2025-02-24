@@ -202,18 +202,18 @@ mod tests {
         let variable = factory.create_variable("x".to_string());
         
         // Test constant
-        if let Some(expr) = constant.as_any().downcast_ref::<Expr>() {
+        match constant.as_any().downcast_ref::<Expr>() { Some(expr) => {
             assert_eq!(*expr, Expr::Const(42.0));
-        } else {
+        } _ => {
             panic!("Expected Expr type for constant");
-        }
+        }}
 
         // Test variable
-        if let Some(expr) = variable.as_any().downcast_ref::<Expr>() {
+        match variable.as_any().downcast_ref::<Expr>() { Some(expr) => {
             assert_eq!(*expr, Expr::Var("x".to_string()));
-        } else {
+        } _ => {
             panic!("Expected Expr type for variable");
-        }
+        }}
     }
 
     // Expression parsing tests

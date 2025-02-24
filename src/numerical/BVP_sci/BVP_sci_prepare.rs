@@ -100,11 +100,11 @@ pub fn wrap_functions(
     D: DMatrix<f64>,
 ) -> (Fun, Bc, FunJac, BcJac) {
     let fun_jac_wrapped: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>> =
-        if let Some(fun_jac) = fun_jac {
+        match fun_jac { Some(fun_jac) => {
             Some(Box::new(move |x, y| fun_jac(x, y)))
-        } else {
+        } _ => {
             None
-        };
+        }};
 
     let S1 = S.clone();
     let D1 = D.clone();
@@ -124,7 +124,7 @@ pub fn wrap_functions(
         fun
     };
 
-    let fun_jac_wrapped: FunJac = if let Some(fun_jac_wrapped) = fun_jac_wrapped {
+    let fun_jac_wrapped: FunJac = match fun_jac_wrapped { Some(fun_jac_wrapped) => {
         if let Some(S) = S.clone() {
             Some(Box::new(move |x: f64, y: &DVector<f64>| {
                 let mut df_dy = fun_jac_wrapped(x, y);
@@ -141,9 +141,9 @@ pub fn wrap_functions(
         } else {
             Some(fun_jac_wrapped)
         }
-    } else {
+    } _ => {
         None
-    };
+    }};
     let bc_jac_wrapped = bc_jac;
     let bc_wrapped = bc;
     (fun_wrapped, bc_wrapped, fun_jac_wrapped, bc_jac_wrapped)
@@ -193,11 +193,11 @@ pub fn estimate_fun_jac(
     let (n, m) = y.shape();
     let x_len = x.len();
     assert_eq!(n, x_len, "x and y have different lengths");
-    let f0: DMatrix<f64> = if let Some(f0_) = f0 {
+    let f0: DMatrix<f64> = match f0 { Some(f0_) => {
         calc_F(&f0_, x, &y)
-    } else {
+    } _ => {
         calc_F(&fun, x, &y)
-    };
+    }};
     let mut y_abs = y.abs();
     y_abs.add_assign(DMatrix::from_element(n, m, 1.0));
     let y_plus_1: DMatrix<f64> = y_abs;
@@ -230,11 +230,11 @@ pub fn estimate_bc_jac(
     bc0: Option<Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DVector<f64>>>,
 ) -> (DMatrix<f64>, DMatrix<f64>) {
     let n = ya.len();
-    let bc0: DVector<f64> = if let Some(bc0_) = bc0 {
+    let bc0: DVector<f64> = match bc0 { Some(bc0_) => {
         bc0_(ya, yb)
-    } else {
+    } _ => {
         bc(ya, yb)
-    };
+    }};
 
     let mut dbc_dya = DMatrix::zeros(n, n);
     let mut y_abs = ya.abs();

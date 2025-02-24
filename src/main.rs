@@ -977,19 +977,23 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 2000; //
-            let strategy = "Damped".to_string(); //
+            let n_steps = 100; //
+            let strategy = "Damped".to_string(); // 
 
             let strategy_params = match strategy.as_str() {
                 "Naive" => None,
                 "Damped" => Some(HashMap::from([
-                    ("max_jac".to_string(), None),
-                    ("maxDampIter".to_string(), None),
-                    ("DampFacor".to_string(), None),
+                    ("max_jac".to_string(), None),// maximum iterations with old Jacobian, None means the default number is taken-3
+                    ("maxDampIter".to_string(), None),// maximum number of damped steps, None means the default value of 5 is used
+                    ("DampFacor".to_string(), None),// factor to decrease the damping coefficient, None means the default value of 0.5 is used
                     (
-                        "adaptive".to_string(),
+                        "adaptive".to_string(),// adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
+                        // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means 
+                        // maximum number of refinments allowed 
                         Some(vec![1.0, 5.0]), //  None
                     ),
+                    // the name of grid refinement strategy, this key-value pair will be used only if "adaptive" is Some, in opposite case this pair
+              // will be ignored: vector of parametrs is used inside the grid refinement algorithm
                     //  ("pearson".to_string(), Some(vec![0.2] ) ) (""two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
                     ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
                 ])),
@@ -1001,7 +1005,7 @@ fn main() {
             };
 
             let scheme = "trapezoid".to_string();
-            let method = "Sparse".to_string(); // or  "Dense"
+            let method = "Dense".to_string(); //   "Sparse" or "Dense"
             let linear_sys_method = None;
             let ones = vec![0.0; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
@@ -1043,9 +1047,14 @@ fn main() {
             #[allow(unused_variables)]
             nr.solve();
             // println!("result = {:?}", solution);
-
+            // get solution plot using plotters crate or gnuplot crate (gnuplot library MUST BE INSTALLED AND IN THE PATH)
             nr.plot_result();
+            nr.gnuplot_result();
+            // save to txt
             nr.save_to_file(None);
+            // save to csv
+            nr.save_to_csv(None);
+
         }
         
         20 => {

@@ -261,7 +261,7 @@ pub fn pearson_grid_refinement(
           // find keys corresponding to non-zero values in the HashMap
         let non_zero_keys: Vec<usize> = mark
             .iter()
-            .filter(|(_, &value)| value != 0)
+            .filter(|&(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
         info!(
@@ -472,7 +472,7 @@ pub fn grcar_smooke_grid_refinement(
           // find keys corresponding to non-zero values in the HashMap
         let non_zero_keys: Vec<usize> = mark
             .iter()
-            .filter(|(_, &value)| value != 0)
+            .filter(|&(_, &value)| value != 0)
             .map(|(key, _)| *key)
             .collect();
         info!(

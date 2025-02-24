@@ -487,51 +487,38 @@ impl Jacobian {
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun));
         self.residiual_function = boxed_fun;
     }
-
-    /*
-    pub fn lambdify_residual_VectorType_parallel(&mut self, arg: &str, variable_str: Vec<&str>) {
+/*
+    pub fn lambdify_residual_DVector(&mut self, arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
-        fn f(
-            vector_of_functions: Vec<Expr>,
-            arg: String,
-            variable_str: Vec<String>,
-        ) -> Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType> + Send + Sync> {
-            Box::new(move |x: f64, v: &dyn VectorType| -> Box<dyn VectorType> {
-                let res = vector_of_functions
-                    .par_iter()
-                    .enumerate()
-                    .map(|(i, func)| {
-                        let func = Expr::lambdify_IVP_owned(
-                            func.to_owned(),
-                            arg.as_str(),
-                            variable_str.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        );
-                        (i, func(x, v.iterate().collect()))
-                    })
-                    .fold(
-                        || v.zeros(vector_of_functions.len()),
-                        |mut acc, (i, result)| {
-                            acc.assign_value(i, result);
-                            acc
-                        },
-                    )
-                    .reduce(
-                        || v.zeros(vector_of_functions.len()),
-                        |mut acc, res| {
-                            acc.add(res);
-                            acc
-                        },
-                    );
-                res
-            })
-        }
-        let fun = f(
-            vector_of_functions.to_owned(),
-            arg.to_string(),
-            variable_str.clone().iter().map(|s| s.to_string()).collect(),
-        );
+        
+    // Pre-compute lambdified functions
+    let lambdified_functions: Vec<_> = vector_of_functions
+        .iter()
+        .map(|func| {
+            let func_clone = func.clone();
+            let variable_str_clone = variable_str.clone();
+            move |v:Vec<f64> | {
+                Expr::lambdify(&func_clone, variable_str_clone)(v)
+            }
+        })
+        .collect();
+    
+        let fun = Box::new(move |_x: f64, v: &DVector<f64>| -> DVector<f64> {
+            
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            // Use par_iter for parallel execution
+            let result: Vec<_> = (0..lambdified_functions.len())
+                .into_par_iter()
+                .map(|i| lambdified_functions[i](v_vec))
+                .collect();
+    
+            // Construct DVector directly from Vec
+            DVector::from_vec(result)
+        });
+        let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun));
+        self.residiual_function = boxed_fun;
     }
-    */
+     */
     //////////////////////////////////////////////////////////////////////////////////////////
     ////                             SPRS CRATE SPARSE FUNCTIONS
     ///////////////////////////////////////////////////////////////////////////////////////////

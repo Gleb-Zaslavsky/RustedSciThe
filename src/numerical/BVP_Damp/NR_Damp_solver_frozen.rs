@@ -325,7 +325,7 @@ impl NRBVP {
     pub fn save_to_file(&self) {
         //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let result_DMatrix = self.get_result().unwrap();
-        let _ = save_matrix_to_file(&result_DMatrix, &self.values, "result.txt");
+        let _ = save_matrix_to_file(&result_DMatrix, &self.values, "result.txt", &self.x_mesh, &self.arg);
     }
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();

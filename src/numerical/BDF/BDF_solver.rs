@@ -593,7 +593,7 @@ impl BDF {
         // if jac is None, then we calculate the jacobian using the num_jac function and return a wrapped function that computes the jacobian
         // at a given point
 
-        if let Some(jac) = jac {
+        match jac { Some(jac) => {
             info!("analytical jacobian used");
             let J = jac(t0, &y0);
             self.njev += 1;
@@ -624,7 +624,7 @@ impl BDF {
             //  ( Some(jac_wrapped), J)
             self.jac = Some(jac_wrapped);
             self.J = J.clone();
-        } else {
+        } _ => {
             let _new_sparsity: Option<(DMatrix<f64>, Vec<usize>)> = if let Some(sparsity) = sparsity
             {
                 let groups = group_columns(&sparsity, OrderEnum::None);
@@ -654,7 +654,7 @@ impl BDF {
             self.jac = Some(jac_wrapped);
             self.J = J.clone();
                */
-        }; // jac is  None
+        }}; // jac is  None
            //  Ok((A, B))
 
         /*

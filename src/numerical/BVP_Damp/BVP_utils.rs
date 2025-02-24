@@ -6,16 +6,21 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tabled::{builder::Builder, settings::Style};
-pub fn elapsed_time(elapsed: Duration) {
+pub fn elapsed_time(elapsed: Duration) ->(String, f64) {
     let time = elapsed.as_millis();
     if time < 1000 {
-        info!("Elapsed {} ms", time)
+        info!("Elapsed {} ms", time);
+        (" ms ".to_string(), time as f64)
     } else if time >= 1000 && time < 60_000 {
-        info!("Elapsed {} s", elapsed.as_secs())
+        info!("Elapsed {} s", elapsed.as_secs());
+        (" s".to_string(), elapsed.as_secs() as f64)
     } else if time >= 60_000 && time < 3600_000 {
-        info!("Elapsed {} min", elapsed.as_secs() / 60)
+        info!("Elapsed {} min", elapsed.as_secs() / 60);
+        (" min".to_string(), elapsed.as_secs() as f64 / 60.0 )
     } else {
-        info!("Elapsed {} h", elapsed.as_secs() / 3600)
+        info!("Elapsed {} h", elapsed.as_secs() / 3600);
+        (" h".to_string(), elapsed.as_secs() as f64 / 3600.0)
+
     }
 }
 
@@ -29,7 +34,8 @@ pub struct CustomTimer {
   pub   linear_system: Duration,
   pub symbolic_operations_time: Instant,
   pub symbolic_operations: Duration,
-
+  pub grid_refinement_time: Instant,
+  pub grid_refinement: Duration
   
 }
 
@@ -45,7 +51,22 @@ impl CustomTimer {
             linear_system: Duration::from_secs(0),
             symbolic_operations_time: Instant::now(),
             symbolic_operations: Duration::from_secs(0),
+            grid_refinement_time: Instant::now(),
+            grid_refinement: Duration::from_secs(0)
         }
+    }
+    pub fn start(&mut self) {
+        self.start = Instant::now();
+        self.jac_time = Instant::now();
+        self.jac = Duration::from_secs(0);
+        self.fun_time = Instant::now();
+        self.fun = Duration::from_secs(0);
+        self.linear_system_time = Instant::now();
+        self.linear_system = Duration::from_secs(0);
+        self.symbolic_operations_time = Instant::now();
+        self.symbolic_operations = Duration::from_secs(0);
+        self.grid_refinement_time = Instant::now();
+        self.grid_refinement = Duration::from_secs(0);
     }
     pub fn jac_tic(&mut self) {
         self.jac_time = Instant::now();
@@ -83,50 +104,80 @@ impl CustomTimer {
         let symbolic_operations = self.symbolic_operations_time.elapsed();
         self.symbolic_operations += symbolic_operations;
     }
-    pub fn get_all(&self) ->HashMap<String, f64> {
-        let mut timer_data = HashMap::new();
+    pub fn grid_refinement_tic(&mut self) {
+        self.grid_refinement_time = Instant::now();
+    }
+    pub fn grid_refinement_tac(&mut self) {
+        let grid_refinement = self.grid_refinement_time.elapsed();
+        self.grid_refinement += grid_refinement;
+    }
+    pub fn get_all(&self) ->HashMap<String, String> {
+        let mut timer_data:HashMap<String, String> = HashMap::new();
+
         let total_time =  self.start.elapsed().as_nanos() as f64;
+        let total_time_string = elapsed_time(self.start.elapsed());
+
+        let jac_total_string = elapsed_time(self.jac);
         let jac_total = self.jac.as_nanos() as f64;
         let jac_time_percent =   100.0*jac_total/total_time;
+
         let fun_total = self.fun.as_nanos() as f64;
         let fun_time_percent =   100.0*fun_total/total_time;
+        let fun_total_string = elapsed_time(self.fun);
+
         let linear_system_total = self.linear_system.as_nanos() as f64;
         let linear_system_time_percent =   100.0*linear_system_total/total_time;
+        let linear_system_total_string = elapsed_time(self.linear_system);
+
         let symbolic_operations_total = self.symbolic_operations.as_nanos()  as f64;
         let symbolic_operations_time_percent =   100.0*symbolic_operations_total/total_time;
-        let other = total_time - jac_total - fun_total - linear_system_total - symbolic_operations_total;
+        let symbolic_operations_total_string = elapsed_time(self.symbolic_operations);
+
+        let grid_refinement_total = self.grid_refinement.as_nanos() as f64;
+        let grid_refinement_time_percent =   100.0*grid_refinement_total/total_time;
+        let grid_refinement_total_string = elapsed_time(self.grid_refinement);
+        
+        let other = total_time - jac_total - fun_total - linear_system_total - symbolic_operations_total - grid_refinement_total;
+        
         let other_percent = 100.0*other/total_time;
+
         if other_percent > 0.5 {
         timer_data.insert("other %".to_string(), 
-        (other_percent*1000.0).round() / 1000.0);
+        format!("{} ",(other_percent*1000.0).round() / 1000.0)  ) ;
         }
-         timer_data.insert("time elapsed, s".to_string(), self.start.elapsed().as_secs_f64()); 
+         timer_data.insert("time elapsed, ".to_string() + total_time_string.0.as_str(), 
+         format!("{}",total_time_string.1) ); 
  
+        if grid_refinement_time_percent > 0.5 {
+        timer_data.insert(
+            "Grid Refinement (%, ".to_string() + grid_refinement_total_string.0.as_str() + ")", 
+            format!("{}, {}",(grid_refinement_time_percent*1000.0).round() / 1000.0, grid_refinement_total_string.1)
+        ); }
         if jac_time_percent > 0.5 {
             timer_data.insert(
-            "Jacobian %".to_string(),
-            (jac_time_percent*1000.0).round() / 1000.0,
+            "Jacobian (%, ".to_string()+ jac_total_string.0.as_str() +")",
+            format!("{}, {}",(jac_time_percent*1000.0).round() / 1000.0, jac_total_string.1)
         ); }
         if fun_time_percent > 0.5 {
         timer_data.insert(
-            "Function %".to_string(),
-            (fun_time_percent*1000.0).round() / 1000.0,
+            "Function (%, ".to_string() + fun_total_string.0.as_str() + ")",
+            format!("{}, {}",(fun_time_percent*1000.0).round() / 1000.0, fun_total_string.1)
         ); }
         if linear_system_time_percent > 0.5 {
         timer_data.insert(
-            "Linear System %".to_string(),
-            (linear_system_time_percent*1000.0).round() / 1000.0,
+            "Linear System (%, ".to_string() + linear_system_total_string.0.as_str() +")",
+            format!("{}, {}",(linear_system_time_percent*1000.0).round() / 1000.0, linear_system_total_string.1)
             );
         }
         if symbolic_operations_time_percent > 0.5 {
         timer_data.insert(
-                "Symbolic Operations %".to_string(),
-                (symbolic_operations_time_percent*1000.0).round() / 1000.0,
+                "Symbolic Operations (%, ".to_string() + symbolic_operations_total_string.0.as_str() +")",
+                format!("{}, {}",(symbolic_operations_time_percent*1000.0).round() / 1000.0, symbolic_operations_total_string.1)
                 );
         }
         let mut table = Builder::from(timer_data.clone()).build();
         table.with(Style::modern_rounded());
-        println!("{}", table.to_string());
+        info!("\n \n TIMER DATA \n \n {}", table.to_string());
         timer_data
     }
 }
