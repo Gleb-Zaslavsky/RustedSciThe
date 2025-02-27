@@ -9,6 +9,7 @@ use faer::linalg::solvers::Solve;
 use faer::mat::MatRef;
 use faer::mat::Mat;
 
+use enum_dispatch::enum_dispatch;
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Matrix};
@@ -40,13 +41,15 @@ type faer_col = Col<f64>; // Mat<f64>;
 ////////////////////////////////////////////////////////////////
 //  VECTORTYPE - geneic type to store vectors of residuals and Newton steps
 ////////////////////////////////////////////////////////////////
+#[enum_dispatch]
 pub enum YEnum {
     Dense(DVector<f64>),    // dense vector NALGEBRA CRATE
     Sparse_1(CsVec<f64>),   // sparse vector SPRS CRATE
-    Sparse_2(DVector<f64>), // dense vector NALGEBRA SPARSE CRATE
+  
     Sparse_3(faer_col),     // sparse vector  FAER CRATE
 }
 // basic funcionality for vectors
+#[enum_dispatch(YEnum)]
 pub trait VectorType: Any {
     fn as_any(&self) -> &dyn Any;
     fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType>; //
@@ -70,192 +73,39 @@ impl Sub for &dyn VectorType {
     }
 }
 
+impl Clone for Box<dyn VectorType> {
+    fn clone(&self) -> Self {
+        let res = self.clone_box();
+        res
+    }
+}
 impl Iterator for YEnum {
     type Item = f64;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             YEnum::Dense(vec) => vec.iter().next().copied(),
             YEnum::Sparse_1(vec) => vec.iter().map(|x| *x.1).next(),
-            YEnum::Sparse_2(vec) => vec.iter().next().copied(),
+       
             YEnum::Sparse_3(vec) => vec.iter().next().copied(),
         }
     }
 }
+/*Now  you can treat YEnum as if it directly implements VectorType. This means you can call any VectorType method on a YEnum instance without manually 
+matching on the enum variants. Here's an example of how you might use it: 
+fn example_usage(vector: YEnum) {
+    // You can directly call VectorType methods on YEnum
+    let norm = vector.norm();
+    let length = vector.len();
+    let cloned = vector.clone_box();
 
-impl VectorType for YEnum {
-    fn as_any(&self) -> &dyn Any {
-        match self {
-            YEnum::Dense(vec) => vec,
-            YEnum::Sparse_1(vec) => vec,
-            YEnum::Sparse_2(vec) => vec,
-            YEnum::Sparse_3(vec) => vec,
-        }
+    // You can also match on the enum variants if needed
+    match vector {
+        YEnum::Dense(dense_vec) => println!("Dense vector: {:?}", dense_vec),
+        YEnum::Sparse_1(sparse_vec) => println!("Sparse vector 1: {:?}", sparse_vec),
+        YEnum::Sparse_3(faer_vec) => println!("Sparse vector 3: {:?}", faer_vec),
     }
-    fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType> {
-        match self {
-            YEnum::Dense(vec) => {
-                if let Some(d_vec) = other.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(vec - d_vec)
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
-            }
-            YEnum::Sparse_1(vec) => {
-                if let Some(c_vec) = other.as_any().downcast_ref::<CsVec<f64>>() {
-                    Box::new(vec - c_vec)
-                } else {
-                    panic!("Type mismatch: expected CsVec")
-                }
-            }
-            YEnum::Sparse_3(vec) => {
-                if let Some(d_vec) = other.as_any().downcast_ref::<faer_col>() {
-                    assert_eq!(vec.len(), d_vec.len());
-                    let subs = vec.sub(d_vec);
-                    Box::new(subs)
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
-            }
-
-            _ => panic!("Type mismatch: expected DVector or CsVec"),
-        }
-    } // subtract
-    fn norm(&self) -> f64 {
-        match self {
-            YEnum::Dense(vec) => Matrix::norm(vec),
-            YEnum::Sparse_1(vec) => CsVec::l2_norm(vec),
-            YEnum::Sparse_2(vec) => Matrix::norm(vec),
-            YEnum::Sparse_3(vec) => vec.norm_l2(),
-        }
-    }
-    fn to_DVectorType(&self) -> DVector<f64> {
-        match self {
-            YEnum::Dense(vec) => vec.clone(),
-            YEnum::Sparse_1(vec) => {
-                let length = vec.dim();
-
-                DVector::from_iterator(length, vec.iter().map(|x| *x.1))
-            }
-            YEnum::Sparse_2(vec) => vec.clone(),
-            YEnum::Sparse_3(vec) => {
-                let length = vec.nrows();
-
-                //   DVector::from_iterator(length, vec.row_iter().map(|x| x[0]))
-                DVector::from_iterator(length, vec.iter().map(|x| *x))
-            }
-        }
-    } //to_iterator
-    fn clone_box(&self) -> Box<dyn VectorType> {
-        match self {
-            YEnum::Dense(vec) => Box::new(vec.clone()),
-            YEnum::Sparse_1(vec) => Box::new(vec.clone()),
-            YEnum::Sparse_2(vec) => Box::new(vec.clone()),
-            YEnum::Sparse_3(vec) => Box::new(vec.clone()),
-        }
-    }
-
-    fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_> {
-        match self {
-            YEnum::Dense(vec) => Box::new(vec.iter().map(|x| *x)),
-            YEnum::Sparse_1(vec) => Box::new(vec.iter().map(|x| *x.1)),
-            YEnum::Sparse_2(vec) => Box::new(vec.iter().map(|x| *x)),
-            YEnum::Sparse_3(vec) => Box::new(vec.iter().map(|x| *x)),
-        }
-    }
-    fn get_val(&self, index: usize) -> f64 {
-        match self {
-            YEnum::Dense(vec) => vec[index],
-            YEnum::Sparse_1(vec) => vec[index],
-            YEnum::Sparse_2(vec) => vec[index],
-            YEnum::Sparse_3(vec) => vec[index],
-        }
-    }
-    fn mul_float(&self, float: f64) -> Box<dyn VectorType> {
-        match self {
-            YEnum::Dense(vec) => Box::new(vec * float),
-            YEnum::Sparse_1(vec) => Box::new(vec.map(|x| x * (float))),
-            YEnum::Sparse_2(vec) => Box::new(vec * float),
-            YEnum::Sparse_3(vec) => Box::new(vec * float),
-        }
-    }
-    fn len(&self) -> usize {
-        match self {
-            YEnum::Dense(vec) => vec.len(),
-            YEnum::Sparse_1(vec) => vec.len(),
-            YEnum::Sparse_2(vec) => vec.len(),
-            YEnum::Sparse_3(vec) => vec.len(),
-        }
-    }
-    fn zeros(&self, len: usize) -> Box<dyn VectorType> {
-        match self {
-            YEnum::Dense(_) => Box::new(DVector::zeros(len)),
-            YEnum::Sparse_1(_) => Box::new(CsVec::empty(len)),
-            YEnum::Sparse_2(_) => Box::new(DVector::zeros(len)),
-            YEnum::Sparse_3(_) => Box::new(faer_col::zeros(len)), // faer_col::zeros(len)
-        }
-    }
-    fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType> {
-        match self {
-            YEnum::Dense(vec) => {
-                let mut new_vec = vec.clone();
-                new_vec[index] = value;
-                Box::new(new_vec)
-            }
-            YEnum::Sparse_1(vec) => {
-                let mut new_vec = vec.clone();
-                new_vec.append(index, value);
-                Box::new(new_vec)
-            }
-            YEnum::Sparse_2(vec) => {
-                let mut new_vec = vec.clone();
-                new_vec[index] = value;
-                Box::new(new_vec)
-            }
-            YEnum::Sparse_3(vec) => {
-                let mut new_vec = vec.clone();
-                new_vec[index] = value;
-                Box::new(new_vec)
-            }
-        }
-    }// end assign
-    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
-        match self {
-            YEnum::Dense(_) => { let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
-            Box::new(new_matrix)
-             }
-             YEnum::Sparse_1(_) => { 
-             let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
-            Box::new(new_matrix)
-             }
-             YEnum::Sparse_2(_) => { let new_matrix: CsMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
-            Box::new(new_matrix)
-            }
-            YEnum::Sparse_3(_) => { 
-                let triplet:Vec<Triplet<usize, usize, f64>> = non_zero_triplet
-                .iter()
-                .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2)  ).collect::<Vec<_>>();
-                let new_matrix: SparseColMat<usize, f64> =
-                SparseColMat::try_new_from_triplets(
-                    nrows,
-                    ncols,
-                    triplet.as_slice(),
-                )
-                .unwrap();
-            Box::new(new_matrix)
-            }
-            
-         }
-    }//from_vector
-    fn vec_type(&self) -> String {
-        match self {
-            YEnum::Dense(_) => "Dense".to_string(),
-            YEnum::Sparse_1(_) => "Sparse_1".to_string(),
-            YEnum::Sparse_2(_) => "Sparse_2".to_string(),
-            YEnum::Sparse_3(_) => "Sparse_3".to_string(),
-
-        }
-    }
-}//end impl
+}
+    */
 ////////////////////////////////////////////////////////////////
 //           NALGEBRA CRATE
 ////////////////////////////////////////////////////////////////
@@ -434,89 +284,161 @@ impl VectorType for faer_col {
 /////////////////////////////////////////////////////////////
 //      FUN - VECTOR-FUNCTION OF RESIDUALS
 ///////////////////////////////////////////////////////////////
-pub trait Fun {
-    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType>;
-}
 
-pub enum FunEnum {
-    Dense(Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>),
-    Sparse_1(Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>>),
-    Sparse_2(Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>),
-    Sparse_3(Box<dyn Fn(f64, &faer_col) -> faer_col>),
-}
+pub struct DenseFun(Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>);
 
-impl Fun for FunEnum {
-    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
-        match self {
-            FunEnum::Dense(fun) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(fun(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
+pub struct SparseFun1(Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>>);
+
+pub struct SparseFun3(Box<dyn Fn(f64, &faer_col) -> faer_col>);
+//________________________ CONVERSION FUNCTIONS________________________
+// Add new constructors for each Fun variant that take trait objects
+impl DenseFun {
+    pub fn from_trait_object(fun: Box<dyn Fun>) -> Self {
+        // Create a new function that delegates to the trait object
+        let f = Box::new(move |x: f64, vec: &DVector<f64>| -> DVector<f64> {
+            // Convert DVector to trait object result and back
+            if let Some(result) = fun.call(x, vec).as_any().downcast_ref::<DVector<f64>>() {
+                result.clone()
+            } else {
+                panic!("Function did not return expected Dense type")
             }
-            FunEnum::Sparse_1(fun) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<CsVec<f64>>() {
-                    Box::new(fun(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected CsVec")
-                }
-            }
-            FunEnum::Sparse_2(fun) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(fun(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
-            }
-            FunEnum::Sparse_3(fun) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
-                    Box::new(fun(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected faer_col")
-                }
-            }
-        }
+        });
+        DenseFun(f)
     }
 }
 
-impl Fun for  dyn Fn(f64, &DVector<f64>) -> DVector<f64>{
-    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+impl SparseFun1 {
+    pub fn from_trait_object(fun: Box<dyn Fun>) -> Self {
+        let f = Box::new(move |x: f64, vec: &CsVec<f64>| -> CsVec<f64> {
+            if let Some(result) = fun.call(x, vec).as_any().downcast_ref::<CsVec<f64>>() {
+                result.clone()
+            } else {
+                panic!("Function did not return expected Sparse_1 type")
+            }
+        });
+        SparseFun1(f)
+    }
+}
 
+impl SparseFun3 {
+    pub fn from_trait_object(fun: Box<dyn Fun>) -> Self {
+        let f = Box::new(move |x: f64, vec: &faer_col| -> faer_col {
+            if let Some(result) = fun.call(x, vec).as_any().downcast_ref::<faer_col>() {
+                result.clone()
+            } else {
+                panic!("Function did not return expected Sparse_3 type")
+            }
+        });
+        SparseFun3(f)
+    }
+}
+
+
+
+#[enum_dispatch(FunEnum)]
+pub trait Fun {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType>;
+    fn as_any(&self) -> &dyn Any;
+   
+}
+#[enum_dispatch]
+pub enum FunEnum {
+    Dense(DenseFun),
+    Sparse1(SparseFun1),
+    Sparse3(SparseFun3),
+}
+
+
+// Implement Fun for each variant type
+impl Fun for DenseFun {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
         if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-            Box::new(self(x, d_vec))
+            Box::new(self.0(x, d_vec))
         } else {
             panic!("Type mismatch: expected DVector")
         }
-
+    }
+    fn as_any(&self) ->  &dyn Any {
+        self
     }
 }
-impl Fun for dyn Fn(f64, &faer_col) -> faer_col {
+
+impl Fun for SparseFun1 {
     fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
-        if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
-            Box::new(self(x, d_vec))
-        } else {
-            panic!("Type mismatch: expected faer_col")
-        }
-        }
-    
-}
-impl Fun for dyn Fn(f64, &CsVec<f64>) -> CsVec<f64> {
-    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
-        if let Some(d_vec) = vec.as_any().downcast_ref::<CsVec<f64>>() {
-            Box::new(self(x, d_vec))
+        if let Some(cs_vec) = vec.as_any().downcast_ref::<CsVec<f64>>() {
+            Box::new(self.0(x, cs_vec))
         } else {
             panic!("Type mismatch: expected CsVec")
         }
     }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
-// First, create a wrapper struct for the function
+
+
+
+impl Fun for SparseFun3 {
+    fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
+        if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
+            Box::new(self.0(x, d_vec))
+        } else {
+            panic!("Type mismatch: expected faer_col")
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+}
+//___________________CONVERT CONCRETE TRAIT OBJECT TO FunEnum VARIANTS
+pub fn create_dense_fun(f: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>) -> FunEnum {
+    FunEnum::Dense(DenseFun(f))
+}
+
+pub fn create_sparse_fun1(f: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>>) -> FunEnum {
+    FunEnum::Sparse1(SparseFun1(f))
+}
+
+pub fn create_sparse_fun3(f: Box<dyn Fn(f64, &faer_col) -> faer_col>) -> FunEnum {
+    FunEnum::Sparse3(SparseFun3(f))
+}
+
+pub fn Fun_type(fun_box: &Box<dyn Fun>) -> String {
+   let fun = &*fun_box;
+   if let Some(_) = fun.as_any().downcast_ref::<DenseFun>(){
+        "Dense".to_string()
+    } else if let Some(_) = fun.as_any().downcast_ref::<SparseFun1>(){
+        "Sparse_1".to_string()
+    } else if let Some(_) = fun.as_any().downcast_ref::<SparseFun3>(){
+        "Sparse_3".to_string()
+    } else {
+        panic!("Type mismatch: expected a valid Fun type");
+    }
+}
+
+pub fn convert_box_to_fun_enum(fun_box: Box<dyn Fun>) -> FunEnum {
+    // Check the type of vector the function works with using a test call
+    let fun_type = Fun_type(&fun_box);
+    
+    match fun_type.as_str() {
+        "Dense" => FunEnum::Dense(DenseFun::from_trait_object(fun_box)),
+        "Sparse_1" => FunEnum::Sparse1(SparseFun1::from_trait_object(fun_box)),
+        "Sparse_3" => FunEnum::Sparse3(SparseFun3::from_trait_object(fun_box)),
+        _ => panic!("Unknown Fun type"),
+    }
+}
+
+// create a wrapper struct for the function
 pub struct FunctionWrapper(Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType>>);
 
 // Implement Fun for the wrapper
 impl Fun for FunctionWrapper {
     fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
         (self.0)(x, vec)
+    }
+    fn as_any(&self) ->  &dyn Any {
+        self
     }
 }
 
@@ -527,6 +449,8 @@ pub fn convert_to_fun(
     Box::new(FunctionWrapper(f))
 }
 
+// Similarly for Jac trait
+
 
 
 impl fmt::Display for YEnum {
@@ -534,7 +458,7 @@ impl fmt::Display for YEnum {
         match self {
             YEnum::Dense(vec) => write!(f, "Dense Vector: {:?}", vec),
             YEnum::Sparse_1(vec) => write!(f, "Sparse Vector 1: {:?}", vec),
-            YEnum::Sparse_2(vec) => write!(f, "Sparse Vector 2: {:?}", vec),
+       
             YEnum::Sparse_3(vec) => write!(f, "Sparse Vector 3: {:?}", vec),
         }
     }
@@ -573,13 +497,14 @@ impl Debug for dyn VectorType {
 //_________________________________Jacobian______________________________
 ////////////////////////////////////////////////////////////////////////////
 ///  NUMERICAL REPRESENTATION OF JACOBIAN FOR DIFFERENT CRATES
-#[allow(dead_code)]
+#[enum_dispatch]
 pub enum JacTypes {
     Dense(DMatrix<f64>),
     Sparse_1(CsMat<f64>),
     Sparse_2(CsMatrix<f64>),
     Sparse_3(faer_mat),
 }
+#[enum_dispatch(JacTypes)]
 pub trait MatrixType: Any {
     fn as_any(&self) -> &dyn Any;
     fn inverse(self) -> Box<dyn MatrixType>; // inverse
@@ -879,6 +804,7 @@ impl Debug for dyn MatrixType {
 ////////////////////////////////////////////////////////////////////////
 //  JACOBIAN MATRIX-FUNCTION
 ////////////////////////////////////////////////////////////////
+
 pub trait Jac {
     fn call(&mut self, x: f64, vec: &dyn VectorType) -> Box<dyn MatrixType>;
     fn inv(&mut self, matix: &dyn MatrixType, tol: f64, max_iter: usize) -> Box<dyn MatrixType>;
@@ -1131,9 +1057,7 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         let Mat_vec = ColRef::from_slice(vec.as_slice()).to_owned();
 
         Box::new(YEnum::Sparse_3(Mat_vec))
-    } else if desired_type == "Sparse_2".to_string() {
-        Box::new(YEnum::Sparse_2(vec.to_owned()))
-    } else {
+    }  else {
         panic!("Unsupported vector type: {}", desired_type);
     };
     res

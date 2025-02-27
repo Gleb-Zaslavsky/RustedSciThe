@@ -127,8 +127,8 @@ pub fn bvp_examples(example: usize) {
             );
             let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
             let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
-            use faer::col::{from_slice, Col};
-            let Ys3: Col<f64> = from_slice(Y.as_slice()).to_owned();
+            use faer::col::{ColRef, Col};
+            let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
             println!("Ys = {:?} \n", &Ys3);
             let F_eval3 = F_func3(4.0, &Ys3);
             println!("F_eval = {:?} \n", F_eval3);

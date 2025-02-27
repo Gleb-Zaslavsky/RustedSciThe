@@ -1,8 +1,8 @@
 #![allow(non_camel_case_types)]
 
 use crate::symbolic::symbolic_engine::Expr;
-use faer::col::{from_slice, Col};
-use faer::sparse::SparseColMat;
+use faer::col::{ColRef, Col};
+use faer::sparse::{SparseColMat, Triplet};
 use log:: info;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Dyn};
@@ -118,9 +118,9 @@ impl Jacobian {
                 CsMatrix::new_uninitialized_generic(Dyn(2), Dyn(2), 1)
             }),
             function_jacobian_IVP_SparseColMat: Box::new(|_xx: f64, _y: &Col<f64>| {
-                SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &vec![(0, 0, 0.0)]).unwrap()
+                SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)]).unwrap()
             }),
-            lambdified_functions_IVP_Col: Box::new(|_xx: f64, _y: &Col<f64>| Col::new()),
+            lambdified_functions_IVP_Col: Box::new(|_xx: f64, _y: &Col<f64>| Col::zeros(0)),
             bounds: None,
             rel_tolerance_vec: None,
             bandwidth: (0, 0),
@@ -150,9 +150,9 @@ impl Jacobian {
             CsMatrix::new_uninitialized_generic(Dyn(2), Dyn(2), 1)
         });
         let function_jacobian_IVP_SparseColMat = Box::new(|_xx: f64, _y: &Col<f64>| {
-            SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &vec![(0, 0, 0.0)]).unwrap()
+            SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)  ]  ).unwrap()
         });
-        let lambdified_functions_IVP_Col = Box::new(|_xx: f64, _y: &Col<f64>| Col::new());
+        let lambdified_functions_IVP_Col = Box::new(|_xx: f64, _y: &Col<f64>| Col::zeros(0));
         let bounds = Some(Vec::new());
         let rel_tolerance_vec = Some(Vec::new());
         for _ in 0..vector_of_functions.len() {
@@ -826,7 +826,7 @@ impl Jacobian {
                     // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
                     let P = partial_func(x, v_vec.clone());
                     if P.abs() > 1e-8 {
-                        let triplet = (i, j, P);
+                        let triplet = Triplet::new(i, j, P);
                         vector_of_triplets.push(triplet);
                     }
                 }
@@ -885,7 +885,7 @@ impl Jacobian {
                     let v_vec: Vec<f64> = v.iter().cloned().collect();
                     result.push(func(x, v_vec));
                 }
-                let res = from_slice(result.as_slice()).to_owned();
+                let res = ColRef::from_slice(result.as_slice()).to_owned();
                 res
             }) //enf of box
         } // end of function

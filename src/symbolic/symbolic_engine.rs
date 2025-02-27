@@ -6,6 +6,7 @@ use crate::symbolic::utils::{
 use std::collections::HashMap;
 use std::f64;
 use std::fmt;
+
 // Define an enum to represent different types of symbolic expressions
 
 #[derive(Clone, Debug, PartialEq)]
@@ -230,7 +231,7 @@ impl Expr {
         }
     }
     // just shortcut for box
-    fn boxed(self) -> Box<Self> {
+    pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
 
@@ -369,7 +370,7 @@ impl Expr {
 
     /// function to lambdify the symbolic function of multiple variables = convert it into a rust function
 
-    pub fn lambdify(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_> {
+    pub fn lambdify(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64 > {
         /* 
         let var_indices: std::collections::HashMap<&str, usize> = vars
         .iter()
@@ -423,7 +424,7 @@ impl Expr {
             }
         }
     } // end of lambdify
-    /* 
+    
     pub fn lambdify_slice(&self, vars: Vec<&str>) -> Box<dyn Fn(&[f64]) -> f64 + '_> {
         /* 
         let var_indices: std::collections::HashMap<&str, usize> = vars
@@ -444,41 +445,41 @@ impl Expr {
                 Box::new(move |_| val)
             }
             Expr::Add(lhs, rhs) => {
-                let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars);
-                Box::new(move |args| lhs_fn(args.clone()) + rhs_fn(args))
+                let lhs_fn = lhs.lambdify_slice(vars.clone());
+                let rhs_fn = rhs.lambdify_slice(vars);
+                Box::new(move |args| lhs_fn(args) + rhs_fn(args))
             }
             Expr::Sub(lhs, rhs) => {
-                let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars);
-                Box::new(move |args| lhs_fn(args.clone()) - rhs_fn(args))
+                let lhs_fn = lhs.lambdify_slice(vars.clone());
+                let rhs_fn = rhs.lambdify_slice(vars);
+                Box::new(move |args| lhs_fn(args) - rhs_fn(args))
             }
             Expr::Mul(lhs, rhs) => {
-                let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars);
-                Box::new(move |args| lhs_fn(args.clone()) * rhs_fn(args))
+                let lhs_fn = lhs.lambdify_slice(vars.clone());
+                let rhs_fn = rhs.lambdify_slice(vars);
+                Box::new(move |args| lhs_fn(args) * rhs_fn(args))
             }
             Expr::Div(lhs, rhs) => {
-                let lhs_fn = lhs.lambdify(vars.clone());
-                let rhs_fn = rhs.lambdify(vars);
-                Box::new(move |args| lhs_fn(args.clone()) / rhs_fn(args))
+                let lhs_fn = lhs.lambdify_slice(vars.clone());
+                let rhs_fn = rhs.lambdify_slice(vars);
+                Box::new(move |args| lhs_fn(args) / rhs_fn(args))
             }
             Expr::Pow(base, exp) => {
-                let base_fn = base.lambdify(vars.clone());
-                let exp_fn = exp.lambdify(vars);
-                Box::new(move |args| base_fn(args.clone()).powf(exp_fn(args)))
+                let base_fn = base.lambdify_slice(vars.clone());
+                let exp_fn = exp.lambdify_slice(vars);
+                Box::new(move |args| base_fn(args).powf(exp_fn(args)))
             }
             Expr::Exp(expr) => {
-                let expr_fn = expr.lambdify(vars);
+                let expr_fn = expr.lambdify_slice(vars);
                 Box::new(move |args| expr_fn(args).exp())
             }
             Expr::Ln(expr) => {
-                let expr_fn = expr.lambdify(vars);
+                let expr_fn = expr.lambdify_slice(vars);
                 Box::new(move |args| expr_fn(args).ln())
             }
         }
     } // end of lambdify
-    */
+
     pub fn lambdify_owned(self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64> {
         /* 
         let var_indices: std::collections::HashMap<&str, usize> = vars
@@ -587,6 +588,61 @@ impl Expr {
         vars.sort();
         (args, vars)
     } // end of extract_variables
+    // EVAL EXPRESSIONS //////////////////////////////////////////////////////////
+    pub fn eval_expression(&self, vars: Vec<&str>, values:&[f64]) -> f64 {
+        /* 
+        let var_indices: std::collections::HashMap<&str, usize> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| (name, i))
+        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
+    //variable names to indices at the start, avoiding repeated lookups during evaluation.
+    */
+       
+        match self {
+            Expr::Var(name) => {
+                let index = vars.iter().position(|&x| x == name).unwrap();
+                values[index]
+            }
+            Expr::Const(val) => {
+                let val = *val;
+                val
+            }
+            Expr::Add(lhs, rhs) => { 
+                let lhs_fn = lhs.eval_expression(vars.clone(), values);
+                let rhs_fn = rhs.eval_expression(vars, values);
+                 lhs_fn + rhs_fn
+            }
+            Expr::Sub(lhs, rhs) => {
+                let lhs_fn = lhs.eval_expression(vars.clone(), values);
+                let rhs_fn = rhs.eval_expression(vars, values);
+                 lhs_fn- rhs_fn
+            }
+            Expr::Mul(lhs, rhs) => {
+                let lhs_fn = lhs.eval_expression(vars.clone(), values);
+                let rhs_fn = rhs.eval_expression(vars, values);
+               lhs_fn * rhs_fn
+            }
+            Expr::Div(lhs, rhs) => {
+                let lhs_fn = lhs.eval_expression(vars.clone(), values);
+                let rhs_fn = rhs.eval_expression(vars, values);
+                lhs_fn / rhs_fn
+            }
+            Expr::Pow(base, exp) => {
+                let base_fn = base.eval_expression(vars.clone(), values);
+                let exp_fn = exp.eval_expression(vars, values);
+                 base_fn.powf(exp_fn)
+            }
+            Expr::Exp(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                 expr_fn.exp()
+            }
+            Expr::Ln(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.ln()
+            }
+        }
+    } // end of eval_expression
 
     /// PARSE EXPRESSIONS
     /// function to parse an expression from a string
@@ -1350,4 +1406,109 @@ mod tests {
         let expected_result = Expr::Const(0.0);
         assert_eq!(simplified_expr, expected_result);
     }
+    #[test]
+    fn test_eval_expression_var() {
+        let expr = Expr::Var("x".to_string());
+        let vars = vec!["x"];
+        let values = vec![5.0];
+        assert_eq!(expr.eval_expression(vars, &values), 5.0);
+    }
+
+    #[test]
+    fn test_eval_expression_const() {
+        let expr = Expr::Const(3.14);
+        let vars = vec![];
+        let values = vec![];
+        assert_eq!(expr.eval_expression(vars, &values), 3.14);
+    }
+
+    #[test]
+    fn test_eval_expression_add() {
+        let expr = Expr::Add(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let vars = vec!["x", "y"];
+        let values = vec![2.0, 3.0];
+        assert_eq!(expr.eval_expression(vars, &values), 5.0);
+    }
+
+    #[test]
+    fn test_eval_expression_sub() {
+        let expr = Expr::Sub(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let vars = vec!["x", "y"];
+        let values = vec![5.0, 3.0];
+        assert_eq!(expr.eval_expression(vars, &values), 2.0);
+    }
+
+    #[test]
+    fn test_eval_expression_mul() {
+        let expr = Expr::Mul(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let vars = vec!["x", "y"];
+        let values = vec![2.0, 3.0];
+        assert_eq!(expr.eval_expression(vars, &values), 6.0);
+    }
+
+    #[test]
+    fn test_eval_expression_div() {
+        let expr = Expr::Div(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let vars = vec!["x", "y"];
+        let values = vec![6.0, 2.0];
+        assert_eq!(expr.eval_expression(vars, &values), 3.0);
+    }
+
+    #[test]
+    fn test_eval_expression_pow() {
+        let expr = Expr::Pow(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Const(2.0)),
+        );
+        let vars = vec!["x"];
+        let values = vec![3.0];
+        assert_eq!(expr.eval_expression(vars, &values), 9.0);
+    }
+
+    #[test]
+    fn test_eval_expression_exp() {
+        let expr = Expr::Exp(Box::new(Expr::Var("x".to_string())));
+        let vars = vec!["x"];
+        let values = vec![1.0];
+        assert!((expr.eval_expression(vars, &values) - std::f64::consts::E).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_eval_expression_ln() {
+        let expr = Expr::Ln(Box::new(Expr::Var("x".to_string())));
+        let vars = vec!["x"];
+        let values = vec![std::f64::consts::E];
+        assert!((expr.eval_expression(vars, &values) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_eval_expression_complex() {
+        let expr = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("x".to_string())),
+                Box::new(Expr::Var("y".to_string())),
+            )),
+            Box::new(Expr::Pow(
+                Box::new(Expr::Var("z".to_string())),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let vars = vec!["x", "y", "z"];
+        let values = vec![2.0, 3.0, 4.0];
+        assert_eq!(expr.eval_expression(vars, &values), 22.0); // (2 * 3) + (4^2) = 22
+    }
+
+
 }

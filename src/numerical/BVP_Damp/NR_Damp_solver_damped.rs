@@ -436,6 +436,7 @@ impl NRBVP {
             self.bandwidth,
             y,
         );
+      //  info!("linear system solution {},\n {} \n {}", undamped_step_k.to_DVectorType(), F_k.to_DVectorType(), J_k.to_DMatrixType());
         let linear_sys_time_end = linear_sys_time_start.elapsed();
         for el in undamped_step_k.iterate() {
             if el.is_nan() {

@@ -1,7 +1,7 @@
 use core::panic;
 use nalgebra::{DMatrix, DVector};
 use rand::prelude::SliceRandom;
-use rand::thread_rng;
+use rand::rng;
 
 const SPARSE: f64 = 0.01;
 /*
@@ -58,7 +58,7 @@ pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
     let new_order = match order {
         OrderEnum::None => {
             // lets create a random permutation of columns
-            let mut rng = thread_rng();
+            let mut rng = rng();
             let mut order = (0..n).collect::<Vec<_>>();
             order.shuffle(&mut rng);
             order
@@ -70,7 +70,7 @@ pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
             o
         }
         OrderEnum::Scalar(_o) => {
-            let mut rng = thread_rng();
+            let mut rng = rng();
             let mut order = (0..n).collect::<Vec<_>>();
             order.shuffle(&mut rng);
             order

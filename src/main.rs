@@ -631,8 +631,8 @@ fn main() {
             );
             let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
             let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
-            use faer::col::{from_slice, Col};
-            let Ys3: Col<f64> = from_slice(Y.as_slice()).to_owned();
+            use faer::col::{ColRef, Col};
+            let Ys3: Col<f64> =ColRef:: from_slice(Y.as_slice()).to_owned();
             println!("Ys = {:?} \n", &Ys3);
             let F_eval3 = F_func3(4.0, &Ys3);
             println!("F_eval = {:?} \n", F_eval3);
@@ -977,7 +977,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 100; //
+            let n_steps = 2_000; //
             let strategy = "Damped".to_string(); // 
 
             let strategy_params = match strategy.as_str() {
@@ -1005,7 +1005,7 @@ fn main() {
             };
 
             let scheme = "trapezoid".to_string();
-            let method = "Dense".to_string(); //   "Sparse" or "Dense"
+            let method = "Sparse".to_string(); //   "Sparse" or "Dense"
             let linear_sys_method = None;
             let ones = vec![0.0; values.len() * n_steps];
             let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
@@ -1040,7 +1040,7 @@ fn main() {
                 max_iterations,
                 Some(rel_tolerance),
                 Some(Bounds),
-                None, // Some("error".to_string()),Some("warn".to_string()),
+                Some("info".to_string()), // Some("error".to_string()),Some("warn".to_string()),
             );
 
             println!("solving system");

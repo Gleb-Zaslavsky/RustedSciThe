@@ -2,8 +2,7 @@ use nalgebra::{DMatrix, DVector};
 use std::fs::File;
 use std::io::{self, Write};
 use csv::Writer;
-use std::path::Path;
-use std::env;
+
 
 pub fn save_matrix_to_file(
     matrix: &DMatrix<f64>,
@@ -55,41 +54,3 @@ pub fn save_matrix_to_csv(
     Ok(())
 }
 
-
-/* 
-pub fn  save_matrix_to_csv(
-    matrix: &DMatrix<f64>,
-    values: &Vec<String>,
-    filename: &str,
-    x_mesh: &DVector<f64>,
-    arg: &String) -> Result<(), Box<dyn std::error::Error>> {
-    let current_dir = env::current_dir().expect("Failed to get current directory");
-    let path = Path::new(&current_dir); //.join("f:\\RUST\\RustProjects_\\RustedSciThe3\\src\\numerical\\results\\");
-    let file_name = filename;// format!("{}+{}.csv", arg, values.join("+"));
-    let full_path = path.join(file_name);
-
-    let mut wtr = Writer::from_path(full_path)?;
-
-    // Write column titles
-    wtr.write_record(&[arg, values])?;
-
-    // Write time column
-    wtr.write_record(x_mesh.iter().map(|&x| x.to_string()))?;
-
-    // Write y columns
-    for (i, col) in matrix.column_iter().enumerate() {
-        let col_name = format!("{}", &values[i]);
-        wtr.write_record(&[
-            &col_name,
-            &col.iter()
-                .map(|&x| x.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        ])?;
-    }
-
-    println!("result saved");
-    wtr.flush()?;
-    Ok(())
-}
-*/

@@ -324,7 +324,7 @@ fn find_bandwidths(A: &DMatrix<f64>) -> (usize, usize) {
 //the number of subdiagonals and the number of superdiagonals
 #[allow(dead_code)]
 fn generate_banded_matrix(n: usize, kl: usize, ku: usize) -> DMatrix<f64> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut A = DMatrix::zeros(n, n);
 
     for i in 0..n {

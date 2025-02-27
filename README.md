@@ -4,7 +4,8 @@
 is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations. 
 NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
 
-PROJECT NEWS: major performance improvement for BVP solver.
+PROJECT NEWS: migration to faer 21.4.
+
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
 ## Content
@@ -568,72 +569,95 @@ the sufficient number of points.
 
 ![alt text](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/BVP_DATA_FLOW.jpg)
 ```rust
-     let eq1 = Expr::parse_expression("y-z");
-        let eq2 = Expr::parse_expression("-z^3");
-        let eq_system = vec![eq1, eq2];
-    
+                let eq1 = Expr::parse_expression("y-z");
+            let eq2 = Expr::parse_expression("-z^3");
+            let eq_system = vec![eq1, eq2];
 
-        let values = vec!["z".to_string(), "y".to_string()];
-        let arg = "x".to_string();
-        let tolerance = 1e-5;
-        let max_iterations = 20;
-   
-        let t0 = 0.0;
-        let t_end = 1.0;
-        let n_steps = 10; //
-        let strategy =   "Damped".to_string();//
+            let values = vec!["z".to_string(), "y".to_string()];
+            let arg = "x".to_string();
+            let tolerance = 1e-5;
+            let max_iterations = 20;
 
-        let  strategy_params =
-        match strategy.as_str() {
-            "Naive" => None,
-            "Damped"=> Some(HashMap::from([("max_jac".to_string(),  // maximum iterations with old Jacobian, None means the default number is taken-3
-            None,    ), ("maxDampIter".to_string(), // maximum number of damped steps, None means the default value of 5 is used
-            None,    ), ("DampFacor".to_string(), // factor to decrease the damping coefficient, None means the default value of 0.5 is used
-            None,    )
-            , ("adaptive".to_string(), // adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
-            // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means 
-            // maximum number of refinments allowed 
-         Some(vec![1.0, 5.0])
-          // or  None
-              ),
-              // the name of grid refinement strategy, this key-value pair will be used only if "adaptive" is Some, in opposite case this pair
+            let t0 = 0.0;
+            let t_end = 1.0;
+            let n_steps = 100; //
+            let strategy = "Damped".to_string(); // 
+
+            let strategy_params = match strategy.as_str() {
+                "Naive" => None,
+                "Damped" => Some(HashMap::from([
+                    ("max_jac".to_string(), None),// maximum iterations with old Jacobian, None means the default number is taken-3
+                    ("maxDampIter".to_string(), None),// maximum number of damped steps, None means the default value of 5 is used
+                    ("DampFacor".to_string(), None),// factor to decrease the damping coefficient, None means the default value of 0.5 is used
+                    (
+                        "adaptive".to_string(),// adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
+                        // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means 
+                        // maximum number of refinments allowed 
+                        Some(vec![1.0, 5.0]), //  None
+                    ),
+                    // the name of grid refinement strategy, this key-value pair will be used only if "adaptive" is Some, in opposite case this pair
               // will be ignored: vector of parametrs is used inside the grid refinement algorithm
-             ("pearson".to_string(), Some(vec![0.2] ) ) // or        ("grcar_smooke".to_string(), Some(vec![0.2, 0.5] ) )
-           ])),
+                    //  ("pearson".to_string(), Some(vec![0.2] ) ) (""two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
+                    ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
+                ])),
+                "Frozen" => Some(HashMap::from([(
+                    "every_m".to_string(),
+                    Some(Vec::from([5 as f64])),
+                )])),
+                &_ => panic!("Invalid strategy!"),
+            };
 
-           "Frozen" => Some(HashMap::from([("every_m".to_string(), 
-           Some(Vec::from( [ 5 as f64]  ))
-           )])),
-            &_=>panic!("Invalid strategy!")
+            let scheme = "trapezoid".to_string();
+            let method = "Dense".to_string(); //   "Sparse" or "Dense"
+            let linear_sys_method = None;
+            let ones = vec![0.0; values.len() * n_steps];
+            let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
+                values.len(),
+                n_steps,
+                DVector::from_vec(ones).as_slice(),
+            );
+            let mut BorderConditions = HashMap::new();
+            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            let Bounds = HashMap::from([
+                ("z".to_string(), (-10.0, 10.0)),
+                ("y".to_string(), (-7.0, 7.0)),
+            ]);
+            let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
+            assert_eq!(&eq_system.len(), &2);
+            let mut nr = BVP::new(
+                eq_system,
+                initial_guess,
+                values,
+                arg,
+                BorderConditions,
+                t0,
+                t_end,
+                n_steps,
+                scheme,
+                strategy,
+                strategy_params,
+                linear_sys_method,
+                method,
+                tolerance,
+                max_iterations,
+                Some(rel_tolerance),
+                Some(Bounds),
+                None, // Some("error".to_string()),Some("warn".to_string()),
+            );
 
+            println!("solving system");
+            #[allow(unused_variables)]
+            nr.solve();
+            // println!("result = {:?}", solution);
+            // get solution plot using plotters crate or gnuplot crate (gnuplot library MUST BE INSTALLED AND IN THE PATH)
+            nr.plot_result();
+            nr.gnuplot_result();
+            // save to txt, with certain name
+            nr.save_to_file(None);
+            // save to csvt, with certain name
+            nr.save_to_csv(None);
 
-        };
-      
-    
-        let method =   "Sparse".to_string();// or  "Dense"
-        let linear_sys_method = None;
-        let ones = vec![0.0; values.len()*n_steps];
-        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-        let mut BorderConditions = HashMap::new();
-        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
-        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
-        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
-        assert_eq!(&eq_system.len(), &2);
-        let mut nr =  BVP::new(eq_system,
-             initial_guess, 
-             values, 
-             arg,
-             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance,
-               max_iterations,  Some(rel_tolerance),Some(Bounds));
-
-        println!("solving system");
-        #[allow(unused_variables)]
-       nr.solve();
-       // println!("result = {:?}", solution);
-       
-        nr.plot_result();
-        nr.save_to_file(None);
 
 ```
 

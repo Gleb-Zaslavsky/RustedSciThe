@@ -8,24 +8,39 @@ use crate::symbolic::symbolic_engine::Expr;
 use std::any::Any;
 use std::collections::HashMap;
 use std::f64;
+use enum_dispatch::enum_dispatch;
 
+#[enum_dispatch]
 pub trait SymbolicType: Any {
+    // Basic
     fn as_any(&self) -> &dyn Any;
     fn as_symbolic_type(&self) -> Box<dyn SymbolicType>;
-    fn diff(&self, str_variable: &str) -> Box<dyn SymbolicType>;
-    fn simplify(&self) -> Box<dyn SymbolicType>;
-    fn lambdify_owned(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64>;
-    fn rename_variables(&self, variables: &HashMap<String, String>) -> Box<dyn SymbolicType>;
-    fn set_variable(&self, variable: &str, value: f64) -> Box<dyn SymbolicType>;
-    fn convert_to_string(&self) -> String;
+    // creating symbolic expressions and variable manipulations
+    fn var_expr(&self, var: &str) ->  Box<dyn SymbolicType>;
+    fn const_expr(&self, val: f64) ->  Box<dyn SymbolicType>;
+    fn exp(&self) -> Box<dyn SymbolicType>;
+    fn ln(&self) -> Box<dyn SymbolicType>;
+    fn pow(&self, rhs: Box<dyn SymbolicType>) -> Box<dyn SymbolicType>;
+    fn is_zero(&self) -> bool;
     fn indexed_matrix(
         self,
         num_vars: usize,
         values: Vec<String>,
     ) -> (Vec<Vec<Box<dyn SymbolicType>>>, Vec<Vec<String>>);
+    fn rename_variables(&self, variables: &HashMap<String, String>) -> Box<dyn SymbolicType>;
+    fn set_variable(&self, variable: &str, value: f64) -> Box<dyn SymbolicType>;
+    fn set_variable_from_map(&self, variables: &HashMap<String, f64>) -> Box<dyn SymbolicType>;
+    fn simplify(&self) -> Box<dyn SymbolicType>;
+    // 
+    fn diff(&self, str_variable: &str) -> Box<dyn SymbolicType>;
+    fn lambdify_owned(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64>;
+    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_>;
+    // misc functions
+    fn convert_to_string(&self) -> String;
     fn to_native(&self) -> Expr;
     fn clone_box(&self)-> Box<dyn SymbolicType>;
     fn get_type(&self) -> String;
+    
 }
 ///////////////// IMPLEMENTATION OF THE TRAIT FOR THE NATIVE ENGINE /////////////////////////
 impl SymbolicType for Expr {
@@ -34,6 +49,28 @@ impl SymbolicType for Expr {
     }
     fn as_symbolic_type(&self) -> Box<dyn SymbolicType> {
         Box::new(self.clone())
+    }
+    fn var_expr(&self, var: &str) -> Box<dyn SymbolicType> {
+        Box::new(Expr::Var(var.to_string()))
+    }
+    fn const_expr(&self, val: f64) -> Box<dyn SymbolicType> {
+        Box::new(Expr::Const(val))
+    }
+    fn exp(&self) -> Box<dyn SymbolicType> {
+        let exp = Expr::Exp(self.clone().boxed());
+        Box::new(exp)
+    }
+    fn ln(&self) -> Box<dyn SymbolicType> {
+        let exp = Expr::Ln(self.clone().boxed());
+        Box::new(exp)
+    }
+    fn pow(&self, rhs: Box<dyn SymbolicType>) -> Box<dyn SymbolicType> {
+        let rhs = rhs.to_native();
+        let exp = Expr::Pow(self.clone().boxed(), Box::new(rhs));
+        Box::new(exp)
+    }
+    fn is_zero(&self) -> bool {
+        self.is_zero()
     }
     fn diff(&self, str_variable: &str) -> Box<dyn SymbolicType> {
         let partial = Expr::diff(&self.clone(), str_variable);
@@ -52,7 +89,17 @@ impl SymbolicType for Expr {
                 .collect::<Vec<_>>()
                 .clone(),
         );
-        Box::new(lambdified)
+        lambdified
+    }
+    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_> {
+        let lambdified = Expr::lambdify(
+            self,
+            variable_str
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        );
+        lambdified
     }
     fn rename_variables(&self, variables: &HashMap<String, String>) -> Box<dyn SymbolicType> {
         let renamed = self.rename_variables(variables);
@@ -60,6 +107,10 @@ impl SymbolicType for Expr {
     }
     fn set_variable(&self, variable: &str, value: f64) -> Box<dyn SymbolicType> {
         let res = self.set_variable(variable, value);
+        Box::new(res)
+    }
+    fn set_variable_from_map(&self, variables: &HashMap<String, f64>) -> Box<dyn SymbolicType> {
+        let res: Expr = self.set_variable_from_map(variables);
         Box::new(res)
     }
     fn convert_to_string(&self) -> String {
@@ -111,6 +162,7 @@ pub fn SymbolicType_casting<T: SymbolicType>(expr: T, desired_type: String) -> B
 /////////////////////////////////////////////////////////////////////////////////////////
 // FACTORY METHODS  ////////////////////////////////////////////////////////////////////
 // Add an enum to represent different symbolic engine types
+
 pub enum SymbolicEngineType {
     Native,
     // Add other engines here as needed
@@ -120,6 +172,7 @@ pub enum SymbolicEngineType {
 pub trait SymbolicFactory: Send + Sync { // Send + Sync is needed for the factory method to be thread-safe
     fn create_constant(&self, value: f64) -> Box<dyn SymbolicType>;
     fn create_variable(&self, name: String) -> Box<dyn SymbolicType>;
+    fn create_variables(&self, name: String) -> Vec<Box<dyn SymbolicType> >;
     fn parse_expression(&self, expr_str: &str) -> Box<dyn SymbolicType>;
 }
 
@@ -134,7 +187,18 @@ impl SymbolicFactory for NativeSymbolicFactory {
     fn create_variable(&self, name: String) -> Box<dyn SymbolicType> {
         Box::new(Expr::Var(name))
     }
+    fn create_variables(&self, vars: String) -> Vec<Box<dyn SymbolicType>> {
+        let vec_trimmed: Vec<String> = vars.split(',').map(|s| s.trim().to_string()).collect();
+        let mut vector_of_symbolic_vars: Vec<Box<dyn SymbolicType>> = Vec::new();
 
+        for var in vec_trimmed {
+            if var.is_empty() {
+                continue;
+            }
+            vector_of_symbolic_vars.push(Box::new(Expr::Var(var)));
+        }
+        vector_of_symbolic_vars
+    }
     fn parse_expression(&self, expr_str: &str) -> Box<dyn SymbolicType> {
         Box::new(Expr::parse_expression(expr_str))
     }
@@ -153,6 +217,9 @@ pub fn symbolic_backend_from_string(engine_type: String) -> &'static dyn Symboli
         // Add other engines here
     }
 }
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
 // Usage example:
 // let factory = get_symbolic_factory(SymbolicEngineType::Native);

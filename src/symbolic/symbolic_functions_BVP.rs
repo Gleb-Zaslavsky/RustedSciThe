@@ -6,8 +6,10 @@ use crate::numerical::BVP_Damp::BVP_traits::{
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::symbolic::symbolic_engine::Expr;
 //use crate::symbolic::symbolic_traits::SymbolicType;
-use faer::col::{from_slice, Col};
-use faer::sparse::SparseColMat;
+use faer::col:: Col;
+use faer::col::ColRef;
+
+use faer::sparse::{SparseColMat, Triplet};
 use log::info;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector};
@@ -82,65 +84,9 @@ impl Jacobian {
     }
 
     // using paretial differentiation a jacobian is calculated from the vector of functions and variables
-    pub fn calc_jacobian(&mut self) {
-        assert!(
-            !self.vector_of_functions.is_empty(),
-            "vector_of_functions is empty"
-        );
-        assert!(
-            !self.vector_of_variables.is_empty(),
-            "vector_of_variables is empty"
-        );
-
-        let mut new_jac: Vec<Vec<Expr>> = Vec::new();
-        let variable_string_vec = self.variable_string.clone();
-        for i in 0..self.vector_of_functions.len() {
-            let mut vector_of_partial_derivatives = Vec::new();
-            for j in 0..self.vector_of_variables.len() {
-                let mut partial = Expr::diff(
-                    &self.vector_of_functions[i].clone(),
-                    &variable_string_vec[j],
-                );
-                partial = partial.symplify();
-                vector_of_partial_derivatives.push(partial);
-            }
-            new_jac.push(vector_of_partial_derivatives);
-        }
-
-        self.symbolic_jacobian = new_jac;
-    }
-
-    // parallel version
-    pub fn calc_jacobian_parallel(&mut self) {
-        assert!(
-            !self.vector_of_functions.is_empty(),
-            "vector_of_functions is empty"
-        );
-        assert!(
-            !self.vector_of_variables.is_empty(),
-            "vector_of_variables is empty"
-        );
-
-        let variable_string_vec = self.variable_string.clone();
-        let new_jac: Vec<Vec<Expr>> = self
-            .vector_of_functions
-            .par_iter()
-            .map(|function| {
-                let mut vector_of_partial_derivatives = Vec::new();
-               // let function = function.clone();
-                for j in 0..self.vector_of_variables.len() {
-                    let mut partial = Expr::diff(&function, &variable_string_vec[j]);
-                    partial = partial.symplify();
-                    vector_of_partial_derivatives.push(partial);
-                }
-                vector_of_partial_derivatives
-            })
-            .collect();
-
-        self.symbolic_jacobian = new_jac;
-    }
     //
     pub fn calc_jacobian_parallel_smart(&mut self) {
+        assert!(self.variables_for_all_disrete.len()> 0);
         assert!(
             !self.vector_of_functions.is_empty(),
             "vector_of_functions is empty"
@@ -175,7 +121,35 @@ impl Jacobian {
 
         self.symbolic_jacobian = new_jac;
     }
+    pub fn calc_jacobian_parallel(&mut self) {
+        assert!(
+            !self.vector_of_functions.is_empty(),
+            "vector_of_functions is empty"
+        );
+        assert!(
+            !self.vector_of_variables.is_empty(),
+            "vector_of_variables is empty"
+        );
 
+        let variable_string_vec = self.variable_string.clone();
+        let new_jac: Vec<Vec<Expr>> = self
+            .vector_of_functions
+            .par_iter()
+            .map(|function| {
+                let mut vector_of_partial_derivatives = Vec::new();
+               // let function = function.clone();
+                for j in 0..self.vector_of_variables.len() {
+                    let mut partial = Expr::diff(&function, &variable_string_vec[j]);
+                    partial = partial.symplify();
+                    vector_of_partial_derivatives.push(partial);
+                }
+                vector_of_partial_derivatives
+            })
+            .collect();
+
+        self.symbolic_jacobian = new_jac;
+    }
+    //
 
     ////////////////////////////////////////////////////////////////////////////////////
     //  GENERIC FUNCTIONS
@@ -375,61 +349,7 @@ impl Jacobian {
         })
     } // end of function
 
-    pub fn jacobian_generate_DMatrix(
-        jac: Vec<Vec<Expr>>,
-        vector_of_functions_len: usize,
-        vector_of_variables_len: usize,
-        variable_str: Vec<String>,
-        _arg: String,
-        bandwidth: Option<(usize, usize)>,
-    ) -> Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> {
-        //let arg = arg.as_str();
-        //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
-
-        Box::new(move |_x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-            let mut new_function_jacobian: DMatrix<f64> =
-                DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
-            for i in 0..vector_of_functions_len {
-                let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                        0
-                    } else {
-                        i - kl - 1
-                    };
-                    (right_border, left_border)
-                } else {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                };
-                for j in left_border..right_border {
-                    // println!("i = {}, j = {}", i, j);
-                    //  let now = std::time::Instant::now();
-                    let symbolic_partoal_derivative = &jac[i][j];
-                    if !symbolic_partoal_derivative.is_zero() {
-                        let partial_func = Expr::lambdify(
-                            symbolic_partoal_derivative,
-                            variable_str
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .clone(),
-                        );
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        new_function_jacobian[(i, j)] = partial_func(v_vec.clone());
-                    } else {
-                        new_function_jacobian[(i, j)] = 0.0;
-                       };
-             
-                    //    let time_test = now.elapsed().as_micros();
-                    //   if time_test > 100 {println!("Elapsed time: {:?} micrs, {:?} ", now.elapsed().as_micros(), jac[i][j].clone() );}
-                }
-            }
-            new_function_jacobian
-        })
-    } // end of function
-
+   
     pub fn lambdify_jacobian_DMatrix(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -487,38 +407,30 @@ impl Jacobian {
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun));
         self.residiual_function = boxed_fun;
     }
-/*
-    pub fn lambdify_residual_DVector(&mut self, arg: &str, variable_str: Vec<&str>) {
-        let vector_of_functions = &self.vector_of_functions;
-        
-    // Pre-compute lambdified functions
-    let lambdified_functions: Vec<_> = vector_of_functions
-        .iter()
-        .map(|func| {
-            let func_clone = func.clone();
-            let variable_str_clone = variable_str.clone();
-            move |v:Vec<f64> | {
-                Expr::lambdify(&func_clone, variable_str_clone)(v)
-            }
-        })
-        .collect();
-    
+
+// slower
+    pub fn lambdify_residual_DVector_eval(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let variable_str = variable_str.iter().map(|&s| s.to_owned()).collect::<Vec<String>>();
+        let vector_of_functions = self.vector_of_functions.clone();
         let fun = Box::new(move |_x: f64, v: &DVector<f64>| -> DVector<f64> {
-            
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let v = v.as_slice();
             // Use par_iter for parallel execution
-            let result: Vec<_> = (0..lambdified_functions.len())
+            let result: Vec<_> = (0..vector_of_functions.len())
                 .into_par_iter()
-                .map(|i| lambdified_functions[i](v_vec))
+                .map(|i|  {
+                    let func = &vector_of_functions[i];
+                    let evaluated = func.eval_expression(variable_str.clone().iter().map(|s| s.as_str()).collect(),
+                     v);
+                    evaluated
+                })
                 .collect();
-    
             // Construct DVector directly from Vec
             DVector::from_vec(result)
         });
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun));
         self.residiual_function = boxed_fun;
+         
     }
-     */
     //////////////////////////////////////////////////////////////////////////////////////////
     ////                             SPRS CRATE SPARSE FUNCTIONS
     ///////////////////////////////////////////////////////////////////////////////////////////
@@ -673,70 +585,7 @@ impl Jacobian {
     ////////////////////////////////////////////////////////////////////////////////////////
     ///         FAER SPARCE CRATE
     ////////////////////////////////////////////////////////////////////////////////////////
-    pub fn jacobian_generate_SparseColMat(
-        jac: Vec<Vec<Expr>>,
-        vector_of_functions_len: usize,
-        vector_of_variables_len: usize,
-        variable_str: Vec<String>,
-        _arg: String,
-        bandwidth: Option<(usize, usize)>,
-    ) -> Box<dyn FnMut(f64, &Col<f64>) -> SparseColMat<usize, f64>> {
-        //let arg = arg.as_str();
-        //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
-
-        Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let _number_of_possible_non_zero: usize = jac.len();
-            //let mut new_function_jacobian: CsMatrix<f64> = CsMatrix::new_uninitialized_generic(Dyn(vector_of_functions_len),
-            //Dyn(vector_of_variables_len), number_of_possible_non_zero);
-            let mut vector_of_triplets = Vec::new();
-            for i in 0..vector_of_functions_len {
-                let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                        0
-                    } else {
-                        i - kl - 1
-                    };
-                    (right_border, left_border)
-                } else {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                };
-                for j in left_border..right_border {
-                    // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
-                        variable_str
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
-                    //let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
-                    // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                    let P = partial_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
-                        let triplet = (i, j, P);
-                        vector_of_triplets.push(triplet);
-                    }
-                }
-            }
-            let new_function_jacobian: SparseColMat<usize, f64> =
-                SparseColMat::try_new_from_triplets(
-                    vector_of_functions_len,
-                    vector_of_variables_len,
-                    vector_of_triplets.as_slice(),
-                )
-                .unwrap();
-            //  panic!("stop here");
-            new_function_jacobian
-        })
-    } // end of function
-
-    ///
+   
     ///
     pub fn jacobian_generate_SparseColMat_par(
         jac: Vec<Vec<Expr>>,
@@ -784,7 +633,7 @@ impl Jacobian {
                         let v_vec: Vec<f64> = v.iter().cloned().collect();
                         let P = partial_func(v_vec.clone());
                         if P.abs() > 1e-8 {
-                            let triplet = (i, j, P);
+                            let triplet = Triplet::new(i, j, P);
                             vector_of_triplets_mutex.lock().unwrap().push(triplet);
                         }
                     }
@@ -854,7 +703,7 @@ impl Jacobian {
                         func( v_vec)
                     })
                     .collect();
-                let res = from_slice(result.as_slice()).to_owned();
+                let res = ColRef::from_slice(result.as_slice()).to_owned();
                 res
             }) //enf of box
         } // end of function
@@ -865,6 +714,31 @@ impl Jacobian {
         );
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
         self.residiual_function = boxed_fun;
+    }
+
+    pub fn lambdify_residual_Col_eval(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let variable_str = variable_str.iter().map(|&s| s.to_owned()).collect::<Vec<String>>();
+        let vector_of_functions = self.vector_of_functions.clone();
+        let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
+            let v: Vec<f64> = v.iter().cloned().collect();
+            let v:&[f64] = v.as_slice();
+            // Use par_iter for parallel execution
+            let result: Vec<_> = (0..vector_of_functions.len())
+                .into_par_iter()
+                .map(|i|  {
+                    let func = &vector_of_functions[i];
+                    let evaluated = func.eval_expression(variable_str.clone().iter().map(|s| s.as_str()).collect(),
+                     v);
+                    evaluated
+                })
+                .collect();
+            // Construct DVector directly from Vec
+            let res = ColRef::from_slice(result.as_slice()).to_owned();
+            res
+        });
+        let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
+        self.residiual_function = boxed_fun;
+         
     }
     ///////////////////////////////////////////////////////////////////////////
     ///              DISCRETZED FUNCTIONS
@@ -1363,8 +1237,8 @@ mod tests {
         let values = vec!["y".to_string(), "z".to_string()];
         //  let arg = "x".to_string();
         Jacobian_instance.from_vectors(eq_system, values);
-        Jacobian_instance.calc_jacobian();
-
+        Jacobian_instance.calc_jacobian_parallel();
+        println!("Jacobian_instance.evaluated_jacobian_DMatrix = {:?}",  Jacobian_instance.symbolic_jacobian); 
         // expecting Jac: | exp(y) ; 10.0  |
         //                 | 1     ;  1/z|
         let vect = &DVector::from_vec(vec![0.0, 1.0]);
@@ -1376,20 +1250,20 @@ mod tests {
         let variables = &*Vectors_type_casting(vect, "Sparse".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
         let result_SparseColMat = jac.call(1.0, variables);
-        assert_eq!(result_SparseColMat.to_DMatrixType(), expexted_jac);
+        assert_eq!(result_SparseColMat.to_DMatrixType(), expexted_jac, "FAER CRATE jac error");
         // NALGEBRA CRATE
         Jacobian_instance.lambdify_jacobian_DMatrix("x", vec!["y", "z"]);
         let variables = &*Vectors_type_casting(vect, "Dense".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
         let result_DMatrix = jac.call(1.0, variables);
-        assert_eq!(result_DMatrix.to_DMatrixType(), expexted_jac);
+        assert_eq!(result_DMatrix.to_DMatrixType(), expexted_jac, "nalagebra jac error");
 
         // NALGEBRA SPARSE CRATE
         Jacobian_instance.lambdify_jacobian_CsMatrix("x", vec!["y", "z"]);
         let variables = &*Vectors_type_casting(vect, "Sparse_2".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();
         let result_CsMatrix = jac.call(1.0, variables);
-        assert_eq!(result_CsMatrix.to_DMatrixType(), expexted_jac);
+        assert_eq!(result_CsMatrix.to_DMatrixType(), expexted_jac, "sprs jac error");
         //SPRS CRATE
         /*
                Jacobian_instance.lambdify_jacobian_CsMat(  "x", vec!("y", "z"));

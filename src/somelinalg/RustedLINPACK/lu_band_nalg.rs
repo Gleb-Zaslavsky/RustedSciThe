@@ -300,7 +300,7 @@ impl LU_nalgebra {
         x
     }
     pub fn solve(&self, b: &DVector<f64>) -> Option<DVector<f64>> {
-        let mut res = b.clone_owned();
+        let res = b.clone_owned();
         let P = self.p.clone();
 
         let n = b.len();
