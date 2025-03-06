@@ -4,6 +4,7 @@ use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
 use std::collections::HashMap;
+use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, Neg};
 use std::f64;
 use std::fmt;
 
@@ -69,6 +70,37 @@ impl std::ops::Div for Expr {
 
     fn div(self, rhs: Self) -> Self::Output {
         Expr::Div(self.boxed(), rhs.boxed())
+    }
+}
+impl std::ops::AddAssign for Expr {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = Expr::Add(Box::new(self.clone()), Box::new(rhs));
+    }
+}
+
+impl std::ops::SubAssign for Expr {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = Expr::Sub(Box::new(self.clone()), Box::new(rhs));
+    }
+}
+
+impl std::ops::MulAssign for Expr {
+    fn mul_assign(&mut self, rhs: Self) {
+        *self = Expr::Mul(Box::new(self.clone()), Box::new(rhs));
+    }
+}
+
+impl std::ops::DivAssign for Expr {
+    fn div_assign(&mut self, rhs: Self) {
+        *self = Expr::Div(Box::new(self.clone()), Box::new(rhs));
+    }
+}
+
+impl std::ops::Neg for Expr {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(self))
     }
 }
 
@@ -253,6 +285,10 @@ impl Expr {
         self = Expr::Ln(self.boxed());
         self
     }
+    pub fn log10(mut self) -> Expr {
+        self = Expr::Ln(self.boxed())/Expr::Const(2.30258509);
+        self
+    }
     pub fn pow(mut self, rhs: Expr) -> Expr {
         self = Expr::Pow(self.boxed(), rhs.boxed());
         self
@@ -263,6 +299,7 @@ impl Expr {
             _ => false,
         }
     }
+
     /// DIFFERENTIATION
 
     // differentiate with respect to a variable - partial derivative in case of a function of many variables,
@@ -1192,7 +1229,64 @@ impl Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_add_assign() {
+        let mut expr = Expr::Var("x".to_string());
+        expr += Expr::Const(2.0);
+        let expected = Expr::Add(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        assert_eq!(expr, expected);
+    }
 
+    #[test]
+    fn test_sub_assign() {
+        let mut expr = Expr::Var("x".to_string());
+        expr -= Expr::Const(2.0);
+        let expected = Expr::Sub(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_mul_assign() {
+        let mut expr = Expr::Var("x".to_string());
+        expr *= Expr::Const(2.0);
+        let expected = Expr::Mul(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_div_assign() {
+        let mut expr = Expr::Var("x".to_string());
+        expr /= Expr::Const(2.0);
+        let expected = Expr::Div(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_neg() {
+        let expr = Expr::Var("x".to_string());
+        let neg_expr = -expr;
+        let expected = Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(Expr::Var("x".to_string())));
+        assert_eq!(neg_expr, expected);
+    }
+    #[test]
+    fn test_combined_operations() {
+        let mut expr = Expr::Var("x".to_string());
+        expr += Expr::Const(2.0);
+        expr *= Expr::Const(3.0);
+        expr -= Expr::Const(1.0);
+        expr /= Expr::Const(2.0);
+        let expected = Expr::Div(
+            Box::new(Expr::Sub(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Add(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)))),
+                    Box::new(Expr::Const(3.0))
+                )),
+                Box::new(Expr::Const(1.0))
+            )),
+            Box::new(Expr::Const(2.0))
+        );
+        assert_eq!(expr, expected);
+    }
     #[test]
     fn test_diff() {
         let x = Expr::Var("x".to_string());

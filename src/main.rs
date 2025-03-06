@@ -977,7 +977,7 @@ fn main() {
 
             let t0 = 0.0;
             let t_end = 1.0;
-            let n_steps = 2_000; //
+            let n_steps = 5_000; //
             let strategy = "Damped".to_string(); // 
 
             let strategy_params = match strategy.as_str() {
