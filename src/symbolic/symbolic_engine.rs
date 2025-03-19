@@ -4,7 +4,7 @@ use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
 use std::collections::HashMap;
-use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, Neg};
+
 use std::f64;
 use std::fmt;
 
@@ -625,6 +625,74 @@ impl Expr {
         vars.sort();
         (args, vars)
     } // end of extract_variables
+    //TAYLOR SERIES///////////////////////////////////////
+    ///Taylor series expansion of a symbolic expression
+    pub fn n_th_derivative1D(&self, var_name: &str, n: usize) -> Expr {
+        let mut expr = self.clone();
+        let mut i =0;
+        while i<n{
+         
+            expr = expr.diff(var_name).symplify();
+            i+=1;
+      
+        } 
+        return expr.symplify()
+    }
+    pub fn taylor_series1D(&self, var_name: &str, x0: f64,  order:usize) -> Expr  {
+        let x = Expr::Var(var_name.to_owned());
+        let x0_sym = Expr::Const(x0);
+        let  fun_at_x0 = self.lambdify1D()(x0);
+        let fun_at_x0_sym = Expr::Const(fun_at_x0);
+
+        if order==0 {return fun_at_x0_sym.symplify() }
+
+        let dfun_dx = self.n_th_derivative1D(var_name, order);
+        let dfun_dx_at_x0 = dfun_dx.lambdify1D()(x0);
+        let factorial = (1..=order).product::<usize>() as f64;
+        let coeff = Expr::Const(dfun_dx_at_x0/factorial);
+        println!("order {}, {:?}, {}", order, coeff, dfun_dx);
+        let term = coeff *( x.clone() - x0_sym.clone()).pow(Expr::Const(order as f64));
+        if  order==1 {
+        let Taylor = fun_at_x0_sym +  term;
+        return Taylor.symplify()
+        } else {
+            let Taylor = self.taylor_series1D(var_name, x0, order-1) + term;
+            return Taylor.symplify()
+        }
+    }
+
+    pub fn taylor_series1D_(&self, var_name: &str, x0: f64, order: usize) -> Expr {
+        let x = Expr::Var(var_name.to_owned());
+        let x0_sym = Expr::Const(x0);
+        let fun_at_x0 = self.lambdify1D()(x0);
+        let fun_at_x0_sym = Expr::Const(fun_at_x0);
+    
+        if order == 0 {
+            return fun_at_x0_sym.symplify();
+        }
+    
+        fn taylor_term(expr: &Expr, var_name: &str, x0: f64, n: usize, x: &Expr, x0_sym: &Expr) -> (Expr, Expr) {
+            let dfun_dx = expr.diff(var_name).symplify();
+            let dfun_dx_at_x0 = dfun_dx.lambdify1D()(x0);
+            let factorial = (1..=n).product::<usize>() as f64;
+            let coeff = Expr::Const(dfun_dx_at_x0 / factorial);
+          //  println!("order {}, {:?}, {}", n, coeff, dfun_dx);
+            (coeff * (x.clone() - x0_sym.clone()).pow(Expr::Const(n as f64)).symplify(),
+            dfun_dx)
+        }
+    
+        fn taylor_recursive(expr: &Expr, var_name: &str, x0: f64, current_order: usize, target_order: usize, x: &Expr, x0_sym: &Expr) -> Expr {
+            if current_order > target_order {
+                return Expr::Const(0.0);
+            }
+            let (term, derivative) = taylor_term(expr, var_name, x0, current_order, x, x0_sym);
+           // println!("\n derivative {}, \n term {} \n", derivative, term);
+            term + taylor_recursive(&derivative, var_name, x0, current_order + 1, target_order, x, x0_sym)
+        }
+    
+        let Taylor = fun_at_x0_sym + taylor_recursive(self, var_name, x0, 1, order, &x, &x0_sym);
+        Taylor.symplify()
+    }
     // EVAL EXPRESSIONS //////////////////////////////////////////////////////////
     pub fn eval_expression(&self, vars: Vec<&str>, values:&[f64]) -> f64 {
         /* 
@@ -1227,6 +1295,7 @@ impl Expr {
 //___________________________________TESTS____________________________________
 
 #[cfg(test)]
+use approx;
 mod tests {
     use super::*;
     #[test]
@@ -1602,6 +1671,36 @@ mod tests {
         let vars = vec!["x", "y", "z"];
         let values = vec![2.0, 3.0, 4.0];
         assert_eq!(expr.eval_expression(vars, &values), 22.0); // (2 * 3) + (4^2) = 22
+    }
+    #[test]
+    fn test_taylor_series1D_constant() {
+        let expr = Expr::Const(5.0);
+        let result = expr.taylor_series1D("x", 0.0, 3);
+        assert_eq!(result, Expr::Const(5.0));
+    }
+    #[test]
+    fn test_taylor_series1D_log() {
+        let x = Expr::Var("x".to_string());
+        let expr = x.clone().ln();
+        let result = expr.taylor_series1D_("x", 5.0, 2);
+        let e5 = Expr::Const(5.0);
+        let expected = e5.clone().ln() + (x.clone() - e5.clone()) /  e5.clone() - (x.clone() - e5.clone()).pow(Expr::Const(2.0)) / (Expr::Const(2.0)* e5.clone().pow(Expr::Const(2.0)) );  
+        println!("{} \n {}", result, expected.symplify());
+        let taylor_eval = result.lambdify1D()(3.0);
+        let expected_eval = expected.lambdify1D()(3.0);
+        approx::assert_relative_eq!(taylor_eval, expected_eval, epsilon=1e-5);
+    }
+    #[test]
+    fn test_taylor_series1D_exp() {
+        let x = Expr::Var("x".to_string());
+
+        let exp_expansion  = Expr::Const(1.0) + x.clone() + x.clone().pow(Expr::Const(2.0))/Expr::Const(2.0) +  x.clone().pow(Expr::Const(3.0))/Expr::Const(6.0);
+        let exp_eval = exp_expansion.lambdify1D()(1.0);
+       
+        let taylor = exp_expansion.taylor_series1D_("x", 0.0, 3);
+         println!("taylor: {}", taylor);
+        let taylor_eval = taylor.lambdify1D()(1.0);
+        assert_eq!(taylor_eval, exp_eval);
     }
 
 
