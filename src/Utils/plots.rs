@@ -78,7 +78,7 @@ pub fn plots_gnulot(arg: String, values: Vec<String>, t_result: DVector<f64>, y_
             .lines(
                 x.as_slice(),
                 &y_col,
-                &[Caption(&varname), Color("blue")]
+                &[Caption(&varname), Color(gnuplot::ColorType::Black)]
             );
 
         // Save the plot to a file
