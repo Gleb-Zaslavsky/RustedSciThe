@@ -1,5 +1,6 @@
-use criterion::{ criterion_group, criterion_main, Criterion, black_box};
-use RustedSciThe::Examples::bvp_examples::bvp_examples; 
+use RustedSciThe::Examples::bvp_examples::bvp_examples;
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /*
 fn benchmark_bvp_examples(c: &mut Criterion) {
@@ -16,8 +17,8 @@ fn benchmark_bvp_examples(c: &mut Criterion) {
 
  */
 
- #[allow(dead_code)]
- fn bench_example_1(c: &mut Criterion) {
+#[allow(dead_code)]
+fn bench_example_1(c: &mut Criterion) {
     c.bench_function("example_1", |b| b.iter(|| bvp_examples(1)));
 }
 #[allow(dead_code)]
@@ -25,14 +26,14 @@ fn bench_example_7(c: &mut Criterion) {
     let mut group = c.benchmark_group("My benchmark group");
     group.sample_size(400);
 
-    group.bench_function("BVP example 7", |b| b.iter(|| black_box(bvp_examples(7)) ));
+    group.bench_function("BVP example 7", |b| b.iter(|| black_box(bvp_examples(7))));
     group.finish();
-}// 321 239
+} // 321 239
 #[allow(dead_code)]
 fn bench_example_7v1(c: &mut Criterion) {
     let mut group = c.benchmark_group("My benchmark group");
     group.sample_size(400);
-   
+
     group.bench_function("BVP example 7v1", |b| b.iter(|| bvp_examples(7)));
     group.finish();
 } // 230 230
@@ -40,10 +41,10 @@ fn bench_example_7v1(c: &mut Criterion) {
 fn bench_example_6(c: &mut Criterion) {
     let mut group = c.benchmark_group("My benchmark group");
     group.sample_size(400);
-  
-    group.bench_function("BVP example 6", |b| b.iter(|| black_box(bvp_examples(6)) ));
+
+    group.bench_function("BVP example 6", |b| b.iter(|| black_box(bvp_examples(6))));
     group.finish();
-}// 135
+} // 135
 #[allow(dead_code)]
 fn bench_example_6v1(c: &mut Criterion) {
     let mut group = c.benchmark_group("My benchmark group");
@@ -53,29 +54,26 @@ fn bench_example_6v1(c: &mut Criterion) {
     group.finish();
 } //  264
 
-
-criterion_group!(benches,  bench_example_6v1);
+criterion_group!(benches, bench_example_6v1);
 criterion_main!(benches);
 
-
-
 // 4CPU
-//   non_modified 
+//   non_modified
 //              black_box       no black_box
 //  example 7:      (241,239)                (231,241)
-//  example 6:      (158, 154)               (153, 154)  
-//    modified 
+//  example 6:      (158, 154)               (153, 154)
+//    modified
 //  example 7:      (219, 220)                      (217, 218)
 //  example 6:        (142, 141)                    (144, 146)
 //20 CPU
-//   non_modified 
+//   non_modified
 //              black_box       no black_box
 //  example 7:        (90, 92)             (91, 91)
-//  example 6:       (60, 60)            (59,60 )   
+//  example 6:       (60, 60)            (59,60 )
 //    modified
 //              black_box       no black_box
 //  example 7:      (88, 88 )              (88, 88)
-//  example 6:      (59, 59)                (59, 60)   
+//  example 6:      (59, 59)                (59, 60)
 
 // 4 CPU
 /*  sparse
