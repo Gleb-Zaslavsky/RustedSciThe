@@ -86,7 +86,10 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
                 println!("content in brackets parsed");
                 let remaining_right = &input[brac_end + 1..];
                 let remaining_left = &input[..brac_start];
-                println!("inner brackets expression: {}, remaining content left: {}, remaining content right: {} ", inner, remaining_left,remaining_right);
+                println!(
+                    "inner brackets expression: {}, remaining content left: {}, remaining content right: {} ",
+                    inner, remaining_left, remaining_right
+                );
             }
         }
     } // end if brackets

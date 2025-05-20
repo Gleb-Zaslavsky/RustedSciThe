@@ -127,7 +127,7 @@ pub fn bvp_examples(example: usize) {
             );
             let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
             let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
-            use faer::col::{ColRef, Col};
+            use faer::col::{Col, ColRef};
             let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
             println!("Ys = {:?} \n", &Ys3);
             let F_eval3 = F_func3(4.0, &Ys3);
@@ -431,19 +431,22 @@ pub fn bvp_examples(example: usize) {
             println!("solving system");
             nr.solve();
             let solution = nr.get_result().unwrap();
-              
-              print!("result = {:?}\n", solution.column(1).iter().map(|x| *x).collect::<Vec<_>>());
-              let y_numer = solution.column(0);
-              let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
 
-              nr.plot_result();
+            print!(
+                "result = {:?}\n",
+                solution.column(1).iter().map(|x| *x).collect::<Vec<_>>()
+            );
+            let y_numer = solution.column(0);
+            let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
+
+            nr.plot_result();
             //compare with exact solution
-             let y_exact = ne.exact_solution(None, None, Some(n_steps));
-             let n = &y_exact.len();
+            let y_exact = ne.exact_solution(None, None, Some(n_steps));
+            let n = &y_exact.len();
             // println!("numerical result = {:?}",  y_numer);
-              println!("\n \n y exact{:?}, {}", &y_exact, &y_exact.len());
+            println!("\n \n y exact{:?}, {}", &y_exact, &y_exact.len());
             println!("\n \n y numer{:?}, {}", &y_numer, &y_numer.len());
-       
+
             let comparsion: Vec<f64> = y_numer
                 .into_iter()
                 .zip(y_exact.clone())
@@ -456,10 +459,13 @@ pub fn bvp_examples(example: usize) {
                 .unwrap();
             let position = comparsion.iter().position(|&x| x == *max_residual).unwrap();
             let relativ_residual = max_residual.abs() / y_exact[position];
-            println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
+            println!(
+                "maximum relative residual of numerical solution wioth respect to exact solution = {}",
+                relativ_residual
+            );
             println!("norm = {}", norm);
             nr.save_to_file(None)
-            
+
             //BVP is general api for all variants of BVP solvers
         }
         5 => {
@@ -488,7 +494,7 @@ pub fn bvp_examples(example: usize) {
                         Some(vec![1.0, 5.0]), //  None
                     ),
                     //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0] ) ),
+                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0])),
                 ])),
                 "Frozen" => Some(HashMap::from([(
                     "every_m".to_string(),
@@ -544,7 +550,8 @@ pub fn bvp_examples(example: usize) {
             nr.plot_result();
             nr.save_to_file(None);
         }
-        6 => { //version of 4 for benchmark
+        6 => {
+            //version of 4 for benchmark
             // enum collection of BVP problems for nonlinear equations with exact solution
             //EXAMPLES OF EXACT SOLUTION OF BVP OF NONLINEAR DIFFERENTIAL EQUATION
             /*
@@ -632,12 +639,11 @@ pub fn bvp_examples(example: usize) {
                 Some("off".to_string()),
             );
 
-
             println!("solving system");
             nr.solve();
-           
         }
-        7 => { //version of 5 for benchmark
+        7 => {
+            //version of 5 for benchmark
             let eq1 = Expr::parse_expression("y-z");
             let eq2 = Expr::parse_expression("-z^3");
             let eq_system = vec![eq1, eq2];
@@ -663,7 +669,7 @@ pub fn bvp_examples(example: usize) {
                         Some(vec![1.0, 5.0]), //  None
                     ),
                     //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0] ) ),
+                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0])),
                 ])),
                 "Frozen" => Some(HashMap::from([(
                     "every_m".to_string(),
@@ -715,7 +721,6 @@ pub fn bvp_examples(example: usize) {
             #[allow(unused_variables)]
             nr.solve();
             // println!("result = {:?}", solution);
-
         }
 
         _ => {

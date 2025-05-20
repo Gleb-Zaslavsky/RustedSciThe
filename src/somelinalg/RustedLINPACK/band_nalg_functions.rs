@@ -298,13 +298,14 @@ fn find_bandwidths(A: &DMatrix<f64>) -> (usize, usize) {
     let n = A.nrows();
     let mut kl = 0; // Number of subdiagonals
     let mut ku = 0; // Number of superdiagonals
-                    /*
-                        Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
-                    Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
-                    kl if this distance is greater than the current value of kl.
-                    Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
-                     and updates ku if this distance is greater than the current value of ku.
-                         */
+
+    /*
+        Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
+    Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
+    kl if this distance is greater than the current value of kl.
+    Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
+     and updates ku if this distance is greater than the current value of ku.
+         */
     for i in 0..n {
         for j in 0..n {
             if A[(i, j)] != 0.0 {

@@ -274,7 +274,9 @@ pub fn validate_tol(
         // rtol is a number
         NumberOrVec::Number(rtol_i) => {
             if rtol_i < 100.0 * f64::EPSILON {
-                error!("At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`.");
+                error!(
+                    "At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`."
+                );
                 NumberOrVec::Number(f64::max(rtol_i, 100.0 * f64::EPSILON))
             } else {
                 NumberOrVec::Number(rtol_i)
@@ -284,7 +286,9 @@ pub fn validate_tol(
             let mut fixed_rtol = rtol.clone();
             for i in 0..rtol.len() {
                 if rtol[i] < 100.0 * f64::EPSILON {
-                    eprintln!("At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`.");
+                    eprintln!(
+                        "At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`."
+                    );
                     fixed_rtol[i] = f64::max(rtol[i], 100.0 * f64::EPSILON);
                 }
             }

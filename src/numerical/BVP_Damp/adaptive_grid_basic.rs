@@ -136,7 +136,7 @@ pub fn easiest_grid_refinement(
                     new_initial_guess.push(y_new);
                 } // if not mark element remains 0
             } //i>0
-              //for i==0 and i==-1 mark elements remain 0
+            //for i==0 and i==-1 mark elements remain 0
         } // for i in 0..x_mesh.len()
         info!(
             "\n \n for row {} mark: {:?} len {} \n \n",
@@ -255,10 +255,10 @@ pub fn pearson_grid_refinement(
                 }
                 // if not mark element remains 0
             } //i>0
-              //for i==0 and i==-1 mark elements remain 0
+            //for i==0 and i==-1 mark elements remain 0
         } // for i in 0..x_mesh.len()
-          //  info!("mark {:?}", mark);
-          // find keys corresponding to non-zero values in the HashMap
+        //  info!("mark {:?}", mark);
+        // find keys corresponding to non-zero values in the HashMap
         let non_zero_keys: Vec<usize> = mark
             .iter()
             .filter(|&(_, &value)| value != 0)
@@ -466,10 +466,10 @@ pub fn grcar_smooke_grid_refinement(
                 }
                 // if not mark element remains 0
             } //i>0
-              //for i==0 and i==-1 mark elements remain 0
+            //for i==0 and i==-1 mark elements remain 0
         } // for i in 0..x_mesh.len()
-          //  info!("mark {:?}", mark);
-          // find keys corresponding to non-zero values in the HashMap
+        //  info!("mark {:?}", mark);
+        // find keys corresponding to non-zero values in the HashMap
         let non_zero_keys: Vec<usize> = mark
             .iter()
             .filter(|&(_, &value)| value != 0)

@@ -2,8 +2,8 @@ use crate::numerical::BDF::BDF_solver::BDF;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 extern crate nalgebra as na;
-use crate::numerical::BDF::common::NumberOrVec;
 use crate::Utils::plots::plots;
+use crate::numerical::BDF::common::NumberOrVec;
 use na::{DMatrix, DVector};
 
 use csv::Writer;

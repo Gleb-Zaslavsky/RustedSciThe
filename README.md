@@ -4,7 +4,7 @@
 is a Rust library for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations. 
 NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
 
-PROJECT NEWS: analytical Taylor series added
+PROJECT NEWS: Newton-Raphson method for solving non-linear systems of equations rewritten in more idiomatic way
 
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
@@ -183,36 +183,28 @@ println!(" result_of compare = {:?}", comparsion);
 //use the shortest way to solve system of equations
     // first define system of equations and initial guess
     let mut NR_instanse = NR::new();
-    let vec_of_expressions = _vec![ "_x^2+_y^2-10".to_string(), "_x-_y-4".to_string()]; 
-    let initial_guess = _vec![1.0, 1.0];
+    let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
+    let initial_guess = vec![1.0, 1.0];
     // solve
-    NR_instanse.eq_generate_from_str(vec_of_expressions,initial_guess, 1e-6, 100, 1e-6);
-    NR_instanse.solve();
-    println!("result = {:?} \n", NR_instanse.get_result().unwrap());
+    NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+    NR_instanse.main_loop();
+    let solution = NR_instanse.get_result().unwrap();
+    assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
     // or more verbose way...
     // first define system of equations
     
-    let vec_of_expressions = _vec![ "_x^2+_y^2-10".to_string(), "_x-_y-4".to_string()]; 
-    let mut Jacobian_instance = Jacobian::new();
-     Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
-     Jacobian_instance.set_variables(_vec!["_x", "_y"]);
-     Jacobian_instance.calc_jacobian();
-     Jacobian_instance.jacobian_generate(_vec!["_x", "_y"]);
-     Jacobian_instance.lambdify_funcvector(_vec!["_x", "_y"]);
-     Jacobian_instance.readable_jacobian();
-     println!("Jacobian_instance: functions  {:?}. Variables {:?}", Jacobian_instance.vector_of_functions, Jacobian_instance.vector_of_variables);
-      println!("Jacobian_instance: Jacobian  {:?} readable {:?}. \n", Jacobian_instance.symbolic_jacobian, Jacobian_instance.readable_jacobian);
-     let initial_guess = _vec![1.0, 1.0];
-     // in case you are interested in Jacobian value at initial guess
-     Jacobian_instance.evaluate_func_jacobian_DMatrix(initial_guess.clone());
-     Jacobian_instance.evaluate_funvector_lambdified_DVector(initial_guess.clone());
-     let guess_jacobian = (Jacobian_instance.evaluated_jacobian_DMatrix).clone();
-     println!("guess Jacobian = {:?} \n", guess_jacobian.try_inverse());
-     // defining NR method instance and solving
-     let mut NR_instanse = NR::new();
-     NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100, 1e-6);
-     NR_instanse.solve();
-     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
+    let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+
+    let initial_guess = vec![1.0, 1.0];
+    let mut NR_instanse = NR::new();
+    let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+    let values = vec!["x".to_string(), "y".to_string()];
+    NR_instanse.set_equation_sysytem(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
+    NR_instanse.set_solver_params(Some("info".to_string()), None, None);
+    NR_instanse.eq_generate();
+    NR_instanse.solve();
+    let solution = NR_instanse.get_result().unwrap();
+    println!("solution: {:?}", solution);
      
 ```
 - set the system of ordinary differential equations (ODEs), compute the analytical Jacobian ana solve it with BDF method.

@@ -1,7 +1,7 @@
 //use std::ops::Mul;\
 use crate::somelinalg::BICGSTAB::BiCGSTAB;
-use nalgebra::sparse::{CsCholesky, CsMatrix};
 use nalgebra::DMatrix;
+use nalgebra::sparse::{CsCholesky, CsMatrix};
 use sprs::linalg::bicgstab::BiCGSTAB as BiCGSTAB_sprs;
 use sprs::{CsMat, CsVec, CsVecI};
 

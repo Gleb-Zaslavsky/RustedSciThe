@@ -11,7 +11,7 @@ pub fn sym_examples(example: usize) {
             // FUNCTION OF MULTIPLE VARIABLES
             //parse expression from string to symbolic expression
             let input = "exp(x)+log(y)"; //log(x)/y-x^2.3 *log(x+y+y^2.6)-exp(x-y)/(x+y) +  (log((x-y)/(x+y)))^2
-                                         // here you've got symbolic expression
+            // here you've got symbolic expression
             let parsed_expression = Expr::parse_expression(input);
             println!(" parsed_expression {}", parsed_expression);
             // turn symbolic expression to a pretty human-readable string

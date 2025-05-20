@@ -101,7 +101,7 @@ fn parse_title(input: &str) -> IResult<&str, String> {
     let mut parser = map(parser, String::from);
 
     // Ignore trailing whitespace, newline characters, and semicolons
- 
+
     let (input, result) = parser.parse(input)?;
 
     let input = input.trim();
@@ -187,9 +187,7 @@ fn parse_section(input: &str) -> IResult<&str, (String, HashMap<String, Vec<Valu
 }
 
 /// Parses the entire document into a HashMap
-pub fn parse_document(
-    input: &str,
-) -> IResult<&str, DocumentMap> {
+pub fn parse_document(input: &str) -> IResult<&str, DocumentMap> {
     let (input, _) = multispace0(input)?;
     // Use many1 instead of separated_list0 to parse sections
     // and ensure each section is properly terminated
@@ -252,7 +250,7 @@ fn parse_document_with_template(
 /// Helper function to parse a document
 pub fn parse_document_as(
     input: &str,
-    template: Option<  DocumentMap  >,
+    template: Option<DocumentMap>,
 ) -> Result<DocumentMap, String> {
     match template {
         Some(template) => parse_document_with_template(input, &template),
@@ -278,7 +276,7 @@ pub fn parse_document_as(
 pub fn parse_document_as_strings(
     input: &str,
     template: Option<HashMap<String, HashMap<String, Option<Vec<String>>>>>,
-) -> Result < HashMap<String, HashMap<String, Option<Vec<String>>>>, String> {
+) -> Result<HashMap<String, HashMap<String, Option<Vec<String>>>>, String> {
     // First parse with our Value enum
     let value_result = parse_document_as(input, None);
 

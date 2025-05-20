@@ -1,13 +1,13 @@
-use faer::col::{ColRef, Col};
+use faer::col::{Col, ColRef};
 
 use faer::mat::{Mat, MatRef};
 
+use faer::linalg::solvers::Solve;
 use faer::sparse::SparseColMat;
-use faer_gmres::restarted_gmres;
 use faer_gmres::JacobiPreconLinOp;
+use faer_gmres::restarted_gmres;
 use sprs::linalg::bicgstab::BiCGSTAB;
 use sprs::{CsMat, CsVec};
-use faer::linalg::solvers::Solve;
 pub fn solve_csmat(
     A: &CsMat<f64>,
     b: &CsVec<f64>,
@@ -71,15 +71,14 @@ pub fn solve_sys_SparseColMat(
         Err(e) => {
             println!("Error: {:?}", e);
             println!("gmres not covered!");
-            let A =  A;
-            let LU =A.sp_lu().unwrap();
-            let b:MatRef<f64> = b; 
-            let _res:Mat<f64> = LU.solve(b); // TODO wh
+            let A = A;
+            let LU = A.sp_lu().unwrap();
+            let b: MatRef<f64> = b;
+            let _res: Mat<f64> = LU.solve(b); // TODO wh
             let res_vec: Vec<f64> = x.row_iter().map(|x| x[0]).collect();
 
-            let res =ColRef:: from_slice(res_vec.as_slice()).to_owned();
+            let res = ColRef::from_slice(res_vec.as_slice()).to_owned();
             Some(res)
         }
     }
 }
-

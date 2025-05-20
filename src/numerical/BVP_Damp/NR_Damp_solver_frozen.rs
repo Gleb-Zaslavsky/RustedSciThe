@@ -5,13 +5,13 @@ use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::Utils::logger::save_matrix_to_file;
+use crate::Utils::plots::plots;
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
 use crate::numerical::BVP_Damp::BVP_utils_damped::interchange_columns;
-use crate::Utils::logger::save_matrix_to_file;
-use crate::Utils::plots::plots;
 use chrono::Local;
 
 use log::info;
@@ -325,7 +325,13 @@ impl NRBVP {
     pub fn save_to_file(&self) {
         //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let result_DMatrix = self.get_result().unwrap();
-        let _ = save_matrix_to_file(&result_DMatrix, &self.values, "result.txt", &self.x_mesh, &self.arg);
+        let _ = save_matrix_to_file(
+            &result_DMatrix,
+            &self.values,
+            "result.txt",
+            &self.x_mesh,
+            &self.arg,
+        );
     }
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();

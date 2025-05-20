@@ -1,4 +1,4 @@
-use crate::somelinalg::GMRES_mult_api:: filter_zeros;
+use crate::somelinalg::GMRES_mult_api::filter_zeros;
 
 use faer::linalg::solvers::Solve;
 use faer::mat::Mat;
@@ -49,7 +49,7 @@ pub fn solve_with_upper_triangular(
 ) -> Option<SparseColMat<usize, f64>> {
     println!("mat = {:?}", mat.row_idx());
     for j in 0..mat.shape().0 {
-        let row_indices_of_col_raw:Vec<usize> = mat.as_dyn().row_idx_of_col(j).collect();
+        let row_indices_of_col_raw: Vec<usize> = mat.as_dyn().row_idx_of_col(j).collect();
         println!("{}-th col {:?}", j, row_indices_of_col_raw);
         row_indices_of_col_raw.into_iter().for_each(|k| {
             if k < j {
@@ -62,10 +62,9 @@ pub fn solve_with_upper_triangular(
 
     assert_eq!(n, m, "matrix must be square");
 
-   
     let mut vec_of_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
     // Use rayon's parallel iterator to parallelize the loop
-    let triplets: Vec<Vec< Triplet<usize, usize, f64>>> = (0..n)
+    let triplets: Vec<Vec<Triplet<usize, usize, f64>>> = (0..n)
         .into_par_iter()
         .map(|i| {
             let mut b: Mat<f64> = Mat::<f64>::zeros(n, 1);

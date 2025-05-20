@@ -1,10 +1,10 @@
 use core::fmt::Display;
 
+use crate::Utils::plots::plots;
 /// Backward Euler method for solving systems of ordinary differential equation
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 use crate::numerical::NR_for_Euler::NRE;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::Utils::plots::plots;
 use nalgebra::{DMatrix, DVector};
 //use ndarray_linalg::Norm;
 use log::info;

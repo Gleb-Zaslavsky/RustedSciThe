@@ -1,4 +1,3 @@
-
 use faer;
 
 use faer::mat::Mat;
@@ -6,11 +5,11 @@ use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
 use faer_gmres::gmres;
 use nalgebra::DMatrix;
-fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<Triplet<usize, usize, f64>>  {
+fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<Triplet<usize, usize, f64>> {
     let mut vec_of_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
     for (j, row) in mat.row_iter().enumerate() {
         if row[0].abs() >= tol {
-            vec_of_triplets.push( Triplet::new(j, i, row[0]));
+            vec_of_triplets.push(Triplet::new(j, i, row[0]));
         }
     }
     vec_of_triplets
@@ -63,7 +62,8 @@ pub fn invers_Mat(
     }
 
     let inverted_matrix: SparseColMat<usize, f64> =
-        SparseColMat::<usize, f64>::try_new_from_triplets(n, m, vec_of_triplets.as_slice()).unwrap();
+        SparseColMat::<usize, f64>::try_new_from_triplets(n, m, vec_of_triplets.as_slice())
+            .unwrap();
     //   println!("inverted matrix {:?}", inverted_matrix);
     Some(inverted_matrix) //None
 }
@@ -95,7 +95,11 @@ mod tests {
     #[test]
     fn test_gmres() {
         // create faer sparse mat from triplets
-        let a_test_triplets: Vec<Triplet<usize, usize, f64>> = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0), Triplet::new(2, 2, 3.0)];
+        let a_test_triplets: Vec<Triplet<usize, usize, f64>> = vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 1, 2.0),
+            Triplet::new(2, 2, 3.0),
+        ];
         let a_test: SparseColMat<usize, f64> =
             SparseColMat::<usize, f64>::try_new_from_triplets(3, 3, &a_test_triplets).unwrap();
 

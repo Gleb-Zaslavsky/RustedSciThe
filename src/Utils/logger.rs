@@ -1,15 +1,14 @@
+use csv::Writer;
 use nalgebra::{DMatrix, DVector};
 use std::fs::File;
 use std::io::{self, Write};
-use csv::Writer;
-
 
 pub fn save_matrix_to_file(
     matrix: &DMatrix<f64>,
     headers: &Vec<String>,
     filename: &str,
     x_mesh: &DVector<f64>,
-    arg: &String
+    arg: &String,
 ) -> io::Result<()> {
     let mut file = File::create(filename)?;
     let mut headers_with_x = Vec::new();
@@ -31,7 +30,7 @@ pub fn save_matrix_to_csv(
     headers: &Vec<String>,
     filename: &str,
     x_mesh: &DVector<f64>,
-    arg: &String
+    arg: &String,
 ) -> io::Result<()> {
     let file = File::create(filename)?;
     let mut writer = Writer::from_writer(file);
@@ -53,4 +52,3 @@ pub fn save_matrix_to_csv(
     writer.flush()?;
     Ok(())
 }
-

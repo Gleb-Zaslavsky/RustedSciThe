@@ -7,20 +7,20 @@ The code mostly inspired by sources listed below:
 */
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
-use chrono:: Local;
+use chrono::Local;
 
+use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
+use crate::Utils::plots::{plots, plots_gnulot};
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::{
-    construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem, CustomTimer
+    CustomTimer, construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
 };
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
     jac_recalc,
 };
-use crate::Utils::logger::{save_matrix_to_file, save_matrix_to_csv};
-use crate::Utils::plots::{plots, plots_gnulot};
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
 use simplelog::*;
@@ -29,7 +29,7 @@ use std::fs::File;
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
 
-use crate::numerical::BVP_Damp::grid_api::{new_grid, GridRefinementMethod};
+use crate::numerical::BVP_Damp::grid_api::{GridRefinementMethod, new_grid};
 
 use log::{error, info, warn};
 
@@ -73,7 +73,7 @@ pub struct NRBVP {
     rel_tolerance_vec: Vec<f64>, // vector of relative tolerance for each of the unkown variables
     variable_string: Vec<String>, // vector of indexed variable names
     #[allow(dead_code)]
-    adaptive: bool,              // flag indicating if adaptive grid should be used
+    adaptive: bool, // flag indicating if adaptive grid should be used
     new_grid_enabled: bool,      //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
@@ -151,7 +151,7 @@ impl NRBVP {
             Bounds,
             loglevel,
             result: None,
-            full_result:None,
+            full_result: None,
             x_mesh: DVector::from_vec(T_list),
             fun: boxed_fun,
             jac: None,
@@ -271,12 +271,12 @@ impl NRBVP {
                 .filter(|&key| self.strategy_params.as_ref().unwrap().contains_key(key))
                 .collect();
             assert_eq!(
-                present_keys.len(), 
-                1, 
-                "Exactly one of {:?} must be present in strategy_params when 'adaptive' is Some, found: {:?}", 
-                strategy_keys, 
+                present_keys.len(),
+                1,
+                "Exactly one of {:?} must be present in strategy_params when 'adaptive' is Some, found: {:?}",
+                strategy_keys,
                 present_keys
-                );
+            );
             let vec_of_params_len = self
                 .strategy_params
                 .as_ref()
@@ -402,8 +402,14 @@ impl NRBVP {
     }
 
     //undamped step without jacobian recalculation
-    pub fn step(&self, p: f64, y: &dyn VectorType) ->( Box<dyn VectorType>, (std::time::Duration, std::time::Duration)) {
-        
+    pub fn step(
+        &self,
+        p: f64,
+        y: &dyn VectorType,
+    ) -> (
+        Box<dyn VectorType>,
+        (std::time::Duration, std::time::Duration),
+    ) {
         let fun_time_start = Instant::now();
         let fun = &self.fun;
         let F_k = fun.call(p, y);
@@ -436,7 +442,7 @@ impl NRBVP {
             self.bandwidth,
             y,
         );
-      //  info!("linear system solution {},\n {} \n {}", undamped_step_k.to_DVectorType(), F_k.to_DVectorType(), J_k.to_DMatrixType());
+        //  info!("linear system solution {},\n {} \n {}", undamped_step_k.to_DVectorType(), F_k.to_DVectorType(), J_k.to_DMatrixType());
         let linear_sys_time_end = linear_sys_time_start.elapsed();
         for el in undamped_step_k.iterate() {
             if el.is_nan() {
@@ -444,27 +450,29 @@ impl NRBVP {
                 panic!()
             }
         }
-        let pair_of_times= (fun_time_end, linear_sys_time_end);
+        let pair_of_times = (fun_time_end, linear_sys_time_end);
         (undamped_step_k, pair_of_times)
     }
 
     pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
-        // macro for saving times 
+        // macro for saving times
         macro_rules! save_operation_times {
             ($self:expr, $pair_of_times:expr) => {
                 let (fun_time, linear_sys_time) = $pair_of_times;
                 $self.custom_timer.append_to_fun_time(fun_time);
-                $self.custom_timer.append_to_linear_sys_time(linear_sys_time);
+                $self
+                    .custom_timer
+                    .append_to_linear_sys_time(linear_sys_time);
             };
         }
-    //_________________________________________________________________
+        //_________________________________________________________________
         let p = self.p;
         let now = Instant::now();
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
         let (undamped_step_k_minus_1, pair_of_times) = self.step(p, y_k_minus_1);
-           // saving times of corresponding operations 
-            save_operation_times!(self, pair_of_times);
+        // saving times of corresponding operations
+        save_operation_times!(self, pair_of_times);
         *self
             .calc_statistics
             .entry("number of solving linear systems".to_string())
@@ -522,8 +530,8 @@ impl NRBVP {
         //   let fun = &self.fun;
         // calculate damped step
         let (undamped_step_k, pair_of_times) = self.step(p, &*y_k);
-             // saving times of corresponding operations 
-             save_operation_times!(self, pair_of_times);
+        // saving times of corresponding operations
+        save_operation_times!(self, pair_of_times);
         *self
             .calc_statistics
             .entry("number of solving linear systems".to_string())
@@ -542,8 +550,8 @@ impl NRBVP {
             // / compute the next undamped step that would result if x1 is accepted
             // J(x_k)^-1 F(x_k+1)
             let (undamped_step_k_plus_1, pair_of_times) = self.step(p, &*y_k_plus_1); //???????????????
-                  // saving times of corresponding operations 
-                  save_operation_times!(self, pair_of_times);
+            // saving times of corresponding operations
+            save_operation_times!(self, pair_of_times);
             let error = &undamped_step_k_plus_1.norm();
             self.error_old = *error;
             info!("\n \n L2 norm of undamped step = {}", error);
@@ -611,7 +619,7 @@ impl NRBVP {
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
         self.result = Some(y.clone()); // save into result in case the vary first iteration
-                                       // with the current n_steps will go wrong and we shall need frid refinement
+        // with the current n_steps will go wrong and we shall need frid refinement
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
@@ -634,12 +642,13 @@ impl NRBVP {
 
             if status == 0 {
                 // status == 0 means convergence is not reached yet we're going to another iteration
-                let y_k_plus_1 = match damped_step_result { Some(y_k_plus_1) => {
-                    y_k_plus_1
-                } _ => {
-                    error!("\n \n y_k_plus_1 is None");
-                    panic!()
-                }};
+                let y_k_plus_1 = match damped_step_result {
+                    Some(y_k_plus_1) => y_k_plus_1,
+                    _ => {
+                        error!("\n \n y_k_plus_1 is None");
+                        panic!()
+                    }
+                };
                 self.y = y_k_plus_1;
                 self.jac_recalc = false;
             }
@@ -648,14 +657,15 @@ impl NRBVP {
                 // status == 1 means convergence is reached, save the result
                 info!("\n \n Solution has converged, breaking the loop!");
 
-                let y_k_plus_1 = match damped_step_result { Some(y_k_plus_1) => {
-                    y_k_plus_1
-                } _ => {
-                    panic!(" \n \n y_k_plus_1 is None")
-                }};
+                let y_k_plus_1 = match damped_step_result {
+                    Some(y_k_plus_1) => y_k_plus_1,
+                    _ => {
+                        panic!(" \n \n y_k_plus_1 is None")
+                    }
+                };
 
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                                                                // before refining in case it will go wrong
+                // before refining in case it will go wrong
                 self.result = result.clone();
                 info!(
                     "\n \n solutioon found for the current grid {}",
@@ -900,53 +910,52 @@ impl NRBVP {
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        let is_logging_disabled = self.loglevel
-        .as_ref()
-        .map(|level| level == "off" || level == "none")
-        .unwrap_or(false);
+        let is_logging_disabled = self
+            .loglevel
+            .as_ref()
+            .map(|level| level == "off" || level == "none")
+            .unwrap_or(false);
 
         if is_logging_disabled {
             let res = self.solver();
             res
-        } else
-        {
-        let loglevel = self.loglevel.clone();
-        let log_option = if let Some(level) = loglevel {
-            match level.as_str() {
-                "debug" => LevelFilter::Info,
-                "info" => LevelFilter::Info,
-                "warn" => LevelFilter::Warn,
-                "error" => LevelFilter::Error,
-                _ => panic!("loglevel must be debug, info, warn or error"),
-            }
         } else {
-            LevelFilter::Info
-        };
-        let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-        let name = format!("log_{}.txt", date_and_time);
-        let logger_instance = CombinedLogger::init(vec![
-            TermLogger::new(
-                log_option,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            ),
-            WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
-        ]);
+            let loglevel = self.loglevel.clone();
+            let log_option = if let Some(level) = loglevel {
+                match level.as_str() {
+                    "debug" => LevelFilter::Info,
+                    "info" => LevelFilter::Info,
+                    "warn" => LevelFilter::Warn,
+                    "error" => LevelFilter::Error,
+                    _ => panic!("loglevel must be debug, info, warn or error"),
+                }
+            } else {
+                LevelFilter::Info
+            };
+            let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
+            let name = format!("log_{}.txt", date_and_time);
+            let logger_instance = CombinedLogger::init(vec![
+                TermLogger::new(
+                    log_option,
+                    Config::default(),
+                    TerminalMode::Mixed,
+                    ColorChoice::Auto,
+                ),
+                WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
+            ]);
 
-        match logger_instance {
-            Ok(()) => {
-                let res = self.solver();
-                info!(" \n \n Program ended");
-                res
-            }
-            Err(_) => {
-                let res = self.solver();
-                res
-            } //end Error
-        }// end mat 
-
-       } 
+            match logger_instance {
+                Ok(()) => {
+                    let res = self.solver();
+                    info!(" \n \n Program ended");
+                    res
+                }
+                Err(_) => {
+                    let res = self.solver();
+                    res
+                } //end Error
+            } // end mat 
+        }
     }
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                     functions to return and save result in different formats
@@ -959,22 +968,34 @@ impl NRBVP {
             "result.txt".to_string()
         };
         let result_DMatrix = self.get_result().unwrap();
-        let _ = save_matrix_to_file(&result_DMatrix, &self.values, &name, &self.x_mesh, &self.arg);
+        let _ = save_matrix_to_file(
+            &result_DMatrix,
+            &self.values,
+            &name,
+            &self.x_mesh,
+            &self.arg,
+        );
     }
-  pub fn save_to_csv(&self, filename: Option<String>) {
-    let name = if let Some(name) = filename {
+    pub fn save_to_csv(&self, filename: Option<String>) {
+        let name = if let Some(name) = filename {
             name
-    } else {
-        "result_table".to_string()
-    };
-    let result_DMatrix = self.get_result().unwrap();
-    let _ = save_matrix_to_csv(&result_DMatrix, &self.values, &name, &self.x_mesh, &self.arg);
-  }
-    pub fn get_result(&self) -> Option<DMatrix<f64>> { 
-                self.full_result.clone()
+        } else {
+            "result_table".to_string()
+        };
+        let result_DMatrix = self.get_result().unwrap();
+        let _ = save_matrix_to_csv(
+            &result_DMatrix,
+            &self.values,
+            &name,
+            &self.x_mesh,
+            &self.arg,
+        );
+    }
+    pub fn get_result(&self) -> Option<DMatrix<f64>> {
+        self.full_result.clone()
     }
 
-    pub fn handle_result(&mut self) { 
+    pub fn handle_result(&mut self) {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
@@ -990,13 +1011,13 @@ impl NRBVP {
             &self.BorderConditions,
             &self.variable_string,
             &self.values.clone(),
-        )
-        ;
+        );
         let permutted_results = interchange_columns(
             full_results,
             self.values.clone(),
             self.variable_string.clone(),
-        ).transpose();
+        )
+        .transpose();
 
         info!(
             "matrix of results has shape {:?}",
@@ -1007,25 +1028,25 @@ impl NRBVP {
         self.full_result = Some(permutted_results.clone());
     }
     pub fn gnuplot_result(&self) {
-       let permutted_results = self.full_result.clone().unwrap();
+        let permutted_results = self.full_result.clone().unwrap();
         plots_gnulot(
             self.arg.clone(),
             self.values.clone(),
             self.x_mesh.clone(),
-            permutted_results
+            permutted_results,
         );
         info!("result plotted");
     }
     pub fn plot_result(&self) {
         let permutted_results = self.full_result.clone().unwrap();
-         plots(
-             self.arg.clone(),
-             self.values.clone(),
-             self.x_mesh.clone(),
-             permutted_results
-         );
-         info!("result plotted");
-     }
+        plots(
+            self.arg.clone(),
+            self.values.clone(),
+            self.x_mesh.clone(),
+            permutted_results,
+        );
+        info!("result plotted");
+    }
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         if let Some(jac) = &self.old_jac {
@@ -1049,12 +1070,11 @@ impl NRBVP {
 
     ////////////////////////////////////////////////////////////
     // misc
-    pub fn step_with_timer(&mut self, pair_of_times: (std::time::Duration, std::time::Duration) ) {
+    pub fn step_with_timer(&mut self, pair_of_times: (std::time::Duration, std::time::Duration)) {
         let (fun_time, linear_sys_time) = pair_of_times;
         self.custom_timer.append_to_fun_time(fun_time);
         self.custom_timer.append_to_linear_sys_time(linear_sys_time);
-
-    } 
+    }
 }
 
 /* */

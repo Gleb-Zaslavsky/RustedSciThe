@@ -171,7 +171,7 @@ impl LU_nalgebra {
         let lower_border = std::cmp::min(nrows, i + kl + 1);
         let right_border = std::cmp::min(nrows, i + ku + kl + 1);
         let mut submat = matrix.view_range_mut(i..lower_border, i..right_border); //
-                                                                                  //  Calculates the inverse of the diagonal element.
+        //  Calculates the inverse of the diagonal element.
         let inv_diag = 1.0 / diag;
         //Splits the submatrix into two parts: coeffs: The first column (column i of the original matrix) submat: The rest of the columns
         let (mut coeffs, mut submat) = submat.columns_range_pair_mut(0, 1..);
@@ -186,13 +186,14 @@ impl LU_nalgebra {
         for k in 0..pivot_row.ncols() {
             down.column_mut(k) // Performs an "axpy" operation on the corresponding column in down.
                 .axpy(-pivot_row[k], &coeffs, 1.0); //
-                                                    //"axpy" stands for "a * x plus y", where:
-                                                    // a is -pivot_row[k] (negated value from the pivot row)
-                                                    // x is coeffs (the multipliers calculated earlier)
-                                                    // y is implicitly the column itself (modified in-place)
+
+            //"axpy" stands for "a * x plus y", where:
+            // a is -pivot_row[k] (negated value from the pivot row)
+            // x is coeffs (the multipliers calculated earlier)
+            // y is implicitly the column itself (modified in-place)
         }
     } // fn gauss_step
-      // more easy and faster LU decomposition solver
+    // more easy and faster LU decomposition solver
     pub fn LU2(&mut self) {
         let kl = self.kl.clone();
         let ku = self.ku.clone();
@@ -352,13 +353,14 @@ impl LU_nalgebra {
         let n = A.nrows();
         let mut kl = 0; // Number of subdiagonals
         let mut ku = 0; // Number of superdiagonals
-                        /*
-                            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
-                        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
-                        kl if this distance is greater than the current value of kl.
-                        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
-                        and updates ku if this distance is greater than the current value of ku.
-                            */
+
+        /*
+            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
+        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
+        kl if this distance is greater than the current value of kl.
+        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
+        and updates ku if this distance is greater than the current value of ku.
+            */
         for i in 0..n {
             for j in 0..n {
                 if A[(i, j)] != 0.0 {

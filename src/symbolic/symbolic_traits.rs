@@ -3,12 +3,11 @@
 // The traits are implemented for the native engine in the symbolic_engine.rs file
 // add other engines here as needed
 
-
 use crate::symbolic::symbolic_engine::Expr;
+use enum_dispatch::enum_dispatch;
 use std::any::Any;
 use std::collections::HashMap;
 use std::f64;
-use enum_dispatch::enum_dispatch;
 
 #[enum_dispatch]
 pub trait SymbolicType: Any {
@@ -16,8 +15,8 @@ pub trait SymbolicType: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_symbolic_type(&self) -> Box<dyn SymbolicType>;
     // creating symbolic expressions and variable manipulations
-    fn var_expr(&self, var: &str) ->  Box<dyn SymbolicType>;
-    fn const_expr(&self, val: f64) ->  Box<dyn SymbolicType>;
+    fn var_expr(&self, var: &str) -> Box<dyn SymbolicType>;
+    fn const_expr(&self, val: f64) -> Box<dyn SymbolicType>;
     fn exp(&self) -> Box<dyn SymbolicType>;
     fn ln(&self) -> Box<dyn SymbolicType>;
     fn pow(&self, rhs: Box<dyn SymbolicType>) -> Box<dyn SymbolicType>;
@@ -31,16 +30,15 @@ pub trait SymbolicType: Any {
     fn set_variable(&self, variable: &str, value: f64) -> Box<dyn SymbolicType>;
     fn set_variable_from_map(&self, variables: &HashMap<String, f64>) -> Box<dyn SymbolicType>;
     fn simplify(&self) -> Box<dyn SymbolicType>;
-    // 
+    //
     fn diff(&self, str_variable: &str) -> Box<dyn SymbolicType>;
     fn lambdify_owned(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64>;
     fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_>;
     // misc functions
     fn convert_to_string(&self) -> String;
     fn to_native(&self) -> Expr;
-    fn clone_box(&self)-> Box<dyn SymbolicType>;
+    fn clone_box(&self) -> Box<dyn SymbolicType>;
     fn get_type(&self) -> String;
-    
 }
 ///////////////// IMPLEMENTATION OF THE TRAIT FOR THE NATIVE ENGINE /////////////////////////
 impl SymbolicType for Expr {
@@ -94,10 +92,7 @@ impl SymbolicType for Expr {
     fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_> {
         let lambdified = Expr::lambdify(
             self,
-            variable_str
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>(),
+            variable_str.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         );
         lambdified
     }
@@ -135,12 +130,11 @@ impl SymbolicType for Expr {
         (indexed_matrix, matrix_of_names)
     }
     fn to_native(&self) -> Expr {
-        if let Some(native) = self.as_any().downcast_ref::<Expr>(){
+        if let Some(native) = self.as_any().downcast_ref::<Expr>() {
             native.to_owned()
         } else {
             panic!("Type mismatch: expected Expr, got {}", self.get_type());
         }
-
     }
     fn clone_box(&self) -> Box<dyn SymbolicType> {
         Box::new(self.clone())
@@ -150,7 +144,10 @@ impl SymbolicType for Expr {
     }
 }
 
-pub fn SymbolicType_casting<T: SymbolicType>(expr: T, desired_type: String) -> Box<dyn SymbolicType> {
+pub fn SymbolicType_casting<T: SymbolicType>(
+    expr: T,
+    desired_type: String,
+) -> Box<dyn SymbolicType> {
     let res = if desired_type == "native" {
         Box::new(expr) as Box<dyn SymbolicType>
     } else {
@@ -166,13 +163,14 @@ pub fn SymbolicType_casting<T: SymbolicType>(expr: T, desired_type: String) -> B
 pub enum SymbolicEngineType {
     Native,
     // Add other engines here as needed
-    // 
+    //
 }
 // Create a factory trait for symbolic expressions. Added &self to the trait methods to make them object-safe
-pub trait SymbolicFactory: Send + Sync { // Send + Sync is needed for the factory method to be thread-safe
+pub trait SymbolicFactory: Send + Sync {
+    // Send + Sync is needed for the factory method to be thread-safe
     fn create_constant(&self, value: f64) -> Box<dyn SymbolicType>;
     fn create_variable(&self, name: String) -> Box<dyn SymbolicType>;
-    fn create_variables(&self, name: String) -> Vec<Box<dyn SymbolicType> >;
+    fn create_variables(&self, name: String) -> Vec<Box<dyn SymbolicType>>;
     fn parse_expression(&self, expr_str: &str) -> Box<dyn SymbolicType>;
 }
 
@@ -219,8 +217,6 @@ pub fn symbolic_backend_from_string(engine_type: String) -> &'static dyn Symboli
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
 // Usage example:
 // let factory = get_symbolic_factory(SymbolicEngineType::Native);
 // let constant = factory.create_constant(42.0);
@@ -234,9 +230,7 @@ Create a new factory implementation for your engine
 4. Add the new engine to the get_symbolic_factory match stateme
 */
 
-
-
- //___________________________________TESTS____________________________________
+//___________________________________TESTS____________________________________
 
 #[cfg(test)]
 mod tests {
@@ -250,16 +244,15 @@ mod tests {
         let df_dx = &f_cast.diff("x");
         let df_dx_native = df_dx.to_native();
 
-      
         let _degree = Box::new(Expr::Const(1.0));
         let C = Expr::Const(2.0);
         let C1 = Expr::Const(1.0);
 
         let expected_result = C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
         //  Mul(Mul(Const(2.0), Pow(Var("x"), Sub(Const(2.0), Const(1.0)))), Const(1.0)) Box::new(Expr::Mul(Box::new(Expr::Const(2.0)), Box::new(x.clone())))
-        println!("df_dx {:?} ",  df_dx_native);
+        println!("df_dx {:?} ", df_dx_native);
         println!("expected_result {:?} ", expected_result);
-        assert_eq!( df_dx_native, expected_result);
+        assert_eq!(df_dx_native, expected_result);
     }
 
     #[test] // Basic factory creation and usage
@@ -267,27 +260,33 @@ mod tests {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
         let constant = factory.create_constant(42.0);
         let variable = factory.create_variable("x".to_string());
-        
+
         // Test constant
-        match constant.as_any().downcast_ref::<Expr>() { Some(expr) => {
-            assert_eq!(*expr, Expr::Const(42.0));
-        } _ => {
-            panic!("Expected Expr type for constant");
-        }}
+        match constant.as_any().downcast_ref::<Expr>() {
+            Some(expr) => {
+                assert_eq!(*expr, Expr::Const(42.0));
+            }
+            _ => {
+                panic!("Expected Expr type for constant");
+            }
+        }
 
         // Test variable
-        match variable.as_any().downcast_ref::<Expr>() { Some(expr) => {
-            assert_eq!(*expr, Expr::Var("x".to_string()));
-        } _ => {
-            panic!("Expected Expr type for variable");
-        }}
+        match variable.as_any().downcast_ref::<Expr>() {
+            Some(expr) => {
+                assert_eq!(*expr, Expr::Var("x".to_string()));
+            }
+            _ => {
+                panic!("Expected Expr type for variable");
+            }
+        }
     }
 
     // Expression parsing tests
     #[test]
     fn test_parse_expression() {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
-        
+
         // Test simple expressions
         let expr = factory.parse_expression("x + 1");
         let result = expr.convert_to_string();
@@ -303,11 +302,11 @@ mod tests {
     #[test]
     fn test_symbolic_operations() {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
-        
+
         // Create expression x^2
         let x = factory.create_variable("x".to_string());
-      //  let two = factory.create_constant(2.0);
-        
+        //  let two = factory.create_constant(2.0);
+
         // Test differentiation
         let derivative = x.diff("x");
         let result = derivative.convert_to_string();
@@ -316,7 +315,7 @@ mod tests {
         // Test evaluation
         let expr = factory.parse_expression("x");
         let evaluated = expr.set_variable("x", 2.0).simplify();
-      
+
         if let Some(native_expr) = evaluated.as_any().downcast_ref::<Expr>() {
             println!("\n \n evaluated {:?} ", native_expr.to_string());
             match native_expr {
@@ -337,12 +336,12 @@ mod tests {
     #[test]
     fn test_variable_substitution() {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
-        
+
         let expr = factory.parse_expression("x + y");
         let mut substitutions = HashMap::new();
         substitutions.insert("x".to_string(), "a".to_string());
         substitutions.insert("y".to_string(), "b".to_string());
-        
+
         let renamed = expr.rename_variables(&substitutions);
         let result = renamed.convert_to_string();
         assert_eq!(result, "(a + b)");
@@ -352,10 +351,10 @@ mod tests {
     #[test]
     fn test_numerical_evaluation() {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
-        
+
         let expr = factory.parse_expression("x^2");
         let func = expr.lambdify_owned(vec!["x".to_string()]);
-        
+
         assert_eq!(func(vec![2.0]), 4.0);
         assert_eq!(func(vec![3.0]), 9.0);
         assert_eq!(func(vec![-2.0]), 4.0);
@@ -365,14 +364,14 @@ mod tests {
     #[test]
     fn test_expression_composition() {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
-        
+
         let x = factory.create_variable("x".to_string());
         let _y = factory.create_variable("y".to_string());
-        
+
         // Create expression: exp(x * y)
-        let product = x.clone_box();  // Need to implement proper multiplication
+        let product = x.clone_box(); // Need to implement proper multiplication
         let expr = factory.parse_expression(&format!("exp({})", product.convert_to_string()));
-        
+
         // Test the resulting expression
         let result = expr.convert_to_string();
         assert_eq!(result, "exp(x)");

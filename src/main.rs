@@ -7,27 +7,27 @@ pub mod symbolic;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 pub mod numerical;
+use crate::numerical::BE::BE;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
+use crate::numerical::NR::NR;
 use crate::numerical::NR_for_ODE::NRODE;
 use crate::numerical::ODE_api::ODEsolver;
-use crate::numerical::BE::BE;
-use crate::numerical::NR::NR;
 use nalgebra::{DMatrix, DVector};
 use sprs::{CsMat, CsVec};
 pub mod Utils;
 pub mod somelinalg;
 
 fn main() {
-    let example = 19;
+    let example = 5;
     match example {
         0 => {
             // FUNCTION OF MULTIPLE VARIABLES
             //parse expression from string to symbolic expression
             let input = "exp(x)+log(y)"; //log(x)/y-x^2.3 *log(x+y+y^2.6)-exp(x-y)/(x+y) +  (log((x-y)/(x+y)))^2
-                                         // here you've got symbolic expression
+            // here you've got symbolic expression
             let parsed_expression = Expr::parse_expression(input);
             println!(" parsed_expression {}", parsed_expression);
             // turn symbolic expression to a pretty human-readable string
@@ -188,37 +188,25 @@ fn main() {
             let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
             let initial_guess = vec![1.0, 1.0];
             // solve
-            NR_instanse.eq_generate_from_str(vec_of_expressions, initial_guess, 1e-6, 100);
+            NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
             NR_instanse.solve();
             println!("result = {:?} \n", NR_instanse.get_result().unwrap());
             // or more verbose way...
             // first define system of equations
-
-            let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
-            let mut Jacobian_instance = Jacobian::new();
-            Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
-            Jacobian_instance.set_variables(vec!["x", "y"]);
-            Jacobian_instance.calc_jacobian();
-            Jacobian_instance.jacobian_generate(vec!["x", "y"]);
-            Jacobian_instance.lambdify_funcvector(vec!["x", "y"]);
-            Jacobian_instance.readable_jacobian();
-            println!(
-                "Jacobian_instance: functions  {:?}. Variables {:?}",
-                Jacobian_instance.vector_of_functions, Jacobian_instance.vector_of_variables
-            );
-            println!(
-                "Jacobian_instance: Jacobian  {:?} readable {:?}. \n",
-                Jacobian_instance.symbolic_jacobian, Jacobian_instance.readable_jacobian
-            );
+            let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
             let initial_guess = vec![1.0, 1.0];
-            // in case you are interested in Jacobian value at initial guess
-            Jacobian_instance.evaluate_func_jacobian_DMatrix(initial_guess.clone());
-            Jacobian_instance.evaluate_funvector_lambdified_DVector(initial_guess.clone());
-            let guess_jacobian = Jacobian_instance.evaluated_jacobian_DMatrix.clone();
-            println!("guess Jacobian = {:?} \n", guess_jacobian.try_inverse());
             // defining NR method instance and solving
             let mut NR_instanse = NR::new();
-            NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100);
+            let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+            let values = vec!["x".to_string(), "y".to_string()];
+            NR_instanse.set_equation_system(
+                vec_of_expr,
+                Some(values.clone()),
+                initial_guess,
+                1e-6,
+                100,
+            );
+            NR_instanse.eq_generate();
             NR_instanse.solve();
             println!("result = {:?} \n", NR_instanse.get_result().unwrap());
         }
@@ -631,8 +619,8 @@ fn main() {
             );
             let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
             let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
-            use faer::col::{ColRef, Col};
-            let Ys3: Col<f64> =ColRef:: from_slice(Y.as_slice()).to_owned();
+            use faer::col::{Col, ColRef};
+            let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
             println!("Ys = {:?} \n", &Ys3);
             let F_eval3 = F_func3(4.0, &Ys3);
             println!("F_eval = {:?} \n", F_eval3);
@@ -959,7 +947,10 @@ fn main() {
                 .unwrap();
             let position = comparsion.iter().position(|&x| x == *max_residual).unwrap();
             let relativ_residual = max_residual.abs() / y_exact[position];
-            println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
+            println!(
+                "maximum relative residual of numerical solution wioth respect to exact solution = {}",
+                relativ_residual
+            );
             println!("norm = {}", norm);
             nr.save_to_file(None)
 
@@ -983,17 +974,17 @@ fn main() {
             let strategy_params = match strategy.as_str() {
                 "Naive" => None,
                 "Damped" => Some(HashMap::from([
-                    ("max_jac".to_string(), None),// maximum iterations with old Jacobian, None means the default number is taken-3
-                    ("maxDampIter".to_string(), None),// maximum number of damped steps, None means the default value of 5 is used
-                    ("DampFacor".to_string(), None),// factor to decrease the damping coefficient, None means the default value of 0.5 is used
+                    ("max_jac".to_string(), None), // maximum iterations with old Jacobian, None means the default number is taken-3
+                    ("maxDampIter".to_string(), None), // maximum number of damped steps, None means the default value of 5 is used
+                    ("DampFacor".to_string(), None), // factor to decrease the damping coefficient, None means the default value of 0.5 is used
                     (
-                        "adaptive".to_string(),// adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
-                        // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means 
-                        // maximum number of refinments allowed 
+                        "adaptive".to_string(), // adaptive strategy parameters, None means no grid refinement is used, if Some - grid refinement is enabled
+                        // first parameter means what criteria to choose is refinement needed or not in the current iteration, second parameter means
+                        // maximum number of refinments allowed
                         Some(vec![1.0, 5.0]), //  None
                     ),
                     // the name of grid refinement strategy, this key-value pair will be used only if "adaptive" is Some, in opposite case this pair
-              // will be ignored: vector of parametrs is used inside the grid refinement algorithm
+                    // will be ignored: vector of parametrs is used inside the grid refinement algorithm
                     //  ("pearson".to_string(), Some(vec![0.2] ) ) (""two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
                     ("two_point".to_string(), Some(vec![0.2, 0.5, 1.4])),
                 ])),
@@ -1054,9 +1045,8 @@ fn main() {
             nr.save_to_file(None);
             // save to csv
             nr.save_to_csv(None);
-
         }
-        
+
         20 => {
             //Utils::profiling::pprof_profiling();
             Utils::sys_info::this_system_info();

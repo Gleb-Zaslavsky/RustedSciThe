@@ -99,12 +99,10 @@ pub fn wrap_functions(
     S: Option<DMatrix<f64>>,
     D: DMatrix<f64>,
 ) -> (Fun, Bc, FunJac, BcJac) {
-    let fun_jac_wrapped: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>> =
-        match fun_jac { Some(fun_jac) => {
-            Some(Box::new(move |x, y| fun_jac(x, y)))
-        } _ => {
-            None
-        }};
+    let fun_jac_wrapped: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>> = match fun_jac {
+        Some(fun_jac) => Some(Box::new(move |x, y| fun_jac(x, y))),
+        _ => None,
+    };
 
     let S1 = S.clone();
     let D1 = D.clone();
@@ -124,26 +122,27 @@ pub fn wrap_functions(
         fun
     };
 
-    let fun_jac_wrapped: FunJac = match fun_jac_wrapped { Some(fun_jac_wrapped) => {
-        if let Some(S) = S.clone() {
-            Some(Box::new(move |x: f64, y: &DVector<f64>| {
-                let mut df_dy = fun_jac_wrapped(x, y);
-                if x == a {
-                    df_dy.set_column(0, &(D.clone() * df_dy.column(0)));
+    let fun_jac_wrapped: FunJac = match fun_jac_wrapped {
+        Some(fun_jac_wrapped) => {
+            if let Some(S) = S.clone() {
+                Some(Box::new(move |x: f64, y: &DVector<f64>| {
+                    let mut df_dy = fun_jac_wrapped(x, y);
+                    if x == a {
+                        df_dy.set_column(0, &(D.clone() * df_dy.column(0)));
+                        df_dy
+                            .columns_mut(1, df_dy.ncols() - 1)
+                            .add_assign(&(S.clone() / (x - a)));
+                    } else {
+                        df_dy.add_assign(&(S.clone() / (x - a)));
+                    }
                     df_dy
-                        .columns_mut(1, df_dy.ncols() - 1)
-                        .add_assign(&(S.clone() / (x - a)));
-                } else {
-                    df_dy.add_assign(&(S.clone() / (x - a)));
-                }
-                df_dy
-            }))
-        } else {
-            Some(fun_jac_wrapped)
+                }))
+            } else {
+                Some(fun_jac_wrapped)
+            }
         }
-    } _ => {
-        None
-    }};
+        _ => None,
+    };
     let bc_jac_wrapped = bc_jac;
     let bc_wrapped = bc;
     (fun_wrapped, bc_wrapped, fun_jac_wrapped, bc_jac_wrapped)
@@ -193,11 +192,10 @@ pub fn estimate_fun_jac(
     let (n, m) = y.shape();
     let x_len = x.len();
     assert_eq!(n, x_len, "x and y have different lengths");
-    let f0: DMatrix<f64> = match f0 { Some(f0_) => {
-        calc_F(&f0_, x, &y)
-    } _ => {
-        calc_F(&fun, x, &y)
-    }};
+    let f0: DMatrix<f64> = match f0 {
+        Some(f0_) => calc_F(&f0_, x, &y),
+        _ => calc_F(&fun, x, &y),
+    };
     let mut y_abs = y.abs();
     y_abs.add_assign(DMatrix::from_element(n, m, 1.0));
     let y_plus_1: DMatrix<f64> = y_abs;
@@ -230,11 +228,10 @@ pub fn estimate_bc_jac(
     bc0: Option<Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DVector<f64>>>,
 ) -> (DMatrix<f64>, DMatrix<f64>) {
     let n = ya.len();
-    let bc0: DVector<f64> = match bc0 { Some(bc0_) => {
-        bc0_(ya, yb)
-    } _ => {
-        bc(ya, yb)
-    }};
+    let bc0: DVector<f64> = match bc0 {
+        Some(bc0_) => bc0_(ya, yb),
+        _ => bc(ya, yb),
+    };
 
     let mut dbc_dya = DMatrix::zeros(n, n);
     let mut y_abs = ya.abs();
@@ -346,98 +343,99 @@ pub fn estimate_rms_residuals(
     let res: DVector<f64> = DVector::from_vec(res);
     res
 } //fn estimate_rms_residuals
-  /*
-  #[cfg(test)]
-  mod tests {
-      use nalgebra::{DMatrix, DVector};
-      use super::*;
 
-      #[test]
-      fn test_estimate_fun_jac() {
-          let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = Box::new(|scalar, vector| {
-              // Multiply each element of the vector by the scalar
-              scalar * vector
-          });
-          let x = DVector::from_element(3, 2.0);
-          let y = DMatrix::from_row_slice(2, 3, &[
-              1.0, 2.0, 3.0,
-              1.0, 2.0, 3.0,
-          ]).transpose();
-          let expected_J = vec![vec![2.0, 2.0, 2.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 2.0, 2.0, 2.0]];
-          let J: Vec<DMatrix<f64>> = estimate_fun_jac(fun, &x, &y, None);
-          print!("\n J {:?}", J);
-          for (i, matrix_i) in J.iter().enumerate() {
-              let J_i:Vec<f64> = matrix_i.iter().cloned().collect();
-              println!("J_i {:?}", J_i);
-              let expected_Ji:Vec<f64> = expected_J[i].clone();
-              println!("expected_Ji {:?}", expected_Ji);
-              let epsilon = 1e-6;
-              let are_equal = J_i.iter().zip(expected_Ji.iter()).all(|(a, b)| (a - b).abs() < epsilon);
-              assert_eq!(are_equal, true, "Row {} is not equal.", i);
-          }
+/*
+#[cfg(test)]
+mod tests {
+    use nalgebra::{DMatrix, DVector};
+    use super::*;
 
-      }
-  /*
-      #[test]
-      fn test_estimate_bc_jac() {
-          let bc: Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DVector<f64>> = Box::new(|vec0, vector| {
-              // Multiply each element of the vector by the scalar
-              vec0 * vector
-          });
-          let ya = DVector::from_element(3, 1.0);
-          let yb = DVector::from_element(3, 2.0);
+    #[test]
+    fn test_estimate_fun_jac() {
+        let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = Box::new(|scalar, vector| {
+            // Multiply each element of the vector by the scalar
+            scalar * vector
+        });
+        let x = DVector::from_element(3, 2.0);
+        let y = DMatrix::from_row_slice(2, 3, &[
+            1.0, 2.0, 3.0,
+            1.0, 2.0, 3.0,
+        ]).transpose();
+        let expected_J = vec![vec![2.0, 2.0, 2.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 2.0, 2.0, 2.0]];
+        let J: Vec<DMatrix<f64>> = estimate_fun_jac(fun, &x, &y, None);
+        print!("\n J {:?}", J);
+        for (i, matrix_i) in J.iter().enumerate() {
+            let J_i:Vec<f64> = matrix_i.iter().cloned().collect();
+            println!("J_i {:?}", J_i);
+            let expected_Ji:Vec<f64> = expected_J[i].clone();
+            println!("expected_Ji {:?}", expected_Ji);
+            let epsilon = 1e-6;
+            let are_equal = J_i.iter().zip(expected_Ji.iter()).all(|(a, b)| (a - b).abs() < epsilon);
+            assert_eq!(are_equal, true, "Row {} is not equal.", i);
+        }
 
-          let expected_dbc_dya = DMatrix::from_element(3, 3, 1.0);
-          let expected_dbc_dyb = DMatrix::from_element(3, 3, 1.0);
+    }
+/*
+    #[test]
+    fn test_estimate_bc_jac() {
+        let bc: Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DVector<f64>> = Box::new(|vec0, vector| {
+            // Multiply each element of the vector by the scalar
+            vec0 * vector
+        });
+        let ya = DVector::from_element(3, 1.0);
+        let yb = DVector::from_element(3, 2.0);
 
-          let (dbc_dya, dbc_dyb) = estimate_bc_jac(bc, &ya, &yb, None);
+        let expected_dbc_dya = DMatrix::from_element(3, 3, 1.0);
+        let expected_dbc_dyb = DMatrix::from_element(3, 3, 1.0);
 
-
-          for (i, row_i) in dbc_dya.row_iter().enumerate() {
-              let df_dy_row_i:DVector<f64> = row_i.transpose().into_owned();
-              let df_dy_vec_i:Vec<f64> = df_dy_row_i.data.as_vec().clone();
-              let exp_df_dy = expected_dbc_dya.row(i).transpose().into_owned();
-              let expected_df_dy:Vec<f64> = exp_df_dy.data.as_vec().clone();
-              let epsilon = 1e-6;
-              let are_equal = df_dy_vec_i.iter().zip(expected_df_dy.iter()).all(|(a, b)| (a - b).abs() < epsilon);
-              assert_eq!(are_equal, true, "Row {} is not equal.", i);
-
-      }
-  }
-          */
-      #[test]
-      fn test_estimate_rms_residuals() {
-          let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = Box::new(|scalar, vector| {
-              // Multiply each element of the vector by the scalar
-              scalar * vector
-          });
-          let sol: fn(&DVector<f64>, bool) -> DMatrix<f64> = |x: &DVector<f64>, flag: bool| {
-              DMatrix::from_iterator(x.len(), 1, x.iter().map(|x| x * x))
-          };
-          let x = DVector::from_iterator(3, 0..3).map(|x| x as f64);
-          let h = DVector::from_element(2, 1.0);
-
-          let r_middle = DMatrix::from_row_slice(2, 3, &[
-              1.0, 2.0, 3.0,
-              1.0, 2.0, 3.0,]);
-          let f_middle =  DMatrix::from_row_slice(2, 3, &[
-              1.01, 2.01, 3.01,
-              1.01, 2.01, 3.01,]);
-
-          let expected_rms_residuals:DVector<f64> = DVector::from_element(1, 0.0);
-
-          let rms_residuals: DVector<f64> = estimate_rms_residuals(fun, sol, &x, &h, &r_middle, &f_middle);
+        let (dbc_dya, dbc_dyb) = estimate_bc_jac(bc, &ya, &yb, None);
 
 
-          for (i, x_i) in rms_residuals.row_iter().enumerate() {
-              let x_i = x_i[0];
-              let epsilon = 1e-6;
-              relative_eq!(x_i, expected_rms_residuals[i], epsilon = epsilon);
-      }
-  }
+        for (i, row_i) in dbc_dya.row_iter().enumerate() {
+            let df_dy_row_i:DVector<f64> = row_i.transpose().into_owned();
+            let df_dy_vec_i:Vec<f64> = df_dy_row_i.data.as_vec().clone();
+            let exp_df_dy = expected_dbc_dya.row(i).transpose().into_owned();
+            let expected_df_dy:Vec<f64> = exp_df_dy.data.as_vec().clone();
+            let epsilon = 1e-6;
+            let are_equal = df_dy_vec_i.iter().zip(expected_df_dy.iter()).all(|(a, b)| (a - b).abs() < epsilon);
+            assert_eq!(are_equal, true, "Row {} is not equal.", i);
 
-  }
+    }
+}
+        */
+    #[test]
+    fn test_estimate_rms_residuals() {
+        let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = Box::new(|scalar, vector| {
+            // Multiply each element of the vector by the scalar
+            scalar * vector
+        });
+        let sol: fn(&DVector<f64>, bool) -> DMatrix<f64> = |x: &DVector<f64>, flag: bool| {
+            DMatrix::from_iterator(x.len(), 1, x.iter().map(|x| x * x))
+        };
+        let x = DVector::from_iterator(3, 0..3).map(|x| x as f64);
+        let h = DVector::from_element(2, 1.0);
+
+        let r_middle = DMatrix::from_row_slice(2, 3, &[
+            1.0, 2.0, 3.0,
+            1.0, 2.0, 3.0,]);
+        let f_middle =  DMatrix::from_row_slice(2, 3, &[
+            1.01, 2.01, 3.01,
+            1.01, 2.01, 3.01,]);
+
+        let expected_rms_residuals:DVector<f64> = DVector::from_element(1, 0.0);
+
+        let rms_residuals: DVector<f64> = estimate_rms_residuals(fun, sol, &x, &h, &r_middle, &f_middle);
+
+
+        for (i, x_i) in rms_residuals.row_iter().enumerate() {
+            let x_i = x_i[0];
+            let epsilon = 1e-6;
+            relative_eq!(x_i, expected_rms_residuals[i], epsilon = epsilon);
+    }
+}
+
+}
 
 
 
-  */
+*/

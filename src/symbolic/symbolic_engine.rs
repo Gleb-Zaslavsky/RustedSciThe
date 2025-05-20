@@ -283,7 +283,7 @@ impl Expr {
         self
     }
     pub fn log10(mut self) -> Expr {
-        self = Expr::Ln(self.boxed())/Expr::Const(2.30258509);
+        self = Expr::Ln(self.boxed()) / Expr::Const(2.30258509);
         self
     }
     pub fn pow(mut self, rhs: Expr) -> Expr {
@@ -296,8 +296,6 @@ impl Expr {
             _ => false,
         }
     }
-
-
 
     ///__________________________________INDEXED VARIABLES____________________________________
     pub fn IndexedVar(index: usize, var_name: &str) -> Expr {
@@ -471,29 +469,29 @@ impl Expr {
                 let lhs = lhs.simplify_();
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) =>Expr::Const(a + b),// (a) + (b) = (a + b) 
-                    (Expr::Const(0.0), _) => rhs, // x + 0 = x
-                    (_, Expr::Const(0.0)) => lhs,//  0 + x = x
-                    _ => Expr::Add(Box::new(lhs), Box::new(rhs) ),
+                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a + b), // (a) + (b) = (a + b)
+                    (Expr::Const(0.0), _) => rhs,                           // x + 0 = x
+                    (_, Expr::Const(0.0)) => lhs,                           //  0 + x = x
+                    _ => Expr::Add(Box::new(lhs), Box::new(rhs)),
                 }
             }
             Expr::Sub(lhs, rhs) => {
                 let lhs = lhs.simplify_();
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) =>Expr::Const(a - b),// (a) - (b) = (a - b)
-                    (_, Expr::Const(0.0)) => lhs, // x - 0 = x
-                    _ =>Expr::Sub(Box::new(lhs), Box::new(rhs)),
+                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a - b), // (a) - (b) = (a - b)
+                    (_, Expr::Const(0.0)) => lhs,                           // x - 0 = x
+                    _ => Expr::Sub(Box::new(lhs), Box::new(rhs)),
                 }
             }
             Expr::Mul(lhs, rhs) => {
                 let lhs = lhs.simplify_();
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b),// (a) * (b) = (a * b)
-                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) =>Expr::Const(0.0), // 0 * x = 0 or 0*x = 0
-                    (Expr::Const(1.0), _) => rhs, // 1 * x = x
-                    (_, Expr::Const(1.0)) => lhs, // x * 1 = x
+                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b), // (a) * (b) = (a * b)
+                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0), // 0 * x = 0 or 0*x = 0
+                    (Expr::Const(1.0), _) => rhs,                                      // 1 * x = x
+                    (_, Expr::Const(1.0)) => lhs,                                      // x * 1 = x
                     _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
                 }
             }
@@ -501,9 +499,9 @@ impl Expr {
                 let lhs = lhs.simplify_();
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b),// (a) / (b) = (a / b)
-                    (Expr::Const(0.0), _) => Expr::Const(0.0),// (0.0) / x = 0.0
-                    (_, Expr::Const(1.0)) => lhs,// x / 1.0 = x
+                    (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b), // (a) / (b) = (a / b)
+                    (Expr::Const(0.0), _) => Expr::Const(0.0), // (0.0) / x = 0.0
+                    (_, Expr::Const(1.0)) => lhs,              // x / 1.0 = x
                     _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
                 }
             }
@@ -512,17 +510,17 @@ impl Expr {
                 let exp = exp.simplify_();
                 match (&base, &exp) {
                     (Expr::Const(a), Expr::Const(b)) => Expr::Const(a.powf(*b)), // (a) ^ (b) = (a ^ b)
-                    (_, Expr::Const(0.0)) => Expr::Const(1.0), // x ^ 0 = 1
-                    (_, Expr::Const(1.0)) => base, // x ^ 1 = x
-                    (Expr::Const(0.0), _) => Expr::Const(0.0), // 0 ^ x = 0
-                    (Expr::Const(1.0), _) => Expr::Const(1.0), // 1 ^ x = 1
+                    (_, Expr::Const(0.0)) => Expr::Const(1.0),                   // x ^ 0 = 1
+                    (_, Expr::Const(1.0)) => base,                               // x ^ 1 = x
+                    (Expr::Const(0.0), _) => Expr::Const(0.0),                   // 0 ^ x = 0
+                    (Expr::Const(1.0), _) => Expr::Const(1.0),                   // 1 ^ x = 1
                     _ => Expr::Pow(Box::new(base), Box::new(exp)),
                 }
             }
             Expr::Exp(expr) => {
                 let expr = expr.simplify_();
                 match &expr {
-                    Expr::Const(a) if a!=&0.0 =>Expr::Const(a.exp()),
+                    Expr::Const(a) if a != &0.0 => Expr::Const(a.exp()),
                     Expr::Const(0.0) => Expr::Const(1.0),
                     _ => Expr::Exp(Box::new(expr)),
                 }
@@ -542,8 +540,6 @@ impl Expr {
         let zeros_proceeded = self.simplify_();
         zeros_proceeded
     }
-
-
 }
 
 //___________________________________TESTS____________________________________
@@ -556,7 +552,10 @@ mod tests {
     fn test_add_assign() {
         let mut expr = Expr::Var("x".to_string());
         expr += Expr::Const(2.0);
-        let expected = Expr::Add(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        let expected = Expr::Add(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Const(2.0)),
+        );
         assert_eq!(expr, expected);
     }
 
@@ -564,7 +563,10 @@ mod tests {
     fn test_sub_assign() {
         let mut expr = Expr::Var("x".to_string());
         expr -= Expr::Const(2.0);
-        let expected = Expr::Sub(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        let expected = Expr::Sub(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Const(2.0)),
+        );
         assert_eq!(expr, expected);
     }
 
@@ -572,7 +574,10 @@ mod tests {
     fn test_mul_assign() {
         let mut expr = Expr::Var("x".to_string());
         expr *= Expr::Const(2.0);
-        let expected = Expr::Mul(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        let expected = Expr::Mul(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Const(2.0)),
+        );
         assert_eq!(expr, expected);
     }
 
@@ -580,7 +585,10 @@ mod tests {
     fn test_div_assign() {
         let mut expr = Expr::Var("x".to_string());
         expr /= Expr::Const(2.0);
-        let expected = Expr::Div(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)));
+        let expected = Expr::Div(
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Const(2.0)),
+        );
         assert_eq!(expr, expected);
     }
 
@@ -588,7 +596,10 @@ mod tests {
     fn test_neg() {
         let expr = Expr::Var("x".to_string());
         let neg_expr = -expr;
-        let expected = Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(Expr::Var("x".to_string())));
+        let expected = Expr::Mul(
+            Box::new(Expr::Const(-1.0)),
+            Box::new(Expr::Var("x".to_string())),
+        );
         assert_eq!(neg_expr, expected);
     }
     #[test]
@@ -601,12 +612,15 @@ mod tests {
         let expected = Expr::Div(
             Box::new(Expr::Sub(
                 Box::new(Expr::Mul(
-                    Box::new(Expr::Add(Box::new(Expr::Var("x".to_string())), Box::new(Expr::Const(2.0)))),
-                    Box::new(Expr::Const(3.0))
+                    Box::new(Expr::Add(
+                        Box::new(Expr::Var("x".to_string())),
+                        Box::new(Expr::Const(2.0)),
+                    )),
+                    Box::new(Expr::Const(3.0)),
                 )),
-                Box::new(Expr::Const(1.0))
+                Box::new(Expr::Const(1.0)),
             )),
-            Box::new(Expr::Const(2.0))
+            Box::new(Expr::Const(2.0)),
         );
         assert_eq!(expr, expected);
     }
@@ -938,24 +952,27 @@ mod tests {
         let expr = x.clone().ln();
         let result = expr.taylor_series1D_("x", 5.0, 2);
         let e5 = Expr::Const(5.0);
-        let expected = e5.clone().ln() + (x.clone() - e5.clone()) /  e5.clone() - (x.clone() - e5.clone()).pow(Expr::Const(2.0)) / (Expr::Const(2.0)* e5.clone().pow(Expr::Const(2.0)) );  
+        let expected = e5.clone().ln() + (x.clone() - e5.clone()) / e5.clone()
+            - (x.clone() - e5.clone()).pow(Expr::Const(2.0))
+                / (Expr::Const(2.0) * e5.clone().pow(Expr::Const(2.0)));
         println!("{} \n {}", result, expected.symplify());
         let taylor_eval = result.lambdify1D()(3.0);
         let expected_eval = expected.lambdify1D()(3.0);
-        approx::assert_relative_eq!(taylor_eval, expected_eval, epsilon=1e-5);
+        approx::assert_relative_eq!(taylor_eval, expected_eval, epsilon = 1e-5);
     }
     #[test]
     fn test_taylor_series1D_exp() {
         let x = Expr::Var("x".to_string());
 
-        let exp_expansion  = Expr::Const(1.0) + x.clone() + x.clone().pow(Expr::Const(2.0))/Expr::Const(2.0) +  x.clone().pow(Expr::Const(3.0))/Expr::Const(6.0);
+        let exp_expansion = Expr::Const(1.0)
+            + x.clone()
+            + x.clone().pow(Expr::Const(2.0)) / Expr::Const(2.0)
+            + x.clone().pow(Expr::Const(3.0)) / Expr::Const(6.0);
         let exp_eval = exp_expansion.lambdify1D()(1.0);
-       
+
         let taylor = exp_expansion.taylor_series1D_("x", 0.0, 3);
-         println!("taylor: {}", taylor);
+        println!("taylor: {}", taylor);
         let taylor_eval = taylor.lambdify1D()(1.0);
         assert_eq!(taylor_eval, exp_eval);
     }
-
-
 }

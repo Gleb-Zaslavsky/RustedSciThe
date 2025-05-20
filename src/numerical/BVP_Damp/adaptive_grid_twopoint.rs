@@ -2,8 +2,8 @@
 #![allow(non_snake_case)]
 
 use crate::numerical::BVP_Damp::BVP_utils::round_to_n_digits;
-use log::{error, info,};
-use nalgebra::{DMatrix, DVector,};
+use log::{error, info};
+use nalgebra::{DMatrix, DVector};
 
 pub fn twpnt_refinement(
     y_DMatrix: DMatrix<f64>,
@@ -211,9 +211,10 @@ impl Grid {
         self.relative_dy_dx = relative_dy_dx;
         self.vary_dy_dx = vary_dy_dx;
     } // end fn mark
-      //////////////////////////////////////////////////////////////////////////////////////////////////////////
-      //                     select the intervals to halve
-      //////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //                     select the intervals to halve
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////
     fn select_intervals(&mut self) {
         //  weight the intervals in which variations that are too large.
         // now we have 1) vector of counter of intervals where grid condition for difference is violated
@@ -300,7 +301,7 @@ impl Grid {
             for k in 0..n_former - 1 {
                 if mark[k] {
                     let mean = 0.5 * (x[k] + x[k + 1]); // For each interval marked for refinement (mark[k] == true), it calculates the mean
-                                                        //of the interval and checks if the mean is within the interval. If not, it increments the counted counter.
+                    //of the interval and checks if the mean is within the interval. If not, it increments the counted counter.
                     if !((x[k] < mean && mean < x[k + 1]) || (x[k + 1] < mean && mean < x[k])) {
                         counted += 1;
                     } // degenerance condition

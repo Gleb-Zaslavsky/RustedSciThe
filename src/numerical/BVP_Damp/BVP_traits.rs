@@ -1,13 +1,13 @@
 #![allow(non_camel_case_types)] //
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
-use crate::somelinalg::some_matrix_inv::invers_csmat;
 use crate::somelinalg::LUsolver::invers_Mat_LU;
 use crate::somelinalg::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
+use crate::somelinalg::some_matrix_inv::invers_csmat;
 
-use faer::col::{ColRef, Col};
+use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
-use faer::mat::MatRef;
 use faer::mat::Mat;
+use faer::mat::MatRef;
 
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::sparse::CsMatrix;
@@ -18,25 +18,26 @@ use std::fmt::{self, Debug};
 use std::ops::Sub;
 type faer_mat = SparseColMat<usize, f64>;
 type faer_col = Col<f64>; // Mat<f64>;
-                          /*
-                          In RST BVP solvers there is an option to use different linear algebra crates
-                          - Nalgebra
-                          - SPRS
-                          - FAER
-                          - Nalgebra SPARSE
-                          Generics in rust allow us to replace specific types with a placeholder that represents multiple types to remove code duplication.
-                          So there are generic types:
-                           - VectorType (generic type that represents vectors of residuals and Newton steps)
-                           - MatrixType (generic type that represents matrices of jacobian)
-                           - Jac (generic type that represents functions for jacobian)
-                           - Fun (generic type that represents functions for vector)
-                           "method" variable (from the BVP task) is a keyword that is used to specify the crate that will be used for linear algebra operations
-                           "Dense" - nalgebra crate
-                           "Sparse" - faer crate
-                          "Sparse_1" - sprs crate
-                          "Sparse_2" - nalgebra sprs crate
 
-                          */
+/*
+In RST BVP solvers there is an option to use different linear algebra crates
+- Nalgebra
+- SPRS
+- FAER
+- Nalgebra SPARSE
+Generics in rust allow us to replace specific types with a placeholder that represents multiple types to remove code duplication.
+So there are generic types:
+ - VectorType (generic type that represents vectors of residuals and Newton steps)
+ - MatrixType (generic type that represents matrices of jacobian)
+ - Jac (generic type that represents functions for jacobian)
+ - Fun (generic type that represents functions for vector)
+ "method" variable (from the BVP task) is a keyword that is used to specify the crate that will be used for linear algebra operations
+ "Dense" - nalgebra crate
+ "Sparse" - faer crate
+"Sparse_1" - sprs crate
+"Sparse_2" - nalgebra sprs crate
+
+*/
 ////////////////////////////////////////////////////////////////
 //  VECTORTYPE - geneic type to store vectors of residuals and Newton steps
 ////////////////////////////////////////////////////////////////
@@ -59,8 +60,14 @@ pub trait VectorType: Any {
     fn len(&self) -> usize; // vector length
     fn zeros(&self, len: usize) -> Box<dyn VectorType>; // creating zero vector of length len
     fn assign_value(&self, index: usize, value: f64) -> Box<dyn VectorType>; // assign value to index
-    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>) -> Box<dyn MatrixType>; 
-    fn vec_type(&self)->String;
+    fn from_vector(
+        &self,
+        nrows: usize,
+        ncols: usize,
+        vec_with_zeros: &Vec<f64>,
+        non_zero_triplet: Vec<(usize, usize, f64)>,
+    ) -> Box<dyn MatrixType>;
+    fn vec_type(&self) -> String;
 }
 
 impl Sub for &dyn VectorType {
@@ -217,45 +224,49 @@ impl VectorType for YEnum {
                 Box::new(new_vec)
             }
         }
-    }// end assign
-    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+    } // end assign
+    fn from_vector(
+        &self,
+        nrows: usize,
+        ncols: usize,
+        vec_with_zeros: &Vec<f64>,
+        non_zero_triplet: Vec<(usize, usize, f64)>,
+    ) -> Box<dyn MatrixType> {
         match self {
-            YEnum::Dense(_) => { let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
-            Box::new(new_matrix)
-             }
-             YEnum::Sparse_1(_) => { 
-             let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
-            Box::new(new_matrix)
-             }
-             YEnum::Sparse_2(_) => { let new_matrix: CsMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
-            Box::new(new_matrix)
+            YEnum::Dense(_) => {
+                let new_matrix: DMatrix<f64> =
+                    DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
+                Box::new(new_matrix)
             }
-            YEnum::Sparse_3(_) => { 
-                let triplet:Vec<Triplet<usize, usize, f64>> = non_zero_triplet
-                .iter()
-                .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2)  ).collect::<Vec<_>>();
+            YEnum::Sparse_1(_) => {
+                let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
+                Box::new(new_matrix)
+            }
+            YEnum::Sparse_2(_) => {
+                let new_matrix: CsMatrix<f64> =
+                    DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
+                Box::new(new_matrix)
+            }
+            YEnum::Sparse_3(_) => {
+                let triplet: Vec<Triplet<usize, usize, f64>> = non_zero_triplet
+                    .iter()
+                    .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2))
+                    .collect::<Vec<_>>();
                 let new_matrix: SparseColMat<usize, f64> =
-                SparseColMat::try_new_from_triplets(
-                    nrows,
-                    ncols,
-                    triplet.as_slice(),
-                )
-                .unwrap();
-            Box::new(new_matrix)
+                    SparseColMat::try_new_from_triplets(nrows, ncols, triplet.as_slice()).unwrap();
+                Box::new(new_matrix)
             }
-            
-         }
-    }//from_vector
+        }
+    } //from_vector
     fn vec_type(&self) -> String {
         match self {
             YEnum::Dense(_) => "Dense".to_string(),
             YEnum::Sparse_1(_) => "Sparse_1".to_string(),
             YEnum::Sparse_2(_) => "Sparse_2".to_string(),
             YEnum::Sparse_3(_) => "Sparse_3".to_string(),
-
         }
     }
-}//end impl
+} //end impl
 ////////////////////////////////////////////////////////////////
 //           NALGEBRA CRATE
 ////////////////////////////////////////////////////////////////
@@ -301,9 +312,15 @@ impl VectorType for DVector<f64> {
             vec
         })
     }
-    fn from_vector(&self, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, _non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+    fn from_vector(
+        &self,
+        nrows: usize,
+        ncols: usize,
+        vec_with_zeros: &Vec<f64>,
+        _non_zero_triplet: Vec<(usize, usize, f64)>,
+    ) -> Box<dyn MatrixType> {
         let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
-            Box::new(new_matrix)
+        Box::new(new_matrix)
     }
     fn vec_type(&self) -> String {
         "Dense".to_string()
@@ -356,10 +373,15 @@ impl VectorType for CsVec<f64> {
             new_vec
         })
     }
-    fn from_vector(&self, nrows:usize, ncols: usize, _vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+    fn from_vector(
+        &self,
+        nrows: usize,
+        ncols: usize,
+        _vec_with_zeros: &Vec<f64>,
+        non_zero_triplet: Vec<(usize, usize, f64)>,
+    ) -> Box<dyn MatrixType> {
         let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
         Box::new(new_matrix)
-           
     }
     fn vec_type(&self) -> String {
         "Sparse_1".to_string()
@@ -413,18 +435,20 @@ impl VectorType for faer_col {
             new_vec
         })
     }
-    fn from_vector(&self, nrows:usize, ncols: usize, _vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
-    let non_zero_triplet: Vec<Triplet<usize, usize, f64>> = non_zero_triplet
-        .iter()
-        .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2)  ).collect::<Vec<_>>();
-    let new_matrix: SparseColMat<usize, f64> =
-                SparseColMat::try_new_from_triplets(
-                    nrows,
-                    ncols,
-                    non_zero_triplet.as_slice(),
-                )
-                .unwrap();
-            Box::new(new_matrix)
+    fn from_vector(
+        &self,
+        nrows: usize,
+        ncols: usize,
+        _vec_with_zeros: &Vec<f64>,
+        non_zero_triplet: Vec<(usize, usize, f64)>,
+    ) -> Box<dyn MatrixType> {
+        let non_zero_triplet: Vec<Triplet<usize, usize, f64>> = non_zero_triplet
+            .iter()
+            .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2))
+            .collect::<Vec<_>>();
+        let new_matrix: SparseColMat<usize, f64> =
+            SparseColMat::try_new_from_triplets(nrows, ncols, non_zero_triplet.as_slice()).unwrap();
+        Box::new(new_matrix)
     }
     fn vec_type(&self) -> String {
         "Sparse_3".to_string()
@@ -480,15 +504,13 @@ impl Fun for FunEnum {
     }
 }
 
-impl Fun for  dyn Fn(f64, &DVector<f64>) -> DVector<f64>{
+impl Fun for dyn Fn(f64, &DVector<f64>) -> DVector<f64> {
     fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
-
         if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
             Box::new(self(x, d_vec))
         } else {
             panic!("Type mismatch: expected DVector")
         }
-
     }
 }
 impl Fun for dyn Fn(f64, &faer_col) -> faer_col {
@@ -498,8 +520,7 @@ impl Fun for dyn Fn(f64, &faer_col) -> faer_col {
         } else {
             panic!("Type mismatch: expected faer_col")
         }
-        }
-    
+    }
 }
 impl Fun for dyn Fn(f64, &CsVec<f64>) -> CsVec<f64> {
     fn call(&self, x: f64, vec: &dyn VectorType) -> Box<dyn VectorType> {
@@ -521,13 +542,9 @@ impl Fun for FunctionWrapper {
 }
 
 // Then create a conversion function
-pub fn convert_to_fun(
-    f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType>>
-) -> Box<dyn Fun> {
+pub fn convert_to_fun(f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn VectorType>>) -> Box<dyn Fun> {
     Box::new(FunctionWrapper(f))
 }
-
-
 
 impl fmt::Display for YEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -567,8 +584,6 @@ impl Debug for dyn VectorType {
     }
 }
 
-
-
 ////////////////////////////////////////////////////////////////////////////
 //_________________________________Jacobian______________________________
 ////////////////////////////////////////////////////////////////////////////
@@ -597,7 +612,6 @@ pub trait MatrixType: Any {
     ) -> Box<dyn VectorType>;
     fn shape(&self) -> (usize, usize); // shape of the matrix
     fn to_DMatrixType(&self) -> DMatrix<f64>; // convert to DMatrix
-  
 }
 /*
 impl Clone for dyn MatrixType {
@@ -800,31 +814,28 @@ impl MatrixType for faer_mat {
                     mat_.ncols(),
                     d_vec.nrows(),
                 );
-              
-                assert_eq!(d_vec.len(),mat_.ncols());
-                assert_eq!(d_vec.len(),mat_.nrows());
+
+                assert_eq!(d_vec.len(), mat_.ncols());
+                assert_eq!(d_vec.len(), mat_.nrows());
                 //let LU0 = lu_in_place( mat_);
-              //  "_gmres".to_owned();
+                //  "_gmres".to_owned();
                 match linear_sys_method {
                     None => {
-                       
                         let lhs: MatRef<f64> = d_vec.as_mat();
                         let LU = mat_.sp_lu().unwrap();
-                        let res: Mat<f64> = LU.solve(lhs );
-                       
-                     
+                        let res: Mat<f64> = LU.solve(lhs);
+
                         let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
-                     
+
                         let res = ColRef::from_slice(res_vec.as_slice()).to_owned(); // TODO! find more idiomatic 
-                      
+
                         Box::new(res)
                     }
                     Some(_gmres) => {
                         if let Some(old_vec) = old_vec.as_any().downcast_ref::<faer_col>() {
                             let lhs: MatRef<f64> = d_vec.as_mat();
                             let res =
-                                solve_sys_SparseColMat(mat_, lhs, tol, max_iter, old_vec)
-                                    .unwrap();
+                                solve_sys_SparseColMat(mat_, lhs, tol, max_iter, old_vec).unwrap();
                             Box::new(res)
                         } else {
                             panic!("old vec must be of type Col<f64>")
@@ -961,8 +972,7 @@ impl Jac for JacEnum {
             JacEnum::Sparse_3(_jac) => {
                 if let Some(mat_) = matrix.as_any().downcast_ref::<SparseColMat<usize, f64>>() {
                     //  let inv_mat = invers_Mat_mult(mat_.to_owned().expect("REASON"), tol, max_iter).unwrap();//why Result()?;
-                    let inv_mat =
-                        invers_Mat_LU(mat_.to_owned(), tol, max_iter).unwrap();
+                    let inv_mat = invers_Mat_LU(mat_.to_owned(), tol, max_iter).unwrap();
                     //  mat_.to_owned().unwrap().sort_indices();
                     // let inv_mat =  solve_with_upper_triangular(mat_.to_owned().expect("REASON"), tol, max_iter).unwrap();
                     Box::new(inv_mat)
@@ -999,11 +1009,10 @@ impl Jac for JacEnum {
                     if let Some(d_vec) = vec.as_any().downcast_ref::<Col<f64>>() {
                         let lhs: MatRef<f64> = d_vec.as_mat();
                         let LU = mat_.sp_lu().unwrap();
-                        let res: Mat<f64> = LU.solve(lhs );
-                       
-                     
+                        let res: Mat<f64> = LU.solve(lhs);
+
                         let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
-                     
+
                         let res = ColRef::from_slice(res_vec.as_slice()).to_owned();
                         Box::new(res)
                     } else {
@@ -1020,11 +1029,10 @@ impl Jac for JacEnum {
     }
 }
 
-
 pub struct JacWrapper(Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>>);
 
 // Implement Fun for the wrapper
-impl Jac for JacWrapper{
+impl Jac for JacWrapper {
     fn call(&mut self, x: f64, vec: &dyn VectorType) -> Box<dyn MatrixType> {
         (self.0)(x, vec)
     }
@@ -1060,13 +1068,12 @@ impl Jac for JacWrapper{
             if let Some(d_vec) = vec.as_any().downcast_ref::<faer_col>() {
                 let lhs: MatRef<f64> = d_vec.as_mat();
                 let LU = mat.sp_lu().unwrap();
-                let res: Mat<f64> = LU.solve(lhs );
-               
-             
+                let res: Mat<f64> = LU.solve(lhs);
+
                 let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
-             
+
                 let res = ColRef::from_slice(res_vec.as_slice()).to_owned();
-               
+
                 Box::new(res)
             } else {
                 panic!("Vector type mismatch for solving system")
@@ -1078,9 +1085,7 @@ impl Jac for JacWrapper{
 }
 
 // Then create a conversion function
-pub fn convert_to_jac(
-    f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>>
-) -> Box<dyn Jac> {
+pub fn convert_to_jac(f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>>) -> Box<dyn Jac> {
     Box::new(JacWrapper(f))
 }
 
@@ -1164,39 +1169,47 @@ pub fn jac_rowwise_printing(jac: &Box<dyn MatrixType>) {
     }
 }
 
-pub fn from_vector_to_matrix(vec_type:String, nrows:usize, ncols: usize, vec_with_zeros: &Vec<f64>, non_zero_triplet: Vec<( usize, usize, f64)>)-> Box<dyn MatrixType>{
+pub fn from_vector_to_matrix(
+    vec_type: String,
+    nrows: usize,
+    ncols: usize,
+    vec_with_zeros: &Vec<f64>,
+    non_zero_triplet: Vec<(usize, usize, f64)>,
+) -> Box<dyn MatrixType> {
     match vec_type.as_str() {
-        "Dense" => { let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
-        Box::new(new_matrix)
-         }
-         "Sparse_1" => {              
+        "Dense" => {
+            let new_matrix: DMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros);
+            Box::new(new_matrix)
+        }
+        "Sparse_1" => {
             let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
             Box::new(new_matrix)
-         }
-         "Sparse_2"  => { let new_matrix: CsMatrix<f64> = DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
-        Box::new(new_matrix)
         }
-        "Sparse_3" => { 
-            let non_zero_triplet:Vec<Triplet<usize, usize, f64>> = non_zero_triplet
-            .iter()
-            .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2)  ).collect::<Vec<_>>();
+        "Sparse_2" => {
+            let new_matrix: CsMatrix<f64> =
+                DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
+            Box::new(new_matrix)
+        }
+        "Sparse_3" => {
+            let non_zero_triplet: Vec<Triplet<usize, usize, f64>> = non_zero_triplet
+                .iter()
+                .map(|triplet| Triplet::new(triplet.0, triplet.1, triplet.2))
+                .collect::<Vec<_>>();
 
             let new_matrix: SparseColMat<usize, f64> =
-            SparseColMat::try_new_from_triplets(
-                nrows,
-                ncols,
-                non_zero_triplet.as_slice(),
-            )
-            .unwrap();
-        Box::new(new_matrix)
+                SparseColMat::try_new_from_triplets(nrows, ncols, non_zero_triplet.as_slice())
+                    .unwrap();
+            Box::new(new_matrix)
         }
-        _=> panic!("Unsupported matrix type: {}", vec_type)
-     }
-}//from_vecto
+        _ => panic!("Unsupported matrix type: {}", vec_type),
+    }
+} //from_vecto
 
-
-fn sprs_triplet_to_csc(nrows:usize, ncols: usize, triplets: &Vec<(usize, usize, f64)>) ->CsMat<f64>{
-
+fn sprs_triplet_to_csc(
+    nrows: usize,
+    ncols: usize,
+    triplets: &Vec<(usize, usize, f64)>,
+) -> CsMat<f64> {
     let mut triplet_matrix = TriMat::new((nrows, ncols));
     for (i, j, v) in triplets {
         triplet_matrix.add_triplet(*i, *j, *v);
@@ -1206,4 +1219,3 @@ fn sprs_triplet_to_csc(nrows:usize, ncols: usize, triplets: &Vec<(usize, usize, 
     let csc_matrix: CsMat<f64> = triplet_matrix.to_csc();
     csc_matrix
 }
-

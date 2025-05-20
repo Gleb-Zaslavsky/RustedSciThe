@@ -1,11 +1,10 @@
-
 use faer;
 
 use faer::mat::{Mat, MatRef};
 
 use faer::sparse::{SparseColMat, Triplet};
-use faer_gmres::gmres;
 use faer_gmres::JacobiPreconLinOp;
+use faer_gmres::gmres;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
@@ -36,7 +35,7 @@ pub fn filter_zeros(mat: &Mat<f64>, i: usize, tol: f64) -> Vec<Triplet<usize, us
 fn get_i_row_as_Mat(mat: &SparseColMat<usize, f64>, i: usize) -> Mat<f64> {
     let (_R, C) = mat.shape();
     let mut row_data: Vec<f64> = Vec::new();
-  
+
     for j in 0..C {
         row_data.push(*mat.as_dyn().get(i, j).to_owned().unwrap_or(&0.0));
     }
@@ -90,7 +89,8 @@ pub fn invers_Mat(
     }
 
     let inverted_matrix: SparseColMat<usize, f64> =
-        SparseColMat::<usize, f64>::try_new_from_triplets(n, m, &vec_of_triplets.as_slice()).unwrap();
+        SparseColMat::<usize, f64>::try_new_from_triplets(n, m, &vec_of_triplets.as_slice())
+            .unwrap();
     Some(inverted_matrix)
 }
 
@@ -116,7 +116,6 @@ pub fn dense_to_sparse(dense: DMatrix<f64>) -> SparseColMat<usize, f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-   
 
     #[test]
     fn test_gmres_mult() {

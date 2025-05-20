@@ -1,56 +1,72 @@
+use crate::numerical::BVP_Damp::BVP_utils::checkmem;
+use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///  Example#1
 /// ```
 ///  use RustedSciThe::numerical::NR::NR;
+/// use nalgebra::DVector;
 /// //use the shortest way to solve system of equations
 ///    // first define system of equations and initial guess
 ///    let mut NR_instanse = NR::new();
+/// 
 ///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()];
 ///   let initial_guess = vec![1.0, 1.0];
 ///    // solve
-///    NR_instanse.eq_generate_from_str(vec_of_expressions,initial_guess, 1e-6, 100, );
-///    NR_instanse.solve();
+///    NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+///    NR_instanse.main_loop();
 ///    println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///  ```
 /// Example#2
-///     ```
+///  ```
 ///    // or more verbose way...
 ///    // first define system of equations
 ///     use RustedSciThe::numerical::NR::NR;
 ///     use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///     use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()];
-///    let mut Jacobian_instance = Jacobian::new();
-///     Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
-///     Jacobian_instance.set_variables(vec!["x", "y"]);
-///     Jacobian_instance.calc_jacobian();
-///     Jacobian_instance.jacobian_generate(vec!["x", "y"]);
-///     Jacobian_instance.lambdify_funcvector(vec!["x", "y"]);
-///     Jacobian_instance.readable_jacobian();
-///     println!("Jacobian_instance: functions  {:?}. Variables {:?}", Jacobian_instance.vector_of_functions, Jacobian_instance.vector_of_variables);
-///      println!("Jacobian_instance: Jacobian  {:?} readable {:?}. \n", Jacobian_instance.symbolic_jacobian, Jacobian_instance.readable_jacobian);
+/// use nalgebra::DVector;
+///     let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+///
 ///     let initial_guess = vec![1.0, 1.0];
-///     // in case you are interested in Jacobian value at initial guess
-///     Jacobian_instance.evaluate_func_jacobian_DMatrix(initial_guess.clone());
-///     Jacobian_instance.evaluate_funvector_lambdified_DVector(initial_guess.clone());
-///     let guess_jacobian = (Jacobian_instance.evaluated_jacobian_DMatrix).clone();
-///     println!("guess Jacobian = {:?} \n", guess_jacobian.try_inverse());
-///     // defining NR method instance and solving
 ///     let mut NR_instanse = NR::new();
-///     NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100, );
-///     NR_instanse.solve();
+///     let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+///     let values = vec!["x".to_string(), "y".to_string()];
+///     NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
+///     NR_instanse.eq_generate();
+///     NR_instanse.main_loop();
+///     let solution = NR_instanse.get_result().unwrap();
+///     assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
-///     ```
+///  ```
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use log::info;
+use chrono::Local;
+use log::{error, info, warn};
+use simplelog::LevelFilter;
+use simplelog::*;
+use tabled::assert;
+use std::collections::HashMap;
+use std::time::Instant;
+use tabled::{builder::Builder, settings::Style};
+use std::error::Error;
 use nalgebra::{DMatrix, DVector, Matrix};
 pub struct NR {
-    jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
-    initial_guess: Vec<f64>, // initial guess
-    tolerance: f64,     // tolerance
-    max_iterations: usize, // max number of iterations
-    max_error: f64,     // max error
-    result: Option<Vec<f64>>, // result of the iteration
+    pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
+    pub eq_system: Vec<Expr>, // vector of equations
+    pub values: Vec<String>, // vector of variables
+    pub initial_guess: Vec<f64>, // initial guess
+    pub tolerance: f64,     // tolerance
+    pub max_iterations: usize, // max number of iterations
+
+    max_error: f64, // max error
+    pub dumping_factor: f64,
+    pub i: usize,                 // iteration counter
+    pub jac: DMatrix<f64>,        // jacobian matrix
+    pub fun_vector: DVector<f64>,     // vector of functions
+    pub result: Option<DVector<f64>>, // result of the iteration
+
+    pub loglevel: Option<String>,
+    pub linear_sys_method: Option<String>, // method for solving linear system
+    pub custom_timer: CustomTimer,
+    calc_statistics: HashMap<String, usize>,
 }
 
 impl NR {
@@ -58,32 +74,58 @@ impl NR {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
         NR {
             jacobian: Jacobian::new(),
+            eq_system: Vec::new(),
+            values: Vec::new(),
             initial_guess: Vec::new(),
             tolerance: 1e-6,
             max_iterations: 100,
             max_error: 0.0,
+            dumping_factor: 1.0,
+            i: 0,
+            jac: DMatrix::zeros(0, 0),
+            fun_vector: DVector::zeros(0),
             result: None,
+            loglevel: Some("info".to_string()),
+            linear_sys_method: Some("lu".to_string()),
+            custom_timer: CustomTimer::new(),
+            calc_statistics: HashMap::new(),
         }
     }
+    ////////////////////////////SETTERS///////////////////////////////////////////////////////////////////
     /// Basic methods to set the equation system
-    pub fn set_equation_sysytem(
+    pub fn set_equation_system(
         &mut self,
-        jacobian: Jacobian,
+        eq_system: Vec<Expr>,
+        unknowns: Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: f64,
         max_iterations: usize,
     ) {
-        assert_eq!(
-            jacobian.vector_of_variables.len(),
-            initial_guess.len(),
-            "Initial guess and vector of variables should have the same length."
-        );
-
-        self.jacobian = jacobian;
+        self.eq_system = eq_system.clone();
         self.initial_guess = initial_guess;
         self.tolerance = tolerance;
         self.max_iterations = max_iterations;
+        let values = if let Some(values) = unknowns {
+            values
+        } else {
+            let mut args: Vec<String> = eq_system
+                .iter()
+                .map(|x| x.all_arguments_are_variables())
+                .flatten()
+                .collect::<Vec<String>>();
+            args.sort();
+            args.dedup();
 
+            assert!(!args.is_empty(), "No variables found in the equations.");
+            assert_eq!(
+                args.len() == eq_system.len(),
+                true,
+                "Equation system and vector of variables should have the same length."
+            );
+
+            args
+        };
+        self.values = values.clone();
         assert!(
             !self.initial_guess.is_empty(),
             "Initial guess should not be empty."
@@ -97,43 +139,11 @@ impl NR {
             "Max iterations should be a positive number."
         );
     }
-    ///Set system of equations with vector of symbolic expressions
-    pub fn eq_generate(
-        &mut self,
-        eq_system: Vec<Expr>,
-        initial_guess: Vec<f64>,
-        tolerance: f64,
-        max_iterations: usize,
-    ) {
-        let mut args_: Vec<String> = eq_system
-            .iter()
-            .map(|x| x.all_arguments_are_variables())
-            .flatten()
-            .collect::<Vec<String>>();
-        args_.sort();
-        args_.dedup();
-        let args: Vec<&str> = args_.iter().map(|x| x.as_str()).collect();
-        assert!(!args.is_empty(), "No variables found in the equations.");
-        assert_eq!(
-            args.len() == eq_system.len(),
-            true,
-            "Equation system and vector of variables should have the same length."
-        );
-        let mut Jacobian_instance = Jacobian::new();
-        Jacobian_instance.set_vector_of_functions(eq_system);
-        Jacobian_instance.set_variables(args.clone());
-        Jacobian_instance.calc_jacobian();
-        Jacobian_instance.jacobian_generate(args.clone());
-        Jacobian_instance.lambdify_funcvector(args);
-        self.jacobian = Jacobian_instance;
-        self.initial_guess = initial_guess;
-        self.tolerance = tolerance;
-        self.max_iterations = max_iterations;
-    }
 
     pub fn eq_generate_from_str(
         &mut self,
         eq_system_string: Vec<String>,
+        unknowns: Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: f64,
         max_iterations: usize,
@@ -142,29 +152,78 @@ impl NR {
             .iter()
             .map(|x| Expr::parse_expression(x))
             .collect::<Vec<Expr>>();
-        assert!(
-            !eq_system.is_empty(),
-            "Equation system should not be empty."
+        self.set_equation_system(
+            eq_system,
+            unknowns,
+            initial_guess,
+            tolerance,
+            max_iterations,
         );
-        assert!(
-            !initial_guess.is_empty(),
-            "Initial guess should not be empty."
-        );
-        assert_eq!(
-            eq_system.len() == initial_guess.len(),
-            true,
-            "Equation system and initial guess should have the same length."
-        );
-        self.eq_generate(eq_system, initial_guess, tolerance, max_iterations);
+        self.eq_generate();
     }
+    pub fn set_solver_params(
+        &mut self,
+        loglevel: Option<String>,
+        linear_sys_method: Option<String>,
+        damping_factor: Option<f64>,
+    ) {
+        self.loglevel = if let Some(level) = loglevel {
+            assert!(level == "debug" || level == "info" || level == "warn" || level == "error", "loglevel must be debug/info, warn or error");
+            Some(level.to_string())
+        } else {
+            self.loglevel.clone()
+        };
+        self.linear_sys_method = if let Some(method) = linear_sys_method {
+            let method = method.to_lowercase();
+            assert!(method == "lu" || method == "inv", "linear_sys_method must be lu or inv");
 
-    ///Newton-Raphson method
+            Some(method.to_string())
+        } else {
+            self.linear_sys_method.clone()
+        };
+        self.dumping_factor = if let Some(dumping_factor) = damping_factor {
+            assert!(
+                dumping_factor >= 0.0 && dumping_factor <= 1.0,
+                "Dumping factor should be between 0.0 and 1.0."
+            );
+            dumping_factor
+        } else {
+            self.dumping_factor
+        };
+    }
+    ///Set system of equations with vector of symbolic expressions
+    pub fn eq_generate(&mut self) {
+        let eq_system = self.eq_system.clone();
+        let mut Jacobian_instance = Jacobian::new();
+        let args = self.values.clone();
+        let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+        Jacobian_instance.set_vector_of_functions(eq_system);
+        Jacobian_instance.set_variables(args.clone());
+        Jacobian_instance.calc_jacobian();
+        Jacobian_instance.jacobian_generate(args.clone());
+        Jacobian_instance.lambdify_funcvector(args);
+        assert_eq!(
+            Jacobian_instance.vector_of_variables.len(),
+            self.initial_guess.len(),
+            "Initial guess and vector of variables should have the same length."
+        );
+        self.jacobian = Jacobian_instance;
+    }
+    /////////////////////////////////////////////////////////////////////////////////////////////
+    //                ITERATIONS
+    /////////////////////////////////////////////////////////////////////////////////////////////
+    // Newton-Raphson method
     /// realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
-    pub fn iteration(&mut self, x: Vec<f64>) -> Vec<f64> {
+    pub fn iteration(&mut self, x: DVector<f64>) -> DVector<f64> {
+        let method = self.linear_sys_method.clone().unwrap();
         let Jacobian_instance = &mut self.jacobian;
         // evaluate jacobian and functions
-        Jacobian_instance.evaluate_func_jacobian_DMatrix(x.clone());
-        Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone());
+        self.custom_timer.jac_tic();
+        Jacobian_instance.evaluate_func_jacobian_DMatrix(x.clone().data.into());
+        self.custom_timer.jac_tac();
+        self.custom_timer.fun_tic();
+        Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone().data.into());
+        self.custom_timer.fun_tac();
         assert!(
             !Jacobian_instance.evaluated_jacobian_DMatrix.is_empty(),
             "Jacobian should not be empty."
@@ -173,52 +232,143 @@ impl NR {
             !Jacobian_instance.evaluated_functions_DVector.is_empty(),
             "Functions should not be empty."
         );
+        self.custom_timer.linear_system_tic();
         let new_j = &Jacobian_instance.evaluated_jacobian_DMatrix;
+        self.jac = new_j.clone();
         let new_f = &Jacobian_instance.evaluated_functions_DVector;
-        let j_inverse = new_j.clone().try_inverse().unwrap();
-        //  let j_inverse = <Matrix<f64, Dyn, Dyn, VecStorage<f64, Dyn, Dyn>> as Clone>::clone(&new_j).try_inverse().unwrap();
-        let delta: DVector<f64> = j_inverse * new_f;
-        let dx: Vec<f64> = delta.data.into(); //.iter().map(|x| *x).collect();
-                                              // element wise subtraction
-        let new_x = x
-            .iter()
-            .zip(&dx)
-            .map(|(x_i, dx_i)| x_i - dx_i)
-            .collect::<Vec<f64>>();
+        let delta = Self:: solve_linear_system(method, new_j, new_f).unwrap();
+
+        let lambda = self.dumping_factor;
+        let new_x: DVector<f64> = x - lambda* delta;
+       // let dx: Vec<f64> = delta.data.into(); //.iter().map(|x| *x).collect();
+        // element wise subtraction
+
+        self.custom_timer.linear_system_tac();
 
         new_x
     }
     /// main function to solve the system of equations  
-    pub fn solve(&mut self) -> Option<Vec<f64>> {
-        let mut x = self.initial_guess.clone();
-        let mut i = 0;
-        while i < self.max_iterations {
+    pub fn main_loop(&mut self) -> Option<DVector<f64>> {
+        let  x = self.initial_guess.clone();
+        let mut x = DVector::from_vec(x);
+        self.result = Some(x.clone()); // save into result in case the very first iteration
+        while self.i < self.max_iterations {
             let new_x = self.iteration(x.clone());
 
-            let dx = new_x
-                .iter()
-                .zip(&x)
-                .map(|(x_i, x_j)| (x_i - x_j).abs())
-                .collect::<Vec<f64>>();
-            let dx_matrix = DVector::from_vec(dx);
-            let error = Matrix::norm(&dx_matrix);
+            let dx: DVector<f64> = new_x.clone() - x;
+            let error = Matrix::norm(&dx);
+            if (error > self.max_error) && (self.i > 0) {
+                warn!("Error is increasing");
+            }
+            self.max_error = error;
             if error < self.tolerance {
                 self.result = Some(new_x.clone());
                 self.max_error = error;
                 return Some(new_x);
             } else {
                 x = new_x;
-                i += 1;
-                info!("iteration = {}, error = {}", i, error)
+                self.i += 1;
+                info!("iteration = {}, error = {}", self.i, error)
             }
         }
+        error!("Maximum number of iterations reached. No solution found.");
         None
     }
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //                                       main functions to start the solver and caclulate statistics
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //
 
-    pub fn get_result(&self) -> Option<Vec<f64>> {
+    pub fn solver(&mut self) -> Option<DVector<f64>> {
+        self.custom_timer.start();
+        self.custom_timer.symbolic_operations_tic();
+        self.eq_generate();
+        self.custom_timer.symbolic_operations_tac();
+        let begin = Instant::now();
+        let res = self.main_loop();
+        self.custom_timer.get_all();
+        let end = begin.elapsed();
+        elapsed_time(end);
+        let time = end.as_secs_f64() as usize;
+
+        self.calc_statistics
+            .insert("time elapsed, s".to_string(), time);
+        self.calc_statistics();
+
+        self.result = res;
         self.result.clone()
     }
+    // wrapper around solver function to implement logging
+    pub fn solve(&mut self) -> Option<DVector<f64>> {
+        let is_logging_disabled = self
+            .loglevel
+            .as_ref()
+            .map(|level| level == "off" || level == "none")
+            .unwrap_or(false);
 
+        if is_logging_disabled {
+            let res = self.solver();
+            res
+        } else {
+            let loglevel = self.loglevel.clone();
+            let log_option = if let Some(level) = loglevel {
+                match level.as_str() {
+                    "debug" => LevelFilter::Info,
+                    "info" => LevelFilter::Info,
+                    "warn" => LevelFilter::Warn,
+                    "error" => LevelFilter::Error,
+                    _ => panic!("loglevel must be debug, info, warn or error"),
+                }
+            } else {
+                LevelFilter::Info
+            };
+            println!(" \n \n Program started with loglevel: {}", log_option);
+          //  let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
+          //  let name = format!("log_{}.txt", date_and_time);
+            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
+                log_option,
+                Config::default(),
+                TerminalMode::Mixed,
+                ColorChoice::Auto,
+            )]);
+
+            match logger_instance {
+                Ok(()) => {
+                    let res = self.solver();
+                    info!(" \n \n Program ended");
+                    res
+                }
+                Err(_) => {
+                    let res = self.solver();
+                    res
+                } //end Error
+            } // end mat 
+        }
+    }
+    pub fn get_result(&self) -> Option<DVector<f64>> {
+        self.result.clone()
+    }
+    fn calc_statistics(&self) {
+        let mut stats = self.calc_statistics.clone();
+        let jac = &self.jac;
+        let jac_shape = jac.shape();
+        let matrix_weight = checkmem(jac);
+        stats.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
+        stats.insert(
+            "number of jacobian elements".to_string(),
+            jac_shape.0 * jac_shape.1,
+        );
+
+        stats.insert("length of y vector".to_string(), self.values.len() as usize);
+        stats.insert("number of iterations".to_string(), self.i as usize);
+        let mut table = Builder::from(stats).build();
+        table.with(Style::modern_rounded());
+        info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
+    }
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    ///                 LINEAR SYSTEM SOLVERS
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    /* 
     pub fn get_error(&mut self, x: Vec<f64>) -> f64 {
         let Jacobian_instance = &mut self.jacobian;
         Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone());
@@ -295,24 +445,52 @@ impl NR {
             }
         }
     }
+*/
+    pub fn solve_linear_system(solver: String, A:&DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Box<dyn Error> > {
+    
+        match solver.as_str() {
+            "lu" => {
+                let lu = A.clone().lu();
+                let x = lu.solve(&b);
+                match x {
+                    Some(x) => Ok(x),
+                    None => Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Failed to solve the system",
+                    ))),
+                }
+            }
+            "inv" =>{
+                let A_inv = A.clone().try_inverse().unwrap(); 
+                let f = A_inv * b; 
+                Ok(f)
+            }
+         _ => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to solve the system",
+         ))) 
+                
+        }// match solver.as_str() {
+
+    }
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                     TESTS
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #[test]
 fn test_NR_set_equation_sysytem() {
-    let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
-    let mut Jacobian_instance = Jacobian::new();
-    Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
-    Jacobian_instance.set_variables(vec!["x", "y"]);
-    Jacobian_instance.calc_jacobian();
-    Jacobian_instance.jacobian_generate(vec!["x", "y"]);
-    Jacobian_instance.lambdify_funcvector(vec!["x", "y"]);
-    Jacobian_instance.readable_jacobian();
+    let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+
     let initial_guess = vec![1.0, 1.0];
     let mut NR_instanse = NR::new();
-    NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100);
-    NR_instanse.solve();
+    let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+    let values = vec!["x".to_string(), "y".to_string()];
+    NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
+    NR_instanse.eq_generate();
+    NR_instanse.main_loop();
     let solution = NR_instanse.get_result().unwrap();
-    assert_eq!(solution, vec![-1.0, 3.0]);
+   assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
 }
 
 #[test]
@@ -321,8 +499,26 @@ fn test_NR_eq_generate_from_str() {
     let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
     let initial_guess = vec![1.0, 1.0];
     // solve
-    NR_instanse.eq_generate_from_str(vec_of_expressions, initial_guess, 1e-6, 100);
+    NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+    NR_instanse.main_loop();
+    let solution = NR_instanse.get_result().unwrap();
+    assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
+}
+
+#[test]
+fn test_NR_set_equation_sysytem_with_features() {
+    let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+
+    let initial_guess = vec![1.0, 1.0];
+    let mut NR_instanse = NR::new();
+    let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+    let values = vec!["x".to_string(), "y".to_string()];
+    NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
+    NR_instanse.set_solver_params(Some("info".to_string()), None, None);
+    NR_instanse.eq_generate();
     NR_instanse.solve();
     let solution = NR_instanse.get_result().unwrap();
-    assert_eq!(solution, vec![-1.0, 3.0]);
+    println!("solution: {:?}", solution);
+
+    assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
 }

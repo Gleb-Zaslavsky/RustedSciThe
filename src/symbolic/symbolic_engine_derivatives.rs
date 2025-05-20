@@ -1,11 +1,10 @@
-use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::parse_expr::parse_expression_func;
+use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
 impl Expr {
-
-        /// DIFFERENTIATION
+    /// DIFFERENTIATION
 
     // differentiate with respect to a variable - partial derivative in case of a function of many variables,
     // a full derivative in case of a function of one variable
@@ -112,16 +111,16 @@ impl Expr {
 
     /// function to lambdify the symbolic function of multiple variables = convert it into a rust function
 
-    pub fn lambdify(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64 > {
-        /* 
-        let var_indices: std::collections::HashMap<&str, usize> = vars
-        .iter()
-        .enumerate()
-        .map(|(i, &name)| (name, i))
-        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
-    //variable names to indices at the start, avoiding repeated lookups during evaluation.
-    */
-       
+    pub fn lambdify(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64> {
+        /*
+            let var_indices: std::collections::HashMap<&str, usize> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| (name, i))
+            .collect(); // . Pre-computed Variable Indices: Creates a HashMap of
+        //variable names to indices at the start, avoiding repeated lookups during evaluation.
+        */
+
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -166,17 +165,17 @@ impl Expr {
             }
         }
     } // end of lambdify
-    
+
     pub fn lambdify_slice(&self, vars: Vec<&str>) -> Box<dyn Fn(&[f64]) -> f64 + '_> {
-        /* 
-        let var_indices: std::collections::HashMap<&str, usize> = vars
-        .iter()
-        .enumerate()
-        .map(|(i, &name)| (name, i))
-        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
-    //variable names to indices at the start, avoiding repeated lookups during evaluation.
-    */
-       
+        /*
+            let var_indices: std::collections::HashMap<&str, usize> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| (name, i))
+            .collect(); // . Pre-computed Variable Indices: Creates a HashMap of
+        //variable names to indices at the start, avoiding repeated lookups during evaluation.
+        */
+
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -223,14 +222,14 @@ impl Expr {
     } // end of lambdify
 
     pub fn lambdify_owned(self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64> {
-        /* 
-        let var_indices: std::collections::HashMap<&str, usize> = vars
-        .iter()
-        .enumerate()
-        .map(|(i, &name)| (name, i))
-        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
-    //variable names to indices at the start, avoiding repeated lookups during evaluation.
-    */
+        /*
+            let var_indices: std::collections::HashMap<&str, usize> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| (name, i))
+            .collect(); // . Pre-computed Variable Indices: Creates a HashMap of
+        //variable names to indices at the start, avoiding repeated lookups during evaluation.
+        */
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -334,35 +333,35 @@ impl Expr {
     ///Taylor series expansion of a symbolic expression
     pub fn n_th_derivative1D(&self, var_name: &str, n: usize) -> Expr {
         let mut expr = self.clone();
-        let mut i =0;
-        while i<n{
-         
+        let mut i = 0;
+        while i < n {
             expr = expr.diff(var_name).symplify();
-            i+=1;
-      
-        } 
-        return expr.symplify()
+            i += 1;
+        }
+        return expr.symplify();
     }
-    pub fn taylor_series1D(&self, var_name: &str, x0: f64,  order:usize) -> Expr  {
+    pub fn taylor_series1D(&self, var_name: &str, x0: f64, order: usize) -> Expr {
         let x = Expr::Var(var_name.to_owned());
         let x0_sym = Expr::Const(x0);
-        let  fun_at_x0 = self.lambdify1D()(x0);
+        let fun_at_x0 = self.lambdify1D()(x0);
         let fun_at_x0_sym = Expr::Const(fun_at_x0);
 
-        if order==0 {return fun_at_x0_sym.symplify() }
+        if order == 0 {
+            return fun_at_x0_sym.symplify();
+        }
 
         let dfun_dx = self.n_th_derivative1D(var_name, order);
         let dfun_dx_at_x0 = dfun_dx.lambdify1D()(x0);
         let factorial = (1..=order).product::<usize>() as f64;
-        let coeff = Expr::Const(dfun_dx_at_x0/factorial);
+        let coeff = Expr::Const(dfun_dx_at_x0 / factorial);
         println!("order {}, {:?}, {}", order, coeff, dfun_dx);
-        let term = coeff *( x.clone() - x0_sym.clone()).pow(Expr::Const(order as f64));
-        if  order==1 {
-        let Taylor = fun_at_x0_sym +  term;
-        return Taylor.symplify()
+        let term = coeff * (x.clone() - x0_sym.clone()).pow(Expr::Const(order as f64));
+        if order == 1 {
+            let Taylor = fun_at_x0_sym + term;
+            return Taylor.symplify();
         } else {
-            let Taylor = self.taylor_series1D(var_name, x0, order-1) + term;
-            return Taylor.symplify()
+            let Taylor = self.taylor_series1D(var_name, x0, order - 1) + term;
+            return Taylor.symplify();
         }
     }
 
@@ -371,44 +370,72 @@ impl Expr {
         let x0_sym = Expr::Const(x0);
         let fun_at_x0 = self.lambdify1D()(x0);
         let fun_at_x0_sym = Expr::Const(fun_at_x0);
-    
+
         if order == 0 {
             return fun_at_x0_sym.symplify();
         }
-    
-        fn taylor_term(expr: &Expr, var_name: &str, x0: f64, n: usize, x: &Expr, x0_sym: &Expr) -> (Expr, Expr) {
+
+        fn taylor_term(
+            expr: &Expr,
+            var_name: &str,
+            x0: f64,
+            n: usize,
+            x: &Expr,
+            x0_sym: &Expr,
+        ) -> (Expr, Expr) {
             let dfun_dx = expr.diff(var_name).symplify();
             let dfun_dx_at_x0 = dfun_dx.lambdify1D()(x0);
             let factorial = (1..=n).product::<usize>() as f64;
             let coeff = Expr::Const(dfun_dx_at_x0 / factorial);
-          //  println!("order {}, {:?}, {}", n, coeff, dfun_dx);
-            (coeff * (x.clone() - x0_sym.clone()).pow(Expr::Const(n as f64)).symplify(),
-            dfun_dx)
+            //  println!("order {}, {:?}, {}", n, coeff, dfun_dx);
+            (
+                coeff
+                    * (x.clone() - x0_sym.clone())
+                        .pow(Expr::Const(n as f64))
+                        .symplify(),
+                dfun_dx,
+            )
         }
-    
-        fn taylor_recursive(expr: &Expr, var_name: &str, x0: f64, current_order: usize, target_order: usize, x: &Expr, x0_sym: &Expr) -> Expr {
+
+        fn taylor_recursive(
+            expr: &Expr,
+            var_name: &str,
+            x0: f64,
+            current_order: usize,
+            target_order: usize,
+            x: &Expr,
+            x0_sym: &Expr,
+        ) -> Expr {
             if current_order > target_order {
                 return Expr::Const(0.0);
             }
             let (term, derivative) = taylor_term(expr, var_name, x0, current_order, x, x0_sym);
-           // println!("\n derivative {}, \n term {} \n", derivative, term);
-            term + taylor_recursive(&derivative, var_name, x0, current_order + 1, target_order, x, x0_sym)
+            // println!("\n derivative {}, \n term {} \n", derivative, term);
+            term + taylor_recursive(
+                &derivative,
+                var_name,
+                x0,
+                current_order + 1,
+                target_order,
+                x,
+                x0_sym,
+            )
         }
-    
+
         let Taylor = fun_at_x0_sym + taylor_recursive(self, var_name, x0, 1, order, &x, &x0_sym);
         Taylor.symplify()
     }
     // EVAL EXPRESSIONS //////////////////////////////////////////////////////////
-    pub fn eval_expression(&self, vars: Vec<&str>, values:&[f64]) -> f64 {
-        /* 
-        let var_indices: std::collections::HashMap<&str, usize> = vars
-        .iter()
-        .enumerate()
-        .map(|(i, &name)| (name, i))
-        .collect(); // . Pre-computed Variable Indices: Creates a HashMap of 
-    //variable names to indices at the start, avoiding repeated lookups during evaluation.
-    */
-       
+    pub fn eval_expression(&self, vars: Vec<&str>, values: &[f64]) -> f64 {
+        /*
+            let var_indices: std::collections::HashMap<&str, usize> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| (name, i))
+            .collect(); // . Pre-computed Variable Indices: Creates a HashMap of
+        //variable names to indices at the start, avoiding repeated lookups during evaluation.
+        */
+
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -418,20 +445,20 @@ impl Expr {
                 let val = *val;
                 val
             }
-            Expr::Add(lhs, rhs) => { 
+            Expr::Add(lhs, rhs) => {
                 let lhs_fn = lhs.eval_expression(vars.clone(), values);
                 let rhs_fn = rhs.eval_expression(vars, values);
-                 lhs_fn + rhs_fn
+                lhs_fn + rhs_fn
             }
             Expr::Sub(lhs, rhs) => {
                 let lhs_fn = lhs.eval_expression(vars.clone(), values);
                 let rhs_fn = rhs.eval_expression(vars, values);
-                 lhs_fn- rhs_fn
+                lhs_fn - rhs_fn
             }
             Expr::Mul(lhs, rhs) => {
                 let lhs_fn = lhs.eval_expression(vars.clone(), values);
                 let rhs_fn = rhs.eval_expression(vars, values);
-               lhs_fn * rhs_fn
+                lhs_fn * rhs_fn
             }
             Expr::Div(lhs, rhs) => {
                 let lhs_fn = lhs.eval_expression(vars.clone(), values);
@@ -441,11 +468,11 @@ impl Expr {
             Expr::Pow(base, exp) => {
                 let base_fn = base.eval_expression(vars.clone(), values);
                 let exp_fn = exp.eval_expression(vars, values);
-                 base_fn.powf(exp_fn)
+                base_fn.powf(exp_fn)
             }
             Expr::Exp(expr) => {
                 let expr_fn = expr.eval_expression(vars, values);
-                 expr_fn.exp()
+                expr_fn.exp()
             }
             Expr::Ln(expr) => {
                 let expr_fn = expr.eval_expression(vars, values);
@@ -529,10 +556,11 @@ impl Expr {
         vars.dedup(); // Remove duplicates
         vars
     } // end of all_arguments_are_variables
-      //___________________________________________________________________________________________________________________
-      //                    1D  function processing, like y = f(x)
-      // _________________________________________________________________________________________________________________
-      // function to calculate the symbolic expression for a vector of values
+
+    //___________________________________________________________________________________________________________________
+    //                    1D  function processing, like y = f(x)
+    // _________________________________________________________________________________________________________________
+    // function to calculate the symbolic expression for a vector of values
     pub fn calc_vector_lambdified1D(&self, x: &Vec<f64>) -> Vec<f64> {
         let mut result = Vec::new();
         for xi in x {
@@ -545,7 +573,7 @@ impl Expr {
         let x = linspace(start, end, num_values);
         self.calc_vector_lambdified1D(&x)
     } // end of lambdify1D_from_linspace
-      // compare lambdified derivative with numerical derivative on certain x values
+    // compare lambdified derivative with numerical derivative on certain x values
     pub fn compare_num1D(
         &self,
         var: &str,
@@ -659,7 +687,7 @@ impl Expr {
             self.evaluate_multi_diff_from_linspace(start.clone(), end.clone(), num_values);
         //println!("vector_of_vectors_of_dy_dx_analytical  {:?}", vector_of_vectors_of_dy_dx_analytical);
         let analitical_function = &self.lambdify_wrapped(); // get the analtical function
-                                                            // let's define step
+        // let's define step
         let max_end = end.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
         let min_start = start.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
         let step = (1.0 / 1e4) * (max_end - min_start) / (num_values as f64 - 1.0); //
@@ -736,7 +764,7 @@ impl Expr {
     ) -> Box<dyn Fn(f64, Vec<f64>) -> f64> {
         let mut x = vec![arg];
         x.extend(vars); // extend vars.clone();
-                        //  println!("x {:?}",&x);
+        //  println!("x {:?}",&x);
         let f = self.lambdify_owned(x);
 
         let f_closure: Box<dyn Fn(f64, Vec<f64>) -> f64> = Box::new(move |x, y_vec| {
@@ -749,5 +777,4 @@ impl Expr {
         });
         f_closure
     } //lambdify_IVP
-
 }

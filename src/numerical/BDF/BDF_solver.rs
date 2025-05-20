@@ -8,11 +8,11 @@ use log::info;
 use std::f64;
 use std::ops::AddAssign;
 
-use crate::numerical::BDF::BDF_utils::{group_columns, OrderEnum};
+use crate::numerical::BDF::BDF_utils::{OrderEnum, group_columns};
 
 use crate::numerical::BDF::common::{
-    check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
-    validate_first_step, validate_max_step, validate_tol, NumberOrVec,
+    NumberOrVec, check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
+    validate_first_step, validate_max_step, validate_tol,
 };
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -163,7 +163,7 @@ where
         }
         dy_norm_old = Some(dy_norm);
     } //for dy_norm
-      //  info!("{}, {}, {}, {}", converged, k_+1, y, d);
+    //  info!("{}, {}, {}, {}", converged, k_+1, y, d);
     (converged, k_ + 1, y, d)
 }
 
@@ -400,8 +400,8 @@ impl BDF {
         self.h_abs = h_abs;
         self.h_abs_old = None; // TODO: check this
         self.error_norm_old = None; //
-                                    //             info!("h_abs {}", h_abs);
-                                    //  let newton_tol = f64::max(10.0 * std::f64::EPSILON / rtol, f64::min(0.03, rtol.powf(0.5)));
+        //             info!("h_abs {}", h_abs);
+        //  let newton_tol = f64::max(10.0 * std::f64::EPSILON / rtol, f64::min(0.03, rtol.powf(0.5)));
         self.newton_tol = newton_tol(rtol);
         //  info!("newton_tol {}", self.newton_tol);
         self.jac_factor = None;
@@ -489,8 +489,9 @@ impl BDF {
             self.lu = Box::new(lu) as Box<dyn FnMut(&DMatrix<f64>) -> LU<f64, Dyn, Dyn>>;
             self.solve_lu = Box::new(solve_lu)
                 as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
-            self.I = DMatrix::identity(self.n, self.n); // . An identity matrix is a square matrix with ones on the main diagonal
-                                                        //(from the top left to the bottom right) and zeros elsewhere.
+            self.I = DMatrix::identity(self.n, self.n);
+            // . An identity matrix is a square matrix with ones on the main diagonal
+            //(from the top left to the bottom right) and zeros elsewhere.
         } else {
             // realization more efficient for dense matrices
 
@@ -514,7 +515,8 @@ impl BDF {
             self.solve_lu = Box::new(solve_lu)
                 as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
             self.I = DMatrix::identity(self.n, self.n); // . An identity matrix is a square matrix with ones on the main diagonal
-                                                        //(from the top left to the bottom right) and zeros elsewhere.
+
+            //(from the top left to the bottom right) and zeros elsewhere.
 
             info!("functions creation: done");
         };
@@ -593,69 +595,72 @@ impl BDF {
         // if jac is None, then we calculate the jacobian using the num_jac function and return a wrapped function that computes the jacobian
         // at a given point
 
-        match jac { Some(jac) => {
-            info!("analytical jacobian used");
-            let J = jac(t0, &y0);
-            self.njev += 1;
+        match jac {
+            Some(jac) => {
+                info!("analytical jacobian used");
+                let J = jac(t0, &y0);
+                self.njev += 1;
 
-            let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
-                if is_sparse(&J, SPARSE) {
-                    Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
-                        // self.njev += 1;
-                        jac(t, &y)
-                    })
-                } else {
-                    Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
-                        //   self.njev += 1;
-                        jac(t, &y)
-                    })
-                };
-            /*
-            if J.shape() != (self.n, self.n) {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "`jac` is expected to have shape ({}, {}), but actually has {:?}.",
-                        self.n, self.n, J.shape()
-                    ),
-                )));
+                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
+                    if is_sparse(&J, SPARSE) {
+                        Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                            // self.njev += 1;
+                            jac(t, &y)
+                        })
+                    } else {
+                        Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                            //   self.njev += 1;
+                            jac(t, &y)
+                        })
+                    };
+                /*
+                if J.shape() != (self.n, self.n) {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "`jac` is expected to have shape ({}, {}), but actually has {:?}.",
+                            self.n, self.n, J.shape()
+                        ),
+                    )));
+                }
+                 */
+                //  ( Some(jac_wrapped), J)
+                self.jac = Some(jac_wrapped);
+                self.J = J.clone();
             }
-             */
-            //  ( Some(jac_wrapped), J)
-            self.jac = Some(jac_wrapped);
-            self.J = J.clone();
-        } _ => {
-            let _new_sparsity: Option<(DMatrix<f64>, Vec<usize>)> = if let Some(sparsity) = sparsity
-            {
-                let groups = group_columns(&sparsity, OrderEnum::None);
-                Some((sparsity.clone(), groups))
-            } else {
-                None
-            };
-            /*
-                  let mut jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>  = Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
-                      //self.njev += 1;
-                      let f = &(self.fun)(t, &y);
-                      let (J, jac_factor) = num_jac(
-                          &self.fun,
-                          t,
-                          &y,
-                          &f,
-                          self.atol.clone(),
-                          self.jac_factor.clone(),
-                        new_sparsity.clone() ,
-                      );
-                      self.jac_factor = Some(jac_factor);
-                      J
-                  });
+            _ => {
+                let _new_sparsity: Option<(DMatrix<f64>, Vec<usize>)> =
+                    if let Some(sparsity) = sparsity {
+                        let groups = group_columns(&sparsity, OrderEnum::None);
+                        Some((sparsity.clone(), groups))
+                    } else {
+                        None
+                    };
+                /*
+                      let mut jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>  = Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                          //self.njev += 1;
+                          let f = &(self.fun)(t, &y);
+                          let (J, jac_factor) = num_jac(
+                              &self.fun,
+                              t,
+                              &y,
+                              &f,
+                              self.atol.clone(),
+                              self.jac_factor.clone(),
+                            new_sparsity.clone() ,
+                          );
+                          self.jac_factor = Some(jac_factor);
+                          J
+                      });
 
-                  let  J = jac_wrapped(t0, &y0);
-            //    let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> = jac_wrapped;
-            self.jac = Some(jac_wrapped);
-            self.J = J.clone();
-               */
-        }}; // jac is  None
-           //  Ok((A, B))
+                      let  J = jac_wrapped(t0, &y0);
+                //    let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> = jac_wrapped;
+                self.jac = Some(jac_wrapped);
+                self.J = J.clone();
+                   */
+            }
+        }; // jac is  None
+        //  Ok((A, B))
 
         /*
 

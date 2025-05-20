@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
 
-
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
     use crate::numerical::Examples_and_utils::NonlinEquation;
     use crate::symbolic::symbolic_engine::Expr;
@@ -163,7 +162,10 @@ mod tests {
                 .unwrap();
             let position = comparsion.iter().position(|&x| x == *max_residual).unwrap();
             let relativ_residual = max_residual.abs() / y_exact[position];
-            println!("maximum relative residual of numerical solution wioth respect to exact solution = {}", relativ_residual);
+            println!(
+                "maximum relative residual of numerical solution wioth respect to exact solution = {}",
+                relativ_residual
+            );
 
             assert!(norm < 1e-2, "norm = {}", norm);
             assert!(relativ_residual < 1e-1, "norm = {}", norm);

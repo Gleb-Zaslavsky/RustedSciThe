@@ -1,6 +1,5 @@
 use nalgebra::{DMatrix, DVector};
 
-
 pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result: DMatrix<f64>) {
     use plotters::prelude::*;
     // Example data
@@ -10,7 +9,7 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
     let x_max = x.max();
     for col in 0..y.ncols() {
         let y_col = y.column(col);
-      //   println!("{}" , y_col);
+        //   println!("{}" , y_col);
         let y_min = y_col.min();
         let y_max = y_col.max();
         let varname = values[col].clone();
@@ -24,7 +23,7 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
             .margin(10)
             .x_label_area_size(30)
             .y_label_area_size(30)
-            .build_cartesian_2d(x_min*0.95..x_max*1.05, y_min*0.95..y_max*1.05)
+            .build_cartesian_2d(x_min * 0.95..x_max * 1.05, y_min * 0.95..y_max * 1.05)
             .unwrap();
 
         // Configure the mesh
@@ -37,7 +36,7 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
 
         // Plot the variable
         let series: Vec<(f64, f64)> = x.iter().zip(y_col.iter()).map(|(&x, &y)| (x, y)).collect();
-         // print!("\n \n series {:?} \n", series);
+        // print!("\n \n series {:?} \n", series);
         chart
             .draw_series(LineSeries::new(series, &Palette99::pick(col)))
             .unwrap()
@@ -56,21 +55,24 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
     }
 }
 
-
-use gnuplot::{Figure, Caption, Color, AxesCommon};
-pub fn plots_gnulot(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result: DMatrix<f64>) {
+use gnuplot::{AxesCommon, Caption, Color, Figure};
+pub fn plots_gnulot(
+    arg: String,
+    values: Vec<String>,
+    t_result: DVector<f64>,
+    y_result: DMatrix<f64>,
+) {
     let x = t_result;
-  //  println!("{:?}, {}", &x, &x.len());
-   // println!("nrows: {:?}, ncols: {} \n ",  y_result.nrows(), y_result.ncols(),);
-  //  println!("{:?} \n", &y_result);
+    //  println!("{:?}, {}", &x, &x.len());
+    // println!("nrows: {:?}, ncols: {} \n ",  y_result.nrows(), y_result.ncols(),);
+    //  println!("{:?} \n", &y_result);
     // Create a new figure for each y variable
     for col in 0..y_result.ncols() {
         let mut fg = Figure::new();
         let y_col: Vec<f64> = y_result.column(col).iter().copied().collect();
         let varname = &values[col];
-      //  println!("\n {}, \n {:?},\n {} \n", varname, &y_col, &y_col.len());
-       
-        
+        //  println!("\n {}, \n {:?},\n {} \n", varname, &y_col, &y_col.len());
+
         fg.axes2d()
             .set_title(&varname, &[])
             .set_x_label(&arg, &[])
@@ -78,7 +80,7 @@ pub fn plots_gnulot(arg: String, values: Vec<String>, t_result: DVector<f64>, y_
             .lines(
                 x.as_slice(),
                 &y_col,
-                &[Caption(&varname), Color(gnuplot::ColorType::Black)]
+                &[Caption(&varname), Color(gnuplot::ColorType::Black)],
             );
 
         // Save the plot to a file

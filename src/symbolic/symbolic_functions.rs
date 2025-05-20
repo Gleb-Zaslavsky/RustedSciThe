@@ -1,9 +1,9 @@
 #![allow(non_camel_case_types)]
 
 use crate::symbolic::symbolic_engine::Expr;
-use faer::col::{ColRef, Col};
+use faer::col::{Col, ColRef};
 use faer::sparse::{SparseColMat, Triplet};
-use log:: info;
+use log::info;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Dyn};
 use regex::Regex;
@@ -118,7 +118,8 @@ impl Jacobian {
                 CsMatrix::new_uninitialized_generic(Dyn(2), Dyn(2), 1)
             }),
             function_jacobian_IVP_SparseColMat: Box::new(|_xx: f64, _y: &Col<f64>| {
-                SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)]).unwrap()
+                SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)])
+                    .unwrap()
             }),
             lambdified_functions_IVP_Col: Box::new(|_xx: f64, _y: &Col<f64>| Col::zeros(0)),
             bounds: None,
@@ -150,7 +151,8 @@ impl Jacobian {
             CsMatrix::new_uninitialized_generic(Dyn(2), Dyn(2), 1)
         });
         let function_jacobian_IVP_SparseColMat = Box::new(|_xx: f64, _y: &Col<f64>| {
-            SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)  ]  ).unwrap()
+            SparseColMat::<usize, f64>::try_new_from_triplets(1, 1, &[Triplet::new(0, 0, 0.0)])
+                .unwrap()
         });
         let lambdified_functions_IVP_Col = Box::new(|_xx: f64, _y: &Col<f64>| Col::zeros(0));
         let bounds = Some(Vec::new());
@@ -993,7 +995,14 @@ impl Jacobian {
                 mesh.unwrap(),
             )
         };
-        log::info!("creating discretization equations with n_steps = {}, H = {:?} ({}), T_list = {:?} ({})", n_steps, H, H.len(),T_list, T_list.len());
+        log::info!(
+            "creating discretization equations with n_steps = {}, H = {:?} ({}), T_list = {:?} ({})",
+            n_steps,
+            H,
+            H.len(),
+            T_list,
+            T_list.len()
+        );
 
         let mut discreditized_system: Vec<Vec<Expr>> = Vec::new();
         // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
@@ -1021,8 +1030,8 @@ impl Jacobian {
         for j in 0..n_steps - 1 {
             for (i, eq_i) in eq_system.clone().into_iter().enumerate() {
                 let Y_name = values[i].clone(); //y_i
-                                                //  println!("eq_i = {:?}", eq_i);
-                                                //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
+                //  println!("eq_i = {:?}", eq_i);
+                //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
                 if let Some((initial_or_final, condition)) = BorderConditions.get(&Y_name) {
                     let mut vec_of_res_for_each_eq = Vec::new();
 
@@ -1161,13 +1170,14 @@ impl Jacobian {
         let n = A.len();
         let mut kl = 0; // Number of subdiagonals
         let mut ku = 0; // Number of superdiagonals
-                        /*
-                            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
-                        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
-                        kl if this distance is greater than the current value of kl.
-                        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
-                         and updates ku if this distance is greater than the current value of ku.
-                             */
+
+        /*
+            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
+        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
+        kl if this distance is greater than the current value of kl.
+        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
+         and updates ku if this distance is greater than the current value of ku.
+             */
         for i in 0..n {
             for j in 0..n {
                 if A[i][j] != Expr::Const(0.0) {
@@ -1411,9 +1421,19 @@ impl Jacobian {
         let n = &self.symbolic_jacobian.len();
         for (_i, vec_s) in self.symbolic_jacobian.iter().enumerate() {
             if n != &vec_s.len() {
-                println!("\n \n symbolic jacobian consists of {:?} vectors, each of length {}\n \n it means it is not square!", n, vec_s.len());
+                println!(
+                    "\n \n symbolic jacobian consists of {:?} vectors, each of length {}\n \n it means it is not square!",
+                    n,
+                    vec_s.len()
+                );
             }
-            assert_eq!(vec_s.len(), *n, "jacobian not square! symbolic jacobian consists of {:?} vectors, each of length {}",  n, vec_s.len());
+            assert_eq!(
+                vec_s.len(),
+                *n,
+                "jacobian not square! symbolic jacobian consists of {:?} vectors, each of length {}",
+                n,
+                vec_s.len()
+            );
         }
 
         self.find_bandwidths();

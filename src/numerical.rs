@@ -45,42 +45,37 @@ pub mod BE;
 /// //use the shortest way to solve system of equations
 ///    // first define system of equations and initial guess
 ///  use RustedSciThe::numerical::NR::NR;
+/// //use the shortest way to solve system of equations
+///    // first define system of equations and initial guess
 ///    let mut NR_instanse = NR::new();
 ///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()];
 ///   let initial_guess = vec![1.0, 1.0];
 ///    // solve
-///    NR_instanse.eq_generate_from_str(vec_of_expressions,initial_guess, 1e-6, 100, );
-///    NR_instanse.solve();
+///    NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+///    NR_instanse.main_loop();
 ///    println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///  ```
 /// Example#2
 /// ```
 ///    // or more verbose way...
 ///    // first define system of equations
+///     use RustedSciThe::numerical::NR::NR;
 ///     use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///     use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-///   use RustedSciThe::numerical::NR::NR;
-///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()];
-///    let mut Jacobian_instance = Jacobian::new();
-///     Jacobian_instance.set_funcvecor_from_str(vec_of_expressions);
-///     Jacobian_instance.set_variables(vec!["x", "y"]);
-///     Jacobian_instance.calc_jacobian();
-///     Jacobian_instance.jacobian_generate(vec!["x", "y"]);
-///     Jacobian_instance.lambdify_funcvector(vec!["x", "y"]);
-///     Jacobian_instance.readable_jacobian();
-///     println!("Jacobian_instance: functions  {:?}. Variables {:?}", Jacobian_instance.vector_of_functions, Jacobian_instance.vector_of_variables);
-///      println!("Jacobian_instance: Jacobian  {:?} readable {:?}. \n", Jacobian_instance.symbolic_jacobian, Jacobian_instance.readable_jacobian);
+///      use nalgebra::DVector;
+///     let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+///
 ///     let initial_guess = vec![1.0, 1.0];
-///     // in case you are interested in Jacobian value at initial guess
-///     Jacobian_instance.evaluate_func_jacobian_DMatrix(initial_guess.clone());
-///     Jacobian_instance.evaluate_funvector_lambdified_DVector(initial_guess.clone());
-///     let guess_jacobian = (Jacobian_instance.evaluated_jacobian_DMatrix).clone();
-///     println!("guess Jacobian = {:?} \n", guess_jacobian.try_inverse());
-///     // defining NR method instance and solving
 ///     let mut NR_instanse = NR::new();
-///     NR_instanse.set_equation_sysytem(Jacobian_instance, initial_guess, 1e-6, 100, );
-///     NR_instanse.solve();
+///     let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+///     let values = vec!["x".to_string(), "y".to_string()];
+///     NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
+///     NR_instanse.eq_generate();
+///     NR_instanse.main_loop();
+///     let solution = NR_instanse.get_result().unwrap();
+///      assert_eq!(solution,  DVector::from_vec(vec![-1.0, 3.0])   );
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
+//
 ///  ```
 pub mod NR;
 pub mod NR_for_Euler;
