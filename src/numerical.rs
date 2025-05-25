@@ -78,8 +78,11 @@ pub mod BE;
 //
 ///  ```
 pub mod NR;
+pub mod NR_damped;
 pub mod NR_for_Euler;
 pub mod NR_for_ODE;
+pub mod NR_trust_region;
+pub mod NR_with_clipping;
 /// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
 pub mod NonStiff_api;
 /// usage of BDF solver

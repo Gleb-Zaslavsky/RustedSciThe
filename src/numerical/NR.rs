@@ -1,5 +1,6 @@
 use crate::numerical::BVP_Damp::BVP_utils::checkmem;
 use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
+
 ///  Example#1
 /// ```
 ///  use RustedSciThe::numerical::NR::NR;
@@ -7,7 +8,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 /// //use the shortest way to solve system of equations
 ///    // first define system of equations and initial guess
 ///    let mut NR_instanse = NR::new();
-/// 
+///
 ///    let vec_of_expressions = vec![ "x^2+y^2-10".to_string(), "x-y-4".to_string()];
 ///   let initial_guess = vec![1.0, 1.0];
 ///    // solve
@@ -38,35 +39,49 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///  ```
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use chrono::Local;
+
 use log::{error, info, warn};
+use nalgebra::{DMatrix, DVector, Matrix};
 use simplelog::LevelFilter;
 use simplelog::*;
-use tabled::assert;
 use std::collections::HashMap;
-use std::time::Instant;
-use tabled::{builder::Builder, settings::Style};
 use std::error::Error;
-use nalgebra::{DMatrix, DVector, Matrix};
+use std::time::Instant;
+use std::vec;
+
+use tabled::{builder::Builder, settings::Style};
+#[derive(Debug, Clone)]
+pub enum Method {
+    simple,
+    damped,
+    clipping,
+    trust_region,
+}
 pub struct NR {
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
     pub eq_system: Vec<Expr>, // vector of equations
     pub values: Vec<String>, // vector of variables
     pub initial_guess: Vec<f64>, // initial guess
-    pub tolerance: f64,     // tolerance
+    pub method: Method,
+    pub Bounds: Option<HashMap<String, (f64, f64)>>,
+    pub bounds_vec: Vec<(f64, f64)>,
+    pub tolerance: f64,        // tolerance
     pub max_iterations: usize, // max number of iterations
 
-    max_error: f64, // max error
+    pub parameters: Option<HashMap<String, f64>>, // parameters
+    pub max_error: f64,                           // max error
     pub dumping_factor: f64,
-    pub i: usize,                 // iteration counter
-    pub jac: DMatrix<f64>,        // jacobian matrix
+    pub i: usize,                     // iteration counter
+    pub jac: DMatrix<f64>,            // jacobian matrix
     pub fun_vector: DVector<f64>,     // vector of functions
+    pub y: DVector<f64>,              // current iteration
+    pub step: DVector<f64>,           // step
     pub result: Option<DVector<f64>>, // result of the iteration
 
     pub loglevel: Option<String>,
     pub linear_sys_method: Option<String>, // method for solving linear system
     pub custom_timer: CustomTimer,
-    calc_statistics: HashMap<String, usize>,
+    pub calc_statistics: HashMap<String, usize>,
 }
 
 impl NR {
@@ -77,13 +92,19 @@ impl NR {
             eq_system: Vec::new(),
             values: Vec::new(),
             initial_guess: Vec::new(),
+            method: Method::simple,
+            Bounds: None,
+            bounds_vec: Vec::new(),
             tolerance: 1e-6,
             max_iterations: 100,
+            parameters: None,
             max_error: 0.0,
             dumping_factor: 1.0,
             i: 0,
             jac: DMatrix::zeros(0, 0),
             fun_vector: DVector::zeros(0),
+            y: DVector::zeros(0),
+            step: DVector::zeros(0),
             result: None,
             loglevel: Some("info".to_string()),
             linear_sys_method: Some("lu".to_string()),
@@ -138,6 +159,7 @@ impl NR {
             max_iterations > 0,
             "Max iterations should be a positive number."
         );
+        self.step = DVector::zeros(self.initial_guess.len());
     }
 
     pub fn eq_generate_from_str(
@@ -161,21 +183,86 @@ impl NR {
         );
         self.eq_generate();
     }
+    
+    /// check if solver parameters are set correctly if not set default values
+    pub fn parameters_handle(
+
+        &mut self,
+        parameters: Option<HashMap<String, f64>>,
+    ) {
+        // set default parameters for each method if not set by user
+        macro_rules! merge_parameters {
+            ($self:expr, $parameters:expr, $default_parameters:expr) => {
+                if let Some(user_defined_parameters) = $parameters {
+                    let mut parameters = user_defined_parameters.clone();
+                    for (key, value) in $default_parameters.iter() {
+                        if !user_defined_parameters.contains_key(key) {
+                            parameters.insert(key.clone(), *value);
+                        }
+                    }
+                    $self.parameters = Some(parameters);
+                } else {
+                    info!("Setting default parameters for method {:?}", $default_parameters);
+                    $self.parameters = Some($default_parameters);
+                }
+            };
+        }
+        let method = self.method.clone();
+        match method {
+
+            Method::simple => {
+              // this method does not have parameters
+            },
+            Method:: clipping =>{
+                let default_parameters = HashMap::from([
+                        ("maxDampIter".to_string(), 50.0),
+                    ]);
+                    merge_parameters!(self, parameters, default_parameters);
+            }// clipping
+            Method::trust_region => {
+                let default_parameters = HashMap::from([
+                        ("eta".to_string(), 0.1),
+                        ("delta".to_string(), 1.0),
+                    ]);
+                    merge_parameters!(self, parameters, default_parameters);
+
+            }
+            _=> {
+                panic!("Method not implemented")
+            }
+      
+        }
+
+    }
     pub fn set_solver_params(
         &mut self,
         loglevel: Option<String>,
         linear_sys_method: Option<String>,
         damping_factor: Option<f64>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        method: Option<Method>,
+        parameters: Option<HashMap<String, f64>>,
     ) {
         self.loglevel = if let Some(level) = loglevel {
-            assert!(level == "debug" || level == "info" || level == "warn" || level == "error", "loglevel must be debug/info, warn or error");
+            assert!(
+                level == "debug"
+                    || level == "info"
+                    || level == "warn"
+                    || level == "error"
+                    || level == "off"
+                    || level == "none",
+                "loglevel must be none/off, debug/info, warn or error"
+            );
             Some(level.to_string())
         } else {
             self.loglevel.clone()
         };
         self.linear_sys_method = if let Some(method) = linear_sys_method {
             let method = method.to_lowercase();
-            assert!(method == "lu" || method == "inv", "linear_sys_method must be lu or inv");
+            assert!(
+                method == "lu" || method == "inv",
+                "linear_sys_method must be lu or inv"
+            );
 
             Some(method.to_string())
         } else {
@@ -190,6 +277,26 @@ impl NR {
         } else {
             self.dumping_factor
         };
+        if Bounds.is_some() {
+            if_initial_guess_inside_bounds(
+                &DVector::from_vec(self.initial_guess.clone()),
+                &Bounds.clone(),
+                &self.values.clone(),
+            );
+            self.Bounds = Bounds;
+            let mut vec_bounds = Vec::new();
+            for values in &self.values {
+                let (lower, upper) = self.Bounds.as_ref().unwrap().get(values).unwrap();
+                vec_bounds.push((*lower, *upper));
+            }
+            self.bounds_vec = vec_bounds;
+        } // if Nounds
+
+        match method {
+            Some(method) => self.method = method,
+            None => self.method = Method::simple,
+        };
+        self.parameters_handle(parameters);
     }
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self) {
@@ -212,17 +319,46 @@ impl NR {
     /////////////////////////////////////////////////////////////////////////////////////////////
     //                ITERATIONS
     /////////////////////////////////////////////////////////////////////////////////////////////
-    // Newton-Raphson method
-    /// realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
-    pub fn iteration(&mut self, x: DVector<f64>) -> DVector<f64> {
+    pub fn evaluate_function(&mut self, y: DVector<f64>) -> DVector<f64> {
+        let y_data = y.data.into();
+
+        // Evaluate functions
+        self.custom_timer.fun_tic();
+        self.jacobian.evaluate_funvector_lambdified_DVector(y_data);
+        self.custom_timer.fun_tac();
+
+        assert!(
+            !self.jacobian.evaluated_functions_DVector.is_empty(),
+            "Functions should not be empty."
+        );
+
+        // Return cloned values to avoid borrow checker issues
+
+        self.jacobian.evaluated_functions_DVector.clone()
+    }
+    pub fn evaluate_jacobian(&mut self, y: DVector<f64>) -> DMatrix<f64> {
+        let y_data = y.data.into();
+        // Evaluate jacobian
+        self.custom_timer.jac_tic();
+        self.jacobian.evaluate_func_jacobian_DMatrix(y_data);
+        self.custom_timer.jac_tac();
+        assert!(
+            !self.jacobian.evaluated_jacobian_DMatrix.is_empty(),
+            "Jacobian should not be empty."
+        );
+        // Return cloned values to avoid borrow checker issues
+        self.jacobian.evaluated_jacobian_DMatrix.clone()
+    }
+    pub fn step(&mut self, y: DVector<f64>) -> (DVector<f64>, DVector<f64>) {
         let method = self.linear_sys_method.clone().unwrap();
+        // let previous_step: DVector<f64> = self.step.clone();
         let Jacobian_instance = &mut self.jacobian;
         // evaluate jacobian and functions
         self.custom_timer.jac_tic();
-        Jacobian_instance.evaluate_func_jacobian_DMatrix(x.clone().data.into());
+        Jacobian_instance.evaluate_func_jacobian_DMatrix(y.clone().data.into());
         self.custom_timer.jac_tac();
         self.custom_timer.fun_tic();
-        Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone().data.into());
+        Jacobian_instance.evaluate_funvector_lambdified_DVector(y.clone().data.into());
         self.custom_timer.fun_tac();
         assert!(
             !Jacobian_instance.evaluated_jacobian_DMatrix.is_empty(),
@@ -233,34 +369,122 @@ impl NR {
             "Functions should not be empty."
         );
         self.custom_timer.linear_system_tic();
-        let new_j = &Jacobian_instance.evaluated_jacobian_DMatrix;
-        self.jac = new_j.clone();
-        let new_f = &Jacobian_instance.evaluated_functions_DVector;
-        let delta = Self:: solve_linear_system(method, new_j, new_f).unwrap();
-
+        let J_k = &Jacobian_instance.evaluated_jacobian_DMatrix;
+        self.jac = J_k.clone();
+        let F_k = &Jacobian_instance.evaluated_functions_DVector;
+        info!("\n J_k: {}", J_k);
+        info!("\n F_k: {}", F_k);
+        for (i, el) in F_k.iter().enumerate() {
+            if el.is_nan() {
+                let issue_func = Jacobian_instance.vector_of_functions[i].clone();
+                let issue_value = y.clone();
+                error!(
+                    "\n \n NaN in undamped step residual function {} with valus {} \n \n",
+                    issue_func, issue_value
+                );
+                panic!();
+                //return previous_step;
+            }
+        }
+        let undamped_step_k = solve_linear_system(method, J_k, F_k).unwrap();
+        for el in undamped_step_k.iter() {
+            if el.is_nan() {
+                log::error!("\n \n NaN in damped step deltaY \n \n");
+                panic!();
+                //return previous_step;
+            }
+        }
+        //    self.step = undamped_step_k.clone();
+        (undamped_step_k, F_k.clone())
+    }
+    pub fn simple_newton_step(&mut self) -> (i32, Option<DVector<f64>>) {
+        let now = Instant::now();
+        let y_k_minus_1 = self.y.clone();
+        let (undamped_step_k_minus_1, F_k_minus_1) = self.step(y_k_minus_1.clone());
         let lambda = self.dumping_factor;
-        let new_x: DVector<f64> = x - lambda* delta;
-       // let dx: Vec<f64> = delta.data.into(); //.iter().map(|x| *x).collect();
-        // element wise subtraction
-
+        let dy = lambda * undamped_step_k_minus_1;
+        let damped_step_result: DVector<f64> = y_k_minus_1 - dy.clone();
         self.custom_timer.linear_system_tac();
+        *self
+            .calc_statistics
+            .entry("number of solving linear systems".to_string())
+            .or_insert(0) += 1;
 
-        new_x
+        let error = Matrix::norm(&F_k_minus_1);
+
+        if (error > self.max_error) && (self.i > 0) {
+            warn!("Error is increasing");
+        }
+        let elapsed = now.elapsed();
+        elapsed_time(elapsed);
+        if error < self.tolerance {
+            return (1, Some(damped_step_result));
+        } else {
+            info!("iteration = {}, error = {}", self.i, error);
+            self.max_error = error;
+            return (0, Some(damped_step_result));
+        }
+    }
+    /// a control function that is used to
+    /// redirects the flow of execution depending on the method: simple newton iteration,  damped newton iteration
+    pub fn extended_step(&mut self) -> (i32, Option<DVector<f64>>) {
+        // SIMPLE NEWTON STEPS - NO BOUNDS OF THE VARIABLES
+        match self.method {
+            Method::simple => self.simple_newton_step(),
+            Method::damped => self.step_damped(),
+            Method::clipping => self.step_with_clipping(),
+            Method::trust_region => self.step_trust_region(),
+        }
     }
     /// main function to solve the system of equations  
     pub fn main_loop(&mut self) -> Option<DVector<f64>> {
-        let  x = self.initial_guess.clone();
-        let mut x = DVector::from_vec(x);
-        self.result = Some(x.clone()); // save into result in case the very first iteration
+        info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
+        let y: DVector<f64> = DVector::from_vec(self.initial_guess.clone());
+        self.result = Some(y.clone()); // save into result in case the vary first iteration
+        self.y = y.clone();
         while self.i < self.max_iterations {
-            let new_x = self.iteration(x.clone());
+            info!(
+                "\n_____________________________________start of iteration = {}_______________________________\n",
+                self.i
+            );
+            let (status, damped_step_result) = self.extended_step();
 
-            let dx: DVector<f64> = new_x.clone() - x;
-            let error = Matrix::norm(&dx);
-            if (error > self.max_error) && (self.i > 0) {
-                warn!("Error is increasing");
+            if status == 0 {
+                let y_k_plus_1 = match damped_step_result {
+                    Some(y_k_plus_1) => y_k_plus_1,
+                    _ => {
+                        error!("\n \n y_k_plus_1 is None");
+                        panic!()
+                    }
+                };
+                self.y = y_k_plus_1;
+
+                info!(
+                    "\n_____________________________________end of iteration = {}, error = {}_______________________________\n",
+                    self.i, self.max_error
+                );
+                self.i += 1;
+            } else if status == 1 {
+                // status == 1 means convergence is reached, save the result
+                info!("\n \n Solution has converged, breaking the loop!");
+
+                let y_k_plus_1 = match damped_step_result {
+                    Some(y_k_plus_1) => y_k_plus_1,
+                    _ => {
+                        panic!(" \n \n y_k_plus_1 is None")
+                    }
+                };
+                let result = Some(y_k_plus_1); // save the successful result of the iteration
+                // before refining in case it will go wrong
+                self.result = result.clone();
+                info!(
+                    "\n \n solutioon found for {}",
+                    &self.result.clone().unwrap()
+                );
+                return result;
             }
-            self.max_error = error;
+
+            /*
             if error < self.tolerance {
                 self.result = Some(new_x.clone());
                 self.max_error = error;
@@ -270,6 +494,7 @@ impl NR {
                 self.i += 1;
                 info!("iteration = {}, error = {}", self.i, error)
             }
+            */
         }
         error!("Maximum number of iterations reached. No solution found.");
         None
@@ -323,8 +548,8 @@ impl NR {
                 LevelFilter::Info
             };
             println!(" \n \n Program started with loglevel: {}", log_option);
-          //  let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-          //  let name = format!("log_{}.txt", date_and_time);
+            //  let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
+            //  let name = format!("log_{}.txt", date_and_time);
             let logger_instance = CombinedLogger::init(vec![TermLogger::new(
                 log_option,
                 Config::default(),
@@ -365,160 +590,493 @@ impl NR {
         table.with(Style::modern_rounded());
         info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
     }
-    //////////////////////////////////////////////////////////////////////////////////////////////
-    ///                 LINEAR SYSTEM SOLVERS
-    //////////////////////////////////////////////////////////////////////////////////////////////
-    /* 
-    pub fn get_error(&mut self, x: Vec<f64>) -> f64 {
-        let Jacobian_instance = &mut self.jacobian;
-        Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone());
-        let new_x = &Jacobian_instance.evaluated_functions_DVector;
-        let dx = new_x
-            .iter()
-            .zip(&x)
-            .map(|(x_i, x_j)| (x_i - x_j).abs())
-            .collect::<Vec<f64>>();
-        let dx_matrix = DVector::from_vec(dx);
-        let error = Matrix::norm(&dx_matrix);
-        error
-    }
 
-    pub fn test_correction(&mut self) -> f64 {
-        let result = self.get_result().clone().unwrap().clone();
-        let norm = self.get_error(result);
-        norm.clone()
-    }
+    /*
+        pub fn get_error(&mut self, x: Vec<f64>) -> f64 {
+            let Jacobian_instance = &mut self.jacobian;
+            Jacobian_instance.evaluate_funvector_lambdified_DVector(x.clone());
+            let new_x = &Jacobian_instance.evaluated_functions_DVector;
+            let dx = new_x
+                .iter()
+                .zip(&x)
+                .map(|(x_i, x_j)| (x_i - x_j).abs())
+                .collect::<Vec<f64>>();
+            let dx_matrix = DVector::from_vec(dx);
+            let error = Matrix::norm(&dx_matrix);
+            error
+        }
 
-    // Gauss-Jordan elimination method. The function takes two parameters: matrix, which is a reference to a vector of vectors representing the coefficients of the linear equations,
-    // and constants, which is a reference to a vector containing the constants on the right-hand side of the equations.
+        pub fn test_correction(&mut self) -> f64 {
+            let result = self.get_result().clone().unwrap().clone();
+            let norm = self.get_error(result);
+            norm.clone()
+        }
 
-    pub fn solve_linear_system(matrix: &[Vec<f64>], constants: &[f64]) -> Vec<f64> {
-        // Implement a linear system solver (e.g., LU decomposition, Gauss-Jordan elimination, etc.)
-        // Here, we'll use a simple implementation for demonstration purposes
-        let n = matrix.len();
-        let mut augmented_matrix = matrix
-            .iter()
-            .cloned()
-            .zip(constants.iter().cloned())
-            .map(|(row, constant)| {
-                row.into_iter()
-                    .chain(std::iter::once(constant))
-                    .collect::<Vec<f64>>()
-            })
-            .collect::<Vec<Vec<f64>>>();
+        // Gauss-Jordan elimination method. The function takes two parameters: matrix, which is a reference to a vector of vectors representing the coefficients of the linear equations,
+        // and constants, which is a reference to a vector containing the constants on the right-hand side of the equations.
 
-        for i in 0..n {
-            let pivot = augmented_matrix[i][i];
-            for j in i..n + 1 {
-                augmented_matrix[i][j] /= pivot;
-            }
+        pub fn solve_linear_system(matrix: &[Vec<f64>], constants: &[f64]) -> Vec<f64> {
+            // Implement a linear system solver (e.g., LU decomposition, Gauss-Jordan elimination, etc.)
+            // Here, we'll use a simple implementation for demonstration purposes
+            let n = matrix.len();
+            let mut augmented_matrix = matrix
+                .iter()
+                .cloned()
+                .zip(constants.iter().cloned())
+                .map(|(row, constant)| {
+                    row.into_iter()
+                        .chain(std::iter::once(constant))
+                        .collect::<Vec<f64>>()
+                })
+                .collect::<Vec<Vec<f64>>>();
 
-            for k in 0..n {
-                if k != i {
-                    let factor = augmented_matrix[k][i];
-                    for j in i..n + 1 {
-                        augmented_matrix[k][j] -= factor * augmented_matrix[i][j];
+            for i in 0..n {
+                let pivot = augmented_matrix[i][i];
+                for j in i..n + 1 {
+                    augmented_matrix[i][j] /= pivot;
+                }
+
+                for k in 0..n {
+                    if k != i {
+                        let factor = augmented_matrix[k][i];
+                        for j in i..n + 1 {
+                            augmented_matrix[k][j] -= factor * augmented_matrix[i][j];
+                        }
                     }
                 }
             }
-        }
 
-        augmented_matrix.iter().map(|row| row[n]).collect()
-    }
-    pub fn solve_linear_LU(
-        coeffs: Vec<Vec<f64>>,
-        constants: Vec<f64>,
-    ) -> Result<Vec<f64>, &'static str> {
-        let mut res: Vec<f64> = Vec::new();
-        let n = coeffs.len();
-        let a: DMatrix<f64> = DMatrix::from_fn(n, n, |i, j| coeffs[i][j]);
-        let b: DVector<f64> = DVector::from_vec(constants);
-        match a.lu().solve(&b) {
-            Some(x) => {
-                info!("Solution: {}", x);
-                res = x.data.into();
-                Ok(res)
-            }
-            None => {
-                info!("No solution found");
-                Err("no solution")
-            }
+            augmented_matrix.iter().map(|row| row[n]).collect()
         }
-    }
-*/
-    pub fn solve_linear_system(solver: String, A:&DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Box<dyn Error> > {
-    
-        match solver.as_str() {
-            "lu" => {
-                let lu = A.clone().lu();
-                let x = lu.solve(&b);
-                match x {
-                    Some(x) => Ok(x),
-                    None => Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Failed to solve the system",
-                    ))),
+        pub fn solve_linear_LU(
+            coeffs: Vec<Vec<f64>>,
+            constants: Vec<f64>,
+        ) -> Result<Vec<f64>, &'static str> {
+            let mut res: Vec<f64> = Vec::new();
+            let n = coeffs.len();
+            let a: DMatrix<f64> = DMatrix::from_fn(n, n, |i, j| coeffs[i][j]);
+            let b: DVector<f64> = DVector::from_vec(constants);
+            match a.lu().solve(&b) {
+                Some(x) => {
+                    info!("Solution: {}", x);
+                    res = x.data.into();
+                    Ok(res)
+                }
+                None => {
+                    info!("No solution found");
+                    Err("no solution")
                 }
             }
-            "inv" =>{
-                let A_inv = A.clone().try_inverse().unwrap(); 
-                let f = A_inv * b; 
-                Ok(f)
+        }
+    */
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+///                 LINEAR SYSTEM SOLVERS
+//////////////////////////////////////////////////////////////////////////////////////////////
+pub fn solve_linear_system(
+    solver: String,
+    A: &DMatrix<f64>,
+    b: &DVector<f64>,
+) -> Result<DVector<f64>, Box<dyn Error>> {
+    match solver.as_str() {
+        "lu" => {
+            let lu = A.clone().lu();
+            let x = lu.solve(&b);
+            match x {
+                Some(x) => Ok(x),
+                None => Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to solve the system",
+                ))),
             }
-         _ => Err(Box::new(std::io::Error::new(
+        }
+        "inv" => {
+            let A_inv = A.clone().try_inverse().unwrap();
+            let f = A_inv * b;
+            Ok(f)
+        }
+        _ => Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
             "Failed to solve the system",
-         ))) 
-                
-        }// match solver.as_str() {
-
+        ))),
+    } // match solver.as_str() {
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///                                         MISC
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+pub fn if_initial_guess_inside_bounds(
+    initial_guess: &DVector<f64>,
+    Bounds: &Option<HashMap<String, (f64, f64)>>,
+    values: &Vec<String>,
+) -> () {
+    //  initial_guess - vector
+    //  Bounds - hashmap where keys are variable names and values are tuples with lower and upper bounds.
+    //  Function checks if initial guess is inside the bounds of the variables. If not, it panics.
+    for (i, el_i) in initial_guess.iter().enumerate() {
+        let var_name = values[i].clone();
+        let bounds = Bounds
+            .as_ref()
+            .expect("No bounds specified")
+            .get(&var_name)
+            .unwrap();
+        let (lower, upper) = bounds;
+        if el_i < lower || el_i > upper {
+            panic!(
+                "\n, \n, Initial guess  of the variable {} is outside the bounds {:?}.",
+                var_name, &bounds
+            );
+        }
     }
 }
 
+// This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
+pub fn bound_step(y: &DVector<f64>, step: &DVector<f64>, bounds: &Vec<(f64, f64)>) -> f64 {
+    // Initialize no damping
+    let mut fbound = 1.0;
+    let mut _entry = 0;
+    let mut _force = false;
+    let mut _value = 0.0;
+    let s0 = step;
+    for (i, y_i) in y.iter().enumerate() {
+        let below = bounds[i].0;
+        let above = bounds[i].1;
+
+        let s_i = s0[i];
+        if s_i > f64::max(y_i - below, 0.0) {
+            let temp = (y_i - below) / s_i;
+            if temp < fbound {
+                fbound = temp;
+                _entry = i + 1; //
+                _force = true;
+                _value = below;
+            }
+        } else if s_i < f64::min(y_i - above, 0.0) {
+            let temp = (y_i - above) / s_i;
+            if temp < fbound {
+                fbound = temp;
+                _entry = i + 1; //
+                _force = true;
+                _value = above;
+            }
+        }
+    }
+    fbound
+}
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //                                     TESTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#[test]
-fn test_NR_set_equation_sysytem() {
-    let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+///
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    #[test]
+    fn test_NR_elem_example_simple() {
+        let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
 
-    let initial_guess = vec![1.0, 1.0];
-    let mut NR_instanse = NR::new();
-    let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
-    let values = vec!["x".to_string(), "y".to_string()];
-    NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
-    NR_instanse.eq_generate();
-    NR_instanse.main_loop();
-    let solution = NR_instanse.get_result().unwrap();
-   assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
-}
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            100,
+        );
+        NR_instanse.eq_generate();
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_eq!(solution, DVector::from(vec![-1.0, 3.0]));
+    }
 
-#[test]
-fn test_NR_eq_generate_from_str() {
-    let mut NR_instanse = NR::new();
-    let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
-    let initial_guess = vec![1.0, 1.0];
-    // solve
-    NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
-    NR_instanse.main_loop();
-    let solution = NR_instanse.get_result().unwrap();
-    assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
-}
+    #[test]
+    fn  test_NR_elem_example_simple_str() {
+        let mut NR_instanse = NR::new();
+        let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
+        let initial_guess = vec![1.0, 1.0];
+        // solve
+        NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+        NR_instanse.main_loop();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_eq!(solution, DVector::from(vec![-1.0, 3.0]));
+    }
+    #[test]
+    fn various_nonlinear_equations_simple() {
+        use std::f64;
+        // 1) x+y-100 =0, 1/x - 1/y  - 1/200=0
+        let mut NR_instanse = NR::new();
+        let vec_of_expressions = vec!["x+y-100", "1/x - 1/y  - 1/200"];
+        let initial_guess = vec![1.0, 1.0];
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            100,
+        );
+        NR_instanse.eq_generate();
+        NR_instanse.main_loop();
+        let solution = NR_instanse.get_result().unwrap();
+        let x = -50.0 * (f64::sqrt(17.0) - 5.0);
+        let y = 50.0 * (f64::sqrt(17.0) - 3.0);
+        assert_relative_eq!(solution[0], y, epsilon = 1e-3);
+        assert_relative_eq!(solution[1], x, epsilon = 1e-3);
+        // 2)
+    }
+    fn elemntary_example_test(method:Method, Bounds: Option<HashMap<String, (f64, f64)>>) {
+                let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
 
-#[test]
-fn test_NR_set_equation_sysytem_with_features() {
-    let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            20,
+        );
+        NR_instanse.set_solver_params(
+            Some("info".to_string()),
+             None, 
+             None, 
+             Bounds, 
+             Some(method), 
+             None);
+        NR_instanse.eq_generate();
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        println!("solution: {:?}", solution);
 
-    let initial_guess = vec![1.0, 1.0];
-    let mut NR_instanse = NR::new();
-    let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
-    let values = vec!["x".to_string(), "y".to_string()];
-    NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 100);
-    NR_instanse.set_solver_params(Some("info".to_string()), None, None);
-    NR_instanse.eq_generate();
-    NR_instanse.solve();
-    let solution = NR_instanse.get_result().unwrap();
-    println!("solution: {:?}", solution);
+          assert_relative_eq!(solution, DVector::from(vec![-1.0, 3.0]), epsilon = 1e-3);
+    }
+    #[test]
+    fn test_NR_elementary_example_simple2() {
+        elemntary_example_test(Method::simple, None);
+    }
+    #[test]
+    fn test_chem_equlibrium_simple_scaled() {
+        // equations
+        let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
+        let dG0 = Expr::Const(-450.0e3);
+        let dG1 = Expr::Const(-150.0e3);
+        let dG2 = Expr::Const(-50e3);
+        // scaling constants for each equation
+        let dGm0 = Expr::Const(8.314 * 450e5);
+        let dGm1 = Expr::Const(8.314 * 150e5);
+        let dGm2 = Expr::Const(8.314 * 50e5);
+        let N0 = symbolic[0].clone();
+        let N1 = symbolic[1].clone();
+        let N2 = symbolic[2].clone();
+        let Np = symbolic[3].clone();
+        let Lambda0 = symbolic[4].clone();
+        let Lambda1 = symbolic[5].clone();
 
-    assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
+        let RT = Expr::Const(8.314) * Expr::Const(273.15);
+        let eq_mu = vec![
+            Lambda0.clone()
+                + Expr::Const(2.0) * Lambda1.clone()
+                + (dG0.clone() + RT.clone() * Expr::ln(N0.clone() / Np.clone())) / dGm0.clone(),
+            Lambda0
+                + Lambda1.clone()
+                + (dG1 + RT.clone() * Expr::ln(N1.clone() / Np.clone())) / dGm1.clone(),
+            Expr::Const(2.0) * Lambda1
+                + (dG2 + RT * Expr::ln(N2.clone() / Np.clone())) / dGm2.clone(),
+        ];
+        let eq_sum_mole_numbers = vec![N0.clone() + N1.clone() + N2.clone() - Np.clone()];
+        let composition_eq = vec![
+            N0.clone() + N1.clone() - Expr::Const(0.999),
+            Expr::Const(2.0) * N0.clone() + N1.clone() + Expr::Const(2.0) * N2 - Expr::Const(1.501),
+        ];
+
+        let mut full_system_sym = Vec::new();
+        full_system_sym.extend(eq_mu.clone());
+        full_system_sym.extend(eq_sum_mole_numbers.clone());
+        full_system_sym.extend(composition_eq.clone());
+
+        for eq in &full_system_sym {
+            println!("eq: {}", eq);
+        }
+        // solver
+        let initial_guess = vec![0.5, 0.5, 0.5, 1.0, 2.0, 2.0];
+        let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
+        let mut solver = NR::new();
+        solver.set_equation_system(
+            full_system_sym.clone(),
+            Some(unknowns.clone()),
+            initial_guess,
+            1e-2,
+            1000,
+        );
+        solver.set_solver_params(
+            Some("info".to_string()),
+            None,
+            Some(0.009),
+            None,
+            None,
+            None,
+        );
+        solver.eq_generate();
+        solver.solve();
+        let solution = solver.get_result().expect("Failed to get result");
+        let solution: Vec<f64> = solution.data.into();
+        let map_of_solutions: HashMap<String, f64> = unknowns
+            .iter()
+            .zip(solution.iter())
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+
+        let map_of_solutions = map_of_solutions;
+        let N0 = map_of_solutions.get("N0").unwrap();
+        let N1 = map_of_solutions.get("N1").unwrap();
+        let N2 = map_of_solutions.get("N2").unwrap();
+        let Np = map_of_solutions.get("Np").unwrap();
+        let _Lambda0 = map_of_solutions.get("Lambda0").unwrap();
+        let _Lambda1 = map_of_solutions.get("Lambda1").unwrap();
+        let d1 = *N0 + *N1 - 0.999;
+        let d2 = N0 + N1 + N2 - Np;
+        let d3 = 2.0 * N0 + N1 + 2.0 * N2 - 1.501;
+        println!("d1: {}", d1);
+        println!("d2: {}", d2);
+        println!("d3: {}", d3);
+        println!("map_of_solutions: {:?}", map_of_solutions);
+        assert!(d1.abs() < 1e-3);
+        assert!(d2.abs() < 1e-2);
+        assert!(d3.abs() < 1e-2);
+    }
+    #[test]
+    fn test_NR_elementary_example_with_bounds() {
+
+        let Bounds = HashMap::from([
+            ("x".to_string(), (-10.0, 10.0)),
+            ("y".to_string(), (-10.0, 10.0)),
+        ]);
+        elemntary_example_test(Method::clipping, Some(Bounds));
+      
+    }
+
+    fn full_system_sym() -> Vec<Expr> {
+        let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
+        let dG0 = Expr::Const(-450.0e3);
+        let dG1 = Expr::Const(-150.0e3);
+        let dG2 = Expr::Const(-50e3);
+        let dGm0 = Expr::Const(8.314 * 450e7);
+
+        let N0 = symbolic[0].clone();
+        let N1 = symbolic[1].clone();
+        let N2 = symbolic[2].clone();
+        let Np = symbolic[3].clone();
+        let Lambda0 = symbolic[4].clone();
+        let Lambda1 = symbolic[5].clone();
+
+        let RT = Expr::Const(8.314) * Expr::Const(273.15);
+        let eq_mu = vec![
+            Lambda0.clone()
+                + Expr::Const(2.0) * Lambda1.clone()
+                + (dG0.clone() + RT.clone() * Expr::ln(N0.clone() / Np.clone())) / dGm0.clone(),
+            Lambda0
+                + Lambda1.clone()
+                + (dG1 + RT.clone() * Expr::ln(N1.clone() / Np.clone())) / dGm0.clone(),
+            Expr::Const(2.0) * Lambda1
+                + (dG2 + RT * Expr::ln(N2.clone() / Np.clone())) / dGm0.clone(),
+        ];
+        let eq_sum_mole_numbers = vec![N0.clone() + N1.clone() + N2.clone() - Np.clone()];
+        let composition_eq = vec![
+            N0.clone() + N1.clone() - Expr::Const(0.999),
+            Expr::Const(2.0) * N0.clone() + N1.clone() + Expr::Const(2.0) * N2 - Expr::Const(1.501),
+        ];
+
+        let mut full_system_sym = Vec::new();
+        full_system_sym.extend(eq_mu.clone());
+        full_system_sym.extend(eq_sum_mole_numbers.clone());
+        full_system_sym.extend(composition_eq.clone());
+        full_system_sym
+    }
+
+        fn test_solver_with_certain_method(method:Method, parameters: Option<HashMap<String, f64>>) {
+        // equations
+        let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
+        let Boubds = HashMap::from([
+            ("N0".to_string(), (1e-10, 1.0)),
+            ("N1".to_string(), (1e-10, 1.0)),
+            ("N2".to_string(), (1e-10, 1.0)),
+            ("Np".to_string(), (1e-10, 10.0)),
+            ("Lambda0".to_string(), (-1000.0, 1000.0)),
+            ("Lambda1".to_string(), (-1000.0, 1000.0)),
+        ]);
+
+        let full_system_sym = full_system_sym();
+        for eq in &full_system_sym {
+            println!("eq: {}", eq);
+        }
+        // solver
+        let initial_guess = vec![0.9, 0.9, 0.9, 1.0, 100.0, 100.0];
+        let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
+        let mut solver = NR::new();
+        solver.set_equation_system(
+            full_system_sym.clone(),
+            Some(unknowns.clone()),
+            initial_guess,
+            1e-2,
+            10,
+        );
+        solver.set_solver_params(
+            Some("info".to_string()),
+            None,
+            None,
+            Some(Boubds),
+            Some(method),
+            parameters,
+        );
+        solver.eq_generate();
+
+        solver.solve();
+        let solution = solver.get_result().expect("Failed to get result");
+        let solution: Vec<f64> = solution.data.into();
+        let map_of_solutions: HashMap<String, f64> = unknowns
+            .iter()
+            .zip(solution.iter())
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+
+        let map_of_solutions = map_of_solutions;
+        let N0 = map_of_solutions.get("N0").unwrap();
+        let N1 = map_of_solutions.get("N1").unwrap();
+        let N2 = map_of_solutions.get("N2").unwrap();
+        let Np = map_of_solutions.get("Np").unwrap();
+        let _Lambda0 = map_of_solutions.get("Lambda0").unwrap();
+        let _Lambda1 = map_of_solutions.get("Lambda1").unwrap();
+        let d1 = *N0 + *N1 - 0.999;
+        let d2 = N0 + N1 + N2 - Np;
+        let d3 = 2.0 * N0 + N1 + 2.0 * N2 - 1.501;
+        println!("d1: {}", d1); 
+        println!("d2: {}", d2);
+        println!("d3: {}", d3);
+        println!("map_of_solutions: {:?}", map_of_solutions);
+        assert!(d1.abs() < 1e-3);
+        assert!(d2.abs() < 1e-2);
+        assert!(d3.abs() < 1e-2);
+    }
+    #[test]
+
+    fn test_solver_with_clipping_method() {
+      test_solver_with_certain_method(Method::clipping, None);
+    }
+    
+    
+     #[test]
+    fn test_solver_with_trust_region_method() {
+    
+        let Bounds = HashMap::from([
+            ("x".to_string(), (-10.0, 10.0)),
+            ("y".to_string(), (-10.0, 10.0)),
+        ]);
+        elemntary_example_test(Method::trust_region, Some(Bounds));
+    //  test_solver_with_certain_method(Method::trust_region, None);
+    }
 }

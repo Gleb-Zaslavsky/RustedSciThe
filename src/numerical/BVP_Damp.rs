@@ -5,7 +5,7 @@ pub mod BVP_traits;
 /// utilities for BVP solver in general
 pub mod BVP_utils;
 /// utilities for BVP solver NR_Damp_solver_damped;
-mod BVP_utils_damped;
+pub mod BVP_utils_damped;
 /// main module for damped modified Newton-Raphson solver with analytic Jacobian
 pub mod NR_Damp_solver_damped;
 /// main module for frozen Newton-Raphson solver with analytic Jacobian

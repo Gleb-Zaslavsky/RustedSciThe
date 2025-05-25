@@ -182,6 +182,7 @@ fn main() {
             );
         }
         5 => {
+            use crate::numerical::NR::Method;
             //use the shortest way to solve system of equations
             // first define system of equations and initial guess
             let mut NR_instanse = NR::new();
@@ -209,6 +210,131 @@ fn main() {
             NR_instanse.eq_generate();
             NR_instanse.solve();
             println!("result = {:?} \n", NR_instanse.get_result().unwrap());
+
+            // equations with bounds
+            let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+
+            let initial_guess = vec![1.0, 1.0];
+            let mut NR_instanse = NR::new();
+            let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+            let values = vec!["x".to_string(), "y".to_string()];
+            NR_instanse.set_equation_system(
+                vec_of_expr,
+                Some(values.clone()),
+                initial_guess,
+                1e-6,
+                100,
+            );
+            let Bounds = HashMap::from([
+                ("x".to_string(), (0.0, 10.0)),
+                ("y".to_string(), (0.0, 10.0)),
+            ]);
+            NR_instanse.set_solver_params(
+                Some("info".to_string()),
+                None,
+                None,
+                Some(Bounds),
+                None,
+                None,
+            );
+            NR_instanse.eq_generate();
+            NR_instanse.main_loop();
+            let solution = NR_instanse.get_result().unwrap();
+            println!("solution = {:?} \n", solution);
+
+            // equations
+            let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
+            let Boubds = HashMap::from([
+                ("N0".to_string(), (0.0, 1.0)),
+                ("N1".to_string(), (0.0, 1.0)),
+                ("N2".to_string(), (0.0, 1.0)),
+                ("Np".to_string(), (0.0, 10.0)),
+                ("Lambda0".to_string(), (-100.0, 100.0)),
+                ("Lambda1".to_string(), (-100.0, 100.0)),
+            ]);
+            let dG0 = Expr::Const(-450.0e3);
+            let dG1 = Expr::Const(-150.0e3);
+            let dG2 = Expr::Const(-50e3);
+            let dGm0 = Expr::Const(8.314 * 450e5);
+            let dGm1 = Expr::Const(8.314 * 150e5);
+            let dGm2 = Expr::Const(8.314 * 50e5);
+            let N0 = symbolic[0].clone();
+            let N1 = symbolic[1].clone();
+            let N2 = symbolic[2].clone();
+            let Np = symbolic[3].clone();
+            let Lambda0 = symbolic[4].clone();
+            let Lambda1 = symbolic[5].clone();
+
+            let RT = Expr::Const(8.314) * Expr::Const(273.15);
+            let eq_mu = vec![
+                Lambda0.clone()
+                    + Expr::Const(2.0) * Lambda1.clone()
+                    + (dG0.clone() + RT.clone() * Expr::ln(N0.clone() / Np.clone())) / dGm0.clone(),
+                Lambda0
+                    + Lambda1.clone()
+                    + (dG1 + RT.clone() * Expr::ln(N1.clone() / Np.clone())) / dGm1.clone(),
+                Expr::Const(2.0) * Lambda1
+                    + (dG2 + RT * Expr::ln(N2.clone() / Np.clone())) / dGm2.clone(),
+            ];
+            let eq_sum_mole_numbers = vec![N0.clone() + N1.clone() + N2.clone() - Np.clone()];
+            let composition_eq = vec![
+                N0.clone() + N1.clone() - Expr::Const(0.999),
+                Expr::Const(2.0) * N0.clone() + N1.clone() + Expr::Const(2.0) * N2
+                    - Expr::Const(1.501),
+            ];
+
+            let mut full_system_sym = Vec::new();
+            full_system_sym.extend(eq_mu.clone());
+            full_system_sym.extend(eq_sum_mole_numbers.clone());
+            full_system_sym.extend(composition_eq.clone());
+
+            for eq in &full_system_sym {
+                println!("eq: {}", eq);
+            }
+            // solver
+            let initial_guess = vec![0.5, 0.5, 0.5, 1.0, 2.0, 2.0];
+            let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
+            let mut solver = NR::new();
+            solver.set_equation_system(
+                full_system_sym.clone(),
+                Some(unknowns.clone()),
+                initial_guess,
+                1e-4,
+                100,
+            );
+            solver.set_solver_params(Some("info".to_string()), 
+            None, 
+            Some(0.5), Some(Boubds), 
+            Some(Method::clipping), 
+            None);
+            solver.eq_generate();
+
+            solver.solve();
+            let solution = solver.get_result().expect("Failed to get result");
+            let solution: Vec<f64> = solution.data.into();
+            let map_of_solutions: HashMap<String, f64> = unknowns
+                .iter()
+                .zip(solution.iter())
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect();
+
+            let map_of_solutions = map_of_solutions;
+            let N0 = map_of_solutions.get("N0").unwrap();
+            let N1 = map_of_solutions.get("N1").unwrap();
+            let N2 = map_of_solutions.get("N2").unwrap();
+            let Np = map_of_solutions.get("Np").unwrap();
+            let _Lambda0 = map_of_solutions.get("Lambda0").unwrap();
+            let _Lambda1 = map_of_solutions.get("Lambda1").unwrap();
+            let d1 = *N0 + *N1 - 0.999;
+            let d2 = N0 + N1 + N2 - Np;
+            let d3 = 2.0 * N0 + N1 + 2.0 * N2 - 1.501;
+            println!("d1: {}", d1);
+            println!("d2: {}", d2);
+            println!("d3: {}", d3);
+            println!("map_of_solutions: {:?}", map_of_solutions);
+            assert!(d1.abs() < 1e-3);
+            assert!(d2.abs() < 1e-2);
+            assert!(d3.abs() < 1e-2);
         }
         6 => {
             // INDEXED VARIABLES

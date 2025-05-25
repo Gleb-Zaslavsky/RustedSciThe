@@ -8,3 +8,5 @@ pub mod Lx_eq_b;
 pub mod some_matrix_inv;
 
 pub mod RustedLINPACK;
+
+pub mod linear_sys_diagnostics;
