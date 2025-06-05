@@ -1,5 +1,5 @@
 use log::warn;
-use nalgebra::{DMatrix, DVector, LU, SVD, stack};
+use nalgebra::{DMatrix, DVector, stack};
 /// In mathematics, the Rouché–Capelli theorem is a fundamental result in linear algebra. It gives a necessary and sufficient condition for a system of
 /// linear equations to have a solution. The theorem is a consequence of the rank theorem. Statement
 /// The Rouché–Capelli theorem states that a system of linear equations Ax = b has a solution if and only if the rank of A is equal to the rank of [A b].

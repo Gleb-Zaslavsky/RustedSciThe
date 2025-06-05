@@ -302,11 +302,14 @@ fn main() {
                 1e-4,
                 100,
             );
-            solver.set_solver_params(Some("info".to_string()), 
-            None, 
-            Some(0.5), Some(Boubds), 
-            Some(Method::clipping), 
-            None);
+            solver.set_solver_params(
+                Some("info".to_string()),
+                None,
+                Some(0.5),
+                Some(Boubds),
+                Some(Method::damped),
+                None,
+            );
             solver.eq_generate();
 
             solver.solve();

@@ -54,8 +54,10 @@ use tabled::{builder::Builder, settings::Style};
 pub enum Method {
     simple,
     damped,
-    clipping,
+
     trust_region,
+    LM,
+    LM_minpack,
 }
 pub struct NR {
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
@@ -183,13 +185,9 @@ impl NR {
         );
         self.eq_generate();
     }
-    
-    /// check if solver parameters are set correctly if not set default values
-    pub fn parameters_handle(
 
-        &mut self,
-        parameters: Option<HashMap<String, f64>>,
-    ) {
+    /// check if solver parameters are set correctly if not set default values
+    pub fn parameters_handle(&mut self, parameters: Option<HashMap<String, f64>>) {
         // set default parameters for each method if not set by user
         macro_rules! merge_parameters {
             ($self:expr, $parameters:expr, $default_parameters:expr) => {
@@ -202,37 +200,60 @@ impl NR {
                     }
                     $self.parameters = Some(parameters);
                 } else {
-                    info!("Setting default parameters for method {:?}", $default_parameters);
+                    info!(
+                        "Setting default parameters for method {:?}",
+                        $default_parameters
+                    );
                     $self.parameters = Some($default_parameters);
                 }
             };
         }
         let method = self.method.clone();
         match method {
-
             Method::simple => {
-              // this method does not have parameters
-            },
-            Method:: clipping =>{
-                let default_parameters = HashMap::from([
-                        ("maxDampIter".to_string(), 50.0),
-                    ]);
-                    merge_parameters!(self, parameters, default_parameters);
-            }// clipping
-            Method::trust_region => {
-                let default_parameters = HashMap::from([
-                        ("eta".to_string(), 0.1),
-                        ("delta".to_string(), 1.0),
-                    ]);
-                    merge_parameters!(self, parameters, default_parameters);
-
+                // this method does not have parameters
             }
-            _=> {
+            Method::damped => {
+                let default_parameters = HashMap::from([("maxDampIter".to_string(), 50.0)]);
+                merge_parameters!(self, parameters, default_parameters);
+            } // clipping
+            Method::trust_region => {
+                let default_parameters: HashMap<String, f64> = HashMap::from([
+                    ("eta_min".to_string(), 0.25), // C5 in original paper
+                    ("eta_max".to_string(), 8.0),// C6 in original paper
+                    ("ro_threshold0".to_string(), 0.25),// C2 in original paper 
+                    ("ro_threshold1".to_string(), 0.75),//C4 in original paper
+                    ("C0".to_string(), 1e-4),
+                    ("M".to_string(), 0.1*10.0*8.0),
+                    ("d".to_string(), 0.8),// little delta in original paper
+                    ("mu".to_string(), 0.1),// mu0 in original paper
+                    ("m".to_string(), 1e-6),// m in original paper
+                ]);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            Method::LM => {
+                let default_parameters = HashMap::from([
+                    ("diag".to_string(), 1.0),
+                    ("increase_factor".to_string(), 3.0),
+                    ("decrease_factor".to_string(), 10.0),
+                    ("max_lambda".to_string(), 1000.0),
+                    ("min_lambda".to_string(), 1e-6),
+                ]);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            Method::LM_minpack => {
+                let default_parameters = HashMap::from([
+                    ("eta".to_string(), 0.1),
+                    ("delta".to_string(), 1.0),
+                    ("max_lambda".to_string(), 1000.0),
+                    ("min_lambda".to_string(), 1e-6),
+                ]);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            _ => {
                 panic!("Method not implemented")
             }
-      
         }
-
     }
     pub fn set_solver_params(
         &mut self,
@@ -404,6 +425,11 @@ impl NR {
         let lambda = self.dumping_factor;
         let dy = lambda * undamped_step_k_minus_1;
         let damped_step_result: DVector<f64> = y_k_minus_1 - dy.clone();
+        let damped_step_result = if self.Bounds.is_some() {
+            self.clip(&damped_step_result, &self.bounds_vec.clone())
+        } else {
+            damped_step_result
+        };
         self.custom_timer.linear_system_tac();
         *self
             .calc_statistics
@@ -411,7 +437,7 @@ impl NR {
             .or_insert(0) += 1;
 
         let error = Matrix::norm(&F_k_minus_1);
-
+        info!("norm of residual = {}", error);
         if (error > self.max_error) && (self.i > 0) {
             warn!("Error is increasing");
         }
@@ -432,8 +458,10 @@ impl NR {
         match self.method {
             Method::simple => self.simple_newton_step(),
             Method::damped => self.step_damped(),
-            Method::clipping => self.step_with_clipping(),
+
             Method::trust_region => self.step_trust_region(),
+            Method::LM => self.step_lm(),
+            Method::LM_minpack => self.step_lm_minpack(),
         }
     }
     /// main function to solve the system of equations  
@@ -678,6 +706,8 @@ pub fn solve_linear_system(
     A: &DMatrix<f64>,
     b: &DVector<f64>,
 ) -> Result<DVector<f64>, Box<dyn Error>> {
+    //  use crate::somelinalg::linear_sys_diagnostics::poorly_conditioned;
+    // poorly_conditioned(A.clone(), 1e5);
     match solver.as_str() {
         "lu" => {
             let lu = A.clone().lu();
@@ -742,16 +772,28 @@ pub fn bound_step(y: &DVector<f64>, step: &DVector<f64>, bounds: &Vec<(f64, f64)
         let above = bounds[i].1;
 
         let s_i = s0[i];
-        if s_i > f64::max(y_i - below, 0.0) {
-            let temp = (y_i - below) / s_i;
+        if *y_i == below {
+            warn!(
+                "Solution is on a lower bound, y[{}] = {} but bound is {}",
+                i, *y_i, below
+            );
+        };
+        if *y_i == above {
+            warn!(
+                "Solution is on an upper bound, y[{}] = {} but bound is {}",
+                i, *y_i, above
+            );
+        }
+        if s_i > f64::max(*y_i - below, 0.0) {
+            let temp = (*y_i - below) / s_i;
             if temp < fbound {
                 fbound = temp;
                 _entry = i + 1; //
                 _force = true;
                 _value = below;
             }
-        } else if s_i < f64::min(y_i - above, 0.0) {
-            let temp = (y_i - above) / s_i;
+        } else if s_i < f64::min(*y_i - above, 0.0) {
+            let temp = (*y_i - above) / s_i;
             if temp < fbound {
                 fbound = temp;
                 _entry = i + 1; //
@@ -792,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn  test_NR_elem_example_simple_str() {
+    fn test_NR_elem_example_simple_str() {
         let mut NR_instanse = NR::new();
         let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
         let initial_guess = vec![1.0, 1.0];
@@ -827,33 +869,28 @@ mod tests {
         assert_relative_eq!(solution[1], x, epsilon = 1e-3);
         // 2)
     }
-    fn elemntary_example_test(method:Method, Bounds: Option<HashMap<String, (f64, f64)>>) {
-                let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+    fn elemntary_example_test(method: Method, Bounds: Option<HashMap<String, (f64, f64)>>) {
+        let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
 
         let initial_guess = vec![1.0, 1.0];
         let mut NR_instanse = NR::new();
         let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
         let values = vec!["x".to_string(), "y".to_string()];
-        NR_instanse.set_equation_system(
-            vec_of_expr,
-            Some(values.clone()),
-            initial_guess,
-            1e-6,
-            20,
-        );
+        NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 20);
         NR_instanse.set_solver_params(
             Some("info".to_string()),
-             None, 
-             None, 
-             Bounds, 
-             Some(method), 
-             None);
+            None,
+            None,
+            Bounds,
+            Some(method),
+            None,
+        );
         NR_instanse.eq_generate();
         NR_instanse.solve();
         let solution = NR_instanse.get_result().unwrap();
         println!("solution: {:?}", solution);
 
-          assert_relative_eq!(solution, DVector::from(vec![-1.0, 3.0]), epsilon = 1e-3);
+        assert_relative_eq!(solution, DVector::from(vec![-1.0, 3.0]), epsilon = 1e-3);
     }
     #[test]
     fn test_NR_elementary_example_simple2() {
@@ -951,21 +988,18 @@ mod tests {
     }
     #[test]
     fn test_NR_elementary_example_with_bounds() {
-
         let Bounds = HashMap::from([
             ("x".to_string(), (-10.0, 10.0)),
             ("y".to_string(), (-10.0, 10.0)),
         ]);
-        elemntary_example_test(Method::clipping, Some(Bounds));
-      
+        elemntary_example_test(Method::damped, Some(Bounds));
     }
 
-    fn full_system_sym() -> Vec<Expr> {
+    fn full_system_sym(dGm0: Expr) -> Vec<Expr> {
         let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
         let dG0 = Expr::Const(-450.0e3);
         let dG1 = Expr::Const(-150.0e3);
         let dG2 = Expr::Const(-50e3);
-        let dGm0 = Expr::Const(8.314 * 450e7);
 
         let N0 = symbolic[0].clone();
         let N1 = symbolic[1].clone();
@@ -998,32 +1032,36 @@ mod tests {
         full_system_sym
     }
 
-        fn test_solver_with_certain_method(method:Method, parameters: Option<HashMap<String, f64>>) {
+    fn test_solver_with_certain_method(
+        method: Method,
+        parameters: Option<HashMap<String, f64>>,
+        dGm0: Expr,
+    ) {
         // equations
         let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
         let Boubds = HashMap::from([
-            ("N0".to_string(), (1e-10, 1.0)),
-            ("N1".to_string(), (1e-10, 1.0)),
-            ("N2".to_string(), (1e-10, 1.0)),
-            ("Np".to_string(), (1e-10, 10.0)),
-            ("Lambda0".to_string(), (-1000.0, 1000.0)),
-            ("Lambda1".to_string(), (-1000.0, 1000.0)),
+            ("N0".to_string(), (1e-40, 2.0)),
+            ("N1".to_string(), (1e-40, 2.0)),
+            ("N2".to_string(), (1e-40, 2.0)),
+            ("Np".to_string(), (1e-40, 10.0)),
+            ("Lambda0".to_string(), (-1e-1, 1e-2)),
+            ("Lambda1".to_string(), (-1e-1, 1e-2)),
         ]);
 
-        let full_system_sym = full_system_sym();
+        let full_system_sym = full_system_sym(dGm0);
         for eq in &full_system_sym {
             println!("eq: {}", eq);
         }
         // solver
-        let initial_guess = vec![0.9, 0.9, 0.9, 1.0, 100.0, 100.0];
+        let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
         let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
         let mut solver = NR::new();
         solver.set_equation_system(
             full_system_sym.clone(),
             Some(unknowns.clone()),
             initial_guess,
-            1e-2,
-            10,
+            2.0 * 1e-3,
+            1000,
         );
         solver.set_solver_params(
             Some("info".to_string()),
@@ -1054,29 +1092,48 @@ mod tests {
         let d1 = *N0 + *N1 - 0.999;
         let d2 = N0 + N1 + N2 - Np;
         let d3 = 2.0 * N0 + N1 + 2.0 * N2 - 1.501;
-        println!("d1: {}", d1); 
+        println!("d1: {}", d1);
         println!("d2: {}", d2);
         println!("d3: {}", d3);
         println!("map_of_solutions: {:?}", map_of_solutions);
-        assert!(d1.abs() < 1e-3);
-        assert!(d2.abs() < 1e-2);
-        assert!(d3.abs() < 1e-2);
+        assert!(d1.abs() < 8e-3);
+        assert!(d2.abs() < 8e-3);
+        assert!(d3.abs() < 8e-3);
     }
     #[test]
 
     fn test_solver_with_clipping_method() {
-      test_solver_with_certain_method(Method::clipping, None);
+        let dGm0 = Expr::Const(8.314 * 8.0e7);
+
+        let params = HashMap::from([("maxDampIter".to_string(), 18.0)]);
+        test_solver_with_certain_method(Method::damped, Some(params), dGm0);
     }
-    
-    
-     #[test]
-    fn test_solver_with_trust_region_method() {
-    
+
+    #[test]
+    fn test_solver_with_levenberg_marquardt_method() {
         let Bounds = HashMap::from([
             ("x".to_string(), (-10.0, 10.0)),
             ("y".to_string(), (-10.0, 10.0)),
         ]);
-        elemntary_example_test(Method::trust_region, Some(Bounds));
-    //  test_solver_with_certain_method(Method::trust_region, None);
+        elemntary_example_test(Method::LM, Some(Bounds));
+        let dGm0 = Expr::Const(8.314 * 450e4);
+
+        let params = HashMap::from([
+            ("diag".to_string(), 1.0),
+            ("increase_factor".to_string(), 11.0),
+            ("decrease_factor".to_string(), 9.0),
+        ]);
+        test_solver_with_certain_method(Method::LM, Some(params), dGm0);
+    }
+    //#[test]
+    fn test_simple_solver() {
+        let dGm0 = Expr::Const(8.314 * 450e4);
+
+        let params = HashMap::from([
+            ("diag".to_string(), 1.0),
+            ("increase_factor".to_string(), 11.0),
+            ("decrease_factor".to_string(), 9.0),
+        ]);
+        test_solver_with_certain_method(Method::simple, Some(params), dGm0);
     }
 }

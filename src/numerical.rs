@@ -39,6 +39,7 @@ pub mod BDF;
 ///          solver.plot_result();
 ///     ```
 pub mod BE;
+
 ///  Example#1
 /// ```
 ///
@@ -78,11 +79,12 @@ pub mod BE;
 //
 ///  ```
 pub mod NR;
+pub mod NR_LM;
+pub mod NR_LM_minpack;
 pub mod NR_damped;
 pub mod NR_for_Euler;
 pub mod NR_for_ODE;
 pub mod NR_trust_region;
-pub mod NR_with_clipping;
 /// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
 pub mod NonStiff_api;
 /// usage of BDF solver
@@ -224,6 +226,7 @@ pub mod NonStiff_api;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
+pub mod optimization;
 
 pub mod BVP_sci;
 
