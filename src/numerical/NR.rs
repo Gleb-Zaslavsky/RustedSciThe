@@ -1,6 +1,11 @@
 use crate::numerical::BVP_Damp::BVP_utils::checkmem;
 use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
-
+/// A framework for solving system of nonlinear equations using
+/// - Newton-Raphson method;
+/// - damped Newton-Raphson method;
+/// - trust region method;
+/// - Levenberg-Marquardt method;
+///
 ///  Example#1
 /// ```
 ///  use RustedSciThe::numerical::NR::NR;
@@ -40,6 +45,9 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 
+use crate::numerical::LM_utils::{
+    ConvergenceCriteria, ReductionRatio, ScalingMethod, SubproblemMethod, UpdateMethod,
+};
 use log::{error, info, warn};
 use nalgebra::{DMatrix, DVector, Matrix};
 use simplelog::LevelFilter;
@@ -48,7 +56,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::time::Instant;
 use std::vec;
-
 use tabled::{builder::Builder, settings::Style};
 #[derive(Debug, Clone)]
 pub enum Method {
@@ -57,7 +64,7 @@ pub enum Method {
 
     trust_region,
     LM,
-    LM_minpack,
+    LM_Nielsen,
 }
 pub struct NR {
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
@@ -79,11 +86,20 @@ pub struct NR {
     pub y: DVector<f64>,              // current iteration
     pub step: DVector<f64>,           // step
     pub result: Option<DVector<f64>>, // result of the iteration
-
     pub loglevel: Option<String>,
     pub linear_sys_method: Option<String>, // method for solving linear system
     pub custom_timer: CustomTimer,
     pub calc_statistics: HashMap<String, usize>,
+    /// module NR_LM_Nielsen contains the most advanced version of the LM method.
+    /// This code needs many parameters to work properly.
+    pub scales_vec: DVector<f64>,
+    pub scaling_method: Option<ScalingMethod>,
+    pub subproblem_method: Option<SubproblemMethod>,
+    pub reduction_ratio: Option<ReductionRatio>,
+    pub update_method: Option<UpdateMethod>,
+    pub convergence_criteria: Option<ConvergenceCriteria>,
+    pub f_tolerance: Option<f64>,
+    pub g_tolerance: Option<f64>,
 }
 
 impl NR {
@@ -112,6 +128,14 @@ impl NR {
             linear_sys_method: Some("lu".to_string()),
             custom_timer: CustomTimer::new(),
             calc_statistics: HashMap::new(),
+            scales_vec: DVector::zeros(0),
+            scaling_method: None,
+            subproblem_method: None,
+            reduction_ratio: None,
+            update_method: None,
+            convergence_criteria: None,
+            f_tolerance: None,
+            g_tolerance: None,
         }
     }
     ////////////////////////////SETTERS///////////////////////////////////////////////////////////////////
@@ -219,15 +243,15 @@ impl NR {
             } // clipping
             Method::trust_region => {
                 let default_parameters: HashMap<String, f64> = HashMap::from([
-                    ("eta_min".to_string(), 0.25), // C5 in original paper
-                    ("eta_max".to_string(), 8.0),// C6 in original paper
-                    ("ro_threshold0".to_string(), 0.25),// C2 in original paper 
-                    ("ro_threshold1".to_string(), 0.75),//C4 in original paper
+                    ("eta_min".to_string(), 0.25),       // C5 in original paper
+                    ("eta_max".to_string(), 8.0),        // C6 in original paper
+                    ("ro_threshold0".to_string(), 0.25), // C2 in original paper
+                    ("ro_threshold1".to_string(), 0.75), //C4 in original paper
                     ("C0".to_string(), 1e-4),
-                    ("M".to_string(), 0.1*10.0*8.0),
-                    ("d".to_string(), 0.8),// little delta in original paper
-                    ("mu".to_string(), 0.1),// mu0 in original paper
-                    ("m".to_string(), 1e-6),// m in original paper
+                    ("M".to_string(), 0.1 * 10.0 * 8.0),
+                    ("d".to_string(), 0.8),  // little delta in original paper
+                    ("mu".to_string(), 0.1), // mu0 in original paper
+                    ("m".to_string(), 1e-6), // m in original paper
                 ]);
                 merge_parameters!(self, parameters, default_parameters);
             }
@@ -241,13 +265,21 @@ impl NR {
                 ]);
                 merge_parameters!(self, parameters, default_parameters);
             }
-            Method::LM_minpack => {
+            Method::LM_Nielsen => {
                 let default_parameters = HashMap::from([
-                    ("eta".to_string(), 0.1),
-                    ("delta".to_string(), 1.0),
-                    ("max_lambda".to_string(), 1000.0),
-                    ("min_lambda".to_string(), 1e-6),
+                    ("tau".to_string(), 1e-6),
+                    ("nu".to_string(), 2.0),
+                    ("factor_up".to_string(), 3.0),
+                    ("factor_down".to_string(), 2.0),
+                    ("rho_threshold".to_string(), 1e-4),
                 ]);
+                self.scaling_method = Some(ScalingMethod::Marquardt);
+                self.reduction_ratio = Some(ReductionRatio::More);
+                self.update_method = Some(UpdateMethod::Nielsen);
+                self.subproblem_method = Some(SubproblemMethod::Direct);
+                self.convergence_criteria = Some(ConvergenceCriteria::SimpleScaled);
+                self.f_tolerance = Some(1e-3);
+                self.g_tolerance = Some(1e-3);
                 merge_parameters!(self, parameters, default_parameters);
             }
             _ => {
@@ -318,6 +350,103 @@ impl NR {
             None => self.method = Method::simple,
         };
         self.parameters_handle(parameters);
+    }
+    /// module NR_LM_Nielsen contains the most advanced version of the LM method.
+    /// This code needs many parameters to work properly.
+    fn set_additional_params(
+        &mut self,
+        // enum to select the scaling method: Levenberg, Marquardt or More (see LM_utils)
+        scaling_method: Option<ScalingMethod>,
+        // enum to select the reduction ratio: from Nielsen book, or from More paper
+        reduction_ratio: Option<ReductionRatio>,
+
+        update_method: Option<UpdateMethod>,
+        // enum to select the subproblem method: direct or dogleg (see LM_utils)
+        subproblem_method: Option<SubproblemMethod>,
+
+        comvergence_criteria: Option<ConvergenceCriteria>,
+        tau: Option<f64>,
+        nu: Option<f64>,
+        factor_up: Option<f64>,
+        factor_down: Option<f64>,
+        rho_threshold: Option<f64>,
+        f_tolerance: Option<f64>,
+        g_tolerance: Option<f64>,
+    ) {
+        if let Some(scaling_method) = scaling_method {
+            self.scaling_method = Some(scaling_method);
+        }
+        if let Some(reduction_ratio) = reduction_ratio {
+            self.reduction_ratio = Some(reduction_ratio);
+        }
+        if let Some(update_method) = update_method {
+            self.update_method = Some(update_method);
+        }
+        if let Some(subproblem_method) = subproblem_method {
+            self.subproblem_method = Some(subproblem_method);
+        }
+        if let Some(comvergence_criteria) = comvergence_criteria {
+            self.convergence_criteria = Some(comvergence_criteria);
+        }
+
+        if let Some(params) = self.parameters.as_mut() {
+            if let Some(tau) = tau {
+                assert!(tau > 0.0, "tau must be positive");
+                params.insert("tau".to_string(), tau);
+            }
+            if let Some(nu) = nu {
+                assert!(nu > 0.0, "nu must be positive");
+                params.insert("nu".to_string(), nu);
+            }
+            if let Some(factor_up) = factor_up {
+                assert!(factor_up > 0.0, "factor_up must be positive");
+                params.insert("factor_up".to_string(), factor_up);
+            }
+            if let Some(factor_down) = factor_down {
+                assert!(factor_down > 0.0, "factor_down must be positive");
+                params.insert("factor_down".to_string(), factor_down);
+            }
+            if let Some(rho_threshold) = rho_threshold {
+                assert!(rho_threshold > 0.0, "rho_threshold must be positive");
+                params.insert("rho_threshold".to_string(), rho_threshold);
+            }
+            if let Some(f_tolerance) = f_tolerance {
+                assert!(f_tolerance > 0.0, "f_tolerance must be positive");
+                params.insert("f_tolerance".to_string(), f_tolerance);
+            }
+            if let Some(g_tolerance) = g_tolerance {
+                assert!(g_tolerance > 0.0, "g_tolerance must be positive");
+                params.insert("g_tolerance".to_string(), g_tolerance);
+            }
+        }
+    }
+
+    pub fn implement_weights(&mut self) {
+        info!("\n implementing weights!");
+
+        let eq_system = self.eq_system.clone();
+        let args = self.values.clone();
+        let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+        let mut Jacobian_instance_for_scaling = Jacobian::new();
+        Jacobian_instance_for_scaling.set_vector_of_functions(eq_system.clone());
+        Jacobian_instance_for_scaling.lambdify_funcvector(args);
+        let y_data = self.initial_guess.clone();
+        Jacobian_instance_for_scaling.evaluate_funvector_lambdified_DVector(y_data);
+        let weights = Jacobian_instance_for_scaling.evaluated_functions_DVector;
+        let weights = weights.map(|x| if x == 0.0 { 1.0 } else { x.abs() });
+        let weights_abs = weights.map(|x| 1.0 / x.abs());
+        let weights_abs_vec: Vec<f64> = weights_abs.data.into();
+        info!("\n weights_abs_vec: {:#?}", weights_abs_vec);
+        println!("\n weights_abs_vec: {:#?}", weights_abs_vec); // .iter().max_by(|a, b| a.partial_cmp(b).unwrap()) 
+        let weighted_resuduals: Vec<Expr> = eq_system
+            .clone()
+            .iter()
+            .zip(weights_abs_vec)
+            .map(|(eq, weight)| eq.clone() * Expr::Const(weight))
+            .collect();
+        info!("\n weighted_resuduals: {:?}", weighted_resuduals);
+        println!("\n weighted_resuduals: {:?}", weighted_resuduals);
+        //self.eq_system = weighted_resuduals;
     }
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self) {
@@ -461,7 +590,7 @@ impl NR {
 
             Method::trust_region => self.step_trust_region(),
             Method::LM => self.step_lm(),
-            Method::LM_minpack => self.step_lm_minpack(),
+            Method::LM_Nielsen => self.step_trust_region_Nielsen(),
         }
     }
     /// main function to solve the system of equations  
@@ -1036,24 +1165,22 @@ mod tests {
         method: Method,
         parameters: Option<HashMap<String, f64>>,
         dGm0: Expr,
+        Bounds: HashMap<String, (f64, f64)>,
+        enable_weighting: bool,
+        initial_guess: Vec<f64>,
+        scaling_method: Option<ScalingMethod>,
+        subproblem_method: Option<SubproblemMethod>,
+        convergence_criteria: Option<ConvergenceCriteria>,
     ) {
         // equations
         let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
-        let Boubds = HashMap::from([
-            ("N0".to_string(), (1e-40, 2.0)),
-            ("N1".to_string(), (1e-40, 2.0)),
-            ("N2".to_string(), (1e-40, 2.0)),
-            ("Np".to_string(), (1e-40, 10.0)),
-            ("Lambda0".to_string(), (-1e-1, 1e-2)),
-            ("Lambda1".to_string(), (-1e-1, 1e-2)),
-        ]);
 
         let full_system_sym = full_system_sym(dGm0);
         for eq in &full_system_sym {
             println!("eq: {}", eq);
         }
         // solver
-        let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
+
         let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
         let mut solver = NR::new();
         solver.set_equation_system(
@@ -1061,16 +1188,33 @@ mod tests {
             Some(unknowns.clone()),
             initial_guess,
             2.0 * 1e-3,
-            1000,
+            130,
         );
         solver.set_solver_params(
             Some("info".to_string()),
             None,
             None,
-            Some(Boubds),
+            Some(Bounds),
             Some(method),
             parameters,
         );
+        solver.set_additional_params(
+            scaling_method,
+            None,
+            None,
+            subproblem_method,
+            convergence_criteria,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        if enable_weighting {
+            solver.implement_weights();
+        }
         solver.eq_generate();
 
         solver.solve();
@@ -1095,7 +1239,7 @@ mod tests {
         println!("d1: {}", d1);
         println!("d2: {}", d2);
         println!("d3: {}", d3);
-        println!("map_of_solutions: {:?}", map_of_solutions);
+        println!("map_of_solutions: {:? }", map_of_solutions);
         assert!(d1.abs() < 8e-3);
         assert!(d2.abs() < 8e-3);
         assert!(d3.abs() < 8e-3);
@@ -1106,7 +1250,26 @@ mod tests {
         let dGm0 = Expr::Const(8.314 * 8.0e7);
 
         let params = HashMap::from([("maxDampIter".to_string(), 18.0)]);
-        test_solver_with_certain_method(Method::damped, Some(params), dGm0);
+        let Boubds = HashMap::from([
+            ("N0".to_string(), (1e-40, 2.0)),
+            ("N1".to_string(), (1e-40, 2.0)),
+            ("N2".to_string(), (1e-40, 2.0)),
+            ("Np".to_string(), (1e-40, 10.0)),
+            ("Lambda0".to_string(), (-1e-1, 1e-2)),
+            ("Lambda1".to_string(), (-1e-1, 1e-2)),
+        ]);
+        let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
+        test_solver_with_certain_method(
+            Method::damped,
+            Some(params),
+            dGm0,
+            Boubds,
+            false,
+            initial_guess,
+            None,
+            None,
+            None,
+        );
     }
 
     #[test]
@@ -1123,17 +1286,72 @@ mod tests {
             ("increase_factor".to_string(), 11.0),
             ("decrease_factor".to_string(), 9.0),
         ]);
-        test_solver_with_certain_method(Method::LM, Some(params), dGm0);
-    }
-    //#[test]
-    fn test_simple_solver() {
-        let dGm0 = Expr::Const(8.314 * 450e4);
-
-        let params = HashMap::from([
-            ("diag".to_string(), 1.0),
-            ("increase_factor".to_string(), 11.0),
-            ("decrease_factor".to_string(), 9.0),
+        let Boubds = HashMap::from([
+            ("N0".to_string(), (1e-40, 2.0)),
+            ("N1".to_string(), (1e-40, 2.0)),
+            ("N2".to_string(), (1e-40, 2.0)),
+            ("Np".to_string(), (1e-40, 10.0)),
+            ("Lambda0".to_string(), (-1e-1, 1e-2)),
+            ("Lambda1".to_string(), (-1e-1, 1e-2)),
         ]);
-        test_solver_with_certain_method(Method::simple, Some(params), dGm0);
+        let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
+        test_solver_with_certain_method(
+            Method::LM,
+            Some(params),
+            dGm0,
+            Boubds,
+            false,
+            initial_guess,
+            None,
+            None,
+            None,
+        );
+    }
+    #[test]
+    fn test_simple_solver() {
+        let dGm0 = Expr::Const(8.314 * 60e5); //  8.314 * 40e5
+
+        let Boubds = HashMap::from([
+            ("N0".to_string(), (1e-40, 2.0)),
+            ("N1".to_string(), (1e-40, 2.0)),
+            ("N2".to_string(), (1e-40, 2.0)),
+            ("Np".to_string(), (1e-40, 10.0)),
+            ("Lambda0".to_string(), (-10000.0, 1e6)),
+            ("Lambda1".to_string(), (-100000.0, 1e6)),
+        ]);
+        let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
+        test_solver_with_certain_method(
+            Method::LM_Nielsen,
+            None,
+            dGm0,
+            Boubds,
+            false,
+            initial_guess,
+            Some(ScalingMethod::More),
+            None,
+            Some(ConvergenceCriteria::SimpleScaled),
+        );
+    }
+    #[test]
+    fn test_w_residuals() {
+        let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];
+
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(vec_of_expr, Some(values.clone()), initial_guess, 1e-6, 20);
+        NR_instanse.set_solver_params(
+            Some("info".to_string()),
+            None,
+            None,
+            None,
+            Some(Method::simple),
+            None,
+        );
+        NR_instanse.implement_weights();
+        println!("weigted residuals: {:?}", NR_instanse.eq_system);
+        NR_instanse.eq_generate();
+        NR_instanse.solve();
     }
 }

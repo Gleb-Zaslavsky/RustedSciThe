@@ -40,6 +40,7 @@ pub mod BDF;
 ///     ```
 pub mod BE;
 
+pub mod LM_utils;
 ///  Example#1
 /// ```
 ///
@@ -80,6 +81,7 @@ pub mod BE;
 ///  ```
 pub mod NR;
 pub mod NR_LM;
+pub mod NR_LM_Nielsen;
 pub mod NR_LM_minpack;
 pub mod NR_damped;
 pub mod NR_for_Euler;
@@ -226,7 +228,10 @@ pub mod NonStiff_api;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
+pub mod dogleg;
 pub mod optimization;
+pub mod trust_region_LM;
+pub mod trust_region_lmpar;
 
 pub mod BVP_sci;
 

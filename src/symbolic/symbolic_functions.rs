@@ -363,7 +363,19 @@ impl Jacobian {
         }
         self.evaluated_jacobian_DMatrix = DMatrix::from_row_slice(vecfunc_len, var_len, &result);
     }
-
+    // evaluate jacobian to nalgebra DMatrix
+    pub fn evaluate_func_jacobian_DMatrix_unmut(&self, x: Vec<f64>) -> DMatrix<f64> {
+        let mut result: Vec<f64> = Vec::new();
+        let vecfunc_len = self.vector_of_functions.len();
+        let var_len = self.vector_of_variables.len();
+        for i in 0..vecfunc_len {
+            for j in 0..var_len {
+                let ij_res = self.function_jacobian[i][j](x.clone());
+                result.push(ij_res);
+            }
+        }
+        DMatrix::from_row_slice(vecfunc_len, var_len, &result)
+    }
     // when you need to lambdify and evaluate a vector of function in one place
     pub fn lambdify_and_ealuate_funcvector(
         &mut self,
@@ -405,6 +417,18 @@ impl Jacobian {
         }
 
         self.evaluated_functions_DVector = DVector::from_vec(result);
+    }
+
+    pub fn evaluate_funvector_lambdified_DVector_unmut(
+        &self,
+        arg_values: Vec<f64>,
+    ) -> DVector<f64> {
+        let mut result: Vec<f64> = Vec::new();
+        for func in &self.lambdified_functions {
+            result.push(func(arg_values.clone()));
+        }
+
+        DVector::from_vec(result)
     }
 
     //_____________________________________________________________________________

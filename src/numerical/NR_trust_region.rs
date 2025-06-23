@@ -77,73 +77,6 @@ impl NR {
             return (0, Some(y_result));
         }
     }
-    pub fn step_trust_region_(&mut self) -> (i32, Option<DVector<f64>>) {
-        let now = Instant::now();
-        let bounds_vec = self.bounds_vec.clone();
-        let parameters = self.parameters.clone().unwrap();
-        let eta = parameters.get("eta").unwrap();
-        let delta_max = 1e6;
-
-        let mut parameters_mut = self.parameters.clone().unwrap();
-        let delta = parameters_mut.get_mut("delta").unwrap();
-        info!("delta = {}", delta);
-
-        let y = self.y.clone();
-        let Fy = self.evaluate_function(y.clone());
-        let Jy = self.evaluate_jacobian(y.clone());
-        let B = Jy.clone().transpose() * Jy.clone();
-        let H = B.clone().try_inverse().unwrap();
-        let norm = Fy.norm_squared();
-        info!("norm = {}", norm);
-        if norm < self.tolerance {
-            info!("Solution found!");
-            return (1, Some(y));
-        }
-
-        // Obtain pk by (approximately)
-        let p = self.solve_trust_region_subproblem_dogleg(&Jy, &Fy, &B, &H, delta.clone());
-        let mut y_new = y.clone() + &p;
-
-        // Project onto bounds (if they exist)
-        y_new = self.clip(&y_new, &bounds_vec);
-
-        let Fy_new = self.evaluate_function(y_new.clone());
-        let actual_reduction = Fy.norm_squared() - Fy_new.norm_squared();
-        let predicted_reduction = Fy.norm_squared() - (Fy.clone() + Jy * &p).norm_squared();
-        let rho = if predicted_reduction.abs() > 1e-12 {
-            actual_reduction / predicted_reduction
-        } else {
-            0.0
-        };
-        info!("rho is: {}", rho);
-        let elapsed = now.elapsed();
-        elapsed_time(elapsed);
-        // renew trust region
-        if rho <= 0.25 {
-            *delta = 0.25 * p.norm_squared();
-            info!("delta changed to {}", delta);
-            self.parameters = Some(parameters_mut);
-        } else {
-            // Update delta
-            if rho > 0.75 && (p.norm() - *delta).abs() < 1e-6 {
-                *delta = (2.0 * *delta).min(delta_max);
-                info!("delta changed to {}", delta);
-                self.parameters = Some(parameters_mut)
-            } else {
-                info!("delta not changed");
-            }
-        }
-        // Accept step if rho > eta
-        if rho > *eta {
-            info!("rho > eta: {}, y changed", rho > *eta);
-            let y_result = y_new + &p; // Accept step
-            return (0, Some(y_result));
-        } else {
-            info!("rho <= eta: {}, y not changed", rho <= *eta);
-            let y_result = y; // Reject step
-            return (0, Some(y_result));
-        }
-    }
 
     fn solve_trust_region_subproblem_dogleg(
         &self,
@@ -227,7 +160,7 @@ impl NR {
         Jy: &DMatrix<f64>,
         Ft: &DVector<f64>,
         delta: f64,
-        m: f64
+        m: f64,
     ) -> Result<DVector<f64>, String> {
         let B = Jy.clone().transpose() * Jy.clone();
         /*

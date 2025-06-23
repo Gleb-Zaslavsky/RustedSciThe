@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.2.29"
+version = "0.3.0"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing: parse strings into symbolic representation, compute symbolic (analytical) derivatives and jacobians, transform symbolic expressions into regular Rust functions, solve nonlinear algebraic equations and ODE with multiple IVP solvers and BVP with several versions of Newton-Raphson,i/o features, plots also on board"
 author = "Gleb Zasllavsky"
@@ -60,6 +60,7 @@ enum_dispatch = "0.3.13"
 src = "0.0.6"
 nom = "8.0.0"
 tempfile = "3.20.0"
+cfg-if = "1.0.0"
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 
