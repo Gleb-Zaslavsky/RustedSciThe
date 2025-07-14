@@ -73,7 +73,7 @@ ______________________________________________________________________
 |                                             |/optimization/        |
 | for solving non-linear optimization problems|                       |
 | and fitting of curves                       | numerical/optimization/|
-|+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+______________________________________________________________________
 | parse string expression to symbolic         | symbolic/            |
 | expression                                  | parse_expression     |
 |                                             |                      |   
@@ -82,12 +82,12 @@ ______________________________________________________________________
 |                                             |                      |
 | symbolic vectors and matrices               | symbolic/            |
 |                                             | symbolic_vectors     |
-|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+______________________________________________________________________
 | Utils                                       | utils/               |  
 | easy api for plotting                       |                      |
 | parsing tasks from text files,              |                      |    
 |        etc.                                 |                      |
-|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+______________________________________________________________________
 | collection of various                        | somelinalg/           |  
 | linear algebra algorithms                    |                       | 
 | or convinente API for linear algebra         |                       | 
