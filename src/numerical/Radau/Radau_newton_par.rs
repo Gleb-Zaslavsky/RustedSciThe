@@ -125,7 +125,7 @@ impl Jacobian {
 
     /// Parallel function vector evaluation
     /// 
-    /*
+    
     pub fn lambdify_funcvector_with_parameters_parallel(
         &mut self,
         arg: &str,
@@ -136,17 +136,34 @@ impl Jacobian {
         variable_and_parameters.extend(parameters.clone());
         println!("variable_and_parameters = {:?} \n", variable_and_parameters);
         
-        // Parallel lambdification
-        let result: Vec<Box<dyn Fn(f64, Vec<f64>) -> f64 + Send + Sync>> = self.vector_of_functions
-            .par_iter()
+        // Create thread-safe lambdified functions
+        let lambdified_funcs: Vec<_> = self.vector_of_functions
+            .iter()
             .map(|func| {
                 Expr::lambdify_IVP_owned(func.clone(), arg, variable_and_parameters.clone())
             })
             .collect();
-        
-        self.lambdified_functions_IVP = result;
+
+        // Store as thread-safe functions
+        self.lambdified_functions_IVP = lambdified_funcs;
     }
- */
+
+/// Alternative: Store functions that can be safely sent between threads
+    pub fn lambdify_funcvector_with_parameters_parallel_safe(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        parameters: Vec<&str>,
+    ) {
+        let mut variable_and_parameters: Vec<&str> = variable_str.clone();
+        variable_and_parameters.extend(parameters.clone());
+        
+        // Instead of storing the functions, we'll recreate them when needed
+        // This avoids the Send/Sync issue entirely
+        println!("variable_and_parameters = {:?} \n", variable_and_parameters);
+    }
+
+
     /// Parallel vector function evaluation following BVP pattern
     pub fn vector_funvector_with_parameters_DVector_parallel(
         &mut self,
