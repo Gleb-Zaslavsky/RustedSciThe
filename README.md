@@ -40,7 +40,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
  PROJECT NAVIGATION
 |                                           |                        |
 |     solver/feature                        |     folder             |                      
-|___________________________________________|________________________|__
+|-------------------------------------------|----------------------: |
 |- ODE solvers for  stiff                   | numerical              |                        
 |    problems:                              |                        |
 | BDF (Backward Didderentiation Formula)    |numerical/BDF           |                      
