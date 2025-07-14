@@ -41,12 +41,19 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 | Solver / Feature                         | Folder Path                         |
 |------------------------------------------|-------------------------------------|
 | ODE solvers for stiff problems:<br>- BDF (Backward Differentiation Formula)<br>- Radau<br>- Backward Euler method | `numerical/BDF`<br>`numerical/Radau`<br>`numerical/BE` |
-| ODE solvers for non-stiff problems:<br>- RK45 (Runge-Kutta 4th order)<br>- DP (Dormand-Prince) | `numerical/Nonstiff_api`            |
-| Boundary Value Problem (BVP):<br>- Advanced Newton-Raphson with adaptive grid<br>- Simpler NR version for low/mid scale problems | `numerical/BVP_damped/NR_Damp_solver_damped`<br>`numerical/BVP_damped/NR_Damp_solver_frozen` |
+| ODE solvers for non-stiff problems:<br>- RK45 (Runge-Kutta 4th order)<br>- DP (Dormand-Prince) | `numerical/Nonstiff_api` |
+
+| Boundary Value Problem (BVP):<br>- Advanced Newton-Raphson with adaptive grid | `numerical/BVP_damped/NR_Damp_solver_damped` |
+| Simpler NR version for low/mid scale problems | `numerical/BVP_damped/NR_Damp_solver_frozen` |
+
 | Optimization:<br>- Bisection, Secant, Newton-Raphson (1D)<br>- Levenberg-Marquardt for non-linear problems and curve fitting | `numerical/optimization/minimize_scalar`<br>`numerical/optimization` |
+
 | Symbolic Computation:<br>- Parse expressions<br>- Symbolic engine<br>- Symbolic vectors/matrices | `symbolic/parse_expression`<br>`symbolic/symbolic_engine`<br>`symbolic/symbolic_vectors` |
-| Utils:<br>- Plotting<br>- Parsing from text files, etc. | `utils/`                              |
-| Linear Algebra Utilities:<br>- Algorithms<br>- Convenient APIs | `somelinalg/`                         |
+
+| Utils:<br>- Plotting<br>- Parsing from text files, etc. | `utils/` |
+
+| Linear Algebra Utilities:<br>- Algorithms<br>- Convenient APIs | `somelinalg/` |
+
 
 ## project_documentation
 
