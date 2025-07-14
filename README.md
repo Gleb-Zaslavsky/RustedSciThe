@@ -38,62 +38,16 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - curve fitting
 - optimization
  PROJECT NAVIGATION
-|                                           |                        |
-|     solver/feature                        |     folder             |                      
-|-------------------------------------------|----------------------: |
-|- ODE solvers for  stiff                   | numerical              |                        
-|    problems:                              |                        |
-| BDF (Backward Didderentiation Formula)    |numerical/BDF           |                      
-|                                           |                        |             
-| Radau                                     |numerical/Radau         |                          
-|                                           |                        |
-| Backward Euler method                     |numerical/BE            |
-| -  ODE solver for non-stiff problems:     |                        |
-| RK45 (Runge-Kutta 4th order)              |numerical/              |  
-|                                           |Nonstiff_api            |
-| DP (Dormand-Prince)                       |numerical/              |
-|                                           |Nonstiff_api            |
-|-------------------------------------------|----------------------: |
-| Boundary Value Problem (BVP)              |numerical/              | 
-|                                           |  BVP_damped            |
-| advanced modified Newton-Raphson method   |                        | 
-| with adaptive grid                        |numerical/              |   
-|                                           |BVP_damped/             |
-|                                           |NR_Damp_solver_damped   |
-| more easier version of NR                 |numerical/              |
-| for low to middle scale problem           |BVP_damped/             |
-|                                           |NR_Damp_solver_frozen   |
-|-------------------------------------------|-----------------------:|
-| Optimization                              |numerical/optimization/ |
-|                                           |numerical               | 
-|  Bisection, secant, and Newton Raphson    |/optimization/          | 
-| solvers to solve 1d equation              | minimize_scalar        |
-|                                           |                        |      
-| powerful Levenberg-Marquardt algorithm    |numerical               | 
-|                                           |/optimization/          |
-| for solving non-linear optimization       |                        |
-| problems                                  |                        |
-| and fitting of curves                     | numerical              |
-|                                           | /optimization/         |
-|-------------------------------------------|-----------------------:|
-| parse string expression to symbolic       | symbolic/              |
-| expression                                | parse_expression       |
-|                                           |                        |   
-| main functionality for symbolic           | symbolic/              | 
-| calculation                               |  symbolic_engine       |
-|                                           |                        |
-| symbolic vectors and matrices             | symbolic/              |
-|                                           | symbolic_vectors       |
-|-------------------------------------------|-----------------------:|
-| Utils                                     | utils/                 |  
-| easy api for plotting                     |                        |
-| parsing tasks from text files,            |                        |    
-|        etc.                               |                        |
-|-------------------------------------------|-----------------------:|
-| collection of various                     | somelinalg/            |  
-| linear algebra algorithms                 |                        | 
-| or convinente API for linear algebra      |                        | 
-| crates                                    |                        |
+| Solver / Feature                         | Folder Path                         |
+|------------------------------------------|-------------------------------------|
+| ODE solvers for stiff problems:<br>- BDF (Backward Differentiation Formula)<br>- Radau<br>- Backward Euler method | `numerical/BDF`<br>`numerical/Radau`<br>`numerical/BE` |
+| ODE solvers for non-stiff problems:<br>- RK45 (Runge-Kutta 4th order)<br>- DP (Dormand-Prince) | `numerical/Nonstiff_api`            |
+| Boundary Value Problem (BVP):<br>- Advanced Newton-Raphson with adaptive grid<br>- Simpler NR version for low/mid scale problems | `numerical/BVP_damped/NR_Damp_solver_damped`<br>`numerical/BVP_damped/NR_Damp_solver_frozen` |
+| Optimization:<br>- Bisection, Secant, Newton-Raphson (1D)<br>- Levenberg-Marquardt for non-linear problems and curve fitting | `numerical/optimization/minimize_scalar`<br>`numerical/optimization` |
+| Symbolic Computation:<br>- Parse expressions<br>- Symbolic engine<br>- Symbolic vectors/matrices | `symbolic/parse_expression`<br>`symbolic/symbolic_engine`<br>`symbolic/symbolic_vectors` |
+| Utils:<br>- Plotting<br>- Parsing from text files, etc. | `utils/`                              |
+| Linear Algebra Utilities:<br>- Algorithms<br>- Convenient APIs | `somelinalg/`                         |
+
 ## project_documentation
 
 In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.
