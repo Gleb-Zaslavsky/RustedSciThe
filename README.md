@@ -38,15 +38,16 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - curve fitting
 - optimization
  PROJECT NAVIGATION
+
+ ## Project Documentation and Navigation
 |                                           |                        |
 |     solver/feature                        |     folder             |                      
-|-------------------------------------------|----------------------- |
+|:------------------------------------------|-----------------------:|
 |- ODE solvers for  stiff                   | numerical              |                        
 |    problems:                              |                        |
 | BDF (Backward Didderentiation Formula)    |numerical/BDF           |                      
 |                                           |                        |             
 | Radau                                     |numerical/Radau         |                          
-|                                           |                        |
 | Backward Euler method                     |numerical/BE            |
 | -  ODE solver for non-stiff problems:     |                        |
 | RK45 (Runge-Kutta 4th order)              |numerical/              |  
