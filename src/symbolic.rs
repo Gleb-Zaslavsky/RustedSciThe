@@ -157,3 +157,5 @@ pub mod symbolic_traits;
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
+
+pub mod symbolic_vectors;

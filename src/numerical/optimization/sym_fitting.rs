@@ -110,7 +110,7 @@ impl Fitting {
             );
         }
     }
-
+    /// set fitting function as a string
     pub fn fitting_generate_from_str(
         &mut self,
         x_data: Vec<f64>,
@@ -141,7 +141,52 @@ impl Fitting {
             max_iterations,
         );
     }
-
+    /// fit with polynomial of certain degree
+    pub fn poly_fitting(
+        &mut self,
+        x_data: Vec<f64>,
+        y_data: Vec<f64>,
+        degree: usize,
+        arg: String,
+        initial_guess: Vec<f64>,
+        tolerance: Option<f64>,
+        f_tolerance: Option<f64>,
+        g_tolerance: Option<f64>,
+        scale_diag: Option<bool>,
+        max_iterations: Option<usize>,
+    ) {
+        // create polynomial equation
+        let (eq, unknowns) = Expr::polyval(degree, &arg);
+        println!("polynom: {}", eq);
+        self.set_fitting(
+            x_data,
+            y_data,
+            eq,
+            Some(unknowns),
+            arg,
+            initial_guess,
+            tolerance,
+            f_tolerance,
+            g_tolerance,
+            scale_diag,
+            max_iterations,
+        );
+    }
+    pub fn fit_linear(&mut self, x_data: Vec<f64>, y_data: Vec<f64>, guess: (f64, f64)) {
+        self.initial_guess = vec![guess.0, guess.1];
+        self.poly_fitting(
+            x_data.clone(),
+            y_data.clone(),
+            1,
+            "x".to_string(),
+            self.initial_guess.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
     pub fn eq_generate(&mut self) {
         let eq = self.eq.clone();
         let arg = self.arg.clone();
@@ -425,5 +470,90 @@ mod tests {
         assert_relative_eq!(map_of_solutions["a"], 5.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["b"], 2.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["c"], 100.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn polinomial_fitting_test() {
+        let x_data = (0..100).map(|x| x as f64).collect::<Vec<f64>>();
+        let polynomial_function = |x: f64| 5.0 * x * x * x + 2.0 * x * x + 100.0 * x + 1000.0;
+        let y_data = x_data
+            .iter()
+            .map(|&x| polynomial_function(x))
+            .collect::<Vec<f64>>();
+        let initial_guess = vec![1.0, 1.0, 1.0, 1.0];
+
+        let mut sym_fitting = Fitting::new();
+        sym_fitting.poly_fitting(
+            x_data,
+            y_data,
+            3,
+            "x".to_string(),
+            initial_guess,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        sym_fitting.eq_generate();
+        sym_fitting.solve();
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map_of_solutions["c3"], 5.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["c2"], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["c1"], 100.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["c0"], 1000.0, epsilon = 1e-6);
+    }
+    #[test]
+    fn test_linear_fit() {
+        let x_data = (0..100).map(|x| x as f64).collect::<Vec<f64>>();
+        let y_data = x_data.iter().map(|&x| 5.0 * x + 2.0).collect::<Vec<f64>>();
+        let initial_guess = (1.0, 1.0);
+        let mut sym_fitting = Fitting::new();
+        sym_fitting.fit_linear(x_data, y_data, initial_guess);
+        sym_fitting.eq_generate();
+        sym_fitting.solve();
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map_of_solutions["c1"], 5.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["c0"], 2.0, epsilon = 1e-6);
+    }
+    #[test]
+    fn test_noisy_linear_fit() {
+        use rand::Rng;
+        let x_data = (0..1000).map(|x| x as f64).collect::<Vec<f64>>();
+        // to y data add some noise from -0.05 to 0.05
+        let y_data = x_data
+            .iter()
+            .map(|&x| 5.0 * x + 2.0 + rand::rng().random_range(-0.1..0.1))
+            .collect::<Vec<f64>>();
+        println!("noisy y_data: {:?}", y_data);
+        let initial_guess = (1.0, 1.0);
+        let mut sym_fitting = Fitting::new();
+        sym_fitting.fit_linear(x_data, y_data, initial_guess);
+        sym_fitting.eq_generate();
+        sym_fitting.solve();
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map_of_solutions["c1"], 5.0, epsilon = 1e-2);
+        assert_relative_eq!(map_of_solutions["c0"], 2.0, epsilon = 1e-2);
+    }
+
+    #[test]
+    fn test_noisy_linear_experimatal() {
+        let x_data = vec![
+            0.0 + 41.35,
+            1.75 + 41.35,
+            4.85 + 41.35,
+            6.0 + 41.35,
+            11.2 + 41.35,
+        ];
+
+        let y_data = vec![-0.69, -2.24, -5.47, -6.47, -11.86];
+        println!("noisy y_data: {:?}", y_data);
+        let initial_guess = (1.0, 1.0);
+        let mut sym_fitting = Fitting::new();
+        sym_fitting.fit_linear(x_data, y_data, initial_guess);
+        sym_fitting.eq_generate();
+        sym_fitting.solve();
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        println!("{:?}", map_of_solutions);
     }
 }

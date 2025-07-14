@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing: parse strings into symbolic representation, compute symbolic (analytical) derivatives and jacobians, transform symbolic expressions into regular Rust functions, solve nonlinear algebraic equations and ODE with multiple IVP solvers and BVP with several versions of Newton-Raphson,i/o features, plots also on board"
 author = "Gleb Zasllavsky"
@@ -9,7 +9,10 @@ keywords = [ "mathematics", "science", "ODE", "symbolic"]
 repository = "https://github.com/Gleb-Zaslavsky/RustedSciThe"
 
 [profile.release]
-debug = true
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
 
 [[bench]]
 name = "bvp_benches"

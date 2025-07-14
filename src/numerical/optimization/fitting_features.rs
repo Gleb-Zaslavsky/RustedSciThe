@@ -3,6 +3,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashMap;
 /// some special cases of fitting
+/// sew two functions:
 /// There are 2 symbolic functions that need to be sewn together:
 /// 1. f1 is valid for x < x_central
 /// 2. f2 is valid for x > x_central
@@ -137,7 +138,7 @@ mod tests {
     fn test_sew_two_functions() {
         /*
         https://webbook.nist.gov/cgi/cbook.cgi?ID=C124389&Units=SI&Mask=1#Thermo-Gas
-        
+
         CO2 heat capacity (two ranges)
         T, K 298. to 1200.	1200. to 6000
         A    24.99735	58.16639

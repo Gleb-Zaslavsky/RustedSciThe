@@ -322,12 +322,12 @@ fn compute_scaled_norm(step: &DVector<f64>, diag: &DVector<f64>) -> f64 {
 }
 
 /// Compute the 2-norm of a vector (similar to enorm in the original codebase)
-fn enorm(v: &DVector<f64>) -> f64 {
+pub fn enorm(v: &DVector<f64>) -> f64 {
     v.norm()
 }
 
 /// Machine epsilon for f64
-fn epsmch() -> f64 {
+pub fn epsmch() -> f64 {
     f64::EPSILON
 }
 

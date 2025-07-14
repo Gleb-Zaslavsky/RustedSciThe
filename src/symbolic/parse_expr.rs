@@ -532,4 +532,14 @@ mod tests {
         let result = parse_expression_func(0, "(x + y");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_multiple_addition() {
+        let result = parse_expression_func(0, "x^2 - x - 1");
+        let x = Box::new(Expr::Var("x".to_string()));
+        let to_check = Expr::Pow(x.clone(), Box::new(Expr::Const(2.0))) - *x - Expr::Const(1.0);
+        println!("{}", to_check);
+        println!("{}", result.clone().unwrap());
+        assert_eq!(result.unwrap(), to_check);
+    }
 }

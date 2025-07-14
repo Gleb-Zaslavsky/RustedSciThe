@@ -1,8 +1,8 @@
 #![allow(unexpected_cfgs)]
 
+use crate::numerical::optimization::LM_optimization::MINPACK_COMPAT;
 use nalgebra::{Dim, RealField, U1, Vector, convert, storage::Storage};
-use num_traits::float::Float;
-
+use num_traits::float::Float; // MINPACK_COMPAT
 // mod derivest;
 
 cfg_if::cfg_if! {
@@ -24,7 +24,7 @@ cfg_if::cfg_if! {
 #[inline]
 #[allow(clippy::unreadable_literal)]
 pub(crate) fn epsmch<F: RealField>() -> F {
-    if cfg!(feature = "minpack-compat") {
+    if MINPACK_COMPAT {
         convert(2.22044604926e-16f64)
     } else {
         F::default_epsilon()
@@ -34,7 +34,7 @@ pub(crate) fn epsmch<F: RealField>() -> F {
 #[inline]
 #[allow(clippy::unreadable_literal)]
 pub(crate) fn giant<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
+    if MINPACK_COMPAT {
         F::from(1.79769313485e+308f64).unwrap()
     } else {
         F::max_value()
@@ -44,7 +44,7 @@ pub(crate) fn giant<F: Float>() -> F {
 #[inline]
 #[allow(clippy::unreadable_literal)]
 pub(crate) fn dwarf<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
+    if MINPACK_COMPAT {
         F::from(2.22507385852e-308f64).unwrap()
     } else {
         F::min_positive_value()
@@ -63,12 +63,12 @@ where
     let mut s3 = F::zero();
     let mut x1max = F::zero();
     let mut x3max = F::zero();
-    let agiant = if cfg!(feature = "minpack-compat") {
+    let agiant = if MINPACK_COMPAT {
         convert(1.304e19f64)
     } else {
         Float::sqrt(giant::<F>())
     } / convert(v.nrows() as f64);
-    let rdwarf = if cfg!(feature = "minpack-compat") {
+    let rdwarf = if MINPACK_COMPAT {
         convert(3.834e-20f64)
     } else {
         Float::sqrt(dwarf())

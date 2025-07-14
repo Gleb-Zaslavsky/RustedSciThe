@@ -14,7 +14,7 @@ pub struct NRE {
     pub max_iterations: usize,        // max number of iterations
     pub max_error: f64,               // max error
     pub result: Option<DVector<f64>>, // result of the iteration
-
+    pub jacobian: Option<Vec<Vec<Expr>>>,
     pub fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
     pub t: f64,
@@ -62,7 +62,7 @@ impl NRE {
             global_timestepping,
             t_bound,
             result: None,
-
+            jacobian: None,
             fun: Box::new(|_t, y| y.clone()),
             jac: None,
             t: 0.0,
@@ -82,6 +82,7 @@ impl NRE {
             self.values.clone(),
             self.arg.clone(),
         );
+        self.jacobian = Some(jacobian_instance.symbolic_jacobian);
         // println!("Jacobian = {:?}", jacobian_instance.symbolic_jacobian);
         let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             jacobian_instance.lambdified_functions_IVP_DVector;

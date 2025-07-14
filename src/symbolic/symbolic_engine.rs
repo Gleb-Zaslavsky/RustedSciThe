@@ -259,6 +259,55 @@ impl Expr {
             _ => self.clone(),
         }
     }
+    /// substitute a variable with an expression
+    pub fn substitute_variable(&self, var: &str, expr: &Expr) -> Expr {
+        match self {
+            Expr::Var(name) if name == var => expr.clone(),
+            Expr::Add(lhs, rhs) => Expr::Add(
+                Box::new(lhs.substitute_variable(var, expr)),
+                Box::new(rhs.substitute_variable(var, expr)),
+            ),
+            Expr::Sub(lhs, rhs) => Expr::Sub(
+                Box::new(lhs.substitute_variable(var, expr)),
+                Box::new(rhs.substitute_variable(var, expr)),
+            ),
+            Expr::Mul(lhs, rhs) => Expr::Mul(
+                Box::new(lhs.substitute_variable(var, expr)),
+                Box::new(rhs.substitute_variable(var, expr)),
+            ),
+            Expr::Div(lhs, rhs) => Expr::Div(
+                Box::new(lhs.substitute_variable(var, expr)),
+                Box::new(rhs.substitute_variable(var, expr)),
+            ),
+            Expr::Pow(base, exp) => Expr::Pow(
+                Box::new(base.substitute_variable(var, expr)),
+                Box::new(exp.substitute_variable(var, expr)),
+            ),
+            Expr::Exp(expr_old) => Expr::Exp(Box::new(expr_old.substitute_variable(var, expr))),
+            Expr::Ln(expr_old) => Expr::Ln(Box::new(expr_old.substitute_variable(var, expr))),
+            _ => self.clone(),
+        }
+    }
+    /// check if the expression contains a variable
+    pub fn contains_variable(&self, var_name: &str) -> bool {
+        match self {
+            Expr::Var(name) => name == var_name,
+            Expr::Const(_) => false,
+            Expr::Add(left, right)
+            | Expr::Sub(left, right)
+            | Expr::Mul(left, right)
+            | Expr::Div(left, right) => {
+                left.contains_variable(var_name) || right.contains_variable(var_name)
+            }
+            Expr::Pow(base, exp) => {
+                base.contains_variable(var_name) || exp.contains_variable(var_name)
+            }
+            Expr::Exp(expr) => expr.contains_variable(var_name),
+            Expr::Ln(expr) => expr.contains_variable(var_name),
+            _ => false,
+        }
+    }
+
     // just shortcut for box
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
@@ -367,6 +416,19 @@ impl Expr {
             .flat_map(|i| (0..num_cols).map(move |j| Expr::IndexedVar2D(i, j, var_name)))
             .collect()
     }
+    /// creates symbolic polinom
+    pub fn polyval(degree: usize, var_name: &str) -> (Expr, Vec<String>) {
+        let mut eq: Expr = Self::Const(0.0);
+        let mut unknowns = Vec::new();
+        let arg_expr = Self::Var(var_name.to_string());
+        for i in 0..degree + 1 {
+            let coeff = Self::Var(format!("c{}", i));
+            unknowns.push(format!("c{}", i));
+            eq = eq + coeff * (arg_expr.clone().pow(Self::Const(i as f64))).simplify_();
+        }
+        (eq, unknowns)
+    }
+
     //___________________________________SYMPLIFICATE____________________________________
     //  function to symplify the symbolic expression in sych way: if in expression there is a
     // subexpression Mul(Expr::Const(0.0), ...something ) the function turns all subexpression into Expr::Const(0.0)
@@ -974,5 +1036,22 @@ mod tests {
         println!("taylor: {}", taylor);
         let taylor_eval = taylor.lambdify1D()(1.0);
         assert_eq!(taylor_eval, exp_eval);
+    }
+    #[test]
+    fn test_substitute() {
+        let x = Expr::Var("x".to_string());
+        let expr = x.clone() + x.clone().pow(Expr::Const(2.0));
+        let result = expr.substitute_variable("x", &Expr::Const(3.0));
+        assert_eq!(result.symplify(), Expr::Const(12.0));
+    }
+
+    #[test]
+    fn test_substitute2() {
+        let x = Expr::Var("x".to_string());
+        let expr = x.clone() + x.clone().pow(Expr::Const(2.0));
+        let result = expr.substitute_variable("x", &Expr::Var("y".to_string()));
+        let y = Expr::Var("y".to_string());
+        let expected = y.clone() + y.clone().pow(Expr::Const(2.0));
+        assert_eq!(result, expected);
     }
 }

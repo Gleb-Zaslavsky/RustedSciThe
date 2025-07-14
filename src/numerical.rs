@@ -434,3 +434,5 @@ The code mostly inspired by sources listed below:
 pub mod BVP_Damp;
 
 pub mod BVP_api;
+
+pub mod Radau;

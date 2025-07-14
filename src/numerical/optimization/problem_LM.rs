@@ -1,8 +1,11 @@
 use nalgebra::{DMatrix, DVector};
 
 /// A least squares minimization problem.
-///
-/// This is what [`LevenbergMarquardt`](struct.LevenbergMarquardt.html) needs
+/// code from modules \numerical\optimization\problem_LM.rs, LM_optimization.rs, trust_region_LM.rs, utils.rs, qr_LM.rs
+///  is rewrite of Levenberg-Marquardt crate https://crates.io/crates/levenberg-marquardt
+///  We get rid of most of generics because in this crate we need only f64
+/// Thus code is more simple and clear
+/// This is what LevenbergMarquardt needs
 /// to compute the residuals and the Jacobian. See the [module documentation](index.html)
 /// for a usage example.
 pub trait LeastSquaresProblem {

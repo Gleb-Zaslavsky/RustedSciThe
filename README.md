@@ -4,7 +4,7 @@
 is a Rust framework for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations. 
 NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
 
-PROJECT NEWS: new methods for solving for solving non-linear systems of equations, including Newton-Raphson method and Levenberg-Marquardt method.
+PROJECT NEWS: optimization and fitting added!
 
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
@@ -31,9 +31,67 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - Newton-Raphson method with analytical Jacobian
 - Backward Eeuler method with analytical Jacobian
 - Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
+- Radau  method with analytical Jacobian 
 - classical methods for non-stiff equations RK45 and DP
 - Boundary Value Problem for ODE with Newton-Raphson method (several versions available)
-
+- solving systems of non-linear equations 
+- curve fitting
+- optimization
+ PROJECT NAVIGATION
+|________________________________________________________________
+|     solver/feature                      |     folder          |                      
+|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+|- ODE solvers for  stiff                   | numerical       |                        
+|    problems:                              |                 |
+| BDF (Backward Didderentiation Formula)    |numerical/BDF    |                      
+|                                           |                 |             
+| Radau                                     |numerical/Radau  |                          
+|                                           |                 |
+| Backward Euler method                     |numerical/BE     |
+| -  ODE solver for non-stiff problems:     |                 |
+| RK45 (Runge-Kutta 4th order)              |numerical/       |  
+|                                           |Nonstiff_api     |
+| DP (Dormand-Prince)                       |numerical/       |
+|                                           |Nonstiff_api     |
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+| Boundary Value Problem (BVP)              |numerical/           | 
+|                                           |  BVP_damped         |
+| advanced modified Newton-Raphson method   |                     | 
+| with adaptive grid                        |numerical/           |   
+|                                           |BVP_damped/          |
+|                                           |NR_Damp_solver_damped|
+| more easier version of NR                 |numerical/           |
+| for low to middle scale problem           |BVP_damped/          |
+|                                           |NR_Damp_solver_frozen|
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+| Optimization                               |numerical/optimization/|
+|                                            |numerical              | 
+|  Bisection, secant, and Newton Raphson     |/optimization/         | 
+| solvers to solve 1d equation               | minimize_scalar       |
+|                                            |                       |      
+| powerful Levenberg-Marquardt algorithm      |numerical             | 
+|                                             |/optimization/        |
+| for solving non-linear optimization problems|                       |
+| and fitting of curves                       | numerical/optimization/|
+|+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+| parse string expression to symbolic         | symbolic/            |
+| expression                                  | parse_expression     |
+|                                             |                      |   
+| main functionality for symbolic             | symbolic/            | 
+| calculation                                 |  symbolic_engine     |
+|                                             |                      |
+| symbolic vectors and matrices               | symbolic/            |
+|                                             | symbolic_vectors     |
+|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+| Utils                                       | utils/               |  
+| easy api for plotting                       |                      |
+| parsing tasks from text files,              |                      |    
+|        etc.                                 |                      |
+|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+| collection of various                        | somelinalg/           |  
+| linear algebra algorithms                    |                       | 
+| or convinente API for linear algebra         |                       | 
+| crates                                       |                       |
 ## project_documentation
 
 In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.
@@ -206,6 +264,68 @@ println!(" result_of compare = {:?}", comparsion);
     let solution = NR_instanse.get_result().unwrap();
     println!("solution: {:?}", solution);
      
+```
+- curve fitting
+```rust
+// curve fitting with symbolic expression and analytical Jacobian
+use RustedSciThe::numerical::optimization::curve_fitting::Fitting;
+// 
+  let x_data = (0..20).map(|x| x as f64).collect::<Vec<f64>>();
+  // computing y data
+        let exp_function = |x: f64| (1e-1 * x).exp() + 10.0;
+        let y_data = x_data
+            .iter()
+            .map(|&x| exp_function(x))
+            .collect::<Vec<f64>>();
+       // our aim is to find a and b in the following equation
+        let initial_guess = vec![1.0, 1.0];
+        let unknown_coeffs = vec!["a".to_string(), "b".to_string()];
+        let eq = " exp(a*x) + b".to_string();
+        let mut sym_fitting = Fitting::new();
+        sym_fitting.fitting_generate_from_str(
+            x_data,
+            y_data,
+            eq,
+            Some(unknown_coeffs),
+            "x".to_string(),
+            initial_guess,
+            None, // some solver params - see sym_fitting.rs for more details
+            None,
+            None,
+            None,
+            None,
+        );
+        sym_fitting.eq_generate();
+        sym_fitting.solve();
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map_of_solutions["a"], 1e-1, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["b"], 10.0, epsilon = 1e-6);
+
+        //or the laziest way
+                let x_data = (0..100).map(|x| x as f64).collect::<Vec<f64>>();
+        let quadratic_function = |x: f64| 5.0 * x * x + 2.0 * x + 100.0;
+        let y_data = x_data
+            .iter()
+            .map(|&x| quadratic_function(x))
+            .collect::<Vec<f64>>();
+        let initial_guess = vec![1.0, 1.0, 1.0];
+        let unknown_coeffs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let eq = "a * x^2.0 + b * x + c".to_string();
+        let mut sym_fitting = Fitting::new();
+        // easy fitting - no solver params
+        sym_fitting.easy_fitting(
+            x_data,
+            y_data,
+            eq,
+            Some(unknown_coeffs),
+            "x".to_string(),
+            initial_guess,
+        );
+        let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map_of_solutions["a"], 5.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["b"], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(map_of_solutions["c"], 100.0, epsilon = 1e-6);
+
 ```
 - set the system of ordinary differential equations (ODEs), compute the analytical Jacobian ana solve it with BDF method.
 ```rust
