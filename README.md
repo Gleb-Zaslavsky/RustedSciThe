@@ -38,32 +38,32 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - curve fitting
 - optimization
  PROJECT NAVIGATION
-|________________________________________________________________
-|     solver/feature                      |     folder          |                      
-|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-|- ODE solvers for  stiff                   | numerical       |                        
-|    problems:                              |                 |
-| BDF (Backward Didderentiation Formula)    |numerical/BDF    |                      
-|                                           |                 |             
-| Radau                                     |numerical/Radau  |                          
-|                                           |                 |
-| Backward Euler method                     |numerical/BE     |
-| -  ODE solver for non-stiff problems:     |                 |
-| RK45 (Runge-Kutta 4th order)              |numerical/       |  
-|                                           |Nonstiff_api     |
-| DP (Dormand-Prince)                       |numerical/       |
-|                                           |Nonstiff_api     |
-+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-| Boundary Value Problem (BVP)              |numerical/           | 
-|                                           |  BVP_damped         |
-| advanced modified Newton-Raphson method   |                     | 
-| with adaptive grid                        |numerical/           |   
-|                                           |BVP_damped/          |
-|                                           |NR_Damp_solver_damped|
-| more easier version of NR                 |numerical/           |
-| for low to middle scale problem           |BVP_damped/          |
-|                                           |NR_Damp_solver_frozen|
-+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+|____________________________________________________________________
+|     solver/feature                        |     folder             |                      
+|___________________________________________|________________________|__
+|- ODE solvers for  stiff                   | numerical              |                        
+|    problems:                              |                        |
+| BDF (Backward Didderentiation Formula)    |numerical/BDF           |                      
+|                                           |                        |             
+| Radau                                     |numerical/Radau         |                          
+|                                           |                        |
+| Backward Euler method                     |numerical/BE            |
+| -  ODE solver for non-stiff problems:     |                        |
+| RK45 (Runge-Kutta 4th order)              |numerical/              |  
+|                                           |Nonstiff_api            |
+| DP (Dormand-Prince)                       |numerical/              |
+|                                           |Nonstiff_api            |
+______________________________________________________________________
+| Boundary Value Problem (BVP)              |numerical/              | 
+|                                           |  BVP_damped            |
+| advanced modified Newton-Raphson method   |                        | 
+| with adaptive grid                        |numerical/              |   
+|                                           |BVP_damped/             |
+|                                           |NR_Damp_solver_damped   |
+| more easier version of NR                 |numerical/              |
+| for low to middle scale problem           |BVP_damped/             |
+|                                           |NR_Damp_solver_frozen   |
+|___________________________________________|________________________|___
 | Optimization                               |numerical/optimization/|
 |                                            |numerical              | 
 |  Bisection, secant, and Newton Raphson     |/optimization/         | 
