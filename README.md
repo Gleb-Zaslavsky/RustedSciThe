@@ -38,7 +38,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 - curve fitting
 - optimization
  PROJECT NAVIGATION
-|____________________________________________________________________
+|                                           |                        |
 |     solver/feature                        |     folder             |                      
 |___________________________________________|________________________|__
 |- ODE solvers for  stiff                   | numerical              |                        
@@ -53,7 +53,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 |                                           |Nonstiff_api            |
 | DP (Dormand-Prince)                       |numerical/              |
 |                                           |Nonstiff_api            |
-______________________________________________________________________
+|-------------------------------------------|----------------------: |
 | Boundary Value Problem (BVP)              |numerical/              | 
 |                                           |  BVP_damped            |
 | advanced modified Newton-Raphson method   |                        | 
@@ -63,35 +63,37 @@ ______________________________________________________________________
 | more easier version of NR                 |numerical/              |
 | for low to middle scale problem           |BVP_damped/             |
 |                                           |NR_Damp_solver_frozen   |
-|___________________________________________|________________________|___
-| Optimization                               |numerical/optimization/|
-|                                            |numerical              | 
-|  Bisection, secant, and Newton Raphson     |/optimization/         | 
-| solvers to solve 1d equation               | minimize_scalar       |
-|                                            |                       |      
-| powerful Levenberg-Marquardt algorithm      |numerical             | 
-|                                             |/optimization/        |
-| for solving non-linear optimization problems|                       |
-| and fitting of curves                       | numerical/optimization/|
-______________________________________________________________________
-| parse string expression to symbolic         | symbolic/            |
-| expression                                  | parse_expression     |
-|                                             |                      |   
-| main functionality for symbolic             | symbolic/            | 
-| calculation                                 |  symbolic_engine     |
-|                                             |                      |
-| symbolic vectors and matrices               | symbolic/            |
-|                                             | symbolic_vectors     |
-______________________________________________________________________
-| Utils                                       | utils/               |  
-| easy api for plotting                       |                      |
-| parsing tasks from text files,              |                      |    
-|        etc.                                 |                      |
-______________________________________________________________________
-| collection of various                        | somelinalg/           |  
-| linear algebra algorithms                    |                       | 
-| or convinente API for linear algebra         |                       | 
-| crates                                       |                       |
+|-------------------------------------------|-----------------------:|
+| Optimization                              |numerical/optimization/ |
+|                                           |numerical               | 
+|  Bisection, secant, and Newton Raphson    |/optimization/          | 
+| solvers to solve 1d equation              | minimize_scalar        |
+|                                           |                        |      
+| powerful Levenberg-Marquardt algorithm    |numerical               | 
+|                                           |/optimization/          |
+| for solving non-linear optimization       |                        |
+| problems                                  |                        |
+| and fitting of curves                     | numerical              |
+|                                           | /optimization/         |
+|-------------------------------------------|-----------------------:|
+| parse string expression to symbolic       | symbolic/              |
+| expression                                | parse_expression       |
+|                                           |                        |   
+| main functionality for symbolic           | symbolic/              | 
+| calculation                               |  symbolic_engine       |
+|                                           |                        |
+| symbolic vectors and matrices             | symbolic/              |
+|                                           | symbolic_vectors       |
+|-------------------------------------------|-----------------------:|
+| Utils                                     | utils/                 |  
+| easy api for plotting                     |                        |
+| parsing tasks from text files,            |                        |    
+|        etc.                               |                        |
+|-------------------------------------------|-----------------------:|
+| collection of various                     | somelinalg/            |  
+| linear algebra algorithms                 |                        | 
+| or convinente API for linear algebra      |                        | 
+| crates                                    |                        |
 ## project_documentation
 
 In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.
