@@ -158,4 +158,5 @@ pub mod symbolic_traits;
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
 
+pub mod symbolic_integration;
 pub mod symbolic_vectors;

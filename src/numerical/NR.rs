@@ -39,7 +39,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///     NR_instanse.eq_generate();
 ///     NR_instanse.main_loop();
 ///     let solution = NR_instanse.get_result().unwrap();
-///     assert_eq!(solution, DVector::from(vec![-1.0, 3.0] ));
+///     assert_eq!(solution, DVector::from(vec![3.0, -1.0] ));
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///  ```
 use crate::symbolic::symbolic_engine::Expr;
@@ -959,7 +959,7 @@ mod tests {
         NR_instanse.eq_generate();
         NR_instanse.solve();
         let solution = NR_instanse.get_result().unwrap();
-        assert_eq!(solution, DVector::from(vec![-1.0, 3.0]));
+        assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
     }
 
     #[test]
@@ -971,7 +971,7 @@ mod tests {
         NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
         NR_instanse.main_loop();
         let solution = NR_instanse.get_result().unwrap();
-        assert_eq!(solution, DVector::from(vec![-1.0, 3.0]));
+        assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
     }
     #[test]
     fn various_nonlinear_equations_simple() {
@@ -994,8 +994,8 @@ mod tests {
         let solution = NR_instanse.get_result().unwrap();
         let x = -50.0 * (f64::sqrt(17.0) - 5.0);
         let y = 50.0 * (f64::sqrt(17.0) - 3.0);
-        assert_relative_eq!(solution[0], y, epsilon = 1e-3);
-        assert_relative_eq!(solution[1], x, epsilon = 1e-3);
+        assert_relative_eq!(solution[0], x, epsilon = 1e-3);
+        assert_relative_eq!(solution[1], y, epsilon = 1e-3);
         // 2)
     }
     fn elemntary_example_test(method: Method, Bounds: Option<HashMap<String, (f64, f64)>>) {
@@ -1019,7 +1019,7 @@ mod tests {
         let solution = NR_instanse.get_result().unwrap();
         println!("solution: {:?}", solution);
 
-        assert_relative_eq!(solution, DVector::from(vec![-1.0, 3.0]), epsilon = 1e-3);
+        assert_relative_eq!(solution, DVector::from(vec![3.0, -1.0]), epsilon = 1e-3);
     }
     #[test]
     fn test_NR_elementary_example_simple2() {

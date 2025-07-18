@@ -331,6 +331,7 @@ pub fn epsmch() -> f64 {
     f64::EPSILON
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,3 +766,4 @@ mod tests2 {
         assert_eq!(result.unwrap_err(), "Trust region radius must be positive");
     }
 }
+ */

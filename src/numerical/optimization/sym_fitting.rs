@@ -318,7 +318,18 @@ impl Fitting {
         self.r_ssquared = Some(r_squared);
         println!("R squared: {}", r_squared);
     }
-
+    /// extrapolate or interpolate function for arbitrary x values
+    pub fn extra_interpolate(&self, x_values: Vec<f64>) -> Vec<f64> {
+        let eq = self.eq.clone();
+        let map_of_solutions = self.map_of_solutions.clone().unwrap();
+        // set numerical values of fittedd parameters
+        let eq = eq.set_variable_from_map(&map_of_solutions);
+        // turn symbolic equation into function
+        let eq_fun = eq.lambdify1D();
+        // calculate predicted y values
+        let y_pred = x_values.iter().map(|x| eq_fun(*x)).collect::<Vec<f64>>();
+        y_pred
+    }
     pub fn get_r_squared(&self) -> Option<f64> {
         self.r_ssquared
     }

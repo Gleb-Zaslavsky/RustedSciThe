@@ -1,8 +1,10 @@
-use rayon::prelude::*;
+use crate::numerical::Radau::Radau_newton::RadauNewton;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use nalgebra::{DMatrix, DVector, };
-use std::sync::{Arc, Mutex};
+use log::info;
+use nalgebra::{DMatrix, DVector};
+use rayon::prelude::*;
+use std::sync::Mutex;
 // Update the Jacobian implementation with parallel versions
 impl Jacobian {
     pub fn generate_NR_solver_for_Radau_parallel(
@@ -44,7 +46,7 @@ impl Jacobian {
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
         let bandwidth = self.bandwidth;
-        
+
         let new_jac = Jacobian::calc_jacobian_fun_with_parameters_parallel(
             symbolic_jacobian,
             vector_of_functions_len,
@@ -73,9 +75,10 @@ impl Jacobian {
 
         let (kl, ku) = bandwidth;
         Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-            let mut vector_of_derivatives = vec![0.0; vector_of_functions_len * vector_of_variables_len];
+            let mut vector_of_derivatives =
+                vec![0.0; vector_of_functions_len * vector_of_variables_len];
             let vector_of_derivatives_mutex = Mutex::new(&mut vector_of_derivatives);
-            
+
             let variales_and_parameters: Vec<&str> = variables_and_parameters
                 .iter()
                 .map(|s| s.as_str())
@@ -124,8 +127,8 @@ impl Jacobian {
     }
 
     /// Parallel function vector evaluation
-    /// 
-    
+    ///
+
     pub fn lambdify_funcvector_with_parameters_parallel(
         &mut self,
         arg: &str,
@@ -135,9 +138,10 @@ impl Jacobian {
         let mut variable_and_parameters: Vec<&str> = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
         println!("variable_and_parameters = {:?} \n", variable_and_parameters);
-        
+
         // Create thread-safe lambdified functions
-        let lambdified_funcs: Vec<_> = self.vector_of_functions
+        let lambdified_funcs: Vec<_> = self
+            .vector_of_functions
             .iter()
             .map(|func| {
                 Expr::lambdify_IVP_owned(func.clone(), arg, variable_and_parameters.clone())
@@ -148,7 +152,7 @@ impl Jacobian {
         self.lambdified_functions_IVP = lambdified_funcs;
     }
 
-/// Alternative: Store functions that can be safely sent between threads
+    /// Alternative: Store functions that can be safely sent between threads
     pub fn lambdify_funcvector_with_parameters_parallel_safe(
         &mut self,
         arg: &str,
@@ -157,12 +161,11 @@ impl Jacobian {
     ) {
         let mut variable_and_parameters: Vec<&str> = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
-        
+
         // Instead of storing the functions, we'll recreate them when needed
         // This avoids the Send/Sync issue entirely
         println!("variable_and_parameters = {:?} \n", variable_and_parameters);
     }
-
 
     /// Parallel vector function evaluation following BVP pattern
     pub fn vector_funvector_with_parameters_DVector_parallel(
@@ -172,7 +175,7 @@ impl Jacobian {
         parameters: Vec<&str>,
     ) {
         let vector_of_functions = &self.vector_of_functions;
-        
+
         fn f_parallel(
             vector_of_functions: Vec<Expr>,
             arg: String,
@@ -180,7 +183,7 @@ impl Jacobian {
         ) -> Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + 'static> {
             Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
                 let v_vec: Vec<f64> = v.iter().cloned().collect();
-                
+
                 // Parallel evaluation following BVP pattern
                 let result: Vec<_> = vector_of_functions
                     .par_iter()
@@ -197,11 +200,11 @@ impl Jacobian {
                         func(x, v_vec.clone())
                     })
                     .collect();
-                
+
                 DVector::from_vec(result)
             })
         }
-        
+
         let mut variable_and_parameters = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
 
@@ -214,5 +217,59 @@ impl Jacobian {
                 .map(|s| s.to_string())
                 .collect(),
         );
+    }
+}
+// Update the RadauNewton implementation
+impl RadauNewton {
+    /// Generate parallel function and Jacobian closures with proper thread safety
+    pub fn eq_generate_parallel(&mut self) {
+        info!("Generating parallel Radau Newton equations and jacobian");
+        let mut jacobian_instance = Jacobian::new();
+
+        jacobian_instance.set_vector_of_functions(self.eq_system.clone());
+        jacobian_instance.set_variables(self.k_variables.iter().map(|x| x.as_str()).collect());
+        jacobian_instance.calc_jacobian();
+
+        let values_str = self
+            .k_variables
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<&str>>();
+        let parameters_str = self
+            .parameters
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<&str>>();
+
+        // Use the safe parallel jacobian generation
+        let symbolic_jacobian = jacobian_instance.symbolic_jacobian.clone();
+        let new_jac = Jacobian::calc_jacobian_fun_with_parameters_parallel(
+            symbolic_jacobian,
+            jacobian_instance.vector_of_functions.len(),
+            jacobian_instance.vector_of_variables.len(),
+            self.k_variables.clone(),
+            self.parameters.clone(),
+            self.arg.clone(),
+            jacobian_instance.bandwidth,
+        );
+
+        // Use the safe parallel vector function generation
+        jacobian_instance.vector_funvector_with_parameters_DVector_parallel(
+            self.arg.as_str(),
+            values_str.clone(),
+            parameters_str.clone(),
+        );
+
+        self.jacobian_symbolic = Some(jacobian_instance.symbolic_jacobian.clone());
+
+        let fun = jacobian_instance.lambdified_functions_IVP_DVector;
+        let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
+            Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> { new_jac(t, y) });
+
+        self.fun = fun;
+        self.jac = Some(jac_wrapped);
+        self.n = self.eq_system.len();
+
+        info!("Parallel Radau Newton functions generated successfully");
     }
 }

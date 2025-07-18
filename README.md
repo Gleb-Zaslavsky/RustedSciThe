@@ -40,7 +40,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
  PROJECT NAVIGATION
 
  ## Project Documentation and Navigation
-|                                           |                        |
+
 |     solver/feature                        |     folder             |                      
 |:------------------------------------------|-----------------------:|
 |- ODE solvers for  stiff                   | numerical              |                        

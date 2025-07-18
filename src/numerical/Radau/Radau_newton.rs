@@ -198,7 +198,7 @@ pub struct RadauNewton {
     // Function closures (generated from symbolic expressions)
     pub fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
-    n: usize,
+    pub n: usize,
 }
 
 impl RadauNewton {

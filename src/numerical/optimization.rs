@@ -22,4 +22,8 @@ pub mod utils;
 
 pub mod Gavin_chi;
 
+/// interpolation and extrapolation of data
+pub mod inter_n_extrapolate;
+pub mod lm_gavin;
+/// using Bisection, Secant,, Newton, and Brent methods to find the minimum of a scalar function of one variable
 pub mod minimize_scalar;

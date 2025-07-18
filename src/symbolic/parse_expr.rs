@@ -43,6 +43,31 @@ fn proc_negative<'a>(left: String, flg: usize) -> String {
     let left_ = if flg == 2 { new_left } else { left };
     left_
 }
+
+// function to find the rightmost occurrence of operators at the same precedence level,
+
+fn find_rightmost_operator_outside_brackets(
+    input: &str,
+    operators: &[char],
+) -> Option<(usize, char)> {
+    let mut bracket_depth = 0;
+    let mut last_op_pos = None;
+    let mut last_op_char = ' ';
+
+    for (i, c) in input.chars().enumerate() {
+        match c {
+            '(' => bracket_depth += 1,
+            ')' => bracket_depth -= 1,
+            _ if bracket_depth == 0 && operators.contains(&c) => {
+                last_op_pos = Some(i); // Updates to LAST match
+                last_op_char = c; // Remembers which operator
+            }
+            _ => {}
+        }
+    }
+
+    last_op_pos.map(|pos| (pos, last_op_char))
+}
 pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
     let input = input.trim();
     println!("input: {} flag {} \n", input, flg);
@@ -99,141 +124,75 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
 
     // Обработка сложения и вычитания
     {
-        // we found '+' in the input only if it's not in brackets
-        if let Some(pos) = find_char_positions_outside_brackets(input, '+') {
-            let mut left: &str = &input[..pos].trim();
-            let right = &input[pos + 1..].trim();
-            println!(
-                "SIGN '+' found at positions {}-{}: left from +: {}, right from +: {}",
-                pos,
-                pos + 1,
-                left,
-                right
-            );
-            println!(
-                "brackets found in posistions: {} - {},",
-                brac_start, brac_end
-            );
-            println!(
-                "left {} has brackets -{}, right {} has brackets - {}",
-                left,
-                has_brackets(left),
-                right,
-                has_brackets(right)
-            );
-
-            // if flag is 2 it means that left part of expression is negative
-            let a = left.to_string();
-            let new_left = format!("(-1.0)*{}", a);
-            let new_left = &new_left.as_str();
-            left = if flg == 2 { new_left } else { left };
-
-            // if left part is in brackets it will be proceeded by parse_expression_func by setting flg=1, otherwise flag is 1.
-            return if left.starts_with("(")
-                && left.ends_with(")")
-                && !(right.starts_with("(") && right.ends_with(")"))
-            {
-                println!("left is brackets");
-                Ok(Expr::Add(
-                    Box::new(parse_expression_func(1, left)?),
-                    Box::new(parse_expression_func(0, right)?),
-                ))
-            }
-            // same with the right part
-            else if (right.starts_with("(") && right.ends_with(")"))
-                && !(left.starts_with("(") && left.ends_with(")"))
-            {
-                println!("right is brackets");
-                Ok(Expr::Add(
-                    Box::new(parse_expression_func(0, left)?),
-                    Box::new(parse_expression_func(1, right)?),
-                ))
-            } else if (left.starts_with("(") && left.ends_with(")"))
-                && (right.starts_with("(") && right.ends_with(")"))
-            {
-                println!("both sides have brackets");
-                Ok(Expr::Add(
-                    Box::new(parse_expression_func(1, left)?),
-                    Box::new(parse_expression_func(1, right)?),
-                ))
-            } else {
-                // both parts are not in brackets (but may have brackets inside)
-                println!("neither has brackets");
-                Ok(Expr::Add(
-                    Box::new(parse_expression_func(0, left)?),
-                    Box::new(parse_expression_func(0, right)?),
-                ))
-            };
-        } else if let Some(pos) = find_char_positions_outside_brackets(input, '-') {
+        if let Some((pos, op)) = find_rightmost_operator_outside_brackets(input, &['+', '-']) {
             let mut left = &input[..pos].trim();
             let right = &input[pos + 1..].trim();
+
             println!(
-                "sign '-' found - at positions {}-{}: left from minus: {}, right from minus: {}",
-                pos,
-                pos + 1,
-                left,
-                right
-            );
-            println!(
-                "brackets found in posistions: {} - {},",
-                brac_start, brac_end
+                "SIGN '{}' found at position {}: left: {}, right: {}",
+                op, pos, left, right
             );
 
+            // Handle negative flag
             let a = left.to_string();
             let new_left = format!("(-1.0)*{}", a);
             let new_left = &new_left.as_str();
             left = if flg == 2 { new_left } else { left };
 
-            return if left != &"" {
-                if (left.starts_with("(") && left.ends_with(")"))
-                    && !(right.starts_with("(") && right.ends_with(")"))
-                {
-                    println!("left in brackets");
-                    Ok(Expr::Sub(
-                        Box::new(parse_expression_func(1, left)?),
-                        Box::new(parse_expression_func(0, right)?),
-                    ))
-                } else if (right.starts_with("(") && right.ends_with(")"))
-                    && !(left.starts_with("(") && left.ends_with(")"))
-                {
-                    println!("right in brackets");
-                    Ok(Expr::Sub(
-                        Box::new(parse_expression_func(0, left)?),
-                        Box::new(parse_expression_func(1, right)?),
-                    ))
-                } else if left.starts_with("(")
-                    && left.ends_with(")")
-                    && (right.starts_with("(") && right.ends_with(")"))
-                {
-                    println!("both sides have brackets");
-                    Ok(Expr::Sub(
-                        Box::new(parse_expression_func(1, left)?),
-                        Box::new(parse_expression_func(1, right)?),
-                    ))
-                } else {
-                    println!("neither in brackets");
-                    Ok(Expr::Sub(
-                        Box::new(parse_expression_func(0, left)?),
-                        Box::new(parse_expression_func(0, right)?),
-                    ))
-                }
-            } else {
-                // case of negative values like -y, -x**2, etc
+            // Handle unary minus
+            if left.is_empty() && op == '-' {
                 println!("negative values found");
                 if right.starts_with("(") && right.ends_with(")") {
-                    // when -(something..)
-                    Ok(Expr::Mul(
+                    return Ok(Expr::Mul(
                         Box::new(Expr::Const(-1.)),
                         Box::new(parse_expression_func(1, right)?),
-                    ))
+                    ));
                 } else {
-                    // set the flag 2 - that means proceeding of negative values will be used in the next step of recursion
                     let inner = parse_expression_func(2, right)?;
-                    Ok(inner)
+                    return Ok(inner);
                 }
+            }
+
+            // Handle bracket cases
+            let left_in_brackets = left.starts_with("(") && left.ends_with(")");
+            let right_in_brackets = right.starts_with("(") && right.ends_with(")");
+
+            return match (left_in_brackets, right_in_brackets, op) {
+                (true, false, '+') => Ok(Expr::Add(
+                    Box::new(parse_expression_func(1, left)?),
+                    Box::new(parse_expression_func(0, right)?),
+                )),
+                (true, false, '-') => Ok(Expr::Sub(
+                    Box::new(parse_expression_func(1, left)?),
+                    Box::new(parse_expression_func(0, right)?),
+                )),
+                (false, true, '+') => Ok(Expr::Add(
+                    Box::new(parse_expression_func(0, left)?),
+                    Box::new(parse_expression_func(1, right)?),
+                )),
+                (false, true, '-') => Ok(Expr::Sub(
+                    Box::new(parse_expression_func(0, left)?),
+                    Box::new(parse_expression_func(1, right)?),
+                )),
+                (true, true, '+') => Ok(Expr::Add(
+                    Box::new(parse_expression_func(1, left)?),
+                    Box::new(parse_expression_func(1, right)?),
+                )),
+                (true, true, '-') => Ok(Expr::Sub(
+                    Box::new(parse_expression_func(1, left)?),
+                    Box::new(parse_expression_func(1, right)?),
+                )),
+                (false, false, '+') => Ok(Expr::Add(
+                    Box::new(parse_expression_func(0, left)?),
+                    Box::new(parse_expression_func(0, right)?),
+                )),
+                (false, false, '-') => Ok(Expr::Sub(
+                    Box::new(parse_expression_func(0, left)?),
+                    Box::new(parse_expression_func(0, right)?),
+                )),
+                _ => unreachable!(),
             };
         }
-
         // Обработка умножения и деления/Handling multiplication and division
         if let Some(pos) = find_char_positions_outside_brackets(input, '*') {
             let mut left = &input[..pos].trim();

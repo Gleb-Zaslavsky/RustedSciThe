@@ -262,10 +262,13 @@ impl Radau {
         self.K_matrix = K_matrix;
         self.y_vector = y_vector;
     }
-        /// Enable or disable parallel processing
+    /// Enable or disable parallel processing
     pub fn set_parallel(&mut self, parallel: bool) {
         self.parallel = parallel;
-        info!("Radau parallel processing: {}", if parallel { "enabled" } else { "disabled" });
+        info!(
+            "Radau parallel processing: {}",
+            if parallel { "enabled" } else { "disabled" }
+        );
     }
     /// Construct the nonlinear system for Radau method
     /// For s stages, we need to solve: K_i - f(t_n + c_i*h, y_n + h*sum(a_ij*K_j)) = 0
@@ -515,7 +518,7 @@ impl Radau {
             }
         }
     }
-     #[allow(dead_code)]
+    #[allow(dead_code)]
     fn update_Y_stages(&mut self, dt: f64, n_stages: usize, n_vars: usize) {
         // Parallel computation of stage values Y_i = y_n + h * sum(a_{i,j} * K_j)
         if self.parallel && n_stages > 1 {

@@ -75,7 +75,7 @@ pub mod LM_utils;
 ///     NR_instanse.eq_generate();
 ///     NR_instanse.main_loop();
 ///     let solution = NR_instanse.get_result().unwrap();
-///      assert_eq!(solution,  DVector::from_vec(vec![-1.0, 3.0])   );
+///      assert_eq!(solution,  DVector::from_vec(vec![3.0, -1.0])   );
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 //
 ///  ```

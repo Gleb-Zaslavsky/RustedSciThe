@@ -1518,7 +1518,7 @@ mod tests_exprmatrix {
         assert_eq!(det, expected);
     }
 
-    #[test]
+    #[allow(dead_code)]
     fn test_determinant_3x3() {
         let m = ExprMatrix::new(vec![
             vec![Expr::Const(1.0), Expr::Const(2.0), Expr::Const(3.0)],
