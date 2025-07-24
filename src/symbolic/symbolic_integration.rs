@@ -52,6 +52,30 @@ impl Expr {
 
             // ∫ ln(f) dx - requires integration by parts
             Expr::Ln(expr) => self.integrate_logarithm(expr, var),
+
+            // ∫ sin(f) dx
+            Expr::sin(expr) => self.integrate_sin(expr, var),
+
+            // ∫ cos(f) dx
+            Expr::cos(expr) => self.integrate_cos(expr, var),
+
+            // ∫ tg(f) dx
+            Expr::tg(expr) => self.integrate_tan(expr, var),
+
+            // ∫ ctg(f) dx
+            Expr::ctg(expr) => self.integrate_cot(expr, var),
+
+            // ∫ arcsin(f) dx
+            Expr::arcsin(expr) => self.integrate_arcsin(expr, var),
+
+            // ∫ arccos(f) dx
+            Expr::arccos(expr) => self.integrate_arccos(expr, var),
+
+            // ∫ arctg(f) dx
+            Expr::arctg(expr) => self.integrate_arctan(expr, var),
+
+            // ∫ arcctg(f) dx
+            Expr::arcctg(expr) => self.integrate_arccot(expr, var),
         }
     }
 
@@ -468,6 +492,250 @@ impl Expr {
         x_power * (term1 - term2)
     }
 
+    /// Handle trigonometric function integration
+
+    /// ∫ sin(f) dx integration
+    fn integrate_sin(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ sin(x) dx = -cos(x)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                return Ok(-Expr::cos(Box::new(Expr::Var(var.to_string()))));
+            }
+        }
+
+        // Case 2: ∫ sin(ax) dx = -(1/a)*cos(ax) where a is constant
+        if let Expr::Mul(lhs, rhs) = expr {
+            if let (Expr::Const(a), Expr::Var(x)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let cos_ax = Expr::cos(Box::new(expr.clone()));
+                    return Ok(-cos_ax / Expr::Const(*a));
+                }
+            }
+            if let (Expr::Var(x), Expr::Const(a)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let cos_ax = Expr::cos(Box::new(expr.clone()));
+                    return Ok(-cos_ax / Expr::Const(*a));
+                }
+            }
+        }
+
+        // Case 3: ∫ sin(ax + b) dx = -(1/a)*cos(ax + b) where a, b are constants
+        if let Expr::Add(lhs, rhs) = expr {
+            if let (Expr::Mul(coeff, var_expr), Expr::Const(_)) = (lhs.as_ref(), rhs.as_ref()) {
+                if let (Expr::Const(a), Expr::Var(x)) = (coeff.as_ref(), var_expr.as_ref()) {
+                    if x == var {
+                        let cos_expr = Expr::cos(Box::new(expr.clone()));
+                        return Ok(-cos_expr / Expr::Const(*a));
+                    }
+                }
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate sin({})", expr))
+    }
+
+    /// ∫ cos(f) dx integration
+    fn integrate_cos(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ cos(x) dx = sin(x)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                return Ok(Expr::sin(Box::new(Expr::Var(var.to_string()))));
+            }
+        }
+
+        // Case 2: ∫ cos(ax) dx = (1/a)*sin(ax) where a is constant
+        if let Expr::Mul(lhs, rhs) = expr {
+            if let (Expr::Const(a), Expr::Var(x)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let sin_ax = Expr::sin(Box::new(expr.clone()));
+                    return Ok(sin_ax / Expr::Const(*a));
+                }
+            }
+            if let (Expr::Var(x), Expr::Const(a)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let sin_ax = Expr::sin(Box::new(expr.clone()));
+                    return Ok(sin_ax / Expr::Const(*a));
+                }
+            }
+        }
+
+        // Case 3: ∫ cos(ax + b) dx = (1/a)*sin(ax + b) where a, b are constants
+        if let Expr::Add(lhs, rhs) = expr {
+            if let (Expr::Mul(coeff, var_expr), Expr::Const(_)) = (lhs.as_ref(), rhs.as_ref()) {
+                if let (Expr::Const(a), Expr::Var(x)) = (coeff.as_ref(), var_expr.as_ref()) {
+                    if x == var {
+                        let sin_expr = Expr::sin(Box::new(expr.clone()));
+                        return Ok(sin_expr / Expr::Const(*a));
+                    }
+                }
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate cos({})", expr))
+    }
+
+    /// ∫ tan(f) dx integration
+    fn integrate_tan(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ tan(x) dx = -ln|cos(x)|
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let cos_x = Expr::cos(Box::new(Expr::Var(var.to_string())));
+                return Ok(-cos_x.ln());
+            }
+        }
+
+        // Case 2: ∫ tan(ax) dx = -(1/a)*ln|cos(ax)| where a is constant
+        if let Expr::Mul(lhs, rhs) = expr {
+            if let (Expr::Const(a), Expr::Var(x)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let cos_ax = Expr::cos(Box::new(expr.clone()));
+                    return Ok(-cos_ax.ln() / Expr::Const(*a));
+                }
+            }
+            if let (Expr::Var(x), Expr::Const(a)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let cos_ax = Expr::cos(Box::new(expr.clone()));
+                    return Ok(-cos_ax.ln() / Expr::Const(*a));
+                }
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate tan({})", expr))
+    }
+
+    /// ∫ cot(f) dx integration
+    fn integrate_cot(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ cot(x) dx = ln|sin(x)|
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let sin_x = Expr::sin(Box::new(Expr::Var(var.to_string())));
+                return Ok(sin_x.ln());
+            }
+        }
+
+        // Case 2: ∫ cot(ax) dx = (1/a)*ln|sin(ax)| where a is constant
+        if let Expr::Mul(lhs, rhs) = expr {
+            if let (Expr::Const(a), Expr::Var(x)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let sin_ax = Expr::sin(Box::new(expr.clone()));
+                    return Ok(sin_ax.ln() / Expr::Const(*a));
+                }
+            }
+            if let (Expr::Var(x), Expr::Const(a)) = (lhs.as_ref(), rhs.as_ref()) {
+                if x == var {
+                    let sin_ax = Expr::sin(Box::new(expr.clone()));
+                    return Ok(sin_ax.ln() / Expr::Const(*a));
+                }
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate cot({})", expr))
+    }
+
+    /// ∫ arcsin(f) dx integration
+    fn integrate_arcsin(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ arcsin(x) dx = x*arcsin(x) + sqrt(1-x²) (integration by parts)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let x_var = Expr::Var(var.to_string());
+                let arcsin_x = Expr::arcsin(Box::new(x_var.clone()));
+                let one_minus_x_squared = Expr::Const(1.0) - x_var.clone().pow(Expr::Const(2.0));
+                let sqrt_term = one_minus_x_squared.pow(Expr::Const(0.5));
+                return Ok(x_var * arcsin_x + sqrt_term);
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate arcsin({})", expr))
+    }
+
+    /// ∫ arccos(f) dx integration
+    fn integrate_arccos(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ arccos(x) dx = x*arccos(x) - sqrt(1-x²) (integration by parts)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let x_var = Expr::Var(var.to_string());
+                let arccos_x = Expr::arccos(Box::new(x_var.clone()));
+                let one_minus_x_squared = Expr::Const(1.0) - x_var.clone().pow(Expr::Const(2.0));
+                let sqrt_term = one_minus_x_squared.pow(Expr::Const(0.5));
+                return Ok(x_var * arccos_x - sqrt_term);
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate arccos({})", expr))
+    }
+
+    /// ∫ arctan(f) dx integration
+    fn integrate_arctan(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ arctan(x) dx = x*arctan(x) - (1/2)*ln(1+x²) (integration by parts)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let x_var = Expr::Var(var.to_string());
+                let arctan_x = Expr::arctg(Box::new(x_var.clone()));
+                let one_plus_x_squared = Expr::Const(1.0) + x_var.clone().pow(Expr::Const(2.0));
+                let ln_term = one_plus_x_squared.ln() / Expr::Const(2.0);
+                return Ok(x_var * arctan_x - ln_term);
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate arctan({})", expr))
+    }
+
+    /// ∫ arccot(f) dx integration
+    fn integrate_arccot(&self, expr: &Expr, var: &str) -> Result<Expr, String> {
+        // Case 1: ∫ arccot(x) dx = x*arccot(x) + (1/2)*ln(1+x²) (integration by parts)
+        if let Expr::Var(x) = expr {
+            if x == var {
+                let x_var = Expr::Var(var.to_string());
+                let arccot_x = Expr::arcctg(Box::new(x_var.clone()));
+                let one_plus_x_squared = Expr::Const(1.0) + x_var.clone().pow(Expr::Const(2.0));
+                let ln_term = one_plus_x_squared.ln() / Expr::Const(2.0);
+                return Ok(x_var * arccot_x + ln_term);
+            }
+        }
+
+        // If expression doesn't contain the variable, treat as constant
+        if !expr.contains_variable(var) {
+            return Ok(self.clone() * Expr::Var(var.to_string()));
+        }
+
+        Err(format!("Cannot integrate arccot({})", expr))
+    }
+
     /// Definite integration using the fundamental theorem of calculus
     pub fn definite_integrate(&self, var: &str, lower: f64, upper: f64) -> Result<f64, String> {
         let indefinite = self.integrate(var)?;
@@ -511,6 +779,32 @@ impl Expr {
         table.insert("1/x".to_string(), "ln(x)".to_string());
         table.insert("exp(x)".to_string(), "exp(x)".to_string());
         table.insert("ln(x)".to_string(), "x*ln(x) - x".to_string());
+
+        // Trigonometric functions
+        table.insert("sin(x)".to_string(), "-cos(x)".to_string());
+        table.insert("cos(x)".to_string(), "sin(x)".to_string());
+        table.insert("tan(x)".to_string(), "-ln|cos(x)|".to_string());
+        table.insert("cot(x)".to_string(), "ln|sin(x)|".to_string());
+        table.insert("sec(x)".to_string(), "ln|sec(x) + tan(x)|".to_string());
+        table.insert("csc(x)".to_string(), "-ln|csc(x) + cot(x)|".to_string());
+
+        // Inverse trigonometric functions
+        table.insert(
+            "arcsin(x)".to_string(),
+            "x*arcsin(x) + sqrt(1-x^2)".to_string(),
+        );
+        table.insert(
+            "arccos(x)".to_string(),
+            "x*arccos(x) - sqrt(1-x^2)".to_string(),
+        );
+        table.insert(
+            "arctan(x)".to_string(),
+            "x*arctan(x) - (1/2)*ln(1+x^2)".to_string(),
+        );
+        table.insert(
+            "arccot(x)".to_string(),
+            "x*arccot(x) + (1/2)*ln(1+x^2)".to_string(),
+        );
 
         table
     }
@@ -889,6 +1183,199 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 1.0;
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    // Trigonometric integration tests
+    #[test]
+    fn test_integrate_sin() {
+        // ∫ sin(x) dx = -cos(x)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::sin(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = -Expr::cos(Box::new(x.clone()));
+
+        // Test by evaluating at a point
+        let x_val = std::f64::consts::PI / 4.0; // π/4
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_cos() {
+        // ∫ cos(x) dx = sin(x)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::cos(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = Expr::sin(Box::new(x.clone()));
+
+        // Test by evaluating at a point
+        let x_val = std::f64::consts::PI / 6.0; // π/6
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_sin_with_coefficient() {
+        // ∫ sin(2x) dx = -(1/2)*cos(2x)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::sin(Box::new(Expr::Const(2.0) * x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = -Expr::cos(Box::new(Expr::Const(2.0) * x.clone())) / Expr::Const(2.0);
+
+        // Test by evaluating at a point
+        let x_val = std::f64::consts::PI / 8.0; // π/8
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_cos_with_coefficient() {
+        // ∫ cos(3x) dx = (1/3)*sin(3x)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::cos(Box::new(Expr::Const(3.0) * x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = Expr::sin(Box::new(Expr::Const(3.0) * x.clone())) / Expr::Const(3.0);
+
+        // Test by evaluating at a point
+        let x_val = std::f64::consts::PI / 9.0; // π/9
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_tan() {
+        // ∫ tan(x) dx = -ln|cos(x)|
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::tg(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = -Expr::cos(Box::new(x.clone())).ln();
+
+        // Test by evaluating at a point (avoiding discontinuities)
+        let x_val = std::f64::consts::PI / 6.0; // π/6
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_cot() {
+        // ∫ cot(x) dx = ln|sin(x)|
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::ctg(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected = Expr::sin(Box::new(x.clone())).ln();
+
+        // Test by evaluating at a point (avoiding discontinuities)
+        let x_val = std::f64::consts::PI / 3.0; // π/3
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_arcsin() {
+        // ∫ arcsin(x) dx = x*arcsin(x) + sqrt(1-x²)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::arcsin(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let arcsin_x = Expr::arcsin(Box::new(x.clone()));
+        let one_minus_x_squared = Expr::Const(1.0) - x.clone().pow(Expr::Const(2.0));
+        let sqrt_term = one_minus_x_squared.pow(Expr::Const(0.5));
+        let expected = x.clone() * arcsin_x + sqrt_term;
+
+        // Test by evaluating at a point in domain
+        let x_val = 0.5;
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_arccos() {
+        // ∫ arccos(x) dx = x*arccos(x) - sqrt(1-x²)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::arccos(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let arccos_x = Expr::arccos(Box::new(x.clone()));
+        let one_minus_x_squared = Expr::Const(1.0) - x.clone().pow(Expr::Const(2.0));
+        let sqrt_term = one_minus_x_squared.pow(Expr::Const(0.5));
+        let expected = x.clone() * arccos_x - sqrt_term;
+
+        // Test by evaluating at a point in domain
+        let x_val = 0.5;
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_integrate_arctan() {
+        // ∫ arctan(x) dx = x*arctan(x) - (1/2)*ln(1+x²)
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::arctg(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let arctan_x = Expr::arctg(Box::new(x.clone()));
+        let one_plus_x_squared = Expr::Const(1.0) + x.clone().pow(Expr::Const(2.0));
+        let ln_term = one_plus_x_squared.ln() / Expr::Const(2.0);
+        let expected = x.clone() * arctan_x - ln_term;
+
+        // Test by evaluating at a point
+        let x_val = 1.0;
+        let result_val = result.eval_expression(vec!["x"], &[x_val]);
+        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_definite_integration_trigonometric() {
+        // ∫₀^(π/2) sin(x) dx = [-cos(x)]₀^(π/2) = -cos(π/2) + cos(0) = 0 + 1 = 1
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::sin(Box::new(x.clone()));
+        let result = expr
+            .definite_integrate("x", 0.0, std::f64::consts::PI / 2.0)
+            .unwrap();
+        assert_relative_eq!(result, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_definite_integration_cos() {
+        // ∫₀^(π/2) cos(x) dx = [sin(x)]₀^(π/2) = sin(π/2) - sin(0) = 1 - 0 = 1
+        let x = Expr::Var("x".to_string());
+        let expr = Expr::cos(Box::new(x.clone()));
+        let result = expr
+            .definite_integrate("x", 0.0, std::f64::consts::PI / 2.0)
+            .unwrap();
+        assert_relative_eq!(result, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_mixed_trigonometric_polynomial() {
+        // ∫ (x + sin(x)) dx = x²/2 - cos(x)
+        let x = Expr::Var("x".to_string());
+        let expr = x.clone() + Expr::sin(Box::new(x.clone()));
+        let result = expr.integrate("x").unwrap();
+
+        let expected =
+            x.clone().pow(Expr::Const(2.0)) / Expr::Const(2.0) - Expr::cos(Box::new(x.clone()));
+
+        // Test by evaluating at a point
+        let x_val = std::f64::consts::PI / 4.0;
         let result_val = result.eval_expression(vec!["x"], &[x_val]);
         let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);

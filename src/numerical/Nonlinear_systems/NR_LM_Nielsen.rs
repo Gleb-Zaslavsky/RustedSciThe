@@ -1,10 +1,10 @@
 use super::NR::{NR, solve_linear_system};
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
-use crate::numerical::dogleg::{DoglegSolver, Powell_dogleg_method};
+use crate::numerical::Nonlinear_systems::dogleg::{DoglegSolver, Powell_dogleg_method};
 use log::{error, info};
 use nalgebra::{DMatrix, DVector};
 
-use crate::numerical::LM_utils::{
+use crate::numerical::Nonlinear_systems::LM_utils::{
     ConvergenceCriteria, ConvergenceCriteriaSolver, ReductionRatioSolver, ScalingMethod,
     TrustRegionScaling, TrustRegionSubproblem, scaled_norm_common,
 };

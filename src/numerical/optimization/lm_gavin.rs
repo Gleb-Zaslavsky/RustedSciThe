@@ -4,10 +4,10 @@ use nalgebra::{DMatrix, DVector};
 /// Based on H.P. Gavin's implementation
 pub struct LevenbergMarquardtGavin {
     pub max_evals: usize,
-    pub epsilon_1: f64,     // convergence tolerance for gradient
-    pub epsilon_2: f64,     // convergence tolerance for coefficients
-    pub epsilon_3: f64,     // convergence tolerance for red. Chi-sqr
-    pub epsilon_4: f64,     // determines acceptance of a L-M step
+    pub eps_grad: f64,      // convergence tolerance for gradient
+    pub eps_coeff: f64,     // convergence tolerance for coefficients
+    pub eps_chi: f64,       // convergence tolerance for red. Chi-sqr
+    pub eps_lm: f64,        // determines acceptance of a L-M step
     pub lambda_0: f64,      // initial value of L-M parameter
     pub lambda_up_fac: f64, // factor for increasing lambda
     pub lambda_dn_fac: f64, // factor for decreasing lambda
@@ -19,10 +19,10 @@ impl Default for LevenbergMarquardtGavin {
     fn default() -> Self {
         Self {
             max_evals: 0, // Will be set to 10*Ncof^2 in solve
-            epsilon_1: 1e-3,
-            epsilon_2: 1e-3,
-            epsilon_3: 1e-1,
-            epsilon_4: 1e-1,
+            eps_grad: 1e-3,
+            eps_coeff: 1e-3,
+            eps_chi: 1e-1,
+            eps_lm: 1e-1,
             lambda_0: 1e-2,
             lambda_up_fac: 11.0,
             lambda_dn_fac: 9.0,
@@ -147,11 +147,11 @@ impl LevenbergMarquardtGavin {
         func_calls += 1;
 
         // Check initial gradient convergence
-        if jtw_dy.amax() < self.epsilon_1 {
+        if jtw_dy.amax() < self.eps_grad {
             if self.print_level > 0 {
                 println!(" *** Your initial guess meets gradient convergence criteria ***");
                 println!(" *** To converge further, reduce epsilon_1 and restart ***");
-                println!(" *** epsilon_1 = {:.6e}", self.epsilon_1);
+                println!(" *** epsilon_1 = {:.6e}", self.eps_grad);
             }
             return Ok(LMResult {
                 a,
@@ -263,7 +263,7 @@ impl LevenbergMarquardtGavin {
             };
 
             // Accept or reject step
-            if rho > self.epsilon_4 {
+            if rho > self.eps_chi {
                 // Accept step
                 let dx2 = x2 - x2_old;
                 x2_old = x2;
@@ -373,10 +373,10 @@ impl LevenbergMarquardtGavin {
             cvg_hst.set_row(iteration - 1, &row.transpose());
 
             // Check convergence criteria
-            if jtw_dy.amax() < self.epsilon_1 && iteration > 2 {
+            if jtw_dy.amax() < self.eps_grad && iteration > 2 {
                 if self.print_level > 0 {
                     println!(" **** Convergence in r.h.s. (\"JtWdy\")  ****");
-                    println!(" **** epsilon_1 = {:.6e}", self.epsilon_1);
+                    println!(" **** epsilon_1 = {:.6e}", self.eps_grad);
                 }
                 stop = true;
             }
@@ -387,18 +387,18 @@ impl LevenbergMarquardtGavin {
                 .map(|(h_i, a_i)| (h_i / (a_i.abs() + 1e-12)).abs())
                 .fold(0.0, f64::max);
 
-            if max_rel_change < self.epsilon_2 && iteration > 2 {
+            if max_rel_change < self.eps_coeff && iteration > 2 {
                 if self.print_level > 0 {
                     println!(" **** Convergence in Parameters ****");
-                    println!(" **** epsilon_2 = {:.6e}", self.epsilon_2);
+                    println!(" **** epsilon_2 = {:.6e}", self.eps_coeff);
                 }
                 stop = true;
             }
 
-            if (x2 / (dof as f64) < self.epsilon_3) && (iteration > 2) {
+            if (x2 / (dof as f64) < self.eps_chi) && (iteration > 2) {
                 if self.print_level > 0 {
                     println!(" **** Convergence in reduced Chi-square  ****");
-                    println!(" **** epsilon_3 = {:.6e}", self.epsilon_3);
+                    println!(" **** epsilon_3 = {:.6e}", self.eps_chi);
                 }
                 stop = true;
             }

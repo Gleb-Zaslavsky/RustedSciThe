@@ -1,5 +1,7 @@
 use nalgebra::{DMatrix, DVector};
 use std::f64;
+
+/// UNDER CONSTRUCTION! NOT PRODUCTION CODE!
 // Code adapted from Gavin, H.P. (2020) The Levenberg-Marquardt method for
 // nonlinear least squares curve-fitting problems.
 static mut FUNC_CALLS: usize = 0;

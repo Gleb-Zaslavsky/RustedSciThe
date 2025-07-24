@@ -75,6 +75,9 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 | problems                                  |                        |
 | and fitting of curves                     | numerical              |
 |                                           | /optimization/         |
+| Gavin, H.P. (2020) algorithm              |                        |
+|The Levenberg-Marquardt method for         |                        |
+| nonlinear curve fitting.                  |                        |
 |-------------------------------------------|------------------------|
 | parse string expression to symbolic       | symbolic/              |
 | expression                                | parse_expression       |

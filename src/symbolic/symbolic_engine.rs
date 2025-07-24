@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use std::f64;
+use std::f64::consts::PI;
 use std::fmt;
 
 // Define an enum to represent different types of symbolic expressions
@@ -18,6 +19,14 @@ pub enum Expr {
     Pow(Box<Expr>, Box<Expr>),
     Exp(Box<Expr>),
     Ln(Box<Expr>),
+    sin(Box<Expr>),
+    cos(Box<Expr>),
+    tg(Box<Expr>),
+    ctg(Box<Expr>),
+    arcsin(Box<Expr>),
+    arccos(Box<Expr>),
+    arctg(Box<Expr>),
+    arcctg(Box<Expr>),
 }
 
 // Implement Display for pretty printing
@@ -34,6 +43,14 @@ impl fmt::Display for Expr {
             Expr::Pow(base, exp) => write!(f, "({} ^ {})", base, exp),
             Expr::Exp(expr) => write!(f, "exp({})", expr),
             Expr::Ln(expr) => write!(f, "ln({})", expr),
+            Expr::sin(expr) => write!(f, "sin({})", expr),
+            Expr::cos(expr) => write!(f, "cos({})", expr),
+            Expr::tg(expr) => write!(f, "tg({})", expr),
+            Expr::ctg(expr) => write!(f, "ctg({})", expr),
+            Expr::arcsin(expr) => write!(f, "arcsin({})", expr),
+            Expr::arccos(expr) => write!(f, "arccos({})", expr),
+            Expr::arctg(expr) => write!(f, "arctg({})", expr),
+            Expr::arcctg(expr) => write!(f, "arcctg({})", expr),
         }
     }
 }
@@ -168,6 +185,14 @@ impl Expr {
             ),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.set_variable(var, value))),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.set_variable(var, value))),
+            Expr::sin(expr) => Expr::sin(Box::new(expr.set_variable(var, value))),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.set_variable(var, value))),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.set_variable(var, value))),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.set_variable(var, value))),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.set_variable(var, value))),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.set_variable(var, value))),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.set_variable(var, value))),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.set_variable(var, value))),
             _ => self.clone(),
         }
     }
@@ -198,6 +223,15 @@ impl Expr {
             ),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.set_variable_from_map(var_map))),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.set_variable_from_map(var_map))),
+
+            Expr::sin(expr) => Expr::sin(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.set_variable_from_map(var_map))),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.set_variable_from_map(var_map))),
             _ => self.clone(),
         }
     }
@@ -227,6 +261,16 @@ impl Expr {
             ),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.rename_variable(old_var, new_var))),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.rename_variable(old_var, new_var))),
+
+            Expr::sin(expr) => Expr::sin(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.rename_variable(old_var, new_var))),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.rename_variable(old_var, new_var))),
+
             _ => self.clone(),
         }
     }
@@ -256,6 +300,15 @@ impl Expr {
             ),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.rename_variables(var_map))),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.rename_variables(var_map))),
+
+            Expr::sin(expr) => Expr::sin(Box::new(expr.rename_variables(var_map))),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.rename_variables(var_map))),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.rename_variables(var_map))),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.rename_variables(var_map))),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.rename_variables(var_map))),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.rename_variables(var_map))),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.rename_variables(var_map))),
+
             _ => self.clone(),
         }
     }
@@ -285,6 +338,15 @@ impl Expr {
             ),
             Expr::Exp(expr_old) => Expr::Exp(Box::new(expr_old.substitute_variable(var, expr))),
             Expr::Ln(expr_old) => Expr::Ln(Box::new(expr_old.substitute_variable(var, expr))),
+
+            Expr::sin(expr) => Expr::sin(Box::new(expr.substitute_variable(var, expr))),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.substitute_variable(var, expr))),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.substitute_variable(var, expr))),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.substitute_variable(var, expr))),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.substitute_variable(var, expr))),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.substitute_variable(var, expr))),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.substitute_variable(var, expr))),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.substitute_variable(var, expr))),
             _ => self.clone(),
         }
     }
@@ -304,6 +366,15 @@ impl Expr {
             }
             Expr::Exp(expr) => expr.contains_variable(var_name),
             Expr::Ln(expr) => expr.contains_variable(var_name),
+
+            Expr::sin(expr) => expr.contains_variable(var_name),
+            Expr::cos(expr) => expr.contains_variable(var_name),
+            Expr::tg(expr) => expr.contains_variable(var_name),
+            Expr::ctg(expr) => expr.contains_variable(var_name),
+            Expr::arcsin(expr) => expr.contains_variable(var_name),
+            Expr::arccos(expr) => expr.contains_variable(var_name),
+            Expr::arctg(expr) => expr.contains_variable(var_name),
+            Expr::arcctg(expr) => expr.contains_variable(var_name),
             _ => false,
         }
     }
@@ -476,6 +547,15 @@ impl Expr {
             Expr::Pow(base, exp) => Expr::Pow(Box::new(base.nozeros()), Box::new(exp.nozeros())),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.nozeros())),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.nozeros())),
+
+            Expr::sin(expr) => Expr::sin(Box::new(expr.nozeros())),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.nozeros())),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.nozeros())),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.nozeros())),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.nozeros())),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.nozeros())),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.nozeros())),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.nozeros())),
         }
     } // nozeros
 
@@ -521,6 +601,14 @@ impl Expr {
             ),
             Expr::Exp(expr) => Expr::Exp(Box::new(expr.simplify_numbers())),
             Expr::Ln(expr) => Expr::Ln(Box::new(expr.simplify_numbers())),
+            Expr::sin(expr) => Expr::sin(Box::new(expr.simplify_numbers())),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.simplify_numbers())),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.simplify_numbers())),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.simplify_numbers())),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.simplify_numbers())),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.simplify_numbers())),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.simplify_numbers())),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.simplify_numbers())),
         }
     }
     pub fn simplify_(&self) -> Expr {
@@ -594,7 +682,67 @@ impl Expr {
                     Expr::Const(a) if *a > 0.0 => Expr::Const(a.ln()),
                     _ => Expr::Ln(Box::new(expr)),
                 }
-            }
+            } // ln
+
+            Expr::sin(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.sin()),
+                    _ => Expr::sin(Box::new(expr)),
+                }
+            } //sin
+
+            Expr::cos(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.cos()),
+                    _ => Expr::cos(Box::new(expr)),
+                }
+            } //cos
+            Expr::tg(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.tan()),
+                    _ => Expr::tg(Box::new(expr)),
+                }
+            } //tg
+            Expr::ctg(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(1.0 / a.tan()),
+                    _ => Expr::ctg(Box::new(expr)),
+                }
+            } //ctg
+
+            Expr::arcsin(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.asin()),
+                    _ => Expr::arcsin(Box::new(expr)),
+                }
+            } //arcsin
+            Expr::arccos(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.acos()),
+                    _ => Expr::arcsin(Box::new(expr)),
+                }
+            } //arccos
+            Expr::arctg(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(a.atan()),
+                    _ => Expr::arcsin(Box::new(expr)),
+                }
+            } //arctg
+
+            Expr::arcctg(expr) => {
+                let expr = expr.simplify_();
+                match &expr {
+                    Expr::Const(a) => Expr::Const(PI/2.0 - (a).atan()),
+                    _ => Expr::arcsin(Box::new(expr)),
+                }
+            } //arctg
         }
     }
     pub fn symplify(&self) -> Expr {

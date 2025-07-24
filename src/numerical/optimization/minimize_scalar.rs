@@ -8,6 +8,7 @@ pub enum RootFindingMethod {
     Bisection,
     Secant,
     NewtonRaphson,
+    Brent,
 }
 
 /// Error types for root finding methods
@@ -400,6 +401,7 @@ impl ScalarRootFinder {
                 self.secant(function, initial_guess, x1)
             }
             RootFindingMethod::NewtonRaphson => self.newton_raphson(function, initial_guess),
+            RootFindingMethod::Brent => self.brent(function, search_range),
         }
     }
 
@@ -658,6 +660,152 @@ impl ScalarRootFinder {
 
         Err(RootFindingError::MaxIterationsReached)
     }
+    pub fn brent<F>(
+        &self,
+        function: &F,
+        search_range: Option<(f64, f64)>,
+    ) -> Result<RootFindingResult, RootFindingError>
+    where
+        F: NonlinearFunction,
+    {
+        let (mut a, mut b) = match search_range {
+            Some((x, y)) => (x, y),
+            None => {
+                return Err(RootFindingError::InvalidInput(
+                    "Brent method requires search range".to_string(),
+                ));
+            }
+        };
+
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+
+        let mut fa = function.evaluate(a);
+        let mut fb = function.evaluate(b);
+
+        // Check if the function values have opposite signs
+        if fa * fb > 0.0 {
+            return Err(RootFindingError::InvalidInterval);
+        }
+
+        // Check if we already have a root at the endpoints
+        if fa.abs() < self.config.tolerance {
+            return Ok(RootFindingResult {
+                root: a,
+                function_value: fa,
+                iterations: 0,
+                converged: true,
+                method: "brent".to_string(),
+            });
+        }
+
+        if fb.abs() < self.config.tolerance {
+            return Ok(RootFindingResult {
+                root: b,
+                function_value: fb,
+                iterations: 0,
+                converged: true,
+                method: "brent".to_string(),
+            });
+        }
+
+        // Ensure |f(a)| >= |f(b)|
+        if fa.abs() < fb.abs() {
+            std::mem::swap(&mut a, &mut b);
+            std::mem::swap(&mut fa, &mut fb);
+        }
+
+        let mut c = a;
+        let mut fc = fa;
+        let mut d = 0.0;
+        let mut e = 0.0;
+        let mut mflag = true;
+        let mut iterations = 0;
+
+        if self.config.verbose {
+            println!("Brent method for function: {}", function.name());
+            println!("Initial interval: [{}, {}]", a, b);
+            println!("Tolerance: {}", self.config.tolerance);
+        }
+
+        while iterations < self.config.max_iterations {
+            // Check for convergence
+            if fb.abs() < self.config.tolerance || (b - a).abs() < self.config.tolerance {
+                return Ok(RootFindingResult {
+                    root: b,
+                    function_value: fb,
+                    iterations: iterations + 1,
+                    converged: true,
+                    method: "brent".to_string(),
+                });
+            }
+
+            let mut s: f64;
+
+            // Determine the interpolation method
+            if fa != fc && fb != fc {
+                // Inverse quadratic interpolation
+                s = a * fb * fc / ((fa - fb) * (fa - fc))
+                    + b * fa * fc / ((fb - fa) * (fb - fc))
+                    + c * fa * fb / ((fc - fa) * (fc - fb));
+            } else {
+                // Secant method
+                s = b - fb * (b - a) / (fb - fa);
+            }
+
+            // Check conditions for accepting the interpolated point
+            let condition1 = s < (3.0 * a + b) / 4.0 || s > b;
+            let condition2 = mflag && (s - b).abs() >= (b - c).abs() / 2.0;
+            let condition3 = !mflag && (s - b).abs() >= (c - d).abs() / 2.0;
+            let condition4 = mflag && (b - c).abs() < self.config.tolerance;
+            let condition5 = !mflag && (c - d).abs() < self.config.tolerance;
+
+            if condition1 || condition2 || condition3 || condition4 || condition5 {
+                // Use bisection method
+                s = (a + b) / 2.0;
+                mflag = true;
+            } else {
+                mflag = false;
+            }
+
+            let fs = function.evaluate(s);
+
+            if self.config.verbose {
+                println!(
+                    "Iteration {}: s = {:.10}, f(s) = {:.2e}, interval = [{:.6}, {:.6}]",
+                    iterations + 1,
+                    s,
+                    fs,
+                    a,
+                    b
+                );
+            }
+
+            // Update for next iteration
+            d = c;
+            c = b;
+            fc = fb;
+
+            if fa * fs < 0.0 {
+                b = s;
+                fb = fs;
+            } else {
+                a = s;
+                fa = fs;
+            }
+
+            // Ensure |f(a)| >= |f(b)|
+            if fa.abs() < fb.abs() {
+                std::mem::swap(&mut a, &mut b);
+                std::mem::swap(&mut fa, &mut fb);
+            }
+
+            iterations += 1;
+        }
+
+        Err(RootFindingError::MaxIterationsReached)
+    }
 
     /// Hybrid method that tries different approaches
     pub fn solve<F>(
@@ -696,8 +844,6 @@ impl Default for ScalarRootFinder {
         Self::new()
     }
 }
-
-// ... (previous code remains the same until the convenience functions)
 
 // Convenience functions for quick usage
 pub fn bisection<F>(function: F, a: f64, b: f64, tolerance: f64) -> Result<f64, RootFindingError>
@@ -1019,7 +1165,118 @@ mod tests {
         // even point for a cost and revenue function\
     }
 }
+#[cfg(test)]
+mod brent_solver_tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use std::f64::consts::PI;
+    #[test]
+    fn test_brent_simple_quadratic() {
+        let solver = ScalarRootFinder::new();
+        let func = ClosureFunction::new(|x| x * x - 4.0, "x^2 - 4".to_string());
 
+        // Test positive root
+        let result = solver.brent(&func, Some((0.0, 3.0))).unwrap();
+        assert_relative_eq!(result.root, 2.0, epsilon = 1e-10);
+        assert!(result.converged);
+        assert_eq!(result.method, "brent");
+
+        // Test negative root
+        let result = solver.brent(&func, Some((-3.0, 0.0))).unwrap();
+        assert_relative_eq!(result.root, -2.0, epsilon = 1e-10);
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_brent_cubic() {
+        let solver = ScalarRootFinder::new();
+        // f(x) = x^3 - x - 1, root approximately at x = 1.324717957
+        let func = ClosureFunction::new(|x| x * x * x - x - 1.0, "x^3 - x - 1".to_string());
+
+        let result = solver.brent(&func, Some((1.0, 2.0))).unwrap();
+        let expected_root = 1.324717957244746;
+        assert_relative_eq!(result.root, expected_root, epsilon = 1e-9);
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_brent_trigonometric() {
+        let solver = ScalarRootFinder::new();
+        // f(x) = sin(x), root at x = π
+        let func = ClosureFunction::new(|x| x.sin(), "sin(x)".to_string());
+
+        let result = solver.brent(&func, Some((3.0, 4.0))).unwrap();
+        assert_relative_eq!(result.root, PI, epsilon = 1e-10);
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_brent_exponential() {
+        let solver = ScalarRootFinder::new();
+        // f(x) = e^x - 2, root at x = ln(2)
+        let func = ClosureFunction::new(|x| x.exp() - 2.0, "e^x - 2".to_string());
+
+        let result = solver.brent(&func, Some((0.0, 1.0))).unwrap();
+        let expected_root = 2.0_f64.ln();
+        assert_relative_eq!(result.root, expected_root, epsilon = 1e-10);
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_brent_no_search_range() {
+        let solver = ScalarRootFinder::new();
+        let func = ClosureFunction::new(|x| x * x - 4.0, "x^2 - 4".to_string());
+
+        let result = solver.brent(&func, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RootFindingError::InvalidInput(msg) => {
+                assert!(msg.contains("Brent method requires search range"));
+            }
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[test]
+    fn test_brent_invalid_interval() {
+        let solver = ScalarRootFinder::new();
+        let func = ClosureFunction::new(|x| x * x + 1.0, "x^2 + 1".to_string());
+
+        // This function has no real roots, so Brent should fail
+        let result = solver.brent(&func, Some((-1.0, 1.0)));
+        assert!(matches!(result, Err(RootFindingError::InvalidInterval)));
+    }
+
+    #[test]
+    fn test_brent_vs_other_methods() {
+        let solver = ScalarRootFinder::new();
+        // f(x) = x^3 - 2x - 5
+        let func = ClosureFunction::new(|x| x * x * x - 2.0 * x - 5.0, "x^3 - 2x - 5".to_string());
+
+        // Test Brent method
+        let brent_result = solver.brent(&func, Some((2.0, 3.0))).unwrap();
+
+        // Test bisection method for comparison
+        let bisection_result = solver.bisection(&func, 2.0, 3.0).unwrap();
+
+        // Test secant method for comparison
+        let secant_result = solver.secant(&func, 2.0, 2.5).unwrap();
+
+        let expected_root = 2.094551481542327;
+
+        // All methods should find the same root
+        assert_relative_eq!(brent_result.root, expected_root, epsilon = 1e-9);
+        assert_relative_eq!(bisection_result.root, expected_root, epsilon = 1e-9);
+        assert_relative_eq!(secant_result.root, expected_root, epsilon = 1e-9);
+
+        // Brent should typically converge faster than bisection
+        assert!(brent_result.iterations <= bisection_result.iterations);
+
+        println!("Brent iterations: {}", brent_result.iterations);
+        println!("Bisection iterations: {}", bisection_result.iterations);
+        println!("Secant iterations: {}", secant_result.iterations);
+    }
+}
 ///////////////////////////////SYMOBOLIC TESTING////////////////////////////////////
 #[cfg(test)]
 mod symbolic_tests {

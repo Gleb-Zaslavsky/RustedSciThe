@@ -12,8 +12,8 @@ use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
-use crate::numerical::NR::NR;
 use crate::numerical::NR_for_ODE::NRODE;
+use crate::numerical::Nonlinear_systems::NR::NR;
 use crate::numerical::ODE_api::ODEsolver;
 use nalgebra::{DMatrix, DVector};
 use sprs::{CsMat, CsVec};
@@ -182,7 +182,7 @@ fn main() {
             );
         }
         5 => {
-            use crate::numerical::NR::Method;
+            use crate::numerical::Nonlinear_systems::NR::Method;
             //use the shortest way to solve system of equations
             // first define system of equations and initial guess
             let mut NR_instanse = NR::new();

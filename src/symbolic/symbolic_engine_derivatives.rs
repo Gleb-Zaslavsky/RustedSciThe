@@ -1,5 +1,6 @@
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
+use std::f64::consts::PI;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
@@ -45,6 +46,76 @@ impl Expr {
                 Expr::Mul(Box::new(Expr::Exp(expr.clone())), Box::new(expr.diff(var)))
             }
             Expr::Ln(expr) => Expr::Div(Box::new(expr.diff(var)), expr.clone()),
+            Expr::sin(expr) => {
+                Expr::Mul(Box::new(Expr::cos(expr.clone())), Box::new(expr.diff(var)))
+            }
+            Expr::cos(expr) => Expr::Mul(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(-1.0)),
+                    Box::new(Expr::sin(expr.clone())),
+                )),
+                Box::new(expr.diff(var)),
+            ),
+            Expr::tg(expr) => Expr::Mul(
+                Box::new(Expr::Div(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::Pow(
+                        Box::new(Expr::cos(expr.clone())),
+                        Box::new(Expr::Const(2.0)),
+                    )),
+                )),
+                Box::new(expr.diff(var)),
+            ),
+            Expr::ctg(expr) => Expr::Mul(
+                Box::new(Expr::Div(
+                    Box::new(Expr::Const(-1.0)),
+                    Box::new(Expr::Pow(
+                        Box::new(Expr::sin(expr.clone())),
+                        Box::new(Expr::Const(2.0)),
+                    )),
+                )),
+                Box::new(expr.diff(var)),
+            ),
+            Expr::arcsin(expr) => Expr::Div(
+                Box::new(expr.diff(var)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Sub(
+                        Box::new(Expr::Const(1.0)),
+                        Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))),
+                    )),
+                    Box::new(Expr::Const(0.5)),
+                )),
+            ),
+            Expr::arccos(expr) => Expr::Div(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(-1.0)),
+                    Box::new(expr.diff(var)),
+                )),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Sub(
+                        Box::new(Expr::Const(1.0)),
+                        Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))),
+                    )),
+                    Box::new(Expr::Const(0.5)),
+                )),
+            ),
+            Expr::arctg(expr) => Expr::Div(
+                Box::new(expr.diff(var)),
+                Box::new(Expr::Add(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))),
+                )),
+            ),
+            Expr::arcctg(expr) => Expr::Div(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(expr.diff(var)),
+                )),
+                Box::new(Expr::Add(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))),
+                )),
+            ),
         }
     } // end of diff
 
@@ -61,6 +132,14 @@ impl Expr {
             Expr::Pow(base, exp) => format!("({}^{})", base.sym_to_str(var), exp.sym_to_str(var)),
             Expr::Exp(expr) => format!("exp({})", expr.sym_to_str(var)),
             Expr::Ln(expr) => format!("ln({})", expr.sym_to_str(var)),
+            Expr::sin(expr) => format!("sin({})", expr.sym_to_str(var)),
+            Expr::cos(expr) => format!("cos({})", expr.sym_to_str(var)),
+            Expr::tg(expr) => format!("tg({})", expr.sym_to_str(var)),
+            Expr::ctg(expr) => format!("ctg({})", expr.sym_to_str(var)),
+            Expr::arcsin(expr) => format!("arcsin({})", expr.sym_to_str(var)),
+            Expr::arccos(expr) => format!("arccos({})", expr.sym_to_str(var)),
+            Expr::arctg(expr) => format!("arctg({})", expr.sym_to_str(var)),
+            Expr::arcctg(expr) => format!("arcctg({})", expr.sym_to_str(var)),
         } // end of match
     } // end of sym_to_str
     ///LAMBDIFY
@@ -105,6 +184,38 @@ impl Expr {
             Expr::Ln(expr) => {
                 let expr_fn = expr.lambdify1D();
                 Box::new(move |x| expr_fn(x).ln())
+            }
+            Expr::sin(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).sin())
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).cos())
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).tan())
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(1.0 / x).tan())
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).asin())
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).acos())
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).atan())
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| PI/2.0 - expr_fn( x).atan())
             }
         } // end of match
     } // end of lambdify1D
@@ -163,6 +274,44 @@ impl Expr {
                 let expr_fn = expr.lambdify(vars);
                 Box::new(move |args| expr_fn(args).ln())
             }
+            Expr::sin(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).sin())
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).cos())
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).tan())
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| {
+                    let args = args.iter().map(|x| 1.0 / x).collect::<Vec<f64>>();
+                    expr_fn(args).tan()
+                })
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).asin())
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).acos())
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| expr_fn(args).atan())
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.lambdify(vars);
+                Box::new(move |args| {
+                  
+                    PI/2.0 - expr_fn(args).tan()
+                })
+            }
         }
     } // end of lambdify
 
@@ -217,6 +366,38 @@ impl Expr {
             Expr::Ln(expr) => {
                 let expr_fn = expr.lambdify_slice(vars);
                 Box::new(move |args| expr_fn(args).ln())
+            }
+            Expr::sin(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).sin())
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).cos())
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).tan())
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| 1.0 / expr_fn(args).tan())
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).asin())
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).acos())
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| expr_fn(args).atan())
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.lambdify_slice(vars);
+                Box::new(move |args| PI/2.0 - expr_fn(args).atan())
             }
         }
     } // end of lambdify
@@ -276,6 +457,38 @@ impl Expr {
                 let expr_fn = expr.lambdify_owned(vars);
                 Box::new(move |args| expr_fn(args).ln())
             }
+            Expr::sin(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).sin())
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).cos())
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).tan())
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| 1.0 / expr_fn(args).tan())
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).asin())
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).acos())
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| expr_fn(args).atan())
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.lambdify_owned(vars);
+                Box::new(move |args| PI/2.0 - expr_fn(args).atan())
+            }
         }
     }
 
@@ -320,6 +533,16 @@ impl Expr {
                 args.push(0);
             }
             Expr::Ln(expr) => {
+                let mut expr_vars = expr.all_arguments_are_variables();
+                vars.append(&mut expr_vars);
+                args.push(0);
+            }
+            Expr::sin(expr) | Expr::cos(expr) | Expr::tg(expr) | Expr::ctg(expr) => {
+                let mut expr_vars = expr.all_arguments_are_variables();
+                vars.append(&mut expr_vars);
+                args.push(0);
+            }
+            Expr::arcsin(expr) | Expr::arccos(expr) | Expr::arctg(expr) | Expr::arcctg(expr) => {
                 let mut expr_vars = expr.all_arguments_are_variables();
                 vars.append(&mut expr_vars);
                 args.push(0);
@@ -478,6 +701,38 @@ impl Expr {
                 let expr_fn = expr.eval_expression(vars, values);
                 expr_fn.ln()
             }
+            Expr::sin(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.sin()
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.cos()
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.tan()
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                (1.0 / expr_fn).tan()
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.asin()
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.acos()
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                expr_fn.atan()
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.eval_expression(vars, values);
+                PI/2.0 - ( expr_fn).atan()
+            }
         }
     } // end of eval_expression
 
@@ -548,6 +803,12 @@ impl Expr {
                 vars.extend(exp.all_arguments_are_variables());
             }
             Expr::Exp(expr) | Expr::Ln(expr) => {
+                vars.extend(expr.all_arguments_are_variables());
+            }
+            Expr::sin(expr) | Expr::cos(expr) | Expr::tg(expr) | Expr::ctg(expr) => {
+                vars.extend(expr.all_arguments_are_variables());
+            }
+            Expr::arcsin(expr) | Expr::arccos(expr) | Expr::arctg(expr) | Expr::arcctg(expr) => {
                 vars.extend(expr.all_arguments_are_variables());
             }
         }

@@ -265,6 +265,7 @@ impl Radau {
     /// Enable or disable parallel processing
     pub fn set_parallel(&mut self, parallel: bool) {
         self.parallel = parallel;
+        self.newton.set_parallel(parallel);
         info!(
             "Radau parallel processing: {}",
             if parallel { "enabled" } else { "disabled" }

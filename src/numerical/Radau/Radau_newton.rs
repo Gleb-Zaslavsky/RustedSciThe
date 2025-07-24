@@ -194,7 +194,7 @@ pub struct RadauNewton {
     pub t_n: f64,          // Current time
     pub n_vars: usize,     // Number of ODE variables
     pub n_stages: usize,   // Number of Radau stages
-
+    pub parallel: bool,
     // Function closures (generated from symbolic expressions)
     pub fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
@@ -231,6 +231,7 @@ impl RadauNewton {
             t_n: 0.0,
             n_vars,
             n_stages,
+            parallel: false,
             fun: Box::new(|_t, y| y.clone()),
             jac: None,
             n: k_variables.len(),
@@ -241,12 +242,25 @@ impl RadauNewton {
     pub fn eq_generate(&mut self) {
         info!("Generating Radau Newton equations and jacobian");
         let mut jacobian_instance = Jacobian::new();
-        jacobian_instance.generate_NR_solver_for_Radau(
-            self.eq_system.clone(),
-            self.k_variables.clone(),
-            self.parameters.clone(),
-            self.arg.clone(),
-        );
+        match self.parallel {
+            true => {
+                println!("\n Parallel version enabled \n");
+                jacobian_instance.generate_NR_solver_for_Radau_parallel(
+                    self.eq_system.clone(),
+                    self.k_variables.clone(),
+                    self.parameters.clone(),
+                    self.arg.clone(),
+                );
+            }
+            false => {
+                jacobian_instance.generate_NR_solver_for_Radau(
+                    self.eq_system.clone(),
+                    self.k_variables.clone(),
+                    self.parameters.clone(),
+                    self.arg.clone(),
+                );
+            }
+        }
 
         self.jacobian_symbolic = Some(jacobian_instance.symbolic_jacobian.clone());
         // Extract the lambdified functions and Jacobian
@@ -275,6 +289,10 @@ impl RadauNewton {
             "Setting Radau Newton parameters: t_n = {:.6}, h = {:.6}",
             t_n, h
         );
+    }
+
+    pub fn set_parallel(&mut self, parallel: bool) {
+        self.parallel = parallel;
     }
 
     /// Set initial guess for K variables

@@ -8,7 +8,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///
 ///  Example#1
 /// ```
-///  use RustedSciThe::numerical::NR::NR;
+///  use RustedSciThe::numerical::Nonlinear_systems::NR::NR;
 /// use nalgebra::DVector;
 /// //use the shortest way to solve system of equations
 ///    // first define system of equations and initial guess
@@ -25,7 +25,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///  ```
 ///    // or more verbose way...
 ///    // first define system of equations
-///     use RustedSciThe::numerical::NR::NR;
+///     use RustedSciThe::numerical::Nonlinear_systems::NR::NR;
 ///     use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///     use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 /// use nalgebra::DVector;
@@ -45,7 +45,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 
-use crate::numerical::LM_utils::{
+use crate::numerical::Nonlinear_systems::LM_utils::{
     ConvergenceCriteria, ReductionRatio, ScalingMethod, SubproblemMethod, UpdateMethod,
 };
 use log::{error, info, warn};

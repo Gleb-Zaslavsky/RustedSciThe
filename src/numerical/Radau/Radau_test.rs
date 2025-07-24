@@ -818,3 +818,407 @@ mod tests_real_odes {
         // Check that solution remains bounded
     }
 }
+
+#[cfg(test)]
+mod tests_real_odes_parallel {
+    use crate::symbolic::symbolic_engine::Expr;
+
+    use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
+    use approx::assert_relative_eq;
+    use nalgebra::DMatrix;
+    use nalgebra::DVector;
+    use simplelog::*;
+    #[test]
+    fn test_radau_simple_linear_ode() {
+        // Test: y' = -y, y(0) = 1
+        // Exact solution: y(t) = exp(-t)
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 1.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (t_result, y_result) = radau.get_result();
+        assert!(t_result.is_some());
+        assert!(y_result.is_some());
+
+        let t_res = t_result.unwrap();
+        let y_res: DMatrix<f64> = y_result.unwrap();
+        println!("t = {:?} \n", t_res);
+        println!("y = {:?} \n", y_res);
+        // Check final value: y(1) ≈ exp(-1) ≈ 0.3679
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        let expected = (-1.0_f64).exp();
+        assert_relative_eq!(final_y, expected, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn test_radau_exponential_growth() {
+        // Test: y' = y, y(0) = 1
+        // Exact solution: y(t) = exp(t)
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 0.5;
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_log_level(LevelFilter::Info);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+        let t_res = radau.t_result;
+        // Check final value: y(0.5) ≈ exp(0.5) ≈ 1.6487
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        let expected = (0.5_f64).exp();
+        assert_relative_eq!(final_y, expected, epsilon = 1e-3);
+        let f_t = |t: f64| (t).exp();
+        for (t, y) in t_res.iter().zip(y_res.row_iter()) {
+            assert_relative_eq!(y[0], f_t(*t), epsilon = 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_radau_linear_system_2x2() {
+        // Test system: y1' = -2*y1 + y2, y2' = y1 - 2*y2
+        // Initial conditions: y1(0) = 1, y2(0) = 0
+        // solution: y1(t) =  1/2 e^(-3 x) (e^(2 x) + 1)
+        // y2(t) = 1/2 e^(-3 x) (-1 + e^(2 x))
+        let eq1 = Expr::parse_expression("-2*y1+y2");
+        let eq2 = Expr::parse_expression("y1-2*y2");
+        let eq_system = vec![eq1, eq2];
+
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(1e-3);
+        let t0 = 0.0;
+        let t_bound = 1.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order3);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+
+        // Check that we have 2 variables
+        assert_eq!(y_res.ncols(), 2);
+        //    println!("y nrows {}, ncols = {:?} \n", y_res.nrows(), y_res.ncols());
+        // The exact solution involves eigenvalues -1 and -3
+        // At t=1: solutions should be decaying
+        let final_y1 = y_res[(y_res.nrows() - 1, 0)];
+        let final_y2 = y_res[(y_res.nrows() - 1, 1)];
+
+        let y1_end = 0.5 * f64::exp(-3.0) * (f64::exp(2.0) + 1.0);
+        let y2_end = 0.5 * f64::exp(-3.0) * (-1.0 + f64::exp(2.0));
+        println!("expected endpoints = {:?}, {} \n", y1_end, y2_end);
+        assert_relative_eq!(final_y1, y1_end, epsilon = 1e-2);
+        assert_relative_eq!(final_y2, y2_end, epsilon = 1e-2);
+        // Both should be positive but smaller than initial values
+        assert!(final_y1 > 0.0 && final_y1 < 1.0);
+        assert!(final_y2.abs() < 1.0); // y2 starts at 0, should remain bounded
+
+        let f_y1 = |t: f64| 0.5 * f64::exp(-3.0 * t) * (f64::exp(2.0 * t) + 1.0);
+        let f_y2 = |t: f64| 0.5 * f64::exp(-3.0 * t) * (-1.0 + f64::exp(2.0 * t));
+        let t_res = radau.t_result;
+        for (t, y) in t_res.iter().zip(y_res.row_iter()) {
+            let y1_exact = f_y1(*t);
+            let y2_exact = f_y2(*t);
+            assert_relative_eq!(y[0], y1_exact, epsilon = 1e-2);
+            assert_relative_eq!(y[1], y2_exact, epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_harmonic_oscillator() {
+        // Test: y1' = y2, y2' = -y1 (harmonic oscillator)
+        // Initial conditions: y1(0) = 1, y2(0) = 0
+        // Exact solution: y1(t) = cos(t), y2(t) = -sin(t)
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("-y1");
+        let eq_system = vec![eq1, eq2];
+
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-8;
+        let max_iterations = 50;
+        let h = Some(1e-2);
+        let t0 = 0.0;
+        let t_bound = std::f64::consts::PI / 2.0; // π/2
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(
+            eq_system,
+            values.clone(),
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+        let t_res = radau.t_result;
+        //  println!("t_res: {}", t_res);
+        //  println!("{:?}", values);
+        //  println!("y_res: {}", y_res);
+        // At t = π/2: y1 should be ≈ 0, y2 should be ≈ -1
+        let final_y1 = y_res[(y_res.nrows() - 1, 0)];
+        let final_y2 = y_res[(y_res.nrows() - 1, 1)];
+
+        assert_relative_eq!(final_y1, 0.0, epsilon = 1e-2);
+        assert_relative_eq!(final_y2, -1.0, epsilon = 1e-2);
+        // compare with exact solution
+        let f_y1 = |t: f64| f64::cos(t);
+        let f_y2 = |t: f64| -f64::sin(t);
+        for (t, y) in t_res.iter().zip(y_res.row_iter()) {
+            let y1_exact = f_y1(*t);
+            let y2_exact = f_y2(*t);
+            assert_relative_eq!(y[0], y1_exact, epsilon = 1e-2);
+            assert_relative_eq!(y[1], y2_exact, epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_nonlinear_ode() {
+        // Test: y' = y^2, y(0) = 1
+        // Exact solution: y(t) = 1/(1-t) for t < 1
+        let eq1 = Expr::parse_expression("y*y");
+        let eq_system = vec![eq1];
+
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 0.5;
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order3);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+
+        // At t = 0.5: y(0.5) = 1/(1-0.5) = 2
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        let expected = 1.0 / (1.0 - 0.5);
+        assert_relative_eq!(final_y, expected, epsilon = 1e-2);
+    }
+
+    #[test]
+    fn test_radau_van_der_pol_oscillator() {
+        // Van der Pol oscillator: y1' = y2, y2' = μ(1-y1^2)y2 - y1
+        // With μ = 0.1 (weakly nonlinear)
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("0.1*(1.0 - y1*y1)*y2 - y1");
+        let eq_system = vec![eq1, eq2];
+
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.1);
+        let t0 = 0.0;
+        let t_bound = 5.0;
+        let y0 = DVector::from_vec(vec![2.0, 0.0]); // Start away from equilibrium
+
+        let mut radau = Radau::new(RadauOrder::Order3);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+
+        // Check that solution remains bounded (Van der Pol has limit cycle)
+        let final_y1 = y_res[(y_res.nrows() - 1, 0)];
+        let final_y2 = y_res[(y_res.nrows() - 1, 1)];
+
+        assert!(final_y1.abs() < 10.0); // Should remain bounded
+        assert!(final_y2.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_radau_stiff_system() {
+        // Stiff system: y1' = -1000*y1 + y2, y2' = y1 - y2
+        // This tests Radau's ability to handle stiff problems
+        let eq1 = Expr::parse_expression("-1000.0*y1 + y2");
+        let eq2 = Expr::parse_expression("y1 - y2");
+        let eq_system = vec![eq1, eq2];
+
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 100; // May need more iterations for stiff problems
+        let h = Some(0.01); // Small step size for stiff problem
+        let t0 = 0.0;
+        let t_bound = 0.1;
+        let y0 = DVector::from_vec(vec![1.0, 1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+
+        // For stiff systems, just check that solution doesn't blow up
+        let final_y1 = y_res[(y_res.nrows() - 1, 0)];
+        let final_y2 = y_res[(y_res.nrows() - 1, 1)];
+
+        assert!(final_y1.is_finite());
+        assert!(final_y2.is_finite());
+        assert!(final_y1.abs() < 100.0); // Should remain reasonable
+        assert!(final_y2.abs() < 100.0);
+    }
+
+    #[test]
+    fn test_radau_three_body_problem_simplified() {
+        // Simplified 3-body problem (2D, one body)
+        // y1' = y3, y2' = y4, y3' = -y1/r^3, y4' = -y2/r^3
+        // where r = sqrt(y1^2 + y2^2)
+        let eq1 = Expr::parse_expression("y3");
+        let eq2 = Expr::parse_expression("y4");
+        let eq3 = Expr::parse_expression("-y1/((y1*y1 + y2*y2)^1.5)");
+        let eq4 = Expr::parse_expression("-y2/((y1*y1 + y2*y2)^1.5)");
+        let eq_system = vec![eq1, eq2, eq3, eq4];
+
+        let values = vec![
+            "y1".to_string(),
+            "y2".to_string(),
+            "y3".to_string(),
+            "y4".to_string(),
+        ];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 1.0;
+        // Initial conditions for circular orbit
+        let y0 = DVector::from_vec(vec![1.0, 0.0, 0.0, 1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+        radau.set_parallel(true);
+        radau.solve();
+
+        assert_eq!(radau.status, "finished");
+        let (_, y_result) = radau.get_result();
+        //let y_res = y_result.unwrap();
+
+        // Check that solution remains bounded
+    }
+}

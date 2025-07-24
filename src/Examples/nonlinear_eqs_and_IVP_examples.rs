@@ -5,8 +5,8 @@
 use crate::symbolic::symbolic_engine::Expr;
 
 use crate::numerical::BE::BE;
-use crate::numerical::NR::NR;
 use crate::numerical::NR_for_ODE::NRODE;
+use crate::numerical::Nonlinear_systems::NR::NR;
 use crate::numerical::ODE_api::ODEsolver;
 use nalgebra::DVector;
 #[allow(dead_code)]
