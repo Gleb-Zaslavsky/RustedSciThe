@@ -1,3 +1,4 @@
+//! different utility modules used throughout the project
 /// tiny module to save solution into file
 pub mod logger;
 /// tiny module to plot result of IVP computation

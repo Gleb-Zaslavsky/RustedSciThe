@@ -868,15 +868,16 @@ where
     Ok(result.root)
 }
 /////////////////////////////////////////TESTS////////////////////////////////////////
+// Helper function to check if two floats are approximately equal
+pub fn approx_equal(a: f64, b: f64, tolerance: f64) -> bool {
+        (a - b).abs() < tolerance
+    }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::PI;
 
-    // Helper function to check if two floats are approximately equal
-    fn approx_equal(a: f64, b: f64, tolerance: f64) -> bool {
-        (a - b).abs() < tolerance
-    }
 
     #[test]
     fn test_closure_function() {

@@ -1,15 +1,66 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
-///pub mod BDF;
-/// SOLVER OF STIFF IVP
+//! solvers of BVPs and IVPs, optization, nonlinear algeraic systems and more
+/// #########################ODEs SECTION######################
+/// 
+/// SOLVER OF STIFF IVPs (initial value problems)
 /// direct rewrite to Rust python code from SciPy
-/// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
+/// 
+/// Example#1
+/// ```
+///use RustedSciThe::symbolic::symbolic_engine::Expr;
+/// use RustedSciThe::symbolic::symbolic_functions::Jacobian;
+/// use RustedSciThe::numerical::ODE_api::ODEsolver;
+///             // set RHS of system as vector of strings
+///            let RHS = vec!["-z-exp(-y)", "y"];
+///            // parse RHS as symbolic expressions
+///            let Equations = Expr::parse_vector_expression(RHS.clone());
+///            let values = vec!["z".to_string(), "y".to_string()];
+///            println!("Equations = {:?}", Equations);
+///            // set argument
+///            let arg = "x".to_string();
+///            // set method
+///            let method = "BDF".to_string();
+///            // set initial conditions
+///            let t0 = 0.0;
+///            let y0 = vec![1.0, 1.0];
+///            let t_bound = 1.0;
+///            // set solver parameters (optional)
+///            let first_step = None;
+///            let atol = 1e-5;
+///            let rtol = 1e-5;
+///            let max_step = 1e-3;
+///            let jac_sparsity = None;
+///            let vectorized = false;
+///            // create instance of ODE solver and solve the system
+///            let mut ODE_instance = ODEsolver::new_complex(
+///                Equations,
+///                values,
+///                arg,
+///                method,
+///                t0,
+///                y0.into(),
+///                t_bound,
+///                max_step,
+///                rtol,
+///                atol,
+///                jac_sparsity,
+///                vectorized,
+///                first_step,
+///            );
+///
+///            ODE_instance.solve();
+///            ODE_instance.plot_result();
+/// ```
 pub mod BDF;
-/// Example#3
-///     ```
-/// // Beckward-Euler method
-///         use RustedSciThe:::symbolic::symbolic_engine::Expr;
+
+/// Backward Euler method (good for stiff ODEs)
+/// 
+/// Example#1
+/// ```
+///         use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///         use RustedSciThe::numerical::BE::BE;
+///         use nalgebra::DVector;
 ///          //  Backward Euler method: slightly non-linear ODE
 ///          let RHS = vec!["-z-exp(-y)", "y"];
 ///          // parse RHS as symbolic expressions
@@ -17,17 +68,13 @@ pub mod BDF;
 ///          let values = vec![  "z".to_string(), "y".to_string()];
 ///          println!("eq_system = {:?}",  Equations);
 ///          let y0 = DVector::from_vec(vec![1.0, 1.0]);
-
 ///          let arg = "x".to_string();
 ///          let tolerance = 1e-2;
 ///          let max_iterations = 500;
-
 ///          let h = Some(1e-3);
 ///          let t0 = 0.0;
 ///          let t_bound = 1.0;
-
 ///          let mut solver = BE::new();
-
 ///          solver.set_initial( Equations, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
 ///          println!("y = {:?}, initial_guess = {:?}", solver.newton.y,solver.newton.initial_guess);
 ///          solver.newton.eq_generate();
@@ -37,17 +84,16 @@ pub mod BDF;
 ///         // println!("\n result 1 = {:?}", result.1);
 ///         // println!("result = {:?}", result.1.unwrap().shape());
 ///          solver.plot_result();
-///     ```
+/// ```
 pub mod BE;
-
+/// Newton Raphson solver for Backward Euler method
 pub mod NR_for_Euler;
 pub mod NR_for_ODE;
 
-/// API for this is RustedSciThe::numerical::ODE_api::ODEsolver;
+/// RK45 and Dormand-Prince methods 
 pub mod NonStiff_api;
-pub mod Nonlinear_systems;
-/// usage of BDF solver
 ///  general api for ODE solvers  (BDF, RK4, etc.)
+/// 
 /// Example#1
 /// ```
 ///use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -103,7 +149,7 @@ pub mod Nonlinear_systems;
 /// ```
 /// Non-stiff equations: use ODE general api ODEsolver
 /// RK45 and Dormand-Prince methods are available
-/// Example#3
+/// Example#2
 /// ```
 /// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///  use RustedSciThe::numerical::ODE_api::ODEsolver;
@@ -149,7 +195,7 @@ pub mod Nonlinear_systems;
 ///    ODE_instance.plot_result();
 ///    ODE_instance.save_result();
 ///  ```
-/// Example#2
+/// Example#3
 /// ```
 /// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///  use RustedSciThe::numerical::ODE_api::ODEsolver;
@@ -185,25 +231,24 @@ pub mod Nonlinear_systems;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
-pub mod optimization;
-pub mod trust_region_LM;
-pub mod trust_region_lmpar;
-
+/// not production ready
 pub mod BVP_sci;
-
+///  a collection of test examples of exect solutions of BVPs for testing purposes
 pub mod Examples_and_utils;
-//BVP section
-/*
- frozen jacobian strategy - recalculating jacobian on condition:
- Description of strategy                                                                 key of strategy        value user must provude for strategy
-1. only first time:                                                                      "Frozen_naive"                   None
-2. every m-th time, where m is a parameter of the strategy:                                "every_m"                    m
-3. every time when the solution norm greater than a certain threshold A:                   "at_high_norm".               A
-4. when norm of (i-1) iter multiplied by certain value B(<1) is lower than norm of i-th iter : "at_low_speed".            B
-5. complex - combined strategies 2,3,4                                                         "complex"              vec of  parameters [m, A, B]
-
- */
-/// Example#5
+/// Boundary value problems solvers for stiff nonlinear ODEs
+///
+/// solver NR_Damp_solver_frozen implements NR method with damping
+/// but without adaptive grid. 
+/// Frozen jacobian strategy - recalculating jacobian on condition:
+/// Description of strategy                                                                 key of strategy        value user must provude for strategy
+/// 1. only first time:                                                                      "Frozen_naive"                   None
+/// 2. every m-th time, where m is a parameter of the strategy:                                "every_m"                    m
+/// 3. every time when the solution norm greater than a certain threshold A:                   "at_high_norm".               A
+/// 4. when norm of (i-1) iter multiplied by certain value B(<1) is lower than norm of i-th iter : "at_low_speed".            B
+/// 5. complex - combined strategies 2,3,4                                                         "complex"              vec of  parameters [m, A, B]
+///
+///
+/// Example#1
 /// ```
 ///      use nalgebra::DMatrix;
 ///      use nalgebra::DVector;
@@ -227,26 +272,26 @@ pub mod Examples_and_utils;
 ///        let  strategy_params = Some(HashMap::from([("complex".to_string(),
 ///       Some(Vec::from( [2f64, 5.0, 1e-1, ]  ))
 ///      )]));
-/*
-  or
-  Some(HashMap::from([("Frozen_naive".to_string(), None)]));
-  or
-  Some(HashMap::from([("every_m".to_string(),
-        Some(Vec::from( [ 5 as f64]  ))
-        )]));
-  or
-  Some(HashMap::from([("at_high_morm".to_string(),
- Some(Vec::from( [ 5 as f64]  ))
-)]));
-or
-Some(HashMap::from([("at_low_speed".to_string(),
- Some(Vec::from( [ 1e-2]  ))
-)]));
-or
- Some(HashMap::from([("complex".to_string(),
- Some(Vec::from( [ 2.0, 5.0, 1e-, ]  ))
-)]));
-  */
+/// //
+///  // or
+/// // Some(HashMap::from([("Frozen_naive".to_string(), None)]));
+/// //  or
+/// //  Some(HashMap::from([("every_m".to_string(),
+/// //        Some(Vec::from( [ 5 as f64]  ))
+/// //        )]));
+/// //  or
+/// //  Some(HashMap::from([("at_high_morm".to_string(),
+/// // Some(Vec::from( [ 5 as f64]  ))
+/// //)]));
+/// //or
+/// //Some(HashMap::from([("at_low_speed".to_string(),
+/// // Some(Vec::from( [ 1e-2]  ))
+/// //)]));
+/// //or
+/// // Some(HashMap::from([("complex".to_string(),
+/// // Some(Vec::from( [ 2.0, 5.0, 1e-, ]  ))
+/// //)]));
+/// //  */
 ///        let method =   "Sparse".to_string();// or  "Dense"
 ///        let linear_sys_method = None;
 ///        let ones = vec![0.0; values.len()*n_steps];
@@ -267,17 +312,16 @@ or
 ///       // println!("result = {:?}", solution);
 ///        nr.plot_result();
 ///    ```
+///
+/// NR_Damp_solver_damped solver implements 
+/// Modified Newton method or Damped Newton method with adaptive grid for solving Boundary value problems for systems of nonlinear ordinary differential equations.
+/// 
+/// The code mostly inspired by sources listed below:
+/// Cantera MultiNewton solver (MultiNewton.cpp )
+/// TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
+///
 
-/*
-Modified Newton method or Damped Newton method for solving a system of nonlinear ordinary differential equations.
-
-This code implements a modified Newton method for solving a system of non-linear boundary value problems..
-The code mostly inspired by sources listed below:
--  Cantera MultiNewton solver (MultiNewton.cpp )
-- TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
- */
-
-/// Example#4
+/// Example#2
 /// ```
 /// use nalgebra::DMatrix;
 ///  use nalgebra::DVector;
@@ -324,8 +368,8 @@ The code mostly inspired by sources listed below:
 ///       // println!("result = {:?}", solution);
 ///        nr.plot_result();
 ///    ```
-
-/// Example#5
+/// API for both solvers
+/// Example#3
 /// ```
 ///  use nalgebra::DMatrix;
 ///  use nalgebra::DVector;
@@ -388,7 +432,59 @@ The code mostly inspired by sources listed below:
 /// nr.save_to_file(None);
 ///    ```
 pub mod BVP_Damp;
-
+/// not production ready
 pub mod BVP_api;
-
+/// Radau solver (good for nonlinear ODEs)
+/// #############################END OF ODEs SECTIONS#####
+/// 
+/// Example#1
+/// ```
+///   use RustedSciThe::symbolic::symbolic_engine::Expr;
+///
+///    use RustedSciThe::numerical::Radau::Radau_main::{Radau, RadauOrder};
+///    use approx::assert_relative_eq;
+///    use nalgebra::DMatrix;
+///    use nalgebra::DVector;
+///    use simplelog::*;
+///   // Test system: y1' = -2*y1 + y2, y2' = y1 - 2*y2
+///        // Initial conditions: y1(0) = 1, y2(0) = 0
+///        // solution: y1(t) =  1/2 e^(-3 x) (e^(2 x) + 1)
+///        // y2(t) = 1/2 e^(-3 x) (-1 + e^(2 x))
+///        let eq1 = Expr::parse_expression("-2*y1+y2");
+///        let eq2 = Expr::parse_expression("y1-2*y2");
+///        let eq_system = vec![eq1, eq2];
+///
+///        let values = vec!["y1".to_string(), "y2".to_string()];
+///        let arg = "t".to_string();
+///        let tolerance = 1e-6;
+///        let max_iterations = 50;
+///        let h = Some(1e-3);
+///        let t0 = 0.0;
+///        let t_bound = 1.0;
+///        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+///
+///        let mut radau = Radau::new(RadauOrder::Order3);
+///        radau.set_initial(
+///            eq_system,
+///            values,
+///            arg,
+///            tolerance,
+///            max_iterations,
+///            h,
+///            t0,
+///            t_bound,
+///            y0,
+///        );
+///
+///        radau.solve();
+///
+///        assert_eq!(radau.status, "finished");
+///        let (_, y_result) = radau.get_result();
+///        let y_res = y_result.unwrap();
+///
+///    ```
 pub mod Radau;
+/// collection of optimization algorithms
+pub mod optimization;
+/// solvers of nonlinear algebraic equations
+pub mod Nonlinear_systems;

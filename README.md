@@ -1,10 +1,9 @@
 [TOC]
 
 # RustedSciThe
-is a Rust framework for symbolic and numerical computing: parse string expressions in symbolic representation/symbolic function and compute symbolic derivatives or/and transform symbolic expressions into regular Rust functions, compute symbolic Jacobian and solve initial value problems for for stiff ODEs with BDF and Backward Euler methods, non-stiff ODEs and Boundary Value Problem (BVP) using Newton iterations. 
-NOTE: Symbolic part of the crate is not supposed to be a "full-scale" all-purpose symbolic library even now it provides a descent amount of features it was supposed for the following main goals a) analytical Jacobians for differential equations b) pretty printing of custom equations c) convenient input of custom equations without the need to wrap the right-hand side function in the implementation of some structure, as is done in many crates, which is quite cumbersome.
+is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: optimization and fitting added!
+PROJECT NEWS: improved documentation
 
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
@@ -22,21 +21,36 @@ ATTENTION: for those interested in solving BVP there is an in-depth guide for th
 At first, this code was part of the KiThe crate, where it was supposed to serve for constructing analytical Jacobians for solving systems of equations of combustion, chemical kinetics and heat and mass transfer, as well as for displaying analytical expressions, but it soon became clear that it could be useful for a broader circle of users
 
 ## Features
-- parsing string expressions in symbolic to a symbolic expression/function
-- symbolic/analytical differentiation of symbolic expressions/functions
-- compare analytical derivative to a numerical one
-- calculate vector of partial derivatives
-- transform symbolic expressions/functions (also derivatives) into regular Rust functions
-- calculate symbolic/analytical Jacobian and transform it into functional form
-- Newton-Raphson method with analytical Jacobian
-- Backward Eeuler method with analytical Jacobian
-- Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
-- Radau  method with analytical Jacobian 
-- classical methods for non-stiff equations RK45 and DP
+- symbolic engine:
+      - parsing string expressions to a symbolic expression/function
+      - symbolic/analytical differentiation of symbolic expressions/functions
+      - compare analytical derivative to a numerical one
+      - calculate vector of partial derivatives
+      - transform symbolic expressions/functions (also derivatives) into regular Rust functions
+     - calculate symbolic/analytical Jacobians for various          
+       numerical methods and transform it
+       into functional form
+      - analytical Taylor series expansion
+      - matrices and vectors of symbolic expressions/functions
+      - symbolic/analytical integration
+      - numerical integration of symbolic expressions/functions
+- IVP for stiff and non-stiff problems with analytical Jacobian:
+      - Backward Eeuler method with analytical Jacobian
+      - Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
+    - Radau  method with analytical Jacobian 
+    - classical methods for non-stiff equations RK45 and DP
 - Boundary Value Problem for ODE with Newton-Raphson method (several versions available)
-- solving systems of non-linear equations 
-- curve fitting
-- optimization
+- Optimization with (if needed) analytical Jacobian:
+        - curve fitting
+        - Levergang-Marquardt method with trust region
+        - H.P.Gavin Levergang-Marquardt method
+        - scalar optimization (Brent method, bisection method, secant, Newton-Raphson method)
+- solving systems of non-linear equations with analytical Jacobian
+      - Newton-Raphson method
+       - Newton-Raphson damped
+      - Levenberg-Marquardt method
+
+
  PROJECT NAVIGATION
 
  ## Project Documentation and Navigation
@@ -790,15 +804,16 @@ If you have any questions, comments or want to contribute, please feel free to c
 
 
 ## To do
-- [_x] Write basic functionality
-- [_x] Write jacobians
-- [_x] Write Newton-Raphson
-- [_x] Write BDF
-- [_x] Write Backward Euler
-- [_x] Write some nonstiff methods
-- [_x] Add indexed variables and matrices
-- [ ] Add more numerical methods for ODEs
-- [_x] Add BVP methods for stiff ODEs
+- [x] Write basic functionality
+- [x] Write jacobians
+- [x] Write Newton-Raphson
+- [x] Write BDF
+- [x] Write Backward Euler
+- [x] Write some nonstiff methods
+- [x] Add indexed variables and matrices
+- [x] Add BVP methods for stiff ODEs
+- [ ] may be GPU accelerated computations
+- [ ] more methods for stiff ODEs
 
 
 

@@ -1,7 +1,18 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+//! symbolic engine features:
+//! 1) turns a String expression into a symbolic expression
+//! 2) turns a symbolic expression into a Rust function
+//! 3) turns a symbolic expression into a string expression for printing and control results
+//! 4) anaytical differentiation and comparsion with numerical differentiation
+//! 5) analytical function of many variables
+//! 6) calculating Jacobians (symbolic expressions and Rust functions) for various ODE problems
+//! 7) analytical Taylor expansion
+//! 8) analytical integration
+//! 9) numerical integration 
+//! 10) vectors and matrices of symbolic expressions
+//! 11) multiple symbolic operations (substitution, addition, multiplication, etc.)
 /// a module turns a String expression into a symbolic expression
-///
 ///# Example
 /// ```
 ///  use RustedSciThe::symbolic::symbolic_functions::Jacobian;
@@ -12,15 +23,12 @@
 /// let parsed_function = parsed_expression.lambdify( vec!["x","y"]);
 /// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0, 2.0]));
 ///  ```
-/// ________________________________________________________________________________________________________________________________
 pub mod parse_expr;
-///____________________________________________________________________________________________________________________________
-/// # Symbolic engine
-/// a module
-/// 1) turns a String expression into a symbolic expression
+///  Symbolic engine 1) turns a String expression into a symbolic expression 
 /// 2) turns a symbolic expression into a Rust function
 /// 3) turns a symbolic expression into a string expression for printing and control results
-///# Example#
+///
+/// # Example#
 /// ```
 ///
 /// use RustedSciThe::symbolic::parse_expr;
@@ -99,10 +107,10 @@ pub mod parse_expr;
 ///   let (norm, res) = f.compare_num1D("x", start, end, num_values, max_norm);
 ///  println!("norm = {}, res = {}", norm, res);
 /// ```
-/// ________________________________________________________________________________________________________________________________________________
 pub mod symbolic_engine;
+/// basic functionality for analytical differentiation of symbolic expressions
 pub mod symbolic_engine_derivatives;
-///________________________________________________________________________________________________________________________________________________
+
 ///
 /// calculate symbolic jacobian and evaluate it
 /// Example#
@@ -150,6 +158,7 @@ pub mod symbolic_engine_derivatives;
 ///     println!("function vector after evaluate_funvector_lambdified_DMatrix = {:?} \n", Jacobian_instance.evaluated_functions_DVector);
 /// ```
 pub mod symbolic_functions;
+/// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
 pub mod symbolic_traits;
@@ -157,6 +166,8 @@ pub mod symbolic_traits;
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
-
+/// basic functionality for symbolic integration (only elementary functions)
+/// also numerical integration of symbolic functions
 pub mod symbolic_integration;
+/// matrices and vectors of symbolic expressions
 pub mod symbolic_vectors;
