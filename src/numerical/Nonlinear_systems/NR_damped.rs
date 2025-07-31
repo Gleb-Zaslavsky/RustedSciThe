@@ -121,7 +121,7 @@ impl NR {
             let y_k: DVector<f64> = y_k_minus_1.clone() - damped_step_k_minus_1;
             //dbg!(&y_k);
             // clip the result vector i.e.
-            let y_k_clipped: DVector<f64> = if (clipping_flag == true) {
+            let y_k_clipped: DVector<f64> = if clipping_flag == true {
                 self.clip(&y_k, &self.bounds_vec)
             } else {
                 y_k

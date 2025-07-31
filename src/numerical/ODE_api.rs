@@ -6,18 +6,20 @@ use crate::Utils::plots::plots;
 use crate::numerical::BDF::common::NumberOrVec;
 use crate::numerical::BE::BE;
 use crate::numerical::NonStiff_api::{DormandPrince, RK45};
+use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
 use csv::Writer;
 use na::{DMatrix, DVector};
 use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-static COMPLEX: [&str; 1] = ["BDF"];
+static COMPLEX: [&str; 2] = ["BDF", "RADAU"];
 
 const EASY: [&str; 2] = ["RK45", "DOPRI"];
 pub enum Solvers {
     BE(BE),
     BDF(BDF),
+    RADAU(Radau),
     RK45(RK45),
     DOPRI(DormandPrince),
 }
@@ -27,6 +29,7 @@ impl Solvers {
         match name {
             //    "BE" => Solvers::BE(BE::new()),
             "BDF" => Solvers::BDF(BDF::new()),
+            "RADAU" => Solvers::RADAU(Radau::new(RadauOrder::Order5)),
             "RK45" => Solvers::RK45(RK45::new()),
             "DOPRI" => Solvers::DOPRI(DormandPrince::new()),
             _ => panic!("Unknown solver name"),
@@ -228,6 +231,23 @@ impl ODEsolver {
             );
             self.solver_instance = Solvers::BDF(solver_instance);
         }
+        // RADAU
+        else if self.method == "RADAU" {
+            let mut solver_instance = Radau::new(RadauOrder::Order5);
+            solver_instance.set_initial(
+                self.eq_system.clone(),
+                self.values.clone(),
+                self.arg.clone(),
+                self.rtol, // tolerance
+                50,        // max_iterations
+                self.first_step,
+                self.t0,
+                self.t_bound,
+                self.y0.clone(),
+            );
+            solver_instance.newton.eq_generate();
+            self.solver_instance = Solvers::RADAU(solver_instance);
+        }
         // BDF
         else if self.method == "RK45" {
             let mut solver_instance = RK45::new();
@@ -260,6 +280,11 @@ impl ODEsolver {
                 Solvers::BDF(bdf) => {
                     bdf.step(self.t_bound, &mut self.status, &mut self.message);
                 }
+                Solvers::RADAU(radau) => {
+                    radau.step();
+                    self.status = radau.status.clone();
+                    self.message = radau.message.clone();
+                }
                 Solvers::RK45(rk45) => {
                     rk45.step(self.t_bound, &mut self.status, &mut self.message);
                 }
@@ -281,6 +306,12 @@ impl ODEsolver {
                 Solvers::BDF(bdf) => {
                     let y_i = bdf.y.clone();
                     let t_i = bdf.t;
+                    t.push(t_i);
+                    y.push(y_i);
+                }
+                Solvers::RADAU(radau) => {
+                    let y_i = radau.y.clone();
+                    let t_i = radau.t;
                     t.push(t_i);
                     y.push(y_i);
                 }
@@ -363,5 +394,344 @@ impl ODEsolver {
         println!("result saved");
         wtr.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests_radau_api {
+    use super::*;
+    use crate::symbolic::symbolic_engine::Expr;
+    use approx::assert_relative_eq;
+    use nalgebra::DVector;
+
+    #[test]
+    fn test_radau_api_simple_linear_ode() {
+        // Test: y' = -y, y(0) = 1
+        // Exact solution: y(t) = exp(-t)
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 1.0;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (t_result, y_result) = solver.get_result();
+
+        // Check that we got results
+        assert!(t_result.len() > 0);
+        assert!(y_result.nrows() > 0);
+
+        // Check final value: y(1) ≈ exp(-1) ≈ 0.3679
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        let expected = (-1.0_f64).exp();
+        assert_relative_eq!(final_y, expected, epsilon = 1e-2);
+    }
+
+    #[test]
+    fn test_radau_api_exponential_growth() {
+        // Test: y' = y, y(0) = 1
+        // Exact solution: y(t) = exp(t)
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 0.5;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (t_result, y_result) = solver.get_result();
+
+        // Check final value: y(0.5) ≈ exp(0.5) ≈ 1.6487
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        let expected = (0.5_f64).exp();
+        assert_relative_eq!(final_y, expected, epsilon = 1e-2);
+
+        // Verify solution against exact solution at multiple points
+        let f_exact = |t: f64| t.exp();
+        for (t, y_row) in t_result.iter().zip(y_result.row_iter()) {
+            assert_relative_eq!(y_row[0], f_exact(*t), epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_api_linear_system_2x2() {
+        // Test system: y1' = -2*y1 + y2, y2' = y1 - 2*y2
+        // Initial conditions: y1(0) = 1, y2(0) = 0
+        // Exact solution: y1(t) = 1/2 * e^(-3t) * (e^(2t) + 1)
+        //                y2(t) = 1/2 * e^(-3t) * (-1 + e^(2t))
+        let eq1 = Expr::parse_expression("-2*y1+y2");
+        let eq2 = Expr::parse_expression("y1-2*y2");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+        let t_bound = 1.0;
+        let max_step = 0.001;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.001);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (t_result, y_result) = solver.get_result();
+
+        // Check that we have 2 variables
+        assert_eq!(y_result.ncols(), 2);
+
+        // Check final values against exact solution
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        let final_y2 = y_result[(y_result.nrows() - 1, 1)];
+
+        let y1_exact = 0.5 * f64::exp(-3.0) * (f64::exp(2.0) + 1.0);
+        let y2_exact = 0.5 * f64::exp(-3.0) * (-1.0 + f64::exp(2.0));
+
+        assert_relative_eq!(final_y1, y1_exact, epsilon = 1e-2);
+        assert_relative_eq!(final_y2, y2_exact, epsilon = 1e-2);
+
+        // Verify exact solution throughout integration
+        let f_y1 = |t: f64| 0.5 * f64::exp(-3.0 * t) * (f64::exp(2.0 * t) + 1.0);
+        let f_y2 = |t: f64| 0.5 * f64::exp(-3.0 * t) * (-1.0 + f64::exp(2.0 * t));
+
+        for (t, y_row) in t_result.iter().zip(y_result.row_iter()) {
+            let y1_exact = f_y1(*t);
+            let y2_exact = f_y2(*t);
+            assert_relative_eq!(y_row[0], y1_exact, epsilon = 1e-2);
+            assert_relative_eq!(y_row[1], y2_exact, epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_api_harmonic_oscillator() {
+        // Test: y1' = y2, y2' = -y1 (harmonic oscillator)
+        // Initial conditions: y1(0) = 1, y2(0) = 0
+        // Exact solution: y1(t) = cos(t), y2(t) = -sin(t)
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("-y1");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+        let t_bound = std::f64::consts::PI / 2.0; // π/2
+        let max_step = 0.01;
+        let rtol = 1e-8;
+        let atol = 1e-10;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (t_result, y_result) = solver.get_result();
+
+        // At t = π/2: y1 should be ≈ 0, y2 should be ≈ -1
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        let final_y2 = y_result[(y_result.nrows() - 1, 1)];
+
+        assert_relative_eq!(final_y1, 0.0, epsilon = 1e-2);
+        assert_relative_eq!(final_y2, -1.0, epsilon = 1e-2);
+
+        // Compare with exact solution throughout integration
+        let f_y1 = |t: f64| f64::cos(t);
+        let f_y2 = |t: f64| -f64::sin(t);
+
+        for (t, y_row) in t_result.iter().zip(y_result.row_iter()) {
+            let y1_exact = f_y1(*t);
+            let y2_exact = f_y2(*t);
+            assert_relative_eq!(y_row[0], y1_exact, epsilon = 1e-2);
+            assert_relative_eq!(y_row[1], y2_exact, epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_api_nonlinear_ode() {
+        // Test: y' = y^2, y(0) = 1
+        // Exact solution: y(t) = 1/(1-t) for t < 1
+        let eq1 = Expr::parse_expression("y*y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 0.5;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (t_result, y_result) = solver.get_result();
+
+        // At t = 0.5: y(0.5) = 1/(1-0.5) = 2
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        let expected = 1.0 / (1.0 - 0.5);
+        assert_relative_eq!(final_y, expected, epsilon = 1e-2);
+
+        // Verify exact solution throughout integration
+        let f_exact = |t: f64| 1.0 / (1.0 - t);
+        for (t, y_row) in t_result.iter().zip(y_result.row_iter()) {
+            assert_relative_eq!(y_row[0], f_exact(*t), epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_radau_api_van_der_pol_oscillator() {
+        // Van der Pol oscillator: y1' = y2, y2' = μ(1-y1^2)y2 - y1
+        // With μ = 0.1 (weakly nonlinear)
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("0.1*(1.0 - y1*y1)*y2 - y1");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![2.0, 0.0]); // Start away from equilibrium
+        let t_bound = 5.0;
+        let max_step = 0.1;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.1);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (_, y_result) = solver.get_result();
+
+        // Check that solution remains bounded (Van der Pol has limit cycle)
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        let final_y2 = y_result[(y_result.nrows() - 1, 1)];
+
+        assert!(final_y1.abs() < 10.0); // Should remain bounded
+        assert!(final_y2.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_radau_api_stiff_system() {
+        // Stiff system: y1' = -1000*y1 + y2, y2' = y1 - y2
+        // This tests Radau's ability to handle stiff problems
+        let eq1 = Expr::parse_expression("-1000.0*y1 + y2");
+        let eq2 = Expr::parse_expression("y1 - y2");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0, 1.0]);
+        let t_bound = 0.1;
+        let max_step = 0.01; // Small step size for stiff problem
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (_, y_result) = solver.get_result();
+
+        // For stiff systems, just check that solution doesn't blow up
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        let final_y2 = y_result[(y_result.nrows() - 1, 1)];
+
+        assert!(final_y1.is_finite());
+        assert!(final_y2.is_finite());
+        assert!(final_y1.abs() < 100.0); // Should remain reasonable
+        assert!(final_y2.abs() < 100.0);
+    }
+
+    #[test]
+    fn test_radau_api_three_body_problem_simplified() {
+        // Simplified 3-body problem (2D, one body)
+        // y1' = y3, y2' = y4, y3' = -y1/r^3, y4' = -y2/r^3
+        // where r = sqrt(y1^2 + y2^2)
+        let eq1 = Expr::parse_expression("y3");
+        let eq2 = Expr::parse_expression("y4");
+        let eq3 = Expr::parse_expression("-y1/((y1*y1 + y2*y2)^1.5)");
+        let eq4 = Expr::parse_expression("-y2/((y1*y1 + y2*y2)^1.5)");
+        let eq_system = vec![eq1, eq2, eq3, eq4];
+        let values = vec![
+            "y1".to_string(),
+            "y2".to_string(),
+            "y3".to_string(),
+            "y4".to_string(),
+        ];
+        let arg = "t".to_string();
+        let method = "RADAU".to_string();
+        let t0 = 0.0;
+        // Initial conditions for circular orbit
+        let y0 = DVector::from_vec(vec![1.0, 0.0, 0.0, 1.0]);
+        let t_bound = 1.0;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-8;
+        let first_step = Some(0.01);
+
+        let mut solver = ODEsolver::new_complex(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            first_step,
+        );
+
+        solver.solve();
+        let (_, y_result) = solver.get_result();
+
+        // Check that solution remains bounded and physical
+        let final_position_x = y_result[(y_result.nrows() - 1, 0)];
+        let final_position_y = y_result[(y_result.nrows() - 1, 1)];
+        let final_velocity_x = y_result[(y_result.nrows() - 1, 2)];
+        let final_velocity_y = y_result[(y_result.nrows() - 1, 3)];
+
+        // All values should be finite and bounded
+        assert!(final_position_x.is_finite());
+        assert!(final_position_y.is_finite());
+        assert!(final_velocity_x.is_finite());
+        assert!(final_velocity_y.is_finite());
+
+        // Check that we're still in a reasonable orbital region
+        let distance =
+            (final_position_x * final_position_x + final_position_y * final_position_y).sqrt();
+        assert!(distance > 0.1 && distance < 10.0);
     }
 }

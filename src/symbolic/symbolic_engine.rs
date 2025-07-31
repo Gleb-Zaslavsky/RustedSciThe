@@ -739,7 +739,7 @@ impl Expr {
             Expr::arcctg(expr) => {
                 let expr = expr.simplify_();
                 match &expr {
-                    Expr::Const(a) => Expr::Const(PI/2.0 - (a).atan()),
+                    Expr::Const(a) => Expr::Const(PI / 2.0 - (a).atan()),
                     _ => Expr::arcsin(Box::new(expr)),
                 }
             } //arctg

@@ -102,7 +102,7 @@ pub struct Radau {
 
     // Status and control
     pub status: String,
-    message: Option<String>,
+    pub message: Option<String>,
     pub h: Option<f64>,
     pub global_timestepping: bool,
 

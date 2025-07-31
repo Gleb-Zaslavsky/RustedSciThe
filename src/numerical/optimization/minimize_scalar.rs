@@ -719,7 +719,7 @@ impl ScalarRootFinder {
         let mut c = a;
         let mut fc = fa;
         let mut d = 0.0;
-        let mut e = 0.0;
+        let _e = 0.0;
         let mut mflag = true;
         let mut iterations = 0;
 
@@ -870,14 +870,13 @@ where
 /////////////////////////////////////////TESTS////////////////////////////////////////
 // Helper function to check if two floats are approximately equal
 pub fn approx_equal(a: f64, b: f64, tolerance: f64) -> bool {
-        (a - b).abs() < tolerance
-    }
+    (a - b).abs() < tolerance
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::PI;
-
 
     #[test]
     fn test_closure_function() {

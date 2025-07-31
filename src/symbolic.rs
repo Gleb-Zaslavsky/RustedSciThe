@@ -9,7 +9,7 @@
 //! 6) calculating Jacobians (symbolic expressions and Rust functions) for various ODE problems
 //! 7) analytical Taylor expansion
 //! 8) analytical integration
-//! 9) numerical integration 
+//! 9) numerical integration
 //! 10) vectors and matrices of symbolic expressions
 //! 11) multiple symbolic operations (substitution, addition, multiplication, etc.)
 /// a module turns a String expression into a symbolic expression
@@ -24,7 +24,7 @@
 /// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0, 2.0]));
 ///  ```
 pub mod parse_expr;
-///  Symbolic engine 1) turns a String expression into a symbolic expression 
+///  Symbolic engine 1) turns a String expression into a symbolic expression
 /// 2) turns a symbolic expression into a Rust function
 /// 3) turns a symbolic expression into a string expression for printing and control results
 ///
@@ -161,13 +161,13 @@ pub mod symbolic_functions;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
+/// basic functionality for symbolic integration (only elementary functions)
+/// also numerical integration of symbolic functions
+pub mod symbolic_integration;
 pub mod symbolic_traits;
+/// matrices and vectors of symbolic expressions
+pub mod symbolic_vectors;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
-/// basic functionality for symbolic integration (only elementary functions)
-/// also numerical integration of symbolic functions
-pub mod symbolic_integration;
-/// matrices and vectors of symbolic expressions
-pub mod symbolic_vectors;

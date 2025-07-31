@@ -2,10 +2,10 @@
 #![allow(non_snake_case)]
 //! solvers of BVPs and IVPs, optization, nonlinear algeraic systems and more
 /// #########################ODEs SECTION######################
-/// 
+///
 /// SOLVER OF STIFF IVPs (initial value problems)
 /// direct rewrite to Rust python code from SciPy
-/// 
+///
 /// Example#1
 /// ```
 ///use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -55,7 +55,7 @@
 pub mod BDF;
 
 /// Backward Euler method (good for stiff ODEs)
-/// 
+///
 /// Example#1
 /// ```
 ///         use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -90,10 +90,215 @@ pub mod BE;
 pub mod NR_for_Euler;
 pub mod NR_for_ODE;
 
-/// RK45 and Dormand-Prince methods 
+/// Boundary value problems solvers for stiff nonlinear ODEs
+///
+/// solver NR_Damp_solver_frozen implements NR method with damping
+/// but without adaptive grid.
+/// Frozen jacobian strategy - recalculating jacobian on condition:
+/// Description of strategy                                                                 key of strategy        value user must provude for strategy
+/// 1. only first time:                                                                      "Frozen_naive"                   None
+/// 2. every m-th time, where m is a parameter of the strategy:                                "every_m"                    m
+/// 3. every time when the solution norm greater than a certain threshold A:                   "at_high_norm".               A
+/// 4. when norm of (i-1) iter multiplied by certain value B(<1) is lower than norm of i-th iter : "at_low_speed".            B
+/// 5. complex - combined strategies 2,3,4                                                         "complex"              vec of  parameters [m, A, B]
+///
+///
+/// Example#1
+/// ```
+///      use nalgebra::DMatrix;
+///      use nalgebra::DVector;
+///      use std::collections::HashMap;
+///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
+///      use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
+///    let eq1 = Expr::parse_expression("y-z");
+///        let eq2 = Expr::parse_expression("-z^2");
+///        let eq_system = vec![eq1, eq2];
+
+///
+///        let values = vec!["z".to_string(), "y".to_string()];
+///        let arg = "x".to_string();
+///        let tolerance = 1e-5;
+///        let max_iterations = 1500;
+///       
+///        let t0 = 0.0;
+///        let t_end = 1.0;
+///        let n_steps = 100; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+///        let strategy =   "Frozen".to_string();//
+///        let  strategy_params = Some(HashMap::from([("complex".to_string(),
+///       Some(Vec::from( [2f64, 5.0, 1e-1, ]  ))
+///      )]));
+/// //
+///  // or
+/// // Some(HashMap::from([("Frozen_naive".to_string(), None)]));
+/// //  or
+/// //  Some(HashMap::from([("every_m".to_string(),
+/// //        Some(Vec::from( [ 5 as f64]  ))
+/// //        )]));
+/// //  or
+/// //  Some(HashMap::from([("at_high_morm".to_string(),
+/// // Some(Vec::from( [ 5 as f64]  ))
+/// //)]));
+/// //or
+/// //Some(HashMap::from([("at_low_speed".to_string(),
+/// // Some(Vec::from( [ 1e-2]  ))
+/// //)]));
+/// //or
+/// // Some(HashMap::from([("complex".to_string(),
+/// // Some(Vec::from( [ 2.0, 5.0, 1e-, ]  ))
+/// //)]));
+/// //  */
+///        let method =   "Sparse".to_string();// or  "Dense"
+///        let linear_sys_method = None;
+///        let ones = vec![0.0; values.len()*n_steps];
+///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+///        let mut BorderConditions = HashMap::new();
+///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+///        assert_eq!(&eq_system.len(), &2);
+///        let mut nr =  NRBVP::new(eq_system,
+///             initial_guess,
+///             values,
+///             arg,
+///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations);
+
+///        println!("solving system");
+///        #[allow(unused_variables)]
+///        let solution = nr.solve().unwrap();
+///       // println!("result = {:?}", solution);
+///        nr.plot_result();
+///    ```
+///
+/// NR_Damp_solver_damped solver implements
+/// Modified Newton method or Damped Newton method with adaptive grid for solving Boundary value problems for systems of nonlinear ordinary differential equations.
+///
+/// The code mostly inspired by sources listed below:
+/// Cantera MultiNewton solver (MultiNewton.cpp )
+/// TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
+///
+
+/// Example#2
+/// ```
+/// use nalgebra::DMatrix;
+///  use nalgebra::DVector;
+///      use std::collections::HashMap;
+///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
+///     use  RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
+///     let eq1 = Expr::parse_expression("y-z");
+///        let eq2 = Expr::parse_expression("-z^3");
+///        let eq_system = vec![eq1, eq2];
+///        let values = vec!["z".to_string(), "y".to_string()];
+///        let arg = "x".to_string();
+///        let tolerance = 1e-5;
+///        let max_iterations = 20;
+///        let t0 = 0.0;
+///        let t_end = 1.0;
+///        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+///        let strategy =   "Damped".to_string();//
+///        let  strategy_params = Some(HashMap::from([("max_jac".to_string(),
+///       None,    ), ("maxDampIter".to_string(),
+///       None,    ), ("DampFacor".to_string(),
+///       None,    )    , ("adaptive".to_string(),
+///           None,    )
+///      ]));
+/// let scheme = "forward".to_string();
+///        let method =   "Sparse".to_string();// or  "Dense"
+///        let linear_sys_method = None;
+///        let ones = vec![0.0; values.len()*n_steps];
+///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+///        let mut BorderConditions = HashMap::new();
+///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+///        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
+///        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
+///        assert_eq!(&eq_system.len(), &2);
+///        let mut nr =  NRBDVPd::new(eq_system,
+///             initial_guess,
+///             values,
+///             arg,
+///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds),None);
+
+///        println!("solving system");
+///        #[allow(unused_variables)]
+///        let solution = nr.solve().unwrap();
+///       // println!("result = {:?}", solution);
+///        nr.plot_result();
+///    ```
+/// API for both solvers
+/// Example#3
+/// ```
+///  use nalgebra::DMatrix;
+///  use nalgebra::DVector;
+///      use std::collections::HashMap;
+/// use RustedSciThe::numerical::BVP_api::BVP;
+///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
+///     let eq1 = Expr::parse_expression("y-z");
+///  let eq2 = Expr::parse_expression("-z^3");
+/// let eq_system = vec![eq1, eq2];
+///
+///
+/// let values = vec!["z".to_string(), "y".to_string()];
+/// let arg = "x".to_string();
+/// let tolerance = 1e-5;
+/// let max_iterations = 20;
+///
+/// let t0 = 0.0;
+/// let t_end = 1.0;
+/// let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+///  let strategy =   "Damped".to_string();//
+///
+/// let  strategy_params =
+/// match strategy.as_str() {
+///     "Naive" => None,
+///     "Damped"=> Some(HashMap::from([("max_jac".to_string(),
+///     None,    ), ("maxDampIter".to_string(),
+///    None,    ), ("DampFacor".to_string(),
+///     None,    )   , ("adaptive".to_string(),
+///           None,    )
+///
+///    ])),
+///    "Frozen" => Some(HashMap::from([("every_m".to_string(),
+///   Some(Vec::from( [ 5 as f64]  ))
+///    )])),
+///     &_=>panic!("Invalid strategy!")
+///
+///
+/// };
+/// let scheme = "forward".to_string();
+/// let method =   "Sparse".to_string();// or  "Dense"
+/// let linear_sys_method = None;
+/// let ones = vec![0.0; values.len()*n_steps];
+/// let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+/// let mut BorderConditions = HashMap::new();
+/// BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
+/// BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+/// let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
+/// let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
+/// assert_eq!(&eq_system.len(), &2);
+/// let mut nr =  BVP::new(eq_system,
+///      initial_guess,
+///      values,
+///      arg,
+///      BorderConditions, t0, t_end, n_steps, scheme, strategy, strategy_params, linear_sys_method, method, tolerance,
+///        max_iterations,  Some(rel_tolerance),Some(Bounds), None);
+///
+/// println!("solving system");
+/// nr.solve();
+/// nr.plot_result();
+/// nr.save_to_file(None);
+///    ```
+pub mod BVP_Damp;
+/// not production ready
+pub mod BVP_api;
+/// not production ready
+pub mod BVP_sci;
+///  a collection of test examples of exect solutions of BVPs for testing purposes
+pub mod Examples_and_utils;
+/// RK45 and Dormand-Prince methods
 pub mod NonStiff_api;
+/// solvers of nonlinear algebraic equations
+pub mod Nonlinear_systems;
 ///  general api for ODE solvers  (BDF, RK4, etc.)
-/// 
+///
 /// Example#1
 /// ```
 ///use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -231,212 +436,9 @@ pub mod NonStiff_api;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
-/// not production ready
-pub mod BVP_sci;
-///  a collection of test examples of exect solutions of BVPs for testing purposes
-pub mod Examples_and_utils;
-/// Boundary value problems solvers for stiff nonlinear ODEs
-///
-/// solver NR_Damp_solver_frozen implements NR method with damping
-/// but without adaptive grid. 
-/// Frozen jacobian strategy - recalculating jacobian on condition:
-/// Description of strategy                                                                 key of strategy        value user must provude for strategy
-/// 1. only first time:                                                                      "Frozen_naive"                   None
-/// 2. every m-th time, where m is a parameter of the strategy:                                "every_m"                    m
-/// 3. every time when the solution norm greater than a certain threshold A:                   "at_high_norm".               A
-/// 4. when norm of (i-1) iter multiplied by certain value B(<1) is lower than norm of i-th iter : "at_low_speed".            B
-/// 5. complex - combined strategies 2,3,4                                                         "complex"              vec of  parameters [m, A, B]
-///
-///
-/// Example#1
-/// ```
-///      use nalgebra::DMatrix;
-///      use nalgebra::DVector;
-///      use std::collections::HashMap;
-///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
-///      use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
-///    let eq1 = Expr::parse_expression("y-z");
-///        let eq2 = Expr::parse_expression("-z^2");
-///        let eq_system = vec![eq1, eq2];
-
-///
-///        let values = vec!["z".to_string(), "y".to_string()];
-///        let arg = "x".to_string();
-///        let tolerance = 1e-5;
-///        let max_iterations = 1500;
-///       
-///        let t0 = 0.0;
-///        let t_end = 1.0;
-///        let n_steps = 100; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-///        let strategy =   "Frozen".to_string();//
-///        let  strategy_params = Some(HashMap::from([("complex".to_string(),
-///       Some(Vec::from( [2f64, 5.0, 1e-1, ]  ))
-///      )]));
-/// //
-///  // or
-/// // Some(HashMap::from([("Frozen_naive".to_string(), None)]));
-/// //  or
-/// //  Some(HashMap::from([("every_m".to_string(),
-/// //        Some(Vec::from( [ 5 as f64]  ))
-/// //        )]));
-/// //  or
-/// //  Some(HashMap::from([("at_high_morm".to_string(),
-/// // Some(Vec::from( [ 5 as f64]  ))
-/// //)]));
-/// //or
-/// //Some(HashMap::from([("at_low_speed".to_string(),
-/// // Some(Vec::from( [ 1e-2]  ))
-/// //)]));
-/// //or
-/// // Some(HashMap::from([("complex".to_string(),
-/// // Some(Vec::from( [ 2.0, 5.0, 1e-, ]  ))
-/// //)]));
-/// //  */
-///        let method =   "Sparse".to_string();// or  "Dense"
-///        let linear_sys_method = None;
-///        let ones = vec![0.0; values.len()*n_steps];
-///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-///        let mut BorderConditions = HashMap::new();
-///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
-///        assert_eq!(&eq_system.len(), &2);
-///        let mut nr =  NRBVP::new(eq_system,
-///             initial_guess,
-///             values,
-///             arg,
-///             BorderConditions, t0, t_end, n_steps,strategy, strategy_params, linear_sys_method, method, tolerance, max_iterations);
-
-///        println!("solving system");
-///        #[allow(unused_variables)]
-///        let solution = nr.solve().unwrap();
-///       // println!("result = {:?}", solution);
-///        nr.plot_result();
-///    ```
-///
-/// NR_Damp_solver_damped solver implements 
-/// Modified Newton method or Damped Newton method with adaptive grid for solving Boundary value problems for systems of nonlinear ordinary differential equations.
-/// 
-/// The code mostly inspired by sources listed below:
-/// Cantera MultiNewton solver (MultiNewton.cpp )
-/// TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
-///
-
-/// Example#2
-/// ```
-/// use nalgebra::DMatrix;
-///  use nalgebra::DVector;
-///      use std::collections::HashMap;
-///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
-///     use  RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
-///     let eq1 = Expr::parse_expression("y-z");
-///        let eq2 = Expr::parse_expression("-z^3");
-///        let eq_system = vec![eq1, eq2];
-///        let values = vec!["z".to_string(), "y".to_string()];
-///        let arg = "x".to_string();
-///        let tolerance = 1e-5;
-///        let max_iterations = 20;
-///        let t0 = 0.0;
-///        let t_end = 1.0;
-///        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-///        let strategy =   "Damped".to_string();//
-///        let  strategy_params = Some(HashMap::from([("max_jac".to_string(),
-///       None,    ), ("maxDampIter".to_string(),
-///       None,    ), ("DampFacor".to_string(),
-///       None,    )    , ("adaptive".to_string(),
-///           None,    )
-///      ]));
-/// let scheme = "forward".to_string();
-///        let method =   "Sparse".to_string();// or  "Dense"
-///        let linear_sys_method = None;
-///        let ones = vec![0.0; values.len()*n_steps];
-///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-///        let mut BorderConditions = HashMap::new();
-///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
-///        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
-///        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
-///        assert_eq!(&eq_system.len(), &2);
-///        let mut nr =  NRBDVPd::new(eq_system,
-///             initial_guess,
-///             values,
-///             arg,
-///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds),None);
-
-///        println!("solving system");
-///        #[allow(unused_variables)]
-///        let solution = nr.solve().unwrap();
-///       // println!("result = {:?}", solution);
-///        nr.plot_result();
-///    ```
-/// API for both solvers
-/// Example#3
-/// ```
-///  use nalgebra::DMatrix;
-///  use nalgebra::DVector;
-///      use std::collections::HashMap;
-/// use RustedSciThe::numerical::BVP_api::BVP;
-///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
-///     let eq1 = Expr::parse_expression("y-z");
-///  let eq2 = Expr::parse_expression("-z^3");
-/// let eq_system = vec![eq1, eq2];
-///
-///
-/// let values = vec!["z".to_string(), "y".to_string()];
-/// let arg = "x".to_string();
-/// let tolerance = 1e-5;
-/// let max_iterations = 20;
-///
-/// let t0 = 0.0;
-/// let t_end = 1.0;
-/// let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-///  let strategy =   "Damped".to_string();//
-///
-/// let  strategy_params =
-/// match strategy.as_str() {
-///     "Naive" => None,
-///     "Damped"=> Some(HashMap::from([("max_jac".to_string(),
-///     None,    ), ("maxDampIter".to_string(),
-///    None,    ), ("DampFacor".to_string(),
-///     None,    )   , ("adaptive".to_string(),
-///           None,    )
-///
-///    ])),
-///    "Frozen" => Some(HashMap::from([("every_m".to_string(),
-///   Some(Vec::from( [ 5 as f64]  ))
-///    )])),
-///     &_=>panic!("Invalid strategy!")
-///
-///
-/// };
-/// let scheme = "forward".to_string();
-/// let method =   "Sparse".to_string();// or  "Dense"
-/// let linear_sys_method = None;
-/// let ones = vec![0.0; values.len()*n_steps];
-/// let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-/// let mut BorderConditions = HashMap::new();
-/// BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-/// BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
-/// let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
-/// let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
-/// assert_eq!(&eq_system.len(), &2);
-/// let mut nr =  BVP::new(eq_system,
-///      initial_guess,
-///      values,
-///      arg,
-///      BorderConditions, t0, t_end, n_steps, scheme, strategy, strategy_params, linear_sys_method, method, tolerance,
-///        max_iterations,  Some(rel_tolerance),Some(Bounds), None);
-///
-/// println!("solving system");
-/// nr.solve();
-/// nr.plot_result();
-/// nr.save_to_file(None);
-///    ```
-pub mod BVP_Damp;
-/// not production ready
-pub mod BVP_api;
 /// Radau solver (good for nonlinear ODEs)
 /// #############################END OF ODEs SECTIONS#####
-/// 
+///
 /// Example#1
 /// ```
 ///   use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -486,5 +488,3 @@ pub mod BVP_api;
 pub mod Radau;
 /// collection of optimization algorithms
 pub mod optimization;
-/// solvers of nonlinear algebraic equations
-pub mod Nonlinear_systems;

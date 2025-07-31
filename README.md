@@ -3,7 +3,8 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: improved documentation
+PROJECT NEWS: new BVP solver using 4th order collocation algorithm
+ (rewrite of scipy _bvp.py )
 
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
@@ -21,34 +22,36 @@ ATTENTION: for those interested in solving BVP there is an in-depth guide for th
 At first, this code was part of the KiThe crate, where it was supposed to serve for constructing analytical Jacobians for solving systems of equations of combustion, chemical kinetics and heat and mass transfer, as well as for displaying analytical expressions, but it soon became clear that it could be useful for a broader circle of users
 
 ## Features
-- symbolic engine:
-      - parsing string expressions to a symbolic expression/function
-      - symbolic/analytical differentiation of symbolic expressions/functions
-      - compare analytical derivative to a numerical one
-      - calculate vector of partial derivatives
-      - transform symbolic expressions/functions (also derivatives) into regular Rust functions
-     - calculate symbolic/analytical Jacobians for various          
+*  symbolic engine:
+    *  parsing string expressions to a symbolic expression/function
+     *  symbolic/analytical differentiation of symbolic expressions/functions
+    *  compare analytical derivative to a numerical one
+    *  calculate vector of partial derivatives
+    *  transform symbolic expressions/functions (also derivatives) into regular Rust functions
+    * calculate symbolic/analytical Jacobians for various          
        numerical methods and transform it
        into functional form
-      - analytical Taylor series expansion
-      - matrices and vectors of symbolic expressions/functions
-      - symbolic/analytical integration
-      - numerical integration of symbolic expressions/functions
-- IVP for stiff and non-stiff problems with analytical Jacobian:
-      - Backward Eeuler method with analytical Jacobian
-      - Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
-    - Radau  method with analytical Jacobian 
-    - classical methods for non-stiff equations RK45 and DP
-- Boundary Value Problem for ODE with Newton-Raphson method (several versions available)
-- Optimization with (if needed) analytical Jacobian:
-        - curve fitting
-        - Levergang-Marquardt method with trust region
-        - H.P.Gavin Levergang-Marquardt method
-        - scalar optimization (Brent method, bisection method, secant, Newton-Raphson method)
-- solving systems of non-linear equations with analytical Jacobian
-      - Newton-Raphson method
-       - Newton-Raphson damped
-      - Levenberg-Marquardt method
+    *  analytical Taylor series expansion
+    *  matrices and vectors of symbolic expressions/functions
+    *  symbolic/analytical integration
+    * numerical integration of symbolic expressions/functions
+* IVP for stiff and non-stiff problems with analytical Jacobian:
+    * Backward Eeuler method with analytical Jacobian
+    * Backward Differetiation Formula method (BDF) with analytical Jacobian (direct rewrite of python BDF solver from SciPy library)
+    * Radau  method with analytical Jacobian 
+    * classical methods for non-stiff equations RK45 and DP
+* Boundary Value Problem for ODE 
+  * damped Newton-Raphson method (several versions available)
+  * Newton-Raphson 4th order collocation algorithm with residual control
+* Optimization with (if needed) analytical Jacobian:
+    * curve fitting
+    * Levergang-Marquardt method with trust region
+    * H.P.Gavin Levergang-Marquardt method
+    * scalar optimization (Brent method, bisection method, secant, Newton-Raphson method)
+* solving systems of non-linear equations with analytical Jacobian
+    * Newton-Raphson method
+    * Newton-Raphson damped
+    * Levenberg-Marquardt method
 
 
  PROJECT NAVIGATION
@@ -78,6 +81,9 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 | more easier version of NR                 |numerical/              |
 | for low to middle scale problem           |BVP_damped/             |
 |                                           |NR_Damp_solver_frozen   |
+| 4th order collocation algorithm           |                        |
+| with residual control                     |numerical/              |
+|                                           |BVP_sci/                |
 |-------------------------------------------|------------------------|
 | Optimization                              |numerical/optimization/ |
 |                                           |numerical               | 

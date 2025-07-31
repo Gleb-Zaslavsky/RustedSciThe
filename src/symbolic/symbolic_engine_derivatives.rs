@@ -1,9 +1,9 @@
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
-use std::f64::consts::PI;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
+use std::f64::consts::PI;
 impl Expr {
     /// DIFFERENTIATION
 
@@ -215,7 +215,7 @@ impl Expr {
             }
             Expr::arcctg(expr) => {
                 let expr_fn = expr.lambdify1D();
-                Box::new(move |x| PI/2.0 - expr_fn( x).atan())
+                Box::new(move |x| PI / 2.0 - expr_fn(x).atan())
             }
         } // end of match
     } // end of lambdify1D
@@ -307,10 +307,7 @@ impl Expr {
             }
             Expr::arcctg(expr) => {
                 let expr_fn = expr.lambdify(vars);
-                Box::new(move |args| {
-                  
-                    PI/2.0 - expr_fn(args).tan()
-                })
+                Box::new(move |args| PI / 2.0 - expr_fn(args).tan())
             }
         }
     } // end of lambdify
@@ -397,7 +394,7 @@ impl Expr {
             }
             Expr::arcctg(expr) => {
                 let expr_fn = expr.lambdify_slice(vars);
-                Box::new(move |args| PI/2.0 - expr_fn(args).atan())
+                Box::new(move |args| PI / 2.0 - expr_fn(args).atan())
             }
         }
     } // end of lambdify
@@ -487,7 +484,7 @@ impl Expr {
             }
             Expr::arcctg(expr) => {
                 let expr_fn = expr.lambdify_owned(vars);
-                Box::new(move |args| PI/2.0 - expr_fn(args).atan())
+                Box::new(move |args| PI / 2.0 - expr_fn(args).atan())
             }
         }
     }
@@ -731,7 +728,7 @@ impl Expr {
             }
             Expr::arcctg(expr) => {
                 let expr_fn = expr.eval_expression(vars, values);
-                PI/2.0 - ( expr_fn).atan()
+                PI / 2.0 - (expr_fn).atan()
             }
         }
     } // end of eval_expression

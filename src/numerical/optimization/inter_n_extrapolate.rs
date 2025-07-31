@@ -1,4 +1,7 @@
 use nalgebra::DVector;
+use std::f64;
+/// Constants for maximum dimensions support
+
 #[allow(dead_code)]
 fn lagrange_interpolate(x: f64, x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> f64 {
     let n = x_vals.len();

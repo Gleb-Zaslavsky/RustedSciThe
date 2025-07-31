@@ -150,7 +150,7 @@ impl ODEsolver {
             }
         }
     } //step
-
+    #[warn(unused_assignments)]
     pub fn main_loop(&mut self) -> () {
         // Analogue of https://github.com/scipy/scipy/blob/main/scipy/integrate/_ivp/ivp.py
         let start = Instant::now();

@@ -9,7 +9,9 @@
 //!         - Newton-Raphson method
 //!         - secant method
 //!         - Brent's method
-//! 
+//!
+/// not production ready
+pub mod Gavin_chi;
 #[allow(non_snake_case)]
 ///here is main loop for solving nonlinear equation system with Levenberg-Marquardt algorithm
 pub mod LM_optimization;
@@ -87,7 +89,7 @@ pub mod qr_LM;
 pub mod sym_fitting;
 /// solver of nonlinear equation system with Levenberg-Marquardt algorithm is
 /// used with residual functions that are symbolic expressions and jacobian functions that are calculated analytically
-/// 
+///
 /// Example#1
 /// ```
 ///  use approx::assert_relative_eq;
@@ -115,14 +117,15 @@ pub mod sym_wrapper;
 pub mod trust_region_LM;
 /// some utility functions for solving nonlinear equation system with Levenberg-Marquardt algorithm
 pub mod utils;
-/// not production ready
-pub mod Gavin_chi;
 
+/// Piecewise polynomial interpolation
+/// rewritten in Rust from SciPy's PPoly class
+pub mod PPoly;
 /// interpolation and extrapolation of data
 pub mod inter_n_extrapolate;
- mod lm_gavin;
+mod lm_gavin;
 /// H.P.Gavin's Levenberg-Marquardt algorithm
-/// 
+///
 /// Example#1
 /// ```
 ///  use RustedSciThe::numerical::optimization::lm_gavin2::{LevenbergMarquardt, PolynomialModel};
@@ -150,7 +153,7 @@ pub mod inter_n_extrapolate;
 ///  ```
 pub mod lm_gavin2;
 /// using Bisection, Secant, Newton, and Brent methods to find the minimum of a scalar function of one variable
-/// 
+///
 /// Example#1
 /// ```
 /// use RustedSciThe:: numerical::optimization::minimize_scalar::{ScalarRootFinder, RootFindingMethod, approx_equal};
@@ -172,7 +175,7 @@ pub mod lm_gavin2;
 ///        assert!(approx_equal(result.root, expected_root, 1e-9));
 ///        assert!(result.converged);
 ///  ```
-/// 
+///
 /// Example#2
 /// ```
 ///  use RustedSciThe::numerical::optimization::minimize_scalar::{ScalarRootFinder, RootFindingMethod, approx_equal};
