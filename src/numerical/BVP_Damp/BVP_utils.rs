@@ -23,6 +23,7 @@ pub fn elapsed_time(elapsed: Duration) -> (String, f64) {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CustomTimer {
     pub start: Instant,
     pub jac_time: Instant,

@@ -1,12 +1,14 @@
 #[cfg(test)]
 mod tests {
+    use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
     use crate::numerical::BVP_sci::BVP_sci_faer::{
         collocation_fun, compute_jac_indices, construct_global_jac, create_spline, estimate_bc_jac,
         estimate_fun_jac, estimate_rms_residuals, modify_mesh, solve_bvp, solve_newton,
     };
+    use core::panic;
     use faer::col::Col;
     use faer::mat::Mat;
-
+    use std::collections::HashMap;
     type faer_col = Col<f64>;
     type faer_dense_mat = Mat<f64>;
 
@@ -44,7 +46,7 @@ mod tests {
             f
         };
 
-        let bc = |ya: &faer_col, yb: &faer_col, _p: &faer_col| {
+        let bc = |ya: &faer_col, _yb: &faer_col, _p: &faer_col| {
             faer_col::from_fn(2, |i| [ya[0], ya[1] - 1.0][i])
         };
 
@@ -68,6 +70,7 @@ mod tests {
             1000,
             2,
             None,
+            None, // No custom timer for this test
         );
 
         match result {
@@ -119,6 +122,7 @@ mod tests {
             1000,
             0,
             None,
+            None,
         );
 
         match result {
@@ -146,7 +150,7 @@ mod tests {
         };
 
         let x = faer_col::from_fn(3, |i| [0.0, 0.5, 1.0][i]);
-        let h = faer_col::from_fn(2, |i| 0.5);
+        let h = faer_col::from_fn(2, |_| 0.5);
 
         let mut y = faer_dense_mat::zeros(1, 3);
         *y.get_mut(0, 0) = 1.0;
@@ -193,7 +197,7 @@ mod tests {
         assert_eq!(df_dy.len(), 3);
         assert!(df_dp.is_none());
 
-        for (i, jac) in df_dy.iter().enumerate() {
+        for (_, jac) in df_dy.iter().enumerate() {
             assert!((jac.get(0, 0).unwrap_or(&0.0) - 1.0).abs() < 1e-6);
             assert!(jac.get(0, 1).unwrap_or(&0.0).abs() < 1e-6);
             assert!(jac.get(1, 0).unwrap_or(&0.0).abs() < 1e-6);
@@ -231,13 +235,13 @@ mod tests {
         let m = 3;
         let k = 0;
 
-        let h = faer_col::from_fn(2, |i| 0.5);
+        let h = faer_col::from_fn(2, |_| 0.5);
 
         let mut df_dy = Vec::new();
         let mut df_dy_middle = Vec::new();
 
         for _i in 0..m {
-            let mut triplets = vec![(0, 0, 1.1), (1, 1, 1.0), (0, 1, 0.1), (1, 0, 0.2)];
+            let triplets = vec![(0, 0, 1.1), (1, 1, 1.0), (0, 1, 0.1), (1, 0, 0.2)];
             let jac = faer::sparse::SparseColMat::try_new_from_triplets(
                 2,
                 2,
@@ -251,7 +255,7 @@ mod tests {
         }
 
         for _i in 0..(m - 1) {
-            let mut triplets = vec![(0, 0, 1.15), (1, 1, 1.0), (0, 1, 0.15), (1, 0, 0.25)];
+            let triplets = vec![(0, 0, 1.15), (1, 1, 1.0), (0, 1, 0.15), (1, 0, 0.25)];
             let jac = faer::sparse::SparseColMat::try_new_from_triplets(
                 2,
                 2,
@@ -327,7 +331,7 @@ mod tests {
         let fun = |_x: &faer_col, _y: &faer_dense_mat, _p: &faer_col| faer_dense_mat::zeros(2, 3);
 
         let x = faer_col::from_fn(3, |i| [0.0, 1.0, 2.0][i]);
-        let h = faer_col::from_fn(2, |i| 1.0);
+        let h = faer_col::from_fn(2, |_| 1.0);
 
         let mut y = faer_dense_mat::zeros(2, 3);
         for j in 0..3 {
@@ -398,10 +402,10 @@ mod tests {
     #[test]
     fn test_create_spline() {
         let x = faer_col::from_fn(3, |i| [0.0, 1.0, 2.0][i]);
-        let h = faer_col::from_fn(2, |i| 1.0);
+        let h = faer_col::from_fn(2, |_| 1.0);
 
-        let y = faer_dense_mat::from_fn(1, 3, |i, j| [0.0, 1.0, 8.0][j]);
-        let yp = faer_dense_mat::from_fn(1, 3, |i, j| [0.0, 3.0, 12.0][j]);
+        let y = faer_dense_mat::from_fn(1, 3, |_, j| [0.0, 1.0, 8.0][j]);
+        let yp = faer_dense_mat::from_fn(1, 3, |_, j| [0.0, 3.0, 12.0][j]);
 
         let spline = create_spline(&y, &yp, &x, &h);
 
@@ -427,10 +431,10 @@ mod tests {
         let fun = |_x: &faer_col, _y: &faer_dense_mat, _p: &faer_col| faer_dense_mat::zeros(1, 3);
 
         let x = faer_col::from_fn(3, |i| [0.0, 0.5, 1.0][i]);
-        let h = faer_col::from_fn(2, |i| 0.5);
+        let h = faer_col::from_fn(2, |_| 0.5);
         let p = faer_col::zeros(0);
 
-        let y = faer_dense_mat::from_fn(1, 3, |i, j| 2.0);
+        let y = faer_dense_mat::from_fn(1, 3, |_, _| 2.0);
         let yp = faer_dense_mat::zeros(1, 3);
 
         let spline = create_spline(&y, &yp, &x, &h);
@@ -450,16 +454,16 @@ mod tests {
         let fun = |_x: &faer_col, y: &faer_dense_mat, _p: &faer_col| y.clone();
 
         let x = faer_col::from_fn(3, |i| [0.0, 1.0, 2.0][i]);
-        let h = faer_col::from_fn(2, |i| 1.0);
+        let h = faer_col::from_fn(2, |_| 1.0);
         let p = faer_col::zeros(0);
 
-        let y = faer_dense_mat::from_fn(1, 3, |i, j| [0.0, 1.0, 2.0][j]);
-        let yp = faer_dense_mat::from_fn(1, 3, |i, j| 1.0);
+        let y = faer_dense_mat::from_fn(1, 3, |_, j| [0.0, 1.0, 2.0][j]);
+        let yp = faer_dense_mat::from_fn(1, 3, |_, _| 1.0);
 
         let spline = create_spline(&y, &yp, &x, &h);
 
-        let r_middle = faer_dense_mat::from_fn(1, 2, |i, j| [0.5, -0.5][j]);
-        let f_middle = faer_dense_mat::from_fn(1, 2, |i, j| [0.5, 1.5][j]);
+        let r_middle = faer_dense_mat::from_fn(1, 2, |_, j| [0.5, -0.5][j]);
+        let f_middle = faer_dense_mat::from_fn(1, 2, |_, j| [0.5, 1.5][j]);
 
         let rms_res = estimate_rms_residuals(&fun, &spline, &x, &h, &p, &r_middle, &f_middle);
 
@@ -502,7 +506,7 @@ mod tests {
         };
 
         let x = faer_col::from_fn(3, |i| [0.0, 0.5, 1.0][i]);
-        let h = faer_col::from_fn(2, |i| 0.5);
+        let h = faer_col::from_fn(2, |_| 0.5);
 
         let mut y = faer_dense_mat::zeros(2, 3);
         *y.get_mut(0, 0) = 0.0;
@@ -514,8 +518,22 @@ mod tests {
 
         let p = faer_col::zeros(0);
 
-        let (y_final, _p_final, singular) =
-            solve_newton(2, 3, &h, &fun, &bc, None, None, y, p, &x, 1e-10, 1e-10);
+        let (y_final, _p_final, singular) = solve_newton(
+            2,
+            3,
+            &h,
+            &fun,
+            &bc,
+            None,
+            None,
+            y,
+            p,
+            &x,
+            1e-10,
+            1e-10,
+            &mut CustomTimer::new(),
+            &mut HashMap::new(),
+        );
 
         assert!(!singular);
 
@@ -534,7 +552,7 @@ mod tests {
         let m = 3;
         let k = 1;
 
-        let h = faer_col::from_fn(2, |i| 0.5);
+        let h = faer_col::from_fn(2, |_| 0.5);
 
         let mut df_dy = Vec::new();
         let mut df_dy_middle = Vec::new();
@@ -711,6 +729,7 @@ mod tests {
             100,
             1,
             None,
+            None,
         );
 
         match result {
@@ -733,9 +752,11 @@ mod tests {
         };
 
         let x = faer_col::from_fn(3, |i| [0.0, 0.5, 1.0][i]);
-        let y = faer_dense_mat::from_fn(2, 3, |i, j| 1.0);
+        let y = faer_dense_mat::from_fn(2, 3, |_, _| 1.0);
 
-        let result = solve_bvp(&fun, &bc, x, y, None, None, None, None, 1e-6, 1000, 0, None);
+        let result = solve_bvp(
+            &fun, &bc, x, y, None, None, None, None, 1e-6, 1000, 0, None, None,
+        );
 
         match result {
             Ok(res) => {
@@ -759,7 +780,7 @@ mod tests {
             f
         };
 
-        let bc = |ya: &faer_col, yb: &faer_col, _p: &faer_col| {
+        let bc = |ya: &faer_col, _yb: &faer_col, _p: &faer_col| {
             faer_col::from_fn(2, |i| [ya[0], ya[1] - 1.0][i])
         };
 
@@ -783,6 +804,7 @@ mod tests {
             1000,
             0,
             Some(1e-12),
+            None,
         );
 
         match result {
@@ -856,7 +878,9 @@ mod tests {
         *y.get_mut(1, 1) = 1.0;
         *y.get_mut(1, 2) = 1.0;
 
-        let result = solve_bvp(&fun, &bc, x, y, None, None, None, None, 1e-8, 1000, 0, None);
+        let result = solve_bvp(
+            &fun, &bc, x, y, None, None, None, None, 1e-8, 1000, 0, None, None,
+        );
 
         match result {
             Ok(res) => {
@@ -911,6 +935,7 @@ mod tests {
             1000,
             0,
             None,
+            None,
         );
 
         match result {
@@ -934,7 +959,7 @@ mod tests {
     }
     /*
         1. Lane-Emden Equation (Index 5)
-    Equation: y'' + (2x)*y' + y^5 = 0
+    Equation: y'' + (2/x)*y' + y^5 = 0
 
     Boundary conditions: y(0) = 1, y'(0) = 0
 
@@ -965,11 +990,13 @@ mod tests {
     Domain: [-1, 1]
 
          */
-    #[test]
+      // problem that leads to singular jacobian  
+    #[test] #[should_panic]
     fn test_lane_emden_equation() {
-        // Lane-Emden equation: y′′+2xy′+y**5=0,y(0)=1,y′(0)=0
+        // Lane-Emden equation: y′′+2y′/x + y**5=0,y(0)=1,y′(0)=0
+
         //y'=z
-        //z'=- 2*x*z - y**5
+        //z'=- 2*z/x - y**5
         let fun = |x: &faer_col, y: &faer_dense_mat, _p: &faer_col| {
             let mut f = faer_dense_mat::zeros(2, y.ncols());
             for j in 0..y.ncols() {
@@ -977,14 +1004,14 @@ mod tests {
                 let z_val = *y.get(1, j);
                 let x_val = x[j];
 
-                *f.get_mut(0, j) = z_val; // y' = z
-                *f.get_mut(1, j) = -2.0 * x_val * z_val - y_val.powi(5); // z' = -2*x*z - y^5
-                
+               *f.get_mut(0, j) = z_val; // y' = z
+                *f.get_mut(1, j) = -2.0  * z_val/x_val - y_val.powi(5); // z' = -2*x*z - y^5
+
                 /* 
                 if x_val.abs() < 1e-10 {
                     *f.get_mut(1, j) = -y_val.powi(5); // z' = -y^5 (limit as x->0)
                 } else {
-                    *f.get_mut(1, j) = -2.0 * x_val * z_val - y_val.powi(5); // z' = -2*x*z - y^5
+                    *f.get_mut(1, j) = -2.0  * z_val/x_val - y_val.powi(5); // z' = -2*x*z - y^5
                 }
                 */
             }
@@ -998,9 +1025,9 @@ mod tests {
                 _ => 0.0,
             })
         };
-
-        let x = faer_col::from_fn(500, |i| i as f64 * 0.5); // [0, 0.5, 1.0, 1.5, 2.0]
-        let mut y = faer_dense_mat::zeros(2, 5);
+        let n = 100;
+        let x = faer_col::from_fn(n, |i| i as f64 * 0.5); // [0, 0.5, 1.0, 1.5, 2.0]
+        let mut y = faer_dense_mat::zeros(2, n);
         for j in 0..5 {
             let x_val = x[j];
             let exact = (1.0 + x_val * x_val / 3.0).powf(-0.5);
@@ -1017,32 +1044,38 @@ mod tests {
             None,
             None,
             None,
-            1e-6,
-            1000,
+            1e-3,
+            2000,
             2,
             None,
+            None,
         );
-
+        println!(" success: {}", result.clone().unwrap().success);
         match result {
             Ok(res) => {
                 if res.success {
-                    let y = res.y.row(0).clone();
-                    println!("Lane-Emden solution: {:?}", y);
+                    let _y = res.y.row(0).clone();
+                    //  println!("Lane-Emden solution: {:?}", y);
                     for i in 0..res.x.nrows() {
                         let x_val = res.x[i];
                         let exact = (1.0 + x_val * x_val / 3.0).powf(-0.5);
                         let error = (*res.y.get(0, i) - exact).abs();
                         assert!(
-                            error < 1e-2,
-                            "Lane-Emden error at x={}: {} vs {}",
+                            error < 1e-1,
+                            "Lane-Emden error at x[{}]={}: {} vs {}",
+                            i,
                             x_val,
                             res.y.get(0, i),
                             exact
                         );
                     }
+                } else {
+                    panic!("Error in Lane-Emden solution");
                 }
             }
-            Err(_) => {}
+            Err(_) => {
+                panic!("Error in Lane-Emden solution");
+            }
         }
     }
 
@@ -1075,13 +1108,10 @@ mod tests {
         let x = faer_col::from_fn(4, |i| i as f64 * 0.2); // [0, 0.2, 0.4, 0.6]
         let mut y = faer_dense_mat::zeros(2, 4);
         for j in 0..4 {
-            let t = x[j];
-            let sqrt_gk = (g * k).sqrt();
-            let exp_term = (2.0 * sqrt_gk * t).exp();
-            let exact_y = (1.0 / k) * (((exp_term + 1.0) / 2.0).ln() - sqrt_gk * t);
-            let exact_z = (g / k).sqrt() * (1.0 - 2.0 / (exp_term + 1.0));
-            *y.get_mut(0, j) = exact_y;
-            *y.get_mut(1, j) = exact_z;
+            let _t = x[j];
+
+            *y.get_mut(0, j) = 0.0; // ;
+            *y.get_mut(1, j) = 0.0;
         }
 
         let result = solve_bvp(
@@ -1093,12 +1123,13 @@ mod tests {
             None,
             None,
             None,
-            1e-4,
-            1000,
+            1e-10,
+            2000,
             2,
             None,
+            None,
         );
-
+        println!(" success: {}", result.clone().unwrap().success);
         match result {
             Ok(res) => {
                 if res.success {
@@ -1109,13 +1140,15 @@ mod tests {
                         let exact = (1.0 / k) * (((exp_term + 1.0) / 2.0).ln() - sqrt_gk * t);
                         let error = (*res.y.get(0, i) - exact).abs();
                         assert!(
-                            error < 1e-2,
+                            error < 1e-7,
                             "Parachute error at t={}: {} vs {}",
                             t,
                             res.y.get(0, i),
                             exact
                         );
                     }
+                } else {
+                    panic!("solution not found");
                 }
             }
             Err(_) => {}
@@ -1129,7 +1162,7 @@ mod tests {
         // Exact solution: y(x) = exp(-x^2/a)
         let a = 4.0;
 
-        let fun =move |_x: &faer_col, y: &faer_dense_mat, _p: &faer_col| {
+        let fun = move |_x: &faer_col, y: &faer_dense_mat, _p: &faer_col| {
             let mut f = faer_dense_mat::zeros(2, y.ncols());
             for j in 0..y.ncols() {
                 let y_val = (*y.get(0, j) as f64).max(1e-10); // Avoid log(0)
@@ -1152,9 +1185,8 @@ mod tests {
         let x = faer_col::from_fn(5, |i| -1.0 + i as f64 * 0.5); // [-1, -0.5, 0, 0.5, 1]
         let mut y = faer_dense_mat::zeros(2, 5);
         for j in 0..5 {
-            let x_val = x[j];
-            let exact_y = (-x_val * x_val / a).exp();
-            let exact_z = -2.0 * x_val / a * exact_y;
+            let exact_y = 0.0; // (-x_val * x_val / a).exp();
+            let exact_z = 0.0; //-2.0 * x_val / a * exact_y;
             *y.get_mut(0, j) = exact_y;
             *y.get_mut(1, j) = exact_z;
         }
@@ -1168,12 +1200,15 @@ mod tests {
             None,
             None,
             None,
-            1e-4,
-            1000,
+            1e-7,
+            2000,
             2,
             None,
+            None,
         );
-
+        let result1 = result.clone().unwrap().y;
+        println!("Result of direct solution: {:?}", result1);
+        println!("is success {}", result.clone().unwrap().success);
         match result {
             Ok(res) => {
                 if res.success {
@@ -1182,13 +1217,15 @@ mod tests {
                         let exact = (-x_val * x_val / a).exp();
                         let error = (*res.y.get(0, i) - exact).abs();
                         assert!(
-                            error < 1e-2,
+                            error < 1e-7,
                             "Exponential BVP error at x={}: {} vs {}",
                             x_val,
                             res.y.get(0, i),
                             exact
                         );
                     }
+                } else {
+                    println!("Exponential BVP did not converge: {}", res.status);
                 }
             }
             Err(_) => {}

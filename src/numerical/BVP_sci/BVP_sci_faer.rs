@@ -2,15 +2,41 @@
 //!
 //! This module implements a 4th order collocation algorithm with residual control
 //! similar to the MATLAB/SciPy BVP solver, translated from Python to Rust.
+//! Important notes about construction of functions in this numerical method
+//! In most of the others methods Residuals function will be as follows
+//! : dyn Fn(f64, &faer_col) -> faer_col - takes argument value and unknowns
+//! vector, returns residuals, and Jacobian will be as follows
+//! Jacobian: dyn Fn(f64, &faer_col) -> faer_mat - takes argument value and
+//!  unknowns vector, returns Jacobian matrix.
+//! but here residual fun is arranged as follows:
+//! pub type ODEFunction =
+//! dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> faer_dense_mat;
+//! Takes (x, y, p) where:
+//! x: mesh points (vector)
+//! y: solution values at all mesh points (n×m matrix)
+//! p: parameters (vector)
+//! Returns: RHS values at ALL mesh points (n×m matrix)
+//! Jacobian function is arranged as follows
+//! pub type ODEJacobian = dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> (Vec<faer_mat>, Option<Vec<faer_mat>>);
+//! Takes same inputs as ODE function
+//! Returns: (df_dy, df_dp) where:
+//! df_dy: Vector of sparse matrices, one (n×n) matrix per mesh point
+//! df_dp: Optional vector of sparse matrices for parameter derivatives
+//!
+
+use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
+//use crate::numerical::BVP_sci::BVP_sci_utils::{final_jacobian_diagnostics, size_of_matrix};
 use crate::numerical::optimization::PPoly::{Extrapolate, PPoly};
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
+use log::info;
 
-type faer_mat = SparseColMat<usize, f64>;
-type faer_col = Col<f64>;
-type faer_dense_mat = Mat<f64>;
+use std::collections::HashMap;
+pub type faer_mat = SparseColMat<usize, f64>;
+pub type faer_col = Col<f64>;
+pub type faer_dense_mat = Mat<f64>;
 // demonstrating function or reminder function with main
 #[allow(dead_code)]
 pub fn test_faer_fn() {
@@ -64,7 +90,7 @@ pub fn test_faer_fn() {
 const EPS: f64 = f64::EPSILON;
 
 /// Result structure for BVP solver
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BVPResult {
     /// Solution as cubic spline interpolator (PPoly)
     pub sol: Option<PPoly>,
@@ -86,8 +112,63 @@ pub struct BVPResult {
     pub message: String,
     /// Success flag
     pub success: bool,
+    //
+    pub calc_statistics: HashMap<String, usize>,
+    //
+    pub custom_timer: CustomTimer,
+    //
+    pub strategy_params: Option<HashMap<String, Vec<f64>>>,
+}
+impl Default for BVPResult {
+    fn default() -> Self {
+        // Initialize with default values
+        let vec_of_tuples = vec![
+            ("number of iterations".to_string(), 0),
+            ("number of solving linear systems".to_string(), 0),
+            ("number of jacobians recalculations".to_string(), 0),
+            ("number of grid refinements".to_string(), 0),
+        ];
+        let Hashmap_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
+        let max_iter = 8;
+        let max_njev = 4;
+        let sigma = 0.2; // Armijo constant
+        let tau = 0.5; // Step size decrease factor
+        let n_trial = 4; // Max backtracking step
+        let strategy_params: Option<HashMap<String, Vec<f64>>> = Some(
+            vec![
+                ("max_iter".to_string(), vec![max_iter as f64]),
+                ("max_njev".to_string(), vec![max_njev as f64]),
+                ("sigma".to_string(), vec![sigma]),
+                ("tau".to_string(), vec![tau]),
+                ("n_trial".to_string(), vec![n_trial as f64]),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        BVPResult {
+            sol: None,
+            p: None,
+            x: faer_col::zeros(0),
+            y: faer_dense_mat::zeros(0, 0),
+            yp: faer_dense_mat::zeros(0, 0),
+            rms_residuals: faer_col::zeros(0),
+            niter: 0,
+            status: 0,
+            message: "".to_string(),
+            success: false,
+            calc_statistics: Hashmap_statistics,
+            custom_timer: CustomTimer::new(),
+            strategy_params: strategy_params,
+        }
+    }
 }
 
+impl BVPResult {
+    /// Set strategy parameters for the BVP solver
+    pub fn set_strategy_params(&mut self, params: HashMap<String, Vec<f64>>) {
+        self.strategy_params = Some(params);
+    }
+}
 /// Function type for ODE right-hand side evaluation
 /// Arguments: (x, y, p) where x is scalar, y is n-dimensional, p is k-dimensional parameters
 pub type ODEFunction = dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> faer_dense_mat;
@@ -680,15 +761,46 @@ pub fn solve_newton(
     x: &faer_col,
     bvp_tol: f64,
     bc_tol: f64,
+    custom_timer: &mut CustomTimer,
+    calc_statistics: &mut HashMap<String, usize>,
 ) -> (faer_dense_mat, faer_col, bool) {
     let k = p.nrows();
 
     // Newton iteration parameters
-    let max_iter = 8;
-    let max_njev = 4;
-    let sigma = 0.2; // Armijo constant
-    let tau = 0.5; // Step size decrease factor
-    let n_trial = 4; // Max backtracking steps
+    let max_iter = BVPResult::default()
+        .strategy_params
+        .as_ref()
+        .unwrap()
+        .get("max_iter")
+        .unwrap()[0] as usize;
+
+    let max_njev = BVPResult::default()
+        .strategy_params
+        .as_ref()
+        .unwrap()
+        .get("max_njev")
+        .unwrap()[0] as usize;
+
+    let sigma = BVPResult::default()
+        .strategy_params
+        .as_ref()
+        .unwrap()
+        .get("sigma")
+        .unwrap()[0];
+
+    let tau = BVPResult::default()
+        .strategy_params
+        .as_ref()
+        .unwrap()
+        .get("tau")
+        .unwrap()[0];
+
+    let n_trial = BVPResult::default()
+        .strategy_params
+        .as_ref()
+        .unwrap()
+        .get("n_trial")
+        .unwrap()[0] as usize;
 
     // Tolerance for collocation residuals
     let tol_r: faer_col = faer_col::from_fn(h.nrows(), |i| 2.0 / 3.0 * h[i] * 5e-2 * bvp_tol);
@@ -700,9 +812,10 @@ pub fn solve_newton(
     let mut cost = 0.0;
 
     for _iteration in 0..max_iter {
+        custom_timer.fun_tic();
         // Compute collocation residuals and function values
         let (col_res, y_middle, f, f_middle) = collocation_fun(fun, &y, &p, x, h);
-
+        custom_timer.fun_tac();
         // Extract first and last columns for boundary conditions
         let ya = faer_col::from_fn(n, |i| *y.get(i, 0));
         let yb = faer_col::from_fn(n, |i| *y.get(i, m - 1));
@@ -724,6 +837,10 @@ pub fn solve_newton(
         }
 
         if recompute_jac {
+            custom_timer.jac_tic();
+            *calc_statistics
+                .entry("number of jacobians recalculations".to_string())
+                .or_insert(0) += 1;
             // Compute Jacobians
             let (df_dy, df_dp) = if let Some(jac_fn) = fun_jac {
                 jac_fn(x, &y, &p)
@@ -762,7 +879,8 @@ pub fn solve_newton(
                 &dbc_dyb,
                 dbc_dp.as_ref(),
             );
-
+            custom_timer.jac_tac();
+            custom_timer.linear_system_tic();
             // Attempt sparse LU decomposition
             match jac_matrix.sp_lu() {
                 Ok(lu) => {
@@ -771,6 +889,9 @@ pub fn solve_newton(
 
                     lu_solver = Some(lu);
                     cost = step_col.squared_norm_l2();
+                    *calc_statistics
+                        .entry("number of solving linear systems".to_string())
+                        .or_insert(0) += 1;
                 }
                 Err(_) => {
                     singular = true;
@@ -779,7 +900,7 @@ pub fn solve_newton(
             }
             njev += 1;
         }
-
+        custom_timer.linear_system_tac();
         if let Some(ref lu) = lu_solver {
             let step: Mat<f64> = lu.solve(res.as_mat());
             let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
@@ -819,11 +940,11 @@ pub fn solve_newton(
                 for i in 0..k {
                     p_new[i] -= alpha * p_step[i];
                 }
-
+                custom_timer.fun_tic();
                 // Compute new residuals
                 let (col_res_new, _y_middle_new, _f_new, _f_middle_new) =
                     collocation_fun(fun, &y_new, &p_new, x, h);
-
+                custom_timer.fun_tac();
                 let ya_new = faer_col::from_fn(n, |i| *y_new.get(i, 0));
                 let yb_new = faer_col::from_fn(n, |i| *y_new.get(i, m - 1));
                 let bc_res_new = bc(&ya_new, &yb_new, &p_new);
@@ -1110,7 +1231,22 @@ pub fn solve_bvp(
     max_nodes: usize,
     verbose: u8,
     bc_tol: Option<f64>,
+    customtimer: Option<CustomTimer>,
 ) -> Result<BVPResult, String> {
+    if fun_jac.is_none() {
+        info!("\n No Jacobian provided, using numerical estimation \n");
+    } else {
+        println!("\n Analytical Jacobian provided! \n");
+    }
+    let mut custom_timer = customtimer.unwrap_or_else(|| CustomTimer::new());
+    let vec_of_tuples = vec![
+        ("number of iterations".to_string(), 0),
+        ("number of solving linear systems".to_string(), 0),
+        ("number of jacobians recalculations".to_string(), 0),
+        ("number of grid refinements".to_string(), 0),
+    ];
+    let mut calc_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
+
     let n = y.nrows();
     let mut m = x.nrows();
 
@@ -1121,7 +1257,7 @@ pub fn solve_bvp(
     let mut p = p.unwrap_or_else(|| faer_col::zeros(0));
     let bc_tol = bc_tol.unwrap_or(tol);
     let max_iteration = 10;
-
+    custom_timer.fun_tic();
     // Initial validation
     let f_test = fun(&x, &y, &p);
     if (f_test.nrows(), f_test.ncols()) != (y.nrows(), y.ncols()) {
@@ -1133,7 +1269,7 @@ pub fn solve_bvp(
             y.ncols()
         ));
     }
-
+    custom_timer.fun_tac();
     let ya_test = faer_col::from_fn(n, |i| *y.get(i, 0));
     let yb_test = faer_col::from_fn(n, |i| *y.get(i, m - 1));
     let bc_test = bc(&ya_test, &yb_test, &p);
@@ -1179,10 +1315,15 @@ pub fn solve_bvp(
             &x,
             tol,
             bc_tol,
+            &mut custom_timer,
+            &mut calc_statistics,
         );
 
         y = y_new;
         p = p_new;
+        *calc_statistics
+            .entry("number of iterations".to_string())
+            .or_insert(0) += 1;
         iteration += 1;
 
         // Compute collocation residuals and boundary condition residuals
@@ -1208,7 +1349,9 @@ pub fn solve_bvp(
         }
 
         let sol = create_spline(&y, &f, &x, &h);
+        custom_timer.fun_tic();
         let rms_res = estimate_rms_residuals(fun, &sol, &x, &h, &p, &r_middle, &f_middle);
+        custom_timer.fun_tac();
         let max_rms_res = (0..rms_res.nrows()).map(|i| rms_res[i]).fold(0.0, f64::max);
 
         // Determine which intervals need refinement
@@ -1248,6 +1391,7 @@ pub fn solve_bvp(
         }
 
         if nodes_added > 0 {
+            custom_timer.grid_refinement_tic();
             x = modify_mesh(&x, &insert_1, &insert_2);
             // Evaluate solution at new mesh points
             let x_eval: Vec<f64> = (0..x.nrows()).map(|i| x[i]).collect();
@@ -1255,6 +1399,10 @@ pub fn solve_bvp(
             y = faer_dense_mat::from_fn(y_new_vals.ncols(), y_new_vals.nrows(), |i, j| {
                 y_new_vals[(j, i)]
             });
+            custom_timer.grid_refinement_tac();
+            *calc_statistics
+                .entry("number of grid refinements".to_string())
+                .or_insert(0) += 1;
         } else if max_bc_res <= bc_tol {
             status = 0;
             break;
@@ -1280,11 +1428,12 @@ pub fn solve_bvp(
             _ => {}
         }
     }
-
+    custom_timer.fun_tic();
     let final_f = fun(&x, &y, &p);
     let final_h = faer_col::from_fn(x.nrows() - 1, |i| x[i + 1] - x[i]);
     let (col_res_final, _y_middle_final, _, f_middle_final) =
         collocation_fun(fun, &y, &p, &x, &final_h);
+    custom_timer.fun_tac();
     let mut r_middle_final = faer_dense_mat::zeros(n, x.nrows() - 1);
     for j in 0..(x.nrows() - 1) {
         for i in 0..n {
@@ -1292,6 +1441,7 @@ pub fn solve_bvp(
         }
     }
     let final_sol = create_spline(&y, &final_f, &x, &final_h);
+    custom_timer.fun_tic();
     let final_rms_res = estimate_rms_residuals(
         fun,
         &final_sol,
@@ -1301,7 +1451,7 @@ pub fn solve_bvp(
         &r_middle_final,
         &f_middle_final,
     );
-
+    custom_timer.fun_tac();
     let message = match status {
         0 => "The algorithm converged to the desired accuracy.",
         1 => "The maximum number of mesh nodes is exceeded.",
@@ -1321,6 +1471,9 @@ pub fn solve_bvp(
         status,
         message: message.to_string(),
         success: status == 0,
+        calc_statistics: calc_statistics,
+        custom_timer: custom_timer,
+        strategy_params: BVPResult::default().strategy_params,
     })
 }
 
@@ -1339,7 +1492,17 @@ pub fn solve_bvp_sparse(
     max_nodes: usize,
     verbose: u8,
     bc_tol: Option<f64>,
+    customtimer: Option<CustomTimer>,
 ) -> Result<BVPResult, String> {
+    let mut custom_timer = customtimer.unwrap_or_else(|| CustomTimer::new());
+    let vec_of_tuples = vec![
+        ("number of iterations".to_string(), 0),
+        ("number of solving linear systems".to_string(), 0),
+        ("number of jacobians recalculations".to_string(), 0),
+        ("number of grid refinements".to_string(), 0),
+    ];
+    let mut calc_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
+
     let n = y.nrows();
     let mut m = x.nrows();
 
@@ -1351,8 +1514,10 @@ pub fn solve_bvp_sparse(
     let bc_tol = bc_tol.unwrap_or(tol);
     let max_iteration = 10;
 
+    custom_timer.fun_tic();
     // Initial validation
     let f_test = fun(&x, &y, &p);
+    custom_timer.fun_tac();
     if (f_test.nrows(), f_test.ncols()) != (y.nrows(), y.ncols()) {
         return Err(format!(
             "Function return shape ({}, {}) doesn't match y shape ({}, {})",
@@ -1408,14 +1573,20 @@ pub fn solve_bvp_sparse(
             &x,
             tol,
             bc_tol,
+            &mut custom_timer,
+            &mut calc_statistics,
         );
 
         y = y_new;
         p = p_new;
         iteration += 1;
-
+        *calc_statistics
+            .entry("number of iterations".to_string())
+            .or_insert(0) += 1;
+        custom_timer.fun_tic();
         // Compute collocation residuals and boundary condition residuals
         let (col_res, _y_middle, f, f_middle) = collocation_fun(fun, &y, &p, &x, &h);
+        custom_timer.fun_tac();
         let ya_curr = faer_col::from_fn(n, |i| *y.get(i, 0));
         let yb_curr = faer_col::from_fn(n, |i| *y.get(i, m - 1));
         let bc_res = bc(&ya_curr, &yb_curr, &p);
@@ -1437,7 +1608,10 @@ pub fn solve_bvp_sparse(
         }
 
         let sol = create_spline(&y, &f, &x, &h);
+
+        custom_timer.fun_tic();
         let rms_res = estimate_rms_residuals(fun, &sol, &x, &h, &p, &r_middle, &f_middle);
+        custom_timer.fun_tac();
         let max_rms_res = (0..rms_res.nrows()).map(|i| rms_res[i]).fold(0.0, f64::max);
 
         // Determine which intervals need refinement
@@ -1477,6 +1651,7 @@ pub fn solve_bvp_sparse(
         }
 
         if nodes_added > 0 {
+            custom_timer.grid_refinement_tic();
             x = modify_mesh(&x, &insert_1, &insert_2);
             // Evaluate solution at new mesh points
             let x_eval: Vec<f64> = (0..x.nrows()).map(|i| x[i]).collect();
@@ -1484,6 +1659,10 @@ pub fn solve_bvp_sparse(
             y = faer_dense_mat::from_fn(y_new_vals.ncols(), y_new_vals.nrows(), |i, j| {
                 y_new_vals[(j, i)]
             });
+            custom_timer.grid_refinement_tac();
+            *calc_statistics
+                .entry("number of grid refinements".to_string())
+                .or_insert(0) += 1;
         } else if max_bc_res <= bc_tol {
             status = 0;
             break;
@@ -1509,8 +1688,9 @@ pub fn solve_bvp_sparse(
             _ => {}
         }
     }
-
+    custom_timer.fun_tic();
     let final_f = fun(&x, &y, &p);
+    custom_timer.fun_tac();
     let final_h = faer_col::from_fn(x.nrows() - 1, |i| x[i + 1] - x[i]);
     let (col_res_final, _y_middle_final, _, f_middle_final) =
         collocation_fun(fun, &y, &p, &x, &final_h);
@@ -1550,5 +1730,8 @@ pub fn solve_bvp_sparse(
         status,
         message: message.to_string(),
         success: status == 0,
+        calc_statistics: calc_statistics,
+        custom_timer: custom_timer,
+        strategy_params: BVPResult::default().strategy_params,
     })
 }

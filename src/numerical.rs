@@ -287,9 +287,10 @@ pub mod NR_for_ODE;
 /// nr.save_to_file(None);
 ///    ```
 pub mod BVP_Damp;
-/// not production ready
+//
 pub mod BVP_api;
-/// not production ready
+/// BVP solver with collocation method
+/// rewritten in Rust from Python code from SciPy
 pub mod BVP_sci;
 ///  a collection of test examples of exect solutions of BVPs for testing purposes
 pub mod Examples_and_utils;

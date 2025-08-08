@@ -30,11 +30,12 @@ pub fn plot_from_expr(
 }
 
 //EXAMPLES OF EXACT SOLUTION OF BVP OF NONLINEAR DIFFERENTIAL EQUATION
+// https://math.stackexchange.com/questions/397461/examples-of-nonlinear-ordinary-differential-equations-with-elementary-solutions
 /*
  the Lane-Emden equation of index 5:
-y′′+2xy′+y**5=0,y(0)=1,y′(0)=0
+y′′+2y′+y**5=0,y(0)=1,y′(0)=0
 y'=z
-z'=- 2*x*z - y**5
+z'=- 2*z/x - y**5
 With initial conditions y(0)=1,y′(0)=0
 exact solution:
 y = (1+(x^2)/3)^(-0.5)
@@ -83,7 +84,7 @@ impl NonlinEquation {
             }
             NonlinEquation::ParachuteEquation => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-x^2 +1"];
+                let eqs = vec!["z", "-x^2 +1"];//??? y not x
                 let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
                 vec_eqs
             }
@@ -140,7 +141,37 @@ impl NonlinEquation {
             }
         }
     }
-
+    pub fn boundary_conditions2(&self) -> HashMap<String, Vec<(usize, f64)>> {
+        match self {
+            NonlinEquation::LaneEmden5 => {
+                let mut BorderConditions = HashMap::new();
+                BorderConditions.insert("z".to_string(), vec![(0usize, 0.0f64)]);
+                BorderConditions.insert("y".to_string(), vec![(0usize, 1.0f64)]);
+                BorderConditions
+            }
+            NonlinEquation::ParachuteEquation => {
+                let mut BorderConditions = HashMap::new();
+                BorderConditions.insert("z".to_string(), vec![(0usize, 0.0f64)]);
+                BorderConditions.insert("y".to_string(), vec![(0usize, 0.0f64)]);
+                BorderConditions
+            }
+            NonlinEquation::Clairaut => {
+                let mut BorderConditions = HashMap::new();
+                BorderConditions.insert("zz".to_string(), vec![(1usize, 2.0f64)]);
+                BorderConditions.insert("z".to_string(), vec![(1usize, 0.0f64)]);
+                BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
+                BorderConditions
+            }
+            NonlinEquation::TwoPointBVP => {
+                let mut BorderConditions = HashMap::new();
+                let z_at_1 = -2.0 * (-1.0 / A).exp();
+                let y_at_min_1 = (-1.0 / A).exp();
+                BorderConditions.insert("y".to_string(), vec![(0usize, y_at_min_1)]);
+                BorderConditions.insert("z".to_string(), vec![(1usize, z_at_1)]);
+                BorderConditions
+            }
+        }
+    }
     pub fn exact_solution(
         &self,
         start: Option<f64>,
