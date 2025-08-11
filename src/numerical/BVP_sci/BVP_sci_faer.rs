@@ -1,3 +1,80 @@
+//!
+//! # BVP_sci_faer - High-Performance Boundary Value Problem Solver
+//!
+//! This module implements a state-of-the-art 4th order collocation algorithm with residual control,
+//! translated and optimized from SciPy's _bvp.py. It provides robust and efficient solutions for
+//! boundary value problems in ordinary differential equations using the faer linear algebra library.
+//!
+//! ## Algorithm Features
+//! - **4th Order Collocation**: Uses cubic spline interpolation with C1 continuity
+//! - **Adaptive Mesh Refinement**: Automatic grid adaptation based on residual estimates
+//! - **Residual Control**: 5-point Lobatto quadrature for accurate error estimation
+//! - **Sparse Matrix Operations**: Efficient handling of large, sparse Jacobian matrices
+//! - **Newton's Method**: Robust nonlinear solver with backtracking line search
+//! - **Parameter Estimation**: Support for unknown parameters in the ODE system
+//!
+//! ## Performance Optimizations
+//! - **faer Linear Algebra**: High-performance sparse matrix operations
+//! - **Parallel Jacobian Evaluation**: Concurrent computation of derivatives
+//! - **Memory Efficient**: Sparse storage for banded and structured matrices
+//! - **Adaptive Strategies**: Smart Jacobian recomputation and step size control
+//!
+//! ## Supported Problem Types
+//! - Linear and nonlinear boundary value problems
+//! - Systems of coupled ODEs with up to thousands of equations
+//! - Multi-point boundary conditions
+//! - Parameter estimation problems
+//! - Stiff and non-stiff differential equations
+//!
+//! ## Function Interface Design
+//! Unlike traditional ODE solvers that work with single points, this solver uses vectorized
+//! evaluation across the entire mesh for optimal performance:
+//!
+//! ```rust,ignore
+//! // ODE Function: f(x, y, p) -> f_values
+//! // x: mesh points (m,)  
+//! // y: solution at all mesh points (n×m)
+//! // p: parameters (k,)
+//! // Returns: RHS values at ALL mesh points (n×m)
+//! pub type ODEFunction = dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> faer_dense_mat;
+//!
+//! // Jacobian: Returns sparse matrices for each mesh point
+//! pub type ODEJacobian = dyn Fn(&faer_col, &faer_dense_mat, &faer_col)
+//!                        -> (Vec<faer_mat>, Option<Vec<faer_mat>>);
+//! ```
+//!
+//! ## Main Solver Functions
+//! - `solve_bvp()`: Main solver with automatic mesh refinement
+//! - `solve_bvp_sparse()`: Optimized version for large sparse systems
+//! - `solve_newton()`: Core Newton iteration with line search
+//! - `collocation_fun()`: Collocation residual computation
+//! - `estimate_rms_residuals()`: Error estimation using Lobatto quadrature
+//!
+//! ## Usage Example
+//! ```rust,ignore
+//! // Define ODE: y'' + y = 0
+//! let fun = |x: &faer_col, y: &faer_dense_mat, p: &faer_col| {
+//!     let mut f = faer_dense_mat::zeros(2, y.ncols());
+//!     for j in 0..y.ncols() {
+//!         *f.get_mut(0, j) = *y.get(1, j);        // y' = z
+//!         *f.get_mut(1, j) = -*y.get(0, j);       // z' = -y  
+//!     }
+//!     f
+//! };
+//!
+//! // Boundary conditions: y(0) = 0, y(π) = 0
+//! let bc = |ya: &faer_col, yb: &faer_col, p: &faer_col| {
+//!     faer_col::from_fn(2, |i| match i {
+//!         0 => ya[0],     // y(0) = 0
+//!         1 => yb[0],     // y(π) = 0
+//!         _ => 0.0,
+//!     })
+//! };
+//!
+//! let result = solve_bvp(&fun, &bc, x, y_guess, None, None,
+//!                        None, None, 1e-6, 1000, 1, None, None)?;
+//! ```
+//!
 //! Boundary value problem solver - Rust translation from SciPy's _bvp.py
 //!
 //! This module implements a 4th order collocation algorithm with residual control

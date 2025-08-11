@@ -30,14 +30,14 @@
 //!     ("y".to_string(), vec![(0, 0.0)]),  // y(0) = 0
 //!     ("z".to_string(), vec![(0, 1.0)]),  // z(0) = 1
 //! ]);
-//! 
+//!
 //! let mut solver = BVPwrap::new(
 //!     None, Some(0.0), Some(π), Some(100),
 //!     Expr::parse_vector_expression(equations),
 //!     variables, vec![], None, boundary_conditions,
 //!     "x".to_string(), 1e-6, 1000, initial_guess
 //! );
-//! 
+//!
 //! solver.solve();
 //! solver.plot_result();
 //! ```
@@ -50,9 +50,7 @@
 //! - `BC_closure_creater()`: Creates boundary condition functions from HashMap
 //! - `plot_result()`, `save_to_file()`: Result visualization and export
 //!
-use crate::numerical::BVP_Damp::BVP_utils::{
-    CustomTimer, elapsed_time, 
-};
+use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 use crate::numerical::BVP_sci::BVP_sci_faer::{
     BCFunction, BCJacobian, BVPResult, ODEFunction, ODEJacobian, faer_col, faer_dense_mat,
     solve_bvp,
@@ -60,7 +58,7 @@ use crate::numerical::BVP_sci::BVP_sci_faer::{
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
 use crate::symbolic::symbolic_engine::Expr;
 use chrono::Local;
-use log::{error, info, };
+use log::{error, info};
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
 use simplelog::*;

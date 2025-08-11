@@ -990,8 +990,9 @@ mod tests {
     Domain: [-1, 1]
 
          */
-      // problem that leads to singular jacobian  
-    #[test] #[should_panic]
+    // problem that leads to singular jacobian
+    #[test]
+    #[should_panic]
     fn test_lane_emden_equation() {
         // Lane-Emden equation: y′′+2y′/x + y**5=0,y(0)=1,y′(0)=0
 
@@ -1004,10 +1005,10 @@ mod tests {
                 let z_val = *y.get(1, j);
                 let x_val = x[j];
 
-               *f.get_mut(0, j) = z_val; // y' = z
-                *f.get_mut(1, j) = -2.0  * z_val/x_val - y_val.powi(5); // z' = -2*x*z - y^5
+                *f.get_mut(0, j) = z_val; // y' = z
+                *f.get_mut(1, j) = -2.0 * z_val / x_val - y_val.powi(5); // z' = -2*x*z - y^5
 
-                /* 
+                /*
                 if x_val.abs() < 1e-10 {
                     *f.get_mut(1, j) = -y_val.powi(5); // z' = -y^5 (limit as x->0)
                 } else {

@@ -84,7 +84,7 @@ impl NonlinEquation {
             }
             NonlinEquation::ParachuteEquation => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-x^2 +1"];//??? y not x
+                let eqs = vec!["z", "-x^2 +1"]; //??? y not x
                 let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
                 vec_eqs
             }

@@ -487,5 +487,7 @@ pub mod ODE_api;
 ///
 ///    ```
 pub mod Radau;
+/// shooting method for solving BVP
+pub mod ShootingBVP;
 /// collection of optimization algorithms
 pub mod optimization;

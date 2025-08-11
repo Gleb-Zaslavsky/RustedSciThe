@@ -10,7 +10,7 @@ mod tests {
     use faer::Row;
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
- 
+
     //////////////////////////////////////////////////////////////////////////////////////////////////////
     /*
     Two-point boundary value problem:
@@ -403,7 +403,7 @@ mod tests {
         // y''= z' = -y^2 + 1
         let eqs = vec!["z", "-z^2 +1"];
         let parachute = NonlinEquation::ParachuteEquation;
-        let eq_system =  Expr::parse_vector_expression(eqs);
+        let eq_system = Expr::parse_vector_expression(eqs);
         let values = parachute.values();
         let boundary_conditions = parachute.boundary_conditions2();
         let start_and_end = parachute.span(None, None);
@@ -428,7 +428,7 @@ mod tests {
             initial_guess,
         );
         let (_, residual_function_from_sym, _) = bvp_solver.eq_generate();
-          ////////////////////////////////////// compare residual function derived from symbolic and directly defined ////////////////////
+        ////////////////////////////////////// compare residual function derived from symbolic and directly defined ////////////////////
         let k = 1.0;
         let g = 1.0;
 
@@ -441,16 +441,17 @@ mod tests {
                 *f.get_mut(1, j) = g - k * y_val * y_val; // z' = g - k*z^2
             }
             f
-        }; 
+        };
         let mut y = faer_dense_mat::zeros(2, 4);
         for j in 0..4 {
             *y.get_mut(0, j) = 0.0; // ;
             *y.get_mut(1, j) = 0.0;
         }
-          let x_test = faer_col::from_fn(n, |i| {
+        let x_test = faer_col::from_fn(n, |i| {
             start_and_end.0 + i as f64 * (start_and_end.1 - start_and_end.0) / (n - 1) as f64
         });
-        let residual_from_sym = residual_function_from_sym(&x_test, &y, &faer_col::from_fn(n, |_| 0.0));
+        let residual_from_sym =
+            residual_function_from_sym(&x_test, &y, &faer_col::from_fn(n, |_| 0.0));
         let residual_from_fun = fun(&x_test, &y, &faer_col::from_fn(n, |_| 0.0));
         println!("residual_from_sym: {:?}", residual_from_sym);
         println!("residual_from_fun: {:?}", residual_from_fun);
@@ -460,11 +461,11 @@ mod tests {
     fn test_parachute_equation_bvp_1() {
         // using symbolic residual
 
-          // y' = z
+        // y' = z
         // y''= z' = -y^2 + 1
         let eqs = vec!["z", "1-z^2"];
         let parachute = NonlinEquation::ParachuteEquation;
-        let eq_system =  Expr::parse_vector_expression(eqs);
+        let eq_system = Expr::parse_vector_expression(eqs);
         let values = parachute.values();
         let boundary_conditions = parachute.boundary_conditions2();
         let start_and_end = parachute.span(None, None);
@@ -496,7 +497,6 @@ mod tests {
         let _fun = move |_x: &faer_col, y: &faer_dense_mat, _p: &faer_col| {
             let mut f = faer_dense_mat::zeros(2, y.ncols());
             for j in 0..y.ncols() {
-         
                 let z_val = *y.get(1, j);
                 *f.get_mut(0, j) = z_val; // y' = z
                 *f.get_mut(1, j) = g - k * z_val * z_val; // z' = g - k*z^2
@@ -520,7 +520,7 @@ mod tests {
         }
 
         let result = solve_bvp(
-            & residual_function_from_sym,
+            &residual_function_from_sym,
             &bc_func.unwrap(),
             x.clone(),
             y,
@@ -560,15 +560,15 @@ mod tests {
         }
     }
 
-     #[test]
+    #[test]
     fn test_parachute_equation_bvp_2() {
         // using symbolic residual
 
-          // y' = z
+        // y' = z
         // y''= z' = -y^2 + 1
         let eqs = vec!["z", "1-z^2"];
         let parachute = NonlinEquation::ParachuteEquation;
-        let eq_system =  Expr::parse_vector_expression(eqs);
+        let eq_system = Expr::parse_vector_expression(eqs);
         let values = parachute.values();
         let boundary_conditions = parachute.boundary_conditions2();
         let start_and_end = parachute.span(None, None);
@@ -593,7 +593,7 @@ mod tests {
             initial_guess,
         );
         bvp_solver.solve();
- //////////////////////////////////////////////////////////////////////////
+        //////////////////////////////////////////////////////////////////////////
         let g = 1.0;
         let k = 1.0;
         let x_mesh_final = bvp_solver.x_mesh.clone();
@@ -622,21 +622,20 @@ mod tests {
                 y_exact
             );
         }
-      
     }
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-        /*
-         the Lane-Emden equation of index 5:
-        y′′+2xy′+y**5=0,y(0)=1,y′(0)=0
-        y'=z
-        z'=- 2*x*z - y**5
-        With initial conditions y(0)=1,y′(0)=0
-        exact solution:
-        y = (1+(x^2)/3)^(-0.5)
-        */
-///////////////////////////////////////////////////////////////////////////////////////////////////////////        
-      // Lane Emden equation
-      #[test]
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /*
+     the Lane-Emden equation of index 5:
+    y′′+2xy′+y**5=0,y(0)=1,y′(0)=0
+    y'=z
+    z'=- 2*x*z - y**5
+    With initial conditions y(0)=1,y′(0)=0
+    exact solution:
+    y = (1+(x^2)/3)^(-0.5)
+    */
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Lane Emden equation
+    #[test]
     fn test_lane_emden_bvp_compare_residuals() {
         /*
          the Lane-Emden equation of index 5:
@@ -675,7 +674,7 @@ mod tests {
         bvp_solver.set_additional_parameters(Some(true), None);
 
         let _ = bvp_solver.eq_generate();
-     
+
         ///////////////////////////////////////////////////////////////////////////////////
         // direct solution /////////////////////////////
 
@@ -706,14 +705,12 @@ mod tests {
 
         let res_direct = fun_direct(&x_test, &y, &faer_col::from_fn(1, |_| 0.0));
         let res_from_sym = fun_from_sym(&x_test, &y, &faer_col::from_fn(1, |_| 0.0));
-      //  println!("res_direct: {:?}", res_direct);
-      //  println!("res_from_sym: {:?}", res_from_sym);
+        //  println!("res_direct: {:?}", res_direct);
+        //  println!("res_from_sym: {:?}", res_from_sym);
         assert!(res_direct == res_from_sym);
-      
-
-      
-    }  
-    #[test] #[should_panic]
+    }
+    #[test]
+    #[should_panic]
     fn test_lane_emden_bvp() {
         /*
         (1/x^2)*d/dx(x^2*dy/dx) + y^5 = 0
@@ -732,14 +729,13 @@ mod tests {
         */
         let lanemden = NonlinEquation::LaneEmden5;
         let eqs = vec!["z", "-2*z/x - y^5"];
-             
-        let eq_system =  Expr::parse_vector_expression(eqs);
+
+        let eq_system = Expr::parse_vector_expression(eqs);
         let values = lanemden.values();
-                        let mut boundary_conditions = HashMap::new();
-                boundary_conditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
-                boundary_conditions.insert("y".to_string(), vec![(0usize,0.0f64)]);
-              
-   
+        let mut boundary_conditions = HashMap::new();
+        boundary_conditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+        boundary_conditions.insert("y".to_string(), vec![(0usize, 0.0f64)]);
+
         let start_and_end = (0.0, 1.0);
         let n = 100 as usize; // number of mesh points
 
@@ -765,15 +761,15 @@ mod tests {
         bvp_solver.set_additional_parameters(Some(true), None);
 
         bvp_solver.solve();
-      //  bvp_solver.plot_result();
-      //  bvp_solver.gnuplot_result();
+        //  bvp_solver.plot_result();
+        //  bvp_solver.gnuplot_result();
         //
         let x_mesh_final = bvp_solver.x_mesh.clone();
-      
+
         ////////////////////////////////////////////////////////////////////////////////
         //
         let ressult = "(1+(x^2)/3)^(-0.5)".to_string();
-        
+
         let expr = Expr::parse_expression(&ressult);
         let exact_sol_func = expr.lambdify1D();
         let _exact_solution: Vec<f64> = x_mesh_final.iter().map(|&x| exact_sol_func(x)).collect();
@@ -781,8 +777,7 @@ mod tests {
         //let exact_solution: Vec<f64> = x_mesh_final.iter().map(|&x| exact_impl(x)).collect();
         let sol: DMatrix<f64> = bvp_solver.get_result().unwrap();
         let numer: DVector<f64> = sol.column(0).to_owned().into();
-        
-  
+
         for i in 0..x_mesh_final.len() {
             let x_val = x_mesh_final[i];
             let y_numerical = numer[i];
@@ -790,16 +785,10 @@ mod tests {
             let error = (y_numerical - y_exact).abs();
             // exact_solution[i];
 
-            
-                        println!(
-                            "x = {:.3}, y_num = {:.6}, y_exact = {:.6}, error = {:.2e}",
-                            x_val,
-                            y_numerical,
-                            y_exact,
-                            error
-                        );
-            
- 
+            println!(
+                "x = {:.3}, y_num = {:.6}, y_exact = {:.6}, error = {:.2e}",
+                x_val, y_numerical, y_exact, error
+            );
         }
         let res = &bvp_solver.result.clone();
 
@@ -818,9 +807,8 @@ mod tests {
                     exact
                 );
             }
-        } else {panic!("solution not found")}
-        
-
-        
+        } else {
+            panic!("solution not found")
+        }
     }
 }

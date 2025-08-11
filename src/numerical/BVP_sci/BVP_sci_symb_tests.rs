@@ -1,14 +1,12 @@
 #[cfg(test)]
 mod tests {
 
- 
     use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
 
-    use crate::numerical::BVP_sci::BVP_sci_faer::{ faer_col, faer_dense_mat};
+    use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat};
     use crate::numerical::BVP_sci::BVP_sci_symb::BVPwrap;
 
     use crate::symbolic::symbolic_engine::Expr;
-
 
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
@@ -495,7 +493,6 @@ mod tests {
 
         let x_mesh = DVector::from_vec(vec![0.0, 0.25, 0.5, 0.75, 1.0]);
         let initial_guess = DMatrix::from_fn(2, 5, |i, _| {
-        
             match i {
                 0 => 1.0, // x_val * (1.0 - x_val), // y = x*(1-x)
                 1 => 1.0, //1.0 - 2.0 * x_val,     // z = y' = 1-2x
@@ -557,7 +554,4 @@ mod tests {
         let z_at_1 = bvp_solver.result.y.get(1, bvp_solver.result.x.nrows() - 1);
         assert!((z_at_1 - (-1.0)).abs() < 1e-6, "y'(1) should be -1");
     }
-  
-
-
 }

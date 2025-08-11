@@ -43,6 +43,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 * Boundary Value Problem for ODE 
   * damped Newton-Raphson method (several versions available)
   * Newton-Raphson 4th order collocation algorithm with residual control
+  * Shooting method for solving BVP 
 * Optimization with (if needed) analytical Jacobian:
     * curve fitting
     * Levergang-Marquardt method with trust region
