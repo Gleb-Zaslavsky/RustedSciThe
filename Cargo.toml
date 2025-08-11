@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing: parse strings into symbolic representation, compute symbolic (analytical) derivatives and jacobians, transform symbolic expressions into regular Rust functions, solve nonlinear algebraic equations and ODE with multiple IVP solvers and BVP with several versions of Newton-Raphson,i/o features, plots also on board"
 author = "Gleb Zasllavsky"
