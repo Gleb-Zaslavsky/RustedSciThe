@@ -437,6 +437,69 @@ pub mod Nonlinear_systems;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
+/// better universal api for all IVP solvers on board 
+/// use universal syntax with "new" function and choise of solvers with enum "SolverType"
+/// ```
+///  use RustedSciThe::numerical::ODE_api2::{UniversalODESolver, SolverType};
+///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
+/// 
+/// use nalgebra::DVector;
+///         let eq1 = Expr::parse_expression("-y");
+///        let eq_system = vec![eq1];
+///        let values = vec!["y".to_string()];
+///        let arg = "t".to_string();
+///        let t0 = 0.0;
+///        let y0 = DVector::from_vec(vec![1.0]);
+///        let t_bound = 0.5;
+///
+///        let mut solver = UniversalODESolver::new(
+///            eq_system,
+///            values,
+///            arg,
+///            SolverType::Radau(RadauOrder::Order3),
+///            t0,
+///            y0,
+///            t_bound,
+///        );
+///        solver.set_max_iterations(100);
+///        solver.set_tolerance(1e-6);
+///        solver.set_step_size(1e-3);
+///        solver.initialize();
+///        solver.solve();
+///        let (t_result, y_result) = solver.get_result();
+///  ```
+///  or use shortcuts for every solver
+/// ``` 
+///  use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
+/// use nalgebra::DVector;
+///        let eq1 = Expr::parse_expression("-y");
+///        let eq_system = vec![eq1];
+///        let values = vec!["y".to_string()];
+///        let arg = "t".to_string();
+///        let t0 = 0.0;
+///        let y0 = DVector::from_vec(vec![1.0]);
+///        let t_bound = 0.5;
+///
+///        let mut solver = UniversalODESolver::radau(
+///            eq_system,
+///            values,
+///            arg,
+///            RadauOrder::Order3,
+///            t0,
+///            y0,
+///            t_bound,
+///            1e-6,
+///            50,
+///            Some(1e-3),
+///        );
+///
+///        solver.solve();
+///        let (t_result, y_result) = solver.get_result();
+///  ```        
+pub mod ODE_api2;
 /// Radau solver (good for nonlinear ODEs)
 /// #############################END OF ODEs SECTIONS#####
 ///
