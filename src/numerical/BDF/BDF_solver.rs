@@ -903,9 +903,13 @@ impl BDF {
         let factors: DVector<f64> = factors.into();
         //        info!("factors = {:?}, error_norms = {:?}", factors, error_norms);
         // argmax returns ( index, value)
-        //ATTENTION! THIS IS AD HOC FIX IN THE ORIGINAL CODE IT WAS 
+        //ATTENTION! THIS IS AD HOC FIX IN THE ORIGINAL CODE IT WAS
         //  let delta_order =  factors.argmax().0 - 1; WHICH CAUSES OVERFLOW OF USIZE IF factors.argmax().0==0
-        let delta_order = if factors.argmax().0==0 {1} else {factors.argmax().0 - 1};
+        let delta_order = if factors.argmax().0 == 0 {
+            1
+        } else {
+            factors.argmax().0 - 1
+        };
         let new_order = order + delta_order;
         self.order = new_order;
 

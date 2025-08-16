@@ -385,7 +385,7 @@ impl UniversalODESolver {
             SolverInstance::NonStiff(solver) => {
                 solver.solve();
                 let (t_result, y_result) = solver.get_result();
-               // let y_result = y_result.transpose();
+                // let y_result = y_result.transpose();
                 self.t_result = Some(t_result);
                 self.y_result = Some(y_result);
             }
@@ -633,7 +633,6 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-
     #[test]
     fn test_universal_rk45() {
         let eq1 = Expr::parse_expression("-y");
@@ -698,19 +697,17 @@ mod tests {
     }
     #[test]
     fn test_ab4_cos() {
-
-
- // y'' + y = 0,
- // y0' =y1,
- // y1' =- y0 
- // y(0) = 1, y'(0) = 0 (solution: y = cos(x))
+        // y'' + y = 0,
+        // y0' =y1,
+        // y1' =- y0
+        // y(0) = 1, y'(0) = 0 (solution: y = cos(x))
         let eq_system = vec![Expr::parse_expression("y1"), Expr::parse_expression("-y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
         let arg = "x".to_string();
         let t0 = 0.0;
-                                                                    // cos(0)=1, -sin(0)=0 
+        // cos(0)=1, -sin(0)=0
         let y0 = DVector::from_vec(vec![1.0, 0.0]);
-        let t_bound = std::f64::consts::PI ;
+        let t_bound = std::f64::consts::PI;
         let step = 1e-5;
         let solver_type = SolverType::NonStiff("AB4".to_owned());
         let mut solver =
@@ -727,7 +724,7 @@ mod tests {
         let x_mesh = t_result.clone().unwrap();
         let y0: DVector<f64> = y_final.column(0).into();
         let y1: DVector<f64> = y_final.column(1).into();
-       // println!("{:?} \n {:?}", y0, y1);
+        // println!("{:?} \n {:?}", y0, y1);
         for i in 0..y0.len() {
             let y = y0[i];
             let x = x_mesh[i];
@@ -739,19 +736,17 @@ mod tests {
     }
     #[test]
     fn test_rk45_cos2() {
-
-
- // y'' + y = 0,
- // y0' =y1,
- // y1' =- y0 
- // y(0) = 1, y'(0) = 0 (solution: y = cos(x))
+        // y'' + y = 0,
+        // y0' =y1,
+        // y1' =- y0
+        // y(0) = 1, y'(0) = 0 (solution: y = cos(x))
         let eq_system = vec![Expr::parse_expression("y1"), Expr::parse_expression("-y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
         let arg = "x".to_string();
         let t0 = 0.0;
-                                                                    // cos(0)=1, -sin(0)=0 
+        // cos(0)=1, -sin(0)=0
         let y0 = DVector::from_vec(vec![1.0, 0.0]);
-        let t_bound = std::f64::consts::PI ;
+        let t_bound = std::f64::consts::PI;
         let step = 1e-5;
         let solver_type = SolverType::NonStiff("RK45".to_owned());
         let mut solver =
@@ -768,7 +763,7 @@ mod tests {
         let x_mesh = t_result.clone().unwrap();
         let y0: DVector<f64> = y_final.column(0).into();
         let y1: DVector<f64> = y_final.column(1).into();
-       // println!("{:?} \n {:?}", y0, y1);
+        // println!("{:?} \n {:?}", y0, y1);
         for i in 0..y0.len() {
             let y = y0[i];
             let x = x_mesh[i];

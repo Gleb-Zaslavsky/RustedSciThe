@@ -64,7 +64,7 @@ use simplelog::LevelFilter;
 use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
-
+use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use crate::Utils::plots::{plots, plots_gnulot};
 use faer::mat::Mat;
@@ -197,6 +197,7 @@ impl BVPwrap {
         &mut self,
         use_analytical_jacobian: Option<bool>,
         Bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
+        loglevel: Option<String>
     ) {
         if let Some(use_analytical_jacobian) = use_analytical_jacobian {
             if use_analytical_jacobian {
@@ -209,6 +210,9 @@ impl BVPwrap {
             println!("\n Using analytical Jacobian \n");
         }
         self.Bounds = Bounds;
+        if let Some(level) = loglevel{
+            self.loglevel = Some(level)
+        }
     }
     pub fn check_task(&self) {
         assert_eq!(
@@ -430,10 +434,26 @@ impl BVPwrap {
             custom_timer.clone(),
         );
         let end = begin.elapsed();
+        // let's now calculate paramters of jacobian
+        let res = self.result.clone();
+        let x_mesh = res.x.clone();
+        let y = res.y.clone();
+        let p =  res.p.clone();
+        let p = if let Some(p) = p {
+           p 
+        } else {
+             faer_col::zeros(0)
+        };
+        let jacfunc = jacobian.unwrap()(
+            &x_mesh,
+            &y,
+            &p
+            ).0;
+        size_of_jacobian(jacfunc);
         elapsed_time(end);
     }
 
-    // wrapper around solver function to implement logging
+    /// wrapper around solver function to implement logging
 
     pub fn solve(&mut self) {
         let is_logging_disabled = self

@@ -76,7 +76,7 @@ use crate::numerical::ShootingBVP::Shooting_simple::{
 };
 
 use crate::symbolic::symbolic_engine::Expr;
-use log::{debug,info};
+use log::{debug, info};
 use nalgebra::{DMatrix, DVector};
 use simplelog::*;
 use std::collections::HashMap;
@@ -327,12 +327,12 @@ impl BVPShooting {
     pub fn get_solution(&self) -> ShootingMethodResult {
         return self.full_sol.clone();
     }
-    
+
     /// Get the spatial mesh (x-coordinates) of the solution.
     pub fn get_x(&self) -> DVector<f64> {
         return self.full_sol.x_mesh.clone();
     }
-    
+
     /// Get the solution matrix where rows are variables and columns are spatial points.
     pub fn get_y(&self) -> DMatrix<f64> {
         return self.full_sol.y.clone();

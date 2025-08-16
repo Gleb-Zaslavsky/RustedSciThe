@@ -49,6 +49,7 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
     * Levergang-Marquardt method with trust region
     * H.P.Gavin Levergang-Marquardt method
     * scalar optimization (Brent method, bisection method, secant, Newton-Raphson method)
+    * interpolation/extrapolation: lagrangian, newtonian, polimomial (direct rewrite fron SciPy library module `scipy.interpolate._interpolate`)
 * solving systems of non-linear equations with analytical Jacobian
     * Newton-Raphson method
     * Newton-Raphson damped
@@ -99,6 +100,10 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 | Gavin, H.P. (2020) algorithm              |                        |
 |The Levenberg-Marquardt method for         |                        |
 | nonlinear curve fitting.                  |                        |
+|                                           |                        |
+|interpolation/extrapolation: lagrangian,   |                        |
+|newtonian, polimomial                       | numerical             |
+|                                           | /optimization/         |
 |-------------------------------------------|------------------------|
 | parse string expression to symbolic       | symbolic/              |
 | expression                                | parse_expression       |

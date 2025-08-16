@@ -1,7 +1,7 @@
 //use crate::symbolic::shared_expr::Expr;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::utils::{
-    find_char_positions_outside_brackets, find_pair_to_this_bracket, has_brackets,
+    find_char_positions_outside_brackets, find_pair_to_this_bracket,
 };
 /// a module turns a String expression into a symbolic expression
 ///# Example
@@ -331,6 +331,69 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             return Ok(Expr::Ln(Box::new(parse_expression_func(0, inner)?)));
         }
 
+        // Обработка тригонометрических функций
+        if input.starts_with("sin(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[4..fisrt_brac_end].trim();
+            return Ok(Expr::sin(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("cos(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[4..fisrt_brac_end].trim();
+            return Ok(Expr::cos(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("tg(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[3..fisrt_brac_end].trim();
+            return Ok(Expr::tg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("tan(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[4..fisrt_brac_end].trim();
+            return Ok(Expr::tg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("ctg(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[4..fisrt_brac_end].trim();
+            return Ok(Expr::ctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("cot(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[4..fisrt_brac_end].trim();
+            return Ok(Expr::ctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("arcsin(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[7..fisrt_brac_end].trim();
+            return Ok(Expr::arcsin(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("asin(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[5..fisrt_brac_end].trim();
+            return Ok(Expr::arcsin(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("arccos(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[7..fisrt_brac_end].trim();
+            return Ok(Expr::arccos(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("acos(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[5..fisrt_brac_end].trim();
+            return Ok(Expr::arccos(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("arctg(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[6..fisrt_brac_end].trim();
+            return Ok(Expr::arctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("atan(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[5..fisrt_brac_end].trim();
+            return Ok(Expr::arctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("arctan(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[7..fisrt_brac_end].trim();
+            return Ok(Expr::arctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("arcctg(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[7..fisrt_brac_end].trim();
+            return Ok(Expr::arcctg(Box::new(parse_expression_func(0, inner)?)));
+        } else if input.starts_with("acot(") && input.ends_with(')') {
+            let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
+            let inner = &input[5..fisrt_brac_end].trim();
+            return Ok(Expr::arcctg(Box::new(parse_expression_func(0, inner)?)));
+        }
+
         // Обработка констант и переменных
         if let Ok(value) = input.parse::<f64>() {
             println!("found constant: {}", value);
@@ -500,5 +563,56 @@ mod tests {
         println!("{}", to_check);
         println!("{}", result.clone().unwrap());
         assert_eq!(result.unwrap(), to_check);
+    }
+
+    #[test]
+    fn test_parse_sin() {
+        let expr = parse_expression_func(0, "sin(x)").unwrap();
+        assert_eq!(expr, Expr::sin(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_cos() {
+        let expr = parse_expression_func(0, "cos(x)").unwrap();
+        assert_eq!(expr, Expr::cos(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_tg() {
+        let expr = parse_expression_func(0, "tg(x)").unwrap();
+        assert_eq!(expr, Expr::tg(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_tan() {
+        let expr = parse_expression_func(0, "tan(x)").unwrap();
+        assert_eq!(expr, Expr::tg(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_arcsin() {
+        let expr = parse_expression_func(0, "arcsin(x)").unwrap();
+        assert_eq!(expr, Expr::arcsin(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_complex_trig() {
+        let expr = parse_expression_func(0, "sin(x) + cos(y)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Add(
+                Box::new(Expr::sin(Box::new(Expr::Var("x".to_string())))),
+                Box::new(Expr::cos(Box::new(Expr::Var("y".to_string()))))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_trig() {
+        let expr = parse_expression_func(0, "sin(cos(x))").unwrap();
+        assert_eq!(
+            expr,
+            Expr::sin(Box::new(Expr::cos(Box::new(Expr::Var("x".to_string())))))
+        );
     }
 }

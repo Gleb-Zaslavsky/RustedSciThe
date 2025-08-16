@@ -1,12 +1,12 @@
 #[cfg(test)]
-mod tests { 
+mod tests {
     use super::super::Shooting_simple::BoundaryConditionType;
     use super::super::Shooting_sym_wrap::BVPShooting;
     use crate::symbolic::symbolic_engine::Expr;
 
     use crate::numerical::Radau::Radau_main::RadauOrder;
     use approx::assert_abs_diff_eq;
-       use approx::assert_relative_eq;
+    use approx::assert_relative_eq;
     use simplelog::*;
     use std::collections::HashMap;
     fn init_logger() {
@@ -32,7 +32,7 @@ mod tests {
         assert!(matches!(left_bc.bc_type, BoundaryConditionType::Dirichlet));
         assert!(matches!(right_bc.bc_type, BoundaryConditionType::Dirichlet));
     }
-   
+
     #[test]
     fn test_bc_create_dirichlet_neumann() {
         init_logger();
@@ -81,7 +81,7 @@ mod tests {
             assert_abs_diff_eq!(y1[i], 1.0, epsilon = 1e-5);
         }
     }
-    #[test] 
+    #[test]
     fn test_simple_linear_bvp2() {
         init_logger();
 
@@ -225,7 +225,7 @@ mod tests {
         assert_abs_diff_eq!(boundpoint[0], 1.0, epsilon = 1e-2);
     }
     #[test]
-    fn test_linear_with_bdf2() { 
+    fn test_linear_with_bdf2() {
         use crate::numerical::ODE_api2::{SolverParam, SolverType};
         init_logger();
 
@@ -265,7 +265,7 @@ mod tests {
     }
     #[test]
     fn test_solve_exp_with_bdf() {
-        use crate::numerical::ODE_api2::{SolverParam, SolverType}; 
+        use crate::numerical::ODE_api2::{SolverParam, SolverType};
         init_logger();
 
         // y'' - y = 0,
@@ -391,7 +391,7 @@ mod tests {
         let y_mesh = bvp.get_y();
         let y0: DVector<f64> = y_mesh.row(0).transpose().into_owned();
         let y1: DVector<f64> = y_mesh.row(1).transpose().into_owned();
-      
+
         for i in 0..x_mesh.len() {
             let exect = (x_mesh[i].exp() - (-x_mesh[i]).exp()) / 2.0;
             assert_abs_diff_eq!(y0[i], exect, epsilon = 1e-4);
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_solve_with_rk45() {
-        use crate::numerical::ODE_api2:: SolverType;
+        use crate::numerical::ODE_api2::SolverType;
         init_logger();
 
         // y'' + y = 0, y(0) = 1, y(π/2) = 0 (solution: y = cos(x))
@@ -434,12 +434,12 @@ mod tests {
             params,
         );
         let sol = bvp.get_solution();
-         let y = sol.y;
-         let y0= y.row(0).into_owned();
-         let y1 = y.row(1).transpose().into_owned();
-         let x_mesh = bvp.get_x();
-         //println!("y0 = {:?}", y0);
-                 for i in 0..y0.len() {
+        let y = sol.y;
+        let y0 = y.row(0).into_owned();
+        let y1 = y.row(1).transpose().into_owned();
+        let x_mesh = bvp.get_x();
+        //println!("y0 = {:?}", y0);
+        for i in 0..y0.len() {
             let y = y0[i];
             let x = x_mesh[i];
             let expected = x.cos();
@@ -447,9 +447,9 @@ mod tests {
             assert_relative_eq!(y, expected, epsilon = 1e-2);
             assert_relative_eq!(y1[i], expected1, epsilon = 1e-2);
         }
-       // let boundpoint = sol.bound_values;
+        // let boundpoint = sol.bound_values;
 
-      //  assert_abs_diff_eq!(boundpoint[0], 0.0, epsilon = 1e-5);
-      // assert_abs_diff_eq!(boundpoint[1], -1.0, epsilon = 1e-5);
+        //  assert_abs_diff_eq!(boundpoint[0], 0.0, epsilon = 1e-5);
+        // assert_abs_diff_eq!(boundpoint[1], -1.0, epsilon = 1e-5);
     }
 }

@@ -77,7 +77,7 @@ mod tests {
         );
         let mut Bounds = HashMap::new();
         Bounds.insert("y".to_string(), vec![(0, 1e-10)]);
-        bvp_solver.set_additional_parameters(Some(true), Some(Bounds));
+        bvp_solver.set_additional_parameters(Some(true), Some(Bounds), None);
         let (jacobian, residual_function, bc_func) = bvp_solver.eq_generate();
         ////////////////////////////////////////////////////////////////////////////////////////////////
         let a = 4.0;
@@ -185,7 +185,7 @@ mod tests {
         );
         let mut Bounds = HashMap::new();
         Bounds.insert("y".to_string(), vec![(0, 1e-10)]);
-        bvp_solver.set_additional_parameters(Some(true), Some(Bounds));
+        bvp_solver.set_additional_parameters(Some(true), Some(Bounds), None);
         bvp_solver.solve();
         //////////////////////////compare residual function derived from symbolic and directly defined/////////////////////
         let func_from_sym = &bvp_solver.residual_function;
@@ -272,7 +272,7 @@ mod tests {
         );
         let mut Bounds = HashMap::new();
         Bounds.insert("y".to_string(), vec![(0, 1e-10)]);
-        bvp_solver.set_additional_parameters(Some(true), Some(Bounds));
+        bvp_solver.set_additional_parameters(Some(true), Some(Bounds), None);
         bvp_solver.solve();
 
         let x_mesh_final = bvp_solver.x_mesh.clone();
@@ -671,7 +671,7 @@ mod tests {
             2000,
             initial_guess,
         );
-        bvp_solver.set_additional_parameters(Some(true), None);
+        bvp_solver.set_additional_parameters(Some(true), None, None);
 
         let _ = bvp_solver.eq_generate();
 
@@ -758,7 +758,7 @@ mod tests {
             initial_guess,
         );
 
-        bvp_solver.set_additional_parameters(Some(true), None);
+        bvp_solver.set_additional_parameters(Some(true), None, None);
 
         bvp_solver.solve();
         //  bvp_solver.plot_result();

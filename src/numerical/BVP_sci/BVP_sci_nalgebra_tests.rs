@@ -881,6 +881,7 @@ mod tests {
     }
 
     // #[test]
+    #[allow(dead_code)]
     fn test_bvp_with_parameters() {
         // Test BVP with unknown parameter: y'' = λy, y(0) = 1, y(1) = e^λ
         // Solution: y = e^(√λ x) with λ = 1 giving y = e^x

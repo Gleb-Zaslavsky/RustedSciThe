@@ -437,13 +437,13 @@ pub mod Nonlinear_systems;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
-/// better universal api for all IVP solvers on board 
+/// better universal api for all IVP solvers on board
 /// use universal syntax with "new" function and choise of solvers with enum "SolverType"
 /// ```
 ///  use RustedSciThe::numerical::ODE_api2::{UniversalODESolver, SolverType};
 ///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
 /// use RustedSciThe::symbolic::symbolic_engine::Expr;
-/// 
+///
 /// use nalgebra::DVector;
 ///         let eq1 = Expr::parse_expression("-y");
 ///        let eq_system = vec![eq1];
@@ -470,7 +470,7 @@ pub mod ODE_api;
 ///        let (t_result, y_result) = solver.get_result();
 ///  ```
 ///  or use shortcuts for every solver
-/// ``` 
+/// ```
 ///  use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 ///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
 /// use RustedSciThe::symbolic::symbolic_engine::Expr;
