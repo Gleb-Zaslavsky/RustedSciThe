@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
@@ -25,8 +25,8 @@ pub fn bvp_examples(example: usize) {
             let scheme = "forward".to_string();
             let h = 1e-4;
             let BorderConditions = HashMap::from([
-                ("z".to_string(), (0, 1000.0)),
-                ("y".to_string(), (1, 333.0)),
+                ("z".to_string(), vec![(0, 1000.0)]),
+                ("y".to_string(), vec![(1, 333.0)]),
             ]);
 
             let Y = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
@@ -164,8 +164,8 @@ pub fn bvp_examples(example: usize) {
                 DVector::from_vec(ones).as_slice(),
             );
             let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
             assert_eq!(&eq_system.len(), &2);
             let mut nr = NRBVP::new(
                 eq_system,
@@ -247,8 +247,8 @@ pub fn bvp_examples(example: usize) {
                 DVector::from_vec(ones).as_slice(),
             );
             let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
             assert_eq!(&eq_system.len(), &2);
             let mut nr = NRBVP::new(
                 eq_system,
@@ -288,12 +288,7 @@ pub fn bvp_examples(example: usize) {
             let n_steps = 1600; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let scheme = "forward".to_string();
             let strategy = "Damped".to_string(); //
-            let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
-                ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
-            ]));
+            let strategy_params = Some(SolverParams::default());
 
             let method = "Sparse".to_string(); // or  "Dense"
             let linear_sys_method = None;
@@ -304,8 +299,8 @@ pub fn bvp_examples(example: usize) {
                 DVector::from_vec(ones).as_slice(),
             );
             let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
             let Bounds = HashMap::from([
                 ("z".to_string(), (-10.0, 10.0)),
                 ("y".to_string(), (-7.0, 7.0)),
@@ -388,12 +383,7 @@ pub fn bvp_examples(example: usize) {
             let t_end = ne.span(None, None).1;
             let n_steps = 50; //
             let strategy = "Damped".to_string(); //
-            let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
-                ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
-            ]));
+
             let scheme = "forward".to_string();
             let method = "Sparse".to_string(); // or  "Dense"
             let linear_sys_method = None;
@@ -406,6 +396,7 @@ pub fn bvp_examples(example: usize) {
             let BorderConditions = ne.boundary_conditions();
             let Bounds = ne.Bounds();
             let rel_tolerance = ne.rel_tolerance();
+            let strategy_params = Some(SolverParams::default());
 
             let mut nr = NRBDVPd::new(
                 eq_system,
@@ -513,14 +504,15 @@ pub fn bvp_examples(example: usize) {
                 DVector::from_vec(ones).as_slice(),
             );
             let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
             let Bounds = HashMap::from([
                 ("z".to_string(), (-10.0, 10.0)),
                 ("y".to_string(), (-7.0, 7.0)),
             ]);
             let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
             assert_eq!(&eq_system.len(), &2);
+            // let strategy_params = Some(SolverParams::default());
             let mut nr = BVP::new(
                 eq_system,
                 initial_guess,
@@ -599,12 +591,7 @@ pub fn bvp_examples(example: usize) {
             let t_end = ne.span(None, None).1;
             let n_steps = 50; //
             let strategy = "Damped".to_string(); //
-            let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
-                ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
-            ]));
+
             let scheme = "forward".to_string();
             let method = "Sparse".to_string(); // or  "Dense"
             let linear_sys_method = None;
@@ -617,6 +604,12 @@ pub fn bvp_examples(example: usize) {
             let BorderConditions = ne.boundary_conditions();
             let Bounds = ne.Bounds();
             let rel_tolerance = ne.rel_tolerance();
+            let strategy_params = Some(HashMap::from([
+                ("max_jac".to_string(), None),
+                ("maxDampIter".to_string(), None),
+                ("DampFacor".to_string(), None),
+                ("adaptive".to_string(), None),
+            ]));
 
             let mut nr = BVP::new(
                 eq_system,
@@ -688,14 +681,20 @@ pub fn bvp_examples(example: usize) {
                 DVector::from_vec(ones).as_slice(),
             );
             let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-            BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
             let Bounds = HashMap::from([
                 ("z".to_string(), (-10.0, 10.0)),
                 ("y".to_string(), (-7.0, 7.0)),
             ]);
             let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
             assert_eq!(&eq_system.len(), &2);
+            let strategy_params = Some(HashMap::from([
+                ("max_jac".to_string(), None),
+                ("maxDampIter".to_string(), None),
+                ("DampFacor".to_string(), None),
+                ("adaptive".to_string(), None),
+            ]));
             let mut nr = BVP::new(
                 eq_system,
                 initial_guess,

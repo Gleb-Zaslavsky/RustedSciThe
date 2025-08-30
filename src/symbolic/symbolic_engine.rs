@@ -1,3 +1,60 @@
+//! # Symbolic Engine Module
+//!
+//! This module provides a comprehensive symbolic mathematics engine for creating, manipulating,
+//! and evaluating symbolic expressions. It serves as the core foundation for symbolic computation
+//! in the RustedSciThe framework, enabling analytical differentiation, expression simplification,
+//! and conversion to executable functions.
+//!
+//! ## Purpose
+//!
+//! The symbolic engine allows users to:
+//! - Parse and create symbolic mathematical expressions
+//! - Perform analytical differentiation and integration
+//! - Simplify complex expressions algebraically
+//! - Convert symbolic expressions to executable Rust functions (lambdification)
+//! - Handle indexed variables for matrix/vector operations
+//! - Support trigonometric, exponential, and logarithmic functions
+//!
+//! ## Main Structures and Methods
+//!
+//! ### `Expr` Enum
+//! The core symbolic expression type supporting:
+//! - **Variables**: `Var(String)` - symbolic variables like "x", "y"
+//! - **Constants**: `Const(f64)` - numerical constants
+//! - **Operations**: `Add`, `Sub`, `Mul`, `Div`, `Pow` - basic arithmetic
+//! - **Functions**: `Exp`, `Ln`, `sin`, `cos`, etc. - mathematical functions
+//!
+//! ### Key Methods
+//! - `Symbols(symbols: &str)` - Create multiple variables from comma-separated string
+//! - `IndexedVar(index: usize, var_name: &str)` - Create indexed variables (x0, x1, etc.)
+//! - `diff(var: &str)` - Analytical differentiation
+//! - `lambdify()` - Convert to executable function
+//! - `simplify_()` - Algebraic simplification
+//! - `set_variable()` - Substitute variables with values
+//!
+//! ## Interesting Code Features
+//!
+//! 1. **Recursive Expression Tree**: Uses Box<Expr> for nested expressions, enabling
+//!    arbitrarily complex mathematical structures
+//!
+//! 2. **Operator Overloading**: Implements std::ops traits (Add, Sub, Mul, Div) for
+//!    natural mathematical syntax: `x + y * z`
+//!
+//! 3. **Pattern Matching Differentiation**: Uses exhaustive match statements to implement
+//!    analytical differentiation rules (product rule, chain rule, etc.)
+//!
+//! 4. **Smart Simplification**: The `simplify_()` method applies algebraic rules like
+//!    `x + 0 = x`, `x * 1 = x`, `0 * x = 0` recursively
+//!
+//! 5. **Indexed Variable System**: Supports both 1D (x0, x1) and 2D (A_2_3) indexing
+//!    for matrix operations and large systems
+//!
+//! 6. **Macro System**: Provides convenient macros like `symbols!(x, y, z)` for
+//!    ergonomic variable creation
+//!
+//! 7. **Non-standard Function Names**: Uses mathematical notation (tg, ctg) instead
+//!    of programming conventions (tan, cot) for trigonometric functions
+
 #![allow(non_camel_case_types)]
 
 use std::collections::HashMap;
@@ -6,31 +63,60 @@ use std::f64;
 use std::f64::consts::PI;
 use std::fmt;
 
-// Define an enum to represent different types of symbolic expressions
-
+/// Core symbolic expression enum representing mathematical expressions as an abstract syntax tree.
+///
+/// Each variant represents a different type of mathematical construct, from simple variables
+/// and constants to complex nested operations. The enum uses Box<Expr> for recursive structures,
+/// allowing arbitrarily deep expression trees.
+///
+/// # Examples
+/// ```rust, ignore
+/// use symbolic_engine::Expr;
+/// let x = Expr::Var("x".to_string());
+/// let expr = Expr::Add(Box::new(x), Box::new(Expr::Const(2.0)));
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
+    /// Symbolic variable with a name (e.g., "x", "y", "velocity")
     Var(String),
+    /// Numerical constant value
     Const(f64),
+    /// Addition operation: left + right
     Add(Box<Expr>, Box<Expr>),
+    /// Subtraction operation: left - right
     Sub(Box<Expr>, Box<Expr>),
+    /// Multiplication operation: left * right
     Mul(Box<Expr>, Box<Expr>),
+    /// Division operation: left / right
     Div(Box<Expr>, Box<Expr>),
+    /// Power operation: base ^ exponent
     Pow(Box<Expr>, Box<Expr>),
+    /// Exponential function: e^x
     Exp(Box<Expr>),
+    /// Natural logarithm: ln(x)
     Ln(Box<Expr>),
+    /// Sine function: sin(x)
     sin(Box<Expr>),
+    /// Cosine function: cos(x)
     cos(Box<Expr>),
+    /// Tangent function: tan(x) - uses mathematical notation 'tg'
     tg(Box<Expr>),
+    /// Cotangent function: cot(x) - uses mathematical notation 'ctg'
     ctg(Box<Expr>),
+    /// Arcsine function: arcsin(x)
     arcsin(Box<Expr>),
+    /// Arccosine function: arccos(x)
     arccos(Box<Expr>),
+    /// Arctangent function: arctan(x) - uses mathematical notation 'arctg'
     arctg(Box<Expr>),
+    /// Arccotangent function: arccot(x) - uses mathematical notation 'arcctg'
     arcctg(Box<Expr>),
 }
 
-// Implement Display for pretty printing
-
+/// Display implementation for pretty printing symbolic expressions.
+///
+/// Converts expressions to human-readable mathematical notation with parentheses
+/// for proper precedence. Uses standard mathematical symbols and function names.
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -148,7 +234,22 @@ impl f64::ops::ln for Expr {
 impl Expr {
     /// BASIC FEATURES
 
-    /// create new variables from string
+    /// Creates multiple symbolic variables from a comma-separated string.
+    ///
+    /// Parses a string containing variable names separated by commas and returns
+    /// a vector of Expr::Var instances. Whitespace is automatically trimmed.
+    ///
+    /// # Arguments
+    /// * `symbols` - Comma-separated string of variable names (e.g., "x, y, z")
+    ///
+    /// # Returns
+    /// Vector of Expr::Var instances for each variable name
+    ///
+    /// # Examples
+    /// ```rust, ignore
+    /// let vars = Expr::Symbols("x, y, z");
+    /// assert_eq!(vars.len(), 3);
+    /// ```
     pub fn Symbols(symbols: &str) -> Vec<Expr> {
         let symbols = symbols.to_string();
         let vec_trimmed: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
@@ -159,7 +260,17 @@ impl Expr {
             .collect();
         vector_of_symbolic_vars
     }
-    /// change a variable to a constant  
+    /// Substitutes a variable with a constant value throughout the expression.
+    ///
+    /// Recursively traverses the expression tree and replaces all occurrences
+    /// of the specified variable with the given constant value.
+    ///
+    /// # Arguments
+    /// * `var` - Name of the variable to substitute
+    /// * `value` - Numerical value to substitute for the variable
+    ///
+    /// # Returns
+    /// New expression with the variable substituted
     pub fn set_variable(&self, var: &str, value: f64) -> Expr {
         match self {
             Expr::Var(name) if name == var => Expr::Const(value),
@@ -197,7 +308,16 @@ impl Expr {
         }
     }
 
-    /// change a variables to a constant from a map
+    /// Substitutes multiple variables with constant values using a HashMap.
+    ///
+    /// More efficient than multiple set_variable calls when substituting many variables.
+    /// Only variables present in the map are substituted.
+    ///
+    /// # Arguments
+    /// * `var_map` - HashMap mapping variable names to their replacement values
+    ///
+    /// # Returns
+    /// New expression with all mapped variables substituted
     pub fn set_variable_from_map(&self, var_map: &HashMap<String, f64>) -> Expr {
         match self {
             Expr::Var(name) if var_map.contains_key(name) => Expr::Const(var_map[name]),
@@ -235,7 +355,17 @@ impl Expr {
             _ => self.clone(),
         }
     }
-    /// rename variable
+    /// Renames a variable throughout the expression.
+    ///
+    /// Recursively replaces all occurrences of old_var with new_var.
+    /// Useful for variable substitution and expression manipulation.
+    ///
+    /// # Arguments
+    /// * `old_var` - Current variable name to replace
+    /// * `new_var` - New variable name
+    ///
+    /// # Returns
+    /// New expression with the variable renamed
     pub fn rename_variable(&self, old_var: &str, new_var: &str) -> Expr {
         match self {
             Expr::Var(name) if name == old_var => Expr::Var(new_var.to_string()),
@@ -379,37 +509,74 @@ impl Expr {
         }
     }
 
-    // just shortcut for box
+    /// Convenience method to wrap expression in Box for recursive structures.
+    ///
+    /// Essential for creating nested expressions since Expr variants use Box<Expr>.
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
 
+    /// Mutates current expression to a variable and returns the new variable expression.
+    ///
+    /// # Arguments
+    /// * `var` - Variable name to create
     pub fn var_expr(&mut self, var: &str) -> Expr {
         let expr = Expr::Var(var.to_string());
         *self = expr.clone();
         expr
     }
 
+    /// Mutates current expression to a constant value.
+    ///
+    /// # Arguments
+    /// * `val` - Constant value to set
     pub fn const_expr(&mut self, val: f64) {
         *self = Expr::Const(val);
     }
-    // implementing different functions that are not part of std
+
+    /// Creates exponential function e^(self).
+    ///
+    /// # Returns
+    /// New Expr::Exp containing this expression
     pub fn exp(mut self) -> Expr {
         self = Expr::Exp(self.boxed());
         self
     }
+
+    /// Creates natural logarithm ln(self).
+    ///
+    /// # Returns
+    /// New Expr::Ln containing this expression
     pub fn ln(mut self) -> Expr {
         self = Expr::Ln(self.boxed());
         self
     }
+
+    /// Creates base-10 logarithm using ln(x)/ln(10) identity.
+    ///
+    /// # Returns
+    /// Expression equivalent to log10(self)
     pub fn log10(mut self) -> Expr {
         self = Expr::Ln(self.boxed()) / Expr::Const(2.30258509);
         self
     }
+
+    /// Creates power expression self^rhs.
+    ///
+    /// # Arguments
+    /// * `rhs` - Exponent expression
+    ///
+    /// # Returns
+    /// New Expr::Pow with self as base and rhs as exponent
     pub fn pow(mut self, rhs: Expr) -> Expr {
         self = Expr::Pow(self.boxed(), rhs.boxed());
         self
     }
+
+    /// Checks if expression is exactly zero (constant 0.0).
+    ///
+    /// # Returns
+    /// true if expression is Const(0.0), false otherwise
     pub fn is_zero(&self) -> bool {
         match self {
             Expr::Const(val) => val == &0.0,
@@ -417,12 +584,34 @@ impl Expr {
         }
     }
 
-    ///__________________________________INDEXED VARIABLES____________________________________
+    //__________________________________INDEXED VARIABLES____________________________________
+
+    /// Creates a single indexed variable with format "name + index" (e.g., "x5").
+    ///
+    /// Useful for creating sequences of related variables in mathematical systems.
+    ///
+    /// # Arguments
+    /// * `index` - Numerical index to append
+    /// * `var_name` - Base variable name
+    ///
+    /// # Returns
+    /// Expr::Var with indexed name
     pub fn IndexedVar(index: usize, var_name: &str) -> Expr {
         let indexed_var_name = format!("{}{}", var_name, index);
         Expr::Var(indexed_var_name)
     }
 
+    /// Creates multiple indexed variables and their string representations.
+    ///
+    /// Generates a sequence of variables like x0, x1, x2, ... up to num_vars-1.
+    /// Returns both the Expr objects and their string names for convenience.
+    ///
+    /// # Arguments
+    /// * `num_vars` - Number of variables to create
+    /// * `var_name` - Base name for variables
+    ///
+    /// # Returns
+    /// Tuple of (Vec<Expr>, Vec<String>) containing expressions and names
     pub fn IndexedVars(num_vars: usize, var_name: &str) -> (Vec<Expr>, Vec<String>) {
         let vec_of_expr = (0..num_vars)
             .map(|i| Expr::IndexedVar(i, var_name))
@@ -451,12 +640,34 @@ impl Expr {
         }
         (matrix_of_expr, matrix)
     }
-    // 2D indexation"x2_315", "Z21_235"
+    /// Creates a 2D indexed variable with format "name_row_col" (e.g., "A_2_3").
+    ///
+    /// Essential for matrix operations and 2D grid systems in numerical methods.
+    ///
+    /// # Arguments
+    /// * `index_row` - Row index
+    /// * `index_col` - Column index  
+    /// * `var_name` - Base variable name
+    ///
+    /// # Returns
+    /// Expr::Var with 2D indexed name
     pub fn IndexedVar2D(index_row: usize, index_col: usize, var_name: &str) -> Expr {
         let indexed_var_name = format!("{}_{}_{}", var_name, index_row, index_col);
         Expr::Var(indexed_var_name)
     }
 
+    /// Creates a 2D matrix of indexed variables.
+    ///
+    /// Generates variables in matrix form like A_0_0, A_0_1, A_1_0, A_1_1, etc.
+    /// Returns both the 2D structure and flattened name list.
+    ///
+    /// # Arguments
+    /// * `num_rows` - Number of rows in matrix
+    /// * `num_cols` - Number of columns in matrix
+    /// * `var_name` - Base name for matrix elements
+    ///
+    /// # Returns
+    /// Tuple of (Vec<Vec<Expr>>, Vec<String>) - matrix structure and flat name list
     pub fn IndexedVars2D(
         num_rows: usize,
         num_cols: usize,
@@ -482,12 +693,35 @@ impl Expr {
         }
         (matrix, vec_of_names)
     }
+
+    /// Creates a flattened vector of 2D indexed variables.
+    ///
+    /// More memory-efficient than IndexedVars2D when matrix structure isn't needed.
+    ///
+    /// # Arguments
+    /// * `num_rows` - Number of rows
+    /// * `num_cols` - Number of columns
+    /// * `var_name` - Base variable name
+    ///
+    /// # Returns
+    /// Flat Vec<Expr> of all matrix elements
     pub fn IndexedVars2Dflat(num_rows: usize, num_cols: usize, var_name: &str) -> Vec<Expr> {
         (0..num_rows)
             .flat_map(|i| (0..num_cols).map(move |j| Expr::IndexedVar2D(i, j, var_name)))
             .collect()
     }
-    /// creates symbolic polinom
+
+    /// Creates a symbolic polynomial of specified degree.
+    ///
+    /// Generates polynomial c0 + c1*x + c2*x^2 + ... + cn*x^n with symbolic coefficients.
+    /// Useful for curve fitting and polynomial approximation.
+    ///
+    /// # Arguments
+    /// * `degree` - Highest power in polynomial
+    /// * `var_name` - Variable name for polynomial argument
+    ///
+    /// # Returns
+    /// Tuple of (polynomial expression, coefficient names)
     pub fn polyval(degree: usize, var_name: &str) -> (Expr, Vec<String>) {
         let mut eq: Expr = Self::Const(0.0);
         let mut unknowns = Vec::new();
@@ -500,9 +734,13 @@ impl Expr {
         (eq, unknowns)
     }
 
-    //___________________________________SYMPLIFICATE____________________________________
-    //  function to symplify the symbolic expression in sych way: if in expression there is a
-    // subexpression Mul(Expr::Const(0.0), ...something ) the function turns all subexpression into Expr::Const(0.0)
+    //___________________________________SIMPLIFICATION____________________________________
+
+    /// Internal method to eliminate zero-multiplication subexpressions.
+    ///
+    /// Recursively identifies patterns like Mul(Const(0.0), anything) and replaces
+    /// the entire subexpression with Const(0.0). This is a specialized optimization
+    /// for expressions with many zero terms.
     #[allow(dead_code)]
     fn nozeros(&self) -> Expr {
         match self {
@@ -559,6 +797,13 @@ impl Expr {
         }
     } // nozeros
 
+    /// Simplifies expressions by evaluating constant arithmetic operations.
+    ///
+    /// Combines numerical constants where possible (e.g., Const(2) + Const(3) = Const(5))
+    /// but leaves variable operations unchanged. Less comprehensive than simplify_().
+    ///
+    /// # Returns
+    /// Simplified expression with constant operations evaluated
     pub fn simplify_numbers(&self) -> Expr {
         match self {
             Expr::Var(_) => self.clone(),
@@ -611,6 +856,20 @@ impl Expr {
             Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.simplify_numbers())),
         }
     }
+    /// Comprehensive algebraic simplification using mathematical identities.
+    ///
+    /// Applies rules like:
+    /// - x + 0 = x, x - 0 = x
+    /// - x * 1 = x, x * 0 = 0
+    /// - x^0 = 1, x^1 = x
+    /// - exp(0) = 1, ln(1) = 0
+    /// - Constant arithmetic evaluation
+    /// - Constant folding in mixed expressions
+    ///
+    /// More powerful than simplify_numbers() as it handles algebraic identities.
+    ///
+    /// # Returns
+    /// Maximally simplified expression
     pub fn simplify_(&self) -> Expr {
         match self {
             Expr::Var(_) => self.clone(),
@@ -620,8 +879,8 @@ impl Expr {
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
                     (Expr::Const(a), Expr::Const(b)) => Expr::Const(a + b), // (a) + (b) = (a + b)
-                    (Expr::Const(0.0), _) => rhs,                           // x + 0 = x
-                    (_, Expr::Const(0.0)) => lhs,                           //  0 + x = x
+                    (Expr::Const(0.0), _) => rhs,                           // 0 + x = x
+                    (_, Expr::Const(0.0)) => lhs,                           // x + 0 = x
                     _ => Expr::Add(Box::new(lhs), Box::new(rhs)),
                 }
             }
@@ -639,9 +898,36 @@ impl Expr {
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
                     (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b), // (a) * (b) = (a * b)
-                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0), // 0 * x = 0 or 0*x = 0
-                    (Expr::Const(1.0), _) => rhs,                                      // 1 * x = x
-                    (_, Expr::Const(1.0)) => lhs,                                      // x * 1 = x
+                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0), // 0 * x = 0
+                    (Expr::Const(1.0), _) => rhs,                           // 1 * x = x
+                    (_, Expr::Const(1.0)) => lhs,                           // x * 1 = x
+                    // Handle nested multiplications with constants: (c1 * expr) * c2 = (c1 * c2) * expr
+                    (Expr::Mul(inner_lhs, inner_rhs), Expr::Const(c)) => {
+                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
+                            (Expr::Const(c1), _) => {
+                                Expr::Mul(Box::new(Expr::Const(c1 * c)), inner_rhs.clone())
+                                    .simplify_()
+                            }
+                            (_, Expr::Const(c1)) => {
+                                Expr::Mul(Box::new(Expr::Const(c1 * c)), inner_lhs.clone())
+                                    .simplify_()
+                            }
+                            _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                        }
+                    }
+                    (Expr::Const(c), Expr::Mul(inner_lhs, inner_rhs)) => {
+                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
+                            (Expr::Const(c1), _) => {
+                                Expr::Mul(Box::new(Expr::Const(c * c1)), inner_rhs.clone())
+                                    .simplify_()
+                            }
+                            (_, Expr::Const(c1)) => {
+                                Expr::Mul(Box::new(Expr::Const(c * c1)), inner_lhs.clone())
+                                    .simplify_()
+                            }
+                            _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                        }
+                    }
                     _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
                 }
             }
@@ -650,8 +936,31 @@ impl Expr {
                 let rhs = rhs.simplify_();
                 match (&lhs, &rhs) {
                     (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b), // (a) / (b) = (a / b)
-                    (Expr::Const(0.0), _) => Expr::Const(0.0), // (0.0) / x = 0.0
-                    (_, Expr::Const(1.0)) => lhs,              // x / 1.0 = x
+                    (Expr::Const(0.0), _) => Expr::Const(0.0), // 0 / x = 0
+                    (_, Expr::Const(1.0)) => lhs,              // x / 1 = x
+                    // Handle division of multiplication by constant: (c1 * expr) / c2 = (c1/c2) * expr
+                    (Expr::Mul(inner_lhs, inner_rhs), Expr::Const(c)) if *c != 0.0 => {
+                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
+                            (Expr::Const(c1), _) => {
+                                Expr::Mul(Box::new(Expr::Const(c1 / c)), inner_rhs.clone())
+                                    .simplify_()
+                            }
+                            (_, Expr::Const(c1)) => {
+                                Expr::Mul(Box::new(Expr::Const(c1 / c)), inner_lhs.clone())
+                                    .simplify_()
+                            }
+                            _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
+                        }
+                    }
+                    // Handle division by multiplication: expr / (c1 * c2) = expr / (c1*c2)
+                    (_, Expr::Mul(inner_lhs, inner_rhs)) => {
+                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
+                            (Expr::Const(c1), Expr::Const(c2)) => {
+                                Expr::Div(Box::new(lhs), Box::new(Expr::Const(c1 * c2))).simplify_()
+                            }
+                            _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
+                        }
+                    }
                     _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
                 }
             }
@@ -745,11 +1054,75 @@ impl Expr {
             } //arctg
         }
     }
+    /// Public interface for expression simplification.
+    ///
+    /// Currently delegates to simplify_() but provides a stable API for future
+    /// enhancements. This is the recommended method for users to simplify expressions.
+    ///
+    /// # Returns
+    /// Simplified expression using all available simplification rules
     pub fn symplify(&self) -> Expr {
         //let zeros_proceeded = self.nozeros().simplify_numbers();
         let zeros_proceeded = self.simplify_();
         zeros_proceeded
     }
+}
+
+//___________________________________MACROS____________________________________
+
+/// Macro to create symbolic variables from a comma-separated list
+/// Usage: symbols!(x, y, z) -> creates variables x, y, z
+#[macro_export]
+macro_rules! symbols {
+    ($($var:ident),+ $(,)?) => {
+        {
+            let var_names = stringify!($($var),+);
+            let vars = Expr::Symbols(var_names);
+            let mut iter = vars.into_iter();
+            ($(
+                {
+                    let $var = iter.next().unwrap();
+                    $var
+                }
+            ),+)
+        }
+    };
+}
+
+/// Macro to create indexed variables
+/// Usage: indexed_vars!(5, "x") -> creates x0, x1, x2, x3, x4
+#[macro_export]
+macro_rules! indexed_vars {
+    ($count:expr, $name:expr) => {
+        Expr::IndexedVars($count, $name)
+    };
+}
+
+/// Macro to create 2D indexed variables
+/// Usage: indexed_vars_2d!(3, 3, "A") -> creates A_0_0, A_0_1, etc.
+#[macro_export]
+macro_rules! indexed_vars_2d {
+    ($rows:expr, $cols:expr, $name:expr) => {
+        Expr::IndexedVars2D($rows, $cols, $name)
+    };
+}
+
+/// Macro to create a single indexed variable
+/// Usage: indexed_var!(5, "x") -> creates x5
+#[macro_export]
+macro_rules! indexed_var {
+    ($index:expr, $name:expr) => {
+        Expr::IndexedVar($index, $name)
+    };
+}
+
+/// Macro to create a 2D indexed variable
+/// Usage: indexed_var_2d!(2, 3, "A") -> creates A_2_3
+#[macro_export]
+macro_rules! indexed_var_2d {
+    ($row:expr, $col:expr, $name:expr) => {
+        Expr::IndexedVar2D($row, $col, $name)
+    };
 }
 
 //___________________________________TESTS____________________________________
@@ -1047,6 +1420,45 @@ mod tests {
         let expected_result = Expr::Const(0.0);
         assert_eq!(simplified_expr, expected_result);
     }
+
+    #[test]
+    fn symplify_test4() {
+        let zero = Expr::Const(0.0);
+        let one = Expr::Const(1.0);
+        let exp = Expr::Exp(Box::new(zero.clone()));
+        let expr1 = one - exp;
+        let expr2 = zero.clone() + (expr1 + zero);
+        let simplified_expr = expr2.symplify();
+        let expected_result = Expr::Const(0.0);
+        assert_eq!(simplified_expr, expected_result);
+    }
+    #[test]
+    fn symplify_test5() {
+        let n6 = Expr::Const(6.0);
+        let n3 = Expr::Const(3.0);
+        let n2 = Expr::Const(2.0);
+        let n9 = Expr::Const(9.0);
+        let n1 = Expr::Const(1.0);
+        let expr2 = n6 * n3 / (n2 * n9) - n1;
+        let simplified_expr = expr2.symplify();
+        let expected_result = Expr::Const(0.0);
+        assert_eq!(simplified_expr, expected_result);
+    }
+    #[test]
+    fn symplify_test6() {
+        let n6 = Expr::Const(6.0);
+        let n3 = Expr::Const(3.0);
+        let n2 = Expr::Const(2.0);
+        let n9 = Expr::Const(9.0);
+        let n1 = Expr::Const(1.0);
+        let x = Expr::Var("x".to_owned());
+        let expr2 = x.clone() * n6 * n3 / (n2 * n9) - n1.clone();
+        let simplified_expr = expr2.symplify();
+        println!("{}", simplified_expr);
+        let expected_result = x - n1;
+
+        assert_eq!(simplified_expr, expected_result);
+    }
     #[test]
     fn test_eval_expression_var() {
         let expr = Expr::Var("x".to_string());
@@ -1201,5 +1613,35 @@ mod tests {
         let y = Expr::Var("y".to_string());
         let expected = y.clone() + y.clone().pow(Expr::Const(2.0));
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_symbols_macro() {
+        let (x, y, z) = symbols!(x, y, z);
+        assert_eq!(x, Expr::Var("x".to_string()));
+        assert_eq!(y, Expr::Var("y".to_string()));
+        assert_eq!(z, Expr::Var("z".to_string()));
+    }
+
+    #[test]
+    fn test_indexed_vars_macro() {
+        let (vars, names) = indexed_vars!(3, "x");
+        assert_eq!(vars.len(), 3);
+        assert_eq!(names.len(), 3);
+        assert_eq!(vars[0], Expr::Var("x0".to_string()));
+        assert_eq!(vars[1], Expr::Var("x1".to_string()));
+        assert_eq!(vars[2], Expr::Var("x2".to_string()));
+    }
+
+    #[test]
+    fn test_indexed_var_macro() {
+        let var = indexed_var!(5, "x");
+        assert_eq!(var, Expr::Var("x5".to_string()));
+    }
+
+    #[test]
+    fn test_indexed_var_2d_macro() {
+        let var = indexed_var_2d!(2, 3, "A");
+        assert_eq!(var, Expr::Var("A_2_3".to_string()));
     }
 }

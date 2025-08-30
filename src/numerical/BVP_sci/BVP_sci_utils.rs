@@ -1,20 +1,19 @@
+use crate::numerical::BVP_sci::BVP_sci_faer::faer_mat;
 use faer::sparse::SparseColMat;
 use log::{info, warn};
 use sysinfo::System;
-use crate::numerical::BVP_sci::BVP_sci_faer::faer_mat;
 
-pub fn size_of_jacobian(jac: Vec<faer_mat>) -> (f64, f64){
+pub fn size_of_jacobian(jac: Vec<faer_mat>) -> (f64, f64) {
     let mut size_of_jac = 0.0;
     let mut average_sparticity = 0.0;
     let n = jac.len();
-    for  single_matrix in jac.iter() {
+    for single_matrix in jac.iter() {
         let (single_matrix_mem, spartisity) = size_of_single_matrix(single_matrix);
-        size_of_jac+= single_matrix_mem;
-        average_sparticity+=spartisity;
-
-    };
+        size_of_jac += single_matrix_mem;
+        average_sparticity += spartisity;
+    }
     final_jacobian_diagnostics(size_of_jac);
-    let average_sparticity = average_sparticity/(n as f64);
+    let average_sparticity = average_sparticity / (n as f64);
     info!("Jacobian sparsity: {:.2}%", average_sparticity * 100.0);
     (size_of_jac, average_sparticity)
 }
@@ -67,7 +66,7 @@ pub fn final_jacobian_diagnostics(matrix_memory: f64) {
     }
     // RAM and swap information:
     info!("total memory: {} bytes", total_memory);
-      info!("used memory : {} bytes", used_memory);
-     info!("total swap  : {} bytes", total_swap);
-     info!("used swap   : {} bytes", used_swap);
+    info!("used memory : {} bytes", used_memory);
+    info!("total swap  : {} bytes", total_swap);
+    info!("used swap   : {} bytes", used_swap);
 }

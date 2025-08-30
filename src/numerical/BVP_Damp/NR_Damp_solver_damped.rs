@@ -1,10 +1,46 @@
-/*
-Modified Newton method or Damped Newton method for solving a system of nonlinear equations.
-This code implements a modified Newton method for solving a system of non-linear boundary value problems..
-The code mostly inspired by sources listed below:
--  Cantera MultiNewton solver (MultiNewton.cpp )
-- TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
-*/
+//! # Damped Newton-Raphson Solver for Boundary Value Problems
+//!
+//! ## Module Purpose
+//! This module implements a robust damped Newton-Raphson method for solving systems of nonlinear
+//! boundary value problems (BVPs). It's the core solver for stiff ODEs with adaptive grid refinement
+//! capabilities, making it essential for the entire RustedSciThe project.
+//!
+//! ## Key Features
+//! - **Damped Newton Method**: Prevents divergence by controlling step size through damping coefficients
+//! - **Adaptive Grid Refinement**: Automatically refines mesh where solution changes rapidly
+//! - **Jacobian Reuse Strategy**: Optimizes performance by intelligently reusing Jacobian matrices
+//! - **Boundary Constraint Handling**: Ensures solution stays within physical bounds
+//! - **Multiple Matrix Backends**: Supports both dense and sparse matrix operations
+//!
+//! ## Core Structures
+//! - [`NRBVP`]: Main solver struct containing all problem parameters and solution state
+//! - [`SolverParams`]: Configuration for damping parameters and adaptive grid settings
+//! - [`AdaptiveGridConfig`]: Specific settings for grid refinement algorithms
+//!
+//! ## Algorithm Overview
+//! The solver uses a modified Newton method with damping to ensure convergence:
+//! 1. Compute undamped Newton step: `J(x_k) * Δx = -F(x_k)`
+//! 2. Apply boundary constraints to determine maximum step size
+//! 3. Use damping coefficient λ to control step: `x_{k+1} = x_k + λ * Δx`
+//! 4. Accept step if residual decreases, otherwise reduce λ and retry
+//!
+//! ## Interesting Code Features
+//! - **Trait-based abstraction**: Uses `VectorType` and `MatrixType` traits for backend flexibility
+//! - **Macro-based timing**: Custom macros for performance profiling of different operations
+//! - **Adaptive strategy pattern**: Configurable Jacobian recalculation strategies
+//! - **Memory-aware design**: Checks system memory before allocating large matrices
+//! - **Comprehensive logging**: Detailed logging with configurable levels for debugging
+//!
+//! ## Performance Tips
+//! - Use sparse matrices for large problems (>1000 unknowns)
+//! - Enable adaptive grid refinement for problems with boundary layers
+//! - Tune damping parameters based on problem stiffness
+//! - Monitor Jacobian age to balance accuracy vs performance
+//!
+//! ## References
+//! - Cantera MultiNewton solver (MultiNewton.cpp)
+//! - TWOPNT Fortran solver ("The Twopnt Program for Boundary Value Problems" by J. F. Grcar)
+//! - Chemkin Theory Manual p.261
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
@@ -18,8 +54,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{
     CustomTimer, construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
 };
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
-    bound_step, convergence_condition, if_initial_guess_inside_bounds, interchange_columns,
-    jac_recalc,
+    bound_step_Cantera2, convergence_condition, if_initial_guess_inside_bounds, jac_recalc,
 };
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
@@ -31,23 +66,66 @@ use tabled::{builder::Builder, settings::Style};
 
 use crate::numerical::BVP_Damp::grid_api::{GridRefinementMethod, new_grid};
 
+/// Configuration parameters for the damped Newton solver
+///
+/// Controls damping behavior, Jacobian reuse strategy, and adaptive grid refinement
+#[derive(Debug, Clone)]
+pub struct SolverParams {
+    /// Maximum iterations before Jacobian recalculation (default: 3)
+    pub max_jac: Option<usize>,
+    /// Maximum damping iterations per Newton step (default: 5)
+    pub max_damp_iter: Option<usize>,
+    /// Factor for reducing damping coefficient (default: 0.5)
+    pub damp_factor: Option<f64>,
+    /// Adaptive grid refinement configuration
+    pub adaptive: Option<AdaptiveGridConfig>,
+}
+
+/// Configuration for adaptive grid refinement
+///
+/// Defines when and how to refine the computational mesh
+#[derive(Debug, Clone)]
+pub struct AdaptiveGridConfig {
+    /// Refinement criterion version (currently only version 1 supported)
+    pub version: usize,
+    /// Maximum number of grid refinements allowed
+    pub max_refinements: usize,
+    /// Grid refinement algorithm to use
+    pub grid_method: GridRefinementMethod,
+}
+
+impl Default for SolverParams {
+    fn default() -> Self {
+        Self {
+            max_jac: Some(3),
+            max_damp_iter: Some(5),
+            damp_factor: Some(0.5),
+            adaptive: None,
+        }
+    }
+}
+
 use log::{error, info, warn};
 
 use super::BVP_utils::checkmem;
 
+/// Main solver structure for damped Newton-Raphson method
+///
+/// Contains all problem parameters, solution state, and solver configuration.
+/// This is the central structure that orchestrates the entire BVP solving process.
 pub struct NRBVP {
     pub eq_system: Vec<Expr>, // the system of ODEs defined in the symbolic format
     pub initial_guess: DMatrix<f64>, // initial guess s - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
     pub values: Vec<String>,         //unknown variables
     pub arg: String,                 // time or coordinate
-    pub BorderConditions: HashMap<String, (usize, f64)>, // hashmap where keys are variable names and values are tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
-    pub t0: f64,                                         // initial value of argument
-    pub t_end: f64,                                      // end of argument
-    pub n_steps: usize,                                  // number of  steps
-    pub scheme: String,                                  // name of the numerical scheme
-    pub strategy: String,                                // name of the strategy
-    pub strategy_params: Option<HashMap<String, Option<Vec<f64>>>>, // solver parameters
-    pub linear_sys_method: Option<String>,               // method for solving linear system
+    pub BorderConditions: HashMap<String, Vec<(usize, f64)>>, // hashmap where keys are variable names and values are vectors of tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
+    pub t0: f64,                                              // initial value of argument
+    pub t_end: f64,                                           // end of argument
+    pub n_steps: usize,                                       // number of  steps
+    pub scheme: String,                                       // name of the numerical scheme
+    pub strategy: String,                                     // name of the strategy
+    pub strategy_params: Option<SolverParams>,                // solver parameters
+    pub linear_sys_method: Option<String>,                    // method for solving linear system
     pub method: String,     // define crate using for matrices and vectors
     pub abs_tolerance: f64, // relative tolerance
 
@@ -56,6 +134,7 @@ pub struct NRBVP {
     pub max_error: f64,
     pub Bounds: Option<HashMap<String, (f64, f64)>>, // hashmap where keys are variable names and values are tuples with lower and upper bounds.
     pub loglevel: Option<String>,
+    no_reports: bool,
     // thets all user defined  parameters
     //
     pub result: Option<DVector<f64>>, // result vector of calculation
@@ -79,28 +158,49 @@ pub struct NRBVP {
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
     calc_statistics: HashMap<String, usize>,
+    nodes_added: Vec<usize>,
     custom_timer: CustomTimer,
 }
 
 impl NRBVP {
+    /// Creates a new NRBVP solver instance
+    ///
+    /// # Arguments
+    /// * `eq_system` - System of ODEs as symbolic expressions
+    /// * `initial_guess` - Initial solution guess as matrix (variables × grid points)
+    /// * `values` - Names of unknown variables
+    /// * `arg` - Independent variable name (usually time or space)
+    /// * `BorderConditions` - Boundary conditions for each variable
+    /// * `t0` - Initial value of independent variable
+    /// * `t_end` - Final value of independent variable
+    /// * `n_steps` - Number of grid points
+    /// * `scheme` - Discretization scheme ("trapezoid", etc.)
+    /// * `strategy` - Solver strategy ("Damped", "Naive", "Frozen")
+    /// * `strategy_params` - Solver configuration parameters
+    /// * `linear_sys_method` - Linear system solver method
+    /// * `method` - Matrix backend ("Dense" or "Sparse")
+    /// * `abs_tolerance` - Absolute convergence tolerance
+    /// * `rel_tolerance` - Relative tolerance for each variable
+    /// * `max_iterations` - Maximum Newton iterations
+    /// * `Bounds` - Solution bounds for each variable
+    /// * `loglevel` - Logging level ("debug", "info", "warn", "error")
     pub fn new(
-        eq_system: Vec<Expr>,        //
-        initial_guess: DMatrix<f64>, // initial guess
+        eq_system: Vec<Expr>,
+        initial_guess: DMatrix<f64>,
         values: Vec<String>,
         arg: String,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         t0: f64,
         t_end: f64,
         n_steps: usize,
         scheme: String,
         strategy: String,
-        strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
+        strategy_params: Option<SolverParams>,
         linear_sys_method: Option<String>,
         method: String,
-        abs_tolerance: f64, // tolerance
+        abs_tolerance: f64,
         rel_tolerance: Option<HashMap<String, f64>>,
-        max_iterations: usize, // max number of iterations
-
+        max_iterations: usize,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         loglevel: Option<String>,
     ) -> NRBVP {
@@ -116,10 +216,8 @@ impl NRBVP {
             .collect::<Vec<_>>();
 
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
-        let new_grid_enabled_: bool = if strategy_params.clone().unwrap().get("adaptive").is_some()
-        {
-            info!("problem with adaptive grid");
-            true
+        let new_grid_enabled_: bool = if let Some(ref params) = strategy_params {
+            params.adaptive.is_some()
         } else {
             false
         };
@@ -150,6 +248,7 @@ impl NRBVP {
             max_error: 0.0,
             Bounds,
             loglevel,
+            no_reports: false,
             result: None,
             full_result: None,
             x_mesh: DVector::from_vec(T_list),
@@ -171,12 +270,19 @@ impl NRBVP {
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             calc_statistics: Hashmap_statistics,
+            nodes_added: Vec::new(),
             custom_timer: CustomTimer::new(),
         }
     }
     /// Basic methods to set the equation system
 
-    // check if user specified task is correct
+    /// Validates solver configuration and input parameters
+    ///
+    /// Performs comprehensive checks on problem dimensions, boundary conditions,
+    /// tolerances, and bounds to ensure the problem is well-posed.
+    ///
+    /// # Panics
+    /// Panics if any validation check fails with descriptive error message
     pub fn task_check(&self) {
         assert_eq!(
             self.initial_guess.len(), //grid length =  number of unknowns
@@ -210,10 +316,13 @@ impl NRBVP {
             !self.BorderConditions.is_empty(),
             "BorderConditions must be specified"
         );
+        let total_conditions: usize = self.BorderConditions.values().map(|v| v.len()).sum();
         assert_eq!(
-            self.BorderConditions.len(),
+            total_conditions,
             self.values.len(),
-            "BorderConditions must be specified for each value"
+            "Total number of boundary conditions ({}) must equal number of variables ({})",
+            total_conditions,
+            self.values.len()
         );
         assert!(
             !self.Bounds.is_none(),
@@ -243,56 +352,19 @@ impl NRBVP {
             "rel_tolerance must be specified for each value"
         );
 
-        let required_keys = vec!["max_jac", "maxDampIter", "DampFacor", "adaptive"];
-        for key in required_keys {
-            assert!(
-                self.strategy_params.as_ref().unwrap().contains_key(key),
-                "Key '{}' must be present in strategy_params",
-                key
-            );
-        }
-        if self
-            .strategy_params
-            .as_ref()
-            .unwrap()
-            .get("adaptive")
-            .unwrap()
-            .is_some()
-        {
-            // Check that exactly one of the required keys is present
-            let strategy_keys = vec![
-                "easy".to_string(),
-                "pearson".to_string(),
-                "grcar_smooke".to_string(),
-                "two_point".to_string(),
-            ];
-            let present_keys: Vec<_> = strategy_keys
-                .iter()
-                .filter(|&key| self.strategy_params.as_ref().unwrap().contains_key(key))
-                .collect();
-            assert_eq!(
-                present_keys.len(),
-                1,
-                "Exactly one of {:?} must be present in strategy_params when 'adaptive' is Some, found: {:?}",
-                strategy_keys,
-                present_keys
-            );
-            let vec_of_params_len = self
-                .strategy_params
-                .as_ref()
-                .unwrap()
-                .get("adaptive")
-                .unwrap()
-                .clone()
-                .unwrap()
-                .len();
-            assert_eq!(
-                vec_of_params_len, 2,
-                "vector of 2 elements must be present in  strategy_params when 'adaptive' is Some"
-            );
-        };
+        // Validation is implicit in the struct design - if adaptive is Some, grid_method is always present
     }
-    ///Set system of equations with vector of symbolic expressions
+    /// Generates discretized system and Jacobian from symbolic expressions
+    ///
+    /// This is the core symbolic-to-numerical transformation that:
+    /// 1. Discretizes the ODE system using finite differences
+    /// 2. Generates analytical Jacobian matrix
+    /// 3. Creates function closures for residual and Jacobian evaluation
+    /// 4. Sets up boundary condition handling
+    ///
+    /// # Arguments
+    /// * `mesh_` - Optional custom mesh points (if None, uniform mesh is used)
+    /// * `bandwidth` - Optional Jacobian bandwidth for sparse matrices
     pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>, bandwidth: Option<(usize, usize)>) {
         // check if memory is enough for
         task_check_mem(self.n_steps, self.values.len(), &self.method);
@@ -343,15 +415,23 @@ impl NRBVP {
         self.variable_string = jacobian_instance.variable_string;
         self.bandwidth = jacobian_instance.bandwidth.unwrap();
     } // end of method eq_generate
+    /// Updates solver state for new iteration step
+    ///
+    /// Used internally during grid refinement to set new problem parameters
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
         self.p = p;
         self.y = y;
         self.initial_guess = initial_guess;
     }
+
+    /// Sets the parameter value (typically time or spatial coordinate)
     pub fn set_p(&mut self, p: f64) {
         self.p = p;
     }
     /////////////////////
+    /// Computes Newton step using cached inverse Jacobian
+    ///
+    /// More efficient than `step()` when Jacobian doesn't need recalculation
     pub fn step_with_inv_Jac(&self, p: f64, y: &dyn VectorType) -> Box<dyn VectorType> {
         let fun = &self.fun;
         let F_k = fun.call(p, y);
@@ -359,6 +439,10 @@ impl NRBVP {
         let undamped_step_k: Box<dyn VectorType> = inv_J_k.mul(&*F_k);
         undamped_step_k
     }
+
+    /// Recalculates and inverts Jacobian matrix if needed
+    ///
+    /// Updates the cached Jacobian and resets iteration counter
     pub fn recalc_and_inverse_Jac(&mut self) {
         if self.jac_recalc {
             let p = self.p;
@@ -377,7 +461,9 @@ impl NRBVP {
     }
     ////////////////////////////////////////////////////////////////
 
-    // jacobian recalculation
+    /// Internal method for Jacobian recalculation with timing
+    ///
+    /// Recalculates Jacobian matrix when needed and updates performance statistics
     fn recalc_jacobian(&mut self) {
         if self.jac_recalc {
             let p = self.p;
@@ -401,7 +487,15 @@ impl NRBVP {
         }
     }
 
-    //undamped step without jacobian recalculation
+    /// Computes undamped Newton step and solves linear system
+    ///
+    /// Core method that:
+    /// 1. Evaluates residual function F(y)
+    /// 2. Solves J(y) * Δy = -F(y) for Newton step
+    /// 3. Returns step and timing information
+    ///
+    /// # Returns
+    /// Tuple of (Newton step, (function time, linear system time))
     pub fn step(
         &self,
         p: f64,
@@ -421,6 +515,19 @@ impl NRBVP {
             "length of F_k {} and number of rows in J_k {} must be equal",
             F_k.len(),
             J_k.shape().0
+        );
+        assert_eq!(
+            J_k.shape().0,
+            J_k.shape().1,
+            "J_k must be a square matrix, but got shape {:?}",
+            J_k.shape()
+        );
+        assert_eq!(
+            F_k.len(),
+            J_k.shape().1,
+            "length of F_k {} and number of columns in J_k {} must be equal",
+            F_k.len(),
+            J_k.shape().1
         );
         let residual_norm = F_k.norm();
         info!("\n \n residual norm = {:?} ", residual_norm);
@@ -454,6 +561,19 @@ impl NRBVP {
         (undamped_step_k, pair_of_times)
     }
 
+    /// Performs damped Newton step with line search
+    ///
+    /// Implements the core damping algorithm:
+    /// 1. Computes undamped Newton step
+    /// 2. Applies boundary constraints to determine maximum step size
+    /// 3. Uses line search with damping to ensure residual decreases
+    /// 4. Returns status code and accepted step
+    ///
+    /// # Returns
+    /// * `(1, Some(step))` - Converged solution found
+    /// * `(0, Some(step))` - Step accepted, continue iterations
+    /// * `(-2, None)` - No acceptable damping coefficient found
+    /// * `(-3, None)` - Step violates bounds
     pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
         // macro for saving times
         macro_rules! save_operation_times {
@@ -477,8 +597,8 @@ impl NRBVP {
             .calc_statistics
             .entry("number of solving linear systems".to_string())
             .or_insert(0) += 1;
-        let y_k = y_k_minus_1 - &*undamped_step_k_minus_1;
-        let fbound = bound_step(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
+
+        let fbound = bound_step_Cantera2(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
             error!("\n \n fbound is NaN \n \n");
             panic!()
@@ -500,99 +620,85 @@ impl NRBVP {
             return (-3, None);
         }
 
-        let maxDampIter = if let Some(maxDampIter_) = self
+        let maxDampIter = self
             .strategy_params
-            .clone()
-            .unwrap()
-            .get("maxDampIter")
-            .unwrap()
-        {
-            maxDampIter_[0] as usize
-        } else {
-            5
-        };
-        let DampFacor: f64 = if let Some(DampFacor_) = self
+            .as_ref()
+            .and_then(|p| p.max_damp_iter)
+            .unwrap_or(5);
+        let DampFacor = self
             .strategy_params
-            .clone()
-            .unwrap()
-            .get("DampFacor")
-            .unwrap()
-        {
-            DampFacor_[0]
-        } else {
-            0.5
-        };
+            .as_ref()
+            .and_then(|p| p.damp_factor)
+            .unwrap_or(0.5);
 
-        let mut k_: usize = 0;
-        let mut S_k_plus_1: Option<f64> = None;
+        let mut S_k: Option<f64> = None;
         let mut damped_step_result: Option<Box<dyn VectorType>> = None;
         let mut conv: f64 = 0.0;
-        //   let fun = &self.fun;
-        // calculate damped step
-        let (undamped_step_k, pair_of_times) = self.step(p, &*y_k);
-        // saving times of corresponding operations
-        save_operation_times!(self, pair_of_times);
-        *self
-            .calc_statistics
-            .entry("number of solving linear systems".to_string())
-            .or_insert(0) += 1;
-        //
-        for mut k in 0..maxDampIter {
+
+        // compute the weighted norm of the undamped step size (s0 in C++ code) - calculated OUTSIDE the loop
+        let s0 = undamped_step_k_minus_1.norm();
+
+        let mut k = 0;
+        while k < maxDampIter {
             if k > 1 {
                 info!("\n \n damped_step number {} ", k);
             }
             info!("\n \n Damping coefficient = {}", lambda);
-            let damped_step_k = undamped_step_k.mul_float(lambda);
-            let S_k = &damped_step_k.norm();
 
-            let y_k_plus_1: Box<dyn VectorType> = &*y_k - &*damped_step_k;
+            // step the solution by the damped step size: x_{k+1} = x_k + alpha_k*step_k
+            let damped_step_k = undamped_step_k_minus_1.mul_float(lambda);
+            let y_k: Box<dyn VectorType> = y_k_minus_1 - &*damped_step_k;
 
-            // / compute the next undamped step that would result if x1 is accepted
+            // compute the next undamped step that would result if x1 is accepted
             // J(x_k)^-1 F(x_k+1)
-            let (undamped_step_k_plus_1, pair_of_times) = self.step(p, &*y_k_plus_1); //???????????????
+            let (undamped_step_k, pair_of_times) = self.step(p, &*y_k);
             // saving times of corresponding operations
             save_operation_times!(self, pair_of_times);
-            let error = &undamped_step_k_plus_1.norm();
-            self.error_old = *error;
-            info!("\n \n L2 norm of undamped step = {}", error);
+            *self
+                .calc_statistics
+                .entry("number of solving linear systems".to_string())
+                .or_insert(0) += 1;
+
+            // compute the weighted norm of step1 (s1 in C++ code)
+            let s1 = undamped_step_k.norm();
+            self.error_old = s1;
+            info!("\n \n L2 norm of undamped step = {}", s1);
             let convergence_cond_for_step =
-                convergence_condition(&*y_k_plus_1, &self.abs_tolerance, &self.rel_tolerance_vec);
-            let S_k_plus_1_temp = &undamped_step_k_plus_1.norm();
-            // If the norm of S_k_plus_1 is less than the norm of S_k, then accept this
+                convergence_condition(&*y_k, &self.abs_tolerance, &self.rel_tolerance_vec);
+
+            // If the norm of s1 is less than the norm of s0, then accept this
             // damping coefficient. Also accept it if this step would result in a
             // converged solution. Otherwise, decrease the damping coefficient and
             // try again.
             let elapsed = now.elapsed();
             elapsed_time(elapsed);
-            if (S_k_plus_1_temp < S_k) || (S_k_plus_1 < Some(convergence_cond_for_step)) {
-                // The  criterion for accepting is that the undamped steps decrease in
-                // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
 
-                k_ = k;
-                S_k_plus_1 = Some(*S_k_plus_1_temp);
-                damped_step_result = Some(y_k_plus_1.clone_box());
+            // C++ acceptance criteria: if (s1 < 1.0 || s1 < s0)
+            if (s1 < 1.0) || (s1 < s0) {
+                // The criterion for accepting is that the undamped steps decrease in
+                // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
+                S_k = Some(s1);
+                damped_step_result = Some(y_k.clone_box());
                 conv = convergence_cond_for_step;
                 break;
             }
-            // if fail this criterion we must reject it and retries the step with a reduced (often halved) damping parameter trying again until
-            // criterion is met  or max damping iterations is reached
-
+            // if fail this criterion we must reject it and retries the step with a reduced damping parameter
             lambda = lambda / (2.0f64.powf(k as f64 + DampFacor));
-            k_ = k;
-            S_k_plus_1 = Some(*S_k_plus_1_temp);
+            info!("damping coefficient decreased to {}", lambda);
+            S_k = Some(s1);
 
-            k = k + 1;
+            k += 1;
         }
 
-        if k_ < maxDampIter {
+        if k < maxDampIter {
             // if there is a damping coefficient found (so max damp steps not exceeded)
-            if S_k_plus_1.unwrap() > conv {
+            if S_k.unwrap() > conv {
                 //found damping coefficient but not converged yet
                 info!("\n \n  Damping coefficient found (solution has not converged yet)");
                 info!(
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old,
-                    S_k_plus_1.unwrap(),
+                    S_k.unwrap(),
                     conv
                 );
                 (0, damped_step_result)
@@ -601,7 +707,7 @@ impl NRBVP {
                 info!(
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old,
-                    S_k_plus_1.unwrap(),
+                    S_k.unwrap(),
                     conv
                 );
                 (1, damped_step_result)
@@ -612,14 +718,25 @@ impl NRBVP {
             (-2, None)
         }
     } // end of damped step
+    /// Main iteration loop for damped Newton-Raphson method
+    ///
+    /// Orchestrates the complete solution process:
+    /// 1. Newton iterations with damping
+    /// 2. Jacobian reuse strategy
+    /// 3. Adaptive grid refinement when needed
+    /// 4. Convergence checking
+    ///
+    /// # Returns
+    /// Solution vector if converged, None if failed
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
+        info!("{:?}", self.initial_guess.shape());
         let y: DMatrix<f64> = self.initial_guess.clone();
         //  println!("new y = {} \n \n", &y);
         let y: Vec<f64> = y.iter().cloned().collect();
         let y: DVector<f64> = DVector::from_vec(y);
-        self.result = Some(y.clone()); // save into result in case the vary first iteration
-        // with the current n_steps will go wrong and we shall need frid refinement
+        self.result = Some(y.clone()); // save into result in case the very first iteration
+        // with the current n_steps will go wrong and we shall need grid refinement
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
@@ -668,20 +785,16 @@ impl NRBVP {
                 // before refining in case it will go wrong
                 self.result = result.clone();
                 info!(
-                    "\n \n solutioon found for the current grid {}",
-                    &self.result.clone().unwrap()
+                    "\n \n solution found for the current grid {}",
+                    &self.result.clone().unwrap().len()
                 );
 
                 // if flag for new grid is up we must call adaptive grid refinement
                 if self.new_grid_enabled
                     && self
                         .strategy_params
-                        .clone()
-                        .unwrap()
-                        .get("adaptive")
-                        .unwrap()
-                        .clone()
-                        .is_some()
+                        .as_ref()
+                        .map_or(false, |p| p.adaptive.is_some())
                 {
                     info!("solving with new grid!");
                     self.solve_with_new_grid()
@@ -723,12 +836,8 @@ impl NRBVP {
         if self.new_grid_enabled
             && self
                 .strategy_params
-                .clone()
-                .unwrap()
-                .get("adaptive")
-                .unwrap()
-                .clone()
-                .is_some()
+                .as_ref()
+                .map_or(false, |p| p.adaptive.is_some())
         {
             info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
             self.solve_with_new_grid()
@@ -740,145 +849,157 @@ impl NRBVP {
     //                                      functions to create a new grid and recalculate with new grid
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //
-    // function to choose if we need to refine the grid in next iteration
+    /// Determines if grid refinement is needed based on solution analysis
+    ///
+    /// Checks refinement criteria and maximum refinement limits
     pub fn we_need_refinement(&mut self) {
-        let vec_of_params = self
-            .strategy_params
-            .as_ref()
-            .unwrap()
-            .get("adaptive")
-            .unwrap()
-            .clone()
-            .unwrap();
-        let version = vec_of_params[0] as usize;
-        let mut res = match version {
-            1 => {
-                if self.number_of_refined_intervals == 0 {
-                    log::info!(
-                        "\n \n number of marked intervals is 0, no new grid is needed \n \n"
-                    );
-                    false
-                } else {
-                    log::info!(
-                        "\n \n number of marked intervals is {}, new grid is needed \n \n",
-                        self.number_of_refined_intervals
-                    );
-                    true
-                }
-            }
+        if let Some(ref params) = self.strategy_params {
+            if let Some(ref adaptive_config) = params.adaptive {
+                let mut res = match adaptive_config.version {
+                    1 => {
+                        if self.number_of_refined_intervals == 0 {
+                            log::info!(
+                                "\n \n number of marked intervals is 0, no new grid is needed \n \n"
+                            );
+                            false
+                        } else {
+                            log::info!(
+                                "\n \n number of marked intervals is {}, new grid is needed \n \n",
+                                self.number_of_refined_intervals
+                            );
+                            true
+                        }
+                    }
+                    _ => panic!("Unsupported adaptive version"),
+                };
 
-            _ => {
-                panic!()
+                if adaptive_config.max_refinements <= self.grid_refinemens {
+                    info!(
+                        "maximum number of grid refinements {} reached {}",
+                        adaptive_config.max_refinements, self.grid_refinemens
+                    );
+                    res = false;
+                }
+                self.new_grid_enabled = res;
             }
-        };
-        let max_grid_refinenents = vec_of_params[1] as usize;
-        if max_grid_refinenents <= self.grid_refinemens {
-            info!(
-                "maximum number of grid refinements {} reached  {} ",
-                max_grid_refinenents, self.grid_refinemens
-            );
-            res = false;
         }
-        self.new_grid_enabled = res;
     }
+
+    /// Creates refined mesh based on solution gradients and error estimates
+    ///
+    /// # Returns
+    /// Tuple of (new mesh points, interpolated initial guess, number of refined intervals)
     fn create_new_grid(&mut self) -> (Vec<f64>, DMatrix<f64>, usize) {
-        info!("\n \n creating new grid \n \n");
+        info!("================GRID REFINEMENT===================");
         let y = self.result.clone().unwrap().clone_box();
         let y_DVector = y.to_DVectorType();
         let nrows = self.values.len();
         let ncols = self.n_steps;
-        let y_DMatrix = DMatrix::from_column_slice(nrows, ncols, y_DVector.as_slice());
+        let y_DMatrix_origin = DMatrix::from_row_slice(nrows, ncols, y_DVector.as_slice());
+        // dbg!(&y_DMatrix.);
+        let method = self
+            .strategy_params
+            .as_ref()
+            .and_then(|p| p.adaptive.as_ref())
+            .map(|a| a.grid_method.clone())
+            .expect("Grid method must be specified when adaptive is enabled");
 
-        // unpack the adaptive strategy parameters
-        let params = self.strategy_params.clone().unwrap();
-
-        //there are several approaches to create a new grid, so we provide some of them for the user to choose from
-        let (vector_of_params, method) = if params.contains_key("easy") {
-            let res = params.get("easy").clone().unwrap().clone().unwrap();
-            if res.len() != 2 {
-                panic!("parameters for adaptive strategy not found")
-            };
-            let method = GridRefinementMethod::Easiest;
-            (res, method)
-        } else if params.contains_key("pearson") {
-            let res = params.get("pearson").clone().unwrap().clone().unwrap();
-            if res.len() != 1 {
-                panic!("this strategy requires only one parameter")
-            };
-            let method = GridRefinementMethod::Pearson;
-            (res, method)
-        } else if params.contains_key("grcar_smooke") {
-            let res = params.get("grcar_smooke").clone().unwrap().clone().unwrap();
-            if res.len() != 3 {
-                panic!("this strategy requires 3 parameters")
-            };
-            let method = GridRefinementMethod::GrcarSmooke;
-            (res, method)
-        } else if params.contains_key("two_point") {
-            let res = params.get("two_point").clone().unwrap().clone().unwrap();
-            if res.len() != 3 {
-                panic!("this strategy requires 3 parameters")
-            };
-
-            let method = GridRefinementMethod::TwoPoint;
-            (res, method)
-        } else {
-            panic!("parameters for adaptive strategy not found")
-        };
-        //create a new mesh with a chosen algorithm a
-        // API of new grid returns a new mesh, initial guess and number of intervals that doesnt meet the criteria and wac subdivided
-        // if number_of_nonzero_keys==0 it means that no need to create a new grid
         self.custom_timer.grid_refinement_tic();
         let y_DMatrix = construct_full_solution(
-            y_DMatrix,
+            y_DMatrix_origin.clone(),
             &self.BorderConditions,
-            &self.variable_string,
             &self.values,
         );
+        for (value, row) in self.values.iter().zip(y_DMatrix.clone().row_iter()) {
+            let row: Vec<f64> = row.iter().cloned().collect();
+            log::debug!(
+                "Initial guess for {}: {:?} of len {}",
+                value,
+                row,
+                row.len()
+            );
+        }
+
+        let residuals: Option<DVector<f64>> = match method {
+            GridRefinementMethod::Sci() => {
+                // compute residuals on the current grid
+                let fun = &self.fun;
+                let p = self.p;
+                let y_dvector = self.result.clone().unwrap();
+                let y = crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting(
+                    &y_dvector,
+                    self.method.clone(),
+                );
+                let residuals = fun.call(p, &*y);
+                let residuals = residuals.to_DVectorType();
+                Some(residuals)
+            }
+            _ => None,
+        };
+
         let (new_mesh, initial_guess, number_of_nonzero_keys) = new_grid(
             method,
             &y_DMatrix,
             &self.x_mesh,
-            vector_of_params.clone(),
             self.abs_tolerance,
+            residuals,
         );
 
-        //   info!("\n \n new grid enabled! \n \n");
-        let initial_guess = extract_unknown_variables(
-            initial_guess,
-            &self.BorderConditions,
-            &self.variable_string,
-            &self.values,
-        );
+        let initial_guess =
+            extract_unknown_variables(initial_guess, &self.BorderConditions, &self.values);
+        info!("================GRID REFINEMENT ENDED===================");
         self.custom_timer.grid_refinement_tac();
+        if number_of_nonzero_keys == 0 {
+            assert_eq!(
+                y_DMatrix_origin, initial_guess,
+                "No refinement done, but initial guess changed - it should not happen!"
+            );
+        }
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
+    /// Continues solving on refined grid
+    ///
+    /// Updates solver state with new mesh and restarts Newton iterations
     fn solve_with_new_grid(&mut self) {
         let (new_mesh, initial_guess, number_of_nonzero_keys) = self.create_new_grid();
         self.number_of_refined_intervals = number_of_nonzero_keys;
-        // mock data
-        //   self.initial_guess = DMatrix::from_column_slice(self.values.len(), self.n_steps, self.y.to_DVectorType().as_slice());
-        //  let binding = self.x_mesh.clone();
-        //  let new_mesh = binding.data.as_vec();
+        self.nodes_added.push(number_of_nonzero_keys);
+        // Clear old Jacobian completely to avoid dimension mismatch
+        self.old_jac = None;
+        self.jac = None; // Clear Jacobian function as well
+        self.jac_recalc = true; // Force Jacobian recalculation for new grid
+        self.m = 0; // Reset Jacobian age counter
 
-        self.jac_recalc = true; // to avoid using old (low dimension) jacobian with new data
+        // Clear other cached state that might be invalid for new grid
+        self.bounds_vec.clear();
+        self.rel_tolerance_vec.clear();
+        self.variable_string.clear();
+
+        // Update grid parameters
         self.n_steps = new_mesh.len() - 1;
         self.initial_guess = initial_guess;
+        self.x_mesh = DVector::from_vec(new_mesh.clone());
+
         self.grid_refinemens += 1;
+
         info!(
             "\n \n grid refinement counter = {} \n \n",
             self.grid_refinemens
         );
+        info!(
+            "new guess of shape {} {}",
+            self.initial_guess.nrows(),
+            self.initial_guess.ncols()
+        );
+        info!("new mesh length {}", new_mesh.len());
         *self
             .calc_statistics
             .entry("number of grid refinements".to_string())
             .or_insert(0) += 1;
         self.custom_timer.symbolic_operations_tic();
-        // here we go again... running the code wtih new grid
-        self.eq_generate(Some(new_mesh.clone()), Some(self.bandwidth));
-        //               bandwidth doesnt change with gerid recalc so we pass into function
-        // previously calculated  bandwidth to avoid O(N^2) calculation of bandwidth
+        // Regenerate system with new grid - force bandwidth recalculation for new grid
+        self.eq_generate(Some(new_mesh), None);
         self.custom_timer.symbolic_operations_tac();
         self.we_need_refinement();
 
@@ -888,9 +1009,15 @@ impl NRBVP {
     //                                       main functions to start the solver
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //
-    //  // main function to solve the system of equations
-    //Newton-Raphson method
-    // realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
+    /// Internal solver method with timing and statistics
+    ///
+    /// Coordinates the complete solution process:
+    /// 1. Symbolic system generation
+    /// 2. Newton iteration loop
+    /// 3. Result processing and statistics
+    ///
+    /// # Returns
+    /// Solution vector if successful, None if failed
     pub fn solver(&mut self) -> Option<DVector<f64>> {
         self.custom_timer.start();
         self.custom_timer.symbolic_operations_tic();
@@ -908,7 +1035,14 @@ impl NRBVP {
         self.custom_timer.get_all();
         res
     }
-    // wrapper around solver function to implement logging
+
+    /// Main public interface for solving BVP
+    ///
+    /// Wrapper that handles logging configuration and calls internal solver.
+    /// Supports configurable logging levels and automatic log file generation.
+    ///
+    /// # Returns
+    /// Solution vector if successful, None if failed
     pub fn solve(&mut self) -> Option<DVector<f64>> {
         let is_logging_disabled = self
             .loglevel
@@ -932,18 +1066,30 @@ impl NRBVP {
             } else {
                 LevelFilter::Info
             };
-            let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-            let name = format!("log_{}.txt", date_and_time);
-            let logger_instance = CombinedLogger::init(vec![
-                TermLogger::new(
+            let logger_instance = if self.no_reports {
+                // don't want to save txt report
+                let logger_instance = CombinedLogger::init(vec![TermLogger::new(
                     log_option,
                     Config::default(),
                     TerminalMode::Mixed,
                     ColorChoice::Auto,
-                ),
-                WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
-            ]);
-
+                )]);
+                logger_instance
+            } else {
+                // want to save txt report
+                let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
+                let name = format!("log_{}.txt", date_and_time);
+                let logger_instance = CombinedLogger::init(vec![
+                    TermLogger::new(
+                        log_option,
+                        Config::default(),
+                        TerminalMode::Mixed,
+                        ColorChoice::Auto,
+                    ),
+                    WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
+                ]);
+                logger_instance
+            };
             match logger_instance {
                 Ok(()) => {
                     let res = self.solver();
@@ -957,11 +1103,17 @@ impl NRBVP {
             } // end mat 
         }
     }
+    pub fn dont_save_log(&mut self, dont_save_log: bool) {
+        self.no_reports = dont_save_log;
+    }
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                     functions to return and save result in different formats
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Saves solution to text file with formatted output
+    ///
+    /// # Arguments
+    /// * `filename` - Optional filename (defaults to "result.txt")
     pub fn save_to_file(&self, filename: Option<String>) {
-        //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let name = if let Some(name) = filename {
             format!("{}.txt", name)
         } else {
@@ -976,6 +1128,11 @@ impl NRBVP {
             &self.arg,
         );
     }
+
+    /// Saves solution to CSV file for data analysis
+    ///
+    /// # Arguments
+    /// * `filename` - Optional filename (defaults to "result_table")
     pub fn save_to_csv(&self, filename: Option<String>) {
         let name = if let Some(name) = filename {
             name
@@ -991,34 +1148,30 @@ impl NRBVP {
             &self.arg,
         );
     }
+
+    /// Returns the complete solution matrix including boundary conditions
+    ///
+    /// # Returns
+    /// Matrix where rows are grid points and columns are variables
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         self.full_result.clone()
     }
 
+    /// Processes raw solution vector into full solution matrix
+    ///
+    /// Reconstructs complete solution by adding boundary conditions
+    /// and reshaping into proper matrix format
     pub fn handle_result(&mut self) {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
+
         let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
+            DMatrix::from_row_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
 
-        for _col in matrix_of_results.column_iter() {
-            //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
-        }
-
-        let full_results = construct_full_solution(
-            matrix_of_results,
-            &self.BorderConditions,
-            &self.variable_string,
-            &self.values.clone(),
-        );
-        let permutted_results = interchange_columns(
-            full_results,
-            self.values.clone(),
-            self.variable_string.clone(),
-        )
-        .transpose();
-
+        let full_results =
+            construct_full_solution(matrix_of_results, &self.BorderConditions, &self.values);
+        let permutted_results = full_results.transpose();
         info!(
             "matrix of results has shape {:?}",
             permutted_results.shape()
@@ -1027,6 +1180,10 @@ impl NRBVP {
         info!("number of Ys: {:?}", number_of_Ys);
         self.full_result = Some(permutted_results.clone());
     }
+    /// Creates plots using gnuplot backend
+    ///
+    /// Generates publication-quality plots of the solution
+    /// Requires gnuplot to be installed and in PATH
     pub fn gnuplot_result(&self) {
         let permutted_results = self.full_result.clone().unwrap();
         plots_gnulot(
@@ -1037,6 +1194,10 @@ impl NRBVP {
         );
         info!("result plotted");
     }
+
+    /// Creates plots using plotters crate
+    ///
+    /// Generates solution plots with embedded Rust plotting
     pub fn plot_result(&self) {
         let permutted_results = self.full_result.clone().unwrap();
         plots(
@@ -1047,6 +1208,10 @@ impl NRBVP {
         );
         info!("result plotted");
     }
+
+    /// Computes and displays solver performance statistics
+    ///
+    /// Shows memory usage, iteration counts, and timing information
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         if let Some(jac) = &self.old_jac {
@@ -1066,10 +1231,29 @@ impl NRBVP {
         let mut table = Builder::from(stats).build();
         table.with(Style::modern_rounded());
         info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
+
+        // What nodes were added per refinement
+
+        let nodes_added_table: Vec<Vec<String>> = self
+            .nodes_added
+            .iter()
+            .enumerate()
+            .map(|(idx, val)| vec![idx.to_string(), val.to_string()])
+            .collect();
+
+        info!("\n \n NODES ADDED PER REFINEMENT \n \n");
+        let mut table = Builder::from(nodes_added_table).build();
+        table.with(Style::modern_rounded());
+        info!("\n {} \n", table.to_string());
     }
 
     ////////////////////////////////////////////////////////////
-    // misc
+    // Utility methods
+    ////////////////////////////////////////////////////////////
+
+    /// Updates internal timing statistics
+    ///
+    /// Used internally to accumulate timing data for performance analysis
     pub fn step_with_timer(&mut self, pair_of_times: (std::time::Duration, std::time::Duration)) {
         let (fun_time, linear_sys_time) = pair_of_times;
         self.custom_timer.append_to_fun_time(fun_time);

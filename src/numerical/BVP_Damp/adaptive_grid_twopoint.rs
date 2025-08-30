@@ -355,8 +355,8 @@ impl Grid {
             new_grid.len()
         );
         log::info!(
-            "\n \n new_initial_guess: {} of shape{:?}",
-            new_initial_guess,
+            "\n \n new_initial_guess of shape{:?}",
+            //  new_initial_guess,
             new_initial_guess.shape()
         );
         assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);

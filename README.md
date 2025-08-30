@@ -3,8 +3,7 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: new BVP solver using 4th order collocation algorithm
- (rewrite of scipy _bvp.py )
+PROJECT NEWS: HUGE BVP solvers debug and performance improvement
 
 ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 

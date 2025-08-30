@@ -11,7 +11,7 @@ use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
-use crate::numerical::BVP_Damp::BVP_utils_damped::interchange_columns;
+
 use chrono::Local;
 
 use log::info;
@@ -25,7 +25,7 @@ pub struct NRBVP {
     pub initial_guess: DMatrix<f64>,
     pub values: Vec<String>,
     pub arg: String,
-    pub BorderConditions: HashMap<String, (usize, f64)>,
+    pub BorderConditions: HashMap<String, Vec<(usize, f64)>>,
     pub t0: f64,
     pub t_end: f64,
     pub n_steps: usize,
@@ -49,6 +49,7 @@ pub struct NRBVP {
     error_old: f64,
     variable_string: Vec<String>, // vector of indexed variable names
     bandwidth: (usize, usize),
+    no_reports: bool,
 }
 
 impl NRBVP {
@@ -57,7 +58,7 @@ impl NRBVP {
         initial_guess: DMatrix<f64>, // initial guess
         values: Vec<String>,
         arg: String,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         t0: f64,
         t_end: f64,
         n_steps: usize,
@@ -107,6 +108,7 @@ impl NRBVP {
             error_old: 0.0,
             variable_string: Vec::new(), // vector of indexed variable names
             bandwidth: (0, 0),
+            no_reports: false,
         }
     }
     /// Basic methods to set the equation system
@@ -295,21 +297,32 @@ impl NRBVP {
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        let date_and_time = Local::now().format("%Y-%m-%d_%H-%M");
-        let name = format!("log_{}.txt", date_and_time);
-        let logger_instance = CombinedLogger::init(vec![
-            TermLogger::new(
+        let logger_instance = if self.no_reports {
+            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
                 LevelFilter::Info,
                 Config::default(),
                 TerminalMode::Mixed,
                 ColorChoice::Auto,
-            ),
-            WriteLogger::new(
-                LevelFilter::Info,
-                Config::default(),
-                File::create(name).unwrap(),
-            ),
-        ]);
+            )]);
+            logger_instance
+        } else {
+            let date_and_time = Local::now().format("%Y-%m-%d_%H-%M");
+            let name = format!("log_{}.txt", date_and_time);
+            let logger_instance = CombinedLogger::init(vec![
+                TermLogger::new(
+                    LevelFilter::Info,
+                    Config::default(),
+                    TerminalMode::Mixed,
+                    ColorChoice::Auto,
+                ),
+                WriteLogger::new(
+                    LevelFilter::Info,
+                    Config::default(),
+                    File::create(name).unwrap(),
+                ),
+            ]);
+            logger_instance
+        };
         match logger_instance {
             Ok(()) => {
                 let res = self.solver();
@@ -321,6 +334,9 @@ impl NRBVP {
                 res
             }
         }
+    }
+    pub fn dont_save_log(&mut self, dont_save_log: bool) {
+        self.no_reports = dont_save_log;
     }
     pub fn save_to_file(&self) {
         //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
@@ -340,11 +356,7 @@ impl NRBVP {
         let matrix_of_results: DMatrix<f64> =
             DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
                 .transpose();
-        let permutted_results = interchange_columns(
-            matrix_of_results,
-            self.values.clone(),
-            self.variable_string.clone(),
-        );
+        let permutted_results = matrix_of_results;
         Some(permutted_results)
     }
 
@@ -402,8 +414,8 @@ mod tests {
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
         let mut BorderConditions = HashMap::new();
-        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+        BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+        BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
         assert_eq!(&eq_system.len(), &2);
         let mut nr = NRBVP::new(
             eq_system,
@@ -424,7 +436,7 @@ mod tests {
         nr.eq_generate();
 
         assert_eq!(nr.eq_system.len(), 2);
-
+        nr.dont_save_log(true);
         // Solve the equation at t=0 with initial guess y=[2.0]
         //    nr.set_new_step(0.0, DVector::from_element(1, 2.0), DVector::from_element(1, 2.0));
         let _solution = nr.solve().unwrap();

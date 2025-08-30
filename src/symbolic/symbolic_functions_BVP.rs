@@ -19,13 +19,14 @@ use faer::sparse::{SparseColMat, Triplet};
 use log::info;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector};
+
 use rayon::prelude::*;
-use regex::Regex;
+
 use sprs::{CsMat, CsVec};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
-
+use std::sync::Mutex;
 /*
  * This struct represents a Jacobian for BVPs, which is a matrix of partial derivatives of a vector function.
  * It contains the symbolic and numerical representations of the jacobian, as well as the functions used to evaluate it.
@@ -592,25 +593,141 @@ impl Jacobian {
     ///         FAER SPARCE CRATE
     ////////////////////////////////////////////////////////////////////////////////////////
 
-    ///
-    pub fn jacobian_generate_SparseColMat_par(
-        jac: Vec<Vec<Expr>>,
-        vector_of_functions_len: usize,
-        vector_of_variables_len: usize,
-        variable_str: Vec<String>,
-        _arg: String,
-        bandwidth: Option<(usize, usize)>,
-    ) -> Box<dyn FnMut(f64, &Col<f64>) -> SparseColMat<usize, f64>> {
-        //let arg = arg.as_str();
-        //let variable_str: Vec<&str> = variable_str.iter().map(|s| s.as_str()).collect();
+    pub fn lambdify_jacobian_SparseColMat_modified(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let symbolic_jacobian = self.symbolic_jacobian.clone();
+        let vector_of_functions_len = self.vector_of_functions.len();
+        let vector_of_variables_len = self.vector_of_variables.len();
+        let bandwidth = self.bandwidth;
 
-        Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let _number_of_possible_non_zero: usize = jac.len();
-            //let mut new_function_jacobian: CsMatrix<f64> = CsMatrix::new_uninitialized_generic(Dyn(vector_of_functions_len),
-            //Dyn(vector_of_variables_len), number_of_possible_non_zero);
+        // Pre-compile all non-zero jacobian elements sequentially to avoid Send issues
+        let mut compiled_jacobian_elements = Vec::new();
+        for i in 0..vector_of_functions_len {
+            let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
+                let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                    0
+                } else {
+                    i - kl - 1
+                };
+                (right_border, left_border)
+            } else {
+                (vector_of_variables_len, 0)
+            };
+
+            for j in left_border..right_border {
+                let symbolic_partial_derivative = &symbolic_jacobian[i][j];
+                if !symbolic_partial_derivative.is_zero() {
+                    let compiled_func =
+                        Expr::lambdify(symbolic_partial_derivative, variable_str.clone());
+                    compiled_jacobian_elements.push((i, j, compiled_func));
+                }
+            }
+        }
+
+        let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+
             let mut vector_of_triplets = Vec::new();
-            let vector_of_triplets_mutex = std::sync::Mutex::new(&mut vector_of_triplets);
-            (0..vector_of_functions_len).into_par_iter().for_each(|i| {
+            for (i, j, func) in &compiled_jacobian_elements {
+                let P = func(v_vec.clone());
+                if P.abs() > 1e-8 {
+                    vector_of_triplets.push(Triplet::new(*i, *j, P));
+                }
+            }
+
+            SparseColMat::try_new_from_triplets(
+                vector_of_functions_len,
+                vector_of_variables_len,
+                vector_of_triplets.as_slice(),
+            )
+            .unwrap()
+        });
+
+        let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
+        self.jac_function = Some(boxed_jac);
+    }
+
+    pub fn lambdify_jacobian_SparseColMat_parallel(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let jac = self.symbolic_jacobian.clone();
+        let vector_of_functions_len = self.vector_of_functions.len();
+        let vector_of_variables_len = self.vector_of_variables.len();
+        let bandwidth = self.bandwidth;
+        
+        // Convert to owned strings to avoid lifetime issues
+     //   let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+        
+        // Store non-zero jacobian positions and expressions (not compiled functions)
+        let mut jacobian_positions = Vec::new();
+        for i in 0..vector_of_functions_len {
+            let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
+                let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                    0
+                } else {
+                    i - kl - 1
+                };
+                (right_border, left_border)
+            } else {
+                (vector_of_variables_len, 0)
+            };
+        let inner: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> = 
+            (left_border..right_border)
+                .into_par_iter()
+                .filter_map(|j| {
+                    let symbolic_partial_derivative = jac[i][j].clone();
+                    if !symbolic_partial_derivative.is_zero() {
+                        let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
+                            Expr::lambdify_thread_safe(symbolic_partial_derivative, variable_str.clone());
+                        Some((i, j, compiled_func))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+                    jacobian_positions.extend(inner);
+                }
+
+        let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let triplets_mutex = std::sync::Mutex::new(Vec::new());
+
+            // Compile and evaluate in parallel without storing closures
+            jacobian_positions
+                .par_iter()
+                .for_each(|(i, j, compiled_func)| {
+                    let P = compiled_func(v_vec.clone());
+                    if P.abs() > 1e-8 {
+                        let mut triplets = triplets_mutex.lock().unwrap();
+                        triplets.push(Triplet::new(*i, *j, P));
+                    }
+                });
+
+            let triplets = triplets_mutex.lock().unwrap();
+            SparseColMat::try_new_from_triplets(
+                vector_of_functions_len,
+                vector_of_variables_len,
+                triplets.as_slice(),
+            )
+            .unwrap()
+        });
+
+        let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
+        self.jac_function = Some(boxed_jac);
+    }
+
+    pub fn lambdify_jacobian_SparseColMat_parallel2(&mut self, _arg: &str, variable_str: Vec<&str>) {
+     let jac = self.symbolic_jacobian.clone();
+        let vector_of_functions_len = self.vector_of_functions.len();
+        let vector_of_variables_len = self.vector_of_variables.len();
+        let bandwidth = self.bandwidth;
+
+        // Convert to owned strings to avoid lifetime issues
+      //  let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+
+        // Create jacobian positions in parallel using outer loop parallelization
+        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> = (0..vector_of_functions_len)
+            .into_par_iter()
+            .flat_map(|i| {
                 let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
                     let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
                     let left_border = if i as i32 - (kl as i32) - 1 < 0 {
@@ -620,130 +737,139 @@ impl Jacobian {
                     };
                     (right_border, left_border)
                 } else {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
+                    (vector_of_variables_len, 0)
                 };
-                for j in left_border..right_border {
-                    // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
-                    let symbolic_partoal_derivative = &jac[i][j];
-                    if !symbolic_partoal_derivative.is_zero() {
-                        let partial_func = Expr::lambdify(
-                            symbolic_partoal_derivative,
-                            variable_str
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .clone(),
-                        );
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        let P = partial_func(v_vec.clone());
-                        if P.abs() > 1e-8 {
-                            let triplet = Triplet::new(i, j, P);
-                            vector_of_triplets_mutex.lock().unwrap().push(triplet);
+                
+                (left_border..right_border)
+                    .filter_map( |j| {
+                        let symbolic_partial_derivative = &jac[i][j];
+                        if !symbolic_partial_derivative.is_zero() {
+                            let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
+                                Expr::lambdify_borrowed_thread_safe(
+                                    &symbolic_partial_derivative,
+                                    variable_str.clone(),
+                                );
+                            Some((i, j, compiled_func))
+                        } else {
+                            None
                         }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let triplets_mutex = std::sync::Mutex::new(Vec::new());
+
+            // Compile and evaluate in parallel without storing closures
+            jacobian_positions
+                .par_iter()
+                .for_each(|(i, j, compiled_func)| {
+                    let P = compiled_func(v_vec.clone());
+                    if P.abs() > 1e-8 {
+                        let mut triplets = triplets_mutex.lock().unwrap();
+                        triplets.push(Triplet::new(*i, *j, P));
                     }
+                });
 
-                    //let v_vec: Vec<f64> = v.iter().cloned().collect();
-
-                    //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
-                    // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                }
-            });
-            let new_function_jacobian: SparseColMat<usize, f64> =
-                SparseColMat::try_new_from_triplets(
-                    vector_of_functions_len,
-                    vector_of_variables_len,
-                    vector_of_triplets.as_slice(),
-                )
-                .unwrap();
-            //  panic!("stop here");
-            new_function_jacobian
-        })
-    } // end of function
-
-    pub fn lambdify_jacobian_SparseColMat(&mut self, arg: &str, variable_str: Vec<&str>) {
-        let symbolic_jacobian = self.symbolic_jacobian.clone();
-        let symbolic_jacobian_rc = symbolic_jacobian.clone();
-
-        let vector_of_functions_len = self.vector_of_functions.len();
-        let vector_of_variables_len = self.vector_of_variables.len();
-
-        let new_jac = Jacobian::jacobian_generate_SparseColMat_par(
-            symbolic_jacobian_rc,
-            vector_of_functions_len,
-            vector_of_variables_len,
-            variable_str.iter().map(|s| s.to_string()).collect(),
-            arg.to_string(),
-            self.bandwidth,
-        );
-        //  let mut boxed_jacobian: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = Box::new(|arg, variable_str_| {
-        //    DMatrix::from_rows(&new_jac) }) ;
+            let triplets = triplets_mutex.lock().unwrap();
+            SparseColMat::try_new_from_triplets(
+                vector_of_functions_len,
+                vector_of_variables_len,
+                triplets.as_slice(),
+            )
+            .unwrap()
+        });
 
         let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
         self.jac_function = Some(boxed_jac);
     }
-    pub fn lambdify_residual_Col(&mut self, arg: &str, variable_str: Vec<&str>) {
+    ////////////////////////////////RESIDUAL LAMBDIFICATION/////////////////////////////////////////////////////////
+
+    pub fn lambdify_residual_Col_modified(&mut self, _arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
-        fn f(
-            vector_of_functions: Vec<Expr>,
-            _arg: String,
-            variable_str: Vec<String>,
-        ) -> Box<dyn Fn(f64, &Col<f64>) -> Col<f64> + 'static> {
-            Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-                //  let mut result: Col<f64> = Col::with_capacity(vector_of_functions.len());
-                let result: Vec<_> = vector_of_functions
-                    .par_iter()
-                    .map(|func| {
-                        let func = Expr::lambdify(
-                            func,
-                            variable_str
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .clone(),
-                        );
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        func(v_vec)
-                    })
-                    .collect();
-                let res = ColRef::from_slice(result.as_slice()).to_owned();
-                res
-            }) //enf of box
-        } // end of function
-        let fun = f(
-            vector_of_functions.to_owned(),
-            arg.to_string(),
-            variable_str.clone().iter().map(|s| s.to_string()).collect(),
-        );
+
+        // Pre-compile all functions once (most significant optimization)
+        let compiled_functions: Vec<_> = vector_of_functions
+            .iter()
+            .map(|func| {
+                Expr::lambdify(
+                    func,
+                    variable_str.iter().map(|s| *s).collect::<Vec<_>>().clone(),
+                )
+            })
+            .collect();
+
+        let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let result: Vec<_> = compiled_functions
+                .iter()
+                .map(|func| func(v_vec.clone()))
+                .collect();
+            ColRef::from_slice(result.as_slice()).to_owned()
+        });
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
         self.residiual_function = boxed_fun;
     }
 
-    pub fn lambdify_residual_Col_eval(&mut self, _arg: &str, variable_str: Vec<&str>) {
-        let variable_str = variable_str
-            .iter()
-            .map(|&s| s.to_owned())
-            .collect::<Vec<String>>();
-        let vector_of_functions = self.vector_of_functions.clone();
-        let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-            let v: Vec<f64> = v.iter().cloned().collect();
-            let v: &[f64] = v.as_slice();
-            // Use par_iter for parallel execution
-            let result: Vec<_> = (0..vector_of_functions.len())
-                .into_par_iter()
-                .map(|i| {
-                    let func = &vector_of_functions[i];
-                    let evaluated = func.eval_expression(
-                        variable_str.clone().iter().map(|s| s.as_str()).collect(),
-                        v,
-                    );
-                    evaluated
-                })
+    pub fn lambdify_residual_Col_parallel(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let vector_of_functions = &self.vector_of_functions;
+        
+        // Convert to owned strings to avoid lifetime issues
+        let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+
+        let compiled_functions: Vec<Box<dyn Fn(Vec<f64> )->f64 + Send+ Sync>>  =
+        vector_of_functions
+            .into_par_iter()
+            .map(|func| {
+                let func = func.clone();
+                let compiled = Expr::lambdify_thread_safe(
+                    func,
+                    variable_str_owned.iter().map(|s| s.as_str()).collect(),
+                );
+                compiled
+            }).collect();
+ 
+
+     let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let result: Vec<_> = compiled_functions
+                .par_iter()
+                .map(|func| func(v_vec.clone()))
                 .collect();
-            // Construct DVector directly from Vec
-            let res = ColRef::from_slice(result.as_slice()).to_owned();
-            res
+            ColRef::from_slice(result.as_slice()).to_owned()
+        });
+        let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
+        self.residiual_function = boxed_fun;
+    }
+
+        pub fn lambdify_residual_Col_parallel2(&mut self, _arg: &str, variable_str: Vec<&str>) {
+        let vector_of_functions = &self.vector_of_functions;
+        
+        // Convert to owned strings to avoid lifetime issues
+        let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+
+        let compiled_functions: Vec<Box<dyn Fn(Vec<f64> )->f64 + Send+ Sync>>  =
+        vector_of_functions
+            .into_par_iter()
+            .map(|func| {
+             
+                let compiled = Expr::lambdify_borrowed_thread_safe(
+                    func,
+                    variable_str_owned.iter().map(|s| s.as_str()).collect(),
+                );
+                compiled
+            }).collect();
+ 
+
+     let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
+            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let result: Vec<_> = compiled_functions
+                .par_iter()
+                .map(|func| func(v_vec.clone()))
+                .collect();
+            ColRef::from_slice(result.as_slice()).to_owned()
         });
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
         self.residiual_function = boxed_fun;
@@ -752,8 +878,11 @@ impl Jacobian {
     ///              DISCRETZED FUNCTIONS
     ///////////////////////////////////////////////////////////////////////////
     pub fn remove_numeric_suffix(input: &str) -> String {
-        let re = Regex::new(r"_\d+$").unwrap();
-        re.replace(input, "").to_string()
+        if let Some(pos) = input.rfind('_') {
+            input[..pos].to_string()
+        } else {
+            input.to_string()
+        }
     }
     fn eq_step(
         matrix_of_names: &[Vec<String>],
@@ -802,8 +931,8 @@ impl Jacobian {
     ) -> (Vec<Expr>, Vec<f64>, usize) {
         // mesh of t's can be defined directly or by size of step -h, and number of steps
         if let Some(mesh) = mesh {
-            info!("mesh is not defined, creating evenly distributed mesh");
             let n_steps = mesh.len();
+            info!("mesh with n_steps = {} is defined directly", n_steps);
             let H: Vec<Expr> = mesh
                 .windows(2)
                 .map(|window| Expr::Const(window[1] - window[0]))
@@ -811,7 +940,10 @@ impl Jacobian {
             (H, mesh, n_steps)
         } else {
             let n_steps = n_steps.unwrap_or(100) + 1;
-            info!("mesh with n_steps = {} is defined directly", n_steps);
+            info!(
+                "mesh is not defined, creating evenly distributed mesh of length {}",
+                n_steps
+            );
             let h = h.unwrap_or(1.0);
             let H: Vec<Expr> = vec![Expr::Const(h); n_steps - 1]; // number of intervals = n_steps -1
             let T_list: Vec<f64> = (0..n_steps).map(|i| t0 + (i as f64) * h).collect();
@@ -825,69 +957,45 @@ impl Jacobian {
         rel_tolerance: Option<HashMap<String, f64>>,
         flat_list_of_names: Vec<String>,
     ) {
-        let mut vec_of_bounds: Vec<(f64, f64)> = Vec::new();
-        let mut vec_of_rel_tolerance: Vec<f64> = Vec::new();
-        if let Some(ref Bounds_) = Bounds.clone() {
-            for Y_i in flat_list_of_names.iter() {
-                let name_without_index = Self::remove_numeric_suffix(&Y_i);
+        let len = flat_list_of_names.len();
 
-                let bound_pair = Bounds_.get(&name_without_index);
-                if let Some(bound_pair) = bound_pair {
-                    vec_of_bounds.push(*bound_pair)
+        self.bounds = Bounds.as_ref().map(|bounds_map| {
+            let mut vec_of_bounds = Vec::with_capacity(len);
+            for name in &flat_list_of_names {
+                // Fast string processing: find last underscore and extract base name
+                let base_name = if let Some(pos) = name.rfind('_') {
+                    &name[..pos]
+                } else {
+                    name
+                };
+
+                if let Some(&bound_pair) = bounds_map.get(base_name) {
+                    vec_of_bounds.push(bound_pair);
                 }
             }
-            self.bounds = Some(vec_of_bounds.clone());
-        } else {
-            self.bounds = None
-        }
+            vec_of_bounds
+        });
 
-        if let Some(ref rel_tolerance_) = rel_tolerance {
-            for Y_i in flat_list_of_names.iter() {
-                let name_without_index = Self::remove_numeric_suffix(&Y_i);
-                let rel_tolerance = rel_tolerance_.get(&name_without_index);
-                if let Some(rel_tolerance) = rel_tolerance {
-                    vec_of_rel_tolerance.push(*rel_tolerance)
+        self.rel_tolerance_vec = rel_tolerance.as_ref().map(|tolerance_map| {
+            let mut vec_of_tolerance = Vec::with_capacity(len);
+            for name in &flat_list_of_names {
+                // Fast string processing: find last underscore and extract base name
+                let base_name = if let Some(pos) = name.rfind('_') {
+                    &name[..pos]
+                } else {
+                    name
+                };
+
+                if let Some(&tolerance) = tolerance_map.get(base_name) {
+                    vec_of_tolerance.push(tolerance);
                 }
             }
-            self.rel_tolerance_vec = Some(vec_of_rel_tolerance.clone());
-        } else {
-            self.rel_tolerance_vec = None
-        }
+            vec_of_tolerance
+        });
     }
 
-    fn consistency_test(
-        &mut self,
-        discreditized_system_flat: Vec<Expr>,
-        flat_list_of_names: Vec<String>,
-    ) {
-        // varaibles from every expression in the system
-        let vars_from_flat: Vec<Vec<String>> = discreditized_system_flat
-            .clone()
-            .iter()
-            .map(|exp_i| Expr::all_arguments_are_variables(exp_i))
-            .collect();
-        self.variables_for_all_disrete = vars_from_flat.clone();
-        let flat_vec_of_vars_extracted: Vec<String> =
-            vars_from_flat.into_iter().flatten().collect();
-        let hashset_of_vars_extracted: HashSet<String> =
-            flat_vec_of_vars_extracted.into_iter().collect();
-        let hashset_of_vars: HashSet<String> = flat_list_of_names.clone().into_iter().collect();
-        let found_difference: HashSet<String> = hashset_of_vars_extracted
-            .difference(&hashset_of_vars)
-            .cloned()
-            .collect();
-        //  println!("hashset_of_vars_extracted: {:?}", hashset_of_vars_extracted);
-
-        if !found_difference.is_empty() {
-            println!("found error: {:?}", found_difference);
-            panic!(
-                "\n \n \n Some variables are not found in the system {:?} ! \n \n \n",
-                found_difference
-            );
-        }
-    }
-
-    pub fn discretization_system_BVP(
+    /// more efficient parallel version of discretization with boundary conditions
+    pub fn discretization_system_BVP_par(
         &mut self,
         eq_system: Vec<Expr>,
         values: Vec<String>,
@@ -896,152 +1004,193 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
     ) {
-        //  let total_time = Instant::now();
+        let total_start = Instant::now();
+        let mut timer_hash: HashMap<String, f64> = HashMap::new();
         let (H, T_list, n_steps) = self.create_mesh(n_steps, h, mesh, t0);
-
-        //   info!("creating discretization equations with n_steps = {}, H = {:?} \n ({}), \n T_list = {:?}, \n ({})", n_steps, H, H.len(),T_list, T_list.len());
-        // variables on each time slice [[x_0, y_0, z_0], [x_1, y_1, z_1], [x_2, y_2, z_2]]
         let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());
-        /*
-        println!(
-            "matrix of names = {:?}, matrix of expr = {:?}",
-            &matrix_of_names, &matrix_of_expr
+        let bc_handling = Instant::now();
+        // Pre-compute boundary conditions lookup for O(1) access
+        let bc_lookup: HashMap<String, HashMap<usize, f64>> = BorderConditions
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
+        // Pre-compute variables to exclude from boundary conditions
+        let mut vars_for_boundary_conditions = HashMap::new();
+        let mut vars_to_exclude = HashSet::new();
+
+        for (var_name, conditions) in &bc_lookup {
+            if let Some(var_idx) = values.iter().position(|v| v == var_name) {
+                for (&pos, &value) in conditions {
+                    match pos {
+                        0 => {
+                            // Initial condition
+                            let var_name = &matrix_of_names[0][var_idx];
+                            vars_for_boundary_conditions.insert(var_name.clone(), value);
+                            vars_to_exclude.insert(var_name.clone());
+                        }
+                        1 => {
+                            // Final condition
+                            let var_name = &matrix_of_names[n_steps - 1][var_idx];
+                            vars_for_boundary_conditions.insert(var_name.clone(), value);
+                            vars_to_exclude.insert(var_name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        timer_hash.insert(
+            "bc handling".to_string(),
+            bc_handling.elapsed().as_millis() as f64,
         );
-            */
         // DISCRETAZING EQUATIONS
         println!("creating discretization equations");
-        /* non parallel version
-         let now = Instant::now();
-        let mut discreditized_system: Vec<Expr> = Vec::with_capacity(n_steps * eq_system.len());
-        // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
-        for j in 0..n_steps - 1 {
-            for (i, eq_i) in eq_system.iter().enumerate() {
-                    //  println!("eq_i = {:?}", eq_i);
-                    //current time step
-                    let t = T_list[j];
-                    let eq_step_j =Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
+        let discretization_start = Instant::now();
 
-                    // defining residuals for each equation on each time step
-                    let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
-                    let Y_j = &matrix_of_expr[j][i].clone();
-                    let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
-                    // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
-
-                    let res_ij = res_ij.symplify();
-                    discreditized_system.push( res_ij);
-
-            } // end of for loop eq_i
-        } // end of for j in 0..n_steps
-        */
-        //  let now = Instant::now();
-
-        // iterate over eq_system and for each eq_i create a vector of discretization equations for all time steps
-        let discreditized_system: Vec<Expr> = (0..n_steps - 1)
+        // Optimized discretization with variable tracking
+        let (discreditized_system, variables_for_all_discrete): (Vec<Expr>, Vec<Vec<String>>) = (0
+            ..n_steps - 1)
             .into_par_iter()
             .flat_map(|j| {
+                let t = T_list[j];
                 eq_system
                     .par_iter()
                     .enumerate()
                     .map(|(i, eq_i)| {
-                        let t = T_list[j]; //set time value of j-th time step
-                        // defining residuals for each equation on each time step
                         let eq_step_j =
-                            Self::eq_step(&matrix_of_names, &eq_i, &values, &arg, j, t, &scheme);
+                            Self::eq_step(&matrix_of_names, eq_i, &values, &arg, j, t, &scheme);
                         let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
-                        let Y_j = &matrix_of_expr[j][i].clone();
+                        let Y_j = &matrix_of_expr[j][i];
                         let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
-                        res_ij.symplify()
+
+                        // Track variables used in this equation (excluding boundary condition vars)
+                        let mut vars_in_equation = Vec::new();
+                        let y_j_plus_1_name = &matrix_of_names[j + 1][i];
+                        let y_j_name = &matrix_of_names[j][i];
+
+                        if !vars_to_exclude.contains(y_j_plus_1_name) {
+                            vars_in_equation.push(y_j_plus_1_name.clone());
+                        }
+                        if !vars_to_exclude.contains(y_j_name) {
+                            vars_in_equation.push(y_j_name.clone());
+                        }
+
+                        // Add variables from eq_step_j (from original equation at this time step)
+                        for var_idx in 0..values.len() {
+                            let var_name = &matrix_of_names[j][var_idx];
+                            if !vars_to_exclude.contains(var_name) {
+                                vars_in_equation.push(var_name.clone());
+                            }
+                        }
+
+                        (res_ij.symplify(), vars_in_equation)
                     })
                     .collect::<Vec<_>>()
             })
-            .collect();
-        //   println!("discretization system created in {} seconds", now.elapsed().as_secs_f64());
+            .unzip();
 
-        // SETTING UP BOUNDARY CONDITION
-        let mut flat_list_of_names = matrix_of_names
-            .clone()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut flat_list_of_expr = matrix_of_expr
-            .clone()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut vars_for_boundary_conditions = HashMap::new();
-        for j in 0..n_steps - 1 {
-            for (i, _) in eq_system.iter().enumerate() {
-                let Y_name = &values[i]; //y_i
-                //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
-                if let Some((initial_or_final, condition)) = BorderConditions.get(Y_name) {
-                    // defining residuals for each equation on each time step
-                    let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
-                    let Y_j = &matrix_of_expr[j][i].clone();
-                    let Y_j_plus_1_str = &matrix_of_names[j + 1][i].clone();
-                    let Y_j_str = &matrix_of_names[j][i].clone();
-                    // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
-                    if j == 0 && *initial_or_final == 0 {
-                        println!("found initial condition");
-                        vars_for_boundary_conditions.insert(Y_j_str.clone(), *condition);
-                        // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
-                        println!("variable {:?} deleted from list", Y_j_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_str);
-                        flat_list_of_expr.retain(|expr| expr != Y_j);
-                    }
-
-                    if j == n_steps - 2 && *initial_or_final == 1 {
-                        println!("found final condition");
-                        vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), *condition);
-                        println!("variable {:?} deleted from list", Y_j_plus_1_str);
-                        flat_list_of_names.retain(|name| name != Y_j_plus_1_str);
-                        flat_list_of_expr.retain(|expr| expr != Y_j_plus_1);
-                    }
-                    //  println!("{:?}",vars_for_boundary_conditions);
-                }
-                // end of if let Some BorderCondition
-                else {
-                    panic!("Border condition for variable {Y_name} not found")
-                }
-            } // end of for loop eq_i
-        } // end of for j in 0..n_steps
-
-        let mut discreditized_system_with_BC = Vec::new();
-        for mut eq_i in discreditized_system {
-            for (Y, k) in vars_for_boundary_conditions.iter() {
-                //  println!("y= {}, eq_i = {:?}", Y,Expr::to_string( &eq_i));
-                eq_i = eq_i.set_variable(Y, *k);
-                eq_i = eq_i.symplify();
-            }
-            // println!(" \n eq_i+BC {:?}",Expr::to_string( &eq_i));
-            discreditized_system_with_BC.push(eq_i.clone());
-        }
-        //
-        let discreditized_system_flat = discreditized_system_with_BC;
-
-        self.consistency_test(
-            discreditized_system_flat.clone(),
-            flat_list_of_names.clone(),
+        self.variables_for_all_disrete = variables_for_all_discrete;
+        timer_hash.insert(
+            "discretization of equations".to_string(),
+            discretization_start.elapsed().as_millis() as f64,
         );
-        //
+        let start_flat_list = Instant::now();
+
+        // Efficient flat list creation with pre-allocation
+        let total_vars = values.len() * n_steps;
+        let mut flat_list_of_names = Vec::with_capacity(total_vars);
+        let mut flat_list_of_expr = Vec::with_capacity(total_vars);
+
+        for var_idx in 0..values.len() {
+            for time_idx in 0..n_steps {
+                let name = &matrix_of_names[time_idx][var_idx];
+                if !vars_to_exclude.contains(name) {
+                    flat_list_of_names.push(name.clone());
+                    flat_list_of_expr.push(matrix_of_expr[time_idx][var_idx].clone());
+                }
+            }
+        }
+
+        timer_hash.insert(
+            "flat list creation".to_string(),
+            start_flat_list.elapsed().as_millis() as f64,
+        );
+        let BC_application_start = Instant::now();
+        // Apply boundary conditions to discretized system in parallel
+        let discreditized_system_with_BC: Vec<Expr> = discreditized_system
+            .into_par_iter()
+            .map(|mut eq_i| {
+                for (var_name, &value) in &vars_for_boundary_conditions {
+                    eq_i = eq_i.set_variable(var_name, value);
+                }
+                eq_i.symplify()
+            })
+            .collect();
+
+        let discreditized_system_flat = discreditized_system_with_BC;
+        timer_hash.insert(
+            "BC application".to_string(),
+            BC_application_start.elapsed().as_millis() as f64,
+        );
+        let consistency_start = Instant::now();
+        // Simplified consistency test using pre-computed variables
+        let hashset_of_vars: HashSet<&String> = flat_list_of_names.iter().collect();
+        let mut missing_vars = Vec::new();
+
+        for var_list in &self.variables_for_all_disrete {
+            for var in var_list {
+                if !hashset_of_vars.contains(var) {
+                    missing_vars.push(var.clone());
+                }
+            }
+        }
+
+        if !missing_vars.is_empty() {
+            missing_vars.sort_unstable();
+            missing_vars.dedup();
+            panic!("Variables not found in system: {:?}", missing_vars);
+        }
+        timer_hash.insert(
+            "consistency test".to_string(),
+            consistency_start.elapsed().as_millis() as f64,
+        );
+
         self.vector_of_functions = discreditized_system_flat;
         self.vector_of_variables = flat_list_of_expr;
         self.variable_string = flat_list_of_names.clone();
+        let bounds_and_tolerances_start = Instant::now();
         self.process_bounds_and_tolerances(Bounds, rel_tolerance, flat_list_of_names);
-        //
+        timer_hash.insert(
+            "bounds and tolerances".to_string(),
+            bounds_and_tolerances_start.elapsed().as_millis() as f64,
+        );
 
-        // println!("total time _elapsed_ {}", total_time.elapsed().as_secs());
-    } // end of discretization_system
+        // timing
+        let total_end = total_start.elapsed().as_millis() as f64;
+        *timer_hash.get_mut("bc handling").unwrap() /= total_end / 100.0;
+        *timer_hash.get_mut("discretization of equations").unwrap() /= total_end / 100.0;
+        *timer_hash.get_mut("BC application").unwrap() /= total_end / 100.0;
+        *timer_hash.get_mut("flat list creation").unwrap() /= total_end / 100.0;
+        *timer_hash.get_mut("consistency test").unwrap() /= total_end / 100.0;
+        *timer_hash.get_mut("bounds and tolerances").unwrap() /= total_end / 100.0;
+        timer_hash.insert("total time, sec".to_string(), total_end);
+
+        let mut table = Builder::from(timer_hash.clone()).build();
+        table.with(Style::modern_rounded());
+        println!("{}", table.to_string());
+    }
 
     fn find_bandwidths(&mut self) {
         let A = &self.symbolic_jacobian;
         let n = A.len();
-        let mut kl = 0; // Number of subdiagonals
-        let mut ku = 0; // Number of superdiagonals
+        // kl  Number of subdiagonals
+        // ku = 0; Number of superdiagonals
 
         /*
             Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
@@ -1050,20 +1199,30 @@ impl Jacobian {
         Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
          and updates ku if this distance is greater than the current value of ku.
              */
-        for i in 0..n {
-            for j in 0..n {
-                if A[i][j] != Expr::Const(0.0) {
-                    if j > i {
-                        ku = std::cmp::max(ku, j - i);
-                    } else if i > j {
-                        kl = std::cmp::max(kl, i - j);
+        let (kl, ku) = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let mut row_kl = 0;
+                let mut row_ku = 0;
+                for j in 0..n {
+                    if A[i][j] != Expr::Const(0.0) {
+                        if j > i {
+                            row_ku = std::cmp::max(row_ku, j - i);
+                        } else if i > j {
+                            row_kl = std::cmp::max(row_kl, i - j);
+                        }
                     }
                 }
-            }
-        }
+                (row_kl, row_ku)
+            })
+            .reduce(
+                || (0, 0),
+                |acc, row| (std::cmp::max(acc.0, row.0), std::cmp::max(acc.1, row.1)),
+            );
 
         self.bandwidth = Some((kl, ku));
     }
+
     // main function of this module
     // This function essentially sets up all the necessary components for solving a Boundary Value Problem, including discretization,
     // Jacobian calculation, and preparation of numerical evaluation functions. It allows for different methods of handling sparse or dense matrices,
@@ -1078,7 +1237,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
@@ -1094,7 +1253,7 @@ impl Jacobian {
         };
         self.method = method.clone();
         let begin = Instant::now();
-        self.discretization_system_BVP(
+        self.discretization_system_BVP_par(
             eq_system,
             values.clone(),
             arg.clone(),
@@ -1149,7 +1308,9 @@ impl Jacobian {
             "Dense" => self.lambdify_jacobian_DMatrix(param.as_str(), indexed_values.clone()),
             "Sparse_1" => self.lambdify_jacobian_CsMat(param.as_str(), indexed_values.clone()),
             "Sparse_2" => self.lambdify_jacobian_CsMatrix(param.as_str(), indexed_values.clone()),
-            "Sparse" => self.lambdify_jacobian_SparseColMat(param.as_str(), indexed_values.clone()),
+            "Sparse" => {
+                self.lambdify_jacobian_SparseColMat_parallel2(param.as_str(), indexed_values.clone())
+            }
             _ => panic!("unknown method: {}", method),
         }
         timer_hash.insert(
@@ -1168,7 +1329,7 @@ impl Jacobian {
             "Dense" => self.lambdify_residual_DVector(param.as_str(), indexed_values.clone()),
             "Sparse_1" => self.lambdify_residual_CsVec(param.as_str(), indexed_values.clone()),
             "Sparse_2" => self.lambdify_residual_DVector(param.as_str(), indexed_values.clone()),
-            "Sparse" => self.lambdify_residual_Col(param.as_str(), indexed_values.clone()),
+            "Sparse" => self.lambdify_residual_Col_parallel2(param.as_str(), indexed_values.clone()),
             _ => panic!("unknown method: {}", method),
         }
         timer_hash.insert(
@@ -1285,7 +1446,7 @@ mod tests {
         let expexted_jac = DMatrix::from_row_slice(2, 2, &[1.0, 10.0, 1.0, 1.0]);
         // cast type to deisred crate type
         // FAER CRATE
-        Jacobian_instance.lambdify_jacobian_SparseColMat("x", vec!["y", "z"]);
+        Jacobian_instance.lambdify_jacobian_SparseColMat_modified("x", vec!["y", "z"]);
 
         let variables = &*Vectors_type_casting(vect, "Sparse".to_string());
         let jac = Jacobian_instance.jac_function.as_mut().unwrap();

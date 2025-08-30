@@ -78,7 +78,7 @@
 //! Boundary value problem solver - Rust translation from SciPy's _bvp.py
 //!
 //! This module implements a 4th order collocation algorithm with residual control
-//! similar to the MATLAB/SciPy BVP solver, translated from Python to Rust.
+//! similar to the SciPy BVP solver, translated from Python to Rust.
 //! Important notes about construction of functions in this numerical method
 //! In most of the others methods Residuals function will be as follows
 //! : dyn Fn(f64, &faer_col) -> faer_col - takes argument value and unknowns
@@ -888,7 +888,10 @@ pub fn solve_newton(
     let mut lu_solver: Option<faer::sparse::linalg::solvers::Lu<_, _>> = None;
     let mut cost = 0.0;
 
-    for _iteration in 0..max_iter {
+    info!("\n \n Starting Newton iterations for collocation system \n \n");
+
+    for iteration in 0..max_iter {
+        info!("\n \n Newton iteration {} \n \n", iteration + 1);
         custom_timer.fun_tic();
         // Compute collocation residuals and function values
         let (col_res, y_middle, f, f_middle) = collocation_fun(fun, &y, &p, x, h);
@@ -914,6 +917,7 @@ pub fn solve_newton(
         }
 
         if recompute_jac {
+            info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             custom_timer.jac_tic();
             *calc_statistics
                 .entry("number of jacobians recalculations".to_string())
@@ -1002,7 +1006,12 @@ pub fn solve_newton(
             let mut best_p = p.clone();
             let mut best_cost = cost;
 
+            info!("\n \n Starting backtracking line search \n \n");
+
             for trial in 0..=n_trial {
+                if trial > 0 {
+                    info!("\n \n Line search trial {}, alpha = {} \n \n", trial, alpha);
+                }
                 let mut y_new = y.clone();
                 let mut p_new = p.clone();
 
@@ -1088,7 +1097,10 @@ pub fn solve_newton(
             }
 
             if converged {
+                info!("\n \n Newton iteration converged! \n \n");
                 break;
+            } else {
+                info!("\n \n Newton iteration not converged, continuing... \n \n");
             }
 
             // Decide whether to recompute Jacobian
@@ -1183,6 +1195,7 @@ pub fn estimate_rms_residuals(
     f_middle: &faer_dense_mat,
 ) -> faer_col {
     let (n, m1) = (r_middle.nrows(), r_middle.ncols()); // n equations, m-1 intervals
+    info!("\n \n Estimating RMS residuals using Lobatto quadrature \n \n");
 
     // Compute middle points of intervals
     let mut x_middle = faer_col::zeros(m1);
@@ -1311,10 +1324,12 @@ pub fn solve_bvp(
     customtimer: Option<CustomTimer>,
 ) -> Result<BVPResult, String> {
     if fun_jac.is_none() {
-        info!("\n No Jacobian provided, using numerical estimation \n");
+        info!("\n \n No Jacobian provided, using numerical estimation \n \n");
     } else {
-        println!("\n Analytical Jacobian provided! \n");
+        info!("\n \n Analytical Jacobian provided! \n \n");
     }
+
+    //  info!("\n \n Starting BVP solver with {} equations and {} mesh points \n \n", n, m);
     let mut custom_timer = customtimer.unwrap_or_else(|| CustomTimer::new());
     let vec_of_tuples = vec![
         ("number of iterations".to_string(), 0),

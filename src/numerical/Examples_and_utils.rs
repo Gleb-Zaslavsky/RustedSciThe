@@ -78,13 +78,13 @@ impl NonlinEquation {
         match self {
             NonlinEquation::LaneEmden5 => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-2*x*z - y^5"];
+                let eqs = vec!["z", "-2*z/x - y^5"];
                 let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
                 vec_eqs
             }
             NonlinEquation::ParachuteEquation => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-x^2 +1"]; //??? y not x
+                let eqs = vec!["z", "1-z^2"]; //??? y not x
                 let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
                 vec_eqs
             }
@@ -96,7 +96,7 @@ impl NonlinEquation {
             }
             NonlinEquation::TwoPointBVP => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-(2.0/1.0)*(1+ln( (y)^2.0 ))*y"];
+                let eqs = vec!["z", "-(2.0/4.0)*(1+2.0*ln( (y) ))*y"];
                 let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
                 vec_eqs
             }
@@ -110,36 +110,8 @@ impl NonlinEquation {
             NonlinEquation::TwoPointBVP => vec!["y".to_string(), "z".to_string()],
         }
     }
-    pub fn boundary_conditions(&self) -> HashMap<String, (usize, f64)> {
-        match self {
-            NonlinEquation::LaneEmden5 => {
-                let mut BorderConditions = HashMap::new();
-                BorderConditions.insert("z".to_string(), (0usize, 0.0f64));
-                BorderConditions.insert("y".to_string(), (0usize, 1.0f64));
-                BorderConditions
-            }
-            NonlinEquation::ParachuteEquation => {
-                let mut BorderConditions = HashMap::new();
-                BorderConditions.insert("z".to_string(), (0usize, 0.0f64));
-                BorderConditions.insert("y".to_string(), (0usize, 0.0f64));
-                BorderConditions
-            }
-            NonlinEquation::Clairaut => {
-                let mut BorderConditions = HashMap::new();
-                BorderConditions.insert("zz".to_string(), (1usize, 2.0f64));
-                BorderConditions.insert("z".to_string(), (1usize, 0.0f64));
-                BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
-                BorderConditions
-            }
-            NonlinEquation::TwoPointBVP => {
-                let mut BorderConditions = HashMap::new();
-                let z_at_1 = -2.0 * (-1.0 / A).exp();
-                let y_at_min_1 = (-1.0 / A).exp();
-                BorderConditions.insert("y".to_string(), (0usize, y_at_min_1));
-                BorderConditions.insert("z".to_string(), (1usize, z_at_1));
-                BorderConditions
-            }
-        }
+    pub fn boundary_conditions(&self) -> HashMap<String, Vec<(usize, f64)>> {
+        self.boundary_conditions2()
     }
     pub fn boundary_conditions2(&self) -> HashMap<String, Vec<(usize, f64)>> {
         match self {
@@ -164,10 +136,13 @@ impl NonlinEquation {
             }
             NonlinEquation::TwoPointBVP => {
                 let mut BorderConditions = HashMap::new();
-                let z_at_1 = -2.0 * (-1.0 / A).exp();
+                let z_at_1 = (-1.0 / A).exp();
                 let y_at_min_1 = (-1.0 / A).exp();
-                BorderConditions.insert("y".to_string(), vec![(0usize, y_at_min_1)]);
-                BorderConditions.insert("z".to_string(), vec![(1usize, z_at_1)]);
+                BorderConditions.insert(
+                    "y".to_string(),
+                    vec![(0usize, y_at_min_1), (1usize, z_at_1)],
+                );
+
                 BorderConditions
             }
         }
@@ -201,7 +176,7 @@ impl NonlinEquation {
                 } else {
                     100
                 };
-                let ressult = "( ln( (exp(2.0*x) +1 )/2  )  -x)".to_string();
+                let ressult = "ln( (exp(2.0*x) +1 )/2  ) - x".to_string();
                 let expr = Expr::parse_expression(&ressult);
                 let y = Expr::lambdify1D_from_linspace(&expr, start, end, num_values);
                 plot_from_expr(ressult, "x", "y_exact", start, end, num_values);
@@ -298,7 +273,7 @@ impl NonlinEquation {
     pub fn rel_tolerance(&self) -> HashMap<String, f64> {
         match self {
             NonlinEquation::LaneEmden5 => {
-                HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)])
+                HashMap::from([("z".to_string(), 1e-7), ("y".to_string(), 1e-7)])
             }
             NonlinEquation::ParachuteEquation => {
                 HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)])

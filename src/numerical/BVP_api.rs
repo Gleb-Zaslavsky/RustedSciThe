@@ -1,4 +1,4 @@
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
@@ -11,10 +11,10 @@ pub struct BVP {
     pub initial_guess: DMatrix<f64>, // initial guess s - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
     pub values: Vec<String>,         //unknown variables
     pub arg: String,                 // time or coordinate
-    pub BorderConditions: HashMap<String, (usize, f64)>, // hashmap where keys are variable names and values are tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
-    pub t0: f64,                                         // initial value of argument
-    pub t_end: f64,                                      // end of argument
-    pub n_steps: usize,                                  //  number of  steps
+    pub BorderConditions: HashMap<String, Vec<(usize, f64)>>, // hashmap where keys are variable names and values are vectors of tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
+    pub t0: f64,                                              // initial value of argument
+    pub t_end: f64,                                           // end of argument
+    pub n_steps: usize,                                       //  number of  steps
     pub scheme: String,   // define crate using for matrices and vectors
     pub strategy: String, // name of the strategy
     pub strategy_params: Option<HashMap<String, Option<Vec<f64>>>>, // solver parameters
@@ -29,6 +29,29 @@ pub struct BVP {
     pub loglevel: Option<String>, //
     pub structure: Option<NRBVP>,
     pub structure_damp: Option<NRBDVPd>,
+}
+
+fn convert_hashmap_to_solver_params(
+    hashmap: &Option<HashMap<String, Option<Vec<f64>>>>,
+) -> Option<SolverParams> {
+    hashmap.as_ref().map(|params| {
+        let max_jac = params
+            .get("max_jac")
+            .and_then(|v| v.as_ref().map(|vec| vec[0] as usize));
+        let max_damp_iter = params
+            .get("maxDampIter")
+            .and_then(|v| v.as_ref().map(|vec| vec[0] as usize));
+        let damp_factor = params
+            .get("DampFacor")
+            .and_then(|v| v.as_ref().map(|vec| vec[0]));
+
+        SolverParams {
+            max_jac,
+            max_damp_iter,
+            damp_factor,
+            adaptive: None, // TODO: Add adaptive conversion if needed
+        }
+    })
 }
 
 impl BVP {
@@ -53,9 +76,9 @@ impl BVP {
             .and_then(|v| v.downcast_ref::<String>())
             .cloned()
             .unwrap_or_default();
-        let BorderConditions: HashMap<String, (usize, f64)> = hashmap
+        let BorderConditions: HashMap<String, Vec<(usize, f64)>> = hashmap
             .get("BorderConditions")
-            .and_then(|v| v.downcast_ref::<HashMap<String, (usize, f64)>>())
+            .and_then(|v| v.downcast_ref::<HashMap<String, Vec<(usize, f64)>>>())
             .cloned()
             .unwrap_or_default();
         let t0: f64 = hashmap
@@ -152,10 +175,10 @@ impl BVP {
         initial_guess: DMatrix<f64>, // initial guess s - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
         values: Vec<String>,         //unknown variables
         arg: String,                 // time or coordinate
-        BorderConditions: HashMap<String, (usize, f64)>, // hashmap where keys are variable names and values are tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
-        t0: f64,                                         // initial value of argument
-        t_end: f64,                                      // end of argument
-        n_steps: usize,                                  //  number of  steps
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>, // hashmap where keys are variable names and values are vectors of tuples with the index of the boundary condition (0 for inititial condition 1 for ending condition) and the value.
+        t0: f64,                                              // initial value of argument
+        t_end: f64,                                           // end of argument
+        n_steps: usize,                                       //  number of  steps
         scheme: String,
         strategy: String, // name of the strategy
         strategy_params: Option<HashMap<String, Option<Vec<f64>>>>, // solver parameters
@@ -192,6 +215,7 @@ impl BVP {
                 let structure_damp = None;
                 (structure, structure_damp, rel_tolerance, Bounds)
             } else if strategy == "Damped" {
+                let converted_params = convert_hashmap_to_solver_params(&strategy_params);
                 let nrbvpd = NRBDVPd::new(
                     eq_system.clone(),
                     initial_guess.clone(),
@@ -203,7 +227,7 @@ impl BVP {
                     n_steps,
                     scheme.clone(),
                     strategy.clone(),
-                    strategy_params.clone(),
+                    converted_params,
                     linear_sys_method.clone(),
                     method.clone(),
                     tolerance,

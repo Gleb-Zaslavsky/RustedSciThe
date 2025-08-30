@@ -1,3 +1,91 @@
+//! # Symbolic Vectors and Matrices Module
+//!
+//! This module provides symbolic linear algebra capabilities by extending the symbolic engine
+//! to work with vectors and matrices of symbolic expressions. It enables symbolic computation
+//! on multi-dimensional mathematical objects, supporting both analytical manipulation and
+//! numerical evaluation.
+//!
+//! ## Purpose
+//!
+//! The module enables:
+//! - **Symbolic Linear Algebra**: Operations on vectors and matrices containing symbolic expressions
+//! - **Analytical Differentiation**: Computing gradients, Jacobians, and Hessians symbolically
+//! - **Numerical Evaluation**: Converting symbolic vectors/matrices to numerical nalgebra types
+//! - **Advanced Matrix Operations**: Determinants, traces, transposes, and block operations
+//! - **Integration with ODE Solvers**: Providing symbolic Jacobians for numerical methods
+//! - **Optimization Support**: Symbolic gradient and Hessian computation for optimization algorithms
+//!
+//! ## Main Structures and Methods
+//!
+//! ### `ExprVector` - Symbolic Vector
+//! A vector where each element is a symbolic expression (`Expr`).
+//!
+//! **Key Methods:**
+//! - `new(data)` - Create from vector of expressions
+//! - `zeros(size)` - Create zero vector
+//! - `indexed_vars_vector(size, name)` - Create vector of indexed variables
+//! - `from_variables(vars)` - Create from variable names
+//! - `dot(other)` - Symbolic dot product
+//! - `axpy(a, x, b)` - AXPY operation: self = a*x + self*b
+//! - `diff(var)` - Differentiate all elements with respect to variable
+//! - `evaluate(vars, values)` - Convert to numerical DVector
+//! - `lambdify(vars)` - Create executable function returning DVector
+//!
+//! ### `ExprMatrix` - Symbolic Matrix
+//! A matrix where each element is a symbolic expression.
+//!
+//! **Key Methods:**
+//! - `new(data)` - Create from 2D vector of expressions
+//! - `zeros(nrows, ncols)` - Create zero matrix
+//! - `identity(size)` - Create identity matrix
+//! - `indexed_vars_matrix(nrows, ncols, name)` - Create matrix of indexed variables
+//! - `transpose()` - Matrix transpose
+//! - `mul_vector(vec)` - Matrix-vector multiplication
+//! - `determinant()` - Symbolic determinant (up to 3×3)
+//! - `trace()` - Sum of diagonal elements
+//! - `diff(var)` - Element-wise differentiation
+//! - `evaluate(vars, values)` - Convert to numerical DMatrix
+//! - `lambdify(vars)` - Create executable function returning DMatrix
+//!
+//! **Advanced Operations:**
+//! - `kronecker(other)` - Kronecker product
+//! - `hadamard(other)` - Element-wise multiplication
+//! - `block_matrix_2x2()` - Create block matrices
+//! - `hstack()` / `vstack()` - Matrix concatenation
+//! - `submatrix()` - Extract submatrices
+//!
+//! ## Interesting and Non-Obvious Code Features
+//!
+//! 1. **Automatic Simplification**: All operations automatically apply symbolic simplification
+//!    using `simplify_()`, ensuring expressions remain in canonical form
+//!
+//! 2. **Operator Overloading**: Implements standard mathematical operators (+, -, *, indexing)
+//!    for both `ExprVector` and `ExprMatrix`, enabling natural mathematical syntax
+//!
+//! 3. **Bidirectional Scalar Multiplication**: Both `Expr * ExprVector` and `ExprVector * Expr`
+//!    are supported through symmetric trait implementations
+//!
+//! 4. **Memory Layout Flexibility**: Provides both row-major (`flatten()`) and column-major
+//!    (`flatten_column_major()`) flattening for compatibility with different numerical libraries
+//!
+//! 5. **Indexed Variable Generation**: Sophisticated indexed variable creation supporting both
+//!    1D (`x0, x1, x2`) and 2D (`A_0_0, A_0_1, A_1_0`) naming schemes
+//!
+//! 6. **Closure Generation with Lifetime Management**: The `lambdify()` methods create closures
+//!    that capture owned data, solving Rust lifetime issues when converting symbolic to numerical
+//!
+//! 7. **AXPY Operation**: Implements the fundamental BLAS operation `y = a*x + b*y` symbolically,
+//!    which is essential for many numerical algorithms
+//!
+//! 8. **Determinant Recursion**: Uses cofactor expansion for 3×3 determinants with proper
+//!    sign alternation, demonstrating recursive symbolic computation
+//!
+//! 9. **Block Matrix Construction**: Advanced `block_matrix_2x2()` method enables construction
+//!    of large matrices from smaller symbolic blocks, useful in finite element methods
+//!
+//! 10. **Integration with nalgebra**: Seamless conversion between symbolic and numerical types,
+//!     enabling hybrid symbolic-numerical workflows
+
 use crate::symbolic::symbolic_engine::Expr;
 
 use nalgebra::{DMatrix, DVector};

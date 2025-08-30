@@ -1,8 +1,6 @@
 //use crate::symbolic::shared_expr::Expr;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::utils::{
-    find_char_positions_outside_brackets, find_pair_to_this_bracket,
-};
+use crate::symbolic::utils::{find_char_positions_outside_brackets, find_pair_to_this_bracket};
 /// a module turns a String expression into a symbolic expression
 ///# Example
 /// ```

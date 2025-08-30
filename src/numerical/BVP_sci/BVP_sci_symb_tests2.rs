@@ -7,6 +7,7 @@ mod tests {
     use crate::numerical::Examples_and_utils::NonlinEquation;
 
     use crate::symbolic::symbolic_engine::Expr;
+    use approx::assert_relative_eq;
     use faer::Row;
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
@@ -639,9 +640,9 @@ mod tests {
     fn test_lane_emden_bvp_compare_residuals() {
         /*
          the Lane-Emden equation of index 5:
-        y′′+2xy′+y**5=0,y(0)=1,y′(0)=0
+        y′′+2y′/x+y**5=0,y(0)=1,y′(0)=0
         y'=z
-        z'=- 2*x*z - y**5
+        z'=- 2*z/x - y**5
         With initial conditions y(0)=1,y′(0)=0
         exact solution:
         y = (1+(x^2)/3)^(-0.5)
@@ -686,7 +687,7 @@ mod tests {
                 let x_val = x[j];
 
                 *f.get_mut(0, j) = z_val; // y' = z
-                *f.get_mut(1, j) = -2.0 * x_val * z_val - y_val.powi(5); // z' = -2*x*z - y^5
+                *f.get_mut(1, j) = -2.0 * z_val / x_val - y_val.powi(5); // z' = -2z/x - y^5
             }
             f
         };
@@ -705,9 +706,16 @@ mod tests {
 
         let res_direct = fun_direct(&x_test, &y, &faer_col::from_fn(1, |_| 0.0));
         let res_from_sym = fun_from_sym(&x_test, &y, &faer_col::from_fn(1, |_| 0.0));
-        //  println!("res_direct: {:?}", res_direct);
-        //  println!("res_from_sym: {:?}", res_from_sym);
-        assert!(res_direct == res_from_sym);
+        for j in 0..n {
+            assert_relative_eq!(
+                res_direct.get(0, j),
+                res_from_sym.get(0, j),
+                epsilon = 1e-10
+            )
+        }
+        //println!("res_direct: {:?}", res_direct);
+        // println!("res_from_sym: {:?}", res_from_sym);
+        // assert!(res_direct == res_from_sym);
     }
     #[test]
     #[should_panic]

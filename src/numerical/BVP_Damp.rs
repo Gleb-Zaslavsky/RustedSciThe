@@ -1,5 +1,7 @@
 /// tests for BVP_Damp module
 mod BVP_Damp_tests;
+/// tests for BVP_Damp module
+mod BVP_Damp_tests2;
 /// interface  abstracting lineat algebra operations and solvers
 pub mod BVP_traits;
 /// utilities for BVP solver in general

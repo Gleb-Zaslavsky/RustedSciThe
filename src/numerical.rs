@@ -152,8 +152,8 @@ pub mod NR_for_ODE;
 ///        let ones = vec![0.0; values.len()*n_steps];
 ///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
 ///        let mut BorderConditions = HashMap::new();
-///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+///        BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+///        BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
 ///        assert_eq!(&eq_system.len(), &2);
 ///        let mut nr =  NRBVP::new(eq_system,
 ///             initial_guess,
@@ -182,6 +182,7 @@ pub mod NR_for_ODE;
 ///  use nalgebra::DVector;
 ///      use std::collections::HashMap;
 ///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
+/// use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::SolverParams;
 ///     use  RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP as NRBDVPd;
 ///     let eq1 = Expr::parse_expression("y-z");
 ///        let eq2 = Expr::parse_expression("-z^3");
@@ -194,20 +195,15 @@ pub mod NR_for_ODE;
 ///        let t_end = 1.0;
 ///        let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
 ///        let strategy =   "Damped".to_string();//
-///        let  strategy_params = Some(HashMap::from([("max_jac".to_string(),
-///       None,    ), ("maxDampIter".to_string(),
-///       None,    ), ("DampFacor".to_string(),
-///       None,    )    , ("adaptive".to_string(),
-///           None,    )
-///      ]));
+///        let  strategy_params = SolverParams::default();
 /// let scheme = "forward".to_string();
 ///        let method =   "Sparse".to_string();// or  "Dense"
 ///        let linear_sys_method = None;
 ///        let ones = vec![0.0; values.len()*n_steps];
 ///        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
 ///        let mut BorderConditions = HashMap::new();
-///        BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-///        BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+///        BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+///        BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
 ///        let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
 ///        let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
 ///        assert_eq!(&eq_system.len(), &2);
@@ -215,7 +211,7 @@ pub mod NR_for_ODE;
 ///             initial_guess,
 ///             values,
 ///             arg,
-///             BorderConditions, t0, t_end, n_steps,scheme, strategy, strategy_params, linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds),None);
+///             BorderConditions, t0, t_end, n_steps,scheme, strategy, Some(strategy_params), linear_sys_method, method, tolerance, Some(rel_tolerance), max_iterations,  Some(Bounds),None);
 
 ///        println!("solving system");
 ///        #[allow(unused_variables)]
@@ -269,8 +265,8 @@ pub mod NR_for_ODE;
 /// let ones = vec![0.0; values.len()*n_steps];
 /// let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
 /// let mut BorderConditions = HashMap::new();
-/// BorderConditions.insert("z".to_string(), (0usize, 1.0f64));
-/// BorderConditions.insert("y".to_string(), (1usize, 1.0f64));
+/// BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+/// BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
 /// let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
 /// let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
 /// assert_eq!(&eq_system.len(), &2);

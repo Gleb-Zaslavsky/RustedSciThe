@@ -50,24 +50,24 @@
 //! - `BC_closure_creater()`: Creates boundary condition functions from HashMap
 //! - `plot_result()`, `save_to_file()`: Result visualization and export
 //!
+use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
+use crate::Utils::plots::{plots, plots_gnulot};
 use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 use crate::numerical::BVP_sci::BVP_sci_faer::{
     BCFunction, BCJacobian, BVPResult, ODEFunction, ODEJacobian, faer_col, faer_dense_mat,
     solve_bvp,
 };
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
+use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
 use crate::symbolic::symbolic_engine::Expr;
 use chrono::Local;
+use faer::mat::Mat;
 use log::{error, info};
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
 use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
-use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
-use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
-use crate::Utils::plots::{plots, plots_gnulot};
-use faer::mat::Mat;
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
 pub struct BVPwrap {
@@ -197,7 +197,7 @@ impl BVPwrap {
         &mut self,
         use_analytical_jacobian: Option<bool>,
         Bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
-        loglevel: Option<String>
+        loglevel: Option<String>,
     ) {
         if let Some(use_analytical_jacobian) = use_analytical_jacobian {
             if use_analytical_jacobian {
@@ -210,7 +210,7 @@ impl BVPwrap {
             println!("\n Using analytical Jacobian \n");
         }
         self.Bounds = Bounds;
-        if let Some(level) = loglevel{
+        if let Some(level) = loglevel {
             self.loglevel = Some(level)
         }
     }
@@ -438,17 +438,13 @@ impl BVPwrap {
         let res = self.result.clone();
         let x_mesh = res.x.clone();
         let y = res.y.clone();
-        let p =  res.p.clone();
+        let p = res.p.clone();
         let p = if let Some(p) = p {
-           p 
+            p
         } else {
-             faer_col::zeros(0)
+            faer_col::zeros(0)
         };
-        let jacfunc = jacobian.unwrap()(
-            &x_mesh,
-            &y,
-            &p
-            ).0;
+        let jacfunc = jacobian.unwrap()(&x_mesh, &y, &p).0;
         size_of_jacobian(jacfunc);
         elapsed_time(end);
     }

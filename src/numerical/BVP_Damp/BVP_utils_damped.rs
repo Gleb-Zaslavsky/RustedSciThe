@@ -1,15 +1,19 @@
 use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
-use crate::symbolic::symbolic_functions::Jacobian;
+
 use nalgebra::DMatrix;
 
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::SolverParams;
 use std::collections::HashMap;
-
-use log::info;
-/*
-pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f64)>) -> f64 {
+////////////////////////////////////BOUND STEP  CONDITIONS////////////////////////////////////
+/// insired by MuliNewton cpp version of bound step
+pub fn bound_step_Cantera(
+    y: &dyn VectorType,
+    y_new: &dyn VectorType,
+    bounds: &Vec<(f64, f64)>,
+) -> f64 {
     let mut fbound = 1.0;
     //println!("bounds = {:?}", bounds.len());
- //  println!("y_new = {:?}", y_new.to_DVectorType()  );
+    //  println!("y_new = {:?}", y_new.to_DVectorType()  );
 
     for (i, y_i) in y.iterate().enumerate() {
         let below = bounds[i].0;
@@ -18,75 +22,38 @@ pub fn bound_step(y:&dyn VectorType,  y_new:&dyn VectorType, bounds:&Vec<(f64, f
         if y_i < below {
             fbound = ((y_i - below) / (y_i - y_new_i)).min(fbound);
         }
-        if  y_i > above {
-            fbound =  (( (above - y_i) / (y_new_i- y_i) ).min(fbound)  ).max(0.0);
+        if y_i > above {
+            fbound = (((above - y_i) / (y_new_i - y_i)).min(fbound)).max(0.0);
         }
-    };
+    }
     fbound
-
 }
-*/
-pub fn jac_recalc(
-    strategy_params: &Option<HashMap<String, Option<Vec<f64>>>>,
-    m: usize,
-    old_jac: &Option<Box<dyn MatrixType>>,
-    old_recalc_flag: &mut bool,
-) -> bool {
-    //let m_from_task = strategy_params.clone().unwrap().values().collect::<Vec<&Option<Vec<f64>>>>()[0].clone().unwrap()[0] as usize;
-    let m_from_task =
-        if let Some(m_from_task_vec) = strategy_params.clone().unwrap().get("max_jac").unwrap() {
-            m_from_task_vec[0] as usize
-        } else {
-            3
-        };
-    // when jac is None it means this is first iteration
-    if old_jac.is_none() || m > m_from_task {
-        log::info!(
-            "\n number of iterations with old jac {} is higher then threshold {}",
-            m,
-            m_from_task
-        );
-        true
-    } else {
-        *old_recalc_flag
-    }
-}
-
-pub fn convergence_condition(
-    y: &dyn VectorType,
-    abs_tolerance: &f64,
-    rel_tolerance_vec: &Vec<f64>,
+/// insired by MuliNewton cpp version of bound step
+pub fn bound_step_Cantera2(
+    x: &dyn VectorType,
+    step: &dyn VectorType,
+    bounds: &Vec<(f64, f64)>,
 ) -> f64 {
-    let mut sum = 0.0;
-    for (i, y_i) in y.iterate().enumerate() {
-        sum += (y_i).abs() * rel_tolerance_vec[i];
-    }
-    let conv = sum.max(*abs_tolerance);
+    let mut fbound: f64 = 1.0;
 
-    conv
-}
+    for (i, val) in x.iterate().enumerate() {
+        let below = bounds[i].0;
+        let above = bounds[i].1;
+        let step_i = step.get_val(i);
+        let newval = val + step_i;
 
-pub fn if_initial_guess_inside_bounds(
-    initial_guess: &DMatrix<f64>,
-    Bounds: &Option<HashMap<String, (f64, f64)>>,
-    values: Vec<String>,
-) -> () {
-    //  initial_guess - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
-    //  Bounds - hashmap where keys are variable names and values are tuples with lower and upper bounds.
-    //  Function checks if initial guess is inside the bounds of the variables. If not, it panics.
-    for (i, row) in initial_guess.row_iter().enumerate() {
-        let var_name = values[i].clone();
-        let bounds = Bounds.as_ref().unwrap().get(&var_name).unwrap();
-        let (lower, upper) = bounds;
-        if row.iter().any(|&x| x < *lower || x > *upper) {
-            panic!(
-                "\n, \n, Initial guess  of the variable {} is outside the bounds {:?}.",
-                var_name, &bounds
-            );
+        if newval > above {
+            fbound = fbound.min((above - val) / (newval - val)).max(0.0);
+        } else if newval < below {
+            fbound = fbound.min((val - below) / (val - newval));
         }
     }
+
+    fbound
 }
+
 // This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
+// twopnt version
 pub fn bound_step(y: &dyn VectorType, step: &dyn VectorType, bounds: &Vec<(f64, f64)>) -> f64 {
     // Initialize no damping
     let mut fbound = 1.0;
@@ -119,36 +86,132 @@ pub fn bound_step(y: &dyn VectorType, step: &dyn VectorType, bounds: &Vec<(f64, 
     }
     fbound
 }
+
+////////////////////////////////////JACOBIAN RECALCULATION STRATEGY////////////////////////////////////
+pub fn jac_recalc(
+    strategy_params: &Option<SolverParams>,
+    m: usize,
+    old_jac: &Option<Box<dyn MatrixType>>,
+    old_recalc_flag: &mut bool,
+) -> bool {
+    let m_from_task = strategy_params
+        .as_ref()
+        .and_then(|p| p.max_jac)
+        .unwrap_or(3);
+
+    // when jac is None it means this is first iteration
+    if old_jac.is_none() || m > m_from_task {
+        log::info!(
+            "\n number of iterations with old jac {} is higher then threshold {}",
+            m,
+            m_from_task
+        );
+        true
+    } else {
+        *old_recalc_flag
+    }
+}
+/////////////////////////////////////////////CONVERGENCE CONDITIONS////////////////////////////////////
+pub fn convergence_condition(
+    y: &dyn VectorType,
+    abs_tolerance: &f64,
+    rel_tolerance_vec: &Vec<f64>,
+) -> f64 {
+    let mut sum = 0.0;
+    for (i, y_i) in y.iterate().enumerate() {
+        sum += (y_i).abs() * rel_tolerance_vec[i];
+    }
+    // let sum = sum/(y.len() as f64);
+    let conv = sum.max(*abs_tolerance);
+
+    conv
+}
+
+// Usage in damped_step would be:
+// let s1 = convergence_condition2(
+//    &*y_k_plus_1,
+//    &*undamped_step_k_plus_1,
+//    &self.rel_tolerance_vec,
+//    &self.abs_tolerance_vec, // You'd need this as Vec<f64>
+//    self.values.len(),
+//    self.n_steps
+//);
+
+/// convergence condition
+///  insired by MuliNewton cpp version
+pub fn weighted_norm(
+    x: &dyn VectorType,
+    step: &dyn VectorType,
+    rel_tolerance_vec: &Vec<f64>,
+    abs_tolerance: f64,
+    n_components: usize,
+    n_points: usize,
+) -> f64 {
+    let mut sum = 0.0;
+
+    for n in 0..n_components {
+        // Calculate average magnitude for component n
+        let mut esum = 0.0;
+        for j in 0..n_points {
+            let idx = j * n_components + n;
+            esum += x.get_val(idx).abs();
+        }
+
+        // Weight = rtol * average + atol
+        let ewt = rel_tolerance_vec[n] * esum / (n_points as f64) + abs_tolerance;
+
+        // Sum of squared normalized steps for component n
+        for j in 0..n_points {
+            let idx = j * n_components + n;
+            let f = step.get_val(idx) / ewt;
+            sum += f * f;
+        }
+    }
+
+    // Average over all points and take square root
+    sum /= (n_components * n_points) as f64;
+    sum.sqrt()
+}
+pub fn if_initial_guess_inside_bounds(
+    initial_guess: &DMatrix<f64>,
+    Bounds: &Option<HashMap<String, (f64, f64)>>,
+    values: Vec<String>,
+) -> () {
+    //  initial_guess - matrix with number of rows equal to the number of unknown vars, and number of columns equal to the number of steps
+    //  Bounds - hashmap where keys are variable names and values are tuples with lower and upper bounds.
+    //  Function checks if initial guess is inside the bounds of the variables. If not, it panics.
+    for (i, row) in initial_guess.row_iter().enumerate() {
+        let var_name = values[i].clone();
+        let bounds = Bounds.as_ref().unwrap().get(&var_name).unwrap();
+        let (lower, upper) = bounds;
+        if row.iter().any(|&x| x < *lower || x > *upper) {
+            panic!(
+                "\n, \n, Initial guess  of the variable {} is outside the bounds {:?}.",
+                var_name, &bounds
+            );
+        }
+    }
+}
+
+/*
+pub fn count_left_and_right_BC(BorderConditions: &HashMap<String, Vec<(usize, f64)>>) -> (usize, usize) {
+
+    let left_cond = BorderConditions.iter   ().map(|(index, value)|
+        {if index==0
+        {value.len()}
+        })
+        .sum();
+        let right_condition = BorderConditions.iter   ().map(|(index, value)|
+        {if index==0
+        {value.len()}
+        })
+        .sum();
+    (left_cond, right_condition)
+}
+*/
 // sometimes order of indexed variables (and therefore order of values in numerical result y_DMatrix ) and order of original variables turns out to be
 // not the same: in that case permutation is needed to transform result matrix into the same order of
-pub fn interchange_columns(
-    y_DMatrix: DMatrix<f64>,
-    variables: Vec<String>,
-    indexed_variables: Vec<String>,
-) -> DMatrix<f64> {
-    let mut reordering: Vec<usize> = Vec::new();
-    // lets take the same quantity of indexed variables as the original variables
-    let indexed_vars_for_reordering: Vec<String> = indexed_variables[0..variables.len()].to_vec();
-    // remove numeric suffix from indexed variables and compare with original variables
-    let unindexed_vars = indexed_vars_for_reordering
-        .iter()
-        .map(|x| Jacobian::remove_numeric_suffix(&x.clone()))
-        .collect::<Vec<String>>();
 
-    let reordered_result = if variables != unindexed_vars {
-        // if they have the same oreder no permutation needed
-        info!("permutation needed");
-        for var in &unindexed_vars {
-            let index = variables.iter().position(|x| x == var).unwrap();
-            reordering.push(index);
-        }
-        let reordered_result = y_DMatrix.select_rows(&reordering);
-        reordered_result
-    } else {
-        y_DMatrix
-    };
-    reordered_result
-}
 /*
 To avoid this difficulty, the solution of the problem is  carried out in E-steps.  The problem is first solved (via the above iterative process) for
 a modest value of E (e.g.,  E  =  1e-1 or 1e-2), and then,  in turn,  for  values of  e smaller  than the preceding  value  of  E  by a

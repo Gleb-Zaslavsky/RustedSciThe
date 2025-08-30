@@ -30,6 +30,15 @@ pub fn nalgebra_solvers_depot(
         }
 
         "full" => {
+            assert_eq!(
+                A.nrows(),
+                b.len(),
+                "dimensons of matrix and vector must match"
+            );
+            //    println!("{:?}, \n  {:?}", &A, A.shape());
+            // println!("{:?}, \n  {:?}", &b, b.len());
+            // panic!();
+            //  dbg!(&b, b.len());
             let lu = A.to_owned().lu();
             let res = lu.solve(b).unwrap();
             res

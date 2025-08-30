@@ -45,7 +45,12 @@ way that the total number of mesh points needed to represent the solution accura
 */
 // sometimes we just need to double the  number of meshes in the grid (actially we get 2*meshes-1) inserting new points int the center of
 //intervals
-#[allow(dead_code)]
+/// refine all intervals in the grid by adding a point in the center of each interval - naive and straightforward but
+/// expensive approach. This method is used as a reference to compare with other more sophisticated methods
+///  Also if other methods have conditiones if it is needed to add points to the grid and if mothing was added it means
+/// that the solution is converged and we can stop the iteration. This method always adds points to the grid so newton
+/// iteration will stop only when the maximum number of grid refinements is reached
+///
 pub fn refine_all_grid(
     y_DMatrix: &DMatrix<f64>,
     x_mesh: &DVector<f64>,
@@ -96,48 +101,44 @@ pub fn refine_all_grid(
         .copy_from(&y_last);
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {} of shape{:?}",
-        new_initial_guess,
+        "\n \n new_initial_guess of shape{:?}",
+        //   new_initial_guess,
         new_initial_guess.shape()
     );
 
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, number_of_nonzero_keys)
 }
-pub fn easiest_grid_refinement(
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//          EASY  GRID  REFINEMENT  PROCEDURE
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+pub fn easy_grid_refinement(
     y_DMatrix: &DMatrix<f64>,
     x_mesh: &DVector<f64>,
     tolerance: f64,
-    safety_param: f64,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
-    let mut h: Vec<f64> = Vec::new();
-    let mut new_initial_guess: Vec<f64> = Vec::new();
+    info!(
+        "shape of solution {}, {}",
+        y_DMatrix.nrows(),
+        y_DMatrix.ncols()
+    );
+    info!("x_mesh len {:?}", x_mesh.len());
     let (n_rows, _) = y_DMatrix.shape();
     let mut new_grid: Vec<f64> = Vec::new();
-    let mut mark: DVector<i8> = DVector::zeros(x_mesh.len());
-    //info!("{} rows", n_rows);
-    // each row is the solution of the ODE at a points in the grid
+    let mut mark: DVector<i32> = DVector::zeros(x_mesh.len());
+
+    // Mark columns that need refinement by checking all rows
     for (j, y) in y_DMatrix.row_iter().enumerate() {
-        // iterate through the the row (solution for one of the unknown variables) and find the corresponding truncation error that is
-        // larger than the tolerance/safety_param. If it is, the point is marked for refinement.  else not.
-        // Also, we are not refining the first and last points (i==0 and i==-1) because they are not at the boundary.
-        for i in 0..x_mesh.len() {
-            new_initial_guess.push(y[i]); // first we just copy element to new_initial_guess
-            if x_mesh.len() - 1 > i && i > 0 {
-                let h_i = x_mesh[i + 1] - x_mesh[i];
-                h.push(h_i);
-                // truncation error
-                let tau_i = (1.0 / (2.0 * h_i) * (y[i + 1] - 2.0 * y[i] + y[i - 1])).abs();
-                if tau_i > tolerance / safety_param {
-                    mark[i] = 1;
-                    // interpolate between y[i] and y[i+1] and add new point to new_initial_guess
-                    let dy_i = y[i + 1] - y[i];
-                    let y_new = y[i] + dy_i / 2.0;
-                    new_initial_guess.push(y_new);
-                } // if not mark element remains 0
-            } //i>0
-            //for i==0 and i==-1 mark elements remain 0
-        } // for i in 0..x_mesh.len()
+        let y_j_max = y.max();
+        let y_j_min = y.min();
+        let delta = tolerance * (y_j_max - y_j_min);
+        for i in 1..x_mesh.len() - 1 {
+            let tau_i = (y[i] + y[i - 1]).abs();
+            if tau_i > delta {
+                info!("tau {} for i {}", tau_i, i);
+                mark[i - 1] = 1;
+            }
+        }
         info!(
             "\n \n for row {} mark: {:?} len {} \n \n",
             j,
@@ -146,39 +147,50 @@ pub fn easiest_grid_refinement(
         );
     }
 
+    //  total number of new points to add
+    let total_new_points: i32 = mark.sum();
+    log::info!("total new points to add: {}", total_new_points);
+
+    let mut biased_i = 0;
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+    // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
     for i in 0..x_mesh.len() {
-        if mark[i] == 1 {
-            new_grid.push(x_mesh[i]); // old points included
+        let y = y_DMatrix.column(i);
+
+        // Always add the original point first
+        new_grid.push(x_mesh[i]);
+        new_initial_guess.column_mut(biased_i).copy_from(&y);
+        biased_i += 1;
+
+        if mark[i] != 0_i32 && i < x_mesh.len() - 1 {
+            // Add new point between current and next
             let h_i = x_mesh[i + 1] - x_mesh[i];
-            let x_new = x_mesh[i] + h_i / 2.0;
+            let x_new = x_mesh[i] + h_i * 0.5;
             new_grid.push(x_new);
-        } else {
-            new_grid.push(x_mesh[i])
+
+            // Interpolate for new initial guess
+            let y_pl_1 = y_DMatrix.column(i + 1);
+            let dy_i = y_pl_1 - y;
+            let column_to_add = y + &dy_i * 0.5;
+            new_initial_guess
+                .column_mut(biased_i as usize)
+                .copy_from(&column_to_add);
+            biased_i += 1;
         }
     }
 
-    log::info!("\n \n new_grid: {:?}", new_grid);
-    log::info!("of length {}", new_grid.len());
+    log::info!("created new grid of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {:?} of length {}",
-        new_initial_guess,
-        new_initial_guess.len()
-    );
-    log::info!(
-        "will be converted to DMatrix wirh number of columns {} and rows {}",
-        new_grid.len(),
-        n_rows
+        "\n \n new_initial_guess of shape{:?}",
+        new_initial_guess.shape()
     );
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-
-    let number_of_nonzero_keys = mark.iter().sum::<i8>() as usize;
-    log::info!("number of nonzero keys {}", number_of_nonzero_keys);
-    let new_initial_guess: DMatrix<f64> =
-        DMatrix::from_vec(n_rows, new_grid.len(), new_initial_guess);
-
-    (new_grid, new_initial_guess, number_of_nonzero_keys)
+    (new_grid, new_initial_guess, total_new_points as usize)
 }
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//          PEARSON  GRID  REFINEMENT  PROCEDURE
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /*
 Saurces:
 1) ON  A  DIFFERENTIAL  EQUATION  OF  BOUNDARY  LAYER  TYPE
@@ -232,7 +244,9 @@ pub fn pearson_grid_refinement(
         info!("delta {} for component j: {}", delta, j);
 
         for i in 0..x_mesh.len() {
-            mark.insert(i, 0); // default value 0 - no point inserted
+            if !mark.contains_key(&i) {
+                mark.insert(i, 0); // default value 0 - no point inserted
+            }
 
             if x_mesh.len() - 1 > i && i > 0 {
                 let tau_i = (y[i] - y[i - 1]).abs();
@@ -242,7 +256,14 @@ pub fn pearson_grid_refinement(
                 // eq 1, eq 2
                 //
                 if tau_i > delta && both_ys_are_not_too_small {
-                    //  info!("tau_i {}, criterion 1 {},  eta_i {}, criterion 2 {}, ctriterion 3 {}", tau_i, tau_i > delta && both_ys_are_not_too_small ,  eta_i, eta_i > gamma && both_ys_are_not_too_small,  both_ys_are_not_too_small);
+                    info!(
+                        "tau {:3} ({:3}, {:3})> delta {:3} for i {}",
+                        tau_i,
+                        y[i],
+                        y[i - 1],
+                        delta,
+                        i
+                    );
 
                     // how many new points should be added
                     let N = if (tau_i / delta) as i32 >= 1 {
@@ -250,8 +271,13 @@ pub fn pearson_grid_refinement(
                     } else {
                         1
                     };
-                    info!(" conditions vaiolation at index {}, => N = {}", i, N);
-                    mark.insert(i, N); // mark[i] = how many points to insert in i-th position
+                    // info!(" conditions vaiolation at index {}, => N = {}", i, N);
+
+                    // Only update if new N is larger than existing value
+                    let current_N = *mark.get(&i).unwrap_or(&0);
+                    if N > current_N {
+                        mark.insert(i - 1, N);
+                    }
                 }
                 // if not mark element remains 0
             } //i>0
@@ -285,7 +311,10 @@ pub fn pearson_grid_refinement(
                 h[i - 1]
             );
             if (i - 1) != 0 {
-                mark.insert(i - 1, 1);
+                let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+                if 1 > current_N {
+                    mark.insert(i - 1, 1);
+                }
             }
         }
         if !buffer_condition_2 {
@@ -296,19 +325,19 @@ pub fn pearson_grid_refinement(
                 h[i - 1]
             );
 
-            mark.insert(i, 1);
+            let current_N = *mark.get(&i).unwrap_or(&0);
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
     }
-    //  number of points to add
-    let number_of_nonzero_keys = mark
-        .iter()
-        .map(|(_x, y)| if *y != 0 { 1 } else { 0 })
-        .sum::<i32>() as usize;
-    log::info!("number of nonzero keys {}", number_of_nonzero_keys);
+    //  total number of new points to add
+    let total_new_points: i32 = mark.values().sum();
+    log::info!("total new points to add: {}", total_new_points);
 
     let mut biased_i = 0;
     let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + number_of_nonzero_keys);
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
     // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
     for i in 0..x_mesh.len() {
         let y = y_DMatrix.column(i);
@@ -316,33 +345,35 @@ pub fn pearson_grid_refinement(
             //
             // adding points to the grid
             let N = *mark.get(&i).unwrap();
-            let h_i = x_mesh[i + 1] - x_mesh[i];
-            for k in 0..N + 1 {
-                // k=0 refers to yhe element existing in the old mesh
-                let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                if k != 0 {
-                    log::info!("\n \n points added: {} at index {} ", x_new, i);
+            if i < x_mesh.len() - 1 {
+                let h_i = x_mesh[i + 1] - x_mesh[i];
+                for k in 0..N + 1 {
+                    // k=0 refers to yhe element existing in the old mesh
+                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
+                    if k != 0 {
+                        log::info!("\n \n points added: {} at index {} ", x_new, i);
+                    }
+                    new_grid.push(x_new);
                 }
-                new_grid.push(x_new);
-            }
-            //
-            // making interpolation between neighbor points of the previous step solution to form the new initial guess
-            let y_pl_1 = y_DMatrix.column(i + 1);
-            let N = *mark.get(&i).unwrap();
-            let dy_i = y_pl_1 - y;
-            for k in 0..N + 1 {
-                // add new point to new_initial_guess
-                let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                if k != 0 {
-                    log::info!(
-                        "\n \n column added: {} at index {} ",
-                        column_to_add,
-                        biased_i
-                    );
+                //
+                // making interpolation between neighbor points of the previous step solution to form the new initial guess
+                let y_pl_1 = y_DMatrix.column(i + 1);
+                let dy_i = y_pl_1 - y;
+                for k in 0..N + 1 {
+                    // add new point to new_initial_guess
+                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
+                    if k != 0 {
+                        // log::info!( "\n \n column added: {} at index {} ", column_to_add,biased_i);
+                    }
+                    new_initial_guess
+                        .column_mut(biased_i as usize)
+                        .copy_from(&column_to_add);
+                    biased_i += 1;
                 }
-                new_initial_guess
-                    .column_mut(biased_i as usize)
-                    .copy_from(&column_to_add);
+            } else {
+                // Last point - just copy
+                new_grid.push(x_mesh[i]);
+                new_initial_guess.column_mut(biased_i).copy_from(&y);
                 biased_i += 1;
             }
         } else {
@@ -357,15 +388,16 @@ pub fn pearson_grid_refinement(
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {} of shape{:?}",
-        new_initial_guess,
+        "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
 
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, number_of_nonzero_keys)
+    (new_grid, new_initial_guess, total_new_points as usize)
 }
-
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//             GRCAR  AND  SMOOKE  GRID  REFINEMENT  PROCEDURE
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /*
 Saurces
 A  HYBRID NEWTON/TIME-INTEGRATION  PROCEDURE FOR THE
@@ -391,6 +423,15 @@ pub fn grcar_smooke_grid_refinement(
     g: f64,
     C: f64,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
+    info!("old mesh len {:?}", x_mesh.len());
+    info!(
+        "shape of solution {}, {}",
+        y_DMatrix.nrows(),
+        y_DMatrix.ncols()
+    );
+    for (j, y) in y_DMatrix.clone().row_iter().enumerate() {
+        log::debug!("row {} : y= {:}", j, y);
+    }
     let mut h: Vec<f64> = Vec::new();
     for i in 0..x_mesh.len() - 1 {
         let h_i = x_mesh[i + 1] - x_mesh[i];
@@ -404,12 +445,15 @@ pub fn grcar_smooke_grid_refinement(
 
     // each row is the solution of the ODE at a points in the grid
     for (j, y) in y_DMatrix.clone().row_iter().enumerate() {
-        //  println!("y, {:}", y);
+        info!("y= {:}, {:?}", y[0], y[y.len() - 1]);
         let threshold = 1e-4;
         let y_j_max = y.max();
         let y_j_min = y.min();
         let delta = d * (y_j_max - y_j_min);
-        info!("delta {} for component j: {}", delta, j);
+        info!(
+            "delta {} ({}, {}) for component j: {}",
+            delta, y_j_max, y_j_min, j
+        );
         let mut list_dy_dx_i = Vec::new();
 
         for i in 0..x_mesh.len() - 1 {
@@ -432,7 +476,9 @@ pub fn grcar_smooke_grid_refinement(
         let gamma = g * derivative_range;
         info!("gamma {} for component j: {}", gamma, j);
         for i in 0..x_mesh.len() {
-            mark.insert(i, 0); // default value 0 - no point inserted
+            if !mark.contains_key(&i) {
+                mark.insert(i, 0); // default value 0 - no point inserted
+            }
 
             if x_mesh.len() - 1 > i && i > 0 {
                 let dy_i = y[i + 1] - y[i];
@@ -454,7 +500,18 @@ pub fn grcar_smooke_grid_refinement(
                     || (eta_i > gamma && both_ys_are_not_too_small)
                 {
                     //  info!("tau_i {}, criterion 1 {},  eta_i {}, criterion 2 {}, ctriterion 3 {}", tau_i, tau_i > delta && both_ys_are_not_too_small ,  eta_i, eta_i > gamma && both_ys_are_not_too_small,  both_ys_are_not_too_small);
-                    //  info!("eta_i {}, criterion  {}, gamma {}",  eta_i, eta_i > gamma && both_ys_are_not_too_small,  gamma);
+                    info!(
+                        "tau {:3} ({:3}, {:3})> delta {:3} for i {}",
+                        tau_i,
+                        y[i],
+                        y[i - 1],
+                        delta,
+                        i
+                    );
+                    info!(
+                        "eta {:3}  ({:3}, {:3})> gamma {:3} for i {}",
+                        eta_i, dy_dx_i, dy_dx_i_min_1, gamma, i
+                    );
                     // how many new points should be added
                     let N = if (tau_i / delta) as i32 >= 1 {
                         (tau_i / delta) as i32
@@ -462,7 +519,12 @@ pub fn grcar_smooke_grid_refinement(
                         1
                     };
                     info!(" conditions vaiolation at index {}, => N = {}", i, N);
-                    mark.insert(i, N); // mark[i] = how many points to insert in i-th position
+
+                    // Only update if new N is larger than existing value
+                    let current_N = *mark.get(&i).unwrap_or(&0);
+                    if N > current_N {
+                        mark.insert(i - 1, N);
+                    }
                 }
                 // if not mark element remains 0
             } //i>0
@@ -496,7 +558,10 @@ pub fn grcar_smooke_grid_refinement(
                 h[i - 1]
             );
             if (i - 1) != 0 {
-                mark.insert(i - 1, 1);
+                let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+                if 1 > current_N {
+                    mark.insert(i - 1, 1);
+                }
             }
         }
         if !buffer_condition_2 {
@@ -507,19 +572,19 @@ pub fn grcar_smooke_grid_refinement(
                 h[i - 1]
             );
 
-            mark.insert(i, 1);
+            let current_N = *mark.get(&i).unwrap_or(&0);
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
     }
-    //  number of points to add
-    let number_of_nonzero_keys = mark
-        .iter()
-        .map(|(_x, y)| if *y != 0 { 1 } else { 0 })
-        .sum::<i32>() as usize;
-    log::info!("number of nonzero keys {}", number_of_nonzero_keys);
+    //  total number of new points to add
+    let total_new_points: i32 = mark.values().sum();
+    log::info!("total new points to add: {}", total_new_points);
 
     let mut biased_i = 0;
     let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + number_of_nonzero_keys);
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
     // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
     for i in 0..x_mesh.len() {
         let y = y_DMatrix.column(i);
@@ -527,33 +592,39 @@ pub fn grcar_smooke_grid_refinement(
             //
             // adding points to the grid
             let N = *mark.get(&i).unwrap();
-            let h_i = x_mesh[i + 1] - x_mesh[i];
-            for k in 0..N + 1 {
-                // k=0 refers to yhe element existing in the old mesh
-                let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                if k != 0 {
-                    log::info!("\n \n points added: {} at index {} ", x_new, i);
+            if i < x_mesh.len() - 1 {
+                let h_i = x_mesh[i + 1] - x_mesh[i];
+                for k in 0..N + 1 {
+                    // k=0 refers to yhe element existing in the old mesh
+                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
+                    if k != 0 {
+                        log::info!("\n \n points added: {} at index {} ", x_new, i);
+                    }
+                    new_grid.push(x_new);
                 }
-                new_grid.push(x_new);
-            }
-            //
-            // making interpolation between neighbor points of the previous step solution to form the new initial guess
-            let y_pl_1 = y_DMatrix.column(i + 1);
-            let N = *mark.get(&i).unwrap();
-            let dy_i = y_pl_1 - y;
-            for k in 0..N + 1 {
-                // add new point to new_initial_guess
-                let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                if k != 0 {
-                    log::info!(
-                        "\n \n column added: {} at index {} ",
-                        column_to_add,
-                        biased_i
-                    );
+                //
+                // making interpolation between neighbor points of the previous step solution to form the new initial guess
+                let y_pl_1 = y_DMatrix.column(i + 1);
+                let dy_i = y_pl_1 - y;
+                for k in 0..N + 1 {
+                    // add new point to new_initial_guess
+                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
+                    if k != 0 {
+                        log::info!(
+                            "\n \n column added: {} at index {} ",
+                            column_to_add,
+                            biased_i
+                        );
+                    }
+                    new_initial_guess
+                        .column_mut(biased_i as usize)
+                        .copy_from(&column_to_add);
+                    biased_i += 1;
                 }
-                new_initial_guess
-                    .column_mut(biased_i as usize)
-                    .copy_from(&column_to_add);
+            } else {
+                // Last point - just copy
+                new_grid.push(x_mesh[i]);
+                new_initial_guess.column_mut(biased_i).copy_from(&y);
                 biased_i += 1;
             }
         } else {
@@ -568,11 +639,118 @@ pub fn grcar_smooke_grid_refinement(
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
-        "\n \n new_initial_guess: {} of shape{:?}",
-        new_initial_guess,
+        "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
 
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, number_of_nonzero_keys)
+    (new_grid, new_initial_guess, total_new_points as usize)
+}
+/////////////////////////////////////////////////////////////////////////////////////////////
+//            SCIPY (solve bvp) INSPIRED GRID  REFINEMENT  PROCEDURE
+/////////////////////////////////////////////////////////////////////////////////////////////
+pub fn scipy_grid_refinement(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+    tolerance: f64,
+    residual: Option<DVector<f64>>,
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    let nrows = y_DMatrix.nrows();
+    let residuals = residual.expect("residual vector is required for scipy grid refinement");
+    // Determine which intervals need refinement
+    let mut insert_1 = Vec::new();
+    let mut insert_2 = Vec::new();
+    let m = residuals.len();
+    for j in 0..(m - 1) {
+        if residuals[j] > tolerance && residuals[j] < 100.0 * tolerance {
+            insert_1.push(j);
+        } else if residuals[j] >= 100.0 * tolerance {
+            insert_2.push(j);
+        }
+    }
+
+    let nodes_added = insert_1.len() + 2 * insert_2.len();
+    info!("nodes to add {}", nodes_added);
+    if nodes_added > 0 {
+        let new_grid = modify_mesh(&x_mesh, &insert_1, &insert_2);
+        let new_grid: Vec<f64> = new_grid.iter().cloned().collect();
+        // Evaluate solution at new mesh points
+        let new_initial_guess = interpolate_solution(
+            &y_DMatrix,
+            insert_1.as_slice(),
+            insert_2.as_slice(),
+            &new_grid,
+        );
+        assert_eq!(new_initial_guess.len(), new_grid.len() * nrows);
+        (new_grid, new_initial_guess, nodes_added as usize)
+    } else {
+        info!("no refinement needed");
+        let x_mesh: Vec<f64> = x_mesh.iter().cloned().collect();
+        (x_mesh.clone(), y_DMatrix.clone(), 0_usize)
+    }
+}
+
+pub fn modify_mesh(x: &DVector<f64>, insert_1: &[usize], insert_2: &[usize]) -> DVector<f64> {
+    let mut new_points = x.iter().cloned().collect::<Vec<f64>>();
+
+    // Insert 1 node in middle of intervals
+    for &i in insert_1 {
+        let mid = 0.5 * (x[i] + x[i + 1]);
+        new_points.push(mid);
+    }
+
+    // Insert 2 nodes to divide interval into 3 parts
+    for &i in insert_2 {
+        let p1 = (2.0 * x[i] + x[i + 1]) / 3.0;
+        let p2 = (x[i] + 2.0 * x[i + 1]) / 3.0;
+        new_points.push(p1);
+        new_points.push(p2);
+    }
+
+    new_points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    DVector::from_vec(new_points)
+}
+
+pub fn interpolate_solution(
+    y: &DMatrix<f64>,
+    insert_1: &[usize],
+    insert_2: &[usize],
+    new_x: &[f64],
+) -> DMatrix<f64> {
+    let (n_rows, old_ncols) = y.shape();
+    let mut new_y = DMatrix::zeros(n_rows, new_x.len());
+    let mut col_idx = 0;
+
+    // Create marking system like other algorithms
+    let mut mark: HashMap<usize, i32> = HashMap::new();
+    for &i in insert_1 {
+        mark.insert(i, 1);
+    }
+    for &i in insert_2 {
+        mark.insert(i, 2);
+    }
+
+    for i in 0..old_ncols {
+        // Always copy original column
+        new_y.column_mut(col_idx).copy_from(&y.column(i));
+        col_idx += 1;
+
+        if let Some(&N) = mark.get(&i) {
+            if i < old_ncols - 1 {
+                let y_curr = y.column(i);
+                let y_next = y.column(i + 1);
+                let dy = y_next - y_curr;
+
+                for k in 1..=N {
+                    let t = k as f64 / (N as f64 + 1.0);
+                    let interpolated = y_curr + &dy * t;
+                    info!("interpolated: {:?} for col {}", interpolated, col_idx);
+                    new_y.column_mut(col_idx).copy_from(&interpolated);
+                    col_idx += 1;
+                }
+            }
+        }
+    }
+
+    new_y
 }

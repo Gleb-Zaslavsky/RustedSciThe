@@ -1,104 +1,47 @@
 use crate::numerical::BVP_Damp::adaptive_grid_basic::{
-    easiest_grid_refinement, grcar_smooke_grid_refinement, pearson_grid_refinement,
+    easy_grid_refinement, grcar_smooke_grid_refinement, pearson_grid_refinement, refine_all_grid,
+    scipy_grid_refinement,
 };
 use crate::numerical::BVP_Damp::adaptive_grid_twopoint::twpnt_refinement;
 use nalgebra::{DMatrix, DVector};
 /// interface for creating a new grid
+#[derive(Debug, Clone)]
 pub enum GridRefinementMethod {
-    Easiest,
-    Pearson,
-    GrcarSmooke,
-    TwoPoint,
-}
-trait GridRefinement {
-    fn refine(
-        &self,
-        y_DMatrix: &DMatrix<f64>,
-        x_mesh: &DVector<f64>,
-        params: Vec<f64>,
-        abs_tolerance: f64,
-    ) -> (Vec<f64>, DMatrix<f64>, usize);
-}
-
-struct EasiestGridRefinement;
-impl GridRefinement for EasiestGridRefinement {
-    fn refine(
-        &self,
-        y_DMatrix: &DMatrix<f64>,
-        x_mesh: &DVector<f64>,
-        params: Vec<f64>,
-        _abs_tolerance: f64,
-    ) -> (Vec<f64>, DMatrix<f64>, usize) {
-        let (tolerance, safety_param) = (params[0], params[1]);
-        let (new_grid, new_solution, number_of_nonzero_keys) =
-            easiest_grid_refinement(y_DMatrix, x_mesh, tolerance, safety_param);
-        (new_grid, new_solution, number_of_nonzero_keys)
-    }
+    /// easiest method: double the number of points
+    DoublePoints, //
+    /// more advanced method: comare differences between adjacent points and refine where large
+    Easy(f64), // tolerance,
+    /// advanced method: Pearson's algorithm
+    Pearson(f64, f64), // single parameter
+    /// advanced method: Grcar-Smooke algorithm
+    GrcarSmooke(f64, f64, f64), // three parameters
+    /// advanced method: SciPy's method (not implemented yet)
+    Sci(),
+    /// advanced method: inspired Two-Point FORTAN algorithm
+    TwoPoint(f64, f64, f64), // three parameters
 }
 
-struct PearsonGridRefinement;
-
-impl GridRefinement for PearsonGridRefinement {
-    fn refine(
-        &self,
-        y_DMatrix: &DMatrix<f64>,
-        x_mesh: &DVector<f64>,
-        params: Vec<f64>,
-        _abs_tolerance: f64,
-    ) -> (Vec<f64>, DMatrix<f64>, usize) {
-        let (new_grid, new_solution, number_of_nonzero_keys) =
-            pearson_grid_refinement(y_DMatrix, x_mesh, params[0], params[1]);
-        (new_grid, new_solution, number_of_nonzero_keys)
-    }
-}
-struct GrcarSmookeRefinement;
-impl GridRefinement for GrcarSmookeRefinement {
-    fn refine(
-        &self,
-        y_DMatrix: &DMatrix<f64>,
-        x_mesh: &DVector<f64>,
-        params: Vec<f64>,
-        _abs_tolerance: f64,
-    ) -> (Vec<f64>, DMatrix<f64>, usize) {
-        let (new_grid, new_solution, number_of_nonzero_keys) =
-            grcar_smooke_grid_refinement(y_DMatrix, x_mesh, params[0], params[1], params[2]);
-        (new_grid, new_solution, number_of_nonzero_keys)
-    }
-}
-struct TwoPointRefinement;
-impl GridRefinement for TwoPointRefinement {
-    fn refine(
-        &self,
-        y_DMatrix: &DMatrix<f64>,
-        x_mesh: &DVector<f64>,
-        params: Vec<f64>,
-        abs_tolerance: f64,
-    ) -> (Vec<f64>, DMatrix<f64>, usize) {
-        let (new_grid, new_solution, number_of_nonzero_keys) = twpnt_refinement(
-            y_DMatrix.clone(),
-            x_mesh.clone(),
-            params[0],
-            params[1],
-            params[2],
-            abs_tolerance,
-        );
-        (new_grid, new_solution, number_of_nonzero_keys)
-    }
-}
 pub fn new_grid(
     method: GridRefinementMethod,
     y_DMatrix: &DMatrix<f64>,
     x_mesh: &DVector<f64>,
-    params: Vec<f64>,
     abs_tolerance: f64,
+    residuals: Option<DVector<f64>>,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
-    let refiner: Box<dyn GridRefinement> = match method {
-        GridRefinementMethod::Easiest => Box::new(EasiestGridRefinement),
-        GridRefinementMethod::Pearson => Box::new(PearsonGridRefinement),
-        GridRefinementMethod::GrcarSmooke => Box::new(GrcarSmookeRefinement),
-        GridRefinementMethod::TwoPoint => Box::new(TwoPointRefinement),
-    };
-    let (new_grid, new_initial_guess, number_of_nonzero_keys) =
-        refiner.refine(&y_DMatrix, &x_mesh, params, abs_tolerance);
-    (new_grid, new_initial_guess, number_of_nonzero_keys)
+    match method {
+        GridRefinementMethod::DoublePoints => refine_all_grid(y_DMatrix, x_mesh),
+        GridRefinementMethod::Easy(tolerance) => easy_grid_refinement(y_DMatrix, x_mesh, tolerance),
+        GridRefinementMethod::Pearson(param, safety_par) => {
+            pearson_grid_refinement(y_DMatrix, x_mesh, param, safety_par)
+        }
+        GridRefinementMethod::GrcarSmooke(p1, p2, p3) => {
+            grcar_smooke_grid_refinement(y_DMatrix, x_mesh, p1, p2, p3)
+        }
+        GridRefinementMethod::Sci() => {
+            scipy_grid_refinement(y_DMatrix, x_mesh, abs_tolerance, residuals)
+        }
+        GridRefinementMethod::TwoPoint(p1, p2, p3) => {
+            twpnt_refinement(y_DMatrix.clone(), x_mesh.clone(), p1, p2, p3, abs_tolerance)
+        }
+    }
 }

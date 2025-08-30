@@ -977,7 +977,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
@@ -1056,7 +1056,7 @@ impl Jacobian {
                 let Y_name = values[i].clone(); //y_i
                 //  println!("eq_i = {:?}", eq_i);
                 //check if there is a border condition. var initial or final ==0 if initial condition, ==1 if final
-                if let Some((initial_or_final, condition)) = BorderConditions.get(&Y_name) {
+                if let Some(boundary_conditions) = BorderConditions.get(&Y_name) {
                     let mut vec_of_res_for_each_eq = Vec::new();
 
                     //currwbt time step
@@ -1076,27 +1076,28 @@ impl Jacobian {
                     let mut res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
                     // println!( "equation {:?} for  {} -th timestep \n", res_ij, j);
 
-                    if j == 0 && initial_or_final.to_owned() == 0 {
-                        println!("found initial condition");
-                        res_ij = res_ij
-                            .set_variable(Expr::to_string(&Y_j).as_str(), condition.to_owned());
-                        vars_for_boundary_conditions.insert(Y_j_str.clone(), condition);
-                        // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
-                        println!("variable {:?} deleted from list", Y_j_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j);
-                    }
+                    // Process all boundary conditions for this variable
+                    for (initial_or_final, condition) in boundary_conditions {
+                        if j == 0 && *initial_or_final == 0 {
+                            println!("found initial condition");
+                            res_ij =
+                                res_ij.set_variable(Expr::to_string(&Y_j).as_str(), *condition);
+                            vars_for_boundary_conditions.insert(Y_j_str.clone(), condition);
+                            // delete the variable name from list of variables because we dont want to differentiate on this variable because it is initial condition
+                            println!("variable {:?} deleted from list", Y_j_str);
+                            flat_list_of_names.retain(|name| *name != *Y_j_str);
+                            flat_list_of_expr.retain(|expr| *expr != Y_j);
+                        }
 
-                    if j == n_steps - 2 && initial_or_final.to_owned() == 1 {
-                        println!("found final condition");
-                        res_ij = res_ij.set_variable(
-                            Expr::to_string(&Y_j_plus_1).as_str(),
-                            condition.to_owned(),
-                        );
-                        vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), condition);
-                        println!("variable {:?} deleted from list", Y_j_plus_1_str);
-                        flat_list_of_names.retain(|name| *name != *Y_j_plus_1_str);
-                        flat_list_of_expr.retain(|expr| *expr != Y_j_plus_1);
+                        if j == n_steps - 2 && *initial_or_final == 1 {
+                            println!("found final condition");
+                            res_ij = res_ij
+                                .set_variable(Expr::to_string(&Y_j_plus_1).as_str(), *condition);
+                            vars_for_boundary_conditions.insert(Y_j_plus_1_str.clone(), condition);
+                            println!("variable {:?} deleted from list", Y_j_plus_1_str);
+                            flat_list_of_names.retain(|name| *name != *Y_j_plus_1_str);
+                            flat_list_of_expr.retain(|expr| *expr != Y_j_plus_1);
+                        }
                     }
                     //  println!("{:?}",vars_for_boundary_conditions);
                     for (Y, k) in vars_for_boundary_conditions.iter() {
@@ -1227,7 +1228,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
@@ -1300,7 +1301,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
@@ -1352,7 +1353,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
@@ -1408,7 +1409,7 @@ impl Jacobian {
         n_steps: Option<usize>,
         h: Option<f64>,
         mesh: Option<Vec<f64>>,
-        BorderConditions: HashMap<String, (usize, f64)>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
         Bounds: Option<HashMap<String, (f64, f64)>>,
         rel_tolerance: Option<HashMap<String, f64>>,
         scheme: String,
