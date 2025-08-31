@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_functions_BVP::Jacobian;
 
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
@@ -15,6 +15,7 @@ use sprs::{CsMat, CsVec};
 pub fn bvp_examples(example: usize) {
     match example {
         0 => {
+            /*
             //BVP jacobian matrix
             let RHS = vec!["-z-y", "y"];
             // parse RHS as symbolic expressions
@@ -51,13 +52,13 @@ pub fn bvp_examples(example: usize) {
             #[allow(unused_variables)]
             let J = &Jacobian_instance.symbolic_jacobian;
             // its functional representation
-            let J_func = &Jacobian_instance.function_jacobian_IVP_DMatrix;
+            let J_func = &Jacobian_instance.lambdify_jacobian_DMatrix_par("x", values.clone());
             // analytic discretized algebraic system,
             #[allow(unused_variables)]
             let F = &Jacobian_instance.vector_of_functions;
             // its functional representation
             #[allow(unused_variables)]
-            let F_func = &Jacobian_instance.lambdified_functions_IVP_DVector;
+            let F_func = &Jacobian_instance.lambdify_residual_DVector("x", values.clone());
             let varvect = &Jacobian_instance.vector_of_variables;
             println!("vector of variables {:?}", varvect);
             let Ys = DVector::from_vec(Y.clone());
@@ -189,6 +190,8 @@ pub fn bvp_examples(example: usize) {
             let solution = nr.solve().unwrap();
             // println!("result = {:?}", solution);
             nr.plot_result();
+            
+             */
         }
         2 => {
             /*

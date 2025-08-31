@@ -31,7 +31,7 @@ pub struct BVP {
     pub structure_damp: Option<NRBDVPd>,
 }
 
-fn convert_hashmap_to_solver_params(
+pub fn convert_hashmap_to_solver_params(
     hashmap: &Option<HashMap<String, Option<Vec<f64>>>>,
 ) -> Option<SolverParams> {
     hashmap.as_ref().map(|params| {

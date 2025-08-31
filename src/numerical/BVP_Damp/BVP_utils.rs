@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tabled::{builder::Builder, settings::Style};
+use regex::Regex;
 pub fn elapsed_time(elapsed: Duration) -> (String, f64) {
     let time = elapsed.as_millis();
     if time < 1000 {
@@ -477,14 +478,17 @@ pub fn round_to_n_digits(value: f64, n: usize) -> f64 {
     let format_string = format!("{:.1$}", value, n);
     format_string.parse::<f64>().unwrap()
 }
-
+    pub fn remove_numeric_suffix(input: &str) -> String {
+        let re = Regex::new(r"_\d+$").unwrap();
+        re.replace(input, "").to_string()
+    }
 pub fn variables_order(variables: Vec<String>, indexed_variables: Vec<String>) -> Vec<String> {
     // lets take the same quantity of indexed variables as the original variables
     let indexed_vars_for_reordering: Vec<String> = indexed_variables[0..variables.len()].to_vec();
     // remove numeric suffix from indexed variables and compare with original variables
     let unindexed_vars = indexed_vars_for_reordering
         .iter()
-        .map(|x| Jacobian::remove_numeric_suffix(&x.clone()))
+        .map(|x| remove_numeric_suffix(&x.clone()))
         .collect::<Vec<String>>();
     unindexed_vars
 }

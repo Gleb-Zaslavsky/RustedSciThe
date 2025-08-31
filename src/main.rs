@@ -6,6 +6,7 @@ pub mod Examples;
 pub mod symbolic;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_functions_BVP::Jacobian as JacobianBVP;
 pub mod numerical;
 use crate::numerical::BE::BE;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
@@ -636,7 +637,7 @@ fn main() {
         }
 
         14 => {
-            //BVP jacobian matrix
+            //BVP jacobian matrix demonstration
             let RHS = vec!["-z-y", "y"];
             // parse RHS as symbolic expressions
             let Equations = Expr::parse_vector_expression(RHS.clone());
@@ -651,14 +652,14 @@ fn main() {
             ]);
 
             let Y = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-            let mut Jacobian_instance = Jacobian::new();
-            // creating analytic discretized algebraic system, its functional representation, analytic Jacobian matrix and its functional representation
-            Jacobian_instance.generate_BVP(
+            let mut Jacobian_instance = JacobianBVP::new();
+            
+            // Create BVP discretization system
+            Jacobian_instance.discretization_system_BVP_par(
                 Equations.clone(),
                 values.clone(),
                 arg.clone(),
                 0.0,
-                None,
                 Some(n_steps),
                 Some(h),
                 None,
@@ -667,99 +668,49 @@ fn main() {
                 None,
                 scheme.clone(),
             );
-
-            // analytic Jacobian matrix
-            #[allow(unused_variables)]
-            let J = &Jacobian_instance.symbolic_jacobian;
-            // its functional representation
-            let J_func = &Jacobian_instance.function_jacobian_IVP_DMatrix;
-            // analytic discretized algebraic system,
-            #[allow(unused_variables)]
-            let F = &Jacobian_instance.vector_of_functions;
-            // its functional representation
-            #[allow(unused_variables)]
-            let F_func = &Jacobian_instance.lambdified_functions_IVP_DVector;
-            let varvect = &Jacobian_instance.vector_of_variables;
-            println!("vector of variables {:?}", varvect);
+            
+            // Calculate jacobian
+            Jacobian_instance.calc_jacobian_parallel_smart();
+            
+            // Set up variables for lambdification
+            let variable_strs: Vec<String> = Jacobian_instance.variable_string.clone();
+            let variable_strs: Vec<&str> =  variable_strs.iter().map(|s| s.as_str()).collect();
+            
+            // Test Dense matrix jacobian
+            Jacobian_instance.lambdify_jacobian_DMatrix_par(&arg, variable_strs.clone());
+            Jacobian_instance.lambdify_residual_DVector(&arg, variable_strs.clone());
+            
+            println!("vector of variables {:?}", Jacobian_instance.variable_string);
             let Ys = DVector::from_vec(Y.clone());
-            let J_eval1 = J_func(4.0, &Ys);
-            println!("Jacobian Dense: J_eval = {:?} \n", J_eval1);
-            // SPARSE JACOBIAN MATRIX with nalgebra (+sparse feature) crate
-
-            Jacobian_instance.generate_BVP_CsMatrix(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func3 = &Jacobian_instance.function_jacobian_IVP_CsMatrix;
-            let J_eval3 = J_func3(4.0, &Ys);
-            println!("Jacobian Sparse with CsMatrix: J_eval = {:?} \n", J_eval3);
-
-            // SPARSE JACOBIAN MATRIX with  crate
-            Jacobian_instance.generate_BVP_CsMat(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func2: &Box<dyn Fn(f64, &CsVec<f64>) -> CsMat<f64>> =
-                &Jacobian_instance.function_jacobian_IVP_CsMat;
-            let F_func2 = &Jacobian_instance.lambdified_functions_IVP_CsVec;
-            let Ys2 = CsVec::new(Y.len(), vec![0, 1, 2, 3, 4, 5], Y.clone());
-            println!("Ys = {:?} \n", &Ys2);
-            let F_eval2 = F_func2(4.0, &Ys2);
-            println!("F_eval = {:?} \n", F_eval2);
-            let J_eval2: CsMat<f64> = J_func2(4.0, &Ys2);
-
-            println!("Jacobian Sparse with CsMat: J_eval = {:?} \n", J_eval2);
-
-            // SPARSE JACOBIAN MATRIX with sprs crate
-            let mut Jacobian_instance = Jacobian::new();
-            Jacobian_instance.generate_BVP_SparseColMat(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
-            let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
+            
+            // Evaluate jacobian and residual using trait objects
+            use crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting;
+            let variables_dense = &*Vectors_type_casting(&Ys, "Dense".to_string());
+            
+            if let Some(ref mut jac) = Jacobian_instance.jac_function {
+                let J_eval = jac.call(4.0, variables_dense);
+                println!("Jacobian Dense: J_eval = {:?} \n", J_eval.to_DMatrixType());
+            }
+            
+            let F_eval = Jacobian_instance.residiual_function.call(4.0, variables_dense);
+            println!("Residual Dense: F_eval = {:?} \n", F_eval.to_DVectorType());
+            
+            // Test Sparse matrix jacobian (faer crate)
             use faer::col::{Col, ColRef};
             let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
-            println!("Ys = {:?} \n", &Ys3);
-            let F_eval3 = F_func3(4.0, &Ys3);
-            println!("F_eval = {:?} \n", F_eval3);
-            #[allow(unused_variables)]
-            let J_eval2 = J_func3(4.0, &Ys3);
-
-            println!(
-                "Jacobian Sparse with SparseColMat: J_eval = {:?} \n",
-                J_eval3
-            );
+            
+            Jacobian_instance.lambdify_jacobian_SparseColMat_parallel2(&arg, variable_strs.clone());
+            Jacobian_instance.lambdify_residual_Col_parallel2(&arg, variable_strs.clone());
+            
+            let variables_sparse = &*Vectors_type_casting(&Ys, "Sparse".to_string());
+            
+            if let Some(ref mut jac) = Jacobian_instance.jac_function {
+                let J_eval_sparse = jac.call(4.0, variables_sparse);
+                println!("Jacobian Sparse (faer): J_eval = {:?} \n", J_eval_sparse.to_DMatrixType());
+            }
+            
+            let F_eval_sparse = Jacobian_instance.residiual_function.call(4.0, variables_sparse);
+            println!("Residual Sparse (faer): F_eval = {:?} \n", F_eval_sparse.to_DVectorType());
         }
         15 => {
             let eq1 = Expr::parse_expression("y-z");
