@@ -34,6 +34,7 @@ pub fn bound_step_Cantera2(
     step: &dyn VectorType,
     bounds: &Vec<(f64, f64)>,
 ) -> f64 {
+    assert_eq!(x.len(), bounds.len());
     let mut fbound: f64 = 1.0;
 
     for (i, val) in x.iterate().enumerate() {

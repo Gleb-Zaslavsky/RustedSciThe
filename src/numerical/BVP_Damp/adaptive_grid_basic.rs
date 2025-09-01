@@ -1,6 +1,51 @@
+//! # Basic Adaptive Grid Refinement Algorithms
+//!
+//! ## Module Purpose
+//! This module implements fundamental adaptive mesh refinement algorithms for boundary value problems,
+//! providing the mathematical foundation for intelligent grid adaptation. Each algorithm analyzes
+//! solution characteristics to determine where additional mesh points are needed for accuracy.
+//!
+//! ## Core Algorithms
+//! - [`refine_all_grid`]: Uniform refinement - doubles mesh density everywhere
+//! - [`easy_grid_refinement`]: Simple gradient-based refinement with tolerance control
+//! - [`pearson_grid_refinement`]: Classical boundary layer algorithm with mesh smoothing
+//! - [`grcar_smooke_grid_refinement`]: Advanced combustion-oriented method with dual criteria
+//! - [`scipy_grid_refinement`]: Residual-based refinement inspired by SciPy's solve_bvp
+//!
+//! ## Mathematical Foundation
+//! All algorithms are based on truncation error analysis and finite difference theory.
+//! The module includes detailed mathematical derivations for:
+//! - Forward/backward/central difference truncation errors
+//! - Taylor series expansions for error estimation
+//! - Mesh adaptation criteria based on solution gradients
+//!
+//! ## Interesting Code Features
+//! - **HashMap-based marking system**: Efficiently tracks which intervals need refinement
+//! - **Biased indexing**: Clever index management during mesh construction to handle variable insertion
+//! - **Multi-row analysis**: Each algorithm analyzes all solution components simultaneously
+//! - **Buffering mechanisms**: Prevents abrupt mesh size changes that could hurt accuracy
+//! - **Linear interpolation**: Provides smooth initial guess on refined mesh
+//! - **Threshold-based filtering**: Avoids refining in regions with negligible solution values
+//!
+//! ## Performance Optimizations
+//! - Pre-allocates matrices with known final size to avoid reallocations
+//! - Uses iterator-based row processing for cache efficiency
+//! - Employs early termination when no refinement is needed
+//! - Leverages nalgebra's optimized linear algebra operations
+//!
+//! ## Algorithm Selection Strategy
+//! Different algorithms excel in different scenarios:
+//! - **Uniform**: Guaranteed improvement but expensive
+//! - **Easy**: Fast and simple, good for smooth solutions
+//! - **Pearson**: Optimal for boundary layer problems
+//! - **Grcar-Smooke**: Best for combustion/reaction systems
+//! - **SciPy**: Excellent when residual information is available
+
 use log::info;
 use nalgebra::{DMatrix, DVector};
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::Mutex;
 /*
 Some math considerations...
 1. truncation error analysis
@@ -109,6 +154,57 @@ pub fn refine_all_grid(
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, number_of_nonzero_keys)
 }
+
+/// Parallel version of refine_all_grid - processes intervals in parallel
+pub fn refine_all_grid_par(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    let (n_rows, _) = y_DMatrix.shape();
+    let number_of_nonzero_keys = x_mesh.len() - 1;
+    let mut new_grid: Vec<f64> = Vec::with_capacity(x_mesh.len() + number_of_nonzero_keys);
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + number_of_nonzero_keys);
+
+    // Parallel computation of grid points and interpolated values
+    let grid_data: Vec<(f64, f64, DVector<f64>)> = (0..x_mesh.len() - 1)
+        .into_par_iter()
+        .map(|i| {
+            let h_i = x_mesh[i + 1] - x_mesh[i];
+            let x_new = x_mesh[i] + h_i * 0.5;
+            let y = y_DMatrix.column(i);
+            let y_pl_1 = y_DMatrix.column(i + 1);
+            let dy_i = y_pl_1 - y;
+            let column_to_add = y + &dy_i * 0.5;
+            (x_mesh[i], x_new, column_to_add)
+        })
+        .collect();
+
+    // Sequential assembly (required for proper ordering)
+    let mut biased_i = 0;
+    for (i, (x_orig, x_new, interpolated)) in grid_data.into_iter().enumerate() {
+        new_grid.push(x_orig);
+        new_grid.push(x_new);
+        
+        let y = y_DMatrix.column(i);
+        new_initial_guess.column_mut(biased_i).copy_from(&y);
+        biased_i += 1;
+        new_initial_guess.column_mut(biased_i).copy_from(&interpolated);
+        biased_i += 1;
+    }
+
+    // Add final point
+    let y_last = y_DMatrix.column(x_mesh.len() - 1);
+    new_grid.push(x_mesh[x_mesh.len() - 1]);
+    new_initial_guess.column_mut(biased_i).copy_from(&y_last);
+
+    log::info!("created new grid of length {}", new_grid.len());
+    log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
+
+    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
+    (new_grid, new_initial_guess, number_of_nonzero_keys)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //          EASY  GRID  REFINEMENT  PROCEDURE
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -132,8 +228,9 @@ pub fn easy_grid_refinement(
         let y_j_max = y.max();
         let y_j_min = y.min();
         let delta = tolerance * (y_j_max - y_j_min);
+        info!("for component j: {} delta {}", j, delta);
         for i in 1..x_mesh.len() - 1 {
-            let tau_i = (y[i] + y[i - 1]).abs();
+            let tau_i = (y[i] - y[i - 1]).abs();
             if tau_i > delta {
                 info!("tau {} for i {}", tau_i, i);
                 mark[i - 1] = 1;
@@ -188,6 +285,86 @@ pub fn easy_grid_refinement(
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, total_new_points as usize)
 }
+
+/// Parallel version of easy_grid_refinement - parallelizes the marking phase
+pub fn easy_grid_refinement_par(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+    tolerance: f64,
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    info!("shape of solution {}, {}", y_DMatrix.nrows(), y_DMatrix.ncols());
+    info!("x_mesh len {:?}", x_mesh.len());
+    let (n_rows, _) = y_DMatrix.shape();
+    let mut new_grid: Vec<f64> = Vec::new();
+    let mark = Mutex::new(DVector::zeros(x_mesh.len()));
+
+    // Parallel marking phase - each row processed in parallel
+    y_DMatrix.row_iter().enumerate().par_bridge().for_each(|(j, y)| {
+        let y_j_max = y.max();
+        let y_j_min = y.min();
+        let delta = tolerance * (y_j_max - y_j_min);
+        info!("for component j: {} delta {}", j, delta);
+        
+        let mut local_mark = Vec::new();
+        for i in 1..x_mesh.len() - 1 {
+            let tau_i = (y[i] - y[i - 1]).abs();
+            if tau_i > delta {
+                info!("tau {} for i {}", tau_i, i);
+                local_mark.push(i - 1);
+            }
+        }
+        
+        // Update global mark under lock
+        if !local_mark.is_empty() {
+            let mut global_mark = mark.lock().unwrap();
+            for &idx in &local_mark {
+                global_mark[idx] = 1;
+            }
+        }
+        
+        info!("for row {} found {} intervals to mark", j, local_mark.len());
+    });
+
+    let mark = mark.into_inner().unwrap();
+    let total_new_points: i32 = mark.sum();
+    log::info!("total new points to add: {}", total_new_points);
+
+    // Sequential insertion phase (required for proper ordering)
+    let mut biased_i = 0;
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+
+    for i in 0..x_mesh.len() {
+        let y = y_DMatrix.column(i);
+
+        // Always add the original point first
+        new_grid.push(x_mesh[i]);
+        new_initial_guess.column_mut(biased_i).copy_from(&y);
+        biased_i += 1;
+
+        if mark[i] != 0_i32 && i < x_mesh.len() - 1 {
+            // Add new point between current and next
+            let h_i = x_mesh[i + 1] - x_mesh[i];
+            let x_new = x_mesh[i] + h_i * 0.5;
+            new_grid.push(x_new);
+
+            // Interpolate for new initial guess
+            let y_pl_1 = y_DMatrix.column(i + 1);
+            let dy_i = y_pl_1 - y;
+            let column_to_add = y + &dy_i * 0.5;
+            new_initial_guess
+                .column_mut(biased_i as usize)
+                .copy_from(&column_to_add);
+            biased_i += 1;
+        }
+    }
+
+    log::info!("created new grid of length {}", new_grid.len());
+    log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
+    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
+    (new_grid, new_initial_guess, total_new_points as usize)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //          PEARSON  GRID  REFINEMENT  PROCEDURE
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -395,6 +572,111 @@ pub fn pearson_grid_refinement(
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, total_new_points as usize)
 }
+
+/// Parallel version of pearson_grid_refinement - parallelizes the marking phase
+pub fn pearson_grid_refinement_par(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+    d: f64,
+    C: f64,
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    let mut h: Vec<f64> = Vec::new();
+    for i in 0..x_mesh.len() - 1 {
+        let h_i = x_mesh[i + 1] - x_mesh[i];
+        h.push(h_i);
+    }
+    let (n_rows, _) = y_DMatrix.shape();
+    let mut new_grid: Vec<f64> = Vec::new();
+    let mark = Mutex::new(HashMap::new());
+
+    // Parallel marking phase
+    y_DMatrix.clone().row_iter().enumerate().par_bridge().for_each(|(j, y)| {
+        let threshold = 1e-4;
+        let y_j_max = y.max();
+        let y_j_min = y.min();
+        let delta = d * (y_j_max - y_j_min);
+        info!("delta {} for component j: {}", delta, j);
+
+        let mut local_marks = Vec::new();
+        for i in 0..x_mesh.len() {
+            if x_mesh.len() - 1 > i && i > 0 {
+                let tau_i = (y[i] - y[i - 1]).abs();
+                let both_ys_are_not_too_small = (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
+                
+                if tau_i > delta && both_ys_are_not_too_small {
+                    let N = if (tau_i / delta) as i32 >= 1 { (tau_i / delta) as i32 } else { 1 };
+                    local_marks.push((i - 1, N));
+                }
+            }
+        }
+
+        if !local_marks.is_empty() {
+            let mut global_mark = mark.lock().unwrap();
+            for (idx, N) in local_marks {
+                let current_N = *global_mark.get(&idx).unwrap_or(&0);
+                if N > current_N {
+                    global_mark.insert(idx, N);
+                }
+            }
+        }
+    });
+
+    let mut mark = mark.into_inner().unwrap();
+    
+    // Sequential bufferization
+    for i in 1..x_mesh.len() - 1 {
+        let buffer_condition_1 = h[i] / h[i - 1] <= C;
+        let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
+        if !buffer_condition_1 && (i - 1) != 0 {
+            let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+            if 1 > current_N { mark.insert(i - 1, 1); }
+        }
+        if !buffer_condition_2 {
+            let current_N = *mark.get(&i).unwrap_or(&0);
+            if 1 > current_N { mark.insert(i - 1, 1); }
+        }
+    }
+
+    let total_new_points: i32 = mark.values().sum();
+    log::info!("total new points to add: {}", total_new_points);
+
+    // Sequential grid construction
+    let mut biased_i = 0;
+    let mut new_initial_guess: DMatrix<f64> = DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+    
+    for i in 0..x_mesh.len() {
+        let y = y_DMatrix.column(i);
+        if mark.get(&i).unwrap_or(&0) != &0 {
+            let N = *mark.get(&i).unwrap();
+            if i < x_mesh.len() - 1 {
+                let h_i = x_mesh[i + 1] - x_mesh[i];
+                for k in 0..N + 1 {
+                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
+                    new_grid.push(x_new);
+                }
+                let y_pl_1 = y_DMatrix.column(i + 1);
+                let dy_i = y_pl_1 - y;
+                for k in 0..N + 1 {
+                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
+                    new_initial_guess.column_mut(biased_i as usize).copy_from(&column_to_add);
+                    biased_i += 1;
+                }
+            } else {
+                new_grid.push(x_mesh[i]);
+                new_initial_guess.column_mut(biased_i).copy_from(&y);
+                biased_i += 1;
+            }
+        } else {
+            new_grid.push(x_mesh[i]);
+            new_initial_guess.column_mut(biased_i).copy_from(&y);
+            biased_i += 1;
+        }
+    }
+
+    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
+    (new_grid, new_initial_guess, total_new_points as usize)
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //             GRCAR  AND  SMOOKE  GRID  REFINEMENT  PROCEDURE
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -646,6 +928,130 @@ pub fn grcar_smooke_grid_refinement(
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, total_new_points as usize)
 }
+
+/// Parallel version of grcar_smooke_grid_refinement - parallelizes the marking phase
+pub fn grcar_smooke_grid_refinement_par(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+    d: f64,
+    g: f64,
+    C: f64,
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    let mut h: Vec<f64> = Vec::new();
+    for i in 0..x_mesh.len() - 1 {
+        let h_i = x_mesh[i + 1] - x_mesh[i];
+        h.push(h_i);
+    }
+    let (n_rows, _) = y_DMatrix.shape();
+    let mut new_grid: Vec<f64> = Vec::new();
+    let mark = Mutex::new(HashMap::new());
+
+    // Parallel marking phase
+    y_DMatrix.clone().row_iter().enumerate().par_bridge().for_each(|(j, y)| {
+        let threshold = 1e-4;
+        let y_j_max = y.max();
+        let y_j_min = y.min();
+        let delta = d * (y_j_max - y_j_min);
+        
+        let mut list_dy_dx_i = Vec::new();
+        for i in 0..x_mesh.len() - 1 {
+            let dy_i = y[i + 1] - y[i];
+            let h_i = h[i];
+            let dy_dx_i = dy_i / h_i;
+            list_dy_dx_i.push(dy_dx_i);
+        }
+        let list_dy_dx_i_min = list_dy_dx_i.iter().cloned().min_by(|a, b| a.total_cmp(b)).unwrap();
+        let list_dy_dx_i_max = list_dy_dx_i.iter().cloned().max_by(|a, b| a.total_cmp(b)).unwrap();
+        let derivative_range = list_dy_dx_i_max - list_dy_dx_i_min;
+        let gamma = g * derivative_range;
+
+        let mut local_marks = Vec::new();
+        for i in 0..x_mesh.len() {
+            if x_mesh.len() - 1 > i && i > 0 {
+                let dy_i = y[i + 1] - y[i];
+                let h_i = h[i];
+                let dy_dx_i = dy_i / h_i;
+                let dy_i_min_1 = y[i] - y[i - 1];
+                let h_i_min_1 = h[i - 1];
+                let dy_dx_i_min_1 = dy_i_min_1 / h_i_min_1;
+                let eta_i = (dy_dx_i - dy_dx_i_min_1).abs();
+                let tau_i = (y[i] - y[i - 1]).abs();
+                let both_ys_are_not_too_small = (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
+                
+                if (tau_i > delta && both_ys_are_not_too_small) || (eta_i > gamma && both_ys_are_not_too_small) {
+                    let N = if (tau_i / delta) as i32 >= 1 { (tau_i / delta) as i32 } else { 1 };
+                    local_marks.push((i - 1, N));
+                }
+            }
+        }
+
+        if !local_marks.is_empty() {
+            let mut global_mark = mark.lock().unwrap();
+            for (idx, N) in local_marks {
+                let current_N = *global_mark.get(&idx).unwrap_or(&0);
+                if N > current_N {
+                    global_mark.insert(idx, N);
+                }
+            }
+        }
+    });
+
+    let mut mark = mark.into_inner().unwrap();
+    
+    // Sequential bufferization
+    for i in 1..x_mesh.len() - 1 {
+        let buffer_condition_1 = h[i] / h[i - 1] <= C;
+        let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
+        if !buffer_condition_1 && (i - 1) != 0 {
+            let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+            if 1 > current_N { mark.insert(i - 1, 1); }
+        }
+        if !buffer_condition_2 {
+            let current_N = *mark.get(&i).unwrap_or(&0);
+            if 1 > current_N { mark.insert(i - 1, 1); }
+        }
+    }
+
+    let total_new_points: i32 = mark.values().sum();
+    log::info!("total new points to add: {}", total_new_points);
+
+    // Sequential grid construction
+    let mut biased_i = 0;
+    let mut new_initial_guess: DMatrix<f64> = DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+    
+    for i in 0..x_mesh.len() {
+        let y = y_DMatrix.column(i);
+        if mark.get(&i).unwrap_or(&0) != &0 {
+            let N = *mark.get(&i).unwrap();
+            if i < x_mesh.len() - 1 {
+                let h_i = x_mesh[i + 1] - x_mesh[i];
+                for k in 0..N + 1 {
+                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
+                    new_grid.push(x_new);
+                }
+                let y_pl_1 = y_DMatrix.column(i + 1);
+                let dy_i = y_pl_1 - y;
+                for k in 0..N + 1 {
+                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
+                    new_initial_guess.column_mut(biased_i as usize).copy_from(&column_to_add);
+                    biased_i += 1;
+                }
+            } else {
+                new_grid.push(x_mesh[i]);
+                new_initial_guess.column_mut(biased_i).copy_from(&y);
+                biased_i += 1;
+            }
+        } else {
+            new_grid.push(x_mesh[i]);
+            new_initial_guess.column_mut(biased_i).copy_from(&y);
+            biased_i += 1;
+        }
+    }
+
+    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
+    (new_grid, new_initial_guess, total_new_points as usize)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////
 //            SCIPY (solve bvp) INSPIRED GRID  REFINEMENT  PROCEDURE
 /////////////////////////////////////////////////////////////////////////////////////////////

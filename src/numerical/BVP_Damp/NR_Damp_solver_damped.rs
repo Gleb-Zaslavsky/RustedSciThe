@@ -718,6 +718,12 @@ impl NRBVP {
             (-2, None)
         }
     } // end of damped step
+    pub fn calc_residual(&self, y: Box<dyn VectorType>) -> f64{
+             
+                        let fun = &self.fun;
+                        let F_k = fun.call(self.p, &*y);
+                        F_k.norm()
+    }
     /// Main iteration loop for damped Newton-Raphson method
     ///
     /// Orchestrates the complete solution process:
@@ -729,6 +735,7 @@ impl NRBVP {
     /// # Returns
     /// Solution vector if converged, None if failed
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
+        ////////////////////////////////////////////////////////////////////////
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         info!("{:?}", self.initial_guess.shape());
         let y: DMatrix<f64> = self.initial_guess.clone();
@@ -738,6 +745,8 @@ impl NRBVP {
         self.result = Some(y.clone()); // save into result in case the very first iteration
         // with the current n_steps will go wrong and we shall need grid refinement
         self.y = Vectors_type_casting(&y.clone(), self.method.clone());
+        let initial_res_nornal = self.calc_residual(self.y.clone_box());
+        info!("norm of the initial residual = {}", initial_res_nornal);
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
         let mut i = 0;
@@ -780,7 +789,8 @@ impl NRBVP {
                         panic!(" \n \n y_k_plus_1 is None")
                     }
                 };
-
+                let resid_norm = self.calc_residual(y_k_plus_1.clone_box());
+                info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
                 // before refining in case it will go wrong
                 self.result = result.clone();
@@ -955,6 +965,8 @@ impl NRBVP {
                 "No refinement done, but initial guess changed - it should not happen!"
             );
         }
+        let initial_guess = initial_guess.transpose();
+        let initial_guess = DMatrix::from_column_slice(initial_guess.ncols(), initial_guess.nrows(), initial_guess.as_slice());
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -965,6 +977,20 @@ impl NRBVP {
         let (new_mesh, initial_guess, number_of_nonzero_keys) = self.create_new_grid();
         self.number_of_refined_intervals = number_of_nonzero_keys;
         self.nodes_added.push(number_of_nonzero_keys);
+        self.initial_guess = initial_guess;
+        self.x_mesh = DVector::from_vec(new_mesh.clone());
+        self.grid_refinemens += 1;
+        info!(
+            "\n \n grid refinement counter = {} \n \n",
+            self.grid_refinemens
+        );
+        *self
+            .calc_statistics
+            .entry("number of grid refinements".to_string())
+            .or_insert(0) += 1;
+        self.we_need_refinement();
+
+        if number_of_nonzero_keys > 0 {
         // Clear old Jacobian completely to avoid dimension mismatch
         self.old_jac = None;
         self.jac = None; // Clear Jacobian function as well
@@ -978,31 +1004,24 @@ impl NRBVP {
 
         // Update grid parameters
         self.n_steps = new_mesh.len() - 1;
-        self.initial_guess = initial_guess;
-        self.x_mesh = DVector::from_vec(new_mesh.clone());
-
-        self.grid_refinemens += 1;
-
-        info!(
-            "\n \n grid refinement counter = {} \n \n",
-            self.grid_refinemens
-        );
+      
         info!(
             "new guess of shape {} {}",
             self.initial_guess.nrows(),
             self.initial_guess.ncols()
         );
         info!("new mesh length {}", new_mesh.len());
-        *self
-            .calc_statistics
-            .entry("number of grid refinements".to_string())
-            .or_insert(0) += 1;
+       
         self.custom_timer.symbolic_operations_tic();
         // Regenerate system with new grid - force bandwidth recalculation for new grid
         self.eq_generate(Some(new_mesh), None);
         self.custom_timer.symbolic_operations_tac();
-        self.we_need_refinement();
+        } else {
+            info!("no new grid needed - returning to main loop");
+            return;
 
+        }
+        self.jac_recalc = true; 
         self.main_loop_damped();
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
