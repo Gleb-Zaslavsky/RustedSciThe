@@ -185,11 +185,13 @@ pub fn refine_all_grid_par(
     for (i, (x_orig, x_new, interpolated)) in grid_data.into_iter().enumerate() {
         new_grid.push(x_orig);
         new_grid.push(x_new);
-        
+
         let y = y_DMatrix.column(i);
         new_initial_guess.column_mut(biased_i).copy_from(&y);
         biased_i += 1;
-        new_initial_guess.column_mut(biased_i).copy_from(&interpolated);
+        new_initial_guess
+            .column_mut(biased_i)
+            .copy_from(&interpolated);
         biased_i += 1;
     }
 
@@ -292,38 +294,46 @@ pub fn easy_grid_refinement_par(
     x_mesh: &DVector<f64>,
     tolerance: f64,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
-    info!("shape of solution {}, {}", y_DMatrix.nrows(), y_DMatrix.ncols());
+    info!(
+        "shape of solution {}, {}",
+        y_DMatrix.nrows(),
+        y_DMatrix.ncols()
+    );
     info!("x_mesh len {:?}", x_mesh.len());
     let (n_rows, _) = y_DMatrix.shape();
     let mut new_grid: Vec<f64> = Vec::new();
     let mark = Mutex::new(DVector::zeros(x_mesh.len()));
 
     // Parallel marking phase - each row processed in parallel
-    y_DMatrix.row_iter().enumerate().par_bridge().for_each(|(j, y)| {
-        let y_j_max = y.max();
-        let y_j_min = y.min();
-        let delta = tolerance * (y_j_max - y_j_min);
-        info!("for component j: {} delta {}", j, delta);
-        
-        let mut local_mark = Vec::new();
-        for i in 1..x_mesh.len() - 1 {
-            let tau_i = (y[i] - y[i - 1]).abs();
-            if tau_i > delta {
-                info!("tau {} for i {}", tau_i, i);
-                local_mark.push(i - 1);
+    y_DMatrix
+        .row_iter()
+        .enumerate()
+        .par_bridge()
+        .for_each(|(j, y)| {
+            let y_j_max = y.max();
+            let y_j_min = y.min();
+            let delta = tolerance * (y_j_max - y_j_min);
+            info!("for component j: {} delta {}", j, delta);
+
+            let mut local_mark = Vec::new();
+            for i in 1..x_mesh.len() - 1 {
+                let tau_i = (y[i] - y[i - 1]).abs();
+                if tau_i > delta {
+                    info!("tau {} for i {}", tau_i, i);
+                    local_mark.push(i - 1);
+                }
             }
-        }
-        
-        // Update global mark under lock
-        if !local_mark.is_empty() {
-            let mut global_mark = mark.lock().unwrap();
-            for &idx in &local_mark {
-                global_mark[idx] = 1;
+
+            // Update global mark under lock
+            if !local_mark.is_empty() {
+                let mut global_mark = mark.lock().unwrap();
+                for &idx in &local_mark {
+                    global_mark[idx] = 1;
+                }
             }
-        }
-        
-        info!("for row {} found {} intervals to mark", j, local_mark.len());
-    });
+
+            info!("for row {} found {} intervals to mark", j, local_mark.len());
+        });
 
     let mark = mark.into_inner().unwrap();
     let total_new_points: i32 = mark.sum();
@@ -590,50 +600,64 @@ pub fn pearson_grid_refinement_par(
     let mark = Mutex::new(HashMap::new());
 
     // Parallel marking phase
-    y_DMatrix.clone().row_iter().enumerate().par_bridge().for_each(|(j, y)| {
-        let threshold = 1e-4;
-        let y_j_max = y.max();
-        let y_j_min = y.min();
-        let delta = d * (y_j_max - y_j_min);
-        info!("delta {} for component j: {}", delta, j);
+    y_DMatrix
+        .clone()
+        .row_iter()
+        .enumerate()
+        .par_bridge()
+        .for_each(|(j, y)| {
+            let threshold = 1e-4;
+            let y_j_max = y.max();
+            let y_j_min = y.min();
+            let delta = d * (y_j_max - y_j_min);
+            info!("delta {} for component j: {}", delta, j);
 
-        let mut local_marks = Vec::new();
-        for i in 0..x_mesh.len() {
-            if x_mesh.len() - 1 > i && i > 0 {
-                let tau_i = (y[i] - y[i - 1]).abs();
-                let both_ys_are_not_too_small = (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
-                
-                if tau_i > delta && both_ys_are_not_too_small {
-                    let N = if (tau_i / delta) as i32 >= 1 { (tau_i / delta) as i32 } else { 1 };
-                    local_marks.push((i - 1, N));
+            let mut local_marks = Vec::new();
+            for i in 0..x_mesh.len() {
+                if x_mesh.len() - 1 > i && i > 0 {
+                    let tau_i = (y[i] - y[i - 1]).abs();
+                    let both_ys_are_not_too_small =
+                        (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
+
+                    if tau_i > delta && both_ys_are_not_too_small {
+                        let N = if (tau_i / delta) as i32 >= 1 {
+                            (tau_i / delta) as i32
+                        } else {
+                            1
+                        };
+                        local_marks.push((i - 1, N));
+                    }
                 }
             }
-        }
 
-        if !local_marks.is_empty() {
-            let mut global_mark = mark.lock().unwrap();
-            for (idx, N) in local_marks {
-                let current_N = *global_mark.get(&idx).unwrap_or(&0);
-                if N > current_N {
-                    global_mark.insert(idx, N);
+            if !local_marks.is_empty() {
+                let mut global_mark = mark.lock().unwrap();
+                for (idx, N) in local_marks {
+                    let current_N = *global_mark.get(&idx).unwrap_or(&0);
+                    if N > current_N {
+                        global_mark.insert(idx, N);
+                    }
                 }
             }
-        }
-    });
+        });
 
     let mut mark = mark.into_inner().unwrap();
-    
+
     // Sequential bufferization
     for i in 1..x_mesh.len() - 1 {
         let buffer_condition_1 = h[i] / h[i - 1] <= C;
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
         if !buffer_condition_1 && (i - 1) != 0 {
             let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
-            if 1 > current_N { mark.insert(i - 1, 1); }
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
         if !buffer_condition_2 {
             let current_N = *mark.get(&i).unwrap_or(&0);
-            if 1 > current_N { mark.insert(i - 1, 1); }
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
     }
 
@@ -642,8 +666,9 @@ pub fn pearson_grid_refinement_par(
 
     // Sequential grid construction
     let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> = DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-    
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+
     for i in 0..x_mesh.len() {
         let y = y_DMatrix.column(i);
         if mark.get(&i).unwrap_or(&0) != &0 {
@@ -658,7 +683,9 @@ pub fn pearson_grid_refinement_par(
                 let dy_i = y_pl_1 - y;
                 for k in 0..N + 1 {
                     let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    new_initial_guess.column_mut(biased_i as usize).copy_from(&column_to_add);
+                    new_initial_guess
+                        .column_mut(biased_i as usize)
+                        .copy_from(&column_to_add);
                     biased_i += 1;
                 }
             } else {
@@ -947,68 +974,120 @@ pub fn grcar_smooke_grid_refinement_par(
     let mark = Mutex::new(HashMap::new());
 
     // Parallel marking phase
-    y_DMatrix.clone().row_iter().enumerate().par_bridge().for_each(|(j, y)| {
-        let threshold = 1e-4;
-        let y_j_max = y.max();
-        let y_j_min = y.min();
-        let delta = d * (y_j_max - y_j_min);
-        
-        let mut list_dy_dx_i = Vec::new();
-        for i in 0..x_mesh.len() - 1 {
-            let dy_i = y[i + 1] - y[i];
-            let h_i = h[i];
-            let dy_dx_i = dy_i / h_i;
-            list_dy_dx_i.push(dy_dx_i);
-        }
-        let list_dy_dx_i_min = list_dy_dx_i.iter().cloned().min_by(|a, b| a.total_cmp(b)).unwrap();
-        let list_dy_dx_i_max = list_dy_dx_i.iter().cloned().max_by(|a, b| a.total_cmp(b)).unwrap();
-        let derivative_range = list_dy_dx_i_max - list_dy_dx_i_min;
-        let gamma = g * derivative_range;
-
-        let mut local_marks = Vec::new();
-        for i in 0..x_mesh.len() {
-            if x_mesh.len() - 1 > i && i > 0 {
+    y_DMatrix
+        .clone()
+        .row_iter()
+        .enumerate()
+        .par_bridge()
+        .for_each(|(j, y)| {
+            let threshold = 1e-4;
+            let y_j_max = y.max();
+            let y_j_min = y.min();
+            let delta = d * (y_j_max - y_j_min);
+            info!(
+                "delta {} ({}, {}) for component j: {}",
+                delta, y_j_max, y_j_min, j
+            );
+            let mut list_dy_dx_i = Vec::new();
+            for i in 0..x_mesh.len() - 1 {
                 let dy_i = y[i + 1] - y[i];
                 let h_i = h[i];
                 let dy_dx_i = dy_i / h_i;
-                let dy_i_min_1 = y[i] - y[i - 1];
-                let h_i_min_1 = h[i - 1];
-                let dy_dx_i_min_1 = dy_i_min_1 / h_i_min_1;
-                let eta_i = (dy_dx_i - dy_dx_i_min_1).abs();
-                let tau_i = (y[i] - y[i - 1]).abs();
-                let both_ys_are_not_too_small = (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
-                
-                if (tau_i > delta && both_ys_are_not_too_small) || (eta_i > gamma && both_ys_are_not_too_small) {
-                    let N = if (tau_i / delta) as i32 >= 1 { (tau_i / delta) as i32 } else { 1 };
-                    local_marks.push((i - 1, N));
-                }
+                list_dy_dx_i.push(dy_dx_i);
             }
-        }
+            let list_dy_dx_i_min = list_dy_dx_i
+                .iter()
+                .cloned()
+                .min_by(|a, b| a.total_cmp(b))
+                .unwrap();
+            let list_dy_dx_i_max = list_dy_dx_i
+                .iter()
+                .cloned()
+                .max_by(|a, b| a.total_cmp(b))
+                .unwrap();
+            let derivative_range = list_dy_dx_i_max - list_dy_dx_i_min;
+            let gamma = g * derivative_range;
+            info!("gamma {} for component j: {}", gamma, j);
+            let mut local_marks = Vec::new();
+            for i in 0..x_mesh.len() {
+                if x_mesh.len() - 1 > i && i > 0 {
+                    let dy_i = y[i + 1] - y[i];
+                    let h_i = h[i];
+                    let dy_dx_i = dy_i / h_i;
+                    let dy_i_min_1 = y[i] - y[i - 1];
+                    let h_i_min_1 = h[i - 1];
+                    let dy_dx_i_min_1 = dy_i_min_1 / h_i_min_1;
+                    let eta_i = (dy_dx_i - dy_dx_i_min_1).abs();
+                    let tau_i = (y[i] - y[i - 1]).abs();
+                    let both_ys_are_not_too_small =
+                        (y[i].abs() > threshold) & (y[i + 1].abs() > threshold);
 
-        if !local_marks.is_empty() {
-            let mut global_mark = mark.lock().unwrap();
-            for (idx, N) in local_marks {
-                let current_N = *global_mark.get(&idx).unwrap_or(&0);
-                if N > current_N {
-                    global_mark.insert(idx, N);
+                    if (tau_i > delta && both_ys_are_not_too_small)
+                        || (eta_i > gamma && both_ys_are_not_too_small)
+                    {
+                        info!(
+                            "tau {:3} ({:3}, {:3})> delta {:3} for i {}",
+                            tau_i,
+                            y[i],
+                            y[i - 1],
+                            delta,
+                            i
+                        );
+                        info!(
+                            "eta {:3}  ({:3}, {:3})> gamma {:3} for i {}",
+                            eta_i, dy_dx_i, dy_dx_i_min_1, gamma, i
+                        );
+                        let N = if (tau_i / delta) as i32 >= 1 {
+                            (tau_i / delta) as i32
+                        } else {
+                            1
+                        };
+                        local_marks.push((i - 1, N));
+                        info!(" conditions vaiolation at index {}, => N = {}", i, N);
+                    }
                 }
             }
-        }
-    });
+
+            if !local_marks.is_empty() {
+                let mut global_mark = mark.lock().unwrap();
+                for (idx, N) in local_marks {
+                    let current_N = *global_mark.get(&idx).unwrap_or(&0);
+                    if N > current_N {
+                        global_mark.insert(idx, N);
+                    }
+                }
+            }
+        });
 
     let mut mark = mark.into_inner().unwrap();
-    
+
     // Sequential bufferization
     for i in 1..x_mesh.len() - 1 {
         let buffer_condition_1 = h[i] / h[i - 1] <= C;
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
         if !buffer_condition_1 && (i - 1) != 0 {
+            log::info!(
+                "bufferization at index {} needed, as h[i]/h[i-1] <= C, h[i], h[i-1] = {} , {}",
+                i,
+                h[i],
+                h[i - 1]
+            );
             let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
-            if 1 > current_N { mark.insert(i - 1, 1); }
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
         if !buffer_condition_2 {
+            log::info!(
+                "bufferization at index {} needed, as h[i]/h[i-1] >= 1.0/C, h[i], h[i-1] = {} , {}",
+                i,
+                h[i],
+                h[i - 1]
+            );
             let current_N = *mark.get(&i).unwrap_or(&0);
-            if 1 > current_N { mark.insert(i - 1, 1); }
+            if 1 > current_N {
+                mark.insert(i - 1, 1);
+            }
         }
     }
 
@@ -1017,8 +1096,9 @@ pub fn grcar_smooke_grid_refinement_par(
 
     // Sequential grid construction
     let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> = DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-    
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
+
     for i in 0..x_mesh.len() {
         let y = y_DMatrix.column(i);
         if mark.get(&i).unwrap_or(&0) != &0 {
@@ -1027,13 +1107,21 @@ pub fn grcar_smooke_grid_refinement_par(
                 let h_i = x_mesh[i + 1] - x_mesh[i];
                 for k in 0..N + 1 {
                     let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
+                    log::info!("\n \n points added: {} at index {} ", x_new, i);
                     new_grid.push(x_new);
                 }
                 let y_pl_1 = y_DMatrix.column(i + 1);
                 let dy_i = y_pl_1 - y;
                 for k in 0..N + 1 {
                     let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    new_initial_guess.column_mut(biased_i as usize).copy_from(&column_to_add);
+                    log::info!(
+                        "\n \n column added: {} at index {} ",
+                        column_to_add,
+                        biased_i
+                    );
+                    new_initial_guess
+                        .column_mut(biased_i as usize)
+                        .copy_from(&column_to_add);
                     biased_i += 1;
                 }
             } else {
@@ -1047,7 +1135,11 @@ pub fn grcar_smooke_grid_refinement_par(
             biased_i += 1;
         }
     }
-
+    log::info!("created new grid of length {}", new_grid.len());
+    log::info!(
+        "\n \n new_initial_guess of shape{:?}",
+        new_initial_guess.shape()
+    );
     assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, total_new_points as usize)
 }

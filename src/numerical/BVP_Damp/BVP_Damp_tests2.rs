@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tets {  
+mod tets {
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
         AdaptiveGridConfig, NRBVP, SolverParams,
     };
@@ -10,11 +10,11 @@ mod tets {
     use prettytable::{Table, row};
     use std::collections::HashMap;
     use std::time::Instant;
-      #[test] 
+    #[test]
     fn test_direct_eq2() {
         // variables
         let unknowns_str: Vec<&str> = vec!["Teta", "q", "C0", "J0", "C1", "J1"];
-        let unhnowns_Str:Vec<String> = unknowns_str.iter().map(|s| s.to_string()).collect();
+        let unhnowns_Str: Vec<String> = unknowns_str.iter().map(|s| s.to_string()).collect();
         let unknowns: Vec<Expr> = Expr::parse_vector_expression(unknowns_str);
         let Teta = unknowns[0].clone();
         let q = unknowns[1].clone();
@@ -31,7 +31,7 @@ mod tets {
         let Lambda = 0.07;
 
         let P = 2e6;
-   
+
         let Tm = 1500.0;
         let C1_0 = 1.0;
         let T_initial = 1000.0;
@@ -39,11 +39,9 @@ mod tets {
 
         // coefficients
 
- 
- 
-        let Pe_q =  0.0090168  ;
+        let Pe_q = 0.0090168;
 
-        let D_ro = 2.88e-4  ;
+        let D_ro = 2.88e-4;
         let Pe_D = 1.50e-3;
         let ro_m_ = M0 * P / (8.314 * Tm);
         // conversion to sym
@@ -64,9 +62,8 @@ mod tets {
         let ro_D = vec![ro_D.clone(), ro_D.clone()];
         let Pe_D = vec![Expr::Const(Pe_D), Expr::Const(Pe_D)];
         let minus = Expr::Const(-1.0);
-               let M_reag = Expr::Const(0.342);
+        let M_reag = Expr::Const(0.342);
         // EQ SYSTEM
-
 
         let Rate = A
             * Expr::exp(-E / (R_g * (Teta * T_scale_sym + dT_sym)))
@@ -79,10 +76,10 @@ mod tets {
             - (M.clone() * minus * Rate.clone() * ro_m.clone() / M.clone()) * qs.clone();
         let eq_C1 = J1.clone() / ro_D[1].clone();
         let eq_J1 = J1 * Pe_D[1].clone() - (M.clone() * Rate * ro_m / M) * qs;
-                
+
         let eqs = vec![eq_T, eq_q, eq_C0, eq_J0, eq_C1, eq_J1];
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
- 
+
         // Pretty print coefficients table
         let mut coeff_table = Table::new();
         coeff_table.add_row(row!["Parameter", "Value"]);
@@ -94,7 +91,7 @@ mod tets {
         coeff_table.add_row(row!["Pe_q", format!("{:.4e}", Pe_q)]);
         coeff_table.add_row(row!["Pe_D", format!("{:?}", Pe_D)]);
         coeff_table.add_row(row!["D_ro", format!("{:.2e}", D_ro)]);
-            coeff_table.add_row(row!["ro", format!("{:.2e}", ro_m_)]);
+        coeff_table.add_row(row!["ro", format!("{:.2e}", ro_m_)]);
 
         println!("\n=== COEFFICIENTS ===");
         coeff_table.printstd();
@@ -108,19 +105,17 @@ mod tets {
         }
         eq_table.printstd();
 
-    
-
         ////////////////////////////////////////////
         //solver
 
-            let Teta_initial = (T_initial - dT) / T_scale;
+        let Teta_initial = (T_initial - dT) / T_scale;
         let BoundaryConditions = HashMap::from([
             ("Teta".to_string(), vec![(0, Teta_initial)]),
             ("q".to_string(), vec![(1, 1e-10)]),
-            ("C0".to_string(),  vec![(0, C1_0)]),
-            ("J0".to_string(),  vec![(1, 1e-7)]),
-            ("C1".to_string(),  vec![(0, 1e-3)]),
-            ("J1".to_string(),  vec![(1, 1e-7)]),
+            ("C0".to_string(), vec![(0, C1_0)]),
+            ("J0".to_string(), vec![(1, 1e-7)]),
+            ("C1".to_string(), vec![(0, 1e-3)]),
+            ("J1".to_string(), vec![(1, 1e-7)]),
         ]);
 
         let Bounds = HashMap::from([
@@ -134,11 +129,10 @@ mod tets {
         let n_steps = 20;
         let grid_method = GridRefinementMethod::GrcarSmooke(0.01, 0.01, 1.5);
         // or GridRefinementMethod::Pearson(0.05, 2.5);
-        let adaptive =AdaptiveGridConfig{
+        let adaptive = AdaptiveGridConfig {
             version: 1,
             max_refinements: 3,
-            grid_method
-
+            grid_method,
         };
         let strategy_params = SolverParams {
             max_jac: Some(5),
@@ -146,8 +140,8 @@ mod tets {
             damp_factor: Some(0.5),
             adaptive: Some(adaptive),
         };
-        
-        let rel_tolerance =HashMap::from([
+
+        let rel_tolerance = HashMap::from([
             ("Teta".to_string(), 1e-5),
             ("q".to_string(), 1e-5),
             ("C0".to_string(), 1e-5),
@@ -155,7 +149,7 @@ mod tets {
             ("C1".to_string(), 1e-5),
             ("J1".to_string(), 1e-5),
         ]);
-                let ig = vec![0.99; n_steps * unknowns.len()];
+        let ig = vec![0.99; n_steps * unknowns.len()];
         let initial_guess = DMatrix::from_vec(unknowns.len(), n_steps, ig);
         let max_iterations = 100;
         let abs_tolerance = 1e-6;
@@ -169,7 +163,7 @@ mod tets {
         let mut bvp = NRBVP::new(
             eqs.clone(),
             initial_guess,
-             unhnowns_Str,
+            unhnowns_Str,
             "x".to_string(),
             BoundaryConditions,
             0.0,
@@ -188,14 +182,13 @@ mod tets {
         );
         bvp.dont_save_log(true);
         bvp.solve();
-        bvp.gnuplot_result();
+        //  bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
-        for (unknown, equation) in  eq_and_unknowns{
+        for (unknown, equation) in eq_and_unknowns {
             println!("unknown: {} | equation: {}", unknown, equation);
         }
         println!("\n=== EQUATIONS SYSTEM ===");
         coeff_table.printstd();
-  
     }
     fn test_problem(grid_method: GridRefinementMethod) {
         // variables
@@ -369,7 +362,7 @@ mod tets {
         );
         bvp.dont_save_log(true);
         bvp.solve();
-        bvp.gnuplot_result();
+        //  bvp.gnuplot_result();
         let solution = bvp.get_result().unwrap();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {
@@ -405,8 +398,8 @@ mod tets {
         //   let v1: DVector<String> = sol_vars.column(0).into();
         //  let v2: DVector<String> = sol_vars.column(1).into();
         //   println!("vec of unknowns {:?}\n {:?}", v1, v2);
-      //  let binding = bvp.full_result.clone().unwrap();
-    //    let v1: DVector<f64> = binding.row(0).transpose().into();
+        //  let binding = bvp.full_result.clone().unwrap();
+        //    let v1: DVector<f64> = binding.row(0).transpose().into();
         // println!("{:?}", v1)
     }
 
@@ -415,9 +408,9 @@ mod tets {
         let begin = Instant::now();
         let grid_method = GridRefinementMethod::GrcarSmooke(0.01, 0.01, 2.5);
         test_problem(grid_method);
-        println!("duration {}", begin.elapsed().as_secs() as f64)
+        println!("duration {}", begin.elapsed().as_millis() as f64)
     }
-        #[test]
+    #[test]
     fn test_BVP_Damp_Twopnt() {
         let begin = Instant::now();
         let grid_method = GridRefinementMethod::TwoPoint(0.02, 0.02, 2.5);
@@ -435,7 +428,7 @@ mod tets {
         let begin = Instant::now();
         let grid_method = GridRefinementMethod::DoublePoints;
         test_problem(grid_method);
-        println!("duration {}", begin.elapsed().as_secs() as f64)
+        println!("duration {}", begin.elapsed().as_millis() as f64)
     }
     #[test]
     fn test_BVP_Damp_Easy() {
@@ -518,10 +511,10 @@ mod tets {
         nr.dont_save_log(true);
         nr.solve();
         let solution = nr.get_result().unwrap();
-    
+
         // assert_eq!(n, n_steps + 1);
         println!("result = {:?}", solution);
-        nr.gnuplot_result();
+        //  nr.gnuplot_result();
     }
     #[test]
     fn test_two_point_bvp() {
@@ -585,11 +578,11 @@ mod tets {
         let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
         println!("solution: {:?}", y_numer.len());
         println!("x len {}", x_mesh.len());
-        nr.gnuplot_result();
+        //    nr.gnuplot_result();
         //compare with exact solution
         let y_exact = ne.exact_solution(None, None, Some(n_steps + 2));
         for i in 0..y_exact.len() {
-           // let y_exact_ = f64::exp(-(x_mesh[i] as f64).powf(2.0));
+            // let y_exact_ = f64::exp(-(x_mesh[i] as f64).powf(2.0));
             assert!(
                 (y_exact[i] - y_numer[i]).abs() < 1e-2,
                 "i {}, y_exact: {} y_numer: {}",
@@ -662,7 +655,7 @@ mod tets {
         let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
         println!("solution: {:?}", y_numer);
         println!("x len {}", x_mesh.len());
-        nr.gnuplot_result();
+        //    nr.gnuplot_result();
 
         let ressult = " 1+ (x- 1)^2 - (1/6)*(x-1)^3 + (1/12)*(x-1)^4 ".to_string();
         let expr = Expr::parse_expression(&ressult);
@@ -753,7 +746,7 @@ mod tets {
         let x_mesh = nr.x_mesh.clone();
         println!("solution: {:?}", y_numer.len());
         println!("x len {}", x_mesh.len());
-       // let y_exect = ne.exact_solution(None, None, Some(n_steps));
+        // let y_exect = ne.exact_solution(None, None, Some(n_steps));
         //nr.gnuplot_result();
         //compare with exact solution
         let g = 1.0;
@@ -890,7 +883,7 @@ mod tets {
         let duration = begin.elapsed();
         println!(
             "Time elapsed in lane_emden_bvp_problem() is: {:?}",
-            duration.as_secs()
+            duration.as_millis()
         );
     }
 }

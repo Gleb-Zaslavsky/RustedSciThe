@@ -16,182 +16,182 @@ pub fn bvp_examples(example: usize) {
     match example {
         0 => {
             /*
-            //BVP jacobian matrix
-            let RHS = vec!["-z-y", "y"];
-            // parse RHS as symbolic expressions
-            let Equations = Expr::parse_vector_expression(RHS.clone());
-            let values = vec!["z".to_string(), "y".to_string()];
-            let arg = "x".to_string();
-            let n_steps = 3;
-            let scheme = "forward".to_string();
-            let h = 1e-4;
-            let BorderConditions = HashMap::from([
-                ("z".to_string(), vec![(0, 1000.0)]),
-                ("y".to_string(), vec![(1, 333.0)]),
-            ]);
+                //BVP jacobian matrix
+                let RHS = vec!["-z-y", "y"];
+                // parse RHS as symbolic expressions
+                let Equations = Expr::parse_vector_expression(RHS.clone());
+                let values = vec!["z".to_string(), "y".to_string()];
+                let arg = "x".to_string();
+                let n_steps = 3;
+                let scheme = "forward".to_string();
+                let h = 1e-4;
+                let BorderConditions = HashMap::from([
+                    ("z".to_string(), vec![(0, 1000.0)]),
+                    ("y".to_string(), vec![(1, 333.0)]),
+                ]);
 
-            let Y = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-            let mut Jacobian_instance = Jacobian::new();
-            // creating analytic discretized algebraic system, its functional representation, analytic Jacobian matrix and its functional representation
-            Jacobian_instance.generate_BVP(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
+                let Y = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+                let mut Jacobian_instance = Jacobian::new();
+                // creating analytic discretized algebraic system, its functional representation, analytic Jacobian matrix and its functional representation
+                Jacobian_instance.generate_BVP(
+                    Equations.clone(),
+                    values.clone(),
+                    arg.clone(),
+                    0.0,
+                    None,
+                    Some(n_steps),
+                    Some(h),
+                    None,
+                    BorderConditions.clone(),
+                    None,
+                    None,
+                    scheme.clone(),
+                );
 
-            // analytic Jacobian matrix
-            #[allow(unused_variables)]
-            let J = &Jacobian_instance.symbolic_jacobian;
-            // its functional representation
-            let J_func = &Jacobian_instance.lambdify_jacobian_DMatrix_par("x", values.clone());
-            // analytic discretized algebraic system,
-            #[allow(unused_variables)]
-            let F = &Jacobian_instance.vector_of_functions;
-            // its functional representation
-            #[allow(unused_variables)]
-            let F_func = &Jacobian_instance.lambdify_residual_DVector("x", values.clone());
-            let varvect = &Jacobian_instance.vector_of_variables;
-            println!("vector of variables {:?}", varvect);
-            let Ys = DVector::from_vec(Y.clone());
-            let J_eval1 = J_func(4.0, &Ys);
-            println!("Jacobian Dense: J_eval = {:?} \n", J_eval1);
-            // SPARSE JACOBIAN MATRIX with nalgebra (+sparse feature) crate
+                // analytic Jacobian matrix
+                #[allow(unused_variables)]
+                let J = &Jacobian_instance.symbolic_jacobian;
+                // its functional representation
+                let J_func = &Jacobian_instance.lambdify_jacobian_DMatrix_par("x", values.clone());
+                // analytic discretized algebraic system,
+                #[allow(unused_variables)]
+                let F = &Jacobian_instance.vector_of_functions;
+                // its functional representation
+                #[allow(unused_variables)]
+                let F_func = &Jacobian_instance.lambdify_residual_DVector("x", values.clone());
+                let varvect = &Jacobian_instance.vector_of_variables;
+                println!("vector of variables {:?}", varvect);
+                let Ys = DVector::from_vec(Y.clone());
+                let J_eval1 = J_func(4.0, &Ys);
+                println!("Jacobian Dense: J_eval = {:?} \n", J_eval1);
+                // SPARSE JACOBIAN MATRIX with nalgebra (+sparse feature) crate
 
-            Jacobian_instance.generate_BVP_CsMatrix(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func3 = &Jacobian_instance.function_jacobian_IVP_CsMatrix;
-            let J_eval3 = J_func3(4.0, &Ys);
-            println!("Jacobian Sparse with CsMatrix: J_eval = {:?} \n", J_eval3);
+                Jacobian_instance.generate_BVP_CsMatrix(
+                    Equations.clone(),
+                    values.clone(),
+                    arg.clone(),
+                    0.0,
+                    None,
+                    Some(n_steps),
+                    Some(h),
+                    None,
+                    BorderConditions.clone(),
+                    None,
+                    None,
+                    scheme.clone(),
+                );
+                let J_func3 = &Jacobian_instance.function_jacobian_IVP_CsMatrix;
+                let J_eval3 = J_func3(4.0, &Ys);
+                println!("Jacobian Sparse with CsMatrix: J_eval = {:?} \n", J_eval3);
 
-            // SPARSE JACOBIAN MATRIX with  crate
-            Jacobian_instance.generate_BVP_CsMat(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func2: &Box<dyn Fn(f64, &CsVec<f64>) -> CsMat<f64>> =
-                &Jacobian_instance.function_jacobian_IVP_CsMat;
-            let F_func2 = &Jacobian_instance.lambdified_functions_IVP_CsVec;
-            let Ys2 = CsVec::new(Y.len(), vec![0, 1, 2, 3, 4, 5], Y.clone());
-            println!("Ys = {:?} \n", &Ys2);
-            let F_eval2 = F_func2(4.0, &Ys2);
-            println!("F_eval = {:?} \n", F_eval2);
-            let J_eval2: CsMat<f64> = J_func2(4.0, &Ys2);
+                // SPARSE JACOBIAN MATRIX with  crate
+                Jacobian_instance.generate_BVP_CsMat(
+                    Equations.clone(),
+                    values.clone(),
+                    arg.clone(),
+                    0.0,
+                    None,
+                    Some(n_steps),
+                    Some(h),
+                    None,
+                    BorderConditions.clone(),
+                    None,
+                    None,
+                    scheme.clone(),
+                );
+                let J_func2: &Box<dyn Fn(f64, &CsVec<f64>) -> CsMat<f64>> =
+                    &Jacobian_instance.function_jacobian_IVP_CsMat;
+                let F_func2 = &Jacobian_instance.lambdified_functions_IVP_CsVec;
+                let Ys2 = CsVec::new(Y.len(), vec![0, 1, 2, 3, 4, 5], Y.clone());
+                println!("Ys = {:?} \n", &Ys2);
+                let F_eval2 = F_func2(4.0, &Ys2);
+                println!("F_eval = {:?} \n", F_eval2);
+                let J_eval2: CsMat<f64> = J_func2(4.0, &Ys2);
 
-            println!("Jacobian Sparse with CsMat: J_eval = {:?} \n", J_eval2);
+                println!("Jacobian Sparse with CsMat: J_eval = {:?} \n", J_eval2);
 
-            // SPARSE JACOBIAN MATRIX with sprs crate
-            let mut Jacobian_instance = Jacobian::new();
-            Jacobian_instance.generate_BVP_SparseColMat(
-                Equations.clone(),
-                values.clone(),
-                arg.clone(),
-                0.0,
-                None,
-                Some(n_steps),
-                Some(h),
-                None,
-                BorderConditions.clone(),
-                None,
-                None,
-                scheme.clone(),
-            );
-            let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
-            let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
-            use faer::col::{Col, ColRef};
-            let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
-            println!("Ys = {:?} \n", &Ys3);
-            let F_eval3 = F_func3(4.0, &Ys3);
-            println!("F_eval = {:?} \n", F_eval3);
-            #[allow(unused_variables)]
-            let J_eval2 = J_func3(4.0, &Ys3);
+                // SPARSE JACOBIAN MATRIX with sprs crate
+                let mut Jacobian_instance = Jacobian::new();
+                Jacobian_instance.generate_BVP_SparseColMat(
+                    Equations.clone(),
+                    values.clone(),
+                    arg.clone(),
+                    0.0,
+                    None,
+                    Some(n_steps),
+                    Some(h),
+                    None,
+                    BorderConditions.clone(),
+                    None,
+                    None,
+                    scheme.clone(),
+                );
+                let J_func3 = &Jacobian_instance.function_jacobian_IVP_SparseColMat;
+                let F_func3 = &Jacobian_instance.lambdified_functions_IVP_Col;
+                use faer::col::{Col, ColRef};
+                let Ys3: Col<f64> = ColRef::from_slice(Y.as_slice()).to_owned();
+                println!("Ys = {:?} \n", &Ys3);
+                let F_eval3 = F_func3(4.0, &Ys3);
+                println!("F_eval = {:?} \n", F_eval3);
+                #[allow(unused_variables)]
+                let J_eval2 = J_func3(4.0, &Ys3);
 
-            println!(
-                "Jacobian Sparse with SparseColMat: J_eval = {:?} \n",
-                J_eval3
-            );
-        }
-        1 => {
-            let eq1 = Expr::parse_expression("y-z");
-            let eq2 = Expr::parse_expression("-z^2");
-            let eq_system = vec![eq1, eq2];
+                println!(
+                    "Jacobian Sparse with SparseColMat: J_eval = {:?} \n",
+                    J_eval3
+                );
+            }
+            1 => {
+                let eq1 = Expr::parse_expression("y-z");
+                let eq2 = Expr::parse_expression("-z^2");
+                let eq_system = vec![eq1, eq2];
 
-            let values = vec!["z".to_string(), "y".to_string()];
-            let arg = "x".to_string();
-            let tolerance = 1e-5;
-            let max_iterations = 50;
+                let values = vec!["z".to_string(), "y".to_string()];
+                let arg = "x".to_string();
+                let tolerance = 1e-5;
+                let max_iterations = 50;
 
-            let t0 = 0.0;
-            let t_end = 1.0;
-            let n_steps = 200;
-            let strategy = "Naive".to_string(); //
-            let strategy_params = None;
-            let method = "Sparse".to_string(); // or  "Dense"
-            let linear_sys_method = None;
-            let ones = vec![0.0; values.len() * n_steps];
-            let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
-                values.len(),
-                n_steps,
-                DVector::from_vec(ones).as_slice(),
-            );
-            let mut BorderConditions = HashMap::new();
-            BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
-            BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
-            assert_eq!(&eq_system.len(), &2);
-            let mut nr = NRBVP::new(
-                eq_system,
-                initial_guess,
-                values,
-                arg,
-                BorderConditions,
-                t0,
-                t_end,
-                n_steps,
-                strategy,
-                strategy_params,
-                linear_sys_method,
-                method,
-                tolerance,
-                max_iterations,
-            );
+                let t0 = 0.0;
+                let t_end = 1.0;
+                let n_steps = 200;
+                let strategy = "Naive".to_string(); //
+                let strategy_params = None;
+                let method = "Sparse".to_string(); // or  "Dense"
+                let linear_sys_method = None;
+                let ones = vec![0.0; values.len() * n_steps];
+                let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
+                    values.len(),
+                    n_steps,
+                    DVector::from_vec(ones).as_slice(),
+                );
+                let mut BorderConditions = HashMap::new();
+                BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
+                BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
+                assert_eq!(&eq_system.len(), &2);
+                let mut nr = NRBVP::new(
+                    eq_system,
+                    initial_guess,
+                    values,
+                    arg,
+                    BorderConditions,
+                    t0,
+                    t_end,
+                    n_steps,
+                    strategy,
+                    strategy_params,
+                    linear_sys_method,
+                    method,
+                    tolerance,
+                    max_iterations,
+                );
 
-            println!("solving system");
-            #[allow(unused_variables)]
-            let solution = nr.solve().unwrap();
-            // println!("result = {:?}", solution);
-            nr.plot_result();
-            
-             */
+                println!("solving system");
+                #[allow(unused_variables)]
+                let solution = nr.solve().unwrap();
+                // println!("result = {:?}", solution);
+                nr.plot_result();
+
+                 */
         }
         2 => {
             /*

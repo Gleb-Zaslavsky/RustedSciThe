@@ -14,8 +14,8 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::{alpha1, alphanumeric1, multispace0, space0},
-    combinator::{map, map_res, recognize},
+    character::complete::{alpha1, alphanumeric1, multispace0, space0, line_ending},
+    combinator::{map, map_res, recognize, not},
     multi::{many0, many1, separated_list0},
     sequence::{delimited, pair, separated_pair, terminated},
 };
@@ -186,9 +186,24 @@ fn parse_section(input: &str) -> IResult<&str, (String, HashMap<String, Vec<Valu
     Ok((input, (title, section_map)))
 }
 
+/// Filters out comment lines (starting with //, #, %, or ;)
+fn filter_comments(input: &str) -> String {
+    input
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("//") && !trimmed.starts_with('#') && 
+            !trimmed.starts_with('%') && !trimmed.starts_with(';') &&
+            !trimmed.is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
 /// Parses the entire document into a HashMap
 pub fn parse_document(input: &str) -> IResult<&str, DocumentMap> {
-    let (input, _) = multispace0(input)?;
+  //  let filtered_input = filter_comments(input);
+   // let (input, _) = multispace0(&filtered_input)?;
     // Use many1 instead of separated_list0 to parse sections
     // and ensure each section is properly terminated
     let mut parser = many1(delimited(

@@ -921,8 +921,6 @@ impl Jacobian {
             variable_str.clone().iter().map(|s| s.to_string()).collect(),
         );
     }
-
-
 } // end of impl
 
 #[cfg(test)]

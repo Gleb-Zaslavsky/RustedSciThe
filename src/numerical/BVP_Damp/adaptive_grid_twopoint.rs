@@ -141,7 +141,7 @@ impl Grid {
             for i in 0..n - 1 {
                 let dy_i = y_j[i + 1] - y_j[i];
                 if dy_i.abs() > delta {
-                    println!("dy_i/dalta: {}", round_to_n_digits(dy_i.abs() / delta, 3))
+                    info!("dy_i/dalta: {}", round_to_n_digits(dy_i.abs() / delta, 3))
                 };
                 list_dy_i.push(dy_i);
                 let dx_i = x_mesh[i + 1] - x_mesh[i];

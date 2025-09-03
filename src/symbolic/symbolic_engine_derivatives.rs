@@ -734,8 +734,10 @@ impl Expr {
         }
     }
 
-      pub fn lambdify_borrowed_thread_safe(&self, vars: Vec<&str>) -> Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync > {
-
+    pub fn lambdify_borrowed_thread_safe(
+        &self,
+        vars: Vec<&str>,
+    ) -> Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> {
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();

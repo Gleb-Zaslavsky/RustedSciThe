@@ -56,6 +56,7 @@ use crate::numerical::BVP_Damp::BVP_utils::{
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step_Cantera2, convergence_condition, if_initial_guess_inside_bounds, jac_recalc,
 };
+use core::panic;
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
 use simplelog::*;
@@ -145,6 +146,7 @@ pub struct NRBVP {
     pub p: f64,            // parameter
     pub y: Box<dyn VectorType>, // iteration vector
     m: usize,              // iteration counter without jacobian recalculation
+    pub BC_position_and_value: Vec<(usize, usize, f64)>, //  where keys are positions of boundary conditions in the global vector and values are the boundary condition values.
     old_jac: Option<Box<dyn MatrixType>>,
     jac_recalc: bool,            //flag indicating if jacobian should be recalculated
     error_old: f64,              // error of previous iteration
@@ -253,6 +255,7 @@ impl NRBVP {
             full_result: None,
             x_mesh: DVector::from_vec(T_list),
             fun: boxed_fun,
+            BC_position_and_value: Vec::new(),
             jac: None,
             p: 0.0,
             y: y0,
@@ -414,6 +417,7 @@ impl NRBVP {
         self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
         self.variable_string = jacobian_instance.variable_string;
         self.bandwidth = jacobian_instance.bandwidth.unwrap();
+        self.BC_position_and_value = jacobian_instance.BC_pos_n_values;
     } // end of method eq_generate
     /// Updates solver state for new iteration step
     ///
@@ -718,11 +722,10 @@ impl NRBVP {
             (-2, None)
         }
     } // end of damped step
-    pub fn calc_residual(&self, y: Box<dyn VectorType>) -> f64{
-             
-                        let fun = &self.fun;
-                        let F_k = fun.call(self.p, &*y);
-                        F_k.norm()
+    pub fn calc_residual(&self, y: Box<dyn VectorType>) -> f64 {
+        let fun = &self.fun;
+        let F_k = fun.call(self.p, &*y);
+        F_k.norm()
     }
     /// Main iteration loop for damped Newton-Raphson method
     ///
@@ -738,13 +741,16 @@ impl NRBVP {
         ////////////////////////////////////////////////////////////////////////
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         info!("{:?}", self.initial_guess.shape());
-        let y: DMatrix<f64> = self.initial_guess.clone();
-        //  println!("new y = {} \n \n", &y);
-        let y: Vec<f64> = y.iter().cloned().collect();
-        let y: DVector<f64> = DVector::from_vec(y);
-        self.result = Some(y.clone()); // save into result in case the very first iteration
-        // with the current n_steps will go wrong and we shall need grid refinement
-        self.y = Vectors_type_casting(&y.clone(), self.method.clone());
+        if self.grid_refinemens == 0 {
+            let y: DMatrix<f64> = self.initial_guess.clone();
+            //  println!("new y = {} \n \n", &y);
+            let y: Vec<f64> = y.iter().cloned().collect();
+            let y: DVector<f64> = DVector::from_vec(y);
+            self.result = Some(y.clone()); // save into result in case the very first iteration
+            // with the current n_steps will go wrong and we shall need grid refinement
+            self.y = Vectors_type_casting(&y.clone(), self.method.clone());
+        } else {
+        }
         let initial_res_nornal = self.calc_residual(self.y.clone_box());
         info!("norm of the initial residual = {}", initial_res_nornal);
         // println!("y = {:?}", &y);
@@ -899,13 +905,13 @@ impl NRBVP {
     ///
     /// # Returns
     /// Tuple of (new mesh points, interpolated initial guess, number of refined intervals)
-    fn create_new_grid(&mut self) -> (Vec<f64>, DMatrix<f64>, usize) {
+    fn create_new_grid(&mut self) -> (Vec<f64>, DVector<f64>, usize) {
         info!("================GRID REFINEMENT===================");
         let y = self.result.clone().unwrap().clone_box();
         let y_DVector = y.to_DVectorType();
-        let nrows = self.values.len();
-        let ncols = self.n_steps;
-        let y_DMatrix_origin = DMatrix::from_row_slice(nrows, ncols, y_DVector.as_slice());
+        let number_of_Ys = self.values.len();
+        let n_steps = self.n_steps;
+
         // dbg!(&y_DMatrix.);
         let method = self
             .strategy_params
@@ -915,11 +921,12 @@ impl NRBVP {
             .expect("Grid method must be specified when adaptive is enabled");
 
         self.custom_timer.grid_refinement_tic();
-        let y_DMatrix = construct_full_solution(
-            y_DMatrix_origin.clone(),
-            &self.BorderConditions,
-            &self.values,
-        );
+
+        let BC_position_and_value = self.BC_position_and_value.clone();
+        let full_result_vector = construct_full_solution(y_DVector.clone(), BC_position_and_value);
+
+        let y_DMatrix =
+            DMatrix::from_column_slice(number_of_Ys, n_steps + 1, full_result_vector.as_slice());
         for (value, row) in self.values.iter().zip(y_DMatrix.clone().row_iter()) {
             let row: Vec<f64> = row.iter().cloned().collect();
             log::debug!(
@@ -955,18 +962,21 @@ impl NRBVP {
             residuals,
         );
 
-        let initial_guess =
-            extract_unknown_variables(initial_guess, &self.BorderConditions, &self.values);
+        let initial_guess = extract_unknown_variables(
+            initial_guess,
+            &self.BC_position_and_value,
+            number_of_nonzero_keys,
+        );
+        assert_eq!(
+            initial_guess.len(),
+            (new_mesh.len() - 1) * self.values.len(),
+            "Initial guess size mismatch after grid refinement"
+        );
+
+        //  dbg!(&initial_guess);
+
         info!("================GRID REFINEMENT ENDED===================");
         self.custom_timer.grid_refinement_tac();
-        if number_of_nonzero_keys == 0 {
-            assert_eq!(
-                y_DMatrix_origin, initial_guess,
-                "No refinement done, but initial guess changed - it should not happen!"
-            );
-        }
-        let initial_guess = initial_guess.transpose();
-        let initial_guess = DMatrix::from_column_slice(initial_guess.ncols(), initial_guess.nrows(), initial_guess.as_slice());
         (new_mesh, initial_guess, number_of_nonzero_keys)
     }
 
@@ -975,9 +985,17 @@ impl NRBVP {
     /// Updates solver state with new mesh and restarts Newton iterations
     fn solve_with_new_grid(&mut self) {
         let (new_mesh, initial_guess, number_of_nonzero_keys) = self.create_new_grid();
+        self.custom_timer.grid_refinement_tac();
         self.number_of_refined_intervals = number_of_nonzero_keys;
         self.nodes_added.push(number_of_nonzero_keys);
-        self.initial_guess = initial_guess;
+        let initial_guess_matrix = DMatrix::from_column_slice(
+            self.values.len(),
+            new_mesh.len() - 1,
+            initial_guess.as_slice(),
+        );
+
+        self.initial_guess = initial_guess_matrix;
+        self.y = Vectors_type_casting(&initial_guess, self.method.clone());
         self.x_mesh = DVector::from_vec(new_mesh.clone());
         self.grid_refinemens += 1;
         info!(
@@ -991,37 +1009,36 @@ impl NRBVP {
         self.we_need_refinement();
 
         if number_of_nonzero_keys > 0 {
-        // Clear old Jacobian completely to avoid dimension mismatch
-        self.old_jac = None;
-        self.jac = None; // Clear Jacobian function as well
-        self.jac_recalc = true; // Force Jacobian recalculation for new grid
-        self.m = 0; // Reset Jacobian age counter
+            // Clear old Jacobian completely to avoid dimension mismatch
+            self.old_jac = None;
+            self.jac = None; // Clear Jacobian function as well
+            self.jac_recalc = true; // Force Jacobian recalculation for new grid
+            self.m = 0; // Reset Jacobian age counter
 
-        // Clear other cached state that might be invalid for new grid
-        self.bounds_vec.clear();
-        self.rel_tolerance_vec.clear();
-        self.variable_string.clear();
+            // Clear other cached state that might be invalid for new grid
+            self.bounds_vec.clear();
+            self.rel_tolerance_vec.clear();
+            self.variable_string.clear();
 
-        // Update grid parameters
-        self.n_steps = new_mesh.len() - 1;
-      
-        info!(
-            "new guess of shape {} {}",
-            self.initial_guess.nrows(),
-            self.initial_guess.ncols()
-        );
-        info!("new mesh length {}", new_mesh.len());
-       
-        self.custom_timer.symbolic_operations_tic();
-        // Regenerate system with new grid - force bandwidth recalculation for new grid
-        self.eq_generate(Some(new_mesh), None);
-        self.custom_timer.symbolic_operations_tac();
+            // Update grid parameters
+            self.n_steps = new_mesh.len() - 1;
+
+            info!(
+                "new guess of shape {} {}",
+                self.initial_guess.nrows(),
+                self.initial_guess.ncols()
+            );
+            info!("new mesh length {}", new_mesh.len());
+
+            self.custom_timer.symbolic_operations_tic();
+            // Regenerate system with new grid - no need to recalculate bandwidth
+            self.eq_generate(Some(new_mesh), Some(self.bandwidth));
+            self.custom_timer.symbolic_operations_tac();
         } else {
             info!("no new grid needed - returning to main loop");
             return;
-
         }
-        self.jac_recalc = true; 
+        self.jac_recalc = true;
         self.main_loop_damped();
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1185,19 +1202,15 @@ impl NRBVP {
         let n_steps = self.n_steps;
         let vector_of_results = self.result.clone().unwrap().clone();
 
-        let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_row_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice());
-
-        let full_results =
-            construct_full_solution(matrix_of_results, &self.BorderConditions, &self.values);
-        let permutted_results = full_results.transpose();
-        info!(
-            "matrix of results has shape {:?}",
-            permutted_results.shape()
-        );
+        let BC_position_and_value = self.BC_position_and_value.clone();
+        let full_results_vector = construct_full_solution(vector_of_results, BC_position_and_value);
+        let full_results: DMatrix<f64> =
+            DMatrix::from_column_slice(number_of_Ys, n_steps + 1, full_results_vector.as_slice());
+        let full_results = full_results.transpose();
+        info!("matrix of results has shape {:?}", full_results.shape());
         info!("length of x mesh : {:?}", n_steps);
         info!("number of Ys: {:?}", number_of_Ys);
-        self.full_result = Some(permutted_results.clone());
+        self.full_result = Some(full_results.clone());
     }
     /// Creates plots using gnuplot backend
     ///
