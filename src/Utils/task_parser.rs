@@ -708,11 +708,11 @@ impl Display for Value {
     }
 }
 
-/// Parses a title (word characters without spaces)
+/// Parses a title (word characters, underscores, and special symbols)
 pub fn parse_title(input: &str) -> IResult<&str, String> {
     let parser = recognize(pair(
         alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_")))),
+        many0(alt((alphanumeric1, tag("_"), tag("=>"), tag("-"), tag(">"), tag("="), tag("<")))),
     ));
 
     let mut parser = map(parser, String::from);
@@ -726,11 +726,11 @@ pub fn parse_title(input: &str) -> IResult<&str, String> {
     Ok((input, result))
 }
 
-/// Parses a key (word characters without spaces)
+/// Parses a key (word characters, underscores, and special symbols like =>)
 pub fn parse_key(input: &str) -> IResult<&str, String> {
     let parser = recognize(pair(
         alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_")))),
+        many0(alt((alphanumeric1, tag("_"), tag("=>"), tag("-"), tag("+")))),
     ));
 
     let mut parser = map(parser, String::from);
@@ -791,16 +791,24 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             Value::Optional(Some(Box::new(Value::String(inner.to_string()))))
         }
     } else if s.starts_with('[') && s.ends_with(']') {
-        // Parse as vector of floats
+        // Parse as vector - try floats first, fallback to string if parsing fails
         let inner = &s[1..s.len() - 1];
         if inner.is_empty() {
             Value::Vector(vec![])
         } else {
-            let values = inner
+            // Try to parse all elements as floats
+            let float_results: Result<Vec<f64>, _> = inner
                 .split(',')
-                .map(|v| v.trim().parse::<f64>().unwrap())
-                .collect::<Vec<f64>>();
-            Value::Vector(values)
+                .map(|v| v.trim().parse::<f64>())
+                .collect();
+            
+            match float_results {
+                Ok(values) => Value::Vector(values),
+                Err(_) => {
+                    // If float parsing fails, treat as string
+                    Value::String(s.to_string())
+                }
+            }
         }
     } else if let Ok(val) = s.parse::<i64>() {
         Value::Integer(val)
@@ -1042,8 +1050,8 @@ pub fn parse_document_as_strings(
 #[cfg(test)]
 
 mod tests {
-    use rand::rand_core::le;
-    use toml::value;
+    // use rand::rand_core::le;
+    // use toml::value;
 
     use super::*;
     #[test]
@@ -1097,4 +1105,51 @@ mod tests {
         println!("bounds_from_map: {:?}", bounds_from_map);
         assert!(res.is_ok());
     }
+    #[test]
+     fn close_to_life_examples2(){
+
+         let task_content = "
+        process_conditions
+        problem_name:HMXTest
+        problem_description: HMXdecompositiontest
+        substances:[HMX, HMXprod]
+        Tm: 1500.0
+        L: 9e-4
+        dT: 600.0
+        T_scale: 600.0
+        P: 1e6
+        Cp: 1464.4
+        Lambda: 0.07
+        m: 0.000770
+        M: 0.0342
+        thermal_effects: [102000.0]
+        boundary_condition
+        HMX: 0.999
+        HMXprod: 0.001
+        T: 800.0
+        groups:true
+        diffusion_coefficients
+        HMX: 4.7619e-8
+        HMXprod: 4.7619e-8
+        HMX
+        H: 4
+        N: 8
+        C: 8
+        O: 8
+        HMXprod
+        H: 6
+        C: 1
+        O: 1
+        reactions
+        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        ";
+        let res = parse_document(task_content);
+        println!("Parse result: {:?}", res);
+        assert!(res.is_ok());
+
+    }
 }
+/*
+
+
+*/
