@@ -67,7 +67,7 @@ mod tests {
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps + 1);
         // println!("result = {:?}", solution);
-        // nr.plot_result();
+        nr.gnuplot_result();
     }
     /// Tests the boundary value problem (BVP) solver for the Clairaut equation.
     ///

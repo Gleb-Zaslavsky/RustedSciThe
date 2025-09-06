@@ -22,3 +22,5 @@ pub mod grid_api;
 pub mod linear_sys_solvers_depot;
 
 pub mod BVP_traits2;
+
+pub mod task_parser_damped;

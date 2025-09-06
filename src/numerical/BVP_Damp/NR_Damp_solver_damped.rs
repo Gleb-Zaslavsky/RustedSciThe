@@ -70,7 +70,7 @@ use crate::numerical::BVP_Damp::grid_api::{GridRefinementMethod, new_grid};
 /// Configuration parameters for the damped Newton solver
 ///
 /// Controls damping behavior, Jacobian reuse strategy, and adaptive grid refinement
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SolverParams {
     /// Maximum iterations before Jacobian recalculation (default: 3)
     pub max_jac: Option<usize>,
@@ -85,7 +85,7 @@ pub struct SolverParams {
 /// Configuration for adaptive grid refinement
 ///
 /// Defines when and how to refine the computational mesh
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdaptiveGridConfig {
     /// Refinement criterion version (currently only version 1 supported)
     pub version: usize,
@@ -155,7 +155,7 @@ pub struct NRBVP {
     variable_string: Vec<String>, // vector of indexed variable names
     #[allow(dead_code)]
     adaptive: bool, // flag indicating if adaptive grid should be used
-    new_grid_enabled: bool,      //flag indicating if the grid should be refined
+  pub  new_grid_enabled: bool,      //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
@@ -276,6 +276,38 @@ impl NRBVP {
             nodes_added: Vec::new(),
             custom_timer: CustomTimer::new(),
         }
+    }
+    pub fn default() -> NRBVP {
+        NRBVP::new(
+            vec![],
+            DMatrix::zeros(0, 0),
+            vec![],
+            "".to_string(),
+            HashMap::new(),
+            0.0,
+            0.0,
+            0,
+            "".to_string(),
+            "".to_string(),
+            None,
+            None,
+            "".to_string(),
+            0.0,
+            None,
+            0,
+            None,
+            None,
+        )
+    }
+    pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
+
+        let h = (t_end - t0) / n_steps as f64;
+        let T_list: Vec<f64> = (0..n_steps + 1)
+            .map(|i| t0 + (i as f64) * h)
+            .collect::<Vec<_>>();
+
+
+        self.x_mesh = DVector::from_vec(T_list);
     }
     /// Basic methods to set the equation system
 

@@ -58,7 +58,7 @@ use nalgebra::{DMatrix, DVector};
 /// - `GrcarSmooke(d, g, C)`: Considers both solution jumps and derivative changes
 /// - `Sci()`: Uses residual-based error estimation
 /// - `TwoPoint(p1, p2, p3)`: Multi-criteria refinement with three parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GridRefinementMethod {
     /// Simplest method: doubles mesh density by adding midpoints to all intervals
     ///
