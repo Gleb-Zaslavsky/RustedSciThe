@@ -133,25 +133,24 @@
 use crate::Utils::task_parser::{DocumentMap, DocumentParser};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
-use std::collections::HashMap;
 use nalgebra::DVector;
+use std::collections::HashMap;
 impl NRBVP {
-    /// in standard NRBVP approach this operation is made in the new(..) method but when 
+    /// in standard NRBVP approach this operation is made in the new(..) method but when
     /// but if params are passed from the hashmap (and may be by parsing task files), it is done here
- 
-    pub fn  before_solve_preprocessing(&mut self) {
-        let  t0 = self.t0;
-        let  t_end = self.t_end;
-        let  n_steps = self.n_steps;
+
+    pub fn before_solve_preprocessing(&mut self) {
+        let t0 = self.t0;
+        let t_end = self.t_end;
+        let n_steps = self.n_steps;
         let h = (t_end - t0) / n_steps as f64;
         let T_list: Vec<f64> = (0..n_steps + 1)
             .map(|i| t0 + (i as f64) * h)
             .collect::<Vec<_>>();
 
-
         self.x_mesh = DVector::from_vec(T_list);
 
-                // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
+        // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         let new_grid_enabled_: bool = if let Some(ref params) = self.strategy_params {
             params.adaptive.is_some()
         } else {
@@ -222,6 +221,14 @@ impl NRBVP {
             .as_string()
             .cloned();
         self.loglevel = loglevel;
+        let dont_save_log = if let Some(dont_save_log) = solver_settings.get("dont_save_log") {
+            dont_save_log.clone().unwrap()[0]
+                .as_boolean()
+                .expect("Failed to get dont_save_log as bool")
+        } else {
+            true
+        };
+        self.dont_save_log(dont_save_log);
         if let Some(bounds) = result.get("bounds") {
             let bounds: HashMap<String, (f64, f64)> = bounds
                 .iter()
@@ -368,14 +375,15 @@ impl NRBVP {
         } else {
             false
         };
-        let dont_save_log = if let Some(dont_save_log) = solver_settings.get("dont_save_log") {
-            dont_save_log.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get dont_save_log as bool")
-        } else {
-            true
-        };
 
+        let name = if let Some(name) = solver_settings.get("filename") {
+            name.clone().unwrap()[0]
+                .as_string()
+                .cloned()
+        } else {
+            None
+        };
+     
         if plot_flag {
             self.plot_result();
         }
@@ -383,21 +391,23 @@ impl NRBVP {
             self.gnuplot_result()
         };
         if save_flag {
-            self.save_to_file(None);
+            self.save_to_file(name.clone());
         };
         if save_to_csv {
-            self.save_to_csv(None);
+            self.save_to_csv(name);
         };
-        self.dont_save_log(dont_save_log);
     }
 
     pub fn parse_settings_from_str_with_exact_names(&mut self, input: &str) {
         let mut parser = DocumentParser::new(input.to_owned());
 
         let _ = parser.parse_document();
-        // keys inside bounds header of rel_tolerance don't need to be converted to lowecase 
+        // keys inside bounds header of rel_tolerance don't need to be converted to lowecase
         // because they contain problem variables names which are arbituary
-        parser.keys_to_lower_case(Some(vec!["bounds".to_string(), "rel_tolerance".to_string()]));
+        parser.keys_to_lower_case(Some(vec![
+            "bounds".to_string(),
+            "rel_tolerance".to_string(),
+        ]));
         let result: DocumentMap = parser.get_result().expect("Failed to get result").clone();
         self.set_params_from_hashmap(result);
     }
@@ -416,7 +426,10 @@ impl NRBVP {
         parser: &mut DocumentParser,
     ) -> Result<(), String> {
         let _ = parser.parse_document();
-        parser.keys_to_lower_case(Some(vec!["bounds".to_string(), "rel_tolerance".to_string()]));
+        parser.keys_to_lower_case(Some(vec![
+            "bounds".to_string(),
+            "rel_tolerance".to_string(),
+        ]));
         let result: DocumentMap = parser
             .get_result()
             .ok_or("No result after parsing")?
@@ -502,7 +515,7 @@ impl NRBVP {
 }
 
 /// Creates a configuration file template with all available options and comments
-/// 
+///
 /// Generates a structured template showing all configuration sections and their expected format.
 /// Users can copy this template and fill in their specific values.
 pub fn create_template_file(path: Option<std::path::PathBuf>) {
@@ -524,7 +537,8 @@ pub fn create_template_file(path: Option<std::path::PathBuf>) {
     max_iterations: 100
     // Logging level (optional) - None or Some(info/warn/error)
     loglevel: Some(info)
-    
+    // Disable log file saving
+     dont_save_log: true
     // Solution bounds for each variable (variable_name: min, max)
     bounds
     // var1: -10.0, 10.0
@@ -571,23 +585,24 @@ pub fn create_template_file(path: Option<std::path::PathBuf>) {
         save: false
         // Save results to CSV file
         save_to_csv: false
-        // Disable log file saving
-        dont_save_log: true
+        filename: somename
+
     "#;
-    
+
+    use std::env;
     use std::fs::File;
     use std::io::Write;
-    use std::env;
-    
+
     let file_path = match path {
         Some(p) => p,
         None => {
-            let mut default_path = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let mut default_path =
+                env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             default_path.push("bvp_config_template.txt");
             default_path
         }
     };
-    
+
     match File::create(&file_path) {
         Ok(mut file) => {
             if let Err(e) = file.write_all(form.as_bytes()) {
@@ -604,7 +619,7 @@ pub fn create_template_file(path: Option<std::path::PathBuf>) {
 #[cfg(test)]
 mod tests {
     //! Comprehensive tests for BVP configuration parsing
-    //! 
+    //!
     //! Tests cover:
     //! - Basic configuration parsing without bounds
     //! - Full configuration with bounds and tolerances
@@ -661,7 +676,7 @@ mod tests {
         assert_eq!(&eq_system.len(), &2);
 
         let mut nr = NRBVP::default();
- 
+
         nr.parse_settings_from_str_with_exact_names(input);
         nr.rel_tolerance = Some(rel_tolerance);
         nr.Bounds = Some(Bounds);
@@ -674,15 +689,15 @@ mod tests {
         nr.BorderConditions = BorderConditions;
         nr.initial_guess = initial_guess;
         nr.before_solve_preprocessing();
-        nr.solve();
         nr.dont_save_log(true);
-        
+        nr.solve();
+
         let solution = nr.get_result().unwrap();
         let x_mesh = &nr.x_mesh;
         println!("x_mesh = {:?}", x_mesh);
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps + 1);
-         nr.gnuplot_result();
+        nr.gnuplot_result();
         // println!("result = {:?}", solution);
         // nr.plot_result();
     }
@@ -741,14 +756,15 @@ mod tests {
         nr.n_steps = n_steps;
         nr.BorderConditions = BorderConditions;
         nr.initial_guess = initial_guess;
-           nr.before_solve_preprocessing();
-        nr.solve();
+        nr.before_solve_preprocessing();
         nr.dont_save_log(true);
+        nr.solve();
+
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps + 1);
         // println!("result = {:?}", solution);
-         nr.plot_result();
+        nr.plot_result();
     }
 
     #[test]
@@ -826,9 +842,10 @@ mod tests {
         nr.n_steps = n_steps;
         nr.BorderConditions = BorderConditions;
         nr.initial_guess = initial_guess;
-           nr.before_solve_preprocessing();
-        nr.solve();
+        nr.before_solve_preprocessing();
         nr.dont_save_log(true);
+        nr.solve();
+
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps + 1);
@@ -863,6 +880,7 @@ mod tests {
         writeln!(file, "absolute_tolerance: 1e-5").unwrap();
         writeln!(file, "max_iterations: 100").unwrap();
         writeln!(file, "loglevel: Some(info)").unwrap();
+        writeln!(file, "dont_save_log:true").unwrap();
         writeln!(file, "bounds").unwrap();
         writeln!(file, "z: -10.0, 10.0").unwrap();
         writeln!(file, "y: -7.0, 7.0").unwrap();
@@ -878,11 +896,11 @@ mod tests {
         writeln!(file, "max_refinements: 1").unwrap();
         writeln!(file, "grid_refinement").unwrap();
         writeln!(file, "pearson: [0.01, 1.5]").unwrap();
-
         writeln!(file, "postprocessing").unwrap();
         writeln!(file, "gnuplot: true").unwrap();
-        writeln!(file, "dont_save_log:true").unwrap();
-      //  writeln!(file, "save: true").unwrap();
+        writeln!(file, "save_to_csv:true").unwrap();
+        writeln!(file, "filename:meow").unwrap();
+        //  writeln!(file, "save: true").unwrap();
 
         let ones = vec![0.0; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
@@ -921,14 +939,12 @@ mod tests {
         nr.n_steps = n_steps;
         nr.BorderConditions = BorderConditions;
         nr.initial_guess = initial_guess;
-       nr.before_solve_preprocessing();
+        nr.before_solve_preprocessing();
         nr.solve();
         println!("{:?}", parser.get_result());
         nr.set_postpocessing_from_hashmap(&mut parser);
 
-       // let solution = nr.get_result().unwrap();
-       // println!("solution {:?}", solution);
-     
-        
+        // let solution = nr.get_result().unwrap();
+        // println!("solution {:?}", solution);
     }
 }

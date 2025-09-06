@@ -362,7 +362,7 @@ mod tets {
         );
         bvp.dont_save_log(true);
         bvp.solve();
-         bvp.gnuplot_result();
+        bvp.gnuplot_result();
         let solution = bvp.get_result().unwrap();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {

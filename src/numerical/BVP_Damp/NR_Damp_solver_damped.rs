@@ -155,7 +155,7 @@ pub struct NRBVP {
     variable_string: Vec<String>, // vector of indexed variable names
     #[allow(dead_code)]
     adaptive: bool, // flag indicating if adaptive grid should be used
-  pub  new_grid_enabled: bool,      //flag indicating if the grid should be refined
+    pub new_grid_enabled: bool,  //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
@@ -300,12 +300,10 @@ impl NRBVP {
         )
     }
     pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
-
         let h = (t_end - t0) / n_steps as f64;
         let T_list: Vec<f64> = (0..n_steps + 1)
             .map(|i| t0 + (i as f64) * h)
             .collect::<Vec<_>>();
-
 
         self.x_mesh = DVector::from_vec(T_list);
     }
