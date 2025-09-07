@@ -712,7 +712,15 @@ impl Display for Value {
 pub fn parse_title(input: &str) -> IResult<&str, String> {
     let parser = recognize(pair(
         alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_"), tag("=>"), tag("-"), tag(">"), tag("="), tag("<")))),
+        many0(alt((
+            alphanumeric1,
+            tag("_"),
+            tag("=>"),
+            tag("-"),
+            tag(">"),
+            tag("="),
+            tag("<"),
+        ))),
     ));
 
     let mut parser = map(parser, String::from);
@@ -730,7 +738,13 @@ pub fn parse_title(input: &str) -> IResult<&str, String> {
 pub fn parse_key(input: &str) -> IResult<&str, String> {
     let parser = recognize(pair(
         alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_"), tag("=>"), tag("-"), tag("+")))),
+        many0(alt((
+            alphanumeric1,
+            tag("_"),
+            tag("=>"),
+            tag("-"),
+            tag("+"),
+        ))),
     ));
 
     let mut parser = map(parser, String::from);
@@ -797,11 +811,9 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             Value::Vector(vec![])
         } else {
             // Try to parse all elements as floats
-            let float_results: Result<Vec<f64>, _> = inner
-                .split(',')
-                .map(|v| v.trim().parse::<f64>())
-                .collect();
-            
+            let float_results: Result<Vec<f64>, _> =
+                inner.split(',').map(|v| v.trim().parse::<f64>()).collect();
+
             match float_results {
                 Ok(values) => Value::Vector(values),
                 Err(_) => {
@@ -810,10 +822,10 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
                 }
             }
         }
-    } else if let Ok(val) = s.parse::<f64>() {
-        Value::Float(val)
     } else if let Ok(val) = s.parse::<i64>() {
         Value::Integer(val)
+    } else if let Ok(val) = s.parse::<f64>() {
+        Value::Float(val)
     } else if let Ok(val) = s.parse::<bool>() {
         Value::Boolean(val)
     } else if let Ok(val) = s.parse::<usize>() {
@@ -1106,9 +1118,8 @@ mod tests {
         assert!(res.is_ok());
     }
     #[test]
-     fn close_to_life_examples2(){
-
-         let task_content2 = "
+    fn close_to_life_examples2() {
+        let task_content2 = "
         process_conditions
         problem_name:HMXTest
         problem_description: HMXdecompositiontest
@@ -1146,10 +1157,9 @@ mod tests {
         let res = parse_document(task_content2);
         println!("Parse result: {:?}", res);
         assert!(res.is_ok());
-
     }
 
-     const task_content: &str = r#"
+    const task_content: &str = r#"
         process_conditions
         problem_name: Some(HMXTest)
         problem_description: Some(HMXdecompositiontest)
@@ -1207,14 +1217,12 @@ mod tests {
         damp_factor: Some(0.5)
         adaptive: None
         "#;
-        #[test]
-     fn close_to_life_examples3(){
-
-                let res = parse_document(task_content);
+    #[test]
+    fn close_to_life_examples3() {
+        let res = parse_document(task_content);
         println!("Parse result: {:?}", res);
         assert!(res.is_ok());
-
-     }
+    }
 }
 /*
 

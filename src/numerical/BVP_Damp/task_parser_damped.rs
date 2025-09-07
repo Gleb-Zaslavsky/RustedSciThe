@@ -377,13 +377,11 @@ impl NRBVP {
         };
 
         let name = if let Some(name) = solver_settings.get("filename") {
-            name.clone().unwrap()[0]
-                .as_string()
-                .cloned()
+            name.clone().unwrap()[0].as_string().cloned()
         } else {
             None
         };
-     
+
         if plot_flag {
             self.plot_result();
         }
