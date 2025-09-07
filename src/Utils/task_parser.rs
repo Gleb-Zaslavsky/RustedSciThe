@@ -810,10 +810,10 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
                 }
             }
         }
-    } else if let Ok(val) = s.parse::<i64>() {
-        Value::Integer(val)
     } else if let Ok(val) = s.parse::<f64>() {
         Value::Float(val)
+    } else if let Ok(val) = s.parse::<i64>() {
+        Value::Integer(val)
     } else if let Ok(val) = s.parse::<bool>() {
         Value::Boolean(val)
     } else if let Ok(val) = s.parse::<usize>() {
@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
      fn close_to_life_examples2(){
 
-         let task_content = "
+         let task_content2 = "
         process_conditions
         problem_name:HMXTest
         problem_description: HMXdecompositiontest
@@ -1143,11 +1143,78 @@ mod tests {
         reactions
         HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
         ";
-        let res = parse_document(task_content);
+        let res = parse_document(task_content2);
         println!("Parse result: {:?}", res);
         assert!(res.is_ok());
 
     }
+
+     const task_content: &str = r#"
+        process_conditions
+        problem_name: Some(HMXTest)
+        problem_description: Some(HMXdecompositiontest)
+        substances: HMX, HMXprod
+        Tm: 1500.0
+        L: 9e-4
+        dT: 600.0
+        T_scale: 600.0
+        P: 1e6
+        Cp: 1464.4
+        Lambda: 0.07
+        m: 0.0043
+        M: 0.0342
+        thermal_effects: [102000.0]
+        groups:true
+        boundary_condition
+        HMX: 0.999
+        HMXprod: 0.001
+        T: 800.0
+        diffusion_coefficients
+        HMX: 0.000009296
+        HMXprod: 0.000009296
+        HMX
+        H: 4
+        N: 8
+        C: 8
+        O: 8
+        HMXprod
+        H: 6
+        C: 1
+        O: 1
+        reactions
+        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        solver_settings
+        scheme: forward
+        method: Sparse
+        strategy: Damped
+        linear_sys_method: None
+        abs_tolerance: 1e-5
+        max_iterations: 100
+        loglevel: Some(info)
+        bounds
+        C: [-10.0, 10.0]
+        J:  [-1e20, 1e20]
+        Teta: [-100.0, 100.0]
+        q: [-1e20, 1e20] 
+        rel_tolerance
+        C: 1e-5
+        J: 1e-5
+        Teta: 1e-5
+        q:  1e-5
+        strategy_params
+        max_jac: Some(3)
+        max_damp_iter: Some(10)
+        damp_factor: Some(0.5)
+        adaptive: None
+        "#;
+        #[test]
+     fn close_to_life_examples3(){
+
+                let res = parse_document(task_content);
+        println!("Parse result: {:?}", res);
+        assert!(res.is_ok());
+
+     }
 }
 /*
 
