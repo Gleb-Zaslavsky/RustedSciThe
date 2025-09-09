@@ -143,6 +143,229 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tabled::{Table, Tabled};
+
+/// Comprehensive error type for document parsing operations.
+/// 
+/// This error type provides detailed information about parsing failures including:
+/// - The specific type of error that occurred
+/// - Location information (line and column numbers when available)
+/// - Contextual information about what was being parsed
+/// - A snippet of the input around the error location for debugging
+/// 
+/// # Examples
+/// 
+/// ```rust,ignore
+/// let error = ParseError::new(
+///     ParseErrorKind::InvalidValue,
+///     Some(5),
+///     Some(12),
+///     "Expected integer but found 'abc'".to_string(),
+///     Some("key: abc, next_key".to_string())
+/// );
+/// ```
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    /// The specific category of parsing error
+    pub kind: ParseErrorKind,
+    /// Line number where the error occurred (1-based indexing)
+    pub line: Option<usize>,
+    /// Column number where the error occurred (1-based indexing)
+    pub column: Option<usize>,
+    /// Human-readable description of what went wrong and context
+    pub context: String,
+    /// A snippet of the input text around the error location for debugging
+    pub input_snippet: Option<String>,
+}
+
+/// Categorizes different types of parsing errors that can occur during document processing.
+/// 
+/// Each variant represents a specific class of parsing failure with distinct characteristics:
+/// 
+/// # Error Categories
+/// 
+/// ## Structural Errors
+/// - `InvalidSection`: Problems with section headers or structure
+/// - `InvalidKey`: Issues with field names or key formatting
+/// - `MissingColon`: Missing or malformed key-value separators
+/// 
+/// ## Value Errors  
+/// - `InvalidValue`: Problems parsing individual values (type mismatches, format issues)
+/// - `UnexpectedToken`: Encountering unexpected characters or symbols
+/// 
+/// ## Validation Errors
+/// - `TemplateValidation`: Mismatches between parsed data and expected template structure
+/// - `PseudonymResolution`: Issues resolving pseudonyms to real names
+/// 
+/// ## System Errors
+/// - `FileError`: File system operations (reading, permissions, not found)
+/// - `CommentFilter`: Problems during comment line filtering
+/// 
+/// # Usage Notes
+/// 
+/// - Use `InvalidValue` for type conversion failures (e.g., "abc" when expecting number)
+/// - Use `TemplateValidation` for missing required fields or unexpected sections
+/// - Use `PseudonymResolution` when pseudonym mappings fail or are ambiguous
+/// - Use `FileError` for any file I/O related issues during document loading
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseErrorKind {
+    /// Section header is malformed, missing, or contains invalid characters.
+    /// 
+    /// Common causes:
+    /// - Section name contains forbidden characters
+    /// - Section header appears in wrong location
+    /// - Duplicate section names
+    InvalidSection,
+    
+    /// Field name/key is malformed, missing, or contains invalid characters.
+    /// 
+    /// Common causes:
+    /// - Key contains spaces or forbidden characters  
+    /// - Key appears without corresponding value
+    /// - Duplicate keys within same section
+    InvalidKey,
+    
+    /// Individual value cannot be parsed or converted to expected type.
+    /// 
+    /// Common causes:
+    /// - Type mismatch (e.g., "abc" when expecting number)
+    /// - Malformed vector syntax (e.g., "[1, 2, abc]")
+    /// - Invalid optional syntax (e.g., "Some(" without closing ")")
+    /// - Boolean values other than "true"/"false"
+    InvalidValue,
+    
+    /// Missing or malformed colon separator between key and value.
+    /// 
+    /// Common causes:
+    /// - Key without colon (e.g., "key value" instead of "key: value")
+    /// - Multiple colons in key-value pair
+    /// - Colon in wrong position
+    MissingColon,
+    
+    /// Unexpected character or token encountered during parsing.
+    /// 
+    /// Common causes:
+    /// - Special characters in wrong context
+    /// - Unclosed brackets or parentheses
+    /// - Invalid escape sequences
+    /// - Encoding issues
+    UnexpectedToken,
+    
+    /// Parsed document doesn't match expected template structure.
+    /// 
+    /// Common causes:
+    /// - Required sections missing from input
+    /// - Required fields missing from sections
+    /// - Value types don't match template expectations
+    /// - Extra sections/fields not allowed by template
+    TemplateValidation,
+    
+    /// Cannot resolve pseudonyms to real names or ambiguous mappings.
+    /// 
+    /// Common causes:
+    /// - Pseudonym maps to multiple real names
+    /// - Real name not found in pseudonym mapping
+    /// - Circular pseudonym references
+    /// - Pseudonym configuration conflicts
+    PseudonymResolution,
+    
+    /// File system operation failed during document loading.
+    /// 
+    /// Common causes:
+    /// - File not found or path doesn't exist
+    /// - Permission denied reading file
+    /// - File is locked by another process
+    /// - Disk I/O errors or corrupted file
+    /// - Invalid file encoding
+    FileError,
+    
+    /// Error occurred while filtering comment lines from input.
+    /// 
+    /// Common causes:
+    /// - Invalid UTF-8 sequences in input
+    /// - Extremely large input causing memory issues
+    /// - Malformed line endings
+    CommentFilter,
+}
+
+impl ParseError {
+    /// Creates a new ParseError with all fields specified.
+    pub fn new(
+        kind: ParseErrorKind,
+        line: Option<usize>,
+        column: Option<usize>,
+        context: String,
+        input_snippet: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            line,
+            column,
+            context,
+            input_snippet,
+        }
+    }
+    
+    /// Creates a simple ParseError with just error kind and context message.
+    pub fn simple(kind: ParseErrorKind, context: String) -> Self {
+        Self {
+            kind,
+            line: None,
+            column: None,
+            context,
+            input_snippet: None,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.context)?;
+        
+        if let (Some(line), Some(col)) = (self.line, self.column) {
+            write!(f, " at line {}, column {}", line, col)?;
+        }
+        
+        if let Some(snippet) = &self.input_snippet {
+            write!(f, "\nNear: {}", snippet)?;
+        }
+        
+        Ok(())
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Helper function to create error with position information from nom input.
+pub fn create_positioned_error(
+    kind: ParseErrorKind,
+    context: String,
+    input: &str,
+    original_input: &str,
+) -> ParseError {
+    let consumed = original_input.len() - input.len();
+    let before_error = &original_input[..consumed];
+    
+    let line = before_error.lines().count();
+    let column = before_error.lines().last().map(|l| l.len() + 1).unwrap_or(1);
+    
+    let snippet = extract_error_snippet(original_input, consumed);
+    
+    ParseError::new(kind, Some(line), Some(column), context, Some(snippet))
+}
+
+/// Extracts a snippet of text around the error position for context.
+fn extract_error_snippet(input: &str, error_pos: usize) -> String {
+    let start = error_pos.saturating_sub(20);
+    let end = (error_pos + 20).min(input.len());
+    
+    let snippet = &input[start..end];
+    if start > 0 {
+        format!("...{}", snippet)
+    } else {
+        snippet.to_string()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemplateType {
@@ -191,7 +414,7 @@ impl DocumentParser {
         self
     }
 
-    /// Parse the document
+    /// Parse the document with enhanced error handling
     pub fn parse_document(&mut self) -> Result<&DocumentMap, String> {
         match parse_document(&self.input) {
             Ok(result) => {
@@ -201,14 +424,25 @@ impl DocumentParser {
                 Ok(self.result.as_ref().unwrap())
             }
             Err(e) => {
-                self.error = Some(e.clone());
-                Err(e)
+                let error_msg = format!("{}", e);
+                self.error = Some(error_msg.clone());
+                Err(error_msg)
             }
         }
     }
+    
 
-    /// Parse document with template support
+
+    /// Parse document with template support and validation
     pub fn parse_document_as(&mut self) -> Result<&DocumentMap, String> {
+        // First validate template if present
+        if let Some(template) = &self.template {
+            if let Err(e) = self.validate_template() {
+                self.error = Some(e.clone());
+                return Err(e);
+            }
+        }
+        
         // Convert template to use actual pseudonyms if pseudonyms are configured
         let template_for_parsing = if let Some(template) = &self.template {
             Some(self.convert_template_to_pseudonyms(template))
@@ -219,13 +453,23 @@ impl DocumentParser {
         match parse_document_as(&self.input, template_for_parsing) {
             Ok(result) => {
                 let result = self.to_real_names(Some(result)).unwrap();
+                
+                // Validate parsed result against template
+                if let Some(template) = &self.template {
+                    if let Err(e) = self.validate_against_template(&result, template) {
+                        self.error = Some(e.clone());
+                        return Err(e);
+                    }
+                }
+                
                 self.result = Some(result);
                 self.error = None;
                 Ok(self.result.as_ref().unwrap())
             }
             Err(e) => {
-                self.error = Some(e.clone());
-                Err(e)
+                let error_msg = format!("{}", e);
+                self.error = Some(error_msg.clone());
+                Err(error_msg)
             }
         }
     }
@@ -250,8 +494,9 @@ impl DocumentParser {
                 Ok(self.string_result.as_ref().unwrap())
             }
             Err(e) => {
-                self.error = Some(e.clone());
-                Err(e)
+                let error_msg = format!("{}", e);
+                self.error = Some(error_msg.clone());
+                Err(error_msg)
             }
         }
     }
@@ -261,7 +506,7 @@ impl DocumentParser {
         // First parse the entire document to discover which pseudonyms are actually used
         let full_doc = match parse_document(&self.input) {
             Ok(doc) => doc,
-            Err(e) => return Err(e),
+            Err(e) => return Err(format!("{}", e)),
         };
 
         // Find actual pseudonyms used in input that correspond to requested real names
@@ -275,8 +520,9 @@ impl DocumentParser {
                 Ok(self.result.as_ref().unwrap())
             }
             Err(e) => {
-                self.error = Some(e.clone());
-                Err(e)
+                let error_msg = format!("{}", e);
+                self.error = Some(error_msg.clone());
+                Err(error_msg)
             }
         }
     }
@@ -297,10 +543,206 @@ impl DocumentParser {
     pub fn get_error(&self) -> Option<&String> {
         self.error.as_ref()
     }
+    
+    /// Get detailed error information with suggestions
+    pub fn get_detailed_error(&self) -> Option<String> {
+        self.error.as_ref().map(|e| {
+            format!(
+                "Parsing Error: {}\n\nSuggestions:\n- Check for missing colons after field names\n- Ensure section names don't contain spaces\n- Verify bracket matching in vectors [1.0, 2.0]\n- Check for duplicate section or field names",
+                e
+            )
+        })
+    }
 
+    pub fn pretty_print_result(&self) {
+        if let Some(result) = &self.result {
+            pretty_print_map(result);
+        }
+    }
     /// Check if parsing was successful
     pub fn is_success(&self) -> bool {
         self.error.is_none() && (self.result.is_some() || self.string_result.is_some())
+    }
+    
+    /// Validate input before parsing (quick syntax check)
+    pub fn validate_syntax(&self) -> Result<(), String> {
+        let lines: Vec<&str> = self.input.lines().collect();
+        
+        for (line_num, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || 
+               trimmed.starts_with('#') || trimmed.starts_with('%') || 
+               trimmed.starts_with(';') {
+                continue;
+            }
+            
+            // Check for common syntax issues
+            if trimmed.contains(':') {
+                let parts: Vec<&str> = trimmed.split(':').collect();
+                if parts.len() != 2 {
+                    return Err(format!("Line {}: Multiple colons found. Each line should have exactly one colon separating key and value.", line_num + 1));
+                }
+                if parts[0].trim().is_empty() {
+                    return Err(format!("Line {}: Empty key before colon.", line_num + 1));
+                }
+                if parts[1].trim().is_empty() {
+                    return Err(format!("Line {}: Empty value after colon.", line_num + 1));
+                }
+            }
+            
+            // Check for unmatched brackets
+            let mut bracket_count = 0;
+            let mut paren_count = 0;
+            for ch in trimmed.chars() {
+                match ch {
+                    '[' => bracket_count += 1,
+                    ']' => bracket_count -= 1,
+                    '(' => paren_count += 1,
+                    ')' => paren_count -= 1,
+                    _ => {}
+                }
+            }
+            if bracket_count != 0 {
+                return Err(format!("Line {}: Unmatched square brackets []. Found {} opening and {} closing brackets.", 
+                    line_num + 1, 
+                    trimmed.matches('[').count(), 
+                    trimmed.matches(']').count()));
+            }
+            if paren_count != 0 {
+                return Err(format!("Line {}: Unmatched parentheses (). Found {} opening and {} closing parentheses.", 
+                    line_num + 1, 
+                    trimmed.matches('(').count(), 
+                    trimmed.matches(')').count()));
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate template structure and types
+    pub fn validate_template(&self) -> Result<(), String> {
+        let template = match &self.template {
+            Some(t) => t,
+            None => return Ok(()), // No template to validate
+        };
+        
+        if template.is_empty() {
+            return Err("Template is empty. At least one section must be defined.".to_string());
+        }
+        
+        for (section_name, fields) in template {
+            if section_name.trim().is_empty() {
+                return Err("Template contains empty section name.".to_string());
+            }
+            
+            if fields.is_empty() {
+                return Err(format!("Template section '{}' contains no fields. Each section must have at least one field.", section_name));
+            }
+            
+            for (field_name, field_types) in fields {
+                if field_name.trim().is_empty() {
+                    return Err(format!("Template section '{}' contains empty field name.", section_name));
+                }
+                
+                if let Some(types) = field_types {
+                    if types.is_empty() {
+                        return Err(format!("Template field '{}.{}' has empty type list. Specify at least one expected type.", section_name, field_name));
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate parsed document against template
+    pub fn validate_against_template(&self, document: &DocumentMap, template: &TemplateMap) -> Result<(), String> {
+        // Check for missing required sections
+        for (template_section, template_fields) in template {
+            if !document.contains_key(template_section) {
+                return Err(format!("Required section '{}' is missing from document.", template_section));
+            }
+            
+            let doc_section = &document[template_section];
+            
+            // Check for missing required fields
+            for (template_field, expected_types) in template_fields {
+                if !doc_section.contains_key(template_field) {
+                    return Err(format!("Required field '{}.{}' is missing from document.", template_section, template_field));
+                }
+                
+                // Check if the field exists but has None value (indicating it was missing from input)
+                if let Some(None) = doc_section.get(template_field) {
+                    return Err(format!("Required field '{}.{}' is missing from document.", template_section, template_field));
+                }
+                
+                // Validate field types if specified
+                if let Some(expected_types) = expected_types {
+                    if let Some(Some(actual_values)) = doc_section.get(template_field) {
+                        for (i, actual_value) in actual_values.iter().enumerate() {
+                            if let Some(expected_type) = expected_types.get(i) {
+                                if let Err(e) = self.validate_value_type(actual_value, expected_type, template_section, template_field, i) {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate individual value against expected type
+    fn validate_value_type(&self, value: &Value, expected_type: &TemplateType, section: &str, field: &str, index: usize) -> Result<(), String> {
+        let matches = match (value, expected_type) {
+            (Value::String(_), TemplateType::String) => true,
+            (Value::Float(_), TemplateType::Float) => true,
+            (Value::Integer(_), TemplateType::Integer) => true,
+            (Value::Usize(_), TemplateType::Usize) => true,
+            (Value::Vector(_), TemplateType::Vector) => true,
+            (Value::Boolean(_), TemplateType::Boolean) => true,
+            (Value::Optional(_), TemplateType::Optional) => true,
+            // Allow some type flexibility
+            (Value::Integer(_), TemplateType::Usize) => true, // Integer can be converted to usize
+            (Value::Integer(_), TemplateType::Float) => true, // Integer can be converted to float
+            _ => false,
+        };
+        
+        if !matches {
+            return Err(format!(
+                "Type mismatch in field '{}.{}' at position {}: expected {:?} but found {:?} (value: {})",
+                section, field, index, expected_type, 
+                self.get_value_type_name(value), value
+            ));
+        }
+        
+        Ok(())
+    }
+    
+    /// Get human-readable type name for Value
+    fn get_value_type_name(&self, value: &Value) -> &'static str {
+        match value {
+            Value::String(_) => "String",
+            Value::Float(_) => "Float",
+            Value::Integer(_) => "Integer",
+            Value::Usize(_) => "Usize",
+            Value::Vector(_) => "Vector",
+            Value::Boolean(_) => "Boolean",
+            Value::Optional(_) => "Optional",
+        }
+    }
+    
+    /// Comprehensive validation combining syntax and template checks
+    pub fn validate_all(&self) -> Result<(), String> {
+        // First check syntax
+        self.validate_syntax()?;
+        
+        // Then validate template if present
+        self.validate_template()?;
+        
+        Ok(())
     }
 
     /// Reset the parser state
@@ -707,11 +1149,15 @@ impl Display for Value {
         }
     }
 }
+/*parse_key_value_pair_new() - Handle colon validation and structure
 
+parse_section_new() - Section-level validation
+
+parse_document_new() - Top-level document parsing */
 /// Parses a title (word characters, underscores, and special symbols)
-pub fn parse_title(input: &str) -> IResult<&str, String> {
+pub fn parse_title<'a>(input: &'a str, original_input: &str) -> Result<(String, &'a str), ParseError> {
     let parser = recognize(pair(
-        alt((alpha1, tag("_"))),
+        alt((alpha1::<&str, nom::error::Error<&str>>, tag("_"))),
         many0(alt((
             alphanumeric1,
             tag("_"),
@@ -725,19 +1171,26 @@ pub fn parse_title(input: &str) -> IResult<&str, String> {
 
     let mut parser = map(parser, String::from);
 
-    // Ignore trailing whitespace, newline characters, and semicolons
-
-    let (input, result) = parser.parse(input)?;
-
-    let input = input.trim();
-    //  println!("Title: {}", input);
-    Ok((input, result))
+    match parser.parse(input) {
+        Ok((remaining, result)) => {
+            let trimmed_remaining = remaining.trim();
+            Ok((result, trimmed_remaining))
+        }
+        Err(_) => {
+            Err(create_positioned_error(
+                ParseErrorKind::InvalidSection,
+                "Failed to parse section title. Section names must start with a letter or underscore and contain only alphanumeric characters, underscores, and symbols (=>, -, >, =, <)".to_string(),
+                input,
+                original_input,
+            ))
+        }
+    }
 }
 
 /// Parses a key (word characters, underscores, and special symbols like =>)
-pub fn parse_key(input: &str) -> IResult<&str, String> {
+pub fn parse_key<'a>(input: &'a str, original_input: &str) -> Result<(String, &'a str), ParseError> {
     let parser = recognize(pair(
-        alt((alpha1, tag("_"))),
+        alt((alpha1::<&str, nom::error::Error<&str>>, tag("_"))),
         many0(alt((
             alphanumeric1,
             tag("_"),
@@ -748,9 +1201,18 @@ pub fn parse_key(input: &str) -> IResult<&str, String> {
     ));
 
     let mut parser = map(parser, String::from);
-    let (input, result) = parser.parse(input)?;
-
-    Ok((input, result))
+    
+    match parser.parse(input) {
+        Ok((remaining, result)) => Ok((result, remaining)),
+        Err(_) => {
+            Err(create_positioned_error(
+                ParseErrorKind::InvalidKey,
+                "Failed to parse field key. Keys must start with a letter or underscore and contain only alphanumeric characters, underscores, and symbols (=>, -, +)".to_string(),
+                input,
+                original_input,
+            ))
+        }
+    }
 }
 
 fn parse_single_value(input: &str) -> IResult<&str, &str> {
@@ -783,16 +1245,21 @@ fn parse_single_value(input: &str) -> IResult<&str, &str> {
     Ok((&input[end_pos..], &input[..end_pos]))
 }
 
-pub fn parse_value(input: &str) -> IResult<&str, Value> {
-    let (remaining, value_str) = parse_single_value(input)?;
+pub fn parse_value<'a>(input: &'a str, original_input: &str) -> Result<(Value, &'a str), ParseError> {
+    let (remaining, value_str) = parse_single_value(input)
+        .map_err(|_| create_positioned_error(
+            ParseErrorKind::InvalidValue,
+            "Failed to extract value from input".to_string(),
+            input,
+            original_input,
+        ))?;
+    
     let s = value_str.trim();
 
     let value = if s == "None" {
         Value::Optional(None)
     } else if s.starts_with("Some(") && s.ends_with(')') {
-        // Extract inner value from Some(...)
         let inner = &s[5..s.len() - 1];
-        // Recursively parse the inner value
         if let Ok(val) = inner.parse::<i64>() {
             Value::Optional(Some(Box::new(Value::Integer(val))))
         } else if let Ok(val) = inner.parse::<f64>() {
@@ -805,20 +1272,22 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             Value::Optional(Some(Box::new(Value::String(inner.to_string()))))
         }
     } else if s.starts_with('[') && s.ends_with(']') {
-        // Parse as vector - try floats first, fallback to string if parsing fails
         let inner = &s[1..s.len() - 1];
         if inner.is_empty() {
             Value::Vector(vec![])
         } else {
-            // Try to parse all elements as floats
             let float_results: Result<Vec<f64>, _> =
                 inner.split(',').map(|v| v.trim().parse::<f64>()).collect();
 
             match float_results {
                 Ok(values) => Value::Vector(values),
                 Err(_) => {
-                    // If float parsing fails, treat as string
-                    Value::String(s.to_string())
+                    return Err(create_positioned_error(
+                        ParseErrorKind::InvalidValue,
+                        format!("Invalid vector format '{}'. Expected comma-separated numbers in brackets like [1.0, 2.0, 3.0]", s),
+                        input,
+                        original_input,
+                    ));
                 }
             }
         }
@@ -834,50 +1303,256 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         Value::String(s.to_string())
     };
 
-    Ok((remaining, value))
+    Ok((value, remaining))
 }
 
-pub fn parse_value_list(input: &str) -> IResult<&str, Vec<Value>> {
-    let (input, _) = multispace0(input)?;
-    // Parse the comma-separated values
-    // delimited function - Matches an object from the first parser and discards it, then gets an object from the second parser,
-    // and finally matches an object from the third parser and discards it. So here we deop spaces from the beginning and end of
-    // the line, and then parse the key and values.
-    let separator_coma = delimited(space0, tag(","), space0);
-    let mut value_parser = separated_list0(separator_coma, parse_value);
-    let (input, result) = value_parser.parse(input)?;
-
-    Ok((input, result))
-}
-
-/// Parses a key-value pair where value is a list
-pub fn parse_key_value_pair(input: &str) -> IResult<&str, (String, Vec<Value>)> {
-    // Parse the colon with optional whitespace
-    // space0 - Matches zero or more whitespace characters.
-    let colon_separator = delimited(space0, tag(":"), space0);
-    // separated_pair - Matches two objects from the first and second parsers, respectively, and discards them.
-    let mut parser = separated_pair(parse_key, colon_separator, parse_value_list);
-    let (input, result) = parser.parse(input)?;
-    Ok((input.trim(), result))
-}
-
-/// Parses a section with a title and multiple key-value pairs
-pub fn parse_section(input: &str) -> IResult<&str, (String, HashMap<String, Vec<Value>>)> {
-    let (input, _) = space0(input)?;
-    let (input, title) = parse_title(input)?;
-
-    // Modified to handle both spaces and newlines after the title
-    let (input, _) = multispace0(input)?;
-    let mut parser = many1(terminated(parse_key_value_pair, space0));
-    let (input, pairs) = parser.parse(input)?;
-
-    let mut section_map = HashMap::new();
-    for (key, values) in pairs {
-        section_map.insert(key, values);
+/// Parses a value list with error handling
+pub fn parse_value_list<'a>(input: &'a str, original_input: &str) -> Result<(Vec<Value>, &'a str), ParseError> {
+    let input = input.trim_start();
+    
+    if input.is_empty() {
+        return Err(create_positioned_error(
+            ParseErrorKind::InvalidValue,
+            "Expected value list but found empty input".to_string(),
+            input,
+            original_input,
+        ));
     }
-
-    Ok((input, (title, section_map)))
+    
+    let mut values = Vec::new();
+    let mut remaining = input;
+    
+    // Parse first value
+    let (value, new_remaining) = parse_value(remaining, original_input)?;
+    values.push(value);
+    remaining = new_remaining.trim_start();
+    
+    // Parse additional comma-separated values
+    while remaining.starts_with(',') {
+        remaining = &remaining[1..].trim_start(); // Skip comma
+        
+        if remaining.is_empty() {
+            return Err(create_positioned_error(
+                ParseErrorKind::InvalidValue,
+                "Expected value after comma but found end of input".to_string(),
+                remaining,
+                original_input,
+            ));
+        }
+        
+        let (value, new_remaining) = parse_value(remaining, original_input)?;
+        values.push(value);
+        remaining = new_remaining.trim_start();
+    }
+    
+    Ok((values, remaining))
 }
+
+/// Parses a value list with lookahead to detect key-value pair boundaries
+fn parse_value_list_with_lookahead<'a>(input: &'a str, original_input: &str) -> Result<(Vec<Value>, &'a str), ParseError> {
+    let input = input.trim_start();
+    
+    if input.is_empty() {
+        return Err(create_positioned_error(
+            ParseErrorKind::InvalidValue,
+            "Expected value list but found empty input".to_string(),
+            input,
+            original_input,
+        ));
+    }
+    
+    let mut values = Vec::new();
+    let mut remaining = input;
+    
+    loop {
+        // Parse a value
+        let (value, new_remaining) = parse_value(remaining, original_input)?;
+        values.push(value);
+        remaining = new_remaining.trim_start();
+        
+        // Check if we should continue parsing values
+        if remaining.starts_with(',') {
+            remaining = &remaining[1..].trim_start(); // Skip comma
+            
+            if remaining.is_empty() {
+                return Err(create_positioned_error(
+                    ParseErrorKind::InvalidValue,
+                    "Expected value after comma but found end of input".to_string(),
+                    remaining,
+                    original_input,
+                ));
+            }
+            continue;
+        }
+        
+        // Check if the next content looks like a new key-value pair
+        if !remaining.is_empty() {
+            // Look for a pattern like "key:" in the remaining text
+            if let Some(colon_pos) = remaining.find(':') {
+                let potential_key = remaining[..colon_pos].trim();
+                // If it looks like a valid key, stop parsing values
+                if !potential_key.is_empty() && 
+                   potential_key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '+') &&
+                   !potential_key.contains(' ') {
+                    break;
+                }
+            }
+        }
+        
+        // If we can't parse another value and it doesn't look like a key, we're done
+        break;
+    }
+    
+    Ok((values, remaining))
+}
+
+/// Parses a key-value pair with comprehensive error handling
+pub fn parse_key_value_pair<'a>(input: &'a str, original_input: &str) -> Result<((String, Vec<Value>), &'a str), ParseError> {
+    let input = input.trim_start();
+    
+    // Parse key
+    let (key, remaining) = parse_key(input, original_input)?;
+    let remaining = remaining.trim_start();
+    
+    // Check for colon
+    if !remaining.starts_with(':') {
+        return Err(create_positioned_error(
+            ParseErrorKind::MissingColon,
+            format!("Expected ':' after key '{}' but found '{}'.", key, 
+                remaining.chars().next().unwrap_or(' ')),
+            remaining,
+            original_input,
+        ));
+    }
+    
+    let remaining = &remaining[1..].trim_start(); // Skip colon
+    
+    // Parse value list with improved handling for mixed spacing
+    let (values, remaining) = parse_value_list_with_lookahead(remaining, original_input)?;
+    
+    Ok(((key, values), remaining))
+}
+
+/// Parses a section with comprehensive error handling
+pub fn parse_section<'a>(input: &'a str, original_input: &str) -> Result<((String, HashMap<String, Vec<Value>>), &'a str), ParseError> {
+    let input = input.trim_start();
+    
+    // Parse section title
+    let (title, mut remaining) = parse_title(input, original_input)?;
+    remaining = remaining.trim();
+    
+    let mut section_map = HashMap::new();
+    
+    // Parse key-value pairs until we hit another section or end of input
+    while !remaining.is_empty() {
+        let trimmed = remaining.trim_start();
+        if trimmed.is_empty() {
+            break;
+        }
+        
+        // Try to parse as key-value pair first
+        match parse_key_value_pair(remaining, original_input) {
+            Ok(((key, values), new_remaining)) => {
+                if section_map.contains_key(&key) {
+                    return Err(create_positioned_error(
+                        ParseErrorKind::InvalidKey,
+                        format!("Duplicate key '{}' found in section '{}'", key, title),
+                        remaining,
+                        original_input,
+                    ));
+                }
+                section_map.insert(key, values);
+                remaining = new_remaining.trim();
+            }
+            Err(_) => {
+                // If we can't parse a key-value pair, check if it looks like a new section
+                let first_line = trimmed.lines().next().unwrap_or("");
+                let words: Vec<&str> = first_line.split_whitespace().collect();
+                
+                if !words.is_empty() {
+                    let first_word = words[0];
+                    // Check if the first word could be a section header
+                    if first_word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') &&
+                       !first_word.is_empty() {
+                        // Try to parse as a title to see if it's a valid section header
+                        if let Ok((parsed_title, _)) = parse_title(first_line, original_input) {
+                            if parsed_title == first_word {
+                                // Looks like a new section, stop parsing this section
+                                break;
+                            }
+                        }
+                    }
+                }
+                // If it's not a new section and we can't parse it as key-value, it's an error
+                // But first, let's check if we have any content parsed already
+                if section_map.is_empty() {
+                    return Err(create_positioned_error(
+                        ParseErrorKind::InvalidSection,
+                        format!("Section '{}' contains no valid key-value pairs", title),
+                        input,
+                        original_input,
+                    ));
+                } else {
+                    // We have some content, so this might be the start of a new section
+                    break;
+                }
+            }
+        }
+    }
+    
+    if section_map.is_empty() {
+        return Err(create_positioned_error(
+            ParseErrorKind::InvalidSection,
+            format!("Section '{}' contains no valid key-value pairs", title),
+            input,
+            original_input,
+        ));
+    }
+    
+    Ok(((title, section_map), remaining))
+}
+
+/// Parses the entire document with comprehensive error handling
+pub fn parse_document(input: &str) -> Result<DocumentMap, ParseError> {
+    let filtered_input = filter_comments(input);
+    let mut remaining = filtered_input.trim();
+    let original_input = &filtered_input;
+    
+    if remaining.is_empty() {
+        return Err(ParseError::simple(
+            ParseErrorKind::InvalidSection,
+            "Document is empty after filtering comments".to_string(),
+        ));
+    }
+    
+    let mut result = HashMap::new();
+    
+    while !remaining.is_empty() {
+        let ((section_title, section_map), new_remaining) = parse_section(remaining, original_input)?;
+        
+        if result.contains_key(&section_title) {
+            return Err(create_positioned_error(
+                ParseErrorKind::InvalidSection,
+                format!("Duplicate section '{}' found in document", section_title),
+                remaining,
+                original_input,
+            ));
+        }
+        
+        // Convert to expected format
+        let mut title_map = HashMap::new();
+        for (key, values) in section_map {
+            title_map.insert(key, Some(values));
+        }
+        result.insert(section_title, title_map);
+        
+        remaining = new_remaining.trim();
+    }
+    
+    Ok(result)
+}
+
+
 
 /// Filters out comment lines (starting with //, #, %, or ;)
 fn filter_comments(input: &str) -> String {
@@ -895,48 +1570,13 @@ fn filter_comments(input: &str) -> String {
         .join("\n")
 }
 
-/// Parses the entire document into a HashMap
-pub fn parse_document(input: &str) -> Result<DocumentMap, String> {
-    let filtered_input = filter_comments(input);
-    let (remaining_input, _) = multispace0::<&str, Error<&str>>(filtered_input.as_str())
-        .map_err(|e| format!("Parsing error: {:?}", e))?;
 
-    // Use many1 instead of separated_list0 to parse sections
-    // and ensure each section is properly terminated
-    let mut parser = many1(delimited(
-        space0, // Allow optional whitespace before a section
-        parse_section,
-        multispace0, // Allow optional whitespace after a section
-    ));
-
-    let (remaining, sections) = parser
-        .parse(remaining_input)
-        .map_err(|e| format!("Parsing error: {:?}", e))?;
-
-    if !remaining.trim().is_empty() {
-        return Err(format!(
-            "Failed to parse entire document. Remaining: '{}'",
-            remaining
-        ));
-    }
-
-    let mut result = HashMap::new();
-    for (title, section_map) in sections.into_iter() {
-        let mut title_map = HashMap::new();
-        for (key, values) in section_map {
-            title_map.insert(key, Some(values));
-        }
-        result.insert(title, title_map);
-    }
-
-    Ok(result)
-}
 
 /// Parses a document and merges with a template HashMap, ensuring all expected keys exist
 pub fn parse_document_with_template(
     input: &str,
     template: &TemplateMap,
-) -> Result<DocumentMap, String> {
+) -> Result<DocumentMap, ParseError> {
     let mut parsed = parse_document(input)?;
 
     // Ensure all expected titles and keys exist
@@ -960,7 +1600,7 @@ pub fn parse_document_with_template(
 pub fn parse_document_as(
     input: &str,
     template: Option<TemplateMap>,
-) -> Result<DocumentMap, String> {
+) -> Result<DocumentMap, ParseError> {
     match template {
         Some(template) => parse_document_with_template(input, &template),
         None => parse_document(input),
@@ -968,18 +1608,25 @@ pub fn parse_document_as(
 }
 
 /// Parses only specific sections by their titles
-pub fn parse_this_sections(input: &str, titles: Vec<String>) -> Result<DocumentMap, String> {
+pub fn parse_this_sections(input: &str, titles: Vec<String>) -> Result<DocumentMap, ParseError> {
     let filtered_input = filter_comments(input);
-    let (mut remaining_input, _) = multispace0::<&str, Error<&str>>(filtered_input.as_str())
-        .map_err(|e| format!("Parsing error: {:?}", e))?;
-
+    let mut remaining = filtered_input.trim();
+    let original_input = &filtered_input;
+    
+    if remaining.is_empty() {
+        return Err(ParseError::simple(
+            ParseErrorKind::InvalidSection,
+            "Document is empty after filtering comments".to_string(),
+        ));
+    }
+    
     let mut result = HashMap::new();
 
     // Keep parsing sections until input is exhausted
-    while !remaining_input.trim().is_empty() {
+    while !remaining.is_empty() {
         // Try to parse a section
-        match parse_section(remaining_input) {
-            Ok((remaining, (title, section_map))) => {
+        match parse_section(remaining, original_input) {
+            Ok(((title, section_map), new_remaining)) => {
                 // Only add to result if title is in the requested titles
                 if titles.contains(&title) {
                     let mut title_map = HashMap::new();
@@ -989,10 +1636,7 @@ pub fn parse_this_sections(input: &str, titles: Vec<String>) -> Result<DocumentM
                     result.insert(title, title_map);
                 }
 
-                // Update remaining input
-                let (new_remaining, _) = multispace0::<&str, Error<&str>>(remaining)
-                    .map_err(|e| format!("Parsing error: {:?}", e))?;
-                remaining_input = new_remaining;
+                remaining = new_remaining.trim();
             }
             Err(_) => {
                 // If we can't parse a section, we're done
@@ -1011,12 +1655,9 @@ pub fn parse_this_sections(input: &str, titles: Vec<String>) -> Result<DocumentM
 pub fn parse_document_as_strings(
     input: &str,
     template: Option<HashMap<String, HashMap<String, Option<Vec<String>>>>>,
-) -> Result<HashMap<String, HashMap<String, Option<Vec<String>>>>, String> {
+) -> Result<HashMap<String, HashMap<String, Option<Vec<String>>>>, ParseError> {
     // First parse with our Value enum
-    let value_result = parse_document_as(input, None);
-
-    match value_result {
-        Ok(value_map) => {
+    let value_map = parse_document_as(input, None)?;
             // Convert the Value map to a String map
             let mut string_map = HashMap::new();
 
@@ -1053,10 +1694,45 @@ pub fn parse_document_as_strings(
                 }
             }
 
-            Ok(string_map)
-        }
-        Err(e) => Err(e),
+    Ok(string_map)
+}
+
+/// Pretty print DocumentMap as a formatted table
+pub fn pretty_print_map(doc_map: &DocumentMap) {
+    #[derive(Tabled)]
+    struct TableRow {
+        #[tabled(rename = "Section")]
+        section: String,
+        #[tabled(rename = "Key")]
+        key: String,
+        #[tabled(rename = "Values")]
+        values: String,
     }
+
+    let mut rows = Vec::new();
+    
+    for (section_name, section_map) in doc_map {
+        for (key, values_opt) in section_map {
+            let values_str = match values_opt {
+                Some(values) => {
+                    values.iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                }
+                None => "None".to_string(),
+            };
+            
+            rows.push(TableRow {
+                section: section_name.clone(),
+                key: key.clone(),
+                values: values_str,
+            });
+        }
+    }
+    
+    let table = Table::new(rows);
+    println!("{}", table);
 }
 
 #[cfg(test)]
@@ -1064,6 +1740,8 @@ pub fn parse_document_as_strings(
 mod tests {
     // use rand::rand_core::le;
     // use toml::value;
+
+    use std::f64::consts::E;
 
     use super::*;
     #[test]
@@ -1123,7 +1801,7 @@ mod tests {
         process_conditions
         problem_name:HMXTest
         problem_description: HMXdecompositiontest
-        substances:[HMX, HMXprod]
+        substances:HMX, HMXprod
         Tm: 1500.0
         L: 9e-4
         dT: 600.0
@@ -1222,9 +1900,128 @@ mod tests {
         let res = parse_document(task_content);
         println!("Parse result: {:?}", res);
         assert!(res.is_ok());
+        match res {
+            Ok(map) => pretty_print_map(&map),
+            Err(e) => println!("Error: {}", e),
+        }
     }
+
+        const task_content3: &str = r#"
+        process_conditions
+        problem_name: Some(HMXTest)
+        problem_description: Some(HMXdecompositiontest)
+        substances: HMX, HMXprod
+        t0: 0.0
+        t_end: 1.0
+        n_steps: 200
+        arg:x
+        Tm: 1500.0
+        L: 9e-4
+        dT: 600.0
+        T_scale: 600.0
+        P: 1e6
+        Cp: 1464.4
+        Lambda: 0.07
+        m: 0.0043
+        M: 0.0342
+        thermal_effects: [102000.0]
+        groups:true
+        boundary_condition
+        HMX: 0.999
+        HMXprod: 0.001
+        T: 800.0
+        diffusion_coefficients
+        HMX: 0.000009296
+        HMXprod: 0.000009296
+        HMX
+        H: 4
+        N: 8
+        C: 8
+        O: 8
+        HMXprod
+        H: 6
+        C: 1
+        O: 1
+        reactions
+        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        solver_settings
+        scheme: forward
+        method: Sparse
+        strategy: Damped
+        linear_sys_method: None
+        abs_tolerance: 1e-5
+        max_iterations: 100
+        loglevel: Some(info)
+        dont_save_logs: true
+        bounds
+        C: -10.0, 10.0
+        J:  -1e20, 1e20
+        Teta:-100.0, 100.0
+        q: -1e20, 1e20
+        rel_tolerance
+        C: 1e-5
+        J: 1e-5
+        Teta: 1e-5
+        q:  1e-5
+        strategy_params
+        max_jac: Some(3)
+        max_damp_iter: Some(10)
+        damp_factor: Some(0.5)
+        adaptive: None
+        postprocessing
+        gnuplot:true
+        save_to_csv:false
+        filename: meow
+        "#;
+        #[test]
+    fn close_to_life_examples4() {
+        let res = parse_document(task_content3);
+        println!("Parse result: {:?}", res);
+        assert!(res.is_ok());
+        match res {
+            Ok(map) => pretty_print_map(&map),
+            Err(e) => println!("Error: {}", e),
+        }
+    }    
 }
 /*
 
 
 */
+    #[test]
+    fn test_as_option_usize() {
+        // Test Some(integer) -> Some(usize)
+        let value = Value::Optional(Some(Box::new(Value::Integer(42))));
+        assert_eq!(value.as_option_usize(), Some(42));
+        
+        // Test None -> None
+        let value = Value::Optional(None);
+        assert_eq!(value.as_option_usize(), None);
+        
+        // Test non-optional value -> None
+        let value = Value::String("test".to_string());
+        assert_eq!(value.as_option_usize(), None);
+        
+        // Test Some(non-integer) -> None
+        let value = Value::Optional(Some(Box::new(Value::String("test".to_string()))));
+        assert_eq!(value.as_option_usize(), None);
+        
+        // Test Some(negative integer) - should still work as it casts i64 to usize
+        let value = Value::Optional(Some(Box::new(Value::Integer(-1))));
+        assert_eq!(value.as_option_usize(), Some(usize::MAX)); // -1 as usize wraps around
+    }
+
+    #[test]
+    fn test_as_option_usize_edge_cases() {
+        // Test zero
+        let value = Value::Optional(Some(Box::new(Value::Integer(0))));
+        assert_eq!(value.as_option_usize(), Some(0));
+        
+        // Test large positive number
+        let value = Value::Optional(Some(Box::new(Value::Integer(i64::MAX))));
+        assert_eq!(value.as_option_usize(), Some(i64::MAX as usize));
+        
+        // Test nested optional (should return None as it's not directly Some(Integer))
+        let nested = Value::Optional(Some(Box::new(Value::Optional(Some(Box::new(Value::Integer(42)))))));
+        assert_eq!(nested.as_option_usize(), None);
+    }
