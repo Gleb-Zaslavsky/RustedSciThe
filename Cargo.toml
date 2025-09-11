@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.3.18"
+version = "0.3.19"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing: symbolic calculations, nonlinear systems, IVP and BVP for ODE, optimization, fitting and more"
 author = "Gleb Zasllavsky"
@@ -66,6 +66,7 @@ tempfile = "3.21.0"
 cfg-if = "1.0.3"
 gauss-quad = "0.2.3"
 prettytable = "0.10.0"
+textplots = "0.8.7"
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }
 

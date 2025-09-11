@@ -1870,7 +1870,7 @@ mod tests {
         C: 1
         O: 1
         reactions
-        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        HMX=>10HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
         method: Sparse
@@ -1943,7 +1943,7 @@ mod tests {
         C: 1
         O: 1
         reactions
-        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        HMX=>10HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
         method: Sparse

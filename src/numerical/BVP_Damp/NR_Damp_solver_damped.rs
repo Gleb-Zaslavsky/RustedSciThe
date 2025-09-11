@@ -46,7 +46,7 @@ use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
 
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
-use crate::Utils::plots::{plots, plots_gnulot};
+use crate::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
@@ -1270,7 +1270,16 @@ impl NRBVP {
         );
         info!("result plotted");
     }
-
+    pub fn plot_result_in_terminal(&self) {
+        let permutted_results = self.full_result.clone().unwrap();
+        plots_terminal(
+            self.arg.clone(),
+            self.values.clone(),
+            self.x_mesh.clone(),
+            permutted_results,
+        );
+        info!("result plotted");
+    }
     /// Computes and displays solver performance statistics
     ///
     /// Shows memory usage, iteration counts, and timing information
