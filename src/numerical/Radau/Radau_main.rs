@@ -11,6 +11,7 @@ use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use simplelog::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::time::Instant;
 
@@ -117,6 +118,10 @@ pub struct Radau {
     pub log_level: Option<LevelFilter>,
     pub log_to_file: Option<String>,
     pub log_to_console: bool,
+    
+    // Stop condition
+    pub stop_condition: Option<HashMap<String, f64>>,
+    pub tolerance: f64,
 }
 
 impl Display for Radau {
@@ -172,6 +177,8 @@ impl Radau {
             log_level: Some(LevelFilter::Warn),
             log_to_file: None,
             log_to_console: true,
+            stop_condition: None,
+            tolerance: 1e-6,
         }
     }
 
@@ -187,6 +194,7 @@ impl Radau {
         t_bound: f64,
         y0: DVector<f64>,
     ) -> () {
+        self.tolerance = tolerance;
         // Initialize logging first
         self.init_logger();
         let n_vars = y0.len();
@@ -255,6 +263,24 @@ impl Radau {
         }
 
         self.check();
+    }
+    
+    pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
+        self.stop_condition = Some(stop_condition);
+    }
+    
+    fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
+        if let Some(ref conditions) = self.stop_condition {
+            for (var_name, target_value) in conditions {
+                if let Some(var_index) = self.values.iter().position(|v| v == var_name) {
+                    let current_value = y[var_index];
+                    if (current_value - target_value).abs() <= self.tolerance {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     #[allow(dead_code)]
@@ -627,6 +653,13 @@ impl Radau {
                 break;
             }
 
+            // Check stop condition before storing solution
+            if self.check_stop_condition(&self.y) {
+                self.status = "stopped_by_condition".to_string();
+                integr_status = Some(0);
+                info!("Radau integration stopped by condition at t = {:.6}", self.t);
+            }
+            
             // Store current solution
             t.push(self.t);
             y.push(self.y.clone());
@@ -746,6 +779,10 @@ impl Radau {
 
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (Some(self.t_result.clone()), Some(self.y_result.clone()))
+    }
+    
+    pub fn get_status(&self) -> &String {
+        &self.status
     }
 
     pub fn plot_result(&self) -> () {

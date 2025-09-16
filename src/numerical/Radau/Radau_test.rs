@@ -1222,3 +1222,129 @@ mod tests_real_odes_parallel {
         // Check that solution remains bounded
     }
 }
+
+#[cfg(test)]
+mod tests_stop_conditions {
+    use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
+    use crate::symbolic::symbolic_engine::Expr;
+    use approx::assert_relative_eq;
+    use nalgebra::DVector;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_radau_stop_condition_single_variable() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-2;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 10.0; // Large bound to ensure stop condition triggers first
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order3);
+        radau.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        radau.set_stop_condition(stop_condition);
+        
+        radau.solve();
+        
+        assert_eq!(radau.get_status(), "stopped_by_condition");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= tolerance);
+    }
+
+    #[test]
+    fn test_radau_stop_condition_multiple_variables() {
+        // Test system: y1' = y2, y2' = -y1, stop when y1 reaches 0.0
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("-y1");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-2;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 10.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y1".to_string(), 0.0);
+        radau.set_stop_condition(stop_condition);
+        
+        radau.solve();
+        
+        assert_eq!(radau.get_status(), "stopped_by_condition");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+        let final_y1 = y_res[(y_res.nrows() - 1, 0)];
+        assert!(final_y1.abs() <= tolerance);
+    }
+
+    #[test]
+    fn test_radau_no_stop_condition() {
+        // Test without stop condition - should run to t_bound
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.1);
+        let t0 = 0.0;
+        let t_bound = 1.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order3);
+        radau.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        radau.solve();
+        
+        assert_eq!(radau.get_status(), "finished");
+        let (t_result, _) = radau.get_result();
+        let t_res = t_result.unwrap();
+        let final_t = t_res[t_res.len() - 1];
+        assert_relative_eq!(final_t, t_bound, epsilon = 0.1);
+    }
+
+    #[test]
+    fn test_radau_stop_condition_nonlinear() {
+        // Test: y' = y^2, y(0) = 1, stop when y reaches 1.5
+        let eq1 = Expr::parse_expression("y*y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let tolerance = 1e-2;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 10.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+
+        let mut radau = Radau::new(RadauOrder::Order5);
+        radau.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 1.5);
+        radau.set_stop_condition(stop_condition);
+        
+        radau.solve();
+        
+        assert_eq!(radau.get_status(), "stopped_by_condition");
+        let (_, y_result) = radau.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 1.5).abs() <= tolerance);
+    }
+}

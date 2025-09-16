@@ -60,7 +60,13 @@ impl Jacobian {
         self.function_jacobian_IVP_DMatrix = new_jac;
     }
 
-    /// Parallel jacobian computation following the BVP pattern
+    /// Parallel jacobian computation with pre-compilation and advanced BVP patterns.
+    ///
+    /// Creates a high-performance Jacobian evaluator following the BVP pattern with:
+    /// - Pre-compilation: All non-zero derivatives compiled once during setup
+    /// - Outer loop parallelization: Uses flat_map pattern for better load balancing
+    /// - Thread-safe closures: Uses Send + Sync bounds for parallel safety
+    /// - Bandwidth optimization: Respects sparse matrix bandwidth if set
     pub fn calc_jacobian_fun_with_parameters_parallel(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -70,59 +76,67 @@ impl Jacobian {
         arg: String,
         bandwidth: (usize, usize),
     ) -> Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> {
-        let mut variables_and_parameters: Vec<String> = variable_str.clone();
-        variables_and_parameters.extend(parameters.clone());
+        // Concatenate all variables: arg + variables + parameters
+        let mut all_variables: Vec<String> = vec![arg.clone()];
+        all_variables.extend(variable_str.clone());
+        all_variables.extend(parameters.clone());
 
         let (kl, ku) = bandwidth;
-        Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-            let mut vector_of_derivatives =
-                vec![0.0; vector_of_functions_len * vector_of_variables_len];
-            let vector_of_derivatives_mutex = Mutex::new(&mut vector_of_derivatives);
+        
+        // Pre-compile jacobian positions using outer loop parallelization
+        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
+            (0..vector_of_functions_len)
+                .into_par_iter()
+                .flat_map(|i| {
+                    let (right_border, left_border) = if kl == 0 && ku == 0 {
+                        (vector_of_variables_len, 0)
+                    } else {
+                        let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                        let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                            0
+                        } else {
+                            i - kl - 1
+                        };
+                        (right_border, left_border)
+                    };
 
-            let variales_and_parameters: Vec<&str> = variables_and_parameters
-                .iter()
-                .map(|s| s.as_str())
+                    (left_border..right_border)
+                        .filter_map(|j| {
+                            let symbolic_partial_derivative = &jac[i][j];
+                            if !symbolic_partial_derivative.is_zero() {
+                                let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
+                                    Expr::lambdify_borrowed_thread_safe(
+                                        &symbolic_partial_derivative,
+                                        all_variables.iter().map(|s| s.as_str()).collect(),
+                                    );
+                                Some((i, j, compiled_func))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .collect();
 
-            // Parallel computation of jacobian elements
-            (0..vector_of_functions_len).into_par_iter().for_each(|i| {
-                let (right_border, left_border) = if kl == 0 && ku == 0 {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
-                } else {
-                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                        0
-                    } else {
-                        i - kl - 1
-                    };
-                    (right_border, left_border)
-                };
+        Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
+            // Concatenate x with v to match all_variables order
+            let mut v_vec: Vec<f64> = vec![x];
+            v_vec.extend(v.iter().cloned());
+            
+            let mut matrix = DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
+            let matrix_mutex = Mutex::new(&mut matrix);
 
-                for j in left_border..right_border {
-                    let symbolic_partial_derivative = &jac[i][j];
-                    if !symbolic_partial_derivative.is_zero() {
-                        let partial_func = Expr::lambdify_IVP_owned(
-                            jac[i][j].clone(),
-                            arg.as_str(),
-                            variales_and_parameters.clone(),
-                        );
-                        let v_vec: Vec<f64> = v.iter().cloned().collect();
-                        let P = partial_func(x, v_vec.clone());
-                        if P.abs() > 1e-8 {
-                            vector_of_derivatives_mutex.lock().unwrap()
-                                [i * vector_of_functions_len + j] = P;
-                        }
+            jacobian_positions
+                .par_iter()
+                .for_each(|(i, j, compiled_func)| {
+                    let P = compiled_func(v_vec.clone());
+                    if P.abs() > 1e-8 {
+                        let mut mat = matrix_mutex.lock().unwrap();
+                        mat[(*i, *j)] = P;
                     }
-                }
-            });
+                });
 
-            DMatrix::from_row_slice(
-                vector_of_functions_len,
-                vector_of_variables_len,
-                &vector_of_derivatives,
-            )
+            matrix
         })
     }
 
@@ -152,22 +166,15 @@ impl Jacobian {
         self.lambdified_functions_IVP = lambdified_funcs;
     }
 
-    /// Alternative: Store functions that can be safely sent between threads
-    pub fn lambdify_funcvector_with_parameters_parallel_safe(
-        &mut self,
-        arg: &str,
-        variable_str: Vec<&str>,
-        parameters: Vec<&str>,
-    ) {
-        let mut variable_and_parameters: Vec<&str> = variable_str.clone();
-        variable_and_parameters.extend(parameters.clone());
 
-        // Instead of storing the functions, we'll recreate them when needed
-        // This avoids the Send/Sync issue entirely
-        println!("variable_and_parameters = {:?} \n", variable_and_parameters);
-    }
 
-    /// Parallel vector function evaluation following BVP pattern
+    /// Parallel vector function evaluation with pre-compilation and thread-safe closures.
+    ///
+    /// Creates a high-performance residual function evaluator following the BVP pattern with:
+    /// - Pre-compilation: All functions compiled once during setup for maximum efficiency
+    /// - Parallel evaluation: Uses rayon for concurrent function evaluation
+    /// - Thread-safe closures: Uses Send + Sync bounds for parallel safety
+    /// - Memory efficient: Direct vector construction without intermediate collections
     pub fn vector_funvector_with_parameters_DVector_parallel(
         &mut self,
         arg: &str,
@@ -175,48 +182,40 @@ impl Jacobian {
         parameters: Vec<&str>,
     ) {
         let vector_of_functions = &self.vector_of_functions;
+        
+        // Convert to owned strings to avoid lifetime issues
+        let mut variable_and_parameters: Vec<String> = Vec::new();
+          variable_and_parameters.push(arg.to_string());
+       variable_and_parameters.extend( variable_str.iter().map(|s| s.to_string()));
+        variable_and_parameters.extend(parameters.iter().map(|s| s.to_string()));
+      
+        
+        // Pre-compile all functions with thread-safe closures
+        let compiled_functions: Vec<Box<dyn Fn( Vec<f64>) -> f64 + Send + Sync>> =
+            vector_of_functions
+                .par_iter()
+                .map(|func| {
+                    let variable_refs: Vec<&str> = variable_and_parameters.iter().map(|s| s.as_str()).collect();
+                    Expr::lambdify_borrowed_thread_safe(func,  variable_refs)
+                })
+                .collect();
 
-        fn f_parallel(
-            vector_of_functions: Vec<Expr>,
-            arg: String,
-            variable_and_parameters: Vec<String>,
-        ) -> Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + 'static> {
-            Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
-                let v_vec: Vec<f64> = v.iter().cloned().collect();
+        // Create the optimized evaluation closure
+        let fun = Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
+            let mut v_vec: Vec<f64> = Vec::new();
+            v_vec.push(x);
+            v_vec.extend( v.iter().cloned());
+            
+            // Parallel evaluation of pre-compiled functions
+            let result: Vec<_> = compiled_functions
+                .par_iter()
+                .map(|func| func( v_vec.clone()))
+                .collect();
+                
+            DVector::from_vec(result)
+        });
 
-                // Parallel evaluation following BVP pattern
-                let result: Vec<_> = vector_of_functions
-                    .par_iter()
-                    .map(|func| {
-                        let func = Expr::lambdify_IVP_owned(
-                            func.to_owned(),
-                            arg.as_str(),
-                            variable_and_parameters
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .clone(),
-                        );
-                        func(x, v_vec.clone())
-                    })
-                    .collect();
-
-                DVector::from_vec(result)
-            })
-        }
-
-        let mut variable_and_parameters = variable_str.clone();
-        variable_and_parameters.extend(parameters.clone());
-
-        self.lambdified_functions_IVP_DVector = f_parallel(
-            vector_of_functions.to_owned(),
-            arg.to_string(),
-            variable_and_parameters
-                .clone()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
+        self.lambdified_functions_IVP_DVector = fun;
     }
 }
 // Update the RadauNewton implementation

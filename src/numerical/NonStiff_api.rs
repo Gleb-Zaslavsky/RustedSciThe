@@ -3,6 +3,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use csv::Writer;
 use nalgebra::{DMatrix, DVector};
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::time::Instant;
@@ -20,6 +21,8 @@ pub struct nonstiffODE {
     message: Option<String>,
     t_result: DVector<f64>,
     y_result: DMatrix<f64>,
+    stop_condition: Option<HashMap<String, f64>>, 
+    neighborhood_check: f64
 }
 pub enum Solvers {
     RK45(RK45),
@@ -113,6 +116,7 @@ impl nonstiffODE {
         y0: DVector<f64>,
         t_bound: f64,
         h_step: f64,
+        stop_condition: Option<HashMap<String, f64>>,
     ) -> Self {
         let solver_instance = Solvers::new(&method);
         nonstiffODE {
@@ -127,9 +131,32 @@ impl nonstiffODE {
             status: "running".to_string(),
             solver_instance,
             message: None,
-            t_result: DVector::zeros(1),
+            t_result: DVector::zeros(1),  
             y_result: DMatrix::zeros(1, 1),
+            stop_condition: stop_condition,
+            neighborhood_check:1e-3
         }
+    }
+    
+    fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
+        if let Some(ref conditions) = self.stop_condition {
+            for (var_name, target_value) in conditions {
+                if let Some(var_index) = self.values.iter().position(|v| v == var_name) {
+                    let current_value = y[var_index];
+                    let tolerance = self.neighborhood_check; // Default tolerance for neighborhood check
+                    if (current_value - target_value).abs() <= tolerance {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
+        self.stop_condition = Some(stop_condition);
+    }
+    pub fn set_neighborhood_check(&mut self, neighborhood_check: f64) {
+        self.neighborhood_check = neighborhood_check;
     }
     pub fn generate(&mut self) {
         let mut jacobian_instance = Jacobian::new();
@@ -174,33 +201,43 @@ impl nonstiffODE {
                 }
             };
 
+            let current_y = match &self.solver_instance {
+                Solvers::RK45(rk45) => {
+                    let y_i = rk45.y.clone();
+                    let t_i = rk45.t;
+                    t.push(t_i);
+                    y.push(y_i.clone());
+                    y_i
+                }
+                Solvers::DOPRI(dopri) => {
+                    let y_i = dopri.y.clone();
+                    let t_i = dopri.t;
+                    t.push(t_i);
+                    y.push(y_i.clone());
+                    y_i
+                }
+                Solvers::AB4(ab4) => {
+                    let y_i = ab4.y.clone();
+                    let t_i = ab4.t;
+                    t.push(t_i);
+                    y.push(y_i.clone());
+                    y_i
+                }
+            };
+            
+            // Check stop condition first, before checking solver status
+            if self.check_stop_condition(&current_y) {
+                self.status = "stopped_by_condition".to_string();
+                integr_status = Some(0);
+                break;
+            }
+
             _i += 1;
             if self.status == "finished" {
                 integr_status = Some(0);
             } else if self.status == "failed" {
                 integr_status = Some(-1);
                 break;
-            }
-
-            match &self.solver_instance {
-                Solvers::RK45(rk45) => {
-                    let y_i = rk45.y.clone();
-                    let t_i = rk45.t;
-                    t.push(t_i);
-                    y.push(y_i);
-                }
-                Solvers::DOPRI(dopri) => {
-                    let y_i = dopri.y.clone();
-                    let t_i = dopri.t;
-                    t.push(t_i);
-                    y.push(y_i);
-                }
-                Solvers::AB4(ab4) => {
-                    let y_i = ab4.y.clone();
-                    let t_i = ab4.t;
-                    t.push(t_i);
-                    y.push(y_i);
-                }
             }
         }
         let rows = y.len();
@@ -235,6 +272,10 @@ impl nonstiffODE {
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
         (self.t_result.clone(), self.y_result.clone())
     }
+    
+    pub fn get_status(&self) -> &String {
+        &self.status
+    }
 
     pub fn save_result(&self) -> Result<(), Box<dyn std::error::Error>> {
         let current_dir = env::current_dir().expect("Failed to get current directory");
@@ -262,7 +303,11 @@ impl nonstiffODE {
             ])?;
         }
 
-        println!("result saved");
+        if self.status == "stopped_by_condition" {
+            println!("result saved (stopped by condition)");
+        } else {
+            println!("result saved");
+        }
         wtr.flush()?;
         Ok(())
     }
@@ -601,7 +646,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-4;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -632,7 +677,7 @@ mod tests_nonstiff_api {
 
         let step = 0.01;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -667,7 +712,7 @@ mod tests_nonstiff_api {
 
         let step = 0.001;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -716,7 +761,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-3;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -755,7 +800,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-3;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -788,7 +833,7 @@ mod tests_nonstiff_api {
 
         let step = 0.1;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (_, y_result) = solver.get_result();
@@ -816,7 +861,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-4;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -846,7 +891,7 @@ mod tests_nonstiff_api {
 
         let step = 0.01;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -881,7 +926,7 @@ mod tests_nonstiff_api {
 
         let step = 0.001;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -928,7 +973,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-3;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -967,7 +1012,7 @@ mod tests_nonstiff_api {
 
         let step = 1e-3;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (t_result, y_result) = solver.get_result();
@@ -1000,7 +1045,7 @@ mod tests_nonstiff_api {
 
         let step = 0.1;
 
-        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step);
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
 
         solver.solve();
         let (_, y_result) = solver.get_result();
@@ -1011,5 +1056,81 @@ mod tests_nonstiff_api {
 
         assert!(final_y1.abs() < 10.0); // Should remain bounded
         assert!(final_y2.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_stop_condition_single_variable() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "RK45".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0; // Large bound to ensure stop condition triggers first
+        let step = 0.01;
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, Some(stop_condition));
+        solver.neighborhood_check = 1e-2;
+        solver.solve();
+    
+    
+        let (_, y_result) = solver.get_result();
+            println!("y_result: {:?}", y_result);
+            assert_eq!(solver.get_status(), "stopped_by_condition");
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= 1e-2); // Within tolerance
+    }
+
+    #[test]
+    fn test_stop_condition_multiple_variables() {
+        // Test system: y1' = y2, y2' = -y1, stop when y1 reaches 0.0
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("-y1");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "RK45".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+        let t_bound = 10.0;
+        let step = 0.01;
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y1".to_string(), 0.0);
+        
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, Some(stop_condition));
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        assert!(final_y1.abs() <= 1e-3);
+    }
+
+    #[test]
+    fn test_no_stop_condition() {
+        // Test without stop condition - should run to t_bound
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "RK45".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 1.0;
+        let step = 0.1;
+        
+        let mut solver = nonstiffODE::new(eq_system, values, arg, method, t0, y0, t_bound, step, None);
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "finished");
+        let (t_result, _) = solver.get_result();
+        let final_t = t_result[t_result.len() - 1];
+        assert!((final_t - t_bound).abs() <= step);
     }
 }

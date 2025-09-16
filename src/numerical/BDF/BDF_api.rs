@@ -7,6 +7,7 @@ use crate::numerical::BDF::common::NumberOrVec;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
+use std::collections::HashMap;
 use std::time::Instant;
 
 pub enum Solvers {
@@ -51,6 +52,7 @@ pub struct ODEsolver {
 
     t_result: DVector<f64>,
     y_result: DMatrix<f64>,
+    stop_condition: Option<HashMap<String, f64>>,
 }
 impl ODEsolver {
     pub fn new(
@@ -92,8 +94,27 @@ impl ODEsolver {
 
             t_result: DVector::zeros(1),
             y_result: DMatrix::zeros(1, 1),
+            stop_condition: None,
         }
     } //new
+    
+    pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
+        self.stop_condition = Some(stop_condition);
+    }
+    
+    fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
+        if let Some(ref conditions) = self.stop_condition {
+            for (var_name, target_value) in conditions {
+                if let Some(var_index) = self.values.iter().position(|v| v == var_name) {
+                    let current_value = y[var_index];
+                    if (current_value - target_value).abs() <= self.atol {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 
     pub fn generate(&mut self) {
         let mut Jacobian_instance = Jacobian::new();
@@ -170,6 +191,12 @@ impl ODEsolver {
                 integr_status = Some(-1);
                 break;
             }
+            // Check stop condition before storing solution
+            if self.check_stop_condition(&self.Solver_instance.y) {
+                self.status = "stopped_by_condition".to_string();
+                integr_status = Some(0);
+            }
+            
             //  println!("i: {}, t: {}, y: {:?}, status: {}", i, self.Solver_instance.t, self.Solver_instance.y, status);
             t.push(self.Solver_instance.t);
             y.push(self.Solver_instance.y.clone());
@@ -211,6 +238,10 @@ impl ODEsolver {
 
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
         (self.t_result.clone(), self.y_result.clone())
+    }
+    
+    pub fn get_status(&self) -> &String {
+        &self.status
     }
 
     pub fn save_result(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -312,3 +343,146 @@ pub fn ODEsolver(
 
 //let mut BDF_instance = BDF.set_initial(self, fun, t0, y0, t_bound, max_step, rtol, atol, jac, jac_sparsity, vectorized, first_step);
 */
+#[cfg(test)]
+mod tests_stop_conditions {
+    use super::*;
+    use crate::symbolic::symbolic_engine::Expr;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_bdf_stop_condition_single_variable() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "BDF".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0; // Large bound to ensure stop condition triggers first
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-3; // This will be used as tolerance for stop condition
+        let jac_sparsity = None;
+        let vectorized = false;
+        let first_step = None;
+
+        let mut solver = ODEsolver::new(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
+            jac_sparsity, vectorized, first_step,
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        solver.set_stop_condition(stop_condition);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= atol);
+    }
+
+    #[test]
+    fn test_bdf_stop_condition_multiple_variables() {
+        // Test system: y1' = y2, y2' = -y1, stop when y1 reaches 0.0
+        let eq1 = Expr::parse_expression("y2");
+        let eq2 = Expr::parse_expression("-y1");
+        let eq_system = vec![eq1, eq2];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+        let arg = "t".to_string();
+        let method = "BDF".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0, 0.0]);
+        let t_bound = 10.0;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-3;
+        let jac_sparsity = None;
+        let vectorized = false;
+        let first_step = None;
+
+        let mut solver = ODEsolver::new(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
+            jac_sparsity, vectorized, first_step,
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y1".to_string(), 0.0);
+        solver.set_stop_condition(stop_condition);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let final_y1 = y_result[(y_result.nrows() - 1, 0)];
+        assert!(final_y1.abs() <= atol);
+    }
+
+    #[test]
+    fn test_bdf_no_stop_condition() {
+        // Test without stop condition - should run to t_bound
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "BDF".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 1.0;
+        let max_step = 0.1;
+        let rtol = 1e-6;
+        let atol = 1e-6;
+        let jac_sparsity = None;
+        let vectorized = false;
+        let first_step = None;
+
+        let mut solver = ODEsolver::new(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
+            jac_sparsity, vectorized, first_step,
+        );
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "finished");
+        let (t_result, _) = solver.get_result();
+        let final_t = t_result[t_result.len() - 1];
+        assert!((final_t - t_bound).abs() <= max_step);
+    }
+
+    #[test]
+    fn test_bdf_stop_condition_nonlinear() {
+        // Test: y' = y^2, y(0) = 1, stop when y reaches 1.5
+        let eq1 = Expr::parse_expression("y*y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let method = "BDF".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0;
+        let max_step = 0.01;
+        let rtol = 1e-6;
+        let atol = 1e-3;
+        let jac_sparsity = None;
+        let vectorized = false;
+        let first_step = None;
+
+        let mut solver = ODEsolver::new(
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
+            jac_sparsity, vectorized, first_step,
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 1.5);
+        solver.set_stop_condition(stop_condition);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let final_y = y_result[(y_result.nrows() - 1, 0)];
+        assert!((final_y - 1.5).abs() <= atol);
+    }
+}

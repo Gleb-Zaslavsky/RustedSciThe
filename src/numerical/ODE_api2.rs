@@ -128,7 +128,16 @@
 //! );
 //! solver.solve();
 //! ```
-
+//! NB! tolerance handling for stop conditions
+//!  tolerance handling:
+//! 
+//! NonStiff methods (RK45, DOPRI, AB4): Use set_neighborhood_check() for custom tolerance
+//!
+//!BE (Backward Euler): Use set_neighborhood_check() for custom tolerance
+//!
+//!Radau: Uses its own tolerance parameter automatically
+//!
+//! BDF: Uses its own atol parameter automatically
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
@@ -159,6 +168,9 @@ pub struct UniversalODESolver {
 
     // Solver-specific parameters
     solver_params: HashMap<String, SolverParam>,
+    
+    // Stop condition
+    stop_condition: Option<HashMap<String, f64>>,
 }
 
 /// Enum for different solver types
@@ -212,6 +224,7 @@ impl UniversalODESolver {
             t_result: None,
             y_result: None,
             solver_params: HashMap::new(),
+            stop_condition: None,
         }
     }
 
@@ -273,6 +286,16 @@ impl UniversalODESolver {
     pub fn set_parallel(&mut self, parallel: bool) {
         self.set_parameter("parallel", SolverParam::Bool(parallel));
     }
+    
+    /// Set stop condition for all solvers
+    pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
+        self.stop_condition = Some(stop_condition);
+    }
+    
+    /// Set neighborhood check tolerance (for NonStiff and BE solvers)
+    pub fn set_neighborhood_check(&mut self, tolerance: f64) {
+        self.set_parameter("neighborhood_check", SolverParam::Float(tolerance));
+    }
 
     /// Initialize the solver based on type and parameters
     pub fn initialize(&mut self) {
@@ -289,8 +312,17 @@ impl UniversalODESolver {
                     self.y0.clone(),
                     self.t_bound,
                     step,
+                    None
                 );
 
+                // Set stop condition and neighborhood check if specified
+                if let Some(ref stop_cond) = self.stop_condition {
+                    solver.set_stop_condition(stop_cond.clone());
+                }
+                if let Some(neighborhood_check) = self.get_float_param("neighborhood_check") {
+                    solver.set_neighborhood_check(neighborhood_check);
+                }
+                
                 solver.generate();
                 self.solver_instance = Some(SolverInstance::NonStiff(solver));
             }
@@ -317,6 +349,11 @@ impl UniversalODESolver {
                 // Set parallel processing if specified
                 if let Some(parallel) = self.get_bool_param("parallel") {
                     solver.set_parallel(parallel);
+                }
+                
+                // Set stop condition if specified (Radau uses its own tolerance)
+                if let Some(ref stop_cond) = self.stop_condition {
+                    solver.set_stop_condition(stop_cond.clone());
                 }
 
                 self.solver_instance = Some(SolverInstance::Radau(solver));
@@ -347,6 +384,11 @@ impl UniversalODESolver {
                     first_step,
                 );
 
+                // Set stop condition if specified (BDF uses atol as tolerance)
+                if let Some(ref stop_cond) = self.stop_condition {
+                    solver.set_stop_condition(stop_cond.clone());
+                }
+                
                 solver.generate();
                 self.solver_instance = Some(SolverInstance::BDF(solver));
             }
@@ -369,6 +411,14 @@ impl UniversalODESolver {
                     self.t_bound,
                     self.y0.clone(),
                 );
+                
+                // Set stop condition and neighborhood check if specified
+                if let Some(ref stop_cond) = self.stop_condition {
+                    solver.set_stop_condition(stop_cond.clone());
+                }
+                if let Some(neighborhood_check) = self.get_float_param("neighborhood_check") {
+                    solver.set_neighborhood_check(neighborhood_check);
+                }
 
                 self.solver_instance = Some(SolverInstance::BE(solver));
             }
@@ -416,6 +466,16 @@ impl UniversalODESolver {
     /// Get results
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (self.t_result.clone(), self.y_result.clone())
+    }
+    
+    /// Get solver status
+    pub fn get_status(&self) -> Option<String> {
+        match self.solver_instance.as_ref()? {
+            SolverInstance::NonStiff(solver) => Some(solver.get_status().clone()),
+            SolverInstance::Radau(solver) => Some(solver.get_status().clone()),
+            SolverInstance::BDF(solver) => Some(solver.get_status().clone()),
+            SolverInstance::BE(solver) => Some(solver.get_status().clone()),
+        }
     }
 
     /// Plot results
@@ -632,6 +692,7 @@ impl UniversalODESolver {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+    use std::collections::HashMap;
 
     #[test]
     fn test_universal_rk45() {
@@ -941,5 +1002,142 @@ mod tests {
 
         assert!(t_result.is_some());
         assert!(y_result.is_some());
+    }
+
+    #[test]
+    fn test_universal_stop_condition_rk45() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0; // Large bound to ensure stop condition triggers first
+        let step_size = 0.01;
+
+        let mut solver = UniversalODESolver::rk45(eq_system, values, arg, t0, y0, t_bound, step_size);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        solver.set_stop_condition(stop_condition);
+        solver.set_neighborhood_check(1e-2);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status().unwrap(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= 1e-2);
+    }
+
+    #[test]
+    fn test_universal_stop_condition_radau() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0;
+
+        let mut solver = UniversalODESolver::radau(
+            eq_system, values, arg, RadauOrder::Order3, t0, y0, t_bound,
+            1e-2, 50, Some(0.01)
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        solver.set_stop_condition(stop_condition);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status().unwrap(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= 1e-2); // Uses Radau's tolerance
+    }
+
+    #[test]
+    fn test_universal_stop_condition_bdf() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0;
+
+        let mut solver = UniversalODESolver::bdf(
+            eq_system, values, arg, t0, y0, t_bound, 1e-3, 1e-5, 1e-3
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 2.0);
+        solver.set_stop_condition(stop_condition);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status().unwrap(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 2.0).abs() <= 1e-2); // Uses BDF's atol
+    }
+
+    #[test]
+    fn test_universal_stop_condition_be() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 1.5
+        let eq1 = Expr::parse_expression("y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 10.0;
+
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system, values, arg, t0, y0, t_bound, 1e-6, 50, Some(0.01)
+        );
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("y".to_string(), 1.5);
+        solver.set_stop_condition(stop_condition);
+        solver.set_neighborhood_check(1e-2);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status().unwrap(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 1.5).abs() <= 1e-2);
+    }
+
+    #[test]
+    fn test_universal_no_stop_condition() {
+        // Test without stop condition - should run to t_bound
+        let eq1 = Expr::parse_expression("-y");
+        let eq_system = vec![eq1];
+        let values = vec!["y".to_string()];
+        let arg = "t".to_string();
+        let t0 = 0.0;
+        let y0 = DVector::from_vec(vec![1.0]);
+        let t_bound = 1.0;
+        let step_size = 0.1;
+
+        let mut solver = UniversalODESolver::rk45(eq_system, values, arg, t0, y0, t_bound, step_size);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status().unwrap(), "finished");
+        let (t_result, _) = solver.get_result();
+        let t_res = t_result.unwrap();
+        let final_t = t_res[t_res.len() - 1];
+        assert!((final_t - t_bound).abs() <= step_size);
     }
 }

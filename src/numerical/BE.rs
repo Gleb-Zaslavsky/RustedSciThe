@@ -8,6 +8,7 @@ use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 //use ndarray_linalg::Norm;
 use log::info;
+use std::collections::HashMap;
 use std::time::Instant;
 pub enum Equation {
     LHS(Vec<Expr>),
@@ -28,6 +29,8 @@ pub struct BE {
     message: Option<String>,
     h: Option<f64>,
     global_timestepping: bool,
+    stop_condition: Option<HashMap<String, f64>>,
+    neighborhood_check: f64,
 }
 impl Display for BE {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +69,8 @@ impl BE {
             message: None,
             h: None,
             global_timestepping: true,
+            stop_condition: None,
+            neighborhood_check: 1e-6,
         }
     }
     pub fn set_initial(
@@ -117,6 +122,28 @@ impl BE {
         self.t = t0;
         self.y = y0.clone();
         self.check();
+    }
+    
+    pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
+        self.stop_condition = Some(stop_condition);
+    }
+    
+    pub fn set_neighborhood_check(&mut self, tolerance: f64) {
+        self.neighborhood_check = tolerance;
+    }
+    
+    fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
+        if let Some(ref conditions) = self.stop_condition {
+            for (var_name, target_value) in conditions {
+                if let Some(var_index) = self.newton.values.iter().position(|v| v == var_name) {
+                    let current_value = y[var_index];
+                    if (current_value - target_value).abs() <= self.neighborhood_check {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
     pub fn check(&self) -> () {
         assert_eq!(!self.y.is_empty(), true, "initial y is empty");
@@ -218,6 +245,12 @@ impl BE {
                 integr_status = Some(-1);
                 break;
             }
+            // Check stop condition before storing solution
+            if self.check_stop_condition(&self.y) {
+                self.status = "stopped_by_condition".to_string();
+                integr_status = Some(0);
+            }
+            
             //  info("i: {}, t: {}, y: {:?}, _status: {}", i, self.Solver_instance.t, self.Solver_instance.y, _status);
             t.push(self.t);
             y.push(self.y.clone());
@@ -259,10 +292,15 @@ impl BE {
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (Some(self.t_result.clone()), Some(self.y_result.clone()))
     }
+    
+    pub fn get_status(&self) -> &String {
+        &self.status
+    }
 }
 
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_newton_raphson_solver_for_Euler_1() {
@@ -421,6 +459,96 @@ mod tests {
         let _result = res.1.unwrap();
         // assert_eq!(result.shape(), (2, 1)) ;
         assert_eq!(solver.status, "finished".to_string());
+    }
+
+    #[test]
+    fn test_be_stop_condition_single_variable() {
+        // Test: y' = y, y(0) = 1, stop when y reaches 2.0
+        let eq1 = Expr::parse_expression("-z+2.0*x"); // z' = -z + 2*x, solution grows
+        let eq_system = vec![eq1];
+        let y0 = DVector::from_vec(vec![1.0]);
+        let values = vec!["z".to_string()];
+        let arg = "x".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 10.0; // Large bound to ensure stop condition triggers first
+
+        let mut solver = BE::new();
+        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("z".to_string(), 1.5);
+        solver.set_stop_condition(stop_condition);
+        solver.set_neighborhood_check(1e-2);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_y = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_y - 1.5).abs() <= 1e-2);
+    }
+
+    #[test]
+    fn test_be_stop_condition_multiple_variables() {
+        // Test system with multiple variables
+        let eq1 = Expr::parse_expression("z+y-2.0*x");
+        let eq2 = Expr::parse_expression("-z*y+3.0*x");
+        let eq_system = vec![eq1, eq2];
+        let y0 = DVector::from_vec(vec![1.0, 1.0]);
+        let values = vec!["z".to_string(), "y".to_string()];
+        let arg = "x".to_string();
+        let tolerance = 1e-6;
+        let max_iterations = 50;
+        let h = Some(0.01);
+        let t0 = 0.0;
+        let t_bound = 10.0;
+
+        let mut solver = BE::new();
+        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        let mut stop_condition = HashMap::new();
+        stop_condition.insert("z".to_string(), 1.2);
+        solver.set_stop_condition(stop_condition);
+        solver.set_neighborhood_check(1e-2);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "stopped_by_condition");
+        let (_, y_result) = solver.get_result();
+        let y_res = y_result.unwrap();
+        let final_z = y_res[(y_res.nrows() - 1, 0)];
+        assert!((final_z - 1.2).abs() <= 1e-2);
+    }
+
+    #[test]
+    fn test_be_no_stop_condition() {
+        // Test without stop condition - should run to t_bound
+        let eq1 = Expr::parse_expression("z+y-10.0*x");
+        let eq2 = Expr::parse_expression("z*y-4.0*x");
+        let eq_system = vec![eq1, eq2];
+        let y0 = DVector::from_vec(vec![1.0, 1.0]);
+        let values = vec!["z".to_string(), "y".to_string()];
+        let arg = "x".to_string();
+        let tolerance = 1e-2;
+        let max_iterations = 50;
+        let h = Some(1e-2);
+        let t0 = 0.0;
+        let t_bound = 0.1;
+
+        let mut solver = BE::new();
+        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
+        
+        solver.solve();
+        
+        assert_eq!(solver.get_status(), "finished");
+        let (t_result, _) = solver.get_result();
+        let t_res = t_result.unwrap();
+        let final_t = t_res[t_res.len() - 1];
+        assert!((final_t - t_bound).abs() <= h.unwrap());
     }
 }
 
