@@ -1,8 +1,8 @@
 #![allow(non_camel_case_types)] //
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
-use crate::somelinalg::LUsolver::invers_Mat_LU;
-use crate::somelinalg::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
-use crate::somelinalg::some_matrix_inv::invers_csmat;
+use crate::somelinalg::iterative_solvers_cpu::LUsolver::invers_Mat_LU;
+use crate::somelinalg::iterative_solvers_cpu::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
+use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
 
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;

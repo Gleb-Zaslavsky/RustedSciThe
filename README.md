@@ -3,9 +3,8 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: task parser improvement to parse problem tasks from txt files
+PROJECT NEWS: added GPU powered GMRES and BiCGSTAB solvers for banded linear systems 
 
-ATTENTION: for those interested in solving BVP there is an in-depth guide for the part of the crate concerned with the BVP on github page of the project (in eng. and rus.). Find it in the Book folder.
 
 ## Content
 - [Motivation](#motivation)
@@ -53,7 +52,28 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
     * Newton-Raphson method
     * Newton-Raphson damped
     * Levenberg-Marquardt method
+* solving large banded linear systems with BiCGSTAB and GMRES methods with several preconditioners.
+  (ArrayFire C++ library is needed on your machine - see below)
+  
 
+### ArrayFire and CUDA features
+To enable GPU features, you need to have the ArrayFire C++ library installed on your machine. You can find installation instructions on the [ArrayFire website](https://arrayfire.org/docs/installing.htm).
+```bash
+cargo build --features arrayfire
+```
+- Enables GPU-accelerated linear algebra via ArrayFire
+- BiCGStab and GMRES solvers with GPU acceleration
+- Vanilla (no preconditioning), Jacobi and ILU0 preconditioners on GPU
+- Requires ArrayFire C++ library installation
+
+
+```bash
+cargo build --features cuda
+```
+- Enables all ArrayFire features
+- GPU-native Gauss-Seidel preconditioner via custom CUDA kernels (so you need to compile multicolor_gs.cu cuda custom
+kernel for Gauss-Seidel preconditioner via nvcc compiler from CUDA library )
+- Requires both ArrayFire and compiled CUDA library
 
  PROJECT NAVIGATION
 
@@ -121,6 +141,8 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
 | linear algebra algorithms                 |                        | 
 | or convinente API for linear algebra      |                        | 
 | crates                                    |                        |
+|                                           |  somelinalg/iterative_ |
+|                                           |  solvers_gpu           |   
 ## project_documentation
 
 In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.

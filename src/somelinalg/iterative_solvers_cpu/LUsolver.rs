@@ -1,4 +1,4 @@
-use crate::somelinalg::GMRES_mult_api::filter_zeros;
+use crate::somelinalg::iterative_solvers_cpu::GMRES_mult_api::filter_zeros;
 
 use faer::linalg::solvers::Solve;
 use faer::mat::Mat;
@@ -89,7 +89,7 @@ pub fn solve_with_upper_triangular(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::somelinalg::GMRES_mult_api::dense_to_sparse;
+    use crate::somelinalg::iterative_solvers_cpu::GMRES_mult_api::dense_to_sparse;
 
     use faer_gmres::gmres;
     use nalgebra::DMatrix;

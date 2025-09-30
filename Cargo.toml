@@ -8,6 +8,21 @@ license = "MIT"
 keywords = [ "mathematics", "science", "ODE", "symbolic"]
 repository = "https://github.com/Gleb-Zaslavsky/RustedSciThe"
 
+
+[features]
+default = []
+arrayfire = ["dep:arrayfire"]
+# The cuda feature automatically includes arrayfire due to this line 
+cuda = ["arrayfire"]
+# must be added to vscode/settings.json
+# {
+#    "rust-analyzer.cargo.features": ["arrayfire", "cuda"]
+# }
+
+[package.metadata.rust-analyzer]
+cargo = { features = ["arrayfire", "cuda"] }
+
+
 [profile.release]
 debug = false
 lto = true
@@ -29,6 +44,7 @@ incremental = false
 panic = "abort"
 
 [dependencies]
+arrayfire = { version = "3.8.0", package = "arrayfire_fork", optional = true }
 itertools = "0.14.0"
 nalgebra = { version = "0.34.0", features = [ "sparse"] }
 nalgebra-sparse = "0.11.0"
