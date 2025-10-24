@@ -1,3 +1,99 @@
+//! # Backward Differentiation Formula (BDF) Solver
+//!
+//! ## Mathematical Foundation
+//!
+//! The Backward Differentiation Formula (BDF) is a family of implicit methods for solving
+//! stiff ordinary differential equations (ODEs) of the form:
+//!
+//! ```text
+//! dy/dt = f(t, y), y(t₀) = y₀
+//! ```
+//!
+//! ### BDF Formula Derivation
+//!
+//! BDF methods approximate the derivative using backward differences. For a k-step BDF method,
+//! the formula is:
+//!
+//! ```text
+//! Σ(i=0 to k) αᵢ yₙ₋ᵢ = h βₖ f(tₙ, yₙ)
+//! ```
+//!
+//! Where:
+//! - `yₙ` is the solution at time `tₙ`
+//! - `h` is the step size
+//! - `αᵢ` are the BDF coefficients
+//! - `βₖ = 1` for BDF methods (implicit)
+//!
+//! ### Stability and Order
+//!
+//! BDF methods up to order 6 exist, but only orders 1-5 are A-stable:
+//! - **Order 1 (Backward Euler)**: `yₙ - yₙ₋₁ = h f(tₙ, yₙ)`
+//! - **Order 2**: `3/2 yₙ - 2yₙ₋₁ + 1/2 yₙ₋₂ = h f(tₙ, yₙ)`
+//! - **Higher orders**: Use more previous points for better accuracy
+//!
+//! ### Newton-Raphson Solution
+//!
+//! At each step, we solve the nonlinear system:
+//! ```text
+//! G(yₙ) = yₙ - h/αₖ f(tₙ, yₙ) - ψ = 0
+//! ```
+//!
+//! Where `ψ` contains contributions from previous solution values.
+//!
+//! Using Newton-Raphson iteration:
+//! ```text
+//! yₙ⁽ᵐ⁺¹⁾ = yₙ⁽ᵐ⁾ - [I - h/αₖ J]⁻¹ G(yₙ⁽ᵐ⁾)
+//! ```
+//!
+//! Where `J = ∂f/∂y` is the Jacobian matrix.
+//!
+//! ## Implementation Details
+//!
+//! ### Variable Order and Step Size Control
+//!
+//! This implementation uses:
+//! - **Adaptive order**: Automatically adjusts between orders 1-5 based on error estimates
+//! - **Adaptive step size**: Uses local error estimation to control step size
+//! - **Nordsieck form**: Stores solution history as scaled derivatives for efficiency
+//!
+//! ### Key Components
+//!
+//! 1. **Difference Matrix (D)**: Stores scaled backward differences
+//!    - `D[0,:]` = current solution
+//!    - `D[1,:]` = h * f(t,y) (scaled first derivative)
+//!    - `D[k,:]` = k-th scaled backward difference
+//!
+//! 2. **Coefficient Arrays**:
+//!    - `alpha`: BDF coefficients for different orders
+//!    - `gamma`: Integration coefficients
+//!    - `error_const`: Error estimation coefficients
+//!
+//! 3. **Error Control**: Uses weighted RMS norm for error estimation:
+//!    ```text
+//!    ||e||ᵣₘₛ = sqrt(1/n Σ(eᵢ/(atol + rtol*|yᵢ|))²)
+//!    ```
+//!
+//! ### Algorithm Flow
+//!
+//! 1. **Prediction**: Use Nordsieck array to predict solution
+//! 2. **Correction**: Solve nonlinear system with Newton-Raphson
+//! 3. **Error Estimation**: Compute local truncation error
+//! 4. **Step/Order Control**: Accept/reject step and adjust order/step size
+//! 5. **Update**: Update Nordsieck array for next step
+//!
+//! ### Stiffness Handling
+//!
+//! BDF methods are particularly effective for stiff problems because:
+//! - **A-stability**: Unconditionally stable for orders 1-2
+//! - **L-stability**: Good damping of high-frequency components
+//! - **Implicit nature**: Can handle large step sizes for stiff systems
+//!
+//! ## References
+//!
+//! - Byrne, G.D., Hindmarsh, A.C. "A Polyalgorithm for the Numerical Solution of ODEs"
+//! - Shampine, L.F., Reichelt, M.W. "The MATLAB ODE Suite"
+//! - Hairer, E., Wanner, G. "Solving Ordinary Differential Equations II: Stiff Problems"
+
 extern crate nalgebra as na;
 extern crate num_traits;
 extern crate sprs;
@@ -21,14 +117,21 @@ const NEWTON_MAXITER: usize = 4;
 const MIN_FACTOR: f64 = 0.2;
 const MAX_FACTOR: f64 = 10.0;
 const SPARSE: f64 = 0.01;
-/// Computes a specific matrix `R` based on the given order and factor.
+/// Computes cumulative product along columns of a matrix.
+/// 
+/// For each column j, computes the cumulative product:
+/// ```text
+/// result[i,j] = ∏(k=0 to i) matrix[k,j]
+/// ```
+/// 
+/// This is used in the BDF coefficient computation where we need
+/// cumulative products of scaling factors.
+/// 
 /// # Parameters
-/// * `order`: An unsigned integer representing the order of the matrix.
-/// * `factor`: A floating-point number representing a factor used in computing the matrix.
+/// * `matrix` - Input matrix for cumulative product computation
+/// 
 /// # Returns
-///
-/// A 2D matrix of type `DMatrix<f64>` representing the computed matrix `R`.
-
+/// Matrix where each element is the cumulative product from top to current row
 fn cumulative_product_along_columns(matrix: &DMatrix<f64>) -> DMatrix<f64> {
     let (rows, cols) = matrix.shape();
     let mut result = DMatrix::zeros(rows, cols);
@@ -44,6 +147,27 @@ fn cumulative_product_along_columns(matrix: &DMatrix<f64>) -> DMatrix<f64> {
     result
 }
 
+/// Computes the R matrix for BDF step size and order changes.
+/// 
+/// The R matrix is used to transform the Nordsieck array when the step size
+/// changes by a factor. The matrix elements are computed as:
+/// ```text
+/// R[i,j] = (i-1-factor*j)/i  for i,j ≥ 1
+/// R[0,j] = 1                 for all j
+/// ```
+/// 
+/// Then cumulative products are taken along columns to get the final R matrix.
+/// 
+/// # Parameters
+/// * `order` - Current BDF order (determines matrix size)
+/// * `factor` - Step size scaling factor (new_h/old_h)
+/// 
+/// # Returns
+/// Transformation matrix R of size (order+1) × (order+1)
+/// 
+/// # Mathematical Background
+/// When step size changes from h to h*factor, the scaled derivatives
+/// in the Nordsieck array must be transformed accordingly.
 fn compute_r(order: usize, factor: f64) -> DMatrix<f64> {
     let mut m = DMatrix::zeros(order + 1, order + 1);
     for i in 1..(order + 1) {
@@ -52,46 +176,73 @@ fn compute_r(order: usize, factor: f64) -> DMatrix<f64> {
         }
     }
     m.row_mut(0).fill(1.0);
-    // info!("\n M= {}", m);
     let result = cumulative_product_along_columns(&m);
     result
 }
 
-/// Updates the matrix `d` in-place by multiplying it with the product of matrices `r` and `u`.
+/// Updates the Nordsieck difference array when step size changes.
+/// 
+/// When the step size changes by a factor, the scaled derivatives in the
+/// Nordsieck array D must be transformed to maintain consistency.
+/// The transformation is: D_new = (R*U)^T * D_old
+/// 
+/// Where:
+/// - R = transformation matrix for the new step size factor
+/// - U = transformation matrix for factor = 1 (identity transformation)
+/// - D contains scaled derivatives: [y, h*y', h²*y''/2!, ...]
+/// 
 /// # Parameters
-/// * `d`: A mutable reference to a mutable 2D matrix of type `DMatrix<f64>`. It will be updated in-place.
-/// * `order`: An unsigned integer representing the order of the matrices `r` and `u`.
-/// * `factor`: A floating-point number representing a factor used in computing the matrices `r` and `u`.
-/// # Returns
-/// This function does not return a value, but it updates the matrix `d` in-place.
+/// * `D` - Nordsieck difference matrix to be updated in-place
+/// * `order` - Current BDF order
+/// * `factor` - Step size scaling factor (h_new/h_old)
+/// 
+/// # Mathematical Formula
+/// ```text
+/// D[0:order+1] = (R(order,factor) * R(order,1))^T * D[0:order+1]
+/// ```
 fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
     let r = compute_r(order, factor);
     let u = compute_r(order, 1.0);
-    //  info!("r={:?}, u={:?}", r, u);
     let ru = r * u;
     let temp = ru.transpose() * D.rows(0, order + 1);
     D.rows_mut(0, order + 1).copy_from(&temp);
 }
 
-/// Solves a system of ordinary differential equations using the Backward Differentiation Formula (BDF) method.
-///
+/// Solves the nonlinear BDF system using Newton-Raphson iteration.
+/// 
+/// At each BDF step, we must solve the nonlinear system:
+/// ```text
+/// G(y) = y - c*f(t,y) - ψ = 0
+/// ```
+/// 
+/// Where:
+/// - c = h/α₀ (step size divided by leading BDF coefficient)
+/// - ψ = (1/α₀) * Σ(i=1 to k) αᵢ*yₙ₋ᵢ (contribution from previous values)
+/// - f(t,y) is the ODE right-hand side
+/// 
+/// Newton-Raphson iteration:
+/// ```text
+/// y^(m+1) = y^(m) - [I - c*J]^(-1) * G(y^(m))
+/// ```
+/// 
+/// Where J = ∂f/∂y is the Jacobian matrix.
+/// 
 /// # Parameters
-/// * `fun`: A closure representing the system of ordinary differential equations. It takes a time `t` and a vector of
-///   dependent variables `y` as input and returns a vector representing the derivatives of `y` with respect to `t`.
-/// * `t_new`: The new time at which the system of ODEs needs to be solved.
-/// * `y_predict`: An initial guess for the solution at the new time `t_new`.
-/// * `c`: A constant used in the BDF method.
-/// * `psi`: A vector used in the BDF method.
-/// * `lu`: A sparse matrix representing the LU decomposition of the Jacobian matrix.
-/// * `solve_lu`: A closure representing the function to solve the linear system using the LU decomposition.
-/// * `scale`: A vector representing the scaling factors used in the BDF method.
-/// * `tol`: The tolerance for the solution.
+/// * `fun` - ODE right-hand side function f(t,y)
+/// * `t_new` - Target time for the solution
+/// * `y_predict` - Initial guess from predictor step
+/// * `c` - BDF coefficient c = h/α₀
+/// * `psi` - Vector ψ containing previous step contributions
+/// * `lumatrx` - LU factorization of [I - c*J]
+/// * `solve_lu` - Function to solve linear systems with LU factorization
+/// * `scale` - Scaling vector for error norm computation
+/// * `tol` - Newton iteration tolerance
+/// 
 /// # Returns
-/// A tuple containing:
-/// * `converged`: A boolean indicating whether the solution converged or not.
-/// * `iterations`: The number of iterations performed during the solution process.
-/// * `y`: The solution vector at the new time `t_new`.
-/// * `d`: An intermediate vector used in the BDF method.
+/// * `converged` - Whether Newton iteration converged
+/// * `iterations` - Number of Newton iterations performed
+/// * `y` - Final solution at t_new
+/// * `d` - Correction vector (y_final - y_predict)
 fn solve_bdf_system<F>(
     fun: F,
     t_new: f64,
@@ -112,37 +263,26 @@ where
     let mut converged = false;
     let mut k_: usize = 0;
     for k in 0..NEWTON_MAXITER {
-        //   info!("Newton iteration: {}", k);
         let f = fun(t_new, &y);
         // checks if all elements in the vector f are finite. If any element is not finite, the loop is broken.
         if !f.iter().all(|&x| x.is_finite()) {
             break;
         }
-        //The dy vector represents the change in the solution vector y at each iteration of the Newton-Raphson method
-        // info!("DY c {:?},\n f = {:?}, \n {:?},\n {:?} \n", c, &f , psi, &d);
+        // The dy vector represents the change in the solution vector y at each iteration of the Newton-Raphson method
         let dy = solve_lu(&lumatrx, &(c * &f - psi - &d));
-        // let new_fun:f64 = (|x:&f64, y:&f64| -x - (-y).exp() )(&y[0], &y[1]);
-        //  print!("new_fun {:?} ", new_fun);
-        //   info!("dy {:}, \n &(c * &f - psi - &d) {:?}", dy, &(c * &f - psi - &d));
         // The dy_norm value is then used to determine the convergence of the Newton-Raphson method and to adjust the step size in the BDF method
         let dy_norm = norm(&(dy.component_div(scale)));
-        //  calculate the rate of convergence for the Newton-Raphson method used to solve the system of ODEs. The rate of convergence is calculated
-        //by dividing the current norm of the change in the solution vector (dy_norm) by the norm of the change in the solution vector from the
-        // previous iteration (dy_norm_old).
+        // Calculate the rate of convergence for the Newton-Raphson method
         let rate: Option<f64> = if let Some(dy_norm_old) = dy_norm_old {
             Some(dy_norm / dy_norm_old)
         } else {
             None
         };
-        // info!("dy = {:?}, dy_norm = {:?}, rate = {:?}, {}", dy, dy_norm, rate, tol);
-        // if the rate of convergence is greater than or equal to 1.0 or if the rate divided by (1.0 - rate) times the norm of the change in
-        //the solution vector is greater than the specified tolerance (tol), the loop breaks, indicating that the Newton-Raphson method has
-        //not converged.
+        // If the rate of convergence is too slow, break the Newton iteration
         if let Some(rate) = rate {
             if rate >= 1.0
                 || (rate.powi((NEWTON_MAXITER - k) as i32) / (1.0 - rate)) * dy_norm > tol
             {
-                // powi is integer exponrnt
                 break;
             }
         }
@@ -154,7 +294,6 @@ where
             converged = true;
             break;
         }
-        // if let Some(rate) = rate { info!("condition {}", rate / (1.0 - rate) * dy_norm)};
         if let Some(rate) = rate {
             if rate / (1.0 - rate) * dy_norm < tol {
                 converged = true;
@@ -162,12 +301,36 @@ where
             }
         }
         dy_norm_old = Some(dy_norm);
-    } //for dy_norm
-    //  info!("{}, {}, {}, {}", converged, k_+1, y, d);
+    }
     (converged, k_ + 1, y, d)
 }
 
-//#[derive(Debug)]
+
+/// Backward Differentiation Formula (BDF) solver for stiff ODEs.
+/// 
+/// This struct implements a variable-order, variable-step-size BDF method
+/// for solving initial value problems of the form:
+/// ```text
+/// dy/dt = f(t,y), y(t₀) = y₀
+/// ```
+/// 
+/// # Key Features
+/// - **Variable order**: Automatically adjusts between orders 1-5
+/// - **Variable step size**: Adaptive step size control based on error estimates
+/// - **Nordsieck form**: Efficient storage of solution history as scaled derivatives
+/// - **Newton-Raphson**: Implicit system solution with Jacobian reuse
+/// - **Stiffness handling**: A-stable methods suitable for stiff problems
+/// 
+/// # Mathematical Foundation
+/// The k-step BDF formula is:
+/// ```text
+/// Σ(i=0 to k) αᵢ yₙ₋ᵢ = h f(tₙ, yₙ)
+/// ```
+/// 
+/// # Data Organization
+/// - **D matrix**: Nordsieck array storing scaled derivatives [y, h*y', h²*y''/2!, ...]
+/// - **Coefficients**: α (BDF), γ (integration), error constants
+/// - **Linear algebra**: Cached LU factorization for efficiency
 pub struct BDF {
     fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub t: f64,
@@ -201,45 +364,7 @@ pub struct BDF {
     njev: usize,
     pub direction: f64,
 }
-/*
-impl Clone for BDF {
-    fn clone(&self) -> Self {
-        BDF {
-            fun: self.fun.clone(),
-            t: self.t,
-            y: self.y.clone(),
-            t_bound: self.t_bound,
-            max_step: self.max_step,
-            rtol: self.rtol.clone(),
-            atol: self.atol.clone(),
-            vectorized: self.vectorized,
-            n: self.n,
-            t_old: self.t_old,
-            h_abs: self.h_abs,
-            h_abs_old: self.h_abs_old,
-            error_norm_old: self.error_norm_old,
-            newton_tol: self.newton_tol,
-            jac_factor: self.jac_factor.clone(),
-            jac: self.jac.clone(),
-            J: self.J.clone(),
-            I: self.I.clone(),
-            lu: self.lu.clone(),
-            solve_lu: self.solve_lu.clone(),
-            gamma: self.gamma.clone(),
-            alpha: self.alpha.clone(),
-            error_const: self.error_const.clone(),
-            D: self.D.clone(),
-            order: self.order,
-            n_equal_steps: self.n_equal_steps,
-            LU: self.LU.clone(),
-            nlu: self.nlu,
-            nfev: self.nfev,
-            njev: self.njev,
-            direction: self.direction,
-        }
-    }
-}
-    */
+
 impl Display for BDF {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
@@ -300,19 +425,14 @@ impl BDF {
     ValueError: If the Jacobian is provided and its shape is not (self.n, self.n).
     */
 
-    pub fn new(/* 
-         fun: Box<dyn Fn(f64, DVector<f64>) -> DVector<f64>>, //?????
-        t0: f64,
-        y0: DVector<f64>,
-        t_bound: f64,
-        max_step: f64,
-        rtol: f64,
-        atol: f64,
-        jac: Option<Box<dyn Fn(f64, DVector<f64>) -> DMatrix<f64>>>,
-        jac_sparsity: Option<DMatrix<f64>>,
-        vectorized: bool,
-        first_step: Option<f64>,
-        */) -> Self {
+    /// Creates a new BDF solver instance with default parameters.
+    /// 
+    /// This constructor initializes the solver with placeholder values.
+    /// The actual problem setup is done via `set_initial()`.
+    /// 
+    /// # Returns
+    /// A new BDF solver instance ready for initialization
+    pub fn new() -> Self {
         BDF {
             fun: Box::new(|_t, y| y.clone()),
             t: 0.0,
@@ -351,11 +471,40 @@ impl BDF {
             n: 0,
             t_old: None,
         }
-    } //fn new
+    }
 
+    /// Initializes the BDF solver with problem-specific parameters.
+    /// 
+    /// Sets up the ODE system, tolerances, Jacobian, and BDF coefficients.
+    /// Computes initial step size and initializes the Nordsieck array.
+    /// 
+    /// # Parameters
+    /// * `fun` - ODE right-hand side function f(t,y) → dy/dt
+    /// * `t0` - Initial time
+    /// * `y0` - Initial solution vector
+    /// * `t_bound` - Final integration time
+    /// * `_max_step` - Maximum allowed step size
+    /// * `rtol` - Relative error tolerance (scalar or vector)
+    /// * `atol` - Absolute error tolerance (scalar or vector)
+    /// * `jac` - Optional Jacobian function ∂f/∂y
+    /// * `jac_sparsity` - Optional sparsity pattern for numerical Jacobian
+    /// * `vectorized` - Whether function supports vectorized evaluation
+    /// * `first_step` - Optional initial step size (auto-selected if None)
+    /// 
+    /// # Mathematical Setup
+    /// Initializes BDF coefficients:
+    /// - α: BDF coefficients for different orders
+    /// - γ: Integration coefficients γₖ = Σ(i=1 to k) 1/i
+    /// - error_const: Local error estimation coefficients
+    /// 
+    /// Nordsieck array initialization:
+    /// ```text
+    /// D[0] = y₀
+    /// D[1] = h * f(t₀, y₀)
+    /// ```
     pub fn set_initial(
         &mut self,
-        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>, //?????
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
         t0: f64,
         y0: DVector<f64>,
         t_bound: f64,
@@ -398,62 +547,46 @@ impl BDF {
             }
         };
         self.h_abs = h_abs;
-        self.h_abs_old = None; // TODO: check this
-        self.error_norm_old = None; //
-        //             info!("h_abs {}", h_abs);
-        //  let newton_tol = f64::max(10.0 * std::f64::EPSILON / rtol, f64::min(0.03, rtol.powf(0.5)));
+        self.h_abs_old = None;
+        self.error_norm_old = None;
         self.newton_tol = newton_tol(rtol);
-        //  info!("newton_tol {}", self.newton_tol);
         self.jac_factor = None;
 
         // kappa: This array contains the coefficients for the BDF method. The values are specific to the BDF method and
         // are used to calculate the differences between the solution and the predicted solution.
         let kappa = DVector::from_vec(vec![0.0, -0.1850, -1.0 / 9.0, -0.0823, -0.0415, 0.0]);
-        //  The gamma coefficients are related to the order of the BDF method.
-        // The gamma vector is created using the DVector::from_iterator function, which takes an iterator as input. The iterator is created using
-        // the std::iter::once and std::iter::map functions. The std::iter::once function is used to create an iterator that yields a single value,
-        // which is 0.0 in this case. The std::iter::map function is used to create an iterator that maps each element of the range 1..=MAX_ORDER to
-        // its reciprocal, which is 1.0 / i as f64. The scan function is used to create an iterator that accumulates the sum of the elements.
-        // The resulting gamma vector has a length of MAX_ORDER + 1 and contains the cumulative sum of the reciprocals of the integers from 1
-        //to MAX_ORDER, with an initial value of 0.0.
-
-        let gamma = DVector::from_iterator(
-            MAX_ORDER + 1,
-            std::iter::once(0.0).chain((1..=MAX_ORDER).map(|i| 1.0 / i as f64).scan(
-                0.0,
-                |acc, x| {
-                    *acc += x;
-                    Some(*acc)
-                },
-            )),
-        );
-        // The alpha coefficients are used to calculate the differences between the predicted solution and the actual solution.
-        assert_eq!(
-            kappa.len(),
-            gamma.len(),
-            "kappa and gamma must have the same length"
-        );
-        let alpha = (DVector::from(vec![1.0; MAX_ORDER + 1]) - kappa.clone()).component_mul(&gamma); // component_mul is element-wise multiplication
-        assert_eq!(
-            alpha.len(),
-            MAX_ORDER + 1,
-            "alpha must have length MAX_ORDER + 1"
-        );
+        
+        // Match Python: self.gamma = np.hstack((0, np.cumsum(1 / np.arange(1, MAX_ORDER + 1))))
+        let gamma = {
+            let mut g = vec![0.0];
+            let mut cumsum = 0.0;
+            for i in 1..=MAX_ORDER {
+                cumsum += 1.0 / (i as f64);
+                g.push(cumsum);
+            }
+            DVector::from_vec(g)
+        };
+        
+        // Match Python: self.alpha = (1 - kappa) * self.gamma
+        let alpha = (DVector::from(vec![1.0; MAX_ORDER + 1]) - kappa.clone()).component_mul(&gamma);
+        
         let error_const = kappa.component_mul(&gamma)
             + DVector::from_iterator(MAX_ORDER + 1, (1..=MAX_ORDER + 1).map(|i| 1.0 / i as f64));
-        //         info!("kappa {:?}, alpha {:?}, gamma {:?},  error_const {:?}", &kappa, &alpha, &gamma, &error_const );
+            
+        // Debug assertions to ensure correct initialization
+        assert_eq!(alpha.len(), MAX_ORDER + 1);
+        assert_eq!(gamma.len(), MAX_ORDER + 1);
+        assert_eq!(error_const.len(), MAX_ORDER + 1);
         self.alpha = alpha;
         self.error_const = error_const;
         self.gamma = gamma;
 
         let mut D = DMatrix::zeros(MAX_ORDER + 3, self.y.len());
+        assert!(D.nrows() >= MAX_ORDER + 3, "D matrix must have at least MAX_ORDER + 3 rows");
         info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
-        //  let row_vector = DVector::from_row_slice([(self.y)  );
-        // D.row_mut(0).copy_from(  &DVector::from_row_slice( row_vector));
+        
         D.set_row(0, &self.y.transpose());
-        //         info!("{:?}",  h_abs);
         D.set_row(1, &(f * h_abs * self.direction).transpose());
-        //           info!("D = {:?},", &D);
         self.D = D;
 
         self.order = 1;
@@ -461,14 +594,17 @@ impl BDF {
         self.LU = None;
         self.create_funct();
         self.validate_jac(jac, jac_sparsity);
-
-        // let (jac, J) = binding;
-        // let (jac, J) = self.validate_jac(jac, jac_sparsity).as_mut().unwrap();
-
-        /*
-         */
     }
 
+    /// Creates linear algebra functions for sparse or dense matrices.
+    /// 
+    /// Sets up LU factorization and linear system solving functions
+    /// optimized for either sparse or dense Jacobian matrices.
+    /// 
+    /// # Implementation Details
+    /// - **Sparse**: Uses specialized sparse LU factorization
+    /// - **Dense**: Uses standard dense LU factorization
+    /// - **Identity matrix**: Creates I for Newton system [I - c*J]
     fn create_funct(&mut self) {
         if is_sparse(&self.J, SPARSE) {
             // realization more efficient for sparse matrices
@@ -490,8 +626,6 @@ impl BDF {
             self.solve_lu = Box::new(solve_lu)
                 as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
             self.I = DMatrix::identity(self.n, self.n);
-            // . An identity matrix is a square matrix with ones on the main diagonal
-            //(from the top left to the bottom right) and zeros elsewhere.
         } else {
             // realization more efficient for dense matrices
 
@@ -514,13 +648,27 @@ impl BDF {
             self.lu = Box::new(lu) as Box<dyn FnMut(&DMatrix<f64>) -> LU<f64, Dyn, Dyn>>;
             self.solve_lu = Box::new(solve_lu)
                 as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
-            self.I = DMatrix::identity(self.n, self.n); // . An identity matrix is a square matrix with ones on the main diagonal
-
-            //(from the top left to the bottom right) and zeros elsewhere.
+            self.I = DMatrix::identity(self.n, self.n);
 
             info!("functions creation: done");
         };
     }
+    /// Performs initial setup and validation of solver parameters.
+    /// 
+    /// This method handles the basic initialization that's common to all
+    /// BDF solvers, including argument validation and direction determination.
+    /// 
+    /// # Parameters
+    /// * `fun` - ODE right-hand side function
+    /// * `t0` - Initial time
+    /// * `y0` - Initial solution vector
+    /// * `t_bound` - Final integration time
+    /// * `vectorized` - Whether function supports vectorized calls
+    /// 
+    /// # Sets
+    /// - Integration direction: sign(t_bound - t0)
+    /// - Problem dimension: n = length(y0)
+    /// - Function evaluation counter: nfev = 0
     fn prelude(
         &mut self,
         fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
@@ -539,27 +687,7 @@ impl BDF {
 
         self.t_bound = t_bound;
         self.vectorized = vectorized;
-        /*
-        if vectorized:
-            def fun_single(t, y):
-                return self._fun(t, y[:, None]).ravel()
-            fun_vectorized = self._fun
-        else:
-            fun_single = self._fun
-
-            def fun_vectorized(t, y):
-                f = np.empty_like(y)
-                for i, yi in enumerate(y.T):
-                    f[:, i] = self._fun(t, yi)
-                return f
-            */
-        //  fn fun(t, y):
-        //    self.nfev += 1;
-        //   return self.fun_single(t, y);
-
         self.fun = fun;
-        //   self.fun_single = fun_single;
-        //   self.fun_vectorized = fun_vectorized;
 
         self.direction = if t_bound != t0 {
             (t_bound - t0).signum()
@@ -568,7 +696,7 @@ impl BDF {
         };
 
         self.nfev = 0;
-    } // end prelude
+    }
 
     /*
     If jac is None, it estimates the Jacobian using numerical differentiation (num_jac) and returns a wrapped function (jac_wrapped)
@@ -583,8 +711,28 @@ impl BDF {
 
     */
 
+    /// Validates and sets up the Jacobian computation strategy.
+    /// 
+    /// Handles three cases:
+    /// 1. **Analytical Jacobian**: User-provided function J = ∂f/∂y
+    /// 2. **Numerical Jacobian**: Finite difference approximation (not implemented)
+    /// 3. **No Jacobian**: Uses identity matrix (not recommended)
+    /// 
+    /// # Parameters
+    /// * `jac` - Optional analytical Jacobian function
+    /// * `sparsity` - Optional sparsity pattern for numerical differentiation
+    /// 
+    /// # Mathematical Background
+    /// The Jacobian matrix J[i,j] = ∂fᵢ/∂yⱼ is crucial for:
+    /// - Newton-Raphson convergence: [I - c*J] Δy = -G(y)
+    /// - Stability analysis: eigenvalues of J determine stiffness
+    /// - Efficiency: analytical J is much faster than numerical
+    /// 
+    /// # Implementation Notes
+    /// - Wraps user Jacobian for consistent interface
+    /// - Handles both sparse and dense matrices
+    /// - Increments Jacobian evaluation counter (njev)
     fn validate_jac(
-        // jacobian can be None or a function, in case of None it will be computed using the num_jac function
         &mut self,
         jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
         sparsity: Option<DMatrix<f64>>,
@@ -636,72 +784,59 @@ impl BDF {
                     } else {
                         None
                     };
-                /*
-                      let mut jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>  = Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
-                          //self.njev += 1;
-                          let f = &(self.fun)(t, &y);
-                          let (J, jac_factor) = num_jac(
-                              &self.fun,
-                              t,
-                              &y,
-                              &f,
-                              self.atol.clone(),
-                              self.jac_factor.clone(),
-                            new_sparsity.clone() ,
-                          );
-                          self.jac_factor = Some(jac_factor);
-                          J
-                      });
 
-                      let  J = jac_wrapped(t0, &y0);
-                //    let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> = jac_wrapped;
-                self.jac = Some(jac_wrapped);
-                self.J = J.clone();
-                   */
             }
-        }; // jac is  None
-        //  Ok((A, B))
-
-        /*
-
-        let J = if let Some(jac) = jac {
-            jac(t0, y0)
-        } else {
-            DMatrix::zeros(self.n, self.n)
         };
 
-        if J.shape() != (self.n, self.n) {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "`jac` is expected to have shape ({}, {}), but actually has {:?}.",
-                    self.n, self.n, J.shape()
-                ),
-            )));
-        }
-
-        (None, J)
-
-
-           */
-
-        // Ok((jac_wrapped, J))
-
         info!("jac validation: done");
-    } // validate_jac
+    }
 
-    //
-
+    /// Performs one BDF integration step with adaptive order and step size control.
+    /// 
+    /// This is the core BDF algorithm implementing:
+    /// 1. **Step size control**: Ensures h ∈ [h_min, h_max]
+    /// 2. **Prediction**: Uses Nordsieck array to predict solution
+    /// 3. **Correction**: Solves nonlinear system with Newton-Raphson
+    /// 4. **Error estimation**: Computes local truncation error
+    /// 5. **Acceptance**: Accept/reject step based on error tolerance
+    /// 6. **Order selection**: Choose optimal order for next step
+    /// 7. **Nordsieck update**: Update scaled derivatives array
+    /// 
+    /// # Returns
+    /// * `(true, None)` - Step accepted successfully
+    /// * `(false, Some(msg))` - Step failed with error message
+    /// 
+    /// # Mathematical Algorithm
+    /// 
+    /// **Prediction Phase**:
+    /// ```text
+    /// y_predict = Σ(i=0 to k) D[i]  (sum of Nordsieck array)
+    /// ```
+    /// 
+    /// **Correction Phase** (Newton-Raphson):
+    /// ```text
+    /// Solve: [I - c*J] Δy = c*f(t,y) - ψ - d
+    /// Where: c = h/αₖ, ψ = D[1:k]^T * γ[1:k] / αₖ
+    /// ```
+    /// 
+    /// **Error Estimation**:
+    /// ```text
+    /// error = Cₖ * d  (where Cₖ is error constant)
+    /// error_norm = ||error / scale||_RMS
+    /// ```
+    /// 
+    /// **Step Control**:
+    /// ```text
+    /// factor = safety * error_norm^(-1/(k+1))
+    /// h_new = h * clamp(factor, MIN_FACTOR, MAX_FACTOR)
+    /// ```
     pub fn _step_impl(&mut self) -> (bool, Option<&'static str>) {
-        //    info!("\n start step: t {}, y {:?}, order {:?}", self.t, self.y, self.order);
         let t = self.t;
         let mut D = self.D.clone();
-        //       info!("D0 {:?}", D.transpose(),);
         let max_step = self.max_step;
-        let min_step = 10.0 * f64::MIN; //(t.next_after(self.direction * INFINITY) - t).abs();
+        let min_step = 10.0 * f64::MIN;
 
         let mut h_abs = if self.h_abs > max_step {
-            //  info!("coind, {:?}, {:?}", self.order, max_step / self.h_abs);
             change_D(&mut D, self.order, max_step / self.h_abs);
             self.n_equal_steps = 0;
 
@@ -713,10 +848,11 @@ impl BDF {
         } else {
             self.h_abs
         };
-        //  info!("h_abs = {:?} \n", h_abs);
-        //   info!("D1 {:?}", D.transpose());
 
         let order = self.order;
+        assert!(order <= MAX_ORDER, "Order cannot exceed MAX_ORDER");
+        assert!(order < self.alpha.len(), "Order must be within alpha bounds");
+        
         let alpha = &self.alpha;
         let gamma = &self.gamma;
         let error_const = &self.error_const;
@@ -738,9 +874,7 @@ impl BDF {
         let mut safety = 0.0;
         // error_norm preallocation
         let mut error_norm = 0.0;
-        // order preallocation
         let mut d = DVector::zeros(self.n);
-        //      info!("{}", &J);
         while !step_accepted {
             if h_abs < min_step {
                 return (false, "step size too small".into());
@@ -750,29 +884,22 @@ impl BDF {
             let t_new_ = t + h;
 
             if self.direction * (t_new - self.t_bound) > 0.0 {
-                //?
-
                 t_new = self.t_bound;
 
                 change_D(&mut D, order, (t_new - t).abs() / h_abs);
                 self.n_equal_steps = 0;
                 LU = None;
             }
-            // info!("D cnanged {:?}", D);
             t_new = t_new_;
 
             let h = t_new - t;
             h_abs = h.abs();
-            //     thread::sleep(Duration::from_millis(100));
-            // info!("for pre {:?}, {:?}, ,", D.rows(0, order + 1).transpose(), order);
             let y_predict = D.rows(0, order + 1).row_sum().transpose();
-            //    info!("y_predict = {:?} \n", y_predict);
             let y_predict_abs = y_predict.abs();
-            let scale_ = scale_func(self.rtol.clone(), self.atol.clone(), &y_predict_abs); //  atol + rtol * y_predict.abs();
+            let scale_ = scale_func(self.rtol.clone(), self.atol.clone(), &y_predict_abs);
             let scale_: DVector<f64> = DVector::from_vec(scale_);
             scale = scale_;
-            //      info!("for psi {:?}, {:?}, {:?}, {:?}", D.rows(1, order).transpose(), gamma.rows(1, order).transpose(), alpha[order], order);
-            let psi = D.rows(1, order).transpose() * gamma.rows(1, order) / alpha[order]; //???
+            let psi = D.rows(1, order).transpose() * gamma.rows(1, order) / alpha[order];
             let mut converged = false;
             let c = h / alpha[order];
 
@@ -782,7 +909,6 @@ impl BDF {
                     assert_eq!(eye.shape(), J.shape(), "J shape is not equal to eye shape");
                     let x = &(eye - c * J.clone());
                     LU = Some((self.lu)(x));
-                    // info!("LU = {:?} \n", LU);
                 }
 
                 let (conv, n_iter_, y_new_, d_) = solve_bdf_system(
@@ -796,14 +922,11 @@ impl BDF {
                     &scale.clone(),
                     self.newton_tol,
                 );
-                // info!("y_new_ = {:?} \n, d_ = {:?}", y_new_, d_);
                 n_iter = n_iter_;
                 y_new = y_new_;
                 d = d_;
                 converged = conv;
-                // info!("converged = {:?}, d = {:?}", converged, d);
                 if !converged {
-                    //?
                     if current_jac {
                         break;
                     }
@@ -811,10 +934,9 @@ impl BDF {
                     LU = None;
                     current_jac = true;
                 }
-            } //end while
+            }
 
             if !converged {
-                //?
                 let factor = 0.5;
                 h_abs *= factor;
                 change_D(&mut D, order, factor);
@@ -831,9 +953,7 @@ impl BDF {
             let error = error_const[order] * d.clone();
             let error_norm_ = norm(&(error.component_div(&scale)));
             error_norm = error_norm_;
-            //          info!("error_norm = {:?}, safety = {:?}, d = {:?}, order {}", error_norm, safety, d.clone(), order);
             if error_norm > 1.0 {
-                //?
                 let factor =
                     (safety * error_norm.powf(-1.0 / (order as f64 + 1.0))).max(MIN_FACTOR);
                 h_abs *= factor;
@@ -842,7 +962,7 @@ impl BDF {
             } else {
                 step_accepted = true;
             }
-        } //end !step_accepted
+        }
 
         self.n_equal_steps += 1;
         self.t = t_new;
@@ -851,29 +971,17 @@ impl BDF {
         self.J = J;
         self.LU = LU;
         let D_ = D.clone();
-        //let row: DVector<f64> =  D_.row(2).transpose().clone();
-        //    info!("d= {:?},", &(d.clone())   );
-        //D.row_mut(order + 2).copy_from(&(d.clone() - D_.row(order + 1).transpose()  )   );
         D.set_row(order + 2, &(d.clone().transpose() - D_.row(order + 1)));
 
         D.set_row(order + 1, &d.transpose());
 
-        //  for i in (0..order).rev() {
-        //     let D_ = D.clone();// avoiding borrow checker issues with mutable and immutable references
-        //      D.row_mut(i).add_assign(D_.row(i + 1));
-        //  }
-        // for i in (0..order+1).rev() {
-        //  D[i] += D[i + 1];
-        //   }
         for i in (0..order + 1).rev() {
             let D_ = D.clone();
             D.row_mut(i).add_assign(D_.row(i + 1));
         }
 
-        //     info!("D1 = {:?} \n, {}", D.transpose(), order);
         if self.n_equal_steps < order + 1 {
-            //          info!("end step exit_0: t {}, y {:?}", self.t, self.y);
-            self.D = D; // !!!
+            self.D = D;
             return (true, None);
         }
 
@@ -901,88 +1009,24 @@ impl BDF {
             .map(|(i, x)| x.powf(-1.0 / (order as f64 + i as f64)))
             .collect(); //?
         let factors: DVector<f64> = factors.into();
-        //        info!("factors = {:?}, error_norms = {:?}", factors, error_norms);
-        // argmax returns ( index, value)
-        //ATTENTION! THIS IS AD HOC FIX IN THE ORIGINAL CODE IT WAS
-        //  let delta_order =  factors.argmax().0 - 1; WHICH CAUSES OVERFLOW OF USIZE IF factors.argmax().0==0
-        let delta_order = if factors.argmax().0 == 0 {
-            1
-        } else {
-            factors.argmax().0 - 1
-        };
-        let new_order = order + delta_order;
+        // Python: delta_order = np.argmax(factors) - 1
+        // This gives delta_order ∈ {-1, 0, 1} since factors has 3 elements
+        let argmax_index = factors.argmax().0;
+        let delta_order = (argmax_index as i32) - 1; // Can be -1, 0, or 1
+        let new_order = ((order as i32) + delta_order).max(1).min(MAX_ORDER as i32) as usize;
         self.order = new_order;
 
         let factor = (safety * factors.max()).min(MAX_FACTOR);
         self.h_abs *= factor;
-        //       info!("delta_order = {}, new_order = {}, factor = {}", delta_order, new_order, factor);
 
         change_D(&mut D, self.order, factor);
         self.n_equal_steps = 0;
         self.LU = None;
-        //      info!("end step exit_1: t {}, y {:?}", self.t, self.y);
-        //    info!(" D end = {:?} \n", &D.transpose());
-        self.D = D; // !!!
+        self.D = D;
 
         (true, None)
     }
 
-    /*
-     */
-} //impl BDF
-
-/*
-pub struct DenseOutput {
-    t_old: f64,
-    t: f64,
 }
 
-impl DenseOutput {
-    pub fn new(t_old: f64, t: f64) -> DenseOutput {
-        DenseOutput { t_old, t }
-    }
-}
 
-pub struct BdfDenseOutput {
-    t_old: f64,
-    t: f64,
-    order: usize,
-    t_shift: DVector<f64>,
-    denom: DVector<f64>,
-    D: DMatrix<f64>,
-}
-
-impl BdfDenseOutput {
-    pub fn new(t_old: f64, t: f64, h: f64, order: usize, D: DMatrix<f64>) -> BdfDenseOutput {  // self.t - h * np.arange(self.order)
-        let t_shift = DVector::from_iterator(order, (0..order).map(|i| t - h * i as f64));
-        let denom = DVector::from_iterator(order, (1..=order).map(|i| h * i as f64));
-
-        BdfDenseOutput {
-            t_old,
-            t,
-            order,
-            t_shift,
-            denom,
-            D,
-        }
-    }
-
-    pub fn call(&self, t: f64) -> DVector<f64> {
-        let x = if t.is_nan() {
-            DVector::zeros(self.order)
-        } else {
-            (t - self.t_shift) / &self.denom
-        };
-
-        let p = x.iter().scan(1.0, |state, &x| Some(state * x)).collect::<DVector<f64>>();
-
-        let y = self.D.slice((1, 0), (self.order, self.D.ncols())).transpose() * p;
-
-        if y.len() == 1 {
-            y + self.D.row(0)
-        } else {
-            y + &self.D.slice((0, 0), (1, self.D.ncols())).into_owned()
-        }
-    }
-}
-*/

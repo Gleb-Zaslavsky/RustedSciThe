@@ -3,7 +3,7 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: added GPU powered GMRES and BiCGSTAB solvers for banded linear systems 
+PROJECT NEWS: cleaned up and fixes bugs in BDF IVP solver
 
 
 ## Content

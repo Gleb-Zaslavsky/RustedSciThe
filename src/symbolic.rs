@@ -167,6 +167,8 @@ pub mod symbolic_integration;
 pub mod symbolic_traits;
 /// matrices and vectors of symbolic expressions
 pub mod symbolic_vectors;
+
+pub mod symbolic_simd;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
