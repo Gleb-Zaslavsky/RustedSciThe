@@ -1,5 +1,5 @@
 /////////////////////////////TESTS////////////////////////////////////////////////////
-/* 
+/*
 comprehensive tests:
 Basic parsing test
 Mixed type parsing test
@@ -860,9 +860,9 @@ mod tests2 {
         template.insert("config".to_string(), config_section);
 
         let mut parser = DocumentParser::new(input.to_string()).with_template(template);
-         println!("parser: {:?}", parser);
+        println!("parser: {:?}", parser);
         let result = parser.parse_document_as().unwrap();
-       
+
         let config = &result["config"];
         assert_eq!(config.len(), 2);
         assert!(config.get("host").unwrap().is_some());
@@ -1512,7 +1512,10 @@ mod pseudonym_tests {
 }
 #[cfg(test)]
 mod error_handling_tests {
-    use crate::Utils::task_parser::{DocumentParser, ParseError, ParseErrorKind, parse_document, parse_key_value_pair, parse_section, parse_value};
+    use crate::Utils::task_parser::{
+        DocumentParser, ParseError, ParseErrorKind, parse_document, parse_key_value_pair,
+        parse_section, parse_value,
+    };
     use std::{collections::HashMap, f32::consts::E};
 
     #[test]
@@ -1521,12 +1524,15 @@ mod error_handling_tests {
         let input = "config key1 value1";
         let result = parse_document(input);
         assert!(result.is_err());
-        
+
         let mut parser = DocumentParser::new(input.to_string());
         let result = parser.parse_document();
         assert!(result.is_err());
         assert!(parser.get_error().is_some());
-        assert!(parser.get_error().unwrap().contains("colon") || parser.get_error().unwrap().contains("key"));
+        assert!(
+            parser.get_error().unwrap().contains("colon")
+                || parser.get_error().unwrap().contains("key")
+        );
     }
 
     #[test]
@@ -1582,7 +1588,7 @@ mod error_handling_tests {
         let input = "config key1: [1.0, 2.0)";
         let result = parse_value(input, input);
         println!("result {:?}", result);
-        
+
         // TODO: This is a parser bug - mixed brackets should be detected as an error
         // Currently the parser incorrectly treats this as a valid string
         // Expected behavior: assert!(result.is_err());
@@ -1596,7 +1602,9 @@ mod error_handling_tests {
             Err(e) => {
                 // This is the correct behavior that should happen
                 println!("Correct: mixed brackets detected as error: {}", e);
-                assert!(format!("{}", e).contains("bracket") || format!("{}", e).contains("vector"));
+                assert!(
+                    format!("{}", e).contains("bracket") || format!("{}", e).contains("vector")
+                );
             }
         }
     }
@@ -1616,7 +1624,7 @@ mod error_handling_tests {
         let input = "config key1: [1.0, abc, 3.0]";
         let result = parse_value(input, input);
         println!("result: {:?}", result);
-        
+
         // TODO: This is a parser bug - vectors with invalid float values should be detected as errors
         // Currently the parser incorrectly treats this as valid
         // Expected behavior: assert!(result.is_err());
@@ -1630,7 +1638,11 @@ mod error_handling_tests {
             Err(e) => {
                 // This is the correct behavior that should happen
                 println!("Correct: malformed vector detected as error: {}", e);
-                assert!(format!("{}", e).contains("vector") || format!("{}", e).contains("float") || format!("{}", e).contains("abc"));
+                assert!(
+                    format!("{}", e).contains("vector")
+                        || format!("{}", e).contains("float")
+                        || format!("{}", e).contains("abc")
+                );
             }
         }
     }
@@ -1660,7 +1672,7 @@ mod error_handling_tests {
         // Duplicate section names
         let input = "config key1: value1\nconfig key2: value2";
         let result = parse_document(input);
-        
+
         // Check what actually happens - either error or merge behavior
         match result {
             Ok(doc) => {
@@ -1674,7 +1686,11 @@ mod error_handling_tests {
                 // If parsing fails, check that error mentions duplicate sections
                 let error_msg = format!("{}", e);
                 println!("Duplicate sections error: {}", error_msg);
-                assert!(error_msg.contains("Duplicate") || error_msg.contains("section") || error_msg.contains("config"));
+                assert!(
+                    error_msg.contains("Duplicate")
+                        || error_msg.contains("section")
+                        || error_msg.contains("config")
+                );
             }
         }
     }
@@ -1712,7 +1728,7 @@ mod error_handling_tests {
         // Extra characters after valid values
         let input = "config key1: value1 extra_chars_here";
         let result = parse_document(input);
-        
+
         // Check what actually happens - either error or parse as separate key
         match result {
             Ok(doc) => {
@@ -1726,7 +1742,12 @@ mod error_handling_tests {
                 // If parsing fails, check that error mentions the issue
                 let error_msg = format!("{}", e);
                 println!("Extra characters error: {}", error_msg);
-                assert!(error_msg.contains("extra") || error_msg.contains("key") || error_msg.contains("value") || error_msg.contains("colon"));
+                assert!(
+                    error_msg.contains("extra")
+                        || error_msg.contains("key")
+                        || error_msg.contains("value")
+                        || error_msg.contains("colon")
+                );
             }
         }
     }
@@ -1737,21 +1758,28 @@ mod error_handling_tests {
         let input = "config key1: Some(";
         let result = parse_value(input, input);
         println!("result: {:?}", result);
-        
+
         // TODO: This is a parser bug - incomplete Some( should be detected as an error
         // Currently the parser incorrectly treats this as a valid string
         // Expected behavior: assert!(result.is_err());
         // Actual behavior: parser treats "Some(" as a string
         match result {
             Ok((value, remaining)) => {
-                println!("Parser bug: incomplete Some( treated as string: {:?}", value);
+                println!(
+                    "Parser bug: incomplete Some( treated as string: {:?}",
+                    value
+                );
                 // This should not happen - incomplete Some( should be an error
                 assert!(value.as_string().is_some());
             }
             Err(e) => {
                 // This is the correct behavior that should happen
                 println!("Correct: incomplete Some( detected as error: {}", e);
-                assert!(format!("{}", e).contains("Some") || format!("{}", e).contains("parenthes") || format!("{}", e).contains("incomplete"));
+                assert!(
+                    format!("{}", e).contains("Some")
+                        || format!("{}", e).contains("parenthes")
+                        || format!("{}", e).contains("incomplete")
+                );
             }
         }
     }
@@ -1768,12 +1796,12 @@ mod error_handling_tests {
     fn test_invalid_number_formats() {
         // Invalid number formats
         let inputs = vec![
-            "config key1: 1.2.3",      // Multiple decimal points
-            "config key1: 1e",         // Incomplete scientific notation
-            "config key1: .123.",      // Multiple decimal points
-            "config key1: 123abc",     // Number with letters
+            "config key1: 1.2.3",  // Multiple decimal points
+            "config key1: 1e",     // Incomplete scientific notation
+            "config key1: .123.",  // Multiple decimal points
+            "config key1: 123abc", // Number with letters
         ];
-        
+
         for input in inputs {
             let result = parse_document(input);
             // These should either fail or parse as strings
@@ -1784,7 +1812,7 @@ mod error_handling_tests {
     #[test]
     fn test_template_validation_errors() {
         let mut parser = DocumentParser::new("config key1: value1".to_string());
-        
+
         // Empty template
         let empty_template = HashMap::new();
         parser = parser.with_template(empty_template);
@@ -1796,29 +1824,33 @@ mod error_handling_tests {
     #[test]
     fn test_template_empty_section_name() {
         let mut parser = DocumentParser::new("config key1: value1".to_string());
-        
+
         // Template with empty section name
         let mut template = HashMap::new();
         let mut section = HashMap::new();
         section.insert("key1".to_string(), None);
         template.insert("".to_string(), section); // Empty section name
-        
+
         parser = parser.with_template(template);
         let validation_result = parser.validate_template();
         assert!(validation_result.is_err());
-        assert!(validation_result.unwrap_err().contains("empty section name"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .contains("empty section name")
+        );
     }
 
     #[test]
     fn test_template_empty_field_name() {
         let mut parser = DocumentParser::new("config key1: value1".to_string());
-        
+
         // Template with empty field name
         let mut template = HashMap::new();
         let mut section = HashMap::new();
         section.insert("".to_string(), None); // Empty field name
         template.insert("config".to_string(), section);
-        
+
         parser = parser.with_template(template);
         let validation_result = parser.validate_template();
         assert!(validation_result.is_err());
@@ -1829,17 +1861,17 @@ mod error_handling_tests {
     fn test_template_missing_required_section() {
         let input = "config key1: value1";
         let mut parser = DocumentParser::new(input.to_string());
-        
+
         // Template requiring a section not in input
         let mut template = HashMap::new();
         let mut config_section = HashMap::new();
         config_section.insert("key1".to_string(), None);
         template.insert("config".to_string(), config_section);
-        
+
         let mut required_section = HashMap::new();
         required_section.insert("required_key".to_string(), None);
         template.insert("required_section".to_string(), required_section);
-        
+
         parser = parser.with_template(template);
         let result = parser.parse_document_as();
         assert!(result.is_err());
@@ -1850,31 +1882,33 @@ mod error_handling_tests {
     fn test_template_missing_required_field() {
         let input = "config key1: value1";
         let mut parser = DocumentParser::new(input.to_string());
-        
+
         // Template requiring a field not in input
         let mut template = HashMap::new();
         let mut config_section = HashMap::new();
         config_section.insert("key1".to_string(), None);
         config_section.insert("required_key".to_string(), None); // Not in input
         template.insert("config".to_string(), config_section);
-        
+
         parser = parser.with_template(template);
         let result = parser.parse_document_as();
-        
+
         // Template validation should detect missing required fields
         assert!(result.is_err());
         let error_msg = result.unwrap_err();
-        assert!(error_msg.contains("Required field 'config.required_key' is missing from document."));
+        assert!(
+            error_msg.contains("Required field 'config.required_key' is missing from document.")
+        );
     }
 
     #[test]
     fn test_syntax_validation_comprehensive() {
         let mut parser = DocumentParser::new("".to_string());
-        
+
         // Test various syntax issues
         let test_cases = vec![
             ("config key1 key2: value", "Multiple colons"),
-            ("config key1: value1: extra", "Multiple colons"), 
+            ("config key1: value1: extra", "Multiple colons"),
             ("config : value", "Empty key"),
             ("config key1:", "Empty value"),
             ("config key1: [1, 2", "Unmatched square brackets"),
@@ -1882,11 +1916,11 @@ mod error_handling_tests {
             ("config key1: ]1, 2[", "Unmatched square brackets"),
             ("config key1: )value(", "Unmatched parentheses"),
         ];
-        
+
         for (input, expected_error_type) in test_cases {
             parser.set_input(input.to_string());
             let validation_result = parser.validate_syntax();
-            
+
             if validation_result.is_err() {
                 let error_msg = validation_result.unwrap_err();
                 println!("Input: '{}' -> Error: '{}'", input, error_msg);
@@ -1894,8 +1928,12 @@ mod error_handling_tests {
                 let error_lower = error_msg.to_lowercase();
                 match expected_error_type {
                     "Multiple colons" => assert!(error_lower.contains("colon")),
-                    "Empty key" => assert!(error_lower.contains("empty") && error_lower.contains("key")),
-                    "Empty value" => assert!(error_lower.contains("empty") && error_lower.contains("value")),
+                    "Empty key" => {
+                        assert!(error_lower.contains("empty") && error_lower.contains("key"))
+                    }
+                    "Empty value" => {
+                        assert!(error_lower.contains("empty") && error_lower.contains("value"))
+                    }
                     "Unmatched square brackets" => assert!(error_lower.contains("bracket")),
                     "Unmatched parentheses" => assert!(error_lower.contains("parentheses")),
                     _ => {}
@@ -1908,10 +1946,10 @@ mod error_handling_tests {
     fn test_detailed_error_messages() {
         let input = "invalid input without proper structure";
         let mut parser = DocumentParser::new(input.to_string());
-        
+
         let result = parser.parse_document();
         assert!(result.is_err());
-        
+
         // Test detailed error message
         let detailed_error = parser.get_detailed_error();
         assert!(detailed_error.is_some());
@@ -1924,13 +1962,13 @@ mod error_handling_tests {
     #[test]
     fn test_error_recovery_and_reset() {
         let mut parser = DocumentParser::new("invalid input".to_string());
-        
+
         // Parse invalid input
         let result = parser.parse_document();
         assert!(result.is_err());
         assert!(!parser.is_success());
         assert!(parser.get_error().is_some());
-        
+
         // Reset and try with valid input
         parser.set_input("config key1: value1".to_string());
         let result = parser.parse_document();
@@ -1942,11 +1980,11 @@ mod error_handling_tests {
     #[test]
     fn test_comprehensive_validation() {
         let mut parser = DocumentParser::new("config key1: [1, 2".to_string());
-        
+
         // Test comprehensive validation
         let validation_result = parser.validate_all();
         assert!(validation_result.is_err());
-        
+
         // Fix the input and validate again
         parser.set_input("config key1: [1, 2]".to_string());
         let validation_result = parser.validate_all();
@@ -1961,7 +1999,10 @@ mod error_handling_tests {
             ("config key1; value1", "Using ; instead of :"),
             ("config key1 -> value1", "Using -> instead of :"),
             ("config\nkey1 value1", "Missing colon"),
-            ("config\n  key1 value1 value2", "Missing comma between values"),
+            (
+                "config\n  key1 value1 value2",
+                "Missing comma between values",
+            ),
             ("config key1: value1,", "Trailing comma"),
             ("config key1: ,value1", "Leading comma"),
             ("config key1: value1,, value2", "Double comma"),
@@ -1970,24 +2011,27 @@ mod error_handling_tests {
             ("config key1: Some(value1", "Unclosed Some()"),
             ("config key1: Somevalue1)", "Missing opening parenthesis"),
         ];
-        
+
         for (input, description) in test_cases {
             println!("Testing: {} - {}", description, input);
-            
+
             let mut parser = DocumentParser::new(input.to_string());
-            
+
             // First try syntax validation
             let syntax_result = parser.validate_syntax();
-            
+
             // Then try parsing
             let parse_result = parser.parse_document();
-            
+
             // At least one should catch the error or handle it gracefully
             if syntax_result.is_ok() && parse_result.is_ok() {
                 println!("  -> Parsed successfully (lenient parsing)");
             } else {
                 if syntax_result.is_err() {
-                    println!("  -> Syntax validation caught: {}", syntax_result.unwrap_err());
+                    println!(
+                        "  -> Syntax validation caught: {}",
+                        syntax_result.unwrap_err()
+                    );
                 }
                 if parse_result.is_err() {
                     println!("  -> Parse error: {}", parse_result.unwrap_err());
@@ -2010,16 +2054,23 @@ mod error_handling_tests {
             ("config\n", "Section name with newline"),
             ("config key1:", "Key with colon but no value"),
             ("config key1: \n", "Key with colon and whitespace"),
-            ("config key1: value1\n\n\n\nsection2", "Multiple empty lines"),
+            (
+                "config key1: value1\n\n\n\nsection2",
+                "Multiple empty lines",
+            ),
             ("config key1: value1 key2", "Missing colon for second key"),
         ];
-        
+
         for (input, description) in edge_cases {
-            println!("Testing edge case: {} - '{}'", description, input.replace('\n', "\\n"));
-            
+            println!(
+                "Testing edge case: {} - '{}'",
+                description,
+                input.replace('\n', "\\n")
+            );
+
             let mut parser = DocumentParser::new(input.to_string());
             let result = parser.parse_document();
-            
+
             match result {
                 Ok(_) => println!("  -> Parsed successfully"),
                 Err(e) => println!("  -> Error: {}", e),
@@ -2034,12 +2085,12 @@ mod error_handling_tests {
         for i in 0..1000 {
             large_input.push_str(&format!("section{} key{}: value{}\n", i, i, i));
         }
-        
+
         let mut parser = DocumentParser::new(large_input);
         let start = std::time::Instant::now();
         let result = parser.parse_document();
         let duration = start.elapsed();
-        
+
         println!("Large input parsing took: {:?}", duration);
         assert!(result.is_ok());
         assert!(duration.as_secs() < 5); // Should complete within 5 seconds
@@ -2059,17 +2110,17 @@ mod error_handling_tests {
             ("config key-with-dashes: value", "Dashes in key"),
             ("config key.with.dots: value", "Dots in key"),
         ];
-        
+
         for (input, description) in unicode_cases {
             println!("Testing Unicode case: {} - {}", description, input);
-            
+
             let mut parser = DocumentParser::new(input.to_string());
             let result = parser.parse_document();
-            
+
             match result {
                 Ok(doc) => {
                     println!("  -> Parsed successfully: {:?}", doc);
-                },
+                }
                 Err(e) => {
                     println!("  -> Error: {}", e);
                 }

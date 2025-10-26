@@ -264,46 +264,51 @@ mod tests {
         // Test the exact case from small_example
         let offsets = vec![-1isize, 0isize, 1isize];
         let diags = vec![
-            vec![0.0, -10.0, -10.0, -10.0],  // Lower diagonal
-            vec![2.0, 20.0, 20.0, 20.0],     // Main diagonal
-            vec![-10.0, -10.0, -10.0, 0.0],  // Upper diagonal
+            vec![0.0, -10.0, -10.0, -10.0], // Lower diagonal
+            vec![2.0, 20.0, 20.0, 20.0],    // Main diagonal
+            vec![-10.0, -10.0, -10.0, 0.0], // Upper diagonal
         ];
-        
+
         println!("Original banded format:");
         println!("Offsets: {:?}", offsets);
         for (i, diag) in diags.iter().enumerate() {
             println!("Diagonal {} (offset {}): {:?}", i, offsets[i], diag);
         }
-        
+
         // Convert to sparse matrix
         let sparse_mat = banded_to_sparsecol(&offsets, &diags);
-        
+
         println!("\nConverted to sparse matrix:");
         for triplet in sparse_mat.triplet_iter() {
             println!("({}, {}) = {}", triplet.row, triplet.col, triplet.val);
         }
-        
+
         // Print as dense matrix for visualization
         println!("\nAs dense matrix:");
         for i in 0..4 {
             let mut row = vec![0.0; 4];
-            for Triplet{row: row_i, col:col_j, val: value} in sparse_mat.triplet_iter() {
+            for Triplet {
+                row: row_i,
+                col: col_j,
+                val: value,
+            } in sparse_mat.triplet_iter()
+            {
                 if row_i == i {
                     row[col_j] = *value;
                 }
             }
             println!("{:?}", row);
         }
-        
+
         // Convert back to banded
         let (offsets2, diags2) = sparsecol_to_banded(&sparse_mat);
-        
+
         println!("\nConverted back to banded:");
         println!("Offsets: {:?}", offsets2);
         for (i, diag) in diags2.iter().enumerate() {
             println!("Diagonal {} (offset {}): {:?}", i, offsets2[i], diag);
         }
-        
+
         // Check if round-trip preserves data
         assert_eq!(offsets, offsets2);
         for (d1, d2) in diags.iter().zip(diags2.iter()) {
@@ -312,46 +317,61 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn debug_manual_matrix_construction() {
         // Manually construct the expected matrix and convert to banded
         let col_ptr = vec![0, 2, 5, 8, 10];
         let row_idx = vec![0, 1, 0, 1, 2, 1, 2, 3, 2, 3];
-        let values = vec![2.0, -10.0, -10.0, 20.0, -10.0, -10.0, 20.0, -10.0, -10.0, 20.0];
+        let values = vec![
+            2.0, -10.0, -10.0, 20.0, -10.0, -10.0, 20.0, -10.0, -10.0, 20.0,
+        ];
         let symbolic = SymbolicSparseColMat::new_checked(4, 4, col_ptr, None, row_idx);
         let expected_mat = SparseColMat::new(symbolic, values);
-        
+
         println!("Expected matrix (manually constructed):");
         for triplet in expected_mat.triplet_iter() {
             println!("({}, {}) = {}", triplet.row, triplet.col, triplet.val);
         }
-        
+
         // Convert to banded format
         let (offsets, diags) = sparsecol_to_banded(&expected_mat);
-        
+
         println!("\nExpected matrix as banded:");
         println!("Offsets: {:?}", offsets);
         for (i, diag) in diags.iter().enumerate() {
             println!("Diagonal {} (offset {}): {:?}", i, offsets[i], diag);
         }
-        
+
         // This should match what we expect for the small_example test
         // Expected: offsets [-1, 0, 1] with specific diagonal values
         let expected_offsets = vec![-1isize, 0isize, 1isize];
         let expected_diags = vec![
             vec![0.0, -10.0, -10.0, -10.0],
-            vec![2.0, 20.0, 20.0, 20.0], 
+            vec![2.0, 20.0, 20.0, 20.0],
             vec![-10.0, -10.0, -10.0, 0.0],
         ];
-        
+
         assert_eq!(offsets, expected_offsets, "Offsets don't match expected");
-        assert_eq!(diags.len(), expected_diags.len(), "Number of diagonals doesn't match");
-        
-        for (i, (actual_diag, expected_diag)) in diags.iter().zip(expected_diags.iter()).enumerate() {
-            for (j, (&actual, &expected)) in actual_diag.iter().zip(expected_diag.iter()).enumerate() {
-                assert!((actual - expected).abs() < 1e-6, 
-                       "Diagonal {} position {}: got {}, expected {}", i, j, actual, expected);
+        assert_eq!(
+            diags.len(),
+            expected_diags.len(),
+            "Number of diagonals doesn't match"
+        );
+
+        for (i, (actual_diag, expected_diag)) in diags.iter().zip(expected_diags.iter()).enumerate()
+        {
+            for (j, (&actual, &expected)) in
+                actual_diag.iter().zip(expected_diag.iter()).enumerate()
+            {
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "Diagonal {} position {}: got {}, expected {}",
+                    i,
+                    j,
+                    actual,
+                    expected
+                );
             }
         }
     }
@@ -365,37 +385,47 @@ mod tests {
             vec![2.0, 20.0, 20.0, 20.0],
             vec![-10.0, -10.0, -10.0, 0.0],
         ];
-        
+
         // Convert to sparse and print the actual matrix
         let mat = banded_to_sparsecol(&offsets, &diags);
-        
+
         println!("Matrix represented by the diagonal data:");
         for i in 0..4 {
             let mut row = vec![0.0; 4];
-            for Triplet{row: row_i, col:col_j, val: value} in mat.triplet_iter() {
-                if  row_i == i {
+            for Triplet {
+                row: row_i,
+                col: col_j,
+                val: value,
+            } in mat.triplet_iter()
+            {
+                if row_i == i {
                     row[col_j] = *value;
                 }
             }
             println!("Row {}: {:?}", i, row);
         }
-        
+
         // Test matrix-vector multiplication with [1,1,1,1]
         let x = vec![1.0, 1.0, 1.0, 1.0];
         let mut y = vec![0.0; 4];
-        
+
         for triplet in mat.triplet_iter() {
             y[triplet.row] += triplet.val * x[triplet.col];
         }
-        
+
         println!("\nMatrix * [1,1,1,1] = {:?}", y);
         println!("This should match the 'Sparse SpMV result' from verify_matrix_reconstruction");
-        
+
         // Expected result: Row 0: 2*1 + (-10)*1 = -8, Row 3: (-10)*1 + 20*1 = 10
         let expected = vec![-8.0, 0.0, 0.0, 10.0];
         for (i, (&actual, &exp)) in y.iter().zip(expected.iter()).enumerate() {
-            assert!((actual - exp).abs() < 1e-6, 
-                   "Mismatch at position {}: got {}, expected {}", i, actual, exp);
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "Mismatch at position {}: got {}, expected {}",
+                i,
+                actual,
+                exp
+            );
         }
     }
 

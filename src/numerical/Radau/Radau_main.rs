@@ -118,7 +118,7 @@ pub struct Radau {
     pub log_level: Option<LevelFilter>,
     pub log_to_file: Option<String>,
     pub log_to_console: bool,
-    
+
     // Stop condition
     pub stop_condition: Option<HashMap<String, f64>>,
     pub tolerance: f64,
@@ -264,11 +264,11 @@ impl Radau {
 
         self.check();
     }
-    
+
     pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
         self.stop_condition = Some(stop_condition);
     }
-    
+
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
         if let Some(ref conditions) = self.stop_condition {
             for (var_name, target_value) in conditions {
@@ -657,9 +657,12 @@ impl Radau {
             if self.check_stop_condition(&self.y) {
                 self.status = "stopped_by_condition".to_string();
                 integr_status = Some(0);
-                info!("Radau integration stopped by condition at t = {:.6}", self.t);
+                info!(
+                    "Radau integration stopped by condition at t = {:.6}",
+                    self.t
+                );
             }
-            
+
             // Store current solution
             t.push(self.t);
             y.push(self.y.clone());
@@ -780,7 +783,7 @@ impl Radau {
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (Some(self.t_result.clone()), Some(self.y_result.clone()))
     }
-    
+
     pub fn get_status(&self) -> &String {
         &self.status
     }

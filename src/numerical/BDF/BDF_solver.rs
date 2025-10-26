@@ -118,18 +118,18 @@ const MIN_FACTOR: f64 = 0.2;
 const MAX_FACTOR: f64 = 10.0;
 const SPARSE: f64 = 0.01;
 /// Computes cumulative product along columns of a matrix.
-/// 
+///
 /// For each column j, computes the cumulative product:
 /// ```text
 /// result[i,j] = ∏(k=0 to i) matrix[k,j]
 /// ```
-/// 
+///
 /// This is used in the BDF coefficient computation where we need
 /// cumulative products of scaling factors.
-/// 
+///
 /// # Parameters
 /// * `matrix` - Input matrix for cumulative product computation
-/// 
+///
 /// # Returns
 /// Matrix where each element is the cumulative product from top to current row
 fn cumulative_product_along_columns(matrix: &DMatrix<f64>) -> DMatrix<f64> {
@@ -148,23 +148,23 @@ fn cumulative_product_along_columns(matrix: &DMatrix<f64>) -> DMatrix<f64> {
 }
 
 /// Computes the R matrix for BDF step size and order changes.
-/// 
+///
 /// The R matrix is used to transform the Nordsieck array when the step size
 /// changes by a factor. The matrix elements are computed as:
 /// ```text
 /// R[i,j] = (i-1-factor*j)/i  for i,j ≥ 1
 /// R[0,j] = 1                 for all j
 /// ```
-/// 
+///
 /// Then cumulative products are taken along columns to get the final R matrix.
-/// 
+///
 /// # Parameters
 /// * `order` - Current BDF order (determines matrix size)
 /// * `factor` - Step size scaling factor (new_h/old_h)
-/// 
+///
 /// # Returns
 /// Transformation matrix R of size (order+1) × (order+1)
-/// 
+///
 /// # Mathematical Background
 /// When step size changes from h to h*factor, the scaled derivatives
 /// in the Nordsieck array must be transformed accordingly.
@@ -181,21 +181,21 @@ fn compute_r(order: usize, factor: f64) -> DMatrix<f64> {
 }
 
 /// Updates the Nordsieck difference array when step size changes.
-/// 
+///
 /// When the step size changes by a factor, the scaled derivatives in the
 /// Nordsieck array D must be transformed to maintain consistency.
 /// The transformation is: D_new = (R*U)^T * D_old
-/// 
+///
 /// Where:
 /// - R = transformation matrix for the new step size factor
 /// - U = transformation matrix for factor = 1 (identity transformation)
 /// - D contains scaled derivatives: [y, h*y', h²*y''/2!, ...]
-/// 
+///
 /// # Parameters
 /// * `D` - Nordsieck difference matrix to be updated in-place
 /// * `order` - Current BDF order
 /// * `factor` - Step size scaling factor (h_new/h_old)
-/// 
+///
 /// # Mathematical Formula
 /// ```text
 /// D[0:order+1] = (R(order,factor) * R(order,1))^T * D[0:order+1]
@@ -209,24 +209,24 @@ fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
 }
 
 /// Solves the nonlinear BDF system using Newton-Raphson iteration.
-/// 
+///
 /// At each BDF step, we must solve the nonlinear system:
 /// ```text
 /// G(y) = y - c*f(t,y) - ψ = 0
 /// ```
-/// 
+///
 /// Where:
 /// - c = h/α₀ (step size divided by leading BDF coefficient)
 /// - ψ = (1/α₀) * Σ(i=1 to k) αᵢ*yₙ₋ᵢ (contribution from previous values)
 /// - f(t,y) is the ODE right-hand side
-/// 
+///
 /// Newton-Raphson iteration:
 /// ```text
 /// y^(m+1) = y^(m) - [I - c*J]^(-1) * G(y^(m))
 /// ```
-/// 
+///
 /// Where J = ∂f/∂y is the Jacobian matrix.
-/// 
+///
 /// # Parameters
 /// * `fun` - ODE right-hand side function f(t,y)
 /// * `t_new` - Target time for the solution
@@ -237,7 +237,7 @@ fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
 /// * `solve_lu` - Function to solve linear systems with LU factorization
 /// * `scale` - Scaling vector for error norm computation
 /// * `tol` - Newton iteration tolerance
-/// 
+///
 /// # Returns
 /// * `converged` - Whether Newton iteration converged
 /// * `iterations` - Number of Newton iterations performed
@@ -305,28 +305,27 @@ where
     (converged, k_ + 1, y, d)
 }
 
-
 /// Backward Differentiation Formula (BDF) solver for stiff ODEs.
-/// 
+///
 /// This struct implements a variable-order, variable-step-size BDF method
 /// for solving initial value problems of the form:
 /// ```text
 /// dy/dt = f(t,y), y(t₀) = y₀
 /// ```
-/// 
+///
 /// # Key Features
 /// - **Variable order**: Automatically adjusts between orders 1-5
 /// - **Variable step size**: Adaptive step size control based on error estimates
 /// - **Nordsieck form**: Efficient storage of solution history as scaled derivatives
 /// - **Newton-Raphson**: Implicit system solution with Jacobian reuse
 /// - **Stiffness handling**: A-stable methods suitable for stiff problems
-/// 
+///
 /// # Mathematical Foundation
 /// The k-step BDF formula is:
 /// ```text
 /// Σ(i=0 to k) αᵢ yₙ₋ᵢ = h f(tₙ, yₙ)
 /// ```
-/// 
+///
 /// # Data Organization
 /// - **D matrix**: Nordsieck array storing scaled derivatives [y, h*y', h²*y''/2!, ...]
 /// - **Coefficients**: α (BDF), γ (integration), error constants
@@ -426,10 +425,10 @@ impl BDF {
     */
 
     /// Creates a new BDF solver instance with default parameters.
-    /// 
+    ///
     /// This constructor initializes the solver with placeholder values.
     /// The actual problem setup is done via `set_initial()`.
-    /// 
+    ///
     /// # Returns
     /// A new BDF solver instance ready for initialization
     pub fn new() -> Self {
@@ -474,10 +473,10 @@ impl BDF {
     }
 
     /// Initializes the BDF solver with problem-specific parameters.
-    /// 
+    ///
     /// Sets up the ODE system, tolerances, Jacobian, and BDF coefficients.
     /// Computes initial step size and initializes the Nordsieck array.
-    /// 
+    ///
     /// # Parameters
     /// * `fun` - ODE right-hand side function f(t,y) → dy/dt
     /// * `t0` - Initial time
@@ -490,13 +489,13 @@ impl BDF {
     /// * `jac_sparsity` - Optional sparsity pattern for numerical Jacobian
     /// * `vectorized` - Whether function supports vectorized evaluation
     /// * `first_step` - Optional initial step size (auto-selected if None)
-    /// 
+    ///
     /// # Mathematical Setup
     /// Initializes BDF coefficients:
     /// - α: BDF coefficients for different orders
     /// - γ: Integration coefficients γₖ = Σ(i=1 to k) 1/i
     /// - error_const: Local error estimation coefficients
-    /// 
+    ///
     /// Nordsieck array initialization:
     /// ```text
     /// D[0] = y₀
@@ -555,7 +554,7 @@ impl BDF {
         // kappa: This array contains the coefficients for the BDF method. The values are specific to the BDF method and
         // are used to calculate the differences between the solution and the predicted solution.
         let kappa = DVector::from_vec(vec![0.0, -0.1850, -1.0 / 9.0, -0.0823, -0.0415, 0.0]);
-        
+
         // Match Python: self.gamma = np.hstack((0, np.cumsum(1 / np.arange(1, MAX_ORDER + 1))))
         let gamma = {
             let mut g = vec![0.0];
@@ -566,13 +565,13 @@ impl BDF {
             }
             DVector::from_vec(g)
         };
-        
+
         // Match Python: self.alpha = (1 - kappa) * self.gamma
         let alpha = (DVector::from(vec![1.0; MAX_ORDER + 1]) - kappa.clone()).component_mul(&gamma);
-        
+
         let error_const = kappa.component_mul(&gamma)
             + DVector::from_iterator(MAX_ORDER + 1, (1..=MAX_ORDER + 1).map(|i| 1.0 / i as f64));
-            
+
         // Debug assertions to ensure correct initialization
         assert_eq!(alpha.len(), MAX_ORDER + 1);
         assert_eq!(gamma.len(), MAX_ORDER + 1);
@@ -582,9 +581,12 @@ impl BDF {
         self.gamma = gamma;
 
         let mut D = DMatrix::zeros(MAX_ORDER + 3, self.y.len());
-        assert!(D.nrows() >= MAX_ORDER + 3, "D matrix must have at least MAX_ORDER + 3 rows");
+        assert!(
+            D.nrows() >= MAX_ORDER + 3,
+            "D matrix must have at least MAX_ORDER + 3 rows"
+        );
         info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
-        
+
         D.set_row(0, &self.y.transpose());
         D.set_row(1, &(f * h_abs * self.direction).transpose());
         self.D = D;
@@ -597,10 +599,10 @@ impl BDF {
     }
 
     /// Creates linear algebra functions for sparse or dense matrices.
-    /// 
+    ///
     /// Sets up LU factorization and linear system solving functions
     /// optimized for either sparse or dense Jacobian matrices.
-    /// 
+    ///
     /// # Implementation Details
     /// - **Sparse**: Uses specialized sparse LU factorization
     /// - **Dense**: Uses standard dense LU factorization
@@ -654,17 +656,17 @@ impl BDF {
         };
     }
     /// Performs initial setup and validation of solver parameters.
-    /// 
+    ///
     /// This method handles the basic initialization that's common to all
     /// BDF solvers, including argument validation and direction determination.
-    /// 
+    ///
     /// # Parameters
     /// * `fun` - ODE right-hand side function
     /// * `t0` - Initial time
     /// * `y0` - Initial solution vector
     /// * `t_bound` - Final integration time
     /// * `vectorized` - Whether function supports vectorized calls
-    /// 
+    ///
     /// # Sets
     /// - Integration direction: sign(t_bound - t0)
     /// - Problem dimension: n = length(y0)
@@ -712,22 +714,22 @@ impl BDF {
     */
 
     /// Validates and sets up the Jacobian computation strategy.
-    /// 
+    ///
     /// Handles three cases:
     /// 1. **Analytical Jacobian**: User-provided function J = ∂f/∂y
     /// 2. **Numerical Jacobian**: Finite difference approximation (not implemented)
     /// 3. **No Jacobian**: Uses identity matrix (not recommended)
-    /// 
+    ///
     /// # Parameters
     /// * `jac` - Optional analytical Jacobian function
     /// * `sparsity` - Optional sparsity pattern for numerical differentiation
-    /// 
+    ///
     /// # Mathematical Background
     /// The Jacobian matrix J[i,j] = ∂fᵢ/∂yⱼ is crucial for:
     /// - Newton-Raphson convergence: [I - c*J] Δy = -G(y)
     /// - Stability analysis: eigenvalues of J determine stiffness
     /// - Efficiency: analytical J is much faster than numerical
-    /// 
+    ///
     /// # Implementation Notes
     /// - Wraps user Jacobian for consistent interface
     /// - Handles both sparse and dense matrices
@@ -784,7 +786,6 @@ impl BDF {
                     } else {
                         None
                     };
-
             }
         };
 
@@ -792,7 +793,7 @@ impl BDF {
     }
 
     /// Performs one BDF integration step with adaptive order and step size control.
-    /// 
+    ///
     /// This is the core BDF algorithm implementing:
     /// 1. **Step size control**: Ensures h ∈ [h_min, h_max]
     /// 2. **Prediction**: Uses Nordsieck array to predict solution
@@ -801,30 +802,30 @@ impl BDF {
     /// 5. **Acceptance**: Accept/reject step based on error tolerance
     /// 6. **Order selection**: Choose optimal order for next step
     /// 7. **Nordsieck update**: Update scaled derivatives array
-    /// 
+    ///
     /// # Returns
     /// * `(true, None)` - Step accepted successfully
     /// * `(false, Some(msg))` - Step failed with error message
-    /// 
+    ///
     /// # Mathematical Algorithm
-    /// 
+    ///
     /// **Prediction Phase**:
     /// ```text
     /// y_predict = Σ(i=0 to k) D[i]  (sum of Nordsieck array)
     /// ```
-    /// 
+    ///
     /// **Correction Phase** (Newton-Raphson):
     /// ```text
     /// Solve: [I - c*J] Δy = c*f(t,y) - ψ - d
     /// Where: c = h/αₖ, ψ = D[1:k]^T * γ[1:k] / αₖ
     /// ```
-    /// 
+    ///
     /// **Error Estimation**:
     /// ```text
     /// error = Cₖ * d  (where Cₖ is error constant)
     /// error_norm = ||error / scale||_RMS
     /// ```
-    /// 
+    ///
     /// **Step Control**:
     /// ```text
     /// factor = safety * error_norm^(-1/(k+1))
@@ -851,8 +852,11 @@ impl BDF {
 
         let order = self.order;
         assert!(order <= MAX_ORDER, "Order cannot exceed MAX_ORDER");
-        assert!(order < self.alpha.len(), "Order must be within alpha bounds");
-        
+        assert!(
+            order < self.alpha.len(),
+            "Order must be within alpha bounds"
+        );
+
         let alpha = &self.alpha;
         let gamma = &self.gamma;
         let error_const = &self.error_const;
@@ -1026,7 +1030,4 @@ impl BDF {
 
         (true, None)
     }
-
 }
-
-

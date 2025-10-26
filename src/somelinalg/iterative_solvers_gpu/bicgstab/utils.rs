@@ -63,7 +63,7 @@ pub fn upload_banded_f32(
     for (&offset, diag_host) in offsets.iter().zip(diags_host.iter()) {
         let diag_arr = Array::new(&diag_host[..], dims);
         let mut mask_host = vec![1.0f32; n];
-       
+
         if offset > 0 {
             let s = offset as usize;
             for i in (n.saturating_sub(s))..n {
@@ -75,7 +75,7 @@ pub fn upload_banded_f32(
                 mask_host[i] = 0.0;
             }
         }
-         /*
+        /*
         if offset > 0 {
             let s = offset as usize;
             for i in 0..s.min(n) {
@@ -117,12 +117,7 @@ pub fn banded_spmv_f32(
 }
 
 */
-pub fn banded_spmv_f32(
-    diags: &Vec<Array<f32>>,
- 
-    offsets: &Vec<i32>,
-    x: &Array<f32>,
-) -> Array<f32> {
+pub fn banded_spmv_f32(diags: &Vec<Array<f32>>, offsets: &Vec<i32>, x: &Array<f32>) -> Array<f32> {
     let dims = x.dims();
     let n = dims[0] as i64;
     let mut y = af::constant(0.0f32, dims);
@@ -143,7 +138,7 @@ pub fn banded_spmv_f32(
             let x_trimmed = af::rows(x, 0, n - abs_off - 1);
             af::join(0, &zeros, &x_trimmed)
         };
-        
+
         let term = &diags[diag_idx] * &x_shifted;
         af::eval!(&term);
         y = &y + &term;
@@ -178,7 +173,7 @@ mod tests {
         // Test SpMV with identity vector to see boundary effects
         let x_host = vec![1.0f32; 4];
         let x = Array::new(&x_host, Dim4::new(&[4, 1, 1, 1]));
-        let y = banded_spmv_f32(&diags_gpu,  &offsets, &x);
+        let y = banded_spmv_f32(&diags_gpu, &offsets, &x);
 
         let mut y_host = vec![0.0f32; 4];
         y.host(&mut y_host);
@@ -186,14 +181,19 @@ mod tests {
 
         // Expected result for matrix * [1,1,1,1]:
         // Row 0: 2*1 + (-10)*1 = -8
-        // Row 1: (-10)*1 + 20*1 + (-10)*1 = 0  
+        // Row 1: (-10)*1 + 20*1 + (-10)*1 = 0
         // Row 2: (-10)*1 + 20*1 + (-10)*1 = 0
         // Row 3: (-10)*1 + 20*1 = 10
         let expected = vec![-8.0, 0.0, 0.0, 10.0];
-        
+
         for (i, (&actual, &exp)) in y_host.iter().zip(expected.iter()).enumerate() {
-            assert!((actual - exp).abs() < 1e-6, 
-                   "SpMV result mismatch at position {}: got {}, expected {}", i, actual, exp);
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "SpMV result mismatch at position {}: got {}, expected {}",
+                i,
+                actual,
+                exp
+            );
         }
     }
 
@@ -207,12 +207,17 @@ mod tests {
         let mut result_pos = vec![0.0f32; 4];
         x_shift_pos.host(&mut result_pos);
         println!("Shift +1: {:?} -> {:?}", x_host, result_pos);
-        
+
         // ArrayFire shift +1 should be [4,1,2,3] (circular)
         let expected_pos = vec![4.0, 1.0, 2.0, 3.0];
         for (i, (&actual, &exp)) in result_pos.iter().zip(expected_pos.iter()).enumerate() {
-            assert!((actual - exp).abs() < 1e-6, 
-                   "Shift +1 mismatch at position {}: got {}, expected {}", i, actual, exp);
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "Shift +1 mismatch at position {}: got {}, expected {}",
+                i,
+                actual,
+                exp
+            );
         }
 
         // Test negative shift (lower diagonal access)
@@ -220,12 +225,17 @@ mod tests {
         let mut result_neg = vec![0.0f32; 4];
         x_shift_neg.host(&mut result_neg);
         println!("Shift -1: {:?} -> {:?}", x_host, result_neg);
-        
+
         // ArrayFire shift -1 should be [2,3,4,1] (circular)
         let expected_neg = vec![2.0, 3.0, 4.0, 1.0];
         for (i, (&actual, &exp)) in result_neg.iter().zip(expected_neg.iter()).enumerate() {
-            assert!((actual - exp).abs() < 1e-6, 
-                   "Shift -1 mismatch at position {}: got {}, expected {}", i, actual, exp);
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "Shift -1 mismatch at position {}: got {}, expected {}",
+                i,
+                actual,
+                exp
+            );
         }
     }
 
@@ -245,7 +255,7 @@ mod tests {
         Row 3: [0.0, 0.0, -10.0, 20.0]
 
          */
-        let x_test = vec![1.0f32, 2.0, 3.0, 4.0];  // Same as failing test
+        let x_test = vec![1.0f32, 2.0, 3.0, 4.0]; // Same as failing test
 
         // Manual CPU calculation
         let mut y_manual = vec![0.0f32; 4];
@@ -271,10 +281,15 @@ mod tests {
 
         // This should match the failing test results
         // Expected from manual calculation: [2*1 + (-10)*2, (-10)*1 + 20*2 + (-10)*3, etc.]
-        
+
         for i in 0..4 {
-            assert!((y_manual[i] - y_gpu[i]).abs() < 1e-6, 
-                   "GPU SpMV mismatch at position {}: CPU={}, GPU={}", i, y_manual[i], y_gpu[i]);
+            assert!(
+                (y_manual[i] - y_gpu[i]).abs() < 1e-6,
+                "GPU SpMV mismatch at position {}: CPU={}, GPU={}",
+                i,
+                y_manual[i],
+                y_gpu[i]
+            );
         }
     }
 
@@ -303,7 +318,7 @@ mod tests {
         // GPU calculation
         let (diags_gpu, _masks_gpu) = upload_banded_f32(&diags_host, &offsets);
         let x = Array::new(&x_host, Dim4::new(&[4, 1, 1, 1]));
-        let y_gpu_array = banded_spmv_f32(&diags_gpu,  &offsets, &x);
+        let y_gpu_array = banded_spmv_f32(&diags_gpu, &offsets, &x);
         let mut y_gpu = vec![0.0f32; 4];
         y_gpu_array.host(&mut y_gpu);
 
@@ -319,8 +334,13 @@ mod tests {
                     i, y_manual[i], y_gpu[i], diff
                 );
             }
-            assert!((y_manual[i] - y_gpu[i]).abs() < 1e-6, 
-                   "GPU SpMV mismatch at position {}: CPU={}, GPU={}", i, y_manual[i], y_gpu[i]);
+            assert!(
+                (y_manual[i] - y_gpu[i]).abs() < 1e-6,
+                "GPU SpMV mismatch at position {}: CPU={}, GPU={}",
+                i,
+                y_manual[i],
+                y_gpu[i]
+            );
         }
     }
 }

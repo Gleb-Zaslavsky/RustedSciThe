@@ -1,9 +1,9 @@
 #![cfg(feature = "arrayfire")]
-use arrayfire as af;
-use af::{Array, Dim4};
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_matrix_api::sparsecol_to_banded;
-use crate::somelinalg::iterative_solvers_gpu::gmres::gmres_with_preconditioners::solve_banded_gmres_f32;
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_with_preconditioneer::PreconditionerType;
+use crate::somelinalg::iterative_solvers_gpu::gmres::gmres_with_preconditioners::solve_banded_gmres_f32;
+use af::{Array, Dim4};
+use arrayfire as af;
 use faer::sparse::SparseColMat;
 
 #[allow(non_snake_case)]
@@ -61,8 +61,8 @@ mod integration_tests {
         let b = vec![8.0f64, 8.0, 8.0];
         let x0 = vec![0.0f64; 3];
 
-        let (x, iter, res) =
-            gmres_solver(mat, b, x0, 1e-6, 100, 30, PreconditionerType::Vanilla).expect("solver ok");
+        let (x, iter, res) = gmres_solver(mat, b, x0, 1e-6, 100, 30, PreconditionerType::Vanilla)
+            .expect("solver ok");
 
         for xi in x {
             assert!((xi - 2.0).abs() < 1e-4);
@@ -79,7 +79,7 @@ mod integration_tests {
         let values = vec![2.0, -1.0, -1.0, 2.0, -1.0, -1.0, 2.0, -1.0, -1.0, 2.0];
         let symbolic = SymbolicSparseColMat::new_checked(4, 4, col_ptr, None, row_idx);
         let mat = SparseColMat::new(symbolic, values);
-        
+
         let lu = mat.sp_lu().unwrap();
         let b_col: Col<f64> = Col::from_iter(b.clone().iter().map(|x| *x));
         let binding = b_col.clone();
@@ -102,11 +102,11 @@ mod integration_tests {
             },
         )
         .expect("solver ok");
-        
+
         println!("GMRES: x = {:?}", x);
         println!("LU solution {:?}", x_lu);
         println!("iter = {:?}, res = {}", iter, res);
-        
+
         for (xi, x_lui) in x.iter().zip(x_lu.iter()) {
             assert!((xi - x_lui).abs() < 1e-3, "xi={} xt={}", xi, x_lui);
         }
@@ -122,7 +122,7 @@ mod integration_tests {
         ];
         let symbolic = SymbolicSparseColMat::new_checked(4, 4, col_ptr, None, row_idx);
         let mat = SparseColMat::new(symbolic, values);
-        
+
         let lu = mat.sp_lu().unwrap();
         let b_col: Col<f64> = Col::from_iter(b.clone().iter().map(|x| *x));
         let binding = b_col.clone();
@@ -145,11 +145,11 @@ mod integration_tests {
             },
         )
         .expect("solver ok");
-        
+
         println!("GMRES: x = {:?}", x);
         println!("LU solution {:?}", x_lu);
         println!("iter = {:?}, res = {}", iter, res);
-        
+
         for (xi, x_lui) in x.iter().zip(x_lu.iter()) {
             assert!((xi - x_lui).abs() < 1e-3, "xi={} xt={}", xi, x_lui);
         }

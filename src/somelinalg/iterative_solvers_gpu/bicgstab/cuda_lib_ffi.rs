@@ -145,11 +145,11 @@ fn test_gsgpu_dll_increment() {
     af::info();
 
     let n = 100;
-    let  data_host: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    let data_host: Vec<f32> = (0..n).map(|i| i as f32).collect();
     let dims = af::Dim4::new(&[n as u64, 1, 1, 1]);
     println!("[RUST] Before ArrayFire: first 5 = {:?}", &data_host[0..5]);
 
-    let  arr = af::Array::new(&data_host, dims);
+    let arr = af::Array::new(&data_host, dims);
 
     unsafe {
         arr.lock();
@@ -221,11 +221,11 @@ fn test_increment_on_gpu() {
     println!("[RUST] test_increment_on_gpu PASSED");
 }
 //
-  #[allow(dead_code)]
+#[allow(dead_code)]
 #[link(name = "gsgpu")] // looks for gsgpu.dll
 unsafe extern "C" {
     fn launch_multicolor_gs_test(data: *mut f32, n: i32) -> c_int;
-  
+
     fn increment_device_data(dev_data: *mut f32, n: i32);
     fn get_gpu_info();
 }
@@ -304,7 +304,7 @@ fn test_gpu_info() {
 #[cfg(test)]
 #[test]
 fn test_arrayfire_context() {
-    use af::Dim4 ;
+    use af::Dim4;
     af::set_backend(af::Backend::CUDA);
     af::info();
     let arr = af::constant(1.0f32, Dim4::new(&[20, 1, 1, 1]));
@@ -316,20 +316,17 @@ fn test_arrayfire_context() {
 mod tests {
     use super::*;
 
-
- 
-
     #[test]
     fn test_gpu_answer() {
         af::set_backend(af::Backend::CUDA);
         af::info();
 
         let n = 100;
-        let  data_host: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let data_host: Vec<f32> = (0..n).map(|i| i as f32).collect();
         let dims = af::Dim4::new(&[n as u64, 1, 1, 1]);
         println!("[RUST] Before ArrayFire: first 5 = {:?}", &data_host[0..5]);
 
-        let  arr = af::Array::new(&data_host, dims);
+        let arr = af::Array::new(&data_host, dims);
 
         unsafe {
             arr.lock();
@@ -426,7 +423,7 @@ mod tests {
         // b and x on device
         let dims_vec = af::Dim4::new(&[n as u64, 1, 1, 1]);
         let b_dev = af::Array::new(&b, dims_vec);
-        let  x_dev = af::Array::new(&x_gpu_host, dims_vec);
+        let x_dev = af::Array::new(&x_gpu_host, dims_vec);
 
         // ---- Raw device pointers ----
         let offsets_dev_ptr = unsafe { offsets_dev.device_ptr() as *const i32 };

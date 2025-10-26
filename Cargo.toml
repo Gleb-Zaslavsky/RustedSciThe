@@ -84,6 +84,7 @@ gauss-quad = "0.2.3"
 prettytable = "0.10.0"
 textplots = "0.8.7"
 wide = "0.8.1"
+bevy = "0.17.2"
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }
 

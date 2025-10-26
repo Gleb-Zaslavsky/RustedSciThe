@@ -1,11 +1,16 @@
 #![cfg(feature = "arrayfire")]
-use std::time::Instant;
-use arrayfire as af;
-use af::Array;
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_with_preconditioneer::{PreconditionerType, Preconditioner, VanillaPreconditioner, JacobiPreconditioner, ILU0Preconditioner};
 #[cfg(feature = "cuda")]
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_with_preconditioneer::GSPreconditioner;
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::utils::{banded_spmv_f32, upload_banded_f32};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_with_preconditioneer::{
+    ILU0Preconditioner, JacobiPreconditioner, Preconditioner, PreconditionerType,
+    VanillaPreconditioner,
+};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::utils::{
+    banded_spmv_f32, upload_banded_f32,
+};
+use af::Array;
+use arrayfire as af;
+use std::time::Instant;
 #[allow(non_snake_case)]
 pub fn solve_banded_gmres_f32(
     n: usize,
@@ -56,7 +61,11 @@ pub fn solve_banded_gmres_f32(
         };
 
         if beta < tol {
-            println!("Converged at outer iteration {} in {:?}", outer_iter, start.elapsed());
+            println!(
+                "Converged at outer iteration {} in {:?}",
+                outer_iter,
+                start.elapsed()
+            );
             return (x, outer_iter * m, beta);
         }
 
@@ -102,7 +111,8 @@ pub fn solve_banded_gmres_f32(
             // Apply previous Givens rotations
             for i in 0..j {
                 let temp = cs[i] * H[i + j * (m + 1)] + sn[i] * H[(i + 1) + j * (m + 1)];
-                H[(i + 1) + j * (m + 1)] = -sn[i] * H[i + j * (m + 1)] + cs[i] * H[(i + 1) + j * (m + 1)];
+                H[(i + 1) + j * (m + 1)] =
+                    -sn[i] * H[i + j * (m + 1)] + cs[i] * H[(i + 1) + j * (m + 1)];
                 H[i + j * (m + 1)] = temp;
             }
 
@@ -110,7 +120,7 @@ pub fn solve_banded_gmres_f32(
             let h_jj = H[j + j * (m + 1)];
             let h_j1j = H[(j + 1) + j * (m + 1)];
             let norm = (h_jj * h_jj + h_j1j * h_j1j).sqrt();
-            
+
             if norm > 1e-12 {
                 cs[j] = h_jj / norm;
                 sn[j] = h_j1j / norm;
@@ -122,7 +132,7 @@ pub fn solve_banded_gmres_f32(
             // Apply new rotation to H and g
             H[j + j * (m + 1)] = cs[j] * h_jj + sn[j] * h_j1j;
             H[(j + 1) + j * (m + 1)] = 0.0;
-            
+
             let temp = cs[j] * g[j];
             g[j + 1] = -sn[j] * g[j];
             g[j] = temp;
@@ -131,7 +141,11 @@ pub fn solve_banded_gmres_f32(
             j += 1;
 
             if residual < tol {
-                  println!("Converged at outer iteration {} in {:?}", outer_iter, start.elapsed());
+                println!(
+                    "Converged at outer iteration {} in {:?}",
+                    outer_iter,
+                    start.elapsed()
+                );
                 // Solve upper triangular system and update solution
                 x = update_solution_gmres(&x, &V, &H, &g, j, m + 1, &mut preconditioner);
                 return (x, outer_iter * m + j, residual);
@@ -173,14 +187,14 @@ fn update_solution_gmres(
     }
     x_new
 }
-    // cargo test gmres_with_preconditioners::tests::test_wide_band_bicgstab_f3 --features cuda
+// cargo test gmres_with_preconditioners::tests::test_wide_band_bicgstab_f3 --features cuda
 #[cfg(all(test, feature = "arrayfire"))]
 mod tests {
     use super::*;
-    use std::time::Instant;
     use af::{Array, Dim4};
+    use std::time::Instant;
 
-     #[test]
+    #[test]
     fn test_wide_band_bicgstab_f32() {
         let now = Instant::now();
 
@@ -212,10 +226,10 @@ mod tests {
 
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags_host, &offsets_i32);
-        let b = banded_spmv_f32(&diags_dev,  &offsets_i32, &x_true);
+        let b = banded_spmv_f32(&diags_dev, &offsets_i32, &x_true);
 
         let (_x, iters, res) = solve_banded_gmres_f32(
-             n,
+            n,
             &offsets,
             &diags_host,
             &b,
@@ -335,11 +349,11 @@ mod tests {
         );
 
         println!("GMRES small: {} iters, residual={}", iters, res);
-        
+
         let mut x_host = vec![0.0f32; 4];
         x.host(&mut x_host);
         println!("Solution: {:?}", x_host);
-        
+
         assert!(res < 1e-4);
     }
 

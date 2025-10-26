@@ -78,7 +78,7 @@ pub fn bicgstab_with_symmetric_gs(
     }
 
     // GS preconditioner: forward-only or symmetric
-    let  apply_preconditioner = |vec: &DVector<f64>| -> DVector<f64> {
+    let apply_preconditioner = |vec: &DVector<f64>| -> DVector<f64> {
         match (&m_lower, &m_upper) {
             (Some(lower), Some(upper)) => {
                 // Symmetric GS: forward + backward sweep

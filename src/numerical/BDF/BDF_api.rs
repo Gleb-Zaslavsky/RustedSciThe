@@ -138,16 +138,16 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 /// High-level ODE solver interface with symbolic expression support.
-/// 
+///
 /// This struct provides a complete solution for solving ODEs defined as symbolic
 /// expressions, automatically generating numerical functions and analytical Jacobians.
-/// 
+///
 /// # Workflow
 /// 1. **Setup**: Define ODE system as symbolic expressions
 /// 2. **Generation**: Convert expressions to numerical functions and Jacobians
 /// 3. **Integration**: Use BDF method with adaptive order/step control
 /// 4. **Results**: Store, plot, and export solution data
-/// 
+///
 /// # Key Features
 /// - Automatic Jacobian generation from symbolic expressions
 /// - Adaptive BDF method (orders 1-5) for stiff problems
@@ -198,7 +198,7 @@ pub struct ODEsolver {
 }
 impl ODEsolver {
     /// Creates a new ODE solver with the specified parameters.
-    /// 
+    ///
     /// # Parameters
     /// * `eq_system` - Vector of symbolic expressions defining dy/dt = f(t,y)
     /// * `values` - Variable names corresponding to solution components
@@ -213,13 +213,13 @@ impl ODEsolver {
     /// * `jac_sparsity` - Optional Jacobian sparsity pattern
     /// * `vectorized` - Whether ODE function supports vectorized calls
     /// * `first_step` - Optional initial step size
-    /// 
+    ///
     /// # Returns
     /// New ODEsolver instance ready for integration
-    /// 
+    ///
     /// # Example
     /// ```rust, ignore
-    /// let eq_system = vec![Expr::parse_expression("y2"), 
+    /// let eq_system = vec![Expr::parse_expression("y2"),
     ///                      Expr::parse_expression("-y1")];
     /// let values = vec!["y1".to_string(), "y2".to_string()];
     /// let solver = ODEsolver::new(
@@ -269,15 +269,15 @@ impl ODEsolver {
             stop_condition: None,
         }
     }
-    
+
     /// Sets stop conditions for early termination of integration.
-    /// 
+    ///
     /// Integration will stop when any variable reaches its target value
     /// within the absolute tolerance.
-    /// 
+    ///
     /// # Parameters
     /// * `stop_condition` - Map of variable names to target values
-    /// 
+    ///
     /// # Example
     /// ```rust, ignore
     /// let mut stop_condition = HashMap::new();
@@ -287,12 +287,12 @@ impl ODEsolver {
     pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
         self.stop_condition = Some(stop_condition);
     }
-    
+
     /// Checks if any stop condition has been met.
-    /// 
+    ///
     /// # Parameters
     /// * `y` - Current solution vector
-    /// 
+    ///
     /// # Returns
     /// `true` if any variable has reached its target value within tolerance
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
@@ -310,13 +310,13 @@ impl ODEsolver {
     }
 
     /// Generates numerical functions and Jacobian from symbolic expressions.
-    /// 
+    ///
     /// This method:
     /// 1. Creates a Jacobian instance for symbolic processing
     /// 2. Converts symbolic expressions to numerical functions
     /// 3. Generates analytical Jacobian matrix function
     /// 4. Initializes the BDF solver with these functions
-    /// 
+    ///
     /// # Implementation Details
     /// Uses the symbolic engine to automatically compute ∂f/∂y analytically,
     /// which is crucial for stiff problem performance.
@@ -348,13 +348,13 @@ impl ODEsolver {
         }
     }
     /// Performs a single integration step.
-    /// 
+    ///
     /// This method wraps the BDF solver's step implementation and manages
     /// the integration status. It handles:
     /// - Boundary detection (reaching t_bound)
     /// - Error handling and status updates
     /// - Direction checking for integration completion
-    /// 
+    ///
     /// # Status Updates
     /// - "finished": Successfully reached t_bound or boundary
     /// - "failed": Step failed (convergence issues, step size too small)
@@ -389,19 +389,19 @@ impl ODEsolver {
     }
     #[warn(unused_assignments)]
     /// Main integration loop that drives the solution from t0 to t_bound.
-    /// 
+    ///
     /// This method implements the complete integration algorithm:
     /// 1. **Step Loop**: Repeatedly calls step() until completion
     /// 2. **Status Monitoring**: Tracks integration progress and failures
     /// 3. **Stop Conditions**: Checks user-defined termination criteria
     /// 4. **Data Collection**: Stores solution points for output
     /// 5. **Matrix Assembly**: Converts solution vectors to result matrices
-    /// 
+    ///
     /// # Performance Features
     /// - **Efficient Storage**: Uses vector extension for minimal allocations
     /// - **Matrix Flattening**: Optimized conversion from Vec<DVector> to DMatrix
     /// - **Timing**: Reports integration time for performance analysis
-    /// 
+    ///
     /// # Matrix Assembly Algorithm
     /// ```text
     /// flat_vec = [y₁(t₁), y₂(t₁), ..., yₙ(t₁), y₁(t₂), y₂(t₂), ..., yₙ(tₘ)]
@@ -429,7 +429,7 @@ impl ODEsolver {
                 self.status = "stopped_by_condition".to_string();
                 integr_status = Some(0);
             }
-            
+
             t.push(self.Solver_instance.t);
             y.push(self.Solver_instance.y.clone());
         }
@@ -451,13 +451,13 @@ impl ODEsolver {
     }
 
     /// Solves the ODE system from t0 to t_bound.
-    /// 
+    ///
     /// This is the main entry point that orchestrates the complete solution process:
     /// 1. **Generate**: Convert symbolic expressions to numerical functions
     /// 2. **Integrate**: Run the main integration loop
-    /// 
+    ///
     /// After calling this method, use `get_result()` to retrieve the solution.
-    /// 
+    ///
     /// # Example
     /// ```rust, ignore
     /// solver.solve();
@@ -469,7 +469,7 @@ impl ODEsolver {
     }
 
     /// Generates plots of the solution using the built-in plotting utility.
-    /// 
+    ///
     /// Creates time-series plots for all solution variables.
     /// Requires the solution to be computed first via `solve()`.
     pub fn plot_result(&self) -> () {
@@ -483,11 +483,11 @@ impl ODEsolver {
     }
 
     /// Returns the computed solution data.
-    /// 
+    ///
     /// # Returns
     /// * `DVector<f64>` - Time points
     /// * `DMatrix<f64>` - Solution matrix (rows = time, columns = variables)
-    /// 
+    ///
     /// # Example
     /// ```rust, ignore
     /// let (t_result, y_result) = solver.get_result();
@@ -497,15 +497,15 @@ impl ODEsolver {
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
         (self.t_result.clone(), self.y_result.clone())
     }
-    
+
     /// Returns the current integration status.
-    /// 
+    ///
     /// # Possible Values
     /// - `"running"`: Integration in progress
     /// - `"finished"`: Successfully completed
     /// - `"failed"`: Integration failed
     /// - `"stopped_by_condition"`: Terminated by stop condition
-    /// 
+    ///
     /// # Returns
     /// Reference to the status string
     pub fn get_status(&self) -> &String {
@@ -513,18 +513,18 @@ impl ODEsolver {
     }
 
     /// Saves the solution results to a CSV file.
-    /// 
+    ///
     /// The CSV format includes:
     /// - First row: Column headers (time variable + solution variables)
     /// - Subsequent rows: Time points and corresponding solution values
-    /// 
+    ///
     /// # File Format
     /// ```csv
     /// t,y1,y2,...
     /// 0.0,1.0,0.0,...
     /// 0.01,0.999,0.01,...
     /// ```
-    /// 
+    ///
     /// # Returns
     /// `Result<(), Box<dyn std::error::Error>>` - Success or file I/O error
 
@@ -559,7 +559,6 @@ impl ODEsolver {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,15 +580,15 @@ mod tests {
         let max_step = 0.001;
         let rtol = 1e-8;
         let atol = 1e-10;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (t_result, y_result) = solver.get_result();
         // Verify solution remains bounded and smooth
         for i in 0..t_result.len() {
@@ -614,18 +613,18 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-6;
         let atol = 1e-8;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (_, y_result) = solver.get_result();
         // Van der Pol should exhibit limit cycle behavior
-        assert!(y_result[(y_result.nrows()-1, 0)].abs() < 3.0); // Bounded oscillation
+        assert!(y_result[(y_result.nrows() - 1, 0)].abs() < 3.0); // Bounded oscillation
     }
 
     #[test]
@@ -643,25 +642,29 @@ mod tests {
         let max_step = 0.001;
         let rtol = 1e-8;
         let atol = 1e-10;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (t_result, y_result) = solver.get_result();
-        
+
         // Compare with analytical solution at final time
         let t_final = t_result[t_result.len() - 1];
         let y_analytical = 1.0 / (3.0 * (2.0 * t_final).exp() + 1.0).sqrt();
         let y_numerical = y_result[(y_result.nrows() - 1, 0)];
-        
-        assert!((y_numerical - y_analytical).abs() < 1e-4, 
-                "Numerical: {}, Analytical: {}, Error: {}", 
-                y_numerical, y_analytical, (y_numerical - y_analytical).abs());
+
+        assert!(
+            (y_numerical - y_analytical).abs() < 1e-4,
+            "Numerical: {}, Analytical: {}, Error: {}",
+            y_numerical,
+            y_analytical,
+            (y_numerical - y_analytical).abs()
+        );
     }
 
     #[test]
@@ -679,30 +682,35 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-8;
         let atol = 1e-10;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (t_result, y_result) = solver.get_result();
-        
+
         // Compare with analytical solution
         let r = 2.0;
         let k = 10.0;
         let y0_val = 1.0;
-        
+
         for i in 0..t_result.len() {
             let t = t_result[i];
             let y_analytical = k * y0_val * (r * t).exp() / (k + y0_val * ((r * t).exp() - 1.0));
             let y_numerical = y_result[(i, 0)];
-            
-            assert!((y_numerical - y_analytical).abs() < 1e-5,
-                    "At t={}: Numerical: {}, Analytical: {}, Error: {}",
-                    t, y_numerical, y_analytical, (y_numerical - y_analytical).abs());
+
+            assert!(
+                (y_numerical - y_analytical).abs() < 1e-5,
+                "At t={}: Numerical: {}, Analytical: {}, Error: {}",
+                t,
+                y_numerical,
+                y_analytical,
+                (y_numerical - y_analytical).abs()
+            );
         }
     }
 
@@ -723,29 +731,39 @@ mod tests {
         let max_step = 0.001;
         let rtol = 1e-6;
         let atol = 1e-8;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (_, y_result) = solver.get_result();
-        
+
         // Energy conservation 0.5 *θ'^2 = C+cos(θ), C = - cos(1)
         // 0.5 *θ'^2 = cos(θ)- cos(1)
         //  so 0.5 *θ'^2 - (cos(θ)- cos(1)) must be close to 0 evarywhere
-        println!("1st and last teta {}, {}",  y_result[(0, 0)], y_result[(y_result.nrows() - 1, 0)] );
-        println!("1st and last omega {}, {}",  y_result[(0, 1)], y_result[(y_result.nrows() - 1, 1)] );
+        println!(
+            "1st and last teta {}, {}",
+            y_result[(0, 0)],
+            y_result[(y_result.nrows() - 1, 0)]
+        );
+        println!(
+            "1st and last omega {}, {}",
+            y_result[(0, 1)],
+            y_result[(y_result.nrows() - 1, 1)]
+        );
         let final_theta = y_result[(y_result.nrows() - 1, 0)];
         let final_omega = y_result[(y_result.nrows() - 1, 1)];
         let final_energy = 0.5 * final_omega.powi(2) - (1.0_f64.cos() - final_theta.cos());
-        
-        assert!( final_energy.abs() < 1e-3,
-                "Energy not conserved: Initial: {}",
-                 final_energy);
+
+        assert!(
+            final_energy.abs() < 1e-3,
+            "Energy not conserved: Initial: {}",
+            final_energy
+        );
     }
 
     #[test]
@@ -764,17 +782,17 @@ mod tests {
         let max_step = 0.001;
         let rtol = 1e-8;
         let atol = 1e-10;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (_, y_result) = solver.get_result();
-        
+
         // Verify chaotic behavior remains bounded
         for i in 0..y_result.nrows() {
             assert!(y_result[(i, 0)].abs() < 50.0); // x bounded
@@ -801,23 +819,27 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-6;
         let atol = 1e-8;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
         assert_eq!(solver.get_status(), "finished");
-        
+
         let (t_result, y_result) = solver.get_result();
-        
+
         // Mass conservation: y1 + y2 + y3 = 1
-        let final_sum = y_result[(y_result.nrows() - 1, 0)] + 
-                       y_result[(y_result.nrows() - 1, 1)] + 
-                       y_result[(y_result.nrows() - 1, 2)];
-        assert!((final_sum - 1.0).abs() < 1e-6, "Mass not conserved: {}", final_sum);
-        
+        let final_sum = y_result[(y_result.nrows() - 1, 0)]
+            + y_result[(y_result.nrows() - 1, 1)]
+            + y_result[(y_result.nrows() - 1, 2)];
+        assert!(
+            (final_sum - 1.0).abs() < 1e-6,
+            "Mass not conserved: {}",
+            final_sum
+        );
+
         // At t_bound, y1 should be approximately exp(-t_bound)
         let t_final = t_result[t_result.len() - 1];
         let y1_analytical = (-t_final).exp();
@@ -839,18 +861,18 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-6;
         let atol = 1e-3;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         let mut stop_condition = HashMap::new();
         stop_condition.insert("y".to_string(), 2.0);
         solver.set_stop_condition(stop_condition);
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "stopped_by_condition");
         let (_, y_result) = solver.get_result();
         let final_y = y_result[(y_result.nrows() - 1, 0)];
@@ -871,18 +893,18 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-6;
         let atol = 1e-3;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         let mut stop_condition = HashMap::new();
         stop_condition.insert("y1".to_string(), 0.0);
         solver.set_stop_condition(stop_condition);
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "stopped_by_condition");
         let (_, y_result) = solver.get_result();
         let final_y1 = y_result[(y_result.nrows() - 1, 0)];
@@ -902,14 +924,14 @@ mod tests {
         let max_step = 0.1;
         let rtol = 1e-6;
         let atol = 1e-6;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "finished");
         let (t_result, _) = solver.get_result();
         let final_t = t_result[t_result.len() - 1];
@@ -929,18 +951,18 @@ mod tests {
         let max_step = 0.01;
         let rtol = 1e-6;
         let atol = 1e-3;
-        
+
         let mut solver = ODEsolver::new(
-            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol,
-            None, false, None,
+            eq_system, values, arg, method, t0, y0, t_bound, max_step, rtol, atol, None, false,
+            None,
         );
-        
+
         let mut stop_condition = HashMap::new();
         stop_condition.insert("y".to_string(), 1.5);
         solver.set_stop_condition(stop_condition);
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "stopped_by_condition");
         let (_, y_result) = solver.get_result();
         let final_y = y_result[(y_result.nrows() - 1, 0)];

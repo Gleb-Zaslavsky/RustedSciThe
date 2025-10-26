@@ -82,7 +82,7 @@ impl Jacobian {
         all_variables.extend(parameters.clone());
 
         let (kl, ku) = bandwidth;
-        
+
         // Pre-compile jacobian positions using outer loop parallelization
         let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
             (0..vector_of_functions_len)
@@ -122,7 +122,7 @@ impl Jacobian {
             // Concatenate x with v to match all_variables order
             let mut v_vec: Vec<f64> = vec![x];
             v_vec.extend(v.iter().cloned());
-            
+
             let mut matrix = DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
             let matrix_mutex = Mutex::new(&mut matrix);
 
@@ -166,8 +166,6 @@ impl Jacobian {
         self.lambdified_functions_IVP = lambdified_funcs;
     }
 
-
-
     /// Parallel vector function evaluation with pre-compilation and thread-safe closures.
     ///
     /// Creates a high-performance residual function evaluator following the BVP pattern with:
@@ -182,21 +180,21 @@ impl Jacobian {
         parameters: Vec<&str>,
     ) {
         let vector_of_functions = &self.vector_of_functions;
-        
+
         // Convert to owned strings to avoid lifetime issues
         let mut variable_and_parameters: Vec<String> = Vec::new();
-          variable_and_parameters.push(arg.to_string());
-       variable_and_parameters.extend( variable_str.iter().map(|s| s.to_string()));
+        variable_and_parameters.push(arg.to_string());
+        variable_and_parameters.extend(variable_str.iter().map(|s| s.to_string()));
         variable_and_parameters.extend(parameters.iter().map(|s| s.to_string()));
-      
-        
+
         // Pre-compile all functions with thread-safe closures
-        let compiled_functions: Vec<Box<dyn Fn( Vec<f64>) -> f64 + Send + Sync>> =
+        let compiled_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>> =
             vector_of_functions
                 .par_iter()
                 .map(|func| {
-                    let variable_refs: Vec<&str> = variable_and_parameters.iter().map(|s| s.as_str()).collect();
-                    Expr::lambdify_borrowed_thread_safe(func,  variable_refs)
+                    let variable_refs: Vec<&str> =
+                        variable_and_parameters.iter().map(|s| s.as_str()).collect();
+                    Expr::lambdify_borrowed_thread_safe(func, variable_refs)
                 })
                 .collect();
 
@@ -204,14 +202,14 @@ impl Jacobian {
         let fun = Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
             let mut v_vec: Vec<f64> = Vec::new();
             v_vec.push(x);
-            v_vec.extend( v.iter().cloned());
-            
+            v_vec.extend(v.iter().cloned());
+
             // Parallel evaluation of pre-compiled functions
             let result: Vec<_> = compiled_functions
                 .par_iter()
-                .map(|func| func( v_vec.clone()))
+                .map(|func| func(v_vec.clone()))
                 .collect();
-                
+
             DVector::from_vec(result)
         });
 

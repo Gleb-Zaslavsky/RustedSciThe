@@ -123,15 +123,15 @@ impl BE {
         self.y = y0.clone();
         self.check();
     }
-    
+
     pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
         self.stop_condition = Some(stop_condition);
     }
-    
+
     pub fn set_neighborhood_check(&mut self, tolerance: f64) {
         self.neighborhood_check = tolerance;
     }
-    
+
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
         if let Some(ref conditions) = self.stop_condition {
             for (var_name, target_value) in conditions {
@@ -250,7 +250,7 @@ impl BE {
                 self.status = "stopped_by_condition".to_string();
                 integr_status = Some(0);
             }
-            
+
             //  info("i: {}, t: {}, y: {:?}, _status: {}", i, self.Solver_instance.t, self.Solver_instance.y, _status);
             t.push(self.t);
             y.push(self.y.clone());
@@ -292,7 +292,7 @@ impl BE {
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (Some(self.t_result.clone()), Some(self.y_result.clone()))
     }
-    
+
     pub fn get_status(&self) -> &String {
         &self.status
     }
@@ -476,15 +476,25 @@ mod tests {
         let t_bound = 10.0; // Large bound to ensure stop condition triggers first
 
         let mut solver = BE::new();
-        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
-        
+        solver.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+
         let mut stop_condition = HashMap::new();
         stop_condition.insert("z".to_string(), 1.5);
         solver.set_stop_condition(stop_condition);
         solver.set_neighborhood_check(1e-2);
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "stopped_by_condition");
         let (_, y_result) = solver.get_result();
         let y_res = y_result.unwrap();
@@ -508,15 +518,25 @@ mod tests {
         let t_bound = 10.0;
 
         let mut solver = BE::new();
-        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
-        
+        solver.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+
         let mut stop_condition = HashMap::new();
         stop_condition.insert("z".to_string(), 1.2);
         solver.set_stop_condition(stop_condition);
         solver.set_neighborhood_check(1e-2);
-        
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "stopped_by_condition");
         let (_, y_result) = solver.get_result();
         let y_res = y_result.unwrap();
@@ -540,10 +560,20 @@ mod tests {
         let t_bound = 0.1;
 
         let mut solver = BE::new();
-        solver.set_initial(eq_system, values, arg, tolerance, max_iterations, h, t0, t_bound, y0);
-        
+        solver.set_initial(
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+        );
+
         solver.solve();
-        
+
         assert_eq!(solver.get_status(), "finished");
         let (t_result, _) = solver.get_result();
         let t_res = t_result.unwrap();

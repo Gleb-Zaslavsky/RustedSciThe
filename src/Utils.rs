@@ -11,3 +11,6 @@ pub mod sys_info;
 pub mod task_parser;
 ///
 mod task_parser_tests;
+
+pub mod animation_3d;
+pub mod animation_2d;

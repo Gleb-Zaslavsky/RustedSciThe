@@ -3,7 +3,7 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: cleaned up and fixes bugs in BDF IVP solver
+PROJECT NEWS: moving in 2d/3d curve animation  
 
 
 ## Content
@@ -48,12 +48,17 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
     * H.P.Gavin Levergang-Marquardt method
     * scalar optimization (Brent method, bisection method, secant, Newton-Raphson method)
     * interpolation/extrapolation: lagrangian, newtonian, polimomial (direct rewrite fron SciPy library module `scipy.interpolate._interpolate`)
+* utilities:
+    * command interpreter to parse task files 
+    * wrappers around plotters and GNUplot
+    * Bevy based 2D and 3D curve animation module to visualize solutions and show phase portraites of systems     
 * solving systems of non-linear equations with analytical Jacobian
     * Newton-Raphson method
     * Newton-Raphson damped
     * Levenberg-Marquardt method
 * solving large banded linear systems with BiCGSTAB and GMRES methods with several preconditioners.
   (ArrayFire C++ library is needed on your machine - see below)
+
   
 
 ### ArrayFire and CUDA features

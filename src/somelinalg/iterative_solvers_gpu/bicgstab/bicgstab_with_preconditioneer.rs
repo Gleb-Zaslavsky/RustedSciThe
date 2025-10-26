@@ -47,14 +47,18 @@
 //! - **Multicolor GS**: Uses CUDA kernel for parallel Gauss-Seidel avoiding race conditions
 //! - **Residual Checking**: Performs periodic residual norm updates (every 10 iterations) for efficiency
 //! - **Breakdown Recovery**: Handles numerical breakdown with epsilon thresholds (1e-30)
-//! - **Mixed Precision**: CPU-GPU transfers use f32 for performance while maintaining accuracy 
+//! - **Mixed Precision**: CPU-GPU transfers use f32 for performance while maintaining accuracy
 
 #![cfg(feature = "arrayfire")]
 
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::ilu_preconditioner::{ILU0, ilu0_apply};
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::utils::{banded_spmv_f32, upload_banded_f32};
 #[cfg(feature = "cuda")]
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::cuda_lib_ffi::{flatten_diagonals, launch_multicolor_gs_fused};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::cuda_lib_ffi::{
+    flatten_diagonals, launch_multicolor_gs_fused,
+};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::ilu_preconditioner::{ILU0, ilu0_apply};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::utils::{
+    banded_spmv_f32, upload_banded_f32,
+};
 use af::{Array, Dim4, MatProp};
 use arrayfire as af;
 use std::time::Instant;
@@ -67,9 +71,14 @@ pub trait Preconditioner {
 /// Enum for preconditioner selection
 pub enum PreconditionerType {
     Vanilla,
-    Jacobi { sweeps: usize },
+    Jacobi {
+        sweeps: usize,
+    },
     #[cfg(feature = "cuda")]
-    GS { sweeps: usize, symmetric: bool },
+    GS {
+        sweeps: usize,
+        symmetric: bool,
+    },
     ILU0,
 }
 
@@ -264,7 +273,7 @@ pub fn solve_banded_bicgstab_flexible_f32(
     };
 
     // Initial residual: r = b - A*x
-    let ax = banded_spmv_f32(&diags_dev,  &offsets_i32, &x);
+    let ax = banded_spmv_f32(&diags_dev, &offsets_i32, &x);
     let mut r = b - &ax;
     af::eval!(&r);
 
@@ -317,7 +326,7 @@ pub fn solve_banded_bicgstab_flexible_f32(
         let cuda_time = cuda_time_begin.elapsed().as_millis() as f64;
         cuda_time_total += cuda_time;
 
-        v = banded_spmv_f32(&diags_dev,  &offsets_i32, &z);
+        v = banded_spmv_f32(&diags_dev, &offsets_i32, &z);
         af::eval!(&v);
 
         let rhat_v = {
@@ -357,7 +366,7 @@ pub fn solve_banded_bicgstab_flexible_f32(
         let cuda_time = cuda_time_begin.elapsed().as_millis() as f64;
         cuda_time_total += cuda_time;
 
-        let t_vec = banded_spmv_f32(&diags_dev,  &offsets_i32, &z_s);
+        let t_vec = banded_spmv_f32(&diags_dev, &offsets_i32, &z_s);
         af::eval!(&t_vec);
 
         let (t_dot_s, t_dot_t) = {
@@ -635,7 +644,7 @@ mod tests_GS {
 
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags_host, &offsets_i32);
-        let b = banded_spmv_f32(&diags_dev,  &offsets_i32, &x_true);
+        let b = banded_spmv_f32(&diags_dev, &offsets_i32, &x_true);
 
         let (_x, iters, res) = solve_banded_bicgstab_flexible_f32(
             n,
@@ -665,11 +674,7 @@ mod tests_GS {
 mod tests_GS_compare_with_lu {
     use super::*;
     use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_matrix_api::banded_to_sparsecol;
-    use faer::{
-        col::Col,
-        prelude::Solve,
-     
-    };
+    use faer::{col::Col, prelude::Solve};
     #[test]
     fn test_large_matrix_gpu_native_with_comparsion() {
         let now = Instant::now();
@@ -837,7 +842,7 @@ mod tests_GS_compare_with_lu {
 
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags_host, &offsets_i32);
-        let b = banded_spmv_f32(&diags_dev,  &offsets_i32, &x_true);
+        let b = banded_spmv_f32(&diags_dev, &offsets_i32, &x_true);
 
         let (x, iters, res) = solve_banded_bicgstab_flexible_f32(
             n,
@@ -949,7 +954,7 @@ mod tests_GS_compare_with_lu {
         // Manual residual check
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags, &offsets_i32);
-        let ax = banded_spmv_f32(&diags_dev,  &offsets_i32, &x);
+        let ax = banded_spmv_f32(&diags_dev, &offsets_i32, &x);
         let r_manual = &b_array - &ax;
 
         let mut r_host = vec![0.0f32; 4];
@@ -975,7 +980,7 @@ mod tests_GS_compare_with_lu {
         // Method 1: GPU banded_spmv_f32
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags, &offsets_i32);
-        let y_gpu = banded_spmv_f32(&diags_dev,  &offsets_i32, &x_array);
+        let y_gpu = banded_spmv_f32(&diags_dev, &offsets_i32, &x_array);
 
         let mut y_gpu_host = vec![0.0f32; 4];
         y_gpu.host(&mut y_gpu_host);
@@ -1025,47 +1030,62 @@ mod tests_GS_compare_with_lu {
         ];
         let b_f32 = vec![1.0f32, 0.0, 0.0, 1.0];
         let b_array = Array::new(&b_f32, Dim4::new(&[4, 1, 1, 1]));
-        
+
         let (x, iters, solver_residual) = solve_banded_bicgstab_flexible_f32(
-            4, &offsets, &diags, &b_array, None, 1e-6, 500,
-            PreconditionerType::Vanilla
+            4,
+            &offsets,
+            &diags,
+            &b_array,
+            None,
+            1e-6,
+            500,
+            PreconditionerType::Vanilla,
         );
-        
-        println!("BiCGStab: {} iters, reported residual: {}", iters, solver_residual);
-        
+
+        println!(
+            "BiCGStab: {} iters, reported residual: {}",
+            iters, solver_residual
+        );
+
         let mut x_host = vec![0.0f32; 4];
         x.host(&mut x_host);
         println!("Solution: {:?}", x_host);
-        
+
         // Check residual using SAME method as BiCGStab internally
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags, &offsets_i32);
-        let ax_internal = banded_spmv_f32(&diags_dev,  &offsets_i32, &x);
+        let ax_internal = banded_spmv_f32(&diags_dev, &offsets_i32, &x);
         let r_internal = &b_array - &ax_internal;
-        
+
         let mut r_internal_host = vec![0.0f32; 4];
         r_internal.host(&mut r_internal_host);
-        let internal_norm = r_internal_host.iter().map(|&x| x*x).sum::<f32>().sqrt();
-        
-        println!("Internal residual (same as BiCGStab): {:?}", r_internal_host);
+        let internal_norm = r_internal_host.iter().map(|&x| x * x).sum::<f32>().sqrt();
+
+        println!(
+            "Internal residual (same as BiCGStab): {:?}",
+            r_internal_host
+        );
         println!("Internal residual norm: {}", internal_norm);
-        
+
         // Check residual using external verification method
         let mat = banded_to_sparsecol(&offsets, &diags);
         let x_f64: Vec<f64> = x_host.iter().map(|&x| x as f64).collect();
         let b_f64: Vec<f64> = b_f32.iter().map(|&x| x as f64).collect();
-        
+
         let x_col = Col::from_iter(x_f64.iter().map(|&x| x));
         let b_col = Col::from_iter(b_f64.iter().map(|&x| x));
         let r_external = b_col.as_mat() - mat * x_col.as_mat();
         let r_external_host: Vec<f64> = r_external.row_iter().map(|x| x[0]).collect();
-        let external_norm = r_external_host.iter().map(|&x| x*x).sum::<f64>().sqrt();
-        
+        let external_norm = r_external_host.iter().map(|&x| x * x).sum::<f64>().sqrt();
+
         println!("External residual (verification): {:?}", r_external_host);
         println!("External residual norm: {}", external_norm);
-        
+
         // The key question: are these the same?
-        println!("Residual norm difference: {}", (internal_norm as f64 - external_norm).abs());
+        println!(
+            "Residual norm difference: {}",
+            (internal_norm as f64 - external_norm).abs()
+        );
     }
 
     #[test]
@@ -1076,10 +1096,10 @@ mod tests_GS_compare_with_lu {
             vec![2.0, 20.0, 20.0, 20.0],
             vec![-10.0, -10.0, -10.0, 0.0],
         ];
-        
+
         // Test vector
         let x_test = vec![1.0f32, 2.0, 3.0, 4.0];
-        
+
         // Method 1: Direct banded SpMV
         let offsets_i32: Vec<i32> = offsets.iter().map(|&o| o as i32).collect();
         let (diags_dev, _masks_dev) = upload_banded_f32(&diags, &offsets_i32);
@@ -1087,27 +1107,29 @@ mod tests_GS_compare_with_lu {
         let y_banded = banded_spmv_f32(&diags_dev, &offsets_i32, &x_array);
         let mut y_banded_host = vec![0.0f32; 4];
         y_banded.host(&mut y_banded_host);
-        
+
         // Method 2: Reconstructed sparse matrix
         let mat = banded_to_sparsecol(&offsets, &diags);
         let x_f64: Vec<f64> = x_test.iter().map(|&x| x as f64).collect();
         let x_col = Col::from_iter(x_f64.iter().map(|&x| x));
         let y_sparse = mat.clone() * x_col.as_mat();
         let y_sparse_host: Vec<f64> = y_sparse.row_iter().map(|x| x[0]).collect();
-        
+
         println!("Test vector: {:?}", x_test);
         println!("Banded SpMV result: {:?}", y_banded_host);
         println!("Sparse SpMV result: {:?}", y_sparse_host);
-        
+
         // Check if matrices are equivalent
         for i in 0..4 {
             let diff = (y_banded_host[i] as f64 - y_sparse_host[i]).abs();
             if diff > 1e-6 {
-                println!("MATRIX MISMATCH at row {}: banded={}, sparse={}, diff={}", 
-                        i, y_banded_host[i], y_sparse_host[i], diff);
+                println!(
+                    "MATRIX MISMATCH at row {}: banded={}, sparse={}, diff={}",
+                    i, y_banded_host[i], y_sparse_host[i], diff
+                );
             }
         }
-        
+
         // Print actual matrix for verification
         println!("\nReconstructed matrix:");
         for i in 0..4 {

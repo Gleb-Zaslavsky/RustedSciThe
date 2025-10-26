@@ -184,4 +184,3 @@ fn group_sparse(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
 
     groups.iter().map(|&x| x as usize).collect()
 }
-

@@ -130,8 +130,6 @@ fn create_fitting_data_partial(
     (x_data, y_data)
 }
 
-
-
 /// Sew multiple functions across multiple ranges
 pub struct SewMultipleFunctions {
     functions: Vec<Expr>,
@@ -143,7 +141,11 @@ pub struct SewMultipleFunctions {
 
 impl SewMultipleFunctions {
     pub fn new(functions: Vec<Expr>, ranges: Vec<(f64, f64)>, n_points: usize) -> Self {
-        assert_eq!(functions.len(), ranges.len(), "Number of functions must match number of ranges");
+        assert_eq!(
+            functions.len(),
+            ranges.len(),
+            "Number of functions must match number of ranges"
+        );
         SewMultipleFunctions {
             functions,
             ranges,
@@ -158,7 +160,8 @@ impl SewMultipleFunctions {
         let mut y_data = Vec::new();
 
         for (func, &(x_start, x_end)) in self.functions.iter().zip(self.ranges.iter()) {
-            let (x_partial, y_partial) = create_fitting_data_partial(func.clone(), x_start, x_end, self.n_points);
+            let (x_partial, y_partial) =
+                create_fitting_data_partial(func.clone(), x_start, x_end, self.n_points);
             x_data.extend(x_partial);
             y_data.extend(y_partial);
         }
@@ -317,14 +320,10 @@ mod tests {
             ("b".to_string(), 2.0),
             ("c".to_string(), 3.0),
         ]);
-        let var_map2: HashMap<String, f64> = HashMap::from([
-            ("d".to_string(), 5.0),
-            ("e".to_string(), 10.0),
-        ]);
-        let var_map3: HashMap<String, f64> = HashMap::from([
-            ("f".to_string(), 0.5),
-            ("g".to_string(), 20.0),
-        ]);
+        let var_map2: HashMap<String, f64> =
+            HashMap::from([("d".to_string(), 5.0), ("e".to_string(), 10.0)]);
+        let var_map3: HashMap<String, f64> =
+            HashMap::from([("f".to_string(), 0.5), ("g".to_string(), 20.0)]);
 
         let func1 = f1.set_variable_from_map(&var_map1);
         let func2 = f2.set_variable_from_map(&var_map2);
@@ -341,14 +340,19 @@ mod tests {
         let target_eq = "A*x^3 + B*x^2 + C*x + D";
         sew_multiple.fit_easy(
             target_eq.to_string(),
-            Some(vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]),
+            Some(vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+            ]),
             "x".to_string(),
             vec![1.0, 1.0, 1.0, 1.0],
         );
 
         let map_of_solutions = sew_multiple.get_map_of_solutions();
         println!("Multiple functions fit result: {:?}", map_of_solutions);
-        
+
         let r_ssquared = sew_multiple.get_r_ssquared();
         println!("R-squared: {}", r_ssquared.unwrap());
         assert!(r_ssquared.unwrap() > 0.8); // Should have reasonable fit

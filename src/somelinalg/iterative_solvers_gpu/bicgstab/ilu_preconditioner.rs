@@ -116,7 +116,7 @@ impl ILU0 {
                 if j < 0 || j >= n as isize {
                     continue;
                 }
-               // let j_usize = j as usize;
+                // let j_usize = j as usize;
 
                 // subtract contributions from previous L*U
                 let mut sum = 0.0f32;

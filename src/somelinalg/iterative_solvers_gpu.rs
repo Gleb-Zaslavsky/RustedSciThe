@@ -98,7 +98,6 @@
 //! - Choose backend at runtime: CPU, CUDA, or OpenCL.  
 //!
 
-
 pub mod bicgstab;
 
 #[cfg(feature = "arrayfire")]

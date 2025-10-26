@@ -182,7 +182,7 @@ mod tets {
         );
         bvp.dont_save_log(true);
         bvp.solve();
-     //   bvp.plot_result_in_terminal();
+        //   bvp.plot_result_in_terminal();
         //  bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {
@@ -516,7 +516,7 @@ mod tets {
         // assert_eq!(n, n_steps + 1);
         println!("result = {:?}", solution);
         //  nr.gnuplot_result();
-     //   nr.plot_result_in_terminal();
+        //   nr.plot_result_in_terminal();
     }
     #[test]
     fn test_two_point_bvp() {
