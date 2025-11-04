@@ -122,8 +122,8 @@ impl Expr {
         }
 
         // Special case: ∫ f'(x)/f(x) dx = ln|f(x)|
-        if let Ok(derivative) = rhs.diff(var).symplify().to_string().parse::<String>() {
-            if let Ok(numerator_str) = lhs.symplify().to_string().parse::<String>() {
+        if let Ok(derivative) = rhs.diff(var).simplify().to_string().parse::<String>() {
+            if let Ok(numerator_str) = lhs.simplify().to_string().parse::<String>() {
                 if derivative == numerator_str {
                     return Ok(Expr::Ln(Box::new(rhs.clone())));
                 }
@@ -912,7 +912,7 @@ mod integration_tests {
         let expr = Expr::Const(5.0);
         let result = expr.integrate("x").unwrap();
         let expected = Expr::Const(5.0) * Expr::Var("x".to_string());
-        assert_eq!(result.symplify(), expected.symplify());
+        assert_eq!(result.simplify(), expected.simplify());
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod integration_tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Const(2.0)),
         ) / Expr::Const(2.0);
-        assert_eq!(result.symplify(), expected.symplify());
+        assert_eq!(result.simplify(), expected.simplify());
     }
 
     #[test]
@@ -933,7 +933,7 @@ mod integration_tests {
         let expr = Expr::Var("y".to_string());
         let result = expr.integrate("x").unwrap();
         let expected = Expr::Var("y".to_string()) * Expr::Var("x".to_string());
-        assert_eq!(result.symplify(), expected.symplify());
+        assert_eq!(result.simplify(), expected.simplify());
     }
 
     #[test]

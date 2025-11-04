@@ -15,6 +15,7 @@ impl Jacobian {
         self.set_vector_of_functions(eq_system);
         self.set_variables(values.iter().map(|x| x.as_str()).collect());
         self.calc_jacobian();
+        self.find_bandwidths();
         let ncols = self.symbolic_jacobian.len();
         let nrows = self.symbolic_jacobian[0].len();
         assert!(nrows == ncols);
@@ -51,7 +52,7 @@ impl Jacobian {
             variable_str.iter().map(|s| s.to_string()).collect(),
             parameters.iter().map(|s| s.to_string()).collect(),
             arg.to_string(),
-            bandwidth,
+            bandwidth.unwrap(),
         );
 
         self.function_jacobian_IVP_DMatrix = new_jac;
@@ -400,6 +401,7 @@ mod tests2 {
         jacobian.vector_of_functions = eq_system;
         jacobian.set_variables(values.iter().map(|x| x.as_str()).collect());
         jacobian.calc_jacobian();
+        jacobian.find_bandwidths();
         info!("Jacobian: {:?}", jacobian.symbolic_jacobian);
     }
 
@@ -420,6 +422,7 @@ mod tests2 {
         jacobian.set_variables(values.iter().map(|x| x.as_str()).collect());
 
         jacobian.calc_jacobian();
+        jacobian.find_bandwidths();
         info!("sym jac");
         for (i, row) in jacobian.symbolic_jacobian.iter().enumerate() {
             for (j, col) in row.iter().enumerate() {
@@ -485,7 +488,7 @@ mod tests2 {
         jacobian.set_vector_of_functions(vec![eq1]);
         jacobian.set_variables(vec!["K00"]);
         jacobian.calc_jacobian();
-
+        jacobian.find_bandwidths();
         let values = vec!["K00".to_string()];
         let parameters = vec!["y0".to_string(), "h".to_string()];
 
@@ -669,7 +672,7 @@ mod tests2 {
         jacobian.set_vector_of_functions(vec![eq1, eq2]);
         jacobian.set_variables(vec!["K00", "K10"]);
         jacobian.calc_jacobian();
-
+        jacobian.find_bandwidths();
         let values = vec!["K00".to_string(), "K10".to_string()];
         let parameters = vec!["y0".to_string(), "h".to_string()];
 

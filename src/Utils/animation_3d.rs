@@ -176,7 +176,7 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
         CameraController {
             center,
             distance: camera_distance,
-            yaw: 45.0_f32.to_radians(),   // Initial horizontal rotation
+            yaw: 45.0_f32.to_radians(),    // Initial horizontal rotation
             pitch: -35.0_f32.to_radians(), // Initial vertical rotation (looking down)
         },
     ));
@@ -259,9 +259,7 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
         "Axes: {} (red), {} (green), {} (blue)",
         line_data.axis_names.0, line_data.axis_names.1, line_data.axis_names.2
     );
-    println!(
-        "Controls: Left-click drag to rotate, scroll to zoom"
-    );
+    println!("Controls: Left-click drag to rotate, scroll to zoom");
 
     // Create UI text for real-time position display (bottom-right corner)
     commands
@@ -282,34 +280,33 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
         .insert(Name::new("PositionText")); // Named for easy querying
 
     // Create axis legend (above position text)
-    commands
-        .spawn((
-            Text::new(format!(
-                "[R] {} (X-axis)\n[G] {} (Y-axis)\n[B] {} (Z-axis)",
-                line_data.axis_names.0, line_data.axis_names.1, line_data.axis_names.2
-            )),
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(60.0), // Above position text
-                right: Val::Px(20.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.6, 0.6, 0.6)), // Gray text
-            TextFont {
-                font_size: 14.0,
-                ..default()
-            },
-            LegendMarker, // Marker component for identification
-        ));
+    commands.spawn((
+        Text::new(format!(
+            "[R] {} (X-axis)\n[G] {} (Y-axis)\n[B] {} (Z-axis)",
+            line_data.axis_names.0, line_data.axis_names.1, line_data.axis_names.2
+        )),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(60.0), // Above position text
+            right: Val::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.6, 0.6, 0.6)), // Gray text
+        TextFont {
+            font_size: 14.0,
+            ..default()
+        },
+        LegendMarker, // Marker component for identification
+    ));
 }
 
 /// Bevy system that handles trajectory animation and 3D rendering
 /// Runs every frame to update animation state and draw 3D elements
 fn animate_line(
-    time: Res<Time>,           // Bevy's time resource for delta time
-    mut gizmos: Gizmos,        // Bevy's immediate-mode 3D drawing API
-    mut query: Query<&mut AnimatedLine>, // Query for animated trajectory entities
-    line_data: Res<LineData>,  // Global trajectory data
+    time: Res<Time>,                              // Bevy's time resource for delta time
+    mut gizmos: Gizmos,                           // Bevy's immediate-mode 3D drawing API
+    mut query: Query<&mut AnimatedLine>,          // Query for animated trajectory entities
+    line_data: Res<LineData>,                     // Global trajectory data
     mut text_query: Query<&mut Text, With<Name>>, // Query for UI text elements
 ) {
     // Process each animated trajectory (usually just one)
@@ -321,15 +318,15 @@ fn animate_line(
 
         // Update animation timer with frame delta time
         line.timer.tick(time.delta());
-        
+
         // Check if it's time to advance to next point
         if line.timer.just_finished() {
             // Calculate point skip based on speed (higher speed = skip more points)
             let skip = (line_data.speed_multiplier as usize).max(1);
-            
+
             // Advance to next point with wraparound
             line.current_index = (line.current_index + skip) % npoints;
-            
+
             // Reset timer for next animation step (fixed 50ms base duration)
             let base_duration = 0.05;
             line.timer = Timer::from_seconds(base_duration, TimerMode::Once);
@@ -379,9 +376,9 @@ fn animate_line(
             if i + 1 < npoints {
                 // Convert matrix columns to 3D points
                 let start = Vec3::new(
-                    line.points[(0, i)],     // X coordinate
-                    line.points[(1, i)],     // Y coordinate
-                    line.points[(2, i)],     // Z coordinate
+                    line.points[(0, i)], // X coordinate
+                    line.points[(1, i)], // Y coordinate
+                    line.points[(2, i)], // Z coordinate
                 );
                 let end = Vec3::new(
                     line.points[(0, i + 1)],
@@ -407,9 +404,12 @@ fn animate_line(
         for mut text in text_query.iter_mut() {
             **text = format!(
                 "Position: {}:{:.2}, {}:{:.2}, {}:{:.2}",
-                line_data.axis_names.0, current_point.x,
-                line_data.axis_names.1, current_point.y,
-                line_data.axis_names.2, current_point.z
+                line_data.axis_names.0,
+                current_point.x,
+                line_data.axis_names.1,
+                current_point.y,
+                line_data.axis_names.2,
+                current_point.z
             );
         }
     }
@@ -418,9 +418,9 @@ fn animate_line(
 /// Bevy system that handles interactive camera control
 /// Provides orbital camera movement with mouse input
 fn camera_controller(
-    mut mouse_motion: MessageReader<MouseMotion>,   // Mouse movement events
-    mut scroll_events: MessageReader<MouseWheel>,   // Mouse scroll events
-    mouse_input: Res<ButtonInput<MouseButton>>,     // Mouse button states
+    mut mouse_motion: MessageReader<MouseMotion>, // Mouse movement events
+    mut scroll_events: MessageReader<MouseWheel>, // Mouse scroll events
+    mouse_input: Res<ButtonInput<MouseButton>>,   // Mouse button states
     mut camera_query: Query<(&mut Transform, &mut CameraController), With<Camera3d>>, // Camera entities
 ) {
     // Process each camera with controller (usually just one)
@@ -429,7 +429,7 @@ fn camera_controller(
         if mouse_input.pressed(MouseButton::Left) {
             for motion in mouse_motion.read() {
                 // Convert mouse movement to rotation angles
-                controller.yaw -= motion.delta.x * 0.01;   // Horizontal rotation
+                controller.yaw -= motion.delta.x * 0.01; // Horizontal rotation
                 controller.pitch -= motion.delta.y * 0.01; // Vertical rotation
                 // Clamp pitch to prevent camera flipping
                 controller.pitch = controller.pitch.clamp(-1.5, 1.5);
@@ -466,10 +466,10 @@ fn camera_controller(
 //////////////////////////////////////////////////////////////////////////////////////////
 
 /// Generates a straight line trajectory from (0,0,0) to (5,0,0)
-/// 
+///
 /// # Arguments
 /// * `num_points` - Number of points along the line
-/// 
+///
 /// # Returns
 /// * Tuple of (positions, times) where positions is 3×N matrix
 pub fn generate_line(num_points: usize) -> (DMatrix<f64>, DVector<f64>) {
@@ -479,8 +479,8 @@ pub fn generate_line(num_points: usize) -> (DMatrix<f64>, DVector<f64>) {
     for i in 0..num_points {
         let t = i as f64 / (num_points - 1) as f64; // Normalized time 0..1
         positions[(0, i)] = t * 5.0; // X: linear from 0 to 5
-        positions[(1, i)] = 0.0;     // Y: constant 0
-        positions[(2, i)] = 0.0;     // Z: constant 0
+        positions[(1, i)] = 0.0; // Y: constant 0
+        positions[(2, i)] = 0.0; // Z: constant 0
         times[i] = t;
     }
 
@@ -488,7 +488,7 @@ pub fn generate_line(num_points: usize) -> (DMatrix<f64>, DVector<f64>) {
 }
 
 /// Generates a circular trajectory in the XY plane
-/// 
+///
 /// # Arguments
 /// * `num_points` - Number of points around the circle
 /// * `radius` - Circle radius
@@ -499,9 +499,9 @@ pub fn generate_circle(num_points: usize, radius: f64) -> (DMatrix<f64>, DVector
     for i in 0..num_points {
         let t = i as f64 / (num_points - 1) as f64;
         let angle = t * 2.0 * std::f64::consts::PI; // Full circle
-        positions[(0, i)] = radius * angle.cos();    // X: cosine
-        positions[(1, i)] = radius * angle.sin();    // Y: sine
-        positions[(2, i)] = 0.0;                     // Z: flat in XY plane
+        positions[(0, i)] = radius * angle.cos(); // X: cosine
+        positions[(1, i)] = radius * angle.sin(); // Y: sine
+        positions[(2, i)] = 0.0; // Z: flat in XY plane
         times[i] = t;
     }
 
@@ -509,7 +509,7 @@ pub fn generate_circle(num_points: usize, radius: f64) -> (DMatrix<f64>, DVector
 }
 
 /// Generates a helical (spiral) trajectory
-/// 
+///
 /// # Arguments
 /// * `num_points` - Number of points along the helix
 /// * `radius` - Helix radius in XY plane
@@ -527,9 +527,9 @@ pub fn generate_helix(
     for i in 0..num_points {
         let t = i as f64 / (num_points - 1) as f64;
         let angle = t * turns * 2.0 * std::f64::consts::PI; // Multiple turns
-        positions[(0, i)] = radius * angle.cos();            // X: circular motion
-        positions[(1, i)] = radius * angle.sin();            // Y: circular motion
-        positions[(2, i)] = t * height;                      // Z: linear rise
+        positions[(0, i)] = radius * angle.cos(); // X: circular motion
+        positions[(1, i)] = radius * angle.sin(); // Y: circular motion
+        positions[(2, i)] = t * height; // Z: linear rise
         times[i] = t;
     }
 
@@ -537,7 +537,7 @@ pub fn generate_helix(
 }
 
 /// Generates a sine wave trajectory along the X-axis
-/// 
+///
 /// # Arguments
 /// * `num_points` - Number of points along the wave
 /// * `amplitude` - Wave amplitude in Y direction
@@ -554,10 +554,10 @@ pub fn generate_sine_wave(
 
     for i in 0..num_points {
         let t = i as f64 / (num_points - 1) as f64;
-        let x = t * length;                                  // X: linear progression
+        let x = t * length; // X: linear progression
         positions[(0, i)] = x;
         positions[(1, i)] = amplitude * (frequency * x).sin(); // Y: sine wave
-        positions[(2, i)] = 0.0;                             // Z: flat
+        positions[(2, i)] = 0.0; // Z: flat
         times[i] = t;
     }
 

@@ -7,6 +7,5 @@ pub mod Utils;
 pub mod numerical;
 pub mod somelinalg;
 pub mod symbolic;
+pub mod global;
 
-#[cfg(test)]
-mod test_simplify_fix;

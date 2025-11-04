@@ -94,7 +94,7 @@
 //! for their specific problem size and sparsity pattern.
 
 #![allow(non_camel_case_types)]
-
+use crate::global::THRESHOLD as T;
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun,
     FunEnum,
@@ -314,7 +314,7 @@ impl Jacobian {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
                         let mut partial = Expr::diff(&self.vector_of_functions[i], variable);
-                        partial = partial.symplify();
+                        partial = partial.simplify();
                         row[j] = partial;
                     }
                 }
@@ -378,7 +378,7 @@ impl Jacobian {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
                         let mut partial = Expr::diff(function, variable);
-                        partial = partial.symplify();
+                        partial = partial.simplify();
                         vector_of_partial_derivatives.push(partial);
                     } else {
                         vector_of_partial_derivatives.push(Expr::Const(0.0));
@@ -433,7 +433,7 @@ impl Jacobian {
                     let list_of_vaiables_for_this_eq = &self.variables_for_all_disrete[i]; // so we can only calculate derivative for variables that are used in this equation
                     if list_of_vaiables_for_this_eq.contains(variable) {
                         let mut partial = Expr::diff(&function, variable);
-                        partial = partial.symplify();
+                        partial = partial.simplify();
                         vector_of_partial_derivatives.push(partial);
                     } else {
                         vector_of_partial_derivatives.push(Expr::Const(0.0));
@@ -480,7 +480,7 @@ impl Jacobian {
                 // let function = function.clone();
                 for j in 0..self.vector_of_variables.len() {
                     let mut partial = Expr::diff(&function, &variable_string_vec[j]);
-                    partial = partial.symplify();
+                    partial = partial.simplify();
                     vector_of_partial_derivatives.push(partial);
                 }
                 vector_of_partial_derivatives
@@ -519,15 +519,16 @@ impl Jacobian {
 
                 // Iterate through functions and assign values
                 for (i, func) in vector_of_functions.iter().enumerate() {
-                    let func = Expr::lambdify_owned(
-                        func.to_owned(),
+                    let func = Expr::lambdify_borrowed_thread_safe(
+                        &func,
                         variable_str
                             .iter()
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
-                            .clone(),
+                            .as_slice(),
                     );
-                    let value = func(v.iterate().collect());
+                    let v: Vec<f64> = v.iterate().collect();
+                    let value = func(v.as_slice());
                     result = result.assign_value(i, value);
                 }
                 result
@@ -563,7 +564,7 @@ impl Jacobian {
     /// - Parallel evaluation using rayon
     /// - Bandwidth-aware computation for sparse matrices
     /// - Thread-safe triplet collection using Mutex
-    /// - Zero-threshold filtering (1e-8) to maintain sparsity
+    /// - Zero-threshold filtering (T = 1e-12) to maintain sparsity
     pub fn jacobian_generate_generic_par(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -599,19 +600,19 @@ impl Jacobian {
                     };
                     for j in left_border..right_border {
                         // if jac[i][j] != Expr::Const(0.0) { println!("i = {}, j = {}, {}", i, j,  &jac[i][j]);}
-                        let partial_func = Expr::lambdify_owned(
-                            jac[i][j].clone(),
+                        let partial_func = Expr::lambdify_borrowed_thread_safe(
+                            &jac[i][j],
                             variable_str
                                 .iter()
                                 .map(|s| s.as_str())
                                 .collect::<Vec<_>>()
-                                .clone(),
+                                .as_slice(),
                         );
 
                         let v_vec: Vec<f64> = v.iterate().collect();
                         let _vec_type = &v.vec_type();
-                        let P = partial_func(v_vec.clone());
-                        if P.abs() > 1e-8 {
+                        let P = partial_func(v_vec.as_slice());
+                        if P.abs() > T {
                             vector_of_derivatives_mutex.lock().unwrap()
                                 [i * vector_of_functions_len + j] = P;
                             let triplet = (i, j, P);
@@ -707,39 +708,39 @@ impl Jacobian {
         //  let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
 
         // Create jacobian positions in parallel using outer loop parallelization
-        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
-            (0..vector_of_functions_len)
-                .into_par_iter()
-                .flat_map(|i| {
-                    let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                        let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                        let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                            0
-                        } else {
-                            i - kl - 1
-                        };
-                        (right_border, left_border)
+        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>)> = (0
+            ..vector_of_functions_len)
+            .into_par_iter()
+            .flat_map(|i| {
+                let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
+                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                        0
                     } else {
-                        (vector_of_variables_len, 0)
+                        i - kl - 1
                     };
+                    (right_border, left_border)
+                } else {
+                    (vector_of_variables_len, 0)
+                };
 
-                    (left_border..right_border)
-                        .filter_map(|j| {
-                            let symbolic_partial_derivative = &jac[i][j];
-                            if !symbolic_partial_derivative.is_zero() {
-                                let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
-                                    Expr::lambdify_borrowed_thread_safe(
-                                        &symbolic_partial_derivative,
-                                        variable_str.clone(),
-                                    );
-                                Some((i, j, compiled_func))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                (left_border..right_border)
+                    .filter_map(|j| {
+                        let symbolic_partial_derivative = &jac[i][j];
+                        if !symbolic_partial_derivative.is_zero() {
+                            let compiled_func: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> =
+                                Expr::lambdify_borrowed_thread_safe(
+                                    &symbolic_partial_derivative,
+                                    variable_str.as_slice(),
+                                );
+                            Some((i, j, compiled_func))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
         let new_jac = Box::new(move |_x: f64, v: &DVector<f64>| -> DMatrix<f64> {
             let v_vec: Vec<f64> = v.iter().cloned().collect();
@@ -749,8 +750,8 @@ impl Jacobian {
             jacobian_positions
                 .par_iter()
                 .for_each(|(i, j, compiled_func)| {
-                    let P = compiled_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
+                    let P = compiled_func(v_vec.as_slice());
+                    if P.abs() > T {
                         let mut mat = matrix_mutex.lock().unwrap();
                         mat[(*i, *j)] = P;
                     }
@@ -791,22 +792,25 @@ impl Jacobian {
         // Convert to owned strings to avoid lifetime issues
         let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
 
-        let compiled_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>> =
-            vector_of_functions
-                .par_iter()
-                .map(|func| {
-                    Expr::lambdify_borrowed_thread_safe(
-                        func,
-                        variable_str_owned.iter().map(|s| s.as_str()).collect(),
-                    )
-                })
-                .collect();
+        let compiled_functions: Vec<Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = vector_of_functions
+            .par_iter()
+            .map(|func| {
+                Expr::lambdify_borrowed_thread_safe(
+                    func,
+                    variable_str_owned
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                )
+            })
+            .collect();
 
         let fun = Box::new(move |_x: f64, v: &DVector<f64>| -> DVector<f64> {
             let v_vec: Vec<f64> = v.iter().cloned().collect();
             let result: Vec<_> = compiled_functions
                 .par_iter()
-                .map(|func| func(v_vec.clone()))
+                .map(|func| func(v_vec.as_slice()))
                 .collect();
             DVector::from_vec(result)
         });
@@ -858,17 +862,17 @@ impl Jacobian {
             for i in 0..vector_of_functions_len {
                 for j in 0..vector_of_variables_len {
                     // println!("i = {}, j = {}", i, j);
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
+                    let partial_func = Expr::lambdify_borrowed_thread_safe(
+                        &jac[i][j],
                         variable_str
                             .iter()
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
-                            .clone(),
+                            .as_slice(),
                     );
                     //let v_vec: Vec<f64> = v.iter().cloned().collect();
                     let v_vec: Vec<f64> = v.to_dense().to_vec();
-                    new_function_jacobian.insert(j, i, partial_func(v_vec.clone()))
+                    new_function_jacobian.insert(j, i, partial_func(v_vec.as_slice()));
                 }
             }
             new_function_jacobian
@@ -1013,19 +1017,19 @@ impl Jacobian {
             for i in 0..vector_of_functions_len {
                 for j in 0..vector_of_variables_len {
                     // println!("i = {}, j = {}", i, j);
-                    let partial_func = Expr::lambdify_owned(
-                        jac[i][j].clone(),
+                    let partial_func = Expr::lambdify_borrowed_thread_safe(
+                        &jac[i][j],
                         variable_str
                             .iter()
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
-                            .clone(),
+                            .as_slice(),
                     );
                     //let v_vec: Vec<f64> = v.iter().cloned().collect();
                     let v_vec: Vec<f64> = v.iter().cloned().collect();
                     //new_function_jacobian = CsMatrix::from_triplet(vector_of_functions_len,
                     // vector_of_variables_len, &[i], &[j], &[partial_func(x, v_vec.clone())]   );
-                    new_function_jacobian[(i, j)] = partial_func(v_vec.clone());
+                    new_function_jacobian[(i, j)] = partial_func(v_vec.as_slice());
                 }
             }
             new_function_jacobian.into()
@@ -1121,7 +1125,7 @@ impl Jacobian {
                 let symbolic_partial_derivative = &symbolic_jacobian[i][j];
                 if !symbolic_partial_derivative.is_zero() {
                     let compiled_func =
-                        Expr::lambdify(symbolic_partial_derivative, variable_str.clone());
+                        Expr::lambdify_borrowed_thread_safe(&symbolic_partial_derivative, variable_str.as_slice());
                     compiled_jacobian_elements.push((i, j, compiled_func));
                 }
             }
@@ -1132,8 +1136,8 @@ impl Jacobian {
 
             let mut vector_of_triplets = Vec::new();
             for (i, j, func) in &compiled_jacobian_elements {
-                let P = func(v_vec.clone());
-                if P.abs() > 1e-8 {
+                let P = func(v_vec.as_slice());
+                if P.abs() > T {
                     vector_of_triplets.push(Triplet::new(*i, *j, P));
                 }
             }
@@ -1150,100 +1154,7 @@ impl Jacobian {
         self.jac_function = Some(boxed_jac);
     }
 
-    /// Compiles the symbolic Jacobian to a faer SparseColMat evaluator (parallel version 1).
-    ///
-    /// Creates a parallel sparse Jacobian evaluator using nested parallelization.
-    /// This version parallelizes the inner loop for each row of the Jacobian matrix.
-    ///
-    /// # Arguments
-    /// * `_arg` - Independent variable name (unused)
-    /// * `variable_str` - Vector of variable names as string slices
-    ///
-    /// # Performance Features
-    /// - **Nested parallelization**: Outer loop sequential, inner loop parallel
-    /// - **Thread-safe compilation**: Uses `lambdify_thread_safe()` for Send+Sync closures
-    /// - **Bandwidth optimization**: Respects sparse matrix bandwidth if set
-    /// - **Parallel evaluation**: Concurrent derivative evaluation during matrix assembly
-    ///
-    /// # Parallelization Strategy
-    /// - Outer loop (rows): Sequential iteration
-    /// - Inner loop (columns): Parallel using `into_par_iter()`
-    /// - Function compilation: Parallel within each row
-    ///
-    /// # When to Use
-    /// - Medium to large sparse systems
-    /// - When row-wise parallelization is preferred
-    /// - Systems with irregular sparsity patterns per row
-    pub fn lambdify_jacobian_SparseColMat_parallel(&mut self, _arg: &str, variable_str: Vec<&str>) {
-        let jac = self.symbolic_jacobian.clone();
-        let vector_of_functions_len = self.vector_of_functions.len();
-        let vector_of_variables_len = self.vector_of_variables.len();
-        let bandwidth = self.bandwidth;
 
-        // Convert to owned strings to avoid lifetime issues
-        //   let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
-
-        // Store non-zero jacobian positions and expressions (not compiled functions)
-        let mut jacobian_positions = Vec::new();
-        for i in 0..vector_of_functions_len {
-            let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                    0
-                } else {
-                    i - kl - 1
-                };
-                (right_border, left_border)
-            } else {
-                (vector_of_variables_len, 0)
-            };
-            let inner: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
-                (left_border..right_border)
-                    .into_par_iter()
-                    .filter_map(|j| {
-                        let symbolic_partial_derivative = jac[i][j].clone();
-                        if !symbolic_partial_derivative.is_zero() {
-                            let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
-                                Expr::lambdify_thread_safe(
-                                    symbolic_partial_derivative,
-                                    variable_str.clone(),
-                                );
-                            Some((i, j, compiled_func))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-            jacobian_positions.extend(inner);
-        }
-
-        let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
-            let triplets_mutex = std::sync::Mutex::new(Vec::new());
-
-            // Compile and evaluate in parallel without storing closures
-            jacobian_positions
-                .par_iter()
-                .for_each(|(i, j, compiled_func)| {
-                    let P = compiled_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
-                        let mut triplets = triplets_mutex.lock().unwrap();
-                        triplets.push(Triplet::new(*i, *j, P));
-                    }
-                });
-
-            let triplets = triplets_mutex.lock().unwrap();
-            SparseColMat::try_new_from_triplets(
-                vector_of_functions_len,
-                vector_of_variables_len,
-                triplets.as_slice(),
-            )
-            .unwrap()
-        });
-
-        let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
-        self.jac_function = Some(boxed_jac);
-    }
 
     /// Compiles the symbolic Jacobian to a faer SparseColMat evaluator (parallel version 2 - RECOMMENDED).
     ///
@@ -1292,39 +1203,40 @@ impl Jacobian {
         //  let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
 
         // Create jacobian positions in parallel using outer loop parallelization
-        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
-            (0..vector_of_functions_len)
-                .into_par_iter()
-                .flat_map(|i| {
-                    let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                        let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                        let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                            0
-                        } else {
-                            i - kl - 1
-                        };
-                        (right_border, left_border)
+        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>)> = (0
+            ..vector_of_functions_len)
+            .into_par_iter()
+            .flat_map(|i| {
+                let variable_str = variable_str.clone();
+                let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
+                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                        0
                     } else {
-                        (vector_of_variables_len, 0)
+                        i - kl - 1
                     };
+                    (right_border, left_border)
+                } else {
+                    (vector_of_variables_len, 0)
+                };
 
-                    (left_border..right_border)
-                        .filter_map(|j| {
-                            let symbolic_partial_derivative = &jac[i][j];
-                            if !symbolic_partial_derivative.is_zero() {
-                                let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
-                                    Expr::lambdify_borrowed_thread_safe(
-                                        &symbolic_partial_derivative,
-                                        variable_str.clone(),
-                                    );
-                                Some((i, j, compiled_func))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                (left_border..right_border)
+                    .filter_map(|j| {
+                        let symbolic_partial_derivative = &jac[i][j];
+                        if !symbolic_partial_derivative.is_zero() {
+                            let compiled_func: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> =
+                                Expr::lambdify_borrowed_thread_safe(
+                                    &symbolic_partial_derivative,
+                                    variable_str.as_slice(),
+                                );
+                            Some((i, j, compiled_func))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
         let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
             let v_vec: Vec<f64> = v.iter().cloned().collect();
@@ -1334,8 +1246,8 @@ impl Jacobian {
             jacobian_positions
                 .par_iter()
                 .for_each(|(i, j, compiled_func)| {
-                    let P = compiled_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
+                    let P = compiled_func(v_vec.as_slice());
+                    if P.abs() > T {
                         let mut triplets = triplets_mutex.lock().unwrap();
                         triplets.push(Triplet::new(*i, *j, P));
                     }
@@ -1385,9 +1297,9 @@ impl Jacobian {
         let compiled_functions: Vec<_> = vector_of_functions
             .iter()
             .map(|func| {
-                Expr::lambdify(
-                    func,
-                    variable_str.iter().map(|s| *s).collect::<Vec<_>>().clone(),
+                Expr::lambdify_borrowed_thread_safe(
+                    &func,
+                    variable_str.as_slice(),
                 )
             })
             .collect();
@@ -1396,7 +1308,7 @@ impl Jacobian {
             let v_vec: Vec<f64> = v.iter().cloned().collect();
             let result: Vec<_> = compiled_functions
                 .iter()
-                .map(|func| func(v_vec.clone()))
+                .map(|func| func(v_vec.as_slice()))
                 .collect();
             ColRef::from_slice(result.as_slice()).to_owned()
         });
@@ -1404,55 +1316,7 @@ impl Jacobian {
         self.residiual_function = boxed_fun;
     }
 
-    /// Compiles residual functions to a faer Col evaluator (parallel version 1).
-    ///
-    /// Creates a parallel residual function evaluator with thread-safe function compilation.
-    /// This version parallelizes both compilation and evaluation phases.
-    ///
-    /// # Arguments
-    /// * `_arg` - Independent variable name (unused)
-    /// * `variable_str` - Vector of variable names as string slices
-    ///
-    /// # Performance Features
-    /// - **Parallel compilation**: Functions compiled concurrently using rayon
-    /// - **Thread-safe closures**: Uses `lambdify_thread_safe()` for Send+Sync bounds
-    /// - **Parallel evaluation**: Concurrent function evaluation during residual computation
-    /// - **Owned strings**: Converts to owned strings early to avoid lifetime issues
-    ///
-    /// # When to Use
-    /// - Large systems with many residual functions
-    /// - When compilation time is significant
-    /// - Multi-core systems where parallel compilation provides benefits
-    pub fn lambdify_residual_Col_parallel(&mut self, _arg: &str, variable_str: Vec<&str>) {
-        let vector_of_functions = &self.vector_of_functions;
-
-        // Convert to owned strings to avoid lifetime issues
-        let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
-
-        let compiled_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>> =
-            vector_of_functions
-                .into_par_iter()
-                .map(|func| {
-                    let func = func.clone();
-                    let compiled = Expr::lambdify_thread_safe(
-                        func,
-                        variable_str_owned.iter().map(|s| s.as_str()).collect(),
-                    );
-                    compiled
-                })
-                .collect();
-
-        let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
-            let result: Vec<_> = compiled_functions
-                .par_iter()
-                .map(|func| func(v_vec.clone()))
-                .collect();
-            ColRef::from_slice(result.as_slice()).to_owned()
-        });
-        let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
-        self.residiual_function = boxed_fun;
-    }
+  
 
     /// Compiles residual functions to a faer Col evaluator (parallel version 2 - RECOMMENDED).
     ///
@@ -1485,23 +1349,26 @@ impl Jacobian {
         // Convert to owned strings to avoid lifetime issues
         let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
 
-        let compiled_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>> =
-            vector_of_functions
-                .into_par_iter()
-                .map(|func| {
-                    let compiled = Expr::lambdify_borrowed_thread_safe(
-                        func,
-                        variable_str_owned.iter().map(|s| s.as_str()).collect(),
-                    );
-                    compiled
-                })
-                .collect();
+        let compiled_functions: Vec<Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = vector_of_functions
+            .into_par_iter()
+            .map(|func| {
+                let compiled = Expr::lambdify_borrowed_thread_safe(
+                    func,
+                    variable_str_owned
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                );
+                compiled
+            })
+            .collect();
 
         let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
             let v_vec: Vec<f64> = v.iter().cloned().collect();
             let result: Vec<_> = compiled_functions
                 .par_iter()
-                .map(|func| func(v_vec.clone()))
+                .map(|func| func(v_vec.as_slice()))
                 .collect();
             ColRef::from_slice(result.as_slice()).to_owned()
         });
@@ -1854,7 +1721,7 @@ impl Jacobian {
                             }
                         }
 
-                        (res_ij.symplify(), vars_in_equation)
+                        (res_ij.simplify(), vars_in_equation)
                     })
                     .collect::<Vec<_>>()
             })
@@ -1893,7 +1760,7 @@ impl Jacobian {
                 for (var_name, &value) in &vars_for_boundary_conditions {
                     eq_i = eq_i.set_variable(var_name, value);
                 }
-                eq_i.symplify()
+                eq_i.simplify()
             })
             .collect();
 

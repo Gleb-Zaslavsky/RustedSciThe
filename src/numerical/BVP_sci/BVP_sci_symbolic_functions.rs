@@ -118,7 +118,7 @@ impl Jacobian_sci_faer {
                     let list_of_variables_for_this_eq = &self.variables_for_all_eq[i]; // so we can only calculate derivative for variables that are used in this equation
                     if list_of_variables_for_this_eq.contains(variable) {
                         let mut partial = Expr::diff(&function, variable);
-                        partial = partial.symplify();
+                        partial = partial.simplify();
                         vector_of_partial_derivatives.push(partial);
                     } else {
                         vector_of_partial_derivatives.push(Expr::Const(0.0));
@@ -275,9 +275,9 @@ impl Jacobian_sci_faer {
                         let result: Vec<_> = vector_of_functions
                             .iter()
                             .map(|func| {
-                                let func = Expr::lambdify(func, all_var_names.clone());
+                                let func = Expr::lambdify_borrowed_thread_safe(&func, all_var_names.as_slice());
 
-                                func(args.clone())
+                                func(args.as_slice())
                             })
                             .collect();
                         result

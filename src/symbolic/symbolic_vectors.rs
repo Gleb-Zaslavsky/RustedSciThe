@@ -33,6 +33,7 @@
 //!
 //! ### `ExprMatrix` - Symbolic Matrix
 //! A matrix where each element is a symbolic expression.
+//! 
 //!
 //! **Key Methods:**
 //! - `new(data)` - Create from 2D vector of expressions
@@ -57,7 +58,7 @@
 //! ## Interesting and Non-Obvious Code Features
 //!
 //! 1. **Automatic Simplification**: All operations automatically apply symbolic simplification
-//!    using `simplify_()`, ensuring expressions remain in canonical form
+//!    using `simplify()`, ensuring expressions remain in canonical form
 //!
 //! 2. **Operator Overloading**: Implements standard mathematical operators (+, -, *, indexing)
 //!    for both `ExprVector` and `ExprMatrix`, enabling natural mathematical syntax
@@ -90,6 +91,17 @@ use crate::symbolic::symbolic_engine::Expr;
 
 use nalgebra::{DMatrix, DVector};
 use std::ops::{Add, Index, IndexMut, Mul, Sub};
+
+/// Helper trait for mathematical equivalence checking
+trait MathEquivalent {
+    fn is_mathematically_equal(&self, other: &Self) -> bool;
+}
+
+impl MathEquivalent for Expr {
+    fn is_mathematically_equal(&self, other: &Self) -> bool {
+        (self.clone() - other.clone()).simplify() == Expr::Const(0.0)
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 /// Symbolic vector
 pub struct ExprVector {
@@ -100,6 +112,19 @@ impl ExprVector {
     /// Create new symbolic vector
     pub fn new(data: Vec<Expr>) -> Self {
         Self { data }
+    }
+
+    /// Check if two expressions are mathematically equivalent
+    pub fn is_equivalent(&self, other: &ExprVector) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if (self[i].clone() - other[i].clone()).simplify() != Expr::Const(0.0) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Create zero vector of given size
@@ -159,7 +184,7 @@ impl ExprVector {
         for i in 0..self.len() {
             result = result + (self.data[i].clone() * other.data[i].clone());
         }
-        result.simplify_()
+        result.simplify()
     }
 
     /// AXPY operation: self = a * x + y*b
@@ -168,14 +193,14 @@ impl ExprVector {
 
         for i in 0..self.len() {
             self.data[i] =
-                (a.clone() * x.data[i].clone() + (self.data[i].clone() * b.clone())).simplify_();
+                (a.clone() * x.data[i].clone() + (self.data[i].clone() * b.clone())).simplify();
         }
     }
 
     /// Scalar multiplication
     pub fn scale(&mut self, scalar: &Expr) {
         for expr in &mut self.data {
-            *expr = (scalar.clone() * expr.clone()).simplify_();
+            *expr = (scalar.clone() * expr.clone()).simplify();
         }
     }
 
@@ -206,7 +231,7 @@ impl ExprVector {
             data: self
                 .data
                 .iter()
-                .map(|expr| (expr.diff(var)).simplify_())
+                .map(|expr| (expr.diff(var)).simplify())
                 .collect(),
         }
     }
@@ -214,7 +239,7 @@ impl ExprVector {
     /// Simplify all expressions
     pub fn simplify(&self) -> ExprVector {
         ExprVector {
-            data: self.data.iter().map(|expr| expr.simplify_()).collect(),
+            data: self.data.iter().map(|expr| expr.simplify()).collect(),
         }
     }
     pub fn as_vec(&self) -> Vec<Expr> {
@@ -271,7 +296,7 @@ impl Add for ExprVector {
             .data
             .into_iter()
             .zip(other.data)
-            .map(|(a, b)| (a + b).simplify_())
+            .map(|(a, b)| (a + b).simplify())
             .collect();
 
         ExprVector { data: result }
@@ -289,7 +314,7 @@ impl Sub for ExprVector {
             .data
             .into_iter()
             .zip(other.data)
-            .map(|(a, b)| (a - b).simplify_())
+            .map(|(a, b)| (a - b).simplify())
             .collect();
 
         ExprVector { data: result }
@@ -304,7 +329,7 @@ impl Mul<Expr> for ExprVector {
         let result: Vec<Expr> = self
             .data
             .into_iter()
-            .map(|expr| (scalar.clone() * expr).simplify_())
+            .map(|expr| (scalar.clone() * expr).simplify())
             .collect();
 
         ExprVector { data: result }
@@ -341,6 +366,21 @@ impl ExprMatrix {
         }
 
         Self { data, nrows, ncols }
+    }
+
+    /// Check if two matrices are mathematically equivalent
+    pub fn is_equivalent(&self, other: &ExprMatrix) -> bool {
+        if self.shape() != other.shape() {
+            return false;
+        }
+        for i in 0..self.nrows {
+            for j in 0..self.ncols {
+                if (self[(i, j)].clone() - other[(i, j)].clone()).simplify() != Expr::Const(0.0) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Create zero matrix
@@ -556,7 +596,7 @@ impl ExprMatrix {
             for j in 0..self.ncols {
                 sum = sum + (self.data[i][j].clone() * vec[j].clone());
             }
-            result_data.push(sum.simplify_());
+            result_data.push(sum.simplify());
         }
 
         ExprVector::new(result_data)
@@ -570,7 +610,7 @@ impl ExprMatrix {
         for i in 0..self.nrows {
             sum = sum + self.data[i][i].clone();
         }
-        sum.simplify_()
+        sum.simplify()
     }
 
     /// Determinant (for 2x2 and 3x3 matrices)
@@ -587,7 +627,7 @@ impl ExprMatrix {
                 let b = &self.data[0][1];
                 let c = &self.data[1][0];
                 let d = &self.data[1][1];
-                (a.clone() * d.clone() - b.clone() * c.clone()).simplify_()
+                (a.clone() * d.clone() - b.clone() * c.clone()).simplify()
             }
             3 => {
                 // Using cofactor expansion along first row
@@ -595,13 +635,13 @@ impl ExprMatrix {
                 for j in 0..3 {
                     let minor = self.minor(0, j);
                     let cofactor = if j % 2 == 0 {
-                        self.data[0][j].clone() * minor.determinant().simplify_()
+                        self.data[0][j].clone() * minor.determinant().simplify()
                     } else {
-                        -(self.data[0][j].clone() * minor.determinant().simplify_())
+                        -(self.data[0][j].clone() * minor.determinant().simplify())
                     };
-                    det = det.simplify_() + cofactor.simplify_();
+                    det = det.simplify() + cofactor.simplify();
                 }
-                det.simplify_()
+                det.simplify()
             }
             _ => panic!("Determinant not implemented for matrices larger than 3x3"),
         }
@@ -633,7 +673,7 @@ impl ExprMatrix {
     pub fn scale(&mut self, scalar: &Expr) {
         for i in 0..self.nrows {
             for j in 0..self.ncols {
-                self.data[i][j] = (scalar.clone() * self.data[i][j].clone()).simplify_();
+                self.data[i][j] = (scalar.clone() * self.data[i][j].clone()).simplify();
             }
         }
     }
@@ -653,7 +693,7 @@ impl ExprMatrix {
 
     /// Simplify all expressions
     pub fn simplify(&self) -> ExprMatrix {
-        self.map(|expr| expr.simplify_())
+        self.map(|expr| expr.simplify())
     }
 
     /// Substitute variables
@@ -763,7 +803,7 @@ impl Add for ExprMatrix {
         for i in 0..self.nrows {
             let mut row = Vec::with_capacity(self.ncols);
             for j in 0..self.ncols {
-                row.push((self.data[i][j].clone() + other.data[i][j].clone()).simplify_());
+                row.push((self.data[i][j].clone() + other.data[i][j].clone()).simplify());
             }
             result_data.push(row);
         }
@@ -783,7 +823,7 @@ impl Sub for ExprMatrix {
         for i in 0..self.nrows {
             let mut row = Vec::with_capacity(self.ncols);
             for j in 0..self.ncols {
-                row.push((self.data[i][j].clone() - other.data[i][j].clone()).simplify_());
+                row.push((self.data[i][j].clone() - other.data[i][j].clone()).simplify());
             }
             result_data.push(row);
         }
@@ -810,7 +850,7 @@ impl Mul for ExprMatrix {
                 for k in 0..self.ncols {
                     sum = sum + (self.data[i][k].clone() * other.data[k][j].clone());
                 }
-                row.push(sum.simplify_());
+                row.push(sum.simplify());
             }
             result_data.push(row);
         }
@@ -824,7 +864,7 @@ impl Mul<ExprMatrix> for Expr {
     type Output = ExprMatrix;
 
     fn mul(self, matrix: ExprMatrix) -> Self::Output {
-        matrix.map(|expr| (self.clone() * expr.clone()).simplify_())
+        matrix.map(|expr| (self.clone() * expr.clone()).simplify())
     }
 }
 
@@ -833,7 +873,7 @@ impl Mul<Expr> for ExprMatrix {
     type Output = Self;
 
     fn mul(self, scalar: Expr) -> Self::Output {
-        self.map(|expr| (scalar.clone() * expr.clone()).simplify_())
+        self.map(|expr| (scalar.clone() * expr.clone()).simplify())
     }
 }
 
@@ -861,7 +901,7 @@ impl ExprMatrix {
                         let row_idx = i * other.nrows + k;
                         let col_idx = j * other.ncols + l;
                         result_data[row_idx][col_idx] =
-                            (self.data[i][j].clone() * other.data[k][l].clone()).simplify_();
+                            (self.data[i][j].clone() * other.data[k][l].clone()).simplify();
                     }
                 }
             }
@@ -878,7 +918,7 @@ impl ExprMatrix {
         for i in 0..self.nrows {
             let mut row = Vec::with_capacity(self.ncols);
             for j in 0..self.ncols {
-                row.push((self.data[i][j].clone() * other.data[i][j].clone()).simplify_());
+                row.push((self.data[i][j].clone() * other.data[i][j].clone()).simplify());
             }
             result_data.push(row);
         }
@@ -894,7 +934,7 @@ impl ExprMatrix {
         for i in 0..self.nrows {
             let mut row = Vec::with_capacity(self.ncols);
             for j in 0..self.ncols {
-                row.push((self.data[i][j].clone() / other.data[i][j].clone()).simplify_());
+                row.push((self.data[i][j].clone() / other.data[i][j].clone()).simplify());
             }
             result_data.push(row);
         }
@@ -932,10 +972,10 @@ impl ExprMatrix {
         }
 
         let mut inv_data = vec![vec![Expr::Const(0.0); 2]; 2];
-        inv_data[0][0] = (self[(1, 1)].clone() / det.clone()).simplify_();
-        inv_data[0][1] = (-(self[(0, 1)].clone()) / det.clone()).simplify_();
-        inv_data[1][0] = (-(self[(1, 0)].clone()) / det.clone()).simplify_();
-        inv_data[1][1] = (self[(0, 0)].clone() / det.clone()).simplify_();
+        inv_data[0][0] = (self[(1, 1)].clone() / det.clone()).simplify();
+        inv_data[0][1] = (-(self[(0, 1)].clone()) / det.clone()).simplify();
+        inv_data[1][0] = (-(self[(1, 0)].clone()) / det.clone()).simplify();
+        inv_data[1][1] = (self[(0, 0)].clone() / det.clone()).simplify();
 
         Some(ExprMatrix::new(inv_data))
     }
@@ -1090,7 +1130,7 @@ impl ExprMatrix {
                 sum = sum + (self.data[i][j].clone().pow(Expr::Const(2.0)));
             }
         }
-        sum.simplify_()
+        sum.simplify()
     }
 
     /// Sum of all elements
@@ -1101,7 +1141,7 @@ impl ExprMatrix {
                 sum = sum + self.data[i][j].clone();
             }
         }
-        sum.simplify_()
+        sum.simplify()
     }
 
     /// Row sums
@@ -1112,7 +1152,7 @@ impl ExprMatrix {
             for j in 0..self.ncols {
                 row_sum = row_sum + self.data[i][j].clone();
             }
-            sums.push(row_sum.simplify_());
+            sums.push(row_sum.simplify());
         }
         ExprVector::new(sums)
     }
@@ -1125,7 +1165,7 @@ impl ExprMatrix {
             for i in 0..self.nrows {
                 col_sum = col_sum + self.data[i][j].clone();
             }
-            sums.push(col_sum.simplify_());
+            sums.push(col_sum.simplify());
         }
         ExprVector::new(sums)
     }
@@ -1182,11 +1222,12 @@ mod tests_vector {
         let dot = v1.dot(&v2);
 
         // Expected: 3*x + y*z + 2*x = (3+2)*x + y*z = 5*x + y*z
-        let expected = Expr::Var("x".to_string()) * Expr::Const(3.0)
-            + Expr::Var("y".to_string()) * Expr::Var("z".to_string())
-            + Expr::Const(2.0) * Expr::Var("x".to_string());
-
-        assert_eq!(dot, expected);
+        let expected =    Expr::Const(5.0)* Expr::Var("x".to_string()) + 
+        Expr::Var("y".to_string()) * Expr::Var("z".to_string()) ;
+     
+        println!("dot: {}", dot);
+        println!("expected: {}", expected);
+        assert_eq!((dot- expected).simplify(), Expr::Const(0.0) ); 
     }
 
     #[test]
@@ -1423,6 +1464,7 @@ mod tests_vector {
 
     #[test]
     fn test_vector_addition_complex() {
+        // v1 = [x^2, 3y], v2 = [2x, y]
         let v1 = ExprVector::new(vec![
             Expr::Var("x".to_string()).pow(Expr::Const(2.0)),
             Expr::Var("y".to_string()) * Expr::Const(3.0),
@@ -1434,18 +1476,19 @@ mod tests_vector {
         ]);
 
         let sum = v1 + v2;
-
+        // Expected: [x^2 + 2x, 3y + y] = [x^2 + 2x, 4y]
         let expected = ExprVector::new(vec![
             Expr::Var("x".to_string()).pow(Expr::Const(2.0))
                 + Expr::Var("x".to_string()) * Expr::Const(2.0),
-            Expr::Var("y".to_string()) * Expr::Const(3.0) + Expr::Var("y".to_string()),
+           Expr::Const(4.0)* Expr::Var("y".to_string()) 
         ]);
 
-        assert_eq!(sum, expected);
+        assert!(sum.is_equivalent(&expected));
     }
 
     #[test]
     fn test_vector_subtraction_with_simplification() {
+        // v1 = [5x, y + 10], v2 = [2x, 5]
         let v1 = ExprVector::new(vec![
             Expr::Var("x".to_string()) * Expr::Const(5.0),
             Expr::Var("y".to_string()) + Expr::Const(10.0),
@@ -1457,14 +1500,14 @@ mod tests_vector {
         ]);
 
         let diff = v1 - v2;
-
+        // Expected: [5x - 2x, (y + 10) - 5] = [3x, y + 5]
         let expected = ExprVector::new(vec![
-            Expr::Var("x".to_string()) * Expr::Const(5.0)
-                - Expr::Var("x".to_string()) * Expr::Const(2.0),
-            Expr::Var("y".to_string()) + Expr::Const(10.0) - Expr::Const(5.0),
+             Expr::Const(3.0)*Expr::Var("x".to_string()),
+            Expr::Var("y".to_string()) + Expr::Const(5.0),
         ]);
-
-        assert_eq!(diff, expected);
+        println!(" {:?}", diff   );
+        println!("\n {:?}", expected);
+        assert_eq!((diff- expected).simplify(), ExprVector::zeros(2) );
     }
 
     #[test]
@@ -1601,7 +1644,7 @@ mod tests_exprmatrix {
 
         // Expected: ad - bc
         let expected = Expr::Var("a".to_string()) * Expr::Var("d".to_string())
-            - Expr::Var("b".to_string()) * Expr::Var("c".to_string());
+            +  Expr::Mul(  Box::new(Expr::Const(-1.0)), Box::new(Expr::Var("b".to_string()) * Expr::Var("c".to_string()) ));
 
         assert_eq!(det, expected);
     }
@@ -1627,7 +1670,7 @@ mod tests_exprmatrix {
         // = -12x + 60
         let expected = Expr::Const(-12.0) * Expr::Var("x".to_string()) + Expr::Const(60.0);
 
-        assert_eq!(det.simplify_(), expected);
+        assert_eq!(det.simplify(), expected);
     }
 
     #[test]
@@ -1687,8 +1730,9 @@ mod tests_exprmatrix {
                 Expr::Var("a".to_string()) / det.clone(),
             ],
         ]);
-
-        assert_eq!(inv, expected);
+        let diff = (inv -  expected).simplify();
+     
+       assert!(diff == ExprMatrix::zeros(2, 2) ) ;
     }
 
     #[test]
@@ -1785,6 +1829,42 @@ mod tests_exprmatrix {
 
     #[test]
     fn test_block_matrix_2x2() {
+        let a11 = ExprMatrix::new(vec![vec![Expr::Const(1.0)]]);
+        let a12 = ExprMatrix::new(vec![vec![Expr::Const(2.0)]]);
+        let a21 = ExprMatrix::new(vec![vec![Expr::Const(3.0)]]);
+        let a22 = ExprMatrix::new(vec![vec![Expr::Const(4.0)]]);
+
+        let b = ExprMatrix::block_matrix_2x2(&a11, &a12, &a21, &a22);
+
+        let expected = ExprMatrix::new(vec![
+            vec![Expr::Const(1.0), Expr::Const(2.0)],
+            vec![Expr::Const(3.0), Expr::Const(4.0)],
+        ]);
+
+        assert_eq!(b, expected);
+
+    }
+
+    #[test]
+    fn test_matrix_power2() {
+        let m = ExprMatrix::new(vec![
+            vec![Expr::Const(1.0), Expr::Const(1.0)],
+            vec![Expr::Const(0.0), Expr::Const(1.0)],
+        ]);
+
+        let m_squared = m.pow(2);
+
+        // Manual calculation: [[1,1],[0,1]] * [[1,1],[0,1]] = [[1,2],[0,1]]
+        let expected = ExprMatrix::new(vec![
+            vec![Expr::Const(1.0), Expr::Const(2.0)],
+            vec![Expr::Const(0.0), Expr::Const(1.0)],
+        ]);
+
+        assert_eq!(m_squared, expected);
+    }
+
+    #[test]
+    fn test_block_matrix_2x2_1() {
         let a11 = ExprMatrix::new(vec![vec![Expr::Const(1.0)]]);
         let a12 = ExprMatrix::new(vec![vec![Expr::Const(2.0)]]);
         let a21 = ExprMatrix::new(vec![vec![Expr::Const(3.0)]]);

@@ -32,8 +32,8 @@ pub trait SymbolicType: Any {
     fn simplify(&self) -> Box<dyn SymbolicType>;
     //
     fn diff(&self, str_variable: &str) -> Box<dyn SymbolicType>;
-    fn lambdify_owned(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64>;
-    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_>;
+
+    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
     // misc functions
     fn convert_to_string(&self) -> String;
     fn to_native(&self) -> Expr;
@@ -75,24 +75,18 @@ impl SymbolicType for Expr {
         Box::new(partial)
     }
     fn simplify(&self) -> Box<dyn SymbolicType> {
-        let simplified = self.symplify();
+        let simplified = self.simplify();
         Box::new(simplified)
     }
-    fn lambdify_owned(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64> {
-        let lambdified = Expr::lambdify_owned(
-            self.to_owned(),
+
+    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+        let lambdified = Expr::lambdify_borrowed_thread_safe(
+            &self,
             variable_str
                 .iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
-                .clone(),
-        );
-        lambdified
-    }
-    fn lambdify(&self, variable_str: Vec<String>) -> Box<dyn Fn(Vec<f64>) -> f64 + '_> {
-        let lambdified = Expr::lambdify(
-            self,
-            variable_str.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                .as_slice(),
         );
         lambdified
     }
@@ -353,11 +347,11 @@ mod tests {
         let factory = get_symbolic_factory(SymbolicEngineType::Native);
 
         let expr = factory.parse_expression("x^2");
-        let func = expr.lambdify_owned(vec!["x".to_string()]);
+        let func = expr.lambdify(vec!["x".to_string()]);
 
-        assert_eq!(func(vec![2.0]), 4.0);
-        assert_eq!(func(vec![3.0]), 9.0);
-        assert_eq!(func(vec![-2.0]), 4.0);
+        assert_eq!(func(&[2.0]), 4.0);
+        assert_eq!(func(&[3.0]), 9.0);
+        assert_eq!(func(&[-2.0]), 4.0);
     }
 
     // Test composition of expressions

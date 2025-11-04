@@ -26,10 +26,10 @@ fn bdf_lorentz_2d(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
     assert_eq!(solver.get_status(), "finished");
 
     let (t, y_result) = solver.get_result();
-    
+
     // Extract only X and Y rows from 3D solution (y_result is 3×N)
     let positions_2d = y_result.transpose().rows(0, 2).into_owned(); // Take first 2 rows
-    
+
     (positions_2d, t)
 }
 

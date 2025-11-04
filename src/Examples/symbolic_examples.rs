@@ -29,8 +29,8 @@ pub fn sym_examples(example: usize) {
             println!("df_dx = {}, df_dy = {}", df_dx, df_dy);
             //convert symbolic expression to a Rust function and evaluate the function
             let args = vec!["x", "y"];
-            let function_of_x_and_y = parsed_expression.lambdify(args);
-            let f_res = function_of_x_and_y(vec![1.0, 2.0]);
+            let function_of_x_and_y = parsed_expression.lambdify_borrowed_thread_safe(args.as_slice());
+            let f_res = function_of_x_and_y(&[1.0, 2.0]);
             println!("f_res = {}", f_res);
             // or you dont want to pass arguments you can use lambdify_wrapped, arguments will be found inside function
             let function_of_x_and_y = parsed_expression.lambdify_wrapped();
@@ -136,28 +136,14 @@ pub fn sym_examples(example: usize) {
                 Jacobian_instance.calc_ij_element(0, 0, vec!["x", "y"], vec![10.0, 2.0]);
             println!("ij_element = {:?} \n", ij_element);
             // evaluate jacobian to numerical values
-            Jacobian_instance.evaluate_func_jacobian(&vec![10.0, 2.0]);
-            println!("Jacobian = {:?} \n", Jacobian_instance.evaluated_jacobian);
+
             // lambdify and evaluate function vector to numerical values
-            Jacobian_instance.lambdify_and_ealuate_funcvector(vec!["x", "y"], vec![10.0, 2.0]);
-            println!(
-                "function vector = {:?} \n",
-                Jacobian_instance.evaluated_functions
-            );
+
             // or first lambdify
             Jacobian_instance.lambdify_funcvector(vec!["x", "y"]);
-            // then evaluate
-            Jacobian_instance.evaluate_funvector_lambdified(vec![10.0, 2.0]);
-            println!(
-                "function vector after evaluate_funvector_lambdified = {:?} \n",
-                Jacobian_instance.evaluated_functions
-            );
+
             // evaluate jacobian to nalgebra matrix format
-            Jacobian_instance.evaluate_func_jacobian_DMatrix(vec![10.0, 2.0]);
-            println!(
-                "Jacobian_DMatrix = {:?} \n",
-                Jacobian_instance.evaluated_jacobian_DMatrix
-            );
+
             // evaluate function vector to nalgebra matrix format
             Jacobian_instance.evaluate_funvector_lambdified_DVector(vec![10.0, 2.0]);
             println!(

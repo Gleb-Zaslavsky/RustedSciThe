@@ -20,8 +20,8 @@
 ///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
 /// let parsed_expression = Expr::parse_expression(input);
 ///println!(" parsed_expression {}", parsed_expression);
-/// let parsed_function = parsed_expression.lambdify( vec!["x","y"]);
-/// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0, 2.0]));
+/// let parsed_function = parsed_expression.lambdify_borrowed_thread_safe( &["x","y"]);
+/// println!("{}, Rust function: {}  \n",input,  parsed_function(&[1.0, 2.0]));
 ///  ```
 pub mod parse_expr;
 ///  Symbolic engine 1) turns a String expression into a symbolic expression
@@ -63,8 +63,8 @@ pub mod parse_expr;
 ///  println!("df_dx = {}, df_dy = {}", df_dx, df_dy);
 ///  //convert symbolic expression to a Rust function and evaluate the function
 ///  let args = vec!["x","y"];
-///  let function_of_x_and_y = parsed_expression.lambdify( args );
-///  let f_res = function_of_x_and_y( (&[1.0, 2.0]).to_vec() );
+///  let function_of_x_and_y = parsed_expression.lambdify_borrowed_thread_safe( args.as_slice() );
+///  let f_res = function_of_x_and_y( &[1.0, 2.0] );
 ///  println!("f_res = {}", f_res);
 ///  // or you dont want to pass arguments you can use lambdify_wrapped, arguments will be found inside function
 ///  let function_of_x_and_y = parsed_expression.lambdify_wrapped( );
@@ -167,9 +167,12 @@ pub mod symbolic_integration;
 pub mod symbolic_traits;
 /// matrices and vectors of symbolic expressions
 pub mod symbolic_vectors;
-
+pub mod symbolic_lambdify;
 pub mod symbolic_simd;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
+mod lambdify_performance_tests;
+mod symbolic_simplify;
+mod symbolic_engine_tests;

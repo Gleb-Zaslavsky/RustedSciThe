@@ -8,8 +8,8 @@ use crate::symbolic::utils::{find_char_positions_outside_brackets, find_pair_to_
 ///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
 /// let parsed_expression = Expr::parse_expression(input);
 ///println!(" parsed_expression {}", parsed_expression);
-/// let parsed_function = parsed_expression.lambdify( vec!["x","y"]);
-/// println!("{}, Rust function: {}  \n",input,  parsed_function(vec![1.0,2.0])    );
+/// let parsed_function = parsed_expression.lambdify_borrowed_thread_safe( &["x","y"]);
+/// println!("{}, Rust function: {}  \n",input,  parsed_function(&[1.0,2.0])    );
 ///  
 /// ```
 //                  search recursion diagram

@@ -1,6 +1,7 @@
 use crate::numerical::Radau::Radau_newton::RadauNewton;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
+use crate::global::THRESHOLD as T;
 use log::info;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
@@ -17,6 +18,7 @@ impl Jacobian {
         self.set_vector_of_functions(eq_system);
         self.set_variables(values.iter().map(|x| x.as_str()).collect());
         self.calc_jacobian(); // Use the smart parallel version
+        self.find_bandwidths();
         let ncols = self.symbolic_jacobian.len();
         let nrows = self.symbolic_jacobian[0].len();
         assert!(nrows == ncols);
@@ -54,7 +56,7 @@ impl Jacobian {
             variable_str.iter().map(|s| s.to_string()).collect(),
             parameters.iter().map(|s| s.to_string()).collect(),
             arg.to_string(),
-            bandwidth,
+            bandwidth.unwrap(),
         );
 
         self.function_jacobian_IVP_DMatrix = new_jac;
@@ -84,39 +86,43 @@ impl Jacobian {
         let (kl, ku) = bandwidth;
 
         // Pre-compile jacobian positions using outer loop parallelization
-        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>)> =
-            (0..vector_of_functions_len)
-                .into_par_iter()
-                .flat_map(|i| {
-                    let (right_border, left_border) = if kl == 0 && ku == 0 {
-                        (vector_of_variables_len, 0)
+        let jacobian_positions: Vec<(usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>)> = (0
+            ..vector_of_functions_len)
+            .into_par_iter()
+            .flat_map(|i| {
+                let (right_border, left_border) = if kl == 0 && ku == 0 {
+                    (vector_of_variables_len, 0)
+                } else {
+                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                        0
                     } else {
-                        let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                        let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                            0
-                        } else {
-                            i - kl - 1
-                        };
-                        (right_border, left_border)
+                        i - kl - 1
                     };
+                    (right_border, left_border)
+                };
 
-                    (left_border..right_border)
-                        .filter_map(|j| {
-                            let symbolic_partial_derivative = &jac[i][j];
-                            if !symbolic_partial_derivative.is_zero() {
-                                let compiled_func: Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync> =
-                                    Expr::lambdify_borrowed_thread_safe(
-                                        &symbolic_partial_derivative,
-                                        all_variables.iter().map(|s| s.as_str()).collect(),
-                                    );
-                                Some((i, j, compiled_func))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                (left_border..right_border)
+                    .filter_map(|j| {
+                        let symbolic_partial_derivative = &jac[i][j];
+                        if !symbolic_partial_derivative.is_zero() {
+                            let compiled_func: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> =
+                                Expr::lambdify_borrowed_thread_safe(
+                                    &symbolic_partial_derivative,
+                                    all_variables
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .as_slice(),
+                                );
+                            Some((i, j, compiled_func))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
         Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
             // Concatenate x with v to match all_variables order
@@ -129,8 +135,8 @@ impl Jacobian {
             jacobian_positions
                 .par_iter()
                 .for_each(|(i, j, compiled_func)| {
-                    let P = compiled_func(v_vec.clone());
-                    if P.abs() > 1e-8 {
+                    let P = compiled_func(v_vec.as_slice());
+                    if P.abs() > T {
                         let mut mat = matrix_mutex.lock().unwrap();
                         mat[(*i, *j)] = P;
                     }
@@ -188,15 +194,14 @@ impl Jacobian {
         variable_and_parameters.extend(parameters.iter().map(|s| s.to_string()));
 
         // Pre-compile all functions with thread-safe closures
-        let compiled_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64 + Send + Sync>> =
-            vector_of_functions
-                .par_iter()
-                .map(|func| {
-                    let variable_refs: Vec<&str> =
-                        variable_and_parameters.iter().map(|s| s.as_str()).collect();
-                    Expr::lambdify_borrowed_thread_safe(func, variable_refs)
-                })
-                .collect();
+        let compiled_functions: Vec<Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = vector_of_functions
+            .par_iter()
+            .map(|func| {
+                let variable_refs: Vec<&str> =
+                    variable_and_parameters.iter().map(|s| s.as_str()).collect();
+                Expr::lambdify_borrowed_thread_safe(func, variable_refs.as_slice())
+            })
+            .collect();
 
         // Create the optimized evaluation closure
         let fun = Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
@@ -207,7 +212,7 @@ impl Jacobian {
             // Parallel evaluation of pre-compiled functions
             let result: Vec<_> = compiled_functions
                 .par_iter()
-                .map(|func| func(v_vec.clone()))
+                .map(|func| func(v_vec.as_slice()))
                 .collect();
 
             DVector::from_vec(result)
@@ -226,7 +231,7 @@ impl RadauNewton {
         jacobian_instance.set_vector_of_functions(self.eq_system.clone());
         jacobian_instance.set_variables(self.k_variables.iter().map(|x| x.as_str()).collect());
         jacobian_instance.calc_jacobian();
-
+        jacobian_instance.find_bandwidths();
         let values_str = self
             .k_variables
             .iter()
@@ -247,7 +252,7 @@ impl RadauNewton {
             self.k_variables.clone(),
             self.parameters.clone(),
             self.arg.clone(),
-            jacobian_instance.bandwidth,
+            jacobian_instance.bandwidth.unwrap(),
         );
 
         // Use the safe parallel vector function generation
@@ -291,6 +296,7 @@ mod tests_parallel {
         jacobian.vector_of_functions = eq_system;
         jacobian.set_variables(values.iter().map(|x| x.as_str()).collect());
         jacobian.calc_jacobian();
+        jacobian.find_bandwidths();
         info!("Parallel Jacobian: {:?}", jacobian.symbolic_jacobian);
     }
 
@@ -363,6 +369,7 @@ mod tests_parallel {
         jacobian.set_vector_of_functions(vec![eq1]);
         jacobian.set_variables(vec!["K00"]);
         jacobian.calc_jacobian();
+        jacobian.find_bandwidths();
 
         let values = vec!["K00".to_string()];
         let parameters = vec!["y0".to_string(), "h".to_string()];

@@ -12,6 +12,7 @@ mod tets {
     use std::time::Instant;
     #[test]
     fn test_direct_eq2() {
+        let start = Instant::now();
         // variables
         let unknowns_str: Vec<&str> = vec!["Teta", "q", "C0", "J0", "C1", "J1"];
         let unhnowns_Str: Vec<String> = unknowns_str.iter().map(|s| s.to_string()).collect();
@@ -190,6 +191,7 @@ mod tets {
         }
         println!("\n=== EQUATIONS SYSTEM ===");
         coeff_table.printstd();
+        println!("duration {}", start.elapsed().as_millis() as f64)
     }
     fn test_problem(grid_method: GridRefinementMethod) {
         // variables
@@ -363,7 +365,7 @@ mod tets {
         );
         bvp.dont_save_log(true);
         bvp.solve();
-        bvp.gnuplot_result();
+        //  bvp.gnuplot_result();
         let solution = bvp.get_result().unwrap();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {
