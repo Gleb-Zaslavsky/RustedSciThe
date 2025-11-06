@@ -29,12 +29,10 @@
 //! - Memoization-friendly design for repeated simplification calls
 
 use crate::symbolic::symbolic_engine::Expr;
+use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::PI;
-use std::collections::{HashMap, BTreeMap};
 
 impl Expr {
-
-
     //___________________________________SIMPLIFICATION____________________________________
 
     /// Internal method to eliminate zero-multiplication subexpressions.
@@ -288,7 +286,8 @@ impl Expr {
                     _ if lhs == rhs => Expr::Const(0.0),
                     _ => {
                         // Convert subtraction to addition: a - b = a + (-1)*b
-                        let neg_rhs = Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(rhs)).simplify_();
+                        let neg_rhs =
+                            Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(rhs)).simplify_();
                         let add_expr = Expr::Add(Box::new(lhs), Box::new(neg_rhs));
                         Self::simplify_polynomial(&add_expr).unwrap_or(add_expr)
                     }
@@ -307,11 +306,16 @@ impl Expr {
                         let new_exp = Expr::Add(exp1.clone(), exp2.clone()).simplify_();
                         Expr::Pow(base1.clone(), Box::new(new_exp))
                     }
-                    (Expr::Var(v1), Expr::Pow(base, exp)) | (Expr::Pow(base, exp), Expr::Var(v1)) => {
+                    (Expr::Var(v1), Expr::Pow(base, exp))
+                    | (Expr::Pow(base, exp), Expr::Var(v1)) => {
                         if let Expr::Var(v2) = base.as_ref() {
                             if v1 == v2 {
-                                let new_exp = Expr::Add(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
-                                return Expr::Pow(Box::new(Expr::Var(v1.clone())), Box::new(new_exp));
+                                let new_exp =
+                                    Expr::Add(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
+                                return Expr::Pow(
+                                    Box::new(Expr::Var(v1.clone())),
+                                    Box::new(new_exp),
+                                );
                             }
                         }
                         Expr::Mul(Box::new(lhs), Box::new(rhs))
@@ -329,7 +333,7 @@ impl Expr {
                                     .simplify_()
                             }
                             (_, Expr::Const(c1)) => {
-                                // Pattern: (expr * c1) * c2 = (c1 * c2) * expr  
+                                // Pattern: (expr * c1) * c2 = (c1 * c2) * expr
                                 Expr::Mul(Box::new(Expr::Const(c1 * c)), inner_lhs.clone())
                                     .simplify_()
                             }
@@ -367,16 +371,22 @@ impl Expr {
                         let new_exp = Expr::Sub(exp1.clone(), exp2.clone()).simplify_();
                         match new_exp {
                             Expr::Const(0.0) => Expr::Const(1.0),
-                            _ => Expr::Pow(base1.clone(), Box::new(new_exp))
+                            _ => Expr::Pow(base1.clone(), Box::new(new_exp)),
                         }
                     }
                     (Expr::Var(v1), Expr::Pow(base, exp)) => {
                         if let Expr::Var(v2) = base.as_ref() {
                             if v1 == v2 {
-                                let new_exp = Expr::Sub(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
+                                let new_exp =
+                                    Expr::Sub(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
                                 match new_exp {
                                     Expr::Const(0.0) => return Expr::Const(1.0),
-                                    _ => return Expr::Pow(Box::new(Expr::Var(v1.clone())), Box::new(new_exp))
+                                    _ => {
+                                        return Expr::Pow(
+                                            Box::new(Expr::Var(v1.clone())),
+                                            Box::new(new_exp),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -385,10 +395,16 @@ impl Expr {
                     (Expr::Pow(base, exp), Expr::Var(v2)) => {
                         if let Expr::Var(v1) = base.as_ref() {
                             if v1 == v2 {
-                                let new_exp = Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0))).simplify_();
+                                let new_exp =
+                                    Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0))).simplify_();
                                 match new_exp {
                                     Expr::Const(0.0) => return Expr::Const(1.0),
-                                    _ => return Expr::Pow(Box::new(Expr::Var(v1.clone())), Box::new(new_exp))
+                                    _ => {
+                                        return Expr::Pow(
+                                            Box::new(Expr::Var(v1.clone())),
+                                            Box::new(new_exp),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -523,7 +539,6 @@ impl Expr {
         }
     }
 
-
     /// Simplify polynomial expressions by collecting like terms.
     ///
     /// This method implements **polynomial term collection** - a sophisticated algorithm
@@ -573,8 +588,10 @@ impl Expr {
     fn simplify_polynomial(expr: &Expr) -> Option<Expr> {
         let mut terms = Vec::new();
         flatten_add(expr, &mut terms);
-        if terms.len() < 2 { return None; }
-        
+        if terms.len() < 2 {
+            return None;
+        }
+
         // Check if all terms are polynomial terms before proceeding
         let mut has_non_poly = false;
         for term in &terms {
@@ -584,29 +601,40 @@ impl Expr {
                 break;
             }
         }
-        
+
         // Don't apply polynomial simplification if there are non-polynomial terms
-        if has_non_poly { return None; }
-        
+        if has_non_poly {
+            return None;
+        }
+
         let poly_map = collect_add_terms(&terms);
-        if poly_map.len() == terms.len() { return None; }
-        
+        if poly_map.len() == terms.len() {
+            return None;
+        }
+
         let mut result_terms = Vec::new();
         for (monomial, coeff) in poly_map {
-            if coeff == 0.0 { continue; }
+            if coeff == 0.0 {
+                continue;
+            }
             let term = Self::build_monomial_term(&monomial, coeff);
             result_terms.push(term);
         }
-        
+
         if result_terms.is_empty() {
             Some(Expr::Const(0.0))
         } else if result_terms.len() == 1 {
             Some(result_terms.into_iter().next().unwrap())
         } else {
-            Some(result_terms.into_iter().reduce(|a, b| Expr::Add(Box::new(a), Box::new(b))).unwrap())
+            Some(
+                result_terms
+                    .into_iter()
+                    .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)))
+                    .unwrap(),
+            )
         }
     }
-    
+
     /// Build a term from monomial key and coefficient.
     ///
     /// This method reconstructs a symbolic expression from its polynomial representation.
@@ -643,27 +671,33 @@ impl Expr {
         if monomial.0.is_empty() {
             return Expr::Const(coeff);
         }
-        
+
         let mut factors = Vec::new();
         if coeff != 1.0 {
             factors.push(Expr::Const(coeff));
         }
-        
+
         for (var, exp) in &monomial.0 {
             let var_expr = Expr::Var(var.clone());
             if *exp == 1 {
                 factors.push(var_expr);
             } else if *exp > 1 {
-                factors.push(Expr::Pow(Box::new(var_expr), Box::new(Expr::Const(*exp as f64))));
+                factors.push(Expr::Pow(
+                    Box::new(var_expr),
+                    Box::new(Expr::Const(*exp as f64)),
+                ));
             }
         }
-        
+
         if factors.is_empty() {
             Expr::Const(1.0)
         } else if factors.len() == 1 {
             factors.into_iter().next().unwrap()
         } else {
-            factors.into_iter().reduce(|a, b| Expr::Mul(Box::new(a), Box::new(b))).unwrap()
+            factors
+                .into_iter()
+                .reduce(|a, b| Expr::Mul(Box::new(a), Box::new(b)))
+                .unwrap()
         }
     }
 
@@ -679,9 +713,7 @@ impl Expr {
         let zeros_proceeded = self.simplify_();
         zeros_proceeded
     }
-
 }
-
 
 /// Represents the variable part of a polynomial term (monomial).
 ///
@@ -764,10 +796,10 @@ fn flatten_add(expr: &Expr, out: &mut Vec<Expr>) {
                         // Distribute: -1 * (a + b) = (-1 * a) + (-1 * b)
                         let neg_a = Expr::Mul(Box::new(Expr::Const(-1.0)), a.clone());
                         let neg_b = Expr::Mul(Box::new(Expr::Const(-1.0)), b.clone());
-                        flatten_add(&neg_a, out);  // Recursively flatten -1*a
-                        flatten_add(&neg_b, out);  // Recursively flatten -1*b
+                        flatten_add(&neg_a, out); // Recursively flatten -1*a
+                        flatten_add(&neg_b, out); // Recursively flatten -1*b
                     }
-                    _ => out.push(expr.clone()),  // -1 * (non-addition) stays as is
+                    _ => out.push(expr.clone()), // -1 * (non-addition) stays as is
                 }
             } else if let Expr::Const(-1.0) = rhs.as_ref() {
                 // Pattern: (something) * -1 (symmetric case)
@@ -779,7 +811,7 @@ fn flatten_add(expr: &Expr, out: &mut Vec<Expr>) {
                         flatten_add(&neg_a, out);
                         flatten_add(&neg_b, out);
                     }
-                    _ => out.push(expr.clone()),  // (non-addition) * -1 stays as is
+                    _ => out.push(expr.clone()), // (non-addition) * -1 stays as is
                 }
             } else {
                 // Regular multiplication (not by -1) - no special handling needed
@@ -874,13 +906,13 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
                 // Critical for handling negated terms from distributive property
                 (Expr::Const(-1.0), other) | (other, Expr::Const(-1.0)) => {
                     let (mon, coeff) = extract_monomial(other);
-                    (mon, -coeff)  // Negate the coefficient
+                    (mon, -coeff) // Negate the coefficient
                 }
                 // Pattern: constant * something or something * constant
                 // Handles simple coefficient extraction like 3 * x
                 (Expr::Const(c), other) | (other, Expr::Const(c)) => {
                     let (mon, coeff) = extract_monomial(other);
-                    (mon, c * coeff)  // Multiply coefficients
+                    (mon, c * coeff) // Multiply coefficients
                 }
                 _ => {
                     // Fall back to flattening approach
@@ -889,7 +921,7 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
                     let mut coeff = 1.0;
                     let mut map = BTreeMap::new();
                     let mut has_non_poly = false;
-                    
+
                     for f in factors {
                         match f {
                             Expr::Const(c) => coeff *= c,
@@ -908,7 +940,7 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
                             _ => has_non_poly = true,
                         }
                     }
-                    
+
                     if has_non_poly {
                         (MonomialKey(BTreeMap::new()), 0.0)
                     } else {
@@ -970,38 +1002,41 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
 ///
 /// # Returns
 /// Expression in Horner form
-fn horner_univariate(var: &str,  terms: Vec<(i32, f64)>) -> Expr {
+fn horner_univariate(var: &str, terms: Vec<(i32, f64)>) -> Expr {
     use Expr::*;
     if terms.is_empty() {
         return Const(0.0);
     }
-    
+
     // Find the highest degree to determine array size
     let max_deg = terms.iter().map(|(e, _)| *e).max().unwrap();
-    
+
     // Create coefficient array indexed by exponent
     let mut coeffs = vec![0.0; (max_deg + 1) as usize];
-    
+
     // Populate coefficient array from input terms
     for (exp, c) in terms {
         if exp >= 0 {
-            coeffs[exp as usize] += c;  // Handle multiple terms with same exponent
+            coeffs[exp as usize] += c; // Handle multiple terms with same exponent
         }
     }
-    
+
     // Find the actual highest degree (skip trailing zeros)
     let mut i = coeffs.len() - 1;
     while i > 0 && coeffs[i] == 0.0 {
         i -= 1;
     }
-    
+
     // Start with the highest degree coefficient
     let mut acc = Const(coeffs[i]);
     let x = Var(var.to_string());
-    
+
     // Build Horner form: (((...((a_n * x) + a_{n-1}) * x) + a_{n-2}) * x) + ... + a_0
     while i > 0 {
-        acc = Add(Box::new(Mul(Box::new(acc), Box::new(x.clone()))), Box::new(Const(coeffs[i - 1])));
+        acc = Add(
+            Box::new(Mul(Box::new(acc), Box::new(x.clone()))),
+            Box::new(Const(coeffs[i - 1])),
+        );
         i -= 1;
     }
     acc

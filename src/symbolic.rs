@@ -161,18 +161,18 @@ pub mod symbolic_functions;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
+mod lambdify_performance_tests;
+mod symbolic_engine_tests;
 /// basic functionality for symbolic integration (only elementary functions)
 /// also numerical integration of symbolic functions
 pub mod symbolic_integration;
+pub mod symbolic_lambdify;
+pub mod symbolic_simd;
+mod symbolic_simplify;
 pub mod symbolic_traits;
 /// matrices and vectors of symbolic expressions
 pub mod symbolic_vectors;
-pub mod symbolic_lambdify;
-pub mod symbolic_simd;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________
 pub mod utils;
-mod lambdify_performance_tests;
-mod symbolic_simplify;
-mod symbolic_engine_tests;

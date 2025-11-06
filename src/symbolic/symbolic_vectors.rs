@@ -33,7 +33,7 @@
 //!
 //! ### `ExprMatrix` - Symbolic Matrix
 //! A matrix where each element is a symbolic expression.
-//! 
+//!
 //!
 //! **Key Methods:**
 //! - `new(data)` - Create from 2D vector of expressions
@@ -1222,12 +1222,12 @@ mod tests_vector {
         let dot = v1.dot(&v2);
 
         // Expected: 3*x + y*z + 2*x = (3+2)*x + y*z = 5*x + y*z
-        let expected =    Expr::Const(5.0)* Expr::Var("x".to_string()) + 
-        Expr::Var("y".to_string()) * Expr::Var("z".to_string()) ;
-     
+        let expected = Expr::Const(5.0) * Expr::Var("x".to_string())
+            + Expr::Var("y".to_string()) * Expr::Var("z".to_string());
+
         println!("dot: {}", dot);
         println!("expected: {}", expected);
-        assert_eq!((dot- expected).simplify(), Expr::Const(0.0) ); 
+        assert_eq!((dot - expected).simplify(), Expr::Const(0.0));
     }
 
     #[test]
@@ -1480,7 +1480,7 @@ mod tests_vector {
         let expected = ExprVector::new(vec![
             Expr::Var("x".to_string()).pow(Expr::Const(2.0))
                 + Expr::Var("x".to_string()) * Expr::Const(2.0),
-           Expr::Const(4.0)* Expr::Var("y".to_string()) 
+            Expr::Const(4.0) * Expr::Var("y".to_string()),
         ]);
 
         assert!(sum.is_equivalent(&expected));
@@ -1502,12 +1502,12 @@ mod tests_vector {
         let diff = v1 - v2;
         // Expected: [5x - 2x, (y + 10) - 5] = [3x, y + 5]
         let expected = ExprVector::new(vec![
-             Expr::Const(3.0)*Expr::Var("x".to_string()),
+            Expr::Const(3.0) * Expr::Var("x".to_string()),
             Expr::Var("y".to_string()) + Expr::Const(5.0),
         ]);
-        println!(" {:?}", diff   );
+        println!(" {:?}", diff);
         println!("\n {:?}", expected);
-        assert_eq!((diff- expected).simplify(), ExprVector::zeros(2) );
+        assert_eq!((diff - expected).simplify(), ExprVector::zeros(2));
     }
 
     #[test]
@@ -1644,7 +1644,10 @@ mod tests_exprmatrix {
 
         // Expected: ad - bc
         let expected = Expr::Var("a".to_string()) * Expr::Var("d".to_string())
-            +  Expr::Mul(  Box::new(Expr::Const(-1.0)), Box::new(Expr::Var("b".to_string()) * Expr::Var("c".to_string()) ));
+            + Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::Var("b".to_string()) * Expr::Var("c".to_string())),
+            );
 
         assert_eq!(det, expected);
     }
@@ -1730,9 +1733,9 @@ mod tests_exprmatrix {
                 Expr::Var("a".to_string()) / det.clone(),
             ],
         ]);
-        let diff = (inv -  expected).simplify();
-     
-       assert!(diff == ExprMatrix::zeros(2, 2) ) ;
+        let diff = (inv - expected).simplify();
+
+        assert!(diff == ExprMatrix::zeros(2, 2));
     }
 
     #[test]
@@ -1842,7 +1845,6 @@ mod tests_exprmatrix {
         ]);
 
         assert_eq!(b, expected);
-
     }
 
     #[test]

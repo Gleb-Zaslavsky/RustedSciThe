@@ -2,9 +2,8 @@ use crate::symbolic::symbolic_engine::Expr;
 use std::f64::consts::PI;
 const LAMBDIFY_METHOD: usize = 0;
 
-use crate::symbolic:: lambdify_performance_tests; 
 impl Expr {
-  /// LAMBDIFICATION - Converting Symbolic Expressions to Executable Functions
+    /// LAMBDIFICATION - Converting Symbolic Expressions to Executable Functions
 
     /// Converts a single-variable symbolic expression into an executable Rust closure.
     ///
@@ -38,29 +37,101 @@ impl Expr {
             let compiled_func = self.lambdify_borrowed_thread_safe(&[]);
             Box::new(move |_| compiled_func(&[]))
         } else {
-            panic!("lambdify1D can only be used with expressions containing exactly one variable, found: {:?}", vars);
+            panic!(
+                "lambdify1D can only be used with expressions containing exactly one variable, found: {:?}",
+                vars
+            );
         }
     } // end of lambdify1D
+    pub fn lambdify1Dlegacy(&self) -> Box<dyn Fn(f64) -> f64> {
+        match self {
+            Expr::Var(_) => Box::new(|x| x),
+            Expr::Const(val) => {
+                let val = *val;
+                Box::new(move |_| val)
+            }
+            Expr::Add(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify1D();
+                let rhs_fn = rhs.lambdify1D();
+                Box::new(move |x| lhs_fn(x) + rhs_fn(x))
+            }
 
+            Expr::Sub(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify1D();
+                let rhs_fn = rhs.lambdify1D();
+                Box::new(move |x| lhs_fn(x) - rhs_fn(x))
+            }
+            Expr::Mul(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify1D();
+                let rhs_fn = rhs.lambdify1D();
+                Box::new(move |x| lhs_fn(x) * rhs_fn(x))
+            }
+            Expr::Div(lhs, rhs) => {
+                let lhs_fn = lhs.lambdify1D();
+                let rhs_fn = rhs.lambdify1D();
+                Box::new(move |x| lhs_fn(x) / rhs_fn(x))
+            }
+            Expr::Pow(base, exp) => {
+                let base_fn = base.lambdify1D();
+                let exp_fn = exp.lambdify1D();
+                Box::new(move |x| base_fn(x).powf(exp_fn(x)))
+            }
+            Expr::Exp(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).exp())
+            }
+            Expr::Ln(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).ln())
+            }
+            Expr::sin(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).sin())
+            }
+            Expr::cos(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).cos())
+            }
+            Expr::tg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).tan())
+            }
+            Expr::ctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(1.0 / x).tan())
+            }
+            Expr::arcsin(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).asin())
+            }
+            Expr::arccos(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).acos())
+            }
+            Expr::arctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| expr_fn(x).atan())
+            }
+            Expr::arcctg(expr) => {
+                let expr_fn = expr.lambdify1D();
+                Box::new(move |x| PI / 2.0 - expr_fn(x).atan())
+            }
+        } // end of match
+    } // end of lambdify1D
     #[inline(always)]
     pub fn lambdify_borrowed_thread_safe(
         &self,
         vars: &[&str],
     ) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
         match LAMBDIFY_METHOD {
-
             0 => self.lambdify1(vars),
 
             _ => self.lambdify2(vars),
         }
-       
     }
 
-   #[inline(always)]
-    pub fn lambdify1(
-        &self,
-        vars: &[&str],
-    ) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+    #[inline(always)]
+    pub fn lambdify1(&self, vars: &[&str]) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
         match self {
             Expr::Var(name) => {
                 let index = vars.iter().position(|&x| x == name).unwrap();
@@ -153,10 +224,8 @@ impl Expr {
         let vars_ = self.all_arguments_are_variables();
         let vars = vars_.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
         let clo = self.lambdify_borrowed_thread_safe(vars.as_slice());
-        let y =
-        Box::new(move |x: Vec<f64>| clo(x.as_slice()));
-        y 
-        
+        let y = Box::new(move |x: Vec<f64>| clo(x.as_slice()));
+        y
     }
     #[inline(always)]
     pub fn lambdify2(&self, vars: &[&str]) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
@@ -165,7 +234,6 @@ impl Expr {
         Box::new(closure)
     } // end of lambdify
 }
-
 
 #[derive(Clone, Debug)]
 pub enum Lambda {
@@ -243,12 +311,10 @@ impl Lambda {
     pub fn as_closure(self) -> impl Fn(&[f64]) -> f64 + Send + Sync {
         move |args| self.eval(args)
     }
-
-    
 }
 
 impl Expr {
-//____________________________________________________________________________________________________________________________
+    //____________________________________________________________________________________________________________________________
     //                    INITIAL VALUE PROBLEM (IVP) SPECIALIZATION
     //____________________________________________________________________________________________________________________________
 
@@ -330,14 +396,23 @@ impl Expr {
         });
         f_closure
     }
-
 }
-
-
+/////////////////////////////TESTS/////////////////////
+pub fn parse_very_complex_expression() -> Expr {
+    let s = " (0.000002669 * (28.0 * T)^0.5) /
+        (13.3225 * ((1.16145 / ((T / 98.1) ^ 0.14874))
+                  + (0.52487 / exp(0.7732 * (T / 98.1)))
+                  + (2.16178 / exp(2.43787 * (T / 98.1)))
+                  + ((0.2 * 0.0 ^ 2) / (T / 98.1))))";
+    let s = Expr::parse_expression(s);
+    let s1 = s.diff("T");
+    let s2 = s1.diff("T");
+    s2
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::time::Instant;
     #[test]
     fn test_lambdify1d_single_variable() {
         let x = Expr::Var("x".to_string());
@@ -366,7 +441,7 @@ mod tests {
         let expr = Expr::sin(Box::new(x));
         let func = expr.lambdify1D();
         assert!((func(0.0) - 0.0).abs() < 1e-10);
-        assert!((func(PI/2.0) - 1.0).abs() < 1e-10);
+        assert!((func(PI / 2.0) - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -379,11 +454,44 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "lambdify1D can only be used with expressions containing exactly one variable")]
+    #[should_panic(
+        expected = "lambdify1D can only be used with expressions containing exactly one variable"
+    )]
     fn test_lambdify1d_multiple_variables_panic() {
         let x = Expr::Var("x".to_string());
         let y = Expr::Var("y".to_string());
         let expr = x + y;
         let _func = expr.lambdify1D();
+    }
+    #[test]
+    fn test_lambdify_wrapped() {
+        let x = Expr::Var("x".to_string());
+        let expr = x.clone() * x.clone() + x.clone() * Expr::Const(2.0) + Expr::Const(1.0); // x^2 + 2x + 1
+        let func = expr.lambdify_wrapped();
+        assert_eq!(func(vec![3.0]), 16.0); // 9 + 6 + 1 = 16
+    }
+    #[test]
+    fn lambdify1d_comapare() {
+        let expr = parse_very_complex_expression();
+        let start = Instant::now();
+        let vars = expr.all_arguments_are_variables();
+        let vars_extracting_time = start.elapsed();
+        //println!("expr {:?}", expr);
+        let start = Instant::now();
+        let func = expr.lambdify1Dlegacy();
+        let x = func(1.0);
+        let end = start.elapsed();
+
+        let start = Instant::now();
+        let func = expr.lambdify1D();
+        let y = func(1.0);
+        let duration = start.elapsed();
+        assert_eq!(x, y);
+        println!("\n lambdify1d_comapare {:?}", duration);
+        println!("\n lambdify1d_comapare legacy {:?}", end);
+        println!(
+            "\n vars_extracting_time {:?}, vars {:?}",
+            vars_extracting_time, vars
+        );
     }
 }

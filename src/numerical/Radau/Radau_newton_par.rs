@@ -1,7 +1,7 @@
+use crate::global::THRESHOLD as T;
 use crate::numerical::Radau::Radau_newton::RadauNewton;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use crate::global::THRESHOLD as T;
 use log::info;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;

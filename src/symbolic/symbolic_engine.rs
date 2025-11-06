@@ -733,7 +733,6 @@ impl Expr {
         }
         (eq, unknowns)
     }
-
 }
 
 //___________________________________MACROS____________________________________
@@ -792,4 +791,3 @@ macro_rules! indexed_var_2d {
         Expr::IndexedVar2D($row, $col, $name)
     };
 }
-

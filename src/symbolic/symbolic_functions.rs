@@ -1,9 +1,9 @@
 #![allow(non_camel_case_types)]
 
+use crate::global::THRESHOLD as T;
 use crate::symbolic::symbolic_engine::Expr;
 use faer::col::{Col, ColRef};
 use faer::sparse::{SparseColMat, Triplet};
-use crate::global::THRESHOLD as T;
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Dyn};
 
@@ -55,7 +55,6 @@ pub struct Jacobian {
     pub vector_of_functions: Vec<Expr>, // vector of symbolic functions/expressions
     pub lambdified_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64>>, // vector of lambdified functions (symbolic functions converted to rust functions)
 
-  
     pub evaluated_functions_DVector: DVector<f64>, // vector of DVector of numerical results of evaluated functions
     pub vector_of_variables: Vec<Expr>,            // vector of symbolic variables
     pub variable_string: Vec<String>,              // vector of string representation of variables
@@ -481,7 +480,6 @@ impl Jacobian {
         });
         self.function_jacobian_IVP_DMatrix = new_jac;
     } // end of function
-
 
     // evaluate the function jacobian when it is defined as Box<dyn Fn(f64, DVector<f64>) -> DMatrix<f64> >
     pub fn evaluate_func_jacobian_box_DMatrix_IVP(&mut self, arg: f64, x: Vec<f64>) {

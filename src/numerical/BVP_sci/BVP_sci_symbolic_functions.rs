@@ -275,7 +275,10 @@ impl Jacobian_sci_faer {
                         let result: Vec<_> = vector_of_functions
                             .iter()
                             .map(|func| {
-                                let func = Expr::lambdify_borrowed_thread_safe(&func, all_var_names.as_slice());
+                                let func = Expr::lambdify_borrowed_thread_safe(
+                                    &func,
+                                    all_var_names.as_slice(),
+                                );
 
                                 func(args.as_slice())
                             })

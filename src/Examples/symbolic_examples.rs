@@ -29,7 +29,8 @@ pub fn sym_examples(example: usize) {
             println!("df_dx = {}, df_dy = {}", df_dx, df_dy);
             //convert symbolic expression to a Rust function and evaluate the function
             let args = vec!["x", "y"];
-            let function_of_x_and_y = parsed_expression.lambdify_borrowed_thread_safe(args.as_slice());
+            let function_of_x_and_y =
+                parsed_expression.lambdify_borrowed_thread_safe(args.as_slice());
             let f_res = function_of_x_and_y(&[1.0, 2.0]);
             println!("f_res = {}", f_res);
             // or you dont want to pass arguments you can use lambdify_wrapped, arguments will be found inside function

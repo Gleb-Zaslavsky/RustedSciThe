@@ -44,7 +44,7 @@
 //!    enabling high-performance numerical computation
 //!
 //! 3. **Memory Management Variants**: Provides  borrowing (`lambdify`) and owned
-//! 
+//!
 //!
 //! 4. **Numerical Validation**: Sophisticated comparison between analytical and numerical
 //!    derivatives using configurable tolerance and step sizes
@@ -237,7 +237,6 @@ impl Expr {
             Expr::arcctg(expr) => format!("arcctg({})", expr.sym_to_str(var)),
         } // end of match
     } // end of sym_to_str
-  
 
     /// Extracts all variables from the expression with structural information.
     ///
@@ -644,40 +643,43 @@ impl Expr {
     /// # Usage
     /// Essential for automatic variable detection in lambdify_wrapped()
     pub fn all_arguments_are_variables(&self) -> Vec<String> {
-        let mut vars = Vec::new();
+        use std::collections::HashSet;
+        let mut vars = HashSet::new();
+        self.collect_variables(&mut vars);
+        let mut result: Vec<String> = vars.into_iter().collect();
+        result.sort();
+        result
+    }
 
+    /// Helper method for efficient variable collection using HashSet
+    fn collect_variables(&self, vars: &mut std::collections::HashSet<String>) {
         match self {
             Expr::Var(name) => {
-                vars.push(name.clone());
+                vars.insert(name.clone());
             }
             Expr::Const(_) => {}
             Expr::Add(lhs, rhs)
             | Expr::Sub(lhs, rhs)
             | Expr::Mul(lhs, rhs)
             | Expr::Div(lhs, rhs) => {
-                let _lhs_vars = lhs.all_arguments_are_variables();
-                vars.extend(lhs.all_arguments_are_variables());
-                vars.extend(rhs.all_arguments_are_variables());
+                lhs.collect_variables(vars);
+                rhs.collect_variables(vars);
             }
             Expr::Pow(base, exp) => {
-                vars.extend(base.all_arguments_are_variables());
-                vars.extend(exp.all_arguments_are_variables());
+                base.collect_variables(vars);
+                exp.collect_variables(vars);
             }
             Expr::Exp(expr) | Expr::Ln(expr) => {
-                vars.extend(expr.all_arguments_are_variables());
+                expr.collect_variables(vars);
             }
             Expr::sin(expr) | Expr::cos(expr) | Expr::tg(expr) | Expr::ctg(expr) => {
-                vars.extend(expr.all_arguments_are_variables());
+                expr.collect_variables(vars);
             }
             Expr::arcsin(expr) | Expr::arccos(expr) | Expr::arctg(expr) | Expr::arcctg(expr) => {
-                vars.extend(expr.all_arguments_are_variables());
+                expr.collect_variables(vars);
             }
         }
-
-        vars.sort(); // Add this line to sort the variables
-        vars.dedup(); // Remove duplicates
-        vars
-    } // end of all_arguments_are_variables
+    } // end of collect_variables
 
     //___________________________________________________________________________________________________________________
     //                    1D FUNCTION PROCESSING - Single Variable Functions y = f(x)
@@ -981,5 +983,4 @@ impl Expr {
             .collect::<Vec<_>>();
         pairs
     }
-    
 }

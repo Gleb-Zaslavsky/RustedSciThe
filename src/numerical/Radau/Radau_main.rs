@@ -458,24 +458,46 @@ impl Radau {
         info!("Radau Newton solver converged {:?}", k_solution.as_slice());
         // Extract stage derivatives from solution vector
         self.k_stages = DMatrix::zeros(n_vars, n_stages);
-        for var_j in 0..n_vars {
-            for stage_i in 0..n_stages {
-                let idx = var_j * n_stages + stage_i; // Row-major indexing
-                self.k_stages[(var_j, stage_i)] = k_solution[idx];
-            }
+        let stage_data: Vec<(usize, usize, f64)> = (0..n_vars)
+            .into_par_iter()
+            .flat_map(|var_j| {
+                let k_solution = k_solution.clone();
+                (0..n_stages).into_par_iter().map(move |stage_i| {
+                    let idx = var_j * n_stages + stage_i;
+                    (var_j, stage_i, k_solution[idx])
+                })
+            })
+            .collect();
+
+        for (var_j, stage_i, value) in stage_data {
+            self.k_stages[(var_j, stage_i)] = value;
         }
 
         // Compute stage values Y_i = y_n + h * sum(a_{i,j} * K_j)
-        for stage_i in 0..n_stages {
-            for var_j in 0..n_vars {
-                let mut y_stage = self.y[var_j];
-                for stage_k in 0..n_stages {
-                    let a_ik = self.coefficients.a[(stage_i, stage_k)];
-                    let k_k = self.k_stages[(var_j, stage_k)];
-                    y_stage += dt * a_ik * k_k;
-                }
-                self.y_stages[(var_j, stage_i)] = y_stage;
-            }
+        let y_vec = self.y.clone();
+        let coefficients_a = self.coefficients.a.clone();
+        let k_stages = self.k_stages.clone();
+
+        let stage_values: Vec<(usize, usize, f64)> = (0..n_stages)
+            .into_par_iter()
+            .flat_map(|stage_i| {
+                let y_vec = y_vec.clone();
+                let coefficients_a = coefficients_a.clone();
+                let k_stages = k_stages.clone();
+                (0..n_vars).into_par_iter().map(move |var_j| {
+                    let mut y_stage = y_vec[var_j];
+                    for stage_k in 0..n_stages {
+                        let a_ik = coefficients_a[(stage_i, stage_k)];
+                        let k_k = k_stages[(var_j, stage_k)];
+                        y_stage += dt * a_ik * k_k;
+                    }
+                    (var_j, stage_i, y_stage)
+                })
+            })
+            .collect();
+
+        for (var_j, stage_i, value) in stage_values {
+            self.y_stages[(var_j, stage_i)] = value;
         }
 
         // Compute final solution: y_{n+1} = y_n + h * sum(b_i * K_i)

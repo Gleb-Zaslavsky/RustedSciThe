@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 //use crate::symbolic::shared_expr::Expr;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::utils::{find_char_positions_outside_brackets, find_pair_to_this_bracket};
@@ -422,6 +424,69 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
     }
     Err("Invalid expression format".to_string())
 }
+////////////////////////////DIAGNOSTIC TOOLS//////////////////////////////////////////////////
+#[allow(dead_code)]
+// Optimized single-pass operator finder
+fn find_all_operators_outside_brackets(input: &str) -> Vec<(usize, char)> {
+    let mut operators = Vec::new();
+    let mut bracket_depth = 0;
+
+    for (i, c) in input.chars().enumerate() {
+        match c {
+            '(' => bracket_depth += 1,
+            ')' => bracket_depth -= 1,
+            '+' | '-' | '*' | '/' | '^' if bracket_depth == 0 => {
+                operators.push((i, c));
+            }
+            _ => {}
+        }
+    }
+    operators
+}
+#[allow(dead_code)]
+// Find rightmost operator of specific types
+fn find_rightmost_of_types(operators: &[(usize, char)], types: &[char]) -> Option<(usize, char)> {
+    operators
+        .iter()
+        .filter(|(_, op)| types.contains(op))
+        .last()
+        .copied()
+}
+#[allow(dead_code)]
+fn bracket_matching(input: &str) {
+    let mut stack = 0;
+    let mut closed_bracket_point: HashMap<i32, String> = HashMap::new();
+    for (i, c) in input.chars().enumerate() {
+        // If a '(' is found, it initializes a stack variable to keep track of nested brackets. It also initializes an end_pos variable
+        // to store the position of the closing bracket. It then iterates through the characters of the input string, incrementing
+        //or decrementing the stack variable based on whether it encounters an opening or closing bracket.
+        if c == '(' {
+            stack += 1;
+        } else if c == ')' {
+            stack -= 1;
+            if stack == 0 {
+                closed_bracket_point.insert(
+                    i as i32,
+                    if i + 1 < input.len() {
+                        input[i..i + 5].to_string()
+                    } else {
+                        input[i..].to_string()
+                    },
+                );
+                break;
+            }
+            //  break; // by adding this line, it will stop the loop when the first closing bracket is found, not the last one
+        }
+    } // end for
+    // If the stack variable is 0, it means that the brackets are balanced and the loop has found the matching closing bracket.
+    // If the stack variable is not 0, it means that the brackets are not balanced and the loop has not found the matching closing bracket.
+    if stack == 0 {
+        println!("Brackets are balanced");
+    } else {
+        println!("Brackets are not balanced");
+    }
+    println!("closed_bracket_point: {:?}", closed_bracket_point);
+}
 
 #[cfg(test)]
 mod tests {
@@ -612,5 +677,200 @@ mod tests {
             expr,
             Expr::sin(Box::new(Expr::cos(Box::new(Expr::Var("x".to_string())))))
         );
+    }
+    const  S: &'static str = "((1000 * (((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))) / 0.028)) * ((((2.5 * (1 - ((0.6366197723675814 * (8.314 / (1.5 * 8.314))) * ((2.5 - (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))) / (((1.8 * (((1 + (2.784163998415854 * ((98.1 / T) ^ 0.5))) + (4.4674011002723395 * (98.1 / T))) + (5.568327996831708 * ((98.1 / T) ^ 3.2)))) / (1 + 3.2271366789503664)) + (0.6366197723675814 * ((0.20046507898324112 * 8.314) + (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))))))))) * (1.5 * 8.314)) + (((((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) * (1 + (0.6366197723675814 * ((2.5 - (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))) / (((1.8 * (((1 + (2.784163998415854 * ((98.1 / T) ^ 0.5))) + (4.4674011002723395 * (98.1 / T))) + (5.568327996831708 * ((98.1 / T) ^ 3.2)))) / (1 + 3.2271366789503664)) + (0.6366197723675814 * ((0.20046507898324112 * 8.314) + (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))))))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1)))))) * 8.314)) + ((((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1)))))) * ((Cp - 8.314) - (2.5 * 8.314)))))";
+  
+    #[test]
+    fn parse_very_complex_expression() {
+        bracket_matching(S);
+    }
+
+    #[test]
+    fn parser_test2() {
+    
+        let mass_const = 2.635385020221708e-09;
+        let K1 = 0.6366197723675814;
+        let K2 = 0.20046507898324112;
+        let R = 8.3144598;
+        let denomA = "1.16145/(T/98.1)^0.14874 + 0.52487/exp(0.7732*(T/98.1)) + 2.16178/exp(2.43787*(T/98.1))";
+        let denomA = parse_expression_func(0, denomA).unwrap();
+        let mu = "0.000002669 * (28.0*T)^0.5 / (13.3225 * (1.16145/(T/98.1)^0.14874 + 0.52487/exp(0.7732*(T/98.1)) + 2.16178/exp(2.43787*(T/98.1))))";
+        let mu = parse_expression_func(0, mu).unwrap();
+        let denomB = "1.06036/(T/98.1)^0.1561 + 0.193/exp(0.47635*(T/98.1)) + 1.03587/exp(1.52996*(T/98.1)) + 1.76474/exp(3.89411*(T/98.1))";
+        let denomB = parse_expression_func(0, denomB).unwrap();
+        let mraw = "ro  * (18750000000000000000 * 0.00000000000000000000018973399110000764 / 1349902.3125)* T^1.5 / denomB";
+        let mraw = parse_expression_func(0, mraw).unwrap();
+        let mraw = mraw.substitute_variable("denomB", &denomB);
+        let denomD = "(1.8 * (1 + 2.784163998415854*(98.1/T)^0.5 + 4.4674011002723395*(98.1/T) + 5.568327996831708*(98.1/T)^3.2)) / (1 + 3.2271366789503664)";
+        let denomD = parse_expression_func(0, denomD).unwrap();
+        let q = "((ro *mass*(T ^ 1.5))/denomB )/((0.000002669 * (28.0 * T)^0.5)/(13.3225*denomA))";
+        let q = parse_expression_func(0, q).unwrap();
+        let q = q
+            .substitute_variable("denomA", &denomA)
+            .substitute_variable("denomB", &denomB)
+            .set_variable("mass", mass_const);
+        let A = "2.5*(1 - (K1*(R/(1.5*R))*(2.5 - q) / mu)) / ( denomD + K1*(K2*R + q) )";
+        let A = parse_expression_func(0, A).unwrap();
+        let A = A
+            .substitute_variable("denomD", &denomD)
+            .substitute_variable("q", &q)
+            .substitute_variable("mu", &mu)
+            .set_variable("K1", K1)
+            .set_variable("K2", K2)
+            .set_variable("R", R);
+        let B = "( mraw * (1 + K1*( (2.5 - q) / mu )) ) / mu";
+        let B = parse_expression_func(0, B).unwrap();
+        let B = B
+            .substitute_variable("mraw", &mraw)
+            .substitute_variable("mu", &mu)
+            .substitute_variable("q", &q)
+            .set_variable("K1", K1);
+        let C = "mraw / mu";
+        let C = parse_expression_func(0, C).unwrap();
+        let C = C
+            .substitute_variable("mraw", &mraw)
+            .substitute_variable("mu", &mu);
+
+        let X = "1000 * ( mu / 0.028 )";
+        let X = parse_expression_func(0, X).unwrap();
+        let X = X.substitute_variable("mu", &mu);
+
+        let Expression = "X * ( A*(1.5*R) + B*R + C*( Cp - 3.5*R ) )";
+        let Expression = parse_expression_func(0, Expression).unwrap();
+        let Expression = Expression
+            .substitute_variable("A", &A)
+            .substitute_variable("B", &B)
+            .substitute_variable("C", &C)
+            .substitute_variable("X", &X)
+            .set_variable("R", 8.3144598);
+
+        println!("\n \n \n expr {}", Expression);
+        let lambda = Expression.set_variable("Cp", 10.0).set_variable("ro", 0.01);
+        let lambda_f = lambda.clone().lambdify1D()(400.0);
+        println!("\n \n lambda {} ", lambda_f);
+    }
+    #[test]
+    fn parser_test3(){
+
+                // === Constants ==============================================================
+        let R: f64 = 8.3144598;
+        let K1: f64 = 0.6366197723675814;
+        let K2: f64 = 0.20046507898324112;
+        let mass_const: f64 = 2.635385020221708e-09; // 2.635e−9
+
+        // === Denominator A ==========================================================
+        let denomA_str = "
+            1.16145/(T/98.1)^0.14874
+            + 0.52487/exp(0.7732*(T/98.1))
+            + 2.16178/exp(2.43787*(T/98.1))
+        ";
+        let denomA = parse_expression_func(0, denomA_str).unwrap();
+
+        // === Viscosity μ ============================================================
+        let mu_str = "
+            0.000002669 * (28.0*T)^0.5 /
+            (13.3225 * (
+                1.16145/(T/98.1)^0.14874
+                + 0.52487/exp(0.7732*(T/98.1))
+                + 2.16178/exp(2.43787*(T/98.1))
+            ))
+        ";
+        let mu = parse_expression_func(0, mu_str).unwrap();
+
+        // === Denominator B ==========================================================
+        let denomB_str = "
+            1.06036/(T/98.1)^0.1561
+            + 0.193/exp(0.47635*(T/98.1))
+            + 1.03587/exp(1.52996*(T/98.1))
+            + 1.76474/exp(3.89411*(T/98.1))
+        ";
+        let denomB = parse_expression_func(0, denomB_str).unwrap();
+
+        // === m_raw ================================================================
+        let mraw_str = "
+            ro * (18750000000000000000 * 0.00000000000000000000018973399110000764 / 1349902.3125)
+            * T^1.5 / denomB
+        ";
+        let mut mraw = parse_expression_func(0, mraw_str).unwrap();
+        mraw = mraw.substitute_variable("denomB", &denomB);
+
+        // === Denominator D =========================================================
+        let denomD_str = "
+            (1.8 * (
+                1
+                + 2.784163998415854*(98.1/T)^0.5
+                + 4.4674011002723395*(98.1/T)
+                + 5.568327996831708*(98.1/T)^3.2
+            )) / (1 + 3.2271366789503664)
+        ";
+        let denomD = parse_expression_func(0, denomD_str).unwrap();
+
+        // === q =====================================================================
+        let q_str = "
+            ((ro * mass * (T^1.5)) / denomB)
+            /
+            ((0.000002669 * (28.0 * T)^0.5) / (13.3225 * denomA))
+        ";
+        let mut q = parse_expression_func(0, q_str).unwrap();
+        q = q
+            .substitute_variable("denomA", &denomA)
+            .substitute_variable("denomB", &denomB)
+            .set_variable("mass", mass_const);
+
+        // === A =====================================================================
+        let A_str = "
+            2.5 * (1 - (K1 * (R/(1.5*R)) * (2.5 - q) / mu))
+            / (denomD + K1 * (K2 * R + q))
+        ";
+        let mut A = parse_expression_func(0, A_str).unwrap();
+        A = A
+            .substitute_variable("denomD", &denomD)
+            .substitute_variable("q", &q)
+            .substitute_variable("mu", &mu)
+            .set_variable("K1", K1)
+            .set_variable("K2", K2)
+            .set_variable("R", R);
+
+        // === B =====================================================================
+        let B_str = "
+            (mraw * (1 + K1 * ((2.5 - q) / mu))) / mu
+        ";
+        let mut B = parse_expression_func(0, B_str).unwrap();
+        B = B
+            .substitute_variable("mraw", &mraw)
+            .substitute_variable("mu", &mu)
+            .substitute_variable("q", &q)
+            .set_variable("K1", K1);
+
+        // === C =====================================================================
+        let C_str = "mraw / mu";
+        let mut C = parse_expression_func(0, C_str).unwrap();
+        C = C
+            .substitute_variable("mraw", &mraw)
+            .substitute_variable("mu", &mu);
+
+        // === X =====================================================================
+        let X_str = "1000 * (mu / 0.028)";
+        let mut X = parse_expression_func(0, X_str).unwrap();
+        X = X.substitute_variable("mu", &mu);
+
+        // === Final Expression ======================================================
+        let expr_str = "
+            X * (
+                A * (1.5 * R)
+                + B * R
+                + C * (Cp - 3.5 * R)
+            )
+        ";
+        let mut Expression = parse_expression_func(0, expr_str).unwrap();
+        Expression = Expression
+            .substitute_variable("A", &A)
+            .substitute_variable("B", &B)
+            .substitute_variable("C", &C)
+            .substitute_variable("X", &X)
+            .set_variable("R", R);
+        let lambda = Expression.set_variable("Cp", 10.0).set_variable("ro", 0.01);
+        let lambda_f = lambda.clone().lambdify1D()(400.0);
+        println!("\n \n lambda {} ", lambda_f);
     }
 }

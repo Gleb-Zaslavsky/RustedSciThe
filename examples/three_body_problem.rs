@@ -135,8 +135,7 @@ fn main() {
     if m0 == m2 && m1 == m2 {
         // if all masses are equal, the center of mass velocity should be zero at any time
         let Y: Vec<&str> = unknowns.iter().map(|x| x.as_str()).collect();
-        let center_mass_eq_v_fun =
-            center_mass_eq_v.lambdify_borrowed_thread_safe(Y.as_slice());
+        let center_mass_eq_v_fun = center_mass_eq_v.lambdify_borrowed_thread_safe(Y.as_slice());
         let x0 = 1.0;
         let y0 = 0.0;
         let x1 = 0.0;
@@ -184,7 +183,7 @@ fn main() {
     let max_step = 0.001;
     let rtol = 1e-7;
     let atol = 1e-8;
-    let solver_name = "BDF".to_string();
+    let solver_name = "Radau".to_string();
     let now = Instant::now();
     let mut solver = match solver_name.as_str() {
         "BDF" => {

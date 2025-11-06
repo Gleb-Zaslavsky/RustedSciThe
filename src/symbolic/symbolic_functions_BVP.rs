@@ -1124,8 +1124,10 @@ impl Jacobian {
             for j in left_border..right_border {
                 let symbolic_partial_derivative = &symbolic_jacobian[i][j];
                 if !symbolic_partial_derivative.is_zero() {
-                    let compiled_func =
-                        Expr::lambdify_borrowed_thread_safe(&symbolic_partial_derivative, variable_str.as_slice());
+                    let compiled_func = Expr::lambdify_borrowed_thread_safe(
+                        &symbolic_partial_derivative,
+                        variable_str.as_slice(),
+                    );
                     compiled_jacobian_elements.push((i, j, compiled_func));
                 }
             }
@@ -1153,8 +1155,6 @@ impl Jacobian {
         let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
         self.jac_function = Some(boxed_jac);
     }
-
-
 
     /// Compiles the symbolic Jacobian to a faer SparseColMat evaluator (parallel version 2 - RECOMMENDED).
     ///
@@ -1296,12 +1296,7 @@ impl Jacobian {
         // Pre-compile all functions once (most significant optimization)
         let compiled_functions: Vec<_> = vector_of_functions
             .iter()
-            .map(|func| {
-                Expr::lambdify_borrowed_thread_safe(
-                    &func,
-                    variable_str.as_slice(),
-                )
-            })
+            .map(|func| Expr::lambdify_borrowed_thread_safe(&func, variable_str.as_slice()))
             .collect();
 
         let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
@@ -1315,8 +1310,6 @@ impl Jacobian {
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
         self.residiual_function = boxed_fun;
     }
-
-  
 
     /// Compiles residual functions to a faer Col evaluator (parallel version 2 - RECOMMENDED).
     ///

@@ -1,6 +1,6 @@
-    use crate::symbolic::symbolic_engine::Expr;
-    use crate::{indexed_vars, symbols, indexed_var, indexed_var_2d};
-    use std::f64;
+use crate::symbolic::symbolic_engine::Expr;
+use crate::{indexed_var, indexed_var_2d, indexed_vars, symbols};
+use std::f64;
 //___________________________________TESTS____________________________________
 
 #[cfg(test)]
@@ -336,23 +336,28 @@ mod tests {
 
         assert_eq!(simplified_expr, expected_result);
     }
-        #[test]  
+    #[test]
     fn simplify_of_complex_expression() {
         println!("\n=== Simplification Test for Very Complex Expression ===");
         let x = Expr::Var("x".to_string());
         let y = Expr::Var("y".to_string());
-        let expr =  Expr::arctg(Box::new(x.clone().pow(Expr::Const(3.0)) / (y.clone() + Expr::Const(1.0))));
+        let expr = Expr::arctg(Box::new(
+            x.clone().pow(Expr::Const(3.0)) / (y.clone() + Expr::Const(1.0)),
+        ));
         println!("Original Expression: {}", expr);
-        let func1 = expr.lambdify1(&["x", "y", ]);
+        let func1 = expr.lambdify1(&["x", "y"]);
         let simplified_expr = expr.simplify();
         println!("\n Simplified Expression: {}", simplified_expr);
-        let func_simplified = simplified_expr.lambdify1(&["x", "y",]);
-        let test_args = vec![1.5, 2.0,];
+        let func_simplified = simplified_expr.lambdify1(&["x", "y"]);
+        let test_args = vec![1.5, 2.0];
         let result_original = func1(&test_args);
         let result_simplified = func_simplified(&test_args);
-        assert!((result_original - result_simplified).abs() < 1e-10, "Results differ: {} vs {}", result_original, result_simplified);
-
-
+        assert!(
+            (result_original - result_simplified).abs() < 1e-10,
+            "Results differ: {} vs {}",
+            result_original,
+            result_simplified
+        );
     }
     #[test]
     fn test_eval_expression_var() {
@@ -472,8 +477,12 @@ mod tests {
         let expected = e5.clone().ln() + (x.clone() - e5.clone()) / e5.clone()
             - (x.clone() - e5.clone()).pow(Expr::Const(2.0))
                 / (Expr::Const(2.0) * e5.clone().pow(Expr::Const(2.0)));
-   
-        println!("result {} \n expected result {}", result, expected.simplify());
+
+        println!(
+            "result {} \n expected result {}",
+            result,
+            expected.simplify()
+        );
         let taylor_eval = result.lambdify1D()(3.0);
         let expected_eval = expected.lambdify1D()(3.0);
         approx::assert_relative_eq!(taylor_eval, expected_eval, epsilon = 1e-5);
@@ -492,18 +501,21 @@ mod tests {
         let test_val = 3.0;
         let original_result = series.set_variable("x", test_val).simplify();
         let simplified_result = simplified.set_variable("x", test_val).simplify();
-        
+
         // Both should evaluate to the same numerical value
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_result, simplified_result) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed the mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed the mathematical value"
+            );
         }
-        
+
         // The simplified form should be more compact than the original
         let simplified_str = format!("{}", simplified);
         let original_str = format!("{}", series);
         println!("Original: {}", original_str);
         println!("Simplified: {}", simplified_str);
-        
+
         // At minimum, constants should be evaluated
         assert!(simplified_str.contains("1.609") || simplified_str.contains("ln"));
     }
@@ -572,7 +584,7 @@ mod tests {
     }
 
     // NEW SIMPLIFICATION TESTS
-    
+
     #[test]
     fn test_like_terms_collection() {
         let x = Expr::Var("x".to_string());
@@ -668,12 +680,12 @@ mod tests {
     fn test_polynomial_collection_complex() {
         let x = Expr::Var("x".to_string());
         // x^2 + 2*x^2 + 3*x + x = 3*x^2 + 4*x
-        let expr = x.clone().pow(Expr::Const(2.0)) 
+        let expr = x.clone().pow(Expr::Const(2.0))
             + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0))
             + Expr::Const(3.0) * x.clone()
             + x.clone();
         let simplified = expr.simplify();
-        
+
         // Check that it contains the right terms (order may vary)
         let simplified_str = format!("{}", simplified);
         assert!(simplified_str.contains("3") && simplified_str.contains("4"));
@@ -737,7 +749,7 @@ mod tests {
         // (x + 1)*(x + 1) expanded and simplified
         let expr = x.clone() * x.clone() + x.clone() + x.clone() + Expr::Const(1.0);
         let simplified = expr.simplify();
-        
+
         // Should collect like terms: x^2 + 2*x + 1
         let simplified_str = format!("{}", simplified);
         assert!(simplified_str.contains("2"));
@@ -762,54 +774,72 @@ mod tests {
             + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0)) * y.clone()
             + x.clone() * y.clone().pow(Expr::Const(2.0));
         let simplified = expr.simplify();
-        
+
         // Check that coefficients are collected properly
         let simplified_str = format!("{}", simplified);
         assert!(simplified_str.contains("3"));
     }
 
     // COMPLEX POLYNOMIAL TESTS WITH TRANSCENDENTAL FUNCTIONS
-    
+
     #[test]
     fn test_polynomial_with_sin() {
         let x = Expr::Var("x".to_string());
         // sin(x) + 2*x + 3*x - should preserve sin(x) and simplify polynomial part
-        let expr = Expr::sin(Box::new(x.clone())) + Expr::Const(2.0) * x.clone() + Expr::Const(3.0) * x.clone();
+        let expr = Expr::sin(Box::new(x.clone()))
+            + Expr::Const(2.0) * x.clone()
+            + Expr::Const(3.0) * x.clone();
         let simplified = expr.simplify();
-        
+
         // Test that mathematical meaning is preserved
         let test_val = 1.5;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should contain both sin and polynomial terms
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin"), "Lost sin function: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin"),
+            "Lost sin function: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_polynomial_with_exp_and_ln() {
         let x = Expr::Var("x".to_string());
         // exp(x) + ln(x) + x^2 + 2*x^2 - should preserve transcendental functions
-        let expr = x.clone().exp() + x.clone().ln() + x.clone().pow(Expr::Const(2.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0));
+        let expr = x.clone().exp()
+            + x.clone().ln()
+            + x.clone().pow(Expr::Const(2.0))
+            + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0));
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 2.0;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("exp") && simplified_str.contains("ln"), 
-                "Lost transcendental functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("exp") && simplified_str.contains("ln"),
+            "Lost transcendental functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -821,67 +851,89 @@ mod tests {
         let denominator = x.clone() + Expr::Const(1.0);
         let expr = numerator1 / denominator.clone() + numerator2 / denominator;
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.5;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve all functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") && simplified_str.contains("cos"), 
-                "Lost trigonometric functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") && simplified_str.contains("cos"),
+            "Lost trigonometric functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_nested_polynomial_with_functions() {
         let x = Expr::Var("x".to_string());
         // ln(x^2 + 2*x + 1) + exp(3*x + x) - nested polynomial inside functions
-        let poly_inside_ln = x.clone().pow(Expr::Const(2.0)) + Expr::Const(2.0) * x.clone() + Expr::Const(1.0);
+        let poly_inside_ln =
+            x.clone().pow(Expr::Const(2.0)) + Expr::Const(2.0) * x.clone() + Expr::Const(1.0);
         let poly_inside_exp = Expr::Const(3.0) * x.clone() + x.clone();
         let expr = poly_inside_ln.ln() + poly_inside_exp.exp();
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 1.0;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve structure
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("ln") && simplified_str.contains("exp"), 
-                "Lost transcendental functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("ln") && simplified_str.contains("exp"),
+            "Lost transcendental functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_mixed_polynomial_division() {
         let x = Expr::Var("x".to_string());
         // (x^3 + 2*x^2 + x) / (sin(x) + x) - polynomial divided by mixed expression
-        let numerator = x.clone().pow(Expr::Const(3.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0)) + x.clone();
+        let numerator = x.clone().pow(Expr::Const(3.0))
+            + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0))
+            + x.clone();
         let denominator = Expr::sin(Box::new(x.clone())) + x.clone();
         let expr = numerator / denominator;
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.8;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve division structure
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin"), "Lost sin function: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin"),
+            "Lost sin function: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -889,24 +941,34 @@ mod tests {
         let x = Expr::Var("x".to_string());
         let a = Expr::Const(2.0);
         // Taylor series: f(a) + f'(a)*(x-a) + f''(a)*(x-a)^2/2! where f(x) = x^2 + sin(x)
-        let taylor = a.clone().pow(Expr::Const(2.0)) + Expr::sin(Box::new(a.clone()))
-                   + (Expr::Const(2.0) * a.clone() + Expr::cos(Box::new(a.clone()))) * (x.clone() - a.clone())
-                   + (Expr::Const(2.0) - Expr::sin(Box::new(a.clone()))) * (x.clone() - a.clone()).pow(Expr::Const(2.0)) / Expr::Const(2.0);
+        let taylor = a.clone().pow(Expr::Const(2.0))
+            + Expr::sin(Box::new(a.clone()))
+            + (Expr::Const(2.0) * a.clone() + Expr::cos(Box::new(a.clone())))
+                * (x.clone() - a.clone())
+            + (Expr::Const(2.0) - Expr::sin(Box::new(a.clone())))
+                * (x.clone() - a.clone()).pow(Expr::Const(2.0))
+                / Expr::Const(2.0);
         let simplified = taylor.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 2.1;
         let original_eval = taylor.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve trigonometric functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") || simplified_str.contains("cos"), 
-                "Lost trigonometric functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") || simplified_str.contains("cos"),
+            "Lost trigonometric functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -915,25 +977,32 @@ mod tests {
         let y = Expr::Var("y".to_string());
         // sin(x*y) + x^2*y + 2*x^2*y + exp(x+y) - multivariate with mixed terms
         let expr = Expr::sin(Box::new(x.clone() * y.clone()))
-                 + x.clone().pow(Expr::Const(2.0)) * y.clone()
-                 + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0)) * y.clone()
-                 + (x.clone() + y.clone()).exp();
+            + x.clone().pow(Expr::Const(2.0)) * y.clone()
+            + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0)) * y.clone()
+            + (x.clone() + y.clone()).exp();
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let original_func = expr.lambdify1(&["x", "y"]);
         let simplified_func = simplified.lambdify1(&["x", "y"]);
         let test_args = vec![1.0, 0.5];
         let orig_result = original_func(&test_args);
         let simp_result = simplified_func(&test_args);
-        
-        assert!((orig_result - simp_result).abs() < 1e-10, 
-                "Simplification changed mathematical value: {} vs {}", orig_result, simp_result);
-        
+
+        assert!(
+            (orig_result - simp_result).abs() < 1e-10,
+            "Simplification changed mathematical value: {} vs {}",
+            orig_result,
+            simp_result
+        );
+
         // Should preserve all functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") && simplified_str.contains("exp"), 
-                "Lost transcendental functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") && simplified_str.contains("exp"),
+            "Lost transcendental functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -941,46 +1010,66 @@ mod tests {
         let x = Expr::Var("x".to_string());
         // (ln(x) + x^2) / (exp(x) + x^3 + 2*x^3) - complex fraction that shouldn't be over-simplified
         let numerator = x.clone().ln() + x.clone().pow(Expr::Const(2.0));
-        let denominator = x.clone().exp() + x.clone().pow(Expr::Const(3.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(3.0));
+        let denominator = x.clone().exp()
+            + x.clone().pow(Expr::Const(3.0))
+            + Expr::Const(2.0) * x.clone().pow(Expr::Const(3.0));
         let expr = numerator / denominator;
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 1.5;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve transcendental functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("ln") && simplified_str.contains("exp"), 
-                "Lost transcendental functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("ln") && simplified_str.contains("exp"),
+            "Lost transcendental functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_zero_coefficient_elimination_with_functions() {
         let x = Expr::Var("x".to_string());
         // sin(x) + 0*x^2 + cos(x) - zero coefficient should be eliminated but functions preserved
-        let expr = Expr::sin(Box::new(x.clone())) + Expr::Const(0.0) * x.clone().pow(Expr::Const(2.0)) + Expr::cos(Box::new(x.clone()));
+        let expr = Expr::sin(Box::new(x.clone()))
+            + Expr::Const(0.0) * x.clone().pow(Expr::Const(2.0))
+            + Expr::cos(Box::new(x.clone()));
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.7;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve both trig functions and eliminate zero term
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") && simplified_str.contains("cos"), 
-                "Lost trigonometric functions: {}", simplified_str);
-        assert!(!simplified_str.contains("0"), "Failed to eliminate zero coefficient: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") && simplified_str.contains("cos"),
+            "Lost trigonometric functions: {}",
+            simplified_str
+        );
+        assert!(
+            !simplified_str.contains("0"),
+            "Failed to eliminate zero coefficient: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -988,45 +1077,61 @@ mod tests {
         let x = Expr::Var("x".to_string());
         // arctg(x^2 + x) + x^3 + 2*x^3 - mixed arctangent and polynomial
         let poly_inside = x.clone().pow(Expr::Const(2.0)) + x.clone();
-        let expr = Expr::arctg(Box::new(poly_inside)) + x.clone().pow(Expr::Const(3.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(3.0));
+        let expr = Expr::arctg(Box::new(poly_inside))
+            + x.clone().pow(Expr::Const(3.0))
+            + Expr::Const(2.0) * x.clone().pow(Expr::Const(3.0));
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.5;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve arctangent function
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("arctg"), "Lost arctangent function: {}", simplified_str);
+        assert!(
+            simplified_str.contains("arctg"),
+            "Lost arctangent function: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_power_inside_transcendental() {
         let x = Expr::Var("x".to_string());
         // sin(x^2 + 3*x^2) + cos(2*x + x) - polynomial simplification inside functions
-        let poly1 = x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone().pow(Expr::Const(2.0));
+        let poly1 =
+            x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone().pow(Expr::Const(2.0));
         let poly2 = Expr::Const(2.0) * x.clone() + x.clone();
         let expr = Expr::sin(Box::new(poly1)) + Expr::cos(Box::new(poly2));
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.3;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve both trig functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") && simplified_str.contains("cos"), 
-                "Lost trigonometric functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") && simplified_str.contains("cos"),
+            "Lost trigonometric functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
@@ -1035,82 +1140,104 @@ mod tests {
         // exp(ln(x^2 + x) + sin(x)) + x^4 + 3*x^4 - deeply nested with polynomial
         let inner_poly = x.clone().pow(Expr::Const(2.0)) + x.clone();
         let nested = inner_poly.ln() + Expr::sin(Box::new(x.clone()));
-        let outer_poly = x.clone().pow(Expr::Const(4.0)) + Expr::Const(3.0) * x.clone().pow(Expr::Const(4.0));
+        let outer_poly =
+            x.clone().pow(Expr::Const(4.0)) + Expr::Const(3.0) * x.clone().pow(Expr::Const(4.0));
         let expr = nested.exp() + outer_poly;
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 1.2;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve all nested functions
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("exp") && simplified_str.contains("ln") && simplified_str.contains("sin"), 
-                "Lost nested functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("exp")
+                && simplified_str.contains("ln")
+                && simplified_str.contains("sin"),
+            "Lost nested functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_rational_polynomial_with_trig() {
         let x = Expr::Var("x".to_string());
         // (x^2 + 2*x^2) / (sin(x) + cos(x)) + (3*x + x) / (sin(x) + cos(x))
-        let num1 = x.clone().pow(Expr::Const(2.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0));
+        let num1 =
+            x.clone().pow(Expr::Const(2.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.0));
         let num2 = Expr::Const(3.0) * x.clone() + x.clone();
         let denom = Expr::sin(Box::new(x.clone())) + Expr::cos(Box::new(x.clone()));
         let expr = num1 / denom.clone() + num2 / denom;
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness
         let test_val = 0.6;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "Simplification changed mathematical value");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "Simplification changed mathematical value"
+            );
         }
-        
+
         // Should preserve trigonometric functions in denominator
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("sin") && simplified_str.contains("cos"), 
-                "Lost trigonometric functions: {}", simplified_str);
+        assert!(
+            simplified_str.contains("sin") && simplified_str.contains("cos"),
+            "Lost trigonometric functions: {}",
+            simplified_str
+        );
     }
 
     #[test]
     fn test_preservation_principle() {
         let x = Expr::Var("x".to_string());
         // Complex expression that can't be fully simplified but must be preserved
-        let expr = x.clone().exp() / (x.clone().ln() + Expr::sin(Box::new(x.clone()))) + x.clone().pow(Expr::Const(2.0)) * Expr::cos(Box::new(x.clone()));
+        let expr = x.clone().exp() / (x.clone().ln() + Expr::sin(Box::new(x.clone())))
+            + x.clone().pow(Expr::Const(2.0)) * Expr::cos(Box::new(x.clone()));
         let simplified = expr.simplify();
-        
+
         // Test mathematical correctness - this is the key principle
         let test_val = 2.5;
         let original_eval = expr.set_variable("x", test_val).simplify();
         let simplified_eval = simplified.set_variable("x", test_val).simplify();
-        
+
         if let (Expr::Const(orig), Expr::Const(simp)) = (original_eval, simplified_eval) {
-            assert!((orig - simp).abs() < 1e-10, "CRITICAL: Simplification changed mathematical value - this violates the preservation principle!");
+            assert!(
+                (orig - simp).abs() < 1e-10,
+                "CRITICAL: Simplification changed mathematical value - this violates the preservation principle!"
+            );
         }
-        
+
         // Should preserve all transcendental functions even if it can't simplify much
         let simplified_str = format!("{}", simplified);
-        assert!(simplified_str.contains("exp") && simplified_str.contains("ln") && 
-                simplified_str.contains("sin") && simplified_str.contains("cos"), 
-                "Lost transcendental functions - preservation principle violated: {}", simplified_str);
+        assert!(
+            simplified_str.contains("exp")
+                && simplified_str.contains("ln")
+                && simplified_str.contains("sin")
+                && simplified_str.contains("cos"),
+            "Lost transcendental functions - preservation principle violated: {}",
+            simplified_str
+        );
     }
-   #[test]
+    #[test]
     fn test_multple_vars1() {
-
-                let expr = Expr::Var("x".to_string()) * Expr::Const(3.0)
+        let expr = Expr::Var("x".to_string()) * Expr::Const(3.0)
             + Expr::Var("y".to_string()) * Expr::Var("z".to_string())
             + Expr::Const(2.0) * Expr::Var("x".to_string());
         let simplified = expr.simplify();
         println!("Simplified: {}", simplified);
-
-
     }
     #[test]
     fn test_simplify_with_variables_fix() {
@@ -1174,4 +1301,6 @@ mod tests {
             "x*(2*3)/(4*1) should simplify to 1.5*x"
         );
     }
+    #[test]
+    fn taylor_series_test() {}
 }
