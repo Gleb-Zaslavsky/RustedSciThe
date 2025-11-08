@@ -236,13 +236,12 @@ mod tests {
         let f = Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(2.0)));
         let f_cast = Box::new(f) as Box<dyn SymbolicType>;
         let df_dx = &f_cast.diff("x");
-        let df_dx_native = df_dx.to_native();
+        let df_dx_native = df_dx.to_native().simplify();
 
         let _degree = Box::new(Expr::Const(1.0));
         let C = Expr::Const(2.0);
-        let C1 = Expr::Const(1.0);
 
-        let expected_result = C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
+        let expected_result = C.clone() * x;
         //  Mul(Mul(Const(2.0), Pow(Var("x"), Sub(Const(2.0), Const(1.0)))), Const(1.0)) Box::new(Expr::Mul(Box::new(Expr::Const(2.0)), Box::new(x.clone())))
         println!("df_dx {:?} ", df_dx_native);
         println!("expected_result {:?} ", expected_result);

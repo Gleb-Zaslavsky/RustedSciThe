@@ -93,6 +93,7 @@ use nalgebra::{DMatrix, DVector};
 use std::ops::{Add, Index, IndexMut, Mul, Sub};
 
 /// Helper trait for mathematical equivalence checking
+#[allow(dead_code)]
 trait MathEquivalent {
     fn is_mathematically_equal(&self, other: &Self) -> bool;
 }
@@ -158,7 +159,7 @@ impl ExprVector {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
-    pub fn iter(&self) -> std::slice::Iter<Expr> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Expr> {
         self.data.iter()
     }
     /// Element access
@@ -209,7 +210,7 @@ impl ExprVector {
         let evaluated: Vec<f64> = self
             .data
             .iter()
-            .map(|expr| expr.eval_expression(vars.to_vec(), values))
+            .map(|expr| expr.eval_expression(vars, values))
             .collect();
         DVector::from_vec(evaluated)
     }
@@ -257,7 +258,7 @@ impl ExprVector {
             let var_refs: Vec<&str> = vars_owned.iter().map(|s| s.as_str()).collect();
             let evaluated: Vec<f64> = exprs
                 .iter()
-                .map(|expr| expr.eval_expression(var_refs.clone(), values))
+                .map(|expr| expr.eval_expression(var_refs.as_slice(), values))
                 .collect();
             DVector::from_vec(evaluated)
         })
@@ -711,7 +712,7 @@ impl ExprMatrix {
         let mut result = DMatrix::zeros(self.nrows, self.ncols);
         for i in 0..self.nrows {
             for j in 0..self.ncols {
-                result[(i, j)] = self.data[i][j].eval_expression(vars.to_vec(), values);
+                result[(i, j)] = self.data[i][j].eval_expression(vars, values);
             }
         }
         result
@@ -729,7 +730,7 @@ impl ExprMatrix {
             let mut result = DMatrix::zeros(nrows, ncols);
             for i in 0..nrows {
                 for j in 0..ncols {
-                    result[(i, j)] = data[i][j].eval_expression(var_refs.clone(), values);
+                    result[(i, j)] = data[i][j].eval_expression(var_refs.as_slice(), values);
                 }
             }
             result

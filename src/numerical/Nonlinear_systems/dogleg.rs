@@ -219,7 +219,7 @@ impl DoglegState {
     pub fn preloop(
         &mut self,
         jacobian: &DMatrix<f64>,
-        residual: &DVector<f64>,
+        _residual: &DVector<f64>,
         gradient: &DVector<f64>,
         diag: &DVector<f64>,
     ) -> Result<(), DoglegError> {

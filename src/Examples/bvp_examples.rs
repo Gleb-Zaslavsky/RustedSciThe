@@ -2,7 +2,6 @@
 use std::collections::HashMap;
 
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions_BVP::Jacobian;
 
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
@@ -10,7 +9,6 @@ use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
 
 use nalgebra::{DMatrix, DVector};
-use sprs::{CsMat, CsVec};
 
 pub fn bvp_examples(example: usize) {
     match example {
@@ -654,7 +652,7 @@ pub fn bvp_examples(example: usize) {
             let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let strategy = "Damped".to_string(); //
 
-            let strategy_params = match strategy.as_str() {
+            let _strategy_params = match strategy.as_str() {
                 "Naive" => None,
                 "Damped" => Some(HashMap::from([
                     ("max_jac".to_string(), None),

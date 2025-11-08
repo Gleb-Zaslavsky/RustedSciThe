@@ -30,7 +30,6 @@
 
 use crate::symbolic::symbolic_engine::Expr;
 use std::collections::{BTreeMap, HashMap};
-use std::f64::consts::PI;
 
 impl Expr {
     //___________________________________SIMPLIFICATION____________________________________
@@ -1002,6 +1001,7 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
 ///
 /// # Returns
 /// Expression in Horner form
+#[allow(dead_code)]
 fn horner_univariate(var: &str, terms: Vec<(i32, f64)>) -> Expr {
     use Expr::*;
     if terms.is_empty() {

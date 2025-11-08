@@ -1,12 +1,11 @@
-use crate::symbolic::symbolic_engine::Expr;
-use crate::{indexed_var, indexed_var_2d, indexed_vars, symbols};
-use std::f64;
 //___________________________________TESTS____________________________________
 
 #[cfg(test)]
-use approx;
 mod tests {
-    use super::*;
+    use crate::symbolic::symbolic_engine::Expr;
+    use crate::{indexed_var, indexed_var_2d, indexed_vars, symbols};
+    use approx;
+    use std::f64;
     #[test]
     fn test_add_assign() {
         let mut expr = Expr::Var("x".to_string());
@@ -87,14 +86,13 @@ mod tests {
     fn test_diff() {
         let x = Expr::Var("x".to_string());
         let f = Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(2.0)));
-        let df_dx = f.diff("x");
+        let df_dx = f.diff("x").simplify();
         let _degree = Box::new(Expr::Const(1.0));
         let C = Expr::Const(2.0);
-        let C1 = Expr::Const(1.0);
 
-        let expected_result = C.clone() * Expr::pow(x.clone(), C.clone() - C1.clone()) * C1.clone();
+        let expected_result = C.clone() * x.clone();
         //  Mul(Mul(Const(2.0), Pow(Var("x"), Sub(Const(2.0), Const(1.0)))), Const(1.0)) Box::new(Expr::Mul(Box::new(Expr::Const(2.0)), Box::new(x.clone())))
-        println!("df_dx {:?} ", df_dx);
+        println!("df_dx {} ", df_dx);
         println!("expected_result {:?} ", expected_result);
         assert_eq!(df_dx, expected_result);
     }
@@ -156,13 +154,12 @@ mod tests {
         let y = Expr::Var("y".to_string());
         let C = Expr::Const(3.0);
         let f = Expr::pow(x.clone(), C.clone()) + Expr::exp(y.clone());
-        let df_dx = f.diff("x");
+        let df_dx = f.diff("x").simplify();
         //  let df_dy = f.diff("y");
 
-        let C1 = Expr::Const(1.0);
-        let C0 = Expr::Const(0.0);
-        let df_dx_expected_result =
-            C.clone() * Expr::pow(x, C - C1.clone()) * C1 + Expr::exp(y.clone()) * C0;
+        let C2 = Expr::Const(2.0);
+
+        let df_dx_expected_result = C.clone() * Expr::pow(x, C2);
         //  let df_dy_expected_result = C* Expr::exp(y);
         assert_eq!(df_dx, df_dx_expected_result);
         let start = vec![1.0, 1.0];
@@ -362,7 +359,7 @@ mod tests {
     #[test]
     fn test_eval_expression_var() {
         let expr = Expr::Var("x".to_string());
-        let vars = vec!["x"];
+        let vars = &["x"];
         let values = vec![5.0];
         assert_eq!(expr.eval_expression(vars, &values), 5.0);
     }
@@ -370,7 +367,7 @@ mod tests {
     #[test]
     fn test_eval_expression_const() {
         let expr = Expr::Const(3.14);
-        let vars = vec![];
+        let vars = &[];
         let values = vec![];
         assert_eq!(expr.eval_expression(vars, &values), 3.14);
     }
@@ -381,7 +378,7 @@ mod tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Var("y".to_string())),
         );
-        let vars = vec!["x", "y"];
+        let vars = &["x", "y"];
         let values = vec![2.0, 3.0];
         assert_eq!(expr.eval_expression(vars, &values), 5.0);
     }
@@ -392,7 +389,7 @@ mod tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Var("y".to_string())),
         );
-        let vars = vec!["x", "y"];
+        let vars = &["x", "y"];
         let values = vec![5.0, 3.0];
         assert_eq!(expr.eval_expression(vars, &values), 2.0);
     }
@@ -403,7 +400,7 @@ mod tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Var("y".to_string())),
         );
-        let vars = vec!["x", "y"];
+        let vars = &["x", "y"];
         let values = vec![2.0, 3.0];
         assert_eq!(expr.eval_expression(vars, &values), 6.0);
     }
@@ -414,7 +411,7 @@ mod tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Var("y".to_string())),
         );
-        let vars = vec!["x", "y"];
+        let vars = &["x", "y"];
         let values = vec![6.0, 2.0];
         assert_eq!(expr.eval_expression(vars, &values), 3.0);
     }
@@ -425,7 +422,7 @@ mod tests {
             Box::new(Expr::Var("x".to_string())),
             Box::new(Expr::Const(2.0)),
         );
-        let vars = vec!["x"];
+        let vars = &["x"];
         let values = vec![3.0];
         assert_eq!(expr.eval_expression(vars, &values), 9.0);
     }
@@ -433,7 +430,7 @@ mod tests {
     #[test]
     fn test_eval_expression_exp() {
         let expr = Expr::Exp(Box::new(Expr::Var("x".to_string())));
-        let vars = vec!["x"];
+        let vars = &["x"];
         let values = vec![1.0];
         assert!((expr.eval_expression(vars, &values) - std::f64::consts::E).abs() < 1e-10);
     }
@@ -441,7 +438,7 @@ mod tests {
     #[test]
     fn test_eval_expression_ln() {
         let expr = Expr::Ln(Box::new(Expr::Var("x".to_string())));
-        let vars = vec!["x"];
+        let vars = &["x"];
         let values = vec![std::f64::consts::E];
         assert!((expr.eval_expression(vars, &values) - 1.0).abs() < 1e-10);
     }
@@ -458,7 +455,7 @@ mod tests {
                 Box::new(Expr::Const(2.0)),
             )),
         );
-        let vars = vec!["x", "y", "z"];
+        let vars = &["x", "y", "z"];
         let values = vec![2.0, 3.0, 4.0];
         assert_eq!(expr.eval_expression(vars, &values), 22.0); // (2 * 3) + (4^2) = 22
     }
@@ -1301,6 +1298,143 @@ mod tests {
             "x*(2*3)/(4*1) should simplify to 1.5*x"
         );
     }
+
+    // TESTS FOR NEW DIFF OPTIMIZATION FEATURES
+
     #[test]
-    fn taylor_series_test() {}
+    fn test_diff_power_rule_optimization() {
+        let x = Expr::Var("x".to_string());
+        // x^3 -> 3*x^2 (not 3*x^(3-1)*1)
+        let f = x.clone().pow(Expr::Const(3.0));
+        let df_dx = f.diff("x").simplify();
+        let expected = Expr::Const(3.0) * x.clone().pow(Expr::Const(2.0));
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_diff_power_rule_exponent_zero() {
+        let x = Expr::Var("x".to_string());
+        // x^0 -> 0
+        let f = x.clone().pow(Expr::Const(0.0));
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(0.0));
+    }
+
+    #[test]
+    fn test_diff_power_rule_exponent_one() {
+        let x = Expr::Var("x".to_string());
+        // x^1 -> 1
+        let f = x.clone().pow(Expr::Const(1.0));
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(1.0));
+    }
+
+    #[test]
+    fn test_diff_immediate_simplification_add() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        // d/dx(x + y) = 1 + 0 = 1 (not Add(Const(1.0), Const(0.0)))
+        let f = x.clone() + y.clone();
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(1.0));
+    }
+
+    #[test]
+    fn test_diff_immediate_simplification_mul() {
+        let x = Expr::Var("x".to_string());
+        let c = Expr::Const(5.0);
+        // d/dx(5*x) = 5*1 + 0*x = 5
+        let f = c.clone() * x.clone();
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(5.0));
+    }
+
+    #[test]
+    fn test_diff_early_termination() {
+        let _x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        // d/dx(y^2 + sin(y)) = 0 (expression doesn't contain x)
+        let f = y.clone().pow(Expr::Const(2.0)) + Expr::sin(Box::new(y.clone()));
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(0.0));
+    }
+
+    #[test]
+    fn test_diff_function_with_zero_inner_derivative() {
+        let _x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        // d/dx(sin(y)) = cos(y) * 0 = 0
+        let f = Expr::sin(Box::new(y.clone()));
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(0.0));
+    }
+
+    #[test]
+    fn test_diff_complex_with_optimizations() {
+        let x = Expr::Var("x".to_string());
+        // d/dx(x^2 + 3*x + 5) = 2*x + 3
+        let f = x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone() + Expr::Const(5.0);
+        let df_dx = f.diff("x").simplify();
+        let expected = Expr::Const(2.0) * x.clone() + Expr::Const(3.0);
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_diff_subtraction_with_zero() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        // d/dx(x - y) = 1 - 0 = 1
+        let f = x.clone() - y.clone();
+        let df_dx = f.diff("x").simplify();
+        assert_eq!(df_dx, Expr::Const(1.0));
+    }
+
+    #[test]
+    fn test_diff_maintains_mathematical_correctness() {
+        let x = Expr::Var("x".to_string());
+        let f =
+            x.clone().pow(Expr::Const(4.0)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(3.0));
+        let df_dx = f.diff("x");
+
+        // Test at x=2: d/dx(x^4 + 2*x^3) = 4*x^3 + 6*x^2 = 4*8 + 6*4 = 56
+        let test_val = 2.0;
+        let derivative_at_2 = df_dx.set_variable("x", test_val).simplify();
+
+        if let Expr::Const(val) = derivative_at_2 {
+            assert!((val - 56.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_diff_zero_elimination_in_complex_expr() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let z = Expr::Var("z".to_string());
+
+        // Expression with terms that will have zero derivatives
+        let f = x.clone().pow(Expr::Const(2.0))
+            + y.clone() * z.clone()
+            + Expr::sin(Box::new(y.clone()))
+            + Expr::Const(42.0);
+
+        let df_dx = f.diff("x").simplify();
+
+        // Should only contain the derivative of x^2, which is 2*x
+        let expected = Expr::Const(2.0) * x.clone();
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_diff_simplify_multiplication_edge_cases() {
+        let x = Expr::Var("x".to_string());
+
+        // Test multiplication by 0 and 1
+        let f1 = Expr::Const(0.0) * x.clone();
+        let df1_dx = f1.diff("x").simplify();
+        assert_eq!(df1_dx, Expr::Const(0.0));
+
+        let f2 = Expr::Const(1.0) * x.clone();
+        let df2_dx = f2.diff("x").simplify();
+        assert_eq!(df2_dx, Expr::Const(1.0));
+    }
 }

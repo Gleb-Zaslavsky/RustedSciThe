@@ -206,7 +206,7 @@ impl Jacobian_sci_faer {
 
                         vector_of_functions
                             .iter()
-                            .map(|func| func.eval_expression(all_var_names.clone(), &args))
+                            .map(|func| func.eval_expression(all_var_names.as_slice(), &args))
                             .collect()
                     })
                     .collect();
@@ -404,8 +404,8 @@ impl Jacobian_sci_faer {
                                     all_var_names.extend(variable_str.iter().map(|s| s.as_str()));
                                     all_var_names.extend(param_str.iter().map(|s| s.as_str()));
 
-                                    let value =
-                                        jac_dy[i][col].eval_expression(all_var_names, &args);
+                                    let value = jac_dy[i][col]
+                                        .eval_expression(all_var_names.as_slice(), &args);
                                     if value.abs() > 1e-15 {
                                         triplets_mutex
                                             .lock()
@@ -453,7 +453,7 @@ impl Jacobian_sci_faer {
                                                 .extend(param_str.iter().map(|s| s.as_str()));
 
                                             let value = jac_dp_vec[i][param_idx]
-                                                .eval_expression(all_var_names, &args);
+                                                .eval_expression(all_var_names.as_slice(), &args);
                                             if value.abs() > 1e-15 {
                                                 triplets.push(Triplet::new(i, param_idx, value));
                                             }

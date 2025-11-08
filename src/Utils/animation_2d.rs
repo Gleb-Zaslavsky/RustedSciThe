@@ -12,7 +12,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust, ignore
 //! use nalgebra::{DMatrix, DVector};
 //! use your_crate::Utils::animation_2d::*;
 //!
@@ -89,7 +89,7 @@ struct LineData2D {
 /// * `speed` - Optional animation speed multiplier. Defaults to 1.0
 ///
 /// # Example
-/// ```rust
+/// ```rust, ignore
 /// let (sine_points, sine_times) = generate_sine_wave_2d(500, 2.0, 3.0, 10.0);
 /// create_2d_animation(
 ///     sine_points,

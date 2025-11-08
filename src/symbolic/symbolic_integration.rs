@@ -739,8 +739,8 @@ impl Expr {
     /// Definite integration using the fundamental theorem of calculus
     pub fn definite_integrate(&self, var: &str, lower: f64, upper: f64) -> Result<f64, String> {
         let indefinite = self.integrate(var)?;
-        let upper_val = indefinite.eval_expression(vec![var], &[upper]);
-        let lower_val = indefinite.eval_expression(vec![var], &[lower]);
+        let upper_val = indefinite.eval_expression(&[var], &[upper]);
+        let lower_val = indefinite.eval_expression(&[var], &[lower]);
         Ok(upper_val - lower_val)
     }
 
@@ -950,8 +950,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 2.0; // 2^2/2 + 3*2 = 2 + 6 = 8
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         assert_relative_eq!(result_val, 8.0, epsilon = 1e-10);
     }
@@ -968,8 +968,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 3.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -987,8 +987,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 2.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1003,8 +1003,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 2.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1019,8 +1019,8 @@ mod integration_tests {
 
         // Test by evaluating at a point (x > 0)
         let x_val = 2.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1035,8 +1035,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 4.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1050,8 +1050,8 @@ mod integration_tests {
 
         // Test by evaluating at a point (x > 0)
         let x_val = std::f64::consts::E;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1066,8 +1066,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 1.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1082,8 +1082,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 0.5;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1098,8 +1098,8 @@ mod integration_tests {
 
         // Test by evaluating at a point (x > 0)
         let x_val = 2.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1117,8 +1117,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 2.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1183,8 +1183,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 1.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1200,8 +1200,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = std::f64::consts::PI / 4.0; // π/4
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1216,8 +1216,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = std::f64::consts::PI / 6.0; // π/6
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1232,8 +1232,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = std::f64::consts::PI / 8.0; // π/8
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1248,8 +1248,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = std::f64::consts::PI / 9.0; // π/9
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1264,8 +1264,8 @@ mod integration_tests {
 
         // Test by evaluating at a point (avoiding discontinuities)
         let x_val = std::f64::consts::PI / 6.0; // π/6
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1280,8 +1280,8 @@ mod integration_tests {
 
         // Test by evaluating at a point (avoiding discontinuities)
         let x_val = std::f64::consts::PI / 3.0; // π/3
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1299,8 +1299,8 @@ mod integration_tests {
 
         // Test by evaluating at a point in domain
         let x_val = 0.5;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1318,8 +1318,8 @@ mod integration_tests {
 
         // Test by evaluating at a point in domain
         let x_val = 0.5;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1337,8 +1337,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = 1.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 
@@ -1376,8 +1376,8 @@ mod integration_tests {
 
         // Test by evaluating at a point
         let x_val = std::f64::consts::PI / 4.0;
-        let result_val = result.eval_expression(vec!["x"], &[x_val]);
-        let expected_val = expected.eval_expression(vec!["x"], &[x_val]);
+        let result_val = result.eval_expression(&["x"], &[x_val]);
+        let expected_val = expected.eval_expression(&["x"], &[x_val]);
         assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
     }
 }
@@ -1647,8 +1647,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 2.0, -1.0, 0.5];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1670,8 +1670,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 2.0, 0.5, 3.0];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1695,8 +1695,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 2.0, -1.0, 0.5];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1720,8 +1720,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 2.0, 0.5, 3.0];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1748,8 +1748,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 2.0, 0.5];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1773,8 +1773,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 0.5, -0.5];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1799,8 +1799,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points
         let test_points = vec![0.0, 1.0, 0.5, -0.5];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
     }
@@ -1819,8 +1819,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points (x > 0)
         let test_points = vec![1.0, 2.0, 0.5, std::f64::consts::E];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 
@@ -1844,8 +1844,8 @@ mod integration_by_parts_tests {
         // Test by evaluating both at several points (x > 0)
         let test_points = vec![1.0, 2.0, 0.5, std::f64::consts::E];
         for point in test_points {
-            let result_val = result.eval_expression(vec!["x"], &[point]);
-            let expected_val = expected.eval_expression(vec!["x"], &[point]);
+            let result_val = result.eval_expression(&["x"], &[point]);
+            let expected_val = expected.eval_expression(&["x"], &[point]);
             assert_relative_eq!(result_val, expected_val, epsilon = 1e-10);
         }
 

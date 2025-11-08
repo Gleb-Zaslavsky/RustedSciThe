@@ -157,7 +157,7 @@ impl BVPShooting {
             let mut all_var_names = vec![arg.as_str()];
             all_var_names.extend(values.iter().map(|s| s.as_str()));
             for i in 0..n {
-                res[i] = eq_vec[i].eval_expression(all_var_names.clone(), &args);
+                res[i] = eq_vec[i].eval_expression(all_var_names.as_slice(), &args);
             }
             res
         });

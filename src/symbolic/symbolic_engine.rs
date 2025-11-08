@@ -60,7 +60,7 @@
 use std::collections::HashMap;
 
 use std::f64;
-use std::f64::consts::PI;
+
 use std::fmt;
 
 /// Core symbolic expression enum representing mathematical expressions as an abstract syntax tree.

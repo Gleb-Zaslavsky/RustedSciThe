@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.3.26"
+version = "0.3.27"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing: symbolic calculations, nonlinear systems, IVP and BVP for ODE, optimization, fitting and more"
 author = "Gleb Zasllavsky"

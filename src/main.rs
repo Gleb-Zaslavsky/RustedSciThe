@@ -19,7 +19,7 @@ use crate::numerical::ODE_api::ODEsolver;
 pub mod global;
 
 use nalgebra::{DMatrix, DVector};
-use sprs::{CsMat, CsVec};
+
 pub mod Utils;
 pub mod somelinalg;
 
