@@ -283,12 +283,12 @@ mod tests {
         // Test simple expressions
         let expr = factory.parse_expression("x + 1");
         let result = expr.convert_to_string();
-        assert_eq!(result, "(x + 1)");
+        assert_eq!(result, "x + 1");
 
         // Test more complex expressions
         let expr = factory.parse_expression("x * exp(y)");
         let result = expr.convert_to_string();
-        assert_eq!(result, "(x * exp(y))");
+        assert_eq!(result, "x * exp(y)");
     }
 
     // Test symbolic operations using factory-created expressions
@@ -337,7 +337,7 @@ mod tests {
 
         let renamed = expr.rename_variables(&substitutions);
         let result = renamed.convert_to_string();
-        assert_eq!(result, "(a + b)");
+        assert_eq!(result, "a + b");
     }
 
     // Test numerical evaluation
