@@ -58,7 +58,12 @@ pub struct Jacobian {
     pub evaluated_functions_DVector: DVector<f64>, // vector of DVector of numerical results of evaluated functions
     pub vector_of_variables: Vec<Expr>,            // vector of symbolic variables
     pub variable_string: Vec<String>,              // vector of string representation of variables
+    pub parameters_string: Vec<String>,            // vector of string representation of parameters
     pub symbolic_jacobian: Vec<Vec<Expr>>,         // vector of symbolic jacobian
+    pub lambdified_jacobian_DMatrix_with_params:Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DMatrix<f64>>,
+    pub lambdified_function_with_params:Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DVector<f64>>,
+    pub lambdified_jacobian_DMatrix: Box<dyn Fn(&DVector<f64>) -> DMatrix<f64>>,
+    pub lambdified_function_DVector: Box<dyn Fn(&DVector<f64>) -> DVector<f64>>,
     pub readable_jacobian: Vec<Vec<String>>,       // human readable jacobian
     pub function_jacobian: Vec<Vec<Box<dyn Fn(Vec<f64>) -> f64>>>,
     pub evaluated_jacobian_DMatrix: DMatrix<f64>, // vector of DMatrix of numerical results of evaluated jacobian
@@ -83,9 +88,22 @@ impl Jacobian {
             evaluated_functions_DVector: Vec::new().into(),
             vector_of_variables: Vec::new(),
             variable_string: Vec::new(),
+            parameters_string: Vec::new(),
             symbolic_jacobian: Vec::new(),
             readable_jacobian: Vec::new(),
             function_jacobian: Vec::new(),
+            lambdified_jacobian_DMatrix_with_params:Box::new(|_xx: &DVector<f64>, _yy: &DVector<f64>| {
+                DMatrix::from_element(2, 2, 0.0)
+            }),
+            lambdified_function_with_params:Box::new(|_xx: &DVector<f64>, _yy: &DVector<f64>| {
+                DVector::from_element(2, 0.0)
+            }),
+            lambdified_jacobian_DMatrix: Box::new(|_xx: &DVector<f64>| {
+                DMatrix::from_element(2, 2, 0.0)
+            }),
+            lambdified_function_DVector: Box::new(|_xx: &DVector<f64>| {
+                DVector::from_element(2, 0.0)
+            }),
             evaluated_jacobian_DMatrix: DMatrix::from_row_slice(2, 2, &vec![0.0, 0.0, 0.0, 0.0]),
             lambdified_functions_IVP: Vec::new(),
             function_jacobian_IVP_DMatrix: Box::new(|_xx: f64, _yy: &DVector<f64>| {
@@ -117,6 +135,18 @@ impl Jacobian {
         let evaluated_functions_DVector = Vec::new().into();
         let mut readable_jacobian = Vec::new();
         let mut function_jacobian = Vec::new();
+        let lambdified_jacobian_DMatrix_with_params = Box::new(|_xx: &DVector<f64>, _yy: &DVector<f64>| {
+                DMatrix::from_element(2, 2, 0.0)
+            });
+        let lambdified_function_with_params = Box::new(|_xx: &DVector<f64>, _yy: &DVector<f64>| {
+                DVector::from_element(2, 0.0)
+            });
+        let     lambdified_jacobian_DMatrix = Box::new(|_xx: &DVector<f64>,| {
+                DMatrix::from_element(2, 2, 0.0)
+            });
+        let lambdified_function_DVector =     Box::new(|_xx: &DVector<f64>, | {
+                DVector::from_element(2, 0.0)
+            });
         let variable_string = Vec::new();
         let evaluated_jacobian_DMatrix = DMatrix::from_row_slice(2, 2, &vec![0.0, 0.0, 0.0, 0.0]);
         let lambdified_functions_IVP = Vec::new();
@@ -145,9 +175,14 @@ impl Jacobian {
         Self {
             vector_of_functions,
             lambdified_functions,
+            lambdified_jacobian_DMatrix_with_params,
+            lambdified_function_with_params,
+            lambdified_jacobian_DMatrix,
+            lambdified_function_DVector,
             evaluated_functions_DVector,
             vector_of_variables,
             variable_string,
+            parameters_string: Vec::new(),
             symbolic_jacobian,
             readable_jacobian,
             function_jacobian,

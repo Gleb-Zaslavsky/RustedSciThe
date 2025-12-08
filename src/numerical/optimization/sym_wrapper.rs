@@ -6,10 +6,12 @@ use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 
 /// A symbolic wrapper for the Levenberg-Marquardt algorithm for solving non-linear least squares problems.
+
 pub struct LM {
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
     pub eq_system: Vec<Expr>, // vector of equations
     pub values: Vec<String>, // vector of variables
+    pub parameters:  Option<Vec<String>>,
     pub initial_guess: Vec<f64>, // initial guess
     pub max_iterations: Option<usize>, // maximum number of iterations
     pub tolerance: Option<f64>, // tolerance
@@ -26,6 +28,7 @@ impl LM {
             jacobian: Jacobian::new(),
             eq_system: Vec::new(),
             values: Vec::new(),
+            parameters: None,
             initial_guess: Vec::new(),
             tolerance: None,
             f_tolerance: None,
@@ -40,12 +43,14 @@ impl LM {
         &mut self,
         eq_system: Vec<Expr>,
         unknowns: Option<Vec<String>>,
+        parameters:  Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: Option<f64>,
         f_tolerance: Option<f64>,
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
+
     ) {
         self.eq_system = eq_system.clone();
         self.initial_guess = initial_guess;
@@ -54,6 +59,7 @@ impl LM {
         self.max_iterations = max_iterations;
         self.f_tolerance = f_tolerance;
         self.scale_diag = scale_diag;
+        self.parameters = parameters;
         let values = if let Some(values) = unknowns {
             values
         } else {
@@ -103,18 +109,21 @@ impl LM {
                 "Function tolerance should be a non-negative number."
             );
         }
+
     }
 
     pub fn eq_generate_from_str(
         &mut self,
         eq_system_string: Vec<String>,
         unknowns: Option<Vec<String>>,
+        parameters:  Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: Option<f64>, // tolerance: f64
         f_tolerance: Option<f64>,
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>, // max_iterations: usize,
+        
     ) {
         let eq_system = eq_system_string
             .iter()
@@ -123,12 +132,14 @@ impl LM {
         self.set_equation_system(
             eq_system,
             unknowns,
+            parameters,
             initial_guess,
             tolerance,
             f_tolerance,
             g_tolerance,
             scale_diag,
             max_iterations,
+            
         );
     }
 
@@ -140,8 +151,8 @@ impl LM {
         Jacobian_instance.set_vector_of_functions(eq_system);
         Jacobian_instance.set_variables(args.clone());
         Jacobian_instance.calc_jacobian();
-        Jacobian_instance.jacobian_generate(args.clone());
-        Jacobian_instance.lambdify_funcvector(args);
+        Jacobian_instance.lambdify_jacobian_DMatrix_parallel();
+        Jacobian_instance.lambdify_vector_funvector_DVector();
         assert_eq!(
             Jacobian_instance.vector_of_variables.len(),
             self.initial_guess.len(),
@@ -149,17 +160,40 @@ impl LM {
         );
         self.jacobian = Jacobian_instance;
     }
+    pub fn eq_generate_with_params(&mut self) {
+
+   let eq_system = self.eq_system.clone();
+        let mut Jacobian_instance = Jacobian::new();
+        let args = self.values.clone();
+        let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+        Jacobian_instance.set_vector_of_functions(eq_system);
+        let params = self.parameters.clone().expect("for a problem with params - params must be set!");
+        Jacobian_instance.set_params(params);
+        Jacobian_instance.set_variables(args.clone());
+        Jacobian_instance.calc_jacobian();
+        Jacobian_instance.lambdify_jacobian_DMatrix_with_parameters_parallel();
+        Jacobian_instance.lambdify_vector_funvector_DVector_with_parameters_parallel();
+        assert_eq!(
+            Jacobian_instance.vector_of_variables.len(),
+            self.initial_guess.len(),
+            "Initial guess and vector of variables should have the same length."
+        );
+        self.jacobian = Jacobian_instance;
+
+    }
     pub fn solve(&mut self) {
         let residual = |x: &DVector<f64>| -> DVector<f64> {
             let residual = &self
                 .jacobian
-                .evaluate_funvector_lambdified_DVector_unmut(x.clone().data.into());
+                .lambdified_function_DVector;
+            let residual = residual(x);
             residual.clone()
         };
         let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
             let jacobian = &self
                 .jacobian
-                .evaluate_func_jacobian_DMatrix_unmut(x.clone().data.into());
+                .lambdified_jacobian_DMatrix;
+            let jacobian = jacobian(x);
             jacobian.clone()
         };
         let problem = NonlinearSystem::new(
@@ -213,6 +247,75 @@ impl LM {
             println!("Map of solutions: {:?}", map_of_solutions);
             self.map_of_solutions = Some(map_of_solutions);
         }
+    }
+
+    pub fn solve_with_params(&mut self, params: Vec<f64>){
+        let params_vec = DVector::from_vec(params);
+        let residual =  |x: &DVector<f64>| -> DVector<f64> {
+                let residual = &self
+                .jacobian
+                .lambdified_function_with_params;
+                residual(&params_vec, x)
+            };
+     
+        let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
+            let jacobian = &self
+                .jacobian
+                .lambdified_jacobian_DMatrix_with_params;
+            jacobian(&params_vec, x)
+        };
+        let problem = NonlinearSystem::new(
+            DVector::from_vec(self.initial_guess.clone()),
+            residual,
+            jacobian,
+        );
+        let LM = LevenbergMarquardt::new();
+        let LM = if let Some(max_iterations) = self.max_iterations {
+            let LM = LM.with_patience(max_iterations);
+            LM
+        } else {
+            LM
+        };
+        let LM = if let Some(tolerance) = self.tolerance {
+            let LM = LM.with_xtol(tolerance);
+            LM
+        } else {
+            LM
+        };
+        let LM = if let Some(g_tolerance) = self.g_tolerance {
+            let LM = LM.with_gtol(g_tolerance);
+            LM
+        } else {
+            LM
+        };
+        let LM = if let Some(f_tolerance) = self.f_tolerance {
+            let LM = LM.with_ftol(f_tolerance);
+            LM
+        } else {
+            LM
+        };
+        let (result, report) = LM.minimize(problem);
+        println!("Nonlinear System Example:");
+        println!("Termination: {:?}", report.termination);
+        println!("Evaluations: {}", report.number_of_evaluations);
+        println!("Final objective: {}", report.objective_function);
+        println!("Final params: {:?}", result.params());
+        if report.termination.was_successful() {
+            let solution = result.params();
+            self.result = Some(solution.clone());
+            let solution: Vec<f64> = solution.data.into();
+            let unknowns = self.values.clone();
+            let map_of_solutions: HashMap<String, f64> = unknowns
+                .iter()
+                .zip(solution.iter())
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect();
+
+            let map_of_solutions = map_of_solutions;
+            println!("Map of solutions: {:?}", map_of_solutions);
+            self.map_of_solutions = Some(map_of_solutions);
+        }
+
     }
 }
 //generic LeastSquaresProblem implementation that accepts closures for residuals and Jacobian:
@@ -418,6 +521,7 @@ mod tests2 {
         LM.eq_generate_from_str(
             vec_of_str,
             Some(values),
+            None,
             initial_guess,
             None,
             None,
@@ -428,6 +532,33 @@ mod tests2 {
         LM.eq_generate();
         LM.solve();
     }
+    #[test]
+    fn test_with_params() {
+        // Solve: a*x^2 + b*y^2 - 1 = 0, x - y = 0 with params a=1, b=1
+        let vec_of_str = vec!["a*x^2 + b*y^2 - 1".to_string(), "x - y".to_string()];
+        let initial_guess = vec![0.5, 0.5];
+        let values = vec!["x".to_string(), "y".to_string()];
+        let params = vec!["a".to_string(), "b".to_string()];
+        let mut LM = LM::new();
+        LM.eq_generate_from_str(
+            vec_of_str,
+            Some(values),
+            Some(params),
+            initial_guess,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        LM.eq_generate_with_params();
+        LM.solve_with_params(vec![1.0, 1.0]);
+        let map = LM.map_of_solutions.unwrap();
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!((map["x"].abs() - expected).abs() < 1e-6);
+        assert!((map["y"].abs() - expected).abs() < 1e-6);
+    }
+
     #[test]
     fn chemical_equations() {
         let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
@@ -475,6 +606,7 @@ mod tests2 {
         LM.set_equation_system(
             full_system_sym.clone(),
             Some(unknowns.clone()),
+            None,
             initial_guess,
             None,
             Some(1e-6),

@@ -19,7 +19,7 @@ pub fn ivp_examples(example: usize) {
             let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
             let initial_guess = vec![1.0, 1.0];
             // solve
-            NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+            NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100, None);
             NR_instanse.main_loop();
             println!("result = {:?} \n", NR_instanse.get_result().unwrap());
             // or more verbose way...

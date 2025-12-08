@@ -10,12 +10,12 @@ use std::collections::HashMap;
 /// 3 we need to find function f3 that is valid for x_left < x < x_right
 
 pub struct SewTwoFunctions {
-    f1: Expr,
-    f2: Expr,
-    x_left: f64,
-    x_central: f64,
-    x_right: f64,
-    n_points: usize,
+  pub  f1: Expr,
+  pub  f2: Expr,
+  pub  x_left: f64,
+  pub  x_central: f64,
+  pub    x_right: f64,
+  pub  n_points: usize,
 
     fitting_data: (Vec<f64>, Vec<f64>),
     fitting: Fitting,
@@ -53,6 +53,9 @@ impl SewTwoFunctions {
         x_data.extend(x_data2);
         y_data.extend(y_data2);
         self.fitting_data = (x_data, y_data);
+    }
+    pub fn set_x_y(&mut self, x: Vec<f64>, y: Vec<f64>) {
+        self.fitting_data = (x, y);
     }
     pub fn fit(
         &mut self,

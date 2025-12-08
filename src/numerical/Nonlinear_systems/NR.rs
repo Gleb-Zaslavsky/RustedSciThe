@@ -78,6 +78,9 @@ pub struct NR {
     pub max_iterations: usize, // max number of iterations
 
     pub parameters: Option<HashMap<String, f64>>, // parameters
+
+    pub eq_params: Option<Vec<String>>, // equations may have parameters
+    pub eq_params_values: Option<DVector<f64>>,
     pub max_error: f64,                           // max error
     pub dumping_factor: f64,
     pub i: usize,                     // iteration counter
@@ -116,6 +119,8 @@ impl NR {
             tolerance: 1e-6,
             max_iterations: 100,
             parameters: None,
+            eq_params: None,
+            eq_params_values: None,
             max_error: 0.0,
             dumping_factor: 1.0,
             i: 0,
@@ -195,7 +200,9 @@ impl NR {
         initial_guess: Vec<f64>,
         tolerance: f64,
         max_iterations: usize,
+        eq_params: Option<Vec<String>>
     ) {
+        self.eq_params = eq_params;
         let eq_system = eq_system_string
             .iter()
             .map(|x| Expr::parse_expression(x))
@@ -353,7 +360,7 @@ impl NR {
     }
     /// module NR_LM_Nielsen contains the most advanced version of the LM method.
     /// This code needs many parameters to work properly.
-    fn set_additional_params(
+   pub fn set_additional_params(
         &mut self,
         // enum to select the scaling method: Levenberg, Marquardt or More (see LM_utils)
         scaling_method: Option<ScalingMethod>,
@@ -420,7 +427,13 @@ impl NR {
             }
         }
     }
+    pub fn set_eq_params(&mut self, eq_params: Vec<String>) {
+        self.eq_params = Some(eq_params.clone());
 
+    }
+    pub fn set_eq_params_values(&mut self, eq_params_values: DVector<f64>) {
+        self.eq_params_values = Some(eq_params_values.clone());
+    }
     pub fn implement_weights(&mut self) {
         info!("\n implementing weights!");
 
@@ -456,9 +469,17 @@ impl NR {
         let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
         Jacobian_instance.set_vector_of_functions(eq_system);
         Jacobian_instance.set_variables(args.clone());
-        Jacobian_instance.calc_jacobian();
-        Jacobian_instance.jacobian_generate(args.clone());
-        Jacobian_instance.lambdify_funcvector(args);
+        if let Some(eq_params) = &self.eq_params{
+            Jacobian_instance.set_params(eq_params.clone());
+            Jacobian_instance.calc_jacobian();
+            Jacobian_instance.lambdify_jacobian_DMatrix_with_parameters_parallel();
+            Jacobian_instance.lambdify_vector_funvector_DVector_with_parameters_parallel();
+        } else {
+            Jacobian_instance.calc_jacobian();
+            Jacobian_instance.lambdify_jacobian_DMatrix_parallel();
+            Jacobian_instance.lambdify_vector_funvector_DVector();
+        }
+
         assert_eq!(
             Jacobian_instance.vector_of_variables.len(),
             self.initial_guess.len(),
@@ -470,73 +491,55 @@ impl NR {
     //                ITERATIONS
     /////////////////////////////////////////////////////////////////////////////////////////////
     pub fn evaluate_function(&mut self, y: DVector<f64>) -> DVector<f64> {
-        let y_data = y.data.into();
+        let y_data = y;
 
         // Evaluate functions
         self.custom_timer.fun_tic();
-        self.jacobian.evaluate_funvector_lambdified_DVector(y_data);
+       let residual = 
+        if let Some(eq_params_values) = &self.eq_params_values{
+          let residual =  &self.jacobian.lambdified_function_with_params;
+          residual(eq_params_values, &y_data)
+        } else {
+           let residual =  &self.jacobian.lambdified_function_DVector;
+          residual(&y_data)
+        };
+   
         self.custom_timer.fun_tac();
 
-        assert!(
-            !self.jacobian.evaluated_functions_DVector.is_empty(),
-            "Functions should not be empty."
-        );
-
-        // Return cloned values to avoid borrow checker issues
-
-        self.jacobian.evaluated_functions_DVector.clone()
+        residual
     }
     pub fn evaluate_jacobian(&mut self, y: DVector<f64>) -> DMatrix<f64> {
-        let y_data = y.data.into();
+        let y_data: DVector<f64> = y;
         // Evaluate jacobian
         self.custom_timer.jac_tic();
-        self.jacobian.evaluate_func_jacobian_DMatrix(y_data);
+        let jac = 
+        if let Some(eq_params_values) = &self.eq_params_values{
+          let jac =  &self.jacobian.lambdified_jacobian_DMatrix_with_params;
+          jac(eq_params_values, &y_data)
+        } else {
+           let jac =  &self.jacobian.lambdified_jacobian_DMatrix;
+           jac(&y_data)
+        };
+   
         self.custom_timer.jac_tac();
-        assert!(
-            !self.jacobian.evaluated_jacobian_DMatrix.is_empty(),
-            "Jacobian should not be empty."
-        );
+  
         // Return cloned values to avoid borrow checker issues
-        self.jacobian.evaluated_jacobian_DMatrix.clone()
+        jac
     }
     pub fn step(&mut self, y: DVector<f64>) -> (DVector<f64>, DVector<f64>) {
         let method = self.linear_sys_method.clone().unwrap();
         // let previous_step: DVector<f64> = self.step.clone();
-        let Jacobian_instance = &mut self.jacobian;
+
         // evaluate jacobian and functions
-        self.custom_timer.jac_tic();
-        Jacobian_instance.evaluate_func_jacobian_DMatrix(y.clone().data.into());
-        self.custom_timer.jac_tac();
-        self.custom_timer.fun_tic();
-        Jacobian_instance.evaluate_funvector_lambdified_DVector(y.clone().data.into());
-        self.custom_timer.fun_tac();
-        assert!(
-            !Jacobian_instance.evaluated_jacobian_DMatrix.is_empty(),
-            "Jacobian should not be empty."
-        );
-        assert!(
-            !Jacobian_instance.evaluated_functions_DVector.is_empty(),
-            "Functions should not be empty."
-        );
+       let J_k = self.evaluate_jacobian(y.clone());
+       let F_k = self.evaluate_function(y.clone());
+     
         self.custom_timer.linear_system_tic();
-        let J_k = &Jacobian_instance.evaluated_jacobian_DMatrix;
+       
         self.jac = J_k.clone();
-        let F_k = &Jacobian_instance.evaluated_functions_DVector;
-        info!("\n J_k: {}", J_k);
-        info!("\n F_k: {}", F_k);
-        for (i, el) in F_k.iter().enumerate() {
-            if el.is_nan() {
-                let issue_func = Jacobian_instance.vector_of_functions[i].clone();
-                let issue_value = y.clone();
-                error!(
-                    "\n \n NaN in undamped step residual function {} with valus {} \n \n",
-                    issue_func, issue_value
-                );
-                panic!();
-                //return previous_step;
-            }
-        }
-        let undamped_step_k = solve_linear_system(method, J_k, F_k).unwrap();
+  
+
+        let undamped_step_k = solve_linear_system(method, &J_k, &F_k).unwrap();
         for el in undamped_step_k.iter() {
             if el.is_nan() {
                 log::error!("\n \n NaN in damped step deltaY \n \n");
@@ -545,6 +548,7 @@ impl NR {
             }
         }
         //    self.step = undamped_step_k.clone();
+         self.custom_timer.linear_system_tac();
         (undamped_step_k, F_k.clone())
     }
     pub fn simple_newton_step(&mut self) -> (i32, Option<DVector<f64>>) {
@@ -954,21 +958,86 @@ mod tests {
             Some(values.clone()),
             initial_guess,
             1e-6,
-            100,
+            1000,
+        );
+         NR_instanse.set_solver_params(
+            Some("info".to_string()),
+            None,
+            Some(1.0),
+            None,
+            Some(Method::simple),
+            None,
         );
         NR_instanse.eq_generate();
         NR_instanse.solve();
         let solution = NR_instanse.get_result().unwrap();
         assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
     }
+    #[test]
+    fn test_NR_elem_example_simple_with_params() {
+        let vec_of_expressions = vec!["a*x^2+y^2-10", "x-b*y-4"];
 
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            100,
+        );
+        NR_instanse.set_eq_params(vec!["a".to_string(), "b".to_string()]);
+        NR_instanse.eq_generate();
+        NR_instanse.set_eq_params_values(DVector::from_vec(vec![1.0, 1.0]));
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
+    }
+
+        #[test]
+    fn test_NR_elem_example_simple_with_params_damping() {
+        let vec_of_expressions = vec!["a*x^2+y^2-10", "x-b*y-4"];
+
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            1000,
+        );
+                let Bounds = HashMap::from([
+            ("x".to_string(), (-10.0, 10.0)),
+            ("y".to_string(), (-10.0, 10.0)),
+        ]);
+            NR_instanse.set_solver_params(
+            Some("info".to_string()),
+            None,
+            Some(0.1),
+            Some(Bounds),
+            Some(Method::damped),
+            None,
+        );
+        NR_instanse.set_eq_params(vec!["a".to_string(), "b".to_string()]);
+        NR_instanse.eq_generate();
+        NR_instanse.set_eq_params_values(DVector::from_vec(vec![1.0, 1.0]));
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_relative_eq!(solution[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(solution[1], -1.0, epsilon = 1e-5);
+    }
     #[test]
     fn test_NR_elem_example_simple_str() {
         let mut NR_instanse = NR::new();
         let vec_of_expressions = vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()];
         let initial_guess = vec![1.0, 1.0];
         // solve
-        NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100);
+        NR_instanse.eq_generate_from_str(vec_of_expressions, None, initial_guess, 1e-6, 100, None);
         NR_instanse.main_loop();
         let solution = NR_instanse.get_result().unwrap();
         assert_eq!(solution, DVector::from(vec![3.0, -1.0]));

@@ -158,6 +158,7 @@ pub mod symbolic_engine_derivatives;
 ///     println!("function vector after evaluate_funvector_lambdified_DMatrix = {:?} \n", Jacobian_instance.evaluated_functions_DVector);
 /// ```
 pub mod symbolic_functions;
+pub mod symbolic_functions2;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
