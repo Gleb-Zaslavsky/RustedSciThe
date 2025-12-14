@@ -1,4 +1,8 @@
 /*
+
+cargo run -r  --example three_body_problem
+
+
 r_i' = v_i
 v_i' = G * Σ (m_j * (r_j - r_i) / |r_j - r_i|^3) for j ≠ i
 let's scale

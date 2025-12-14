@@ -4,7 +4,7 @@
 use crate::numerical::optimization::qr_LM::LinearLeastSquaresDiagonalProblem;
 use crate::numerical::optimization::utils::{dwarf, enorm};
 use nalgebra::DVector;
-
+use log::info;
 pub struct LMParameter {
     pub step: DVector<f64>,
     pub lambda: f64,
@@ -60,7 +60,7 @@ pub fn determine_lambda_and_parameter_update(
     let mut diag_p_norm = enorm(&diag_p);
     let mut fp = diag_p_norm - delta;
     if fp <= delta * P1 {
-        println!("fp <= delta * convert(P1), diag_p_norm = {}", diag_p_norm);
+        info!("fp <= delta * convert(P1), diag_p_norm = {}", diag_p_norm);
         // we have a feasible p with lambda = 0
         return LMParameter {
             step: p,
@@ -68,7 +68,7 @@ pub fn determine_lambda_and_parameter_update(
             dp_norm: diag_p_norm,
         };
     }
-    println!("fp => delta * convert(P1) diag_p_norm = {}", diag_p_norm);
+    info!("fp => delta * convert(P1) diag_p_norm = {}", diag_p_norm);
     // we now look for lambda > 0 with ||D p|| = delta
     // by using an approximate Newton iteration.
 

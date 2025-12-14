@@ -158,37 +158,37 @@ impl fmt::Display for Expr {
         match self {
             Expr::Var(name) => write!(f, "{}", name),
             Expr::Const(val) => write!(f, "{}", val),
-            
+
             Expr::Add(lhs, rhs) => {
                 self.fmt_left_operand(f, lhs)?;
                 write!(f, " + ")?;
                 self.fmt_right_operand(f, rhs)
             }
-            
+
             Expr::Sub(lhs, rhs) => {
                 self.fmt_left_operand(f, lhs)?;
                 write!(f, " - ")?;
                 self.fmt_right_operand(f, rhs)
             }
-            
+
             Expr::Mul(lhs, rhs) => {
                 self.fmt_left_operand(f, lhs)?;
                 write!(f, " * ")?;
                 self.fmt_right_operand(f, rhs)
             }
-            
+
             Expr::Div(lhs, rhs) => {
                 self.fmt_left_operand(f, lhs)?;
                 write!(f, " / ")?;
                 self.fmt_right_operand(f, rhs)
             }
-            
+
             Expr::Pow(base, exp) => {
                 self.fmt_left_operand(f, base)?;
                 write!(f, " ^ ")?;
                 self.fmt_right_operand(f, exp)
             }
-            
+
             Expr::Exp(expr) => write!(f, "exp({})", expr),
             Expr::Ln(expr) => write!(f, "ln({})", expr),
             Expr::sin(expr) => write!(f, "sin({})", expr),
@@ -298,10 +298,17 @@ impl Expr {
     fn precedence(&self) -> u8 {
         match self {
             Expr::Var(_) | Expr::Const(_) => 100, // Highest - never need brackets
-            Expr::Exp(_) | Expr::Ln(_) | Expr::sin(_) | Expr::cos(_) 
-            | Expr::tg(_) | Expr::ctg(_) | Expr::arcsin(_) | Expr::arccos(_) 
-            | Expr::arctg(_) | Expr::arcctg(_) => 90, // Functions
-            Expr::Pow(_, _) => 80, // Power
+            Expr::Exp(_)
+            | Expr::Ln(_)
+            | Expr::sin(_)
+            | Expr::cos(_)
+            | Expr::tg(_)
+            | Expr::ctg(_)
+            | Expr::arcsin(_)
+            | Expr::arccos(_)
+            | Expr::arctg(_)
+            | Expr::arcctg(_) => 90, // Functions
+            Expr::Pow(_, _) => 80,                // Power
             Expr::Mul(_, _) | Expr::Div(_, _) => 60, // Multiplication/Division
             Expr::Add(_, _) | Expr::Sub(_, _) => 40, // Addition/Subtraction
         }
@@ -318,7 +325,7 @@ impl Expr {
             Expr::Sub(_, _) | Expr::Div(_, _) | Expr::Pow(_, _) => {
                 operand.precedence() <= self.precedence()
             }
-            _ => operand.precedence() < self.precedence()
+            _ => operand.precedence() < self.precedence(),
         }
     }
 
@@ -343,44 +350,78 @@ impl Expr {
     /// Format function with multi-line content horizontally
     fn _format_function_horizontal(func_name: &str, inner_lines: &[String]) -> Vec<String> {
         if inner_lines.len() <= 1 {
-            return vec![format!("{}({})", func_name, inner_lines.get(0).unwrap_or(&String::new()))];
+            return vec![format!(
+                "{}({})",
+                func_name,
+                inner_lines.get(0).unwrap_or(&String::new())
+            )];
         }
-        
+
         let mut result = Vec::new();
-        
+
         // First line: function_name( first_line )
         result.push(format!("{}( {} )", func_name, inner_lines[0]));
-        
+
         // Middle lines: align content properly with the content position, not the parenthesis
         let content_offset = func_name.len() + 2; // "func( " length
         for i in 1..inner_lines.len() {
             result.push(format!("{}{}", " ".repeat(content_offset), inner_lines[i]));
         }
-        
+
         result
     }
 
     /// Convert digit to Unicode superscript
     fn to_superscript_digit(digit: u8) -> char {
         match digit {
-            0 => '⁰', 1 => '¹', 2 => '²', 3 => '³', 4 => '⁴',
-            5 => '⁵', 6 => '⁶', 7 => '⁷', 8 => '⁸', 9 => '⁹',
-            _ => '?'
+            0 => '⁰',
+            1 => '¹',
+            2 => '²',
+            3 => '³',
+            4 => '⁴',
+            5 => '⁵',
+            6 => '⁶',
+            7 => '⁷',
+            8 => '⁸',
+            9 => '⁹',
+            _ => '?',
         }
     }
 
     /// Convert single character to Unicode superscript if possible
     fn to_superscript_char(c: char) -> Option<char> {
         match c {
-            'a' => Some('ᵃ'), 'b' => Some('ᵇ'), 'c' => Some('ᶜ'), 'd' => Some('ᵈ'),
-            'e' => Some('ᵉ'), 'f' => Some('ᶠ'), 'g' => Some('ᵍ'), 'h' => Some('ʰ'),
-            'i' => Some('ⁱ'), 'j' => Some('ʲ'), 'k' => Some('ᵏ'), 'l' => Some('ˡ'),
-            'm' => Some('ᵐ'), 'n' => Some('ⁿ'), 'o' => Some('ᵒ'), 'p' => Some('ᵖ'),
-            'r' => Some('ʳ'), 's' => Some('ˢ'), 't' => Some('ᵗ'), 'u' => Some('ᵘ'),
-            'v' => Some('ᵛ'), 'w' => Some('ʷ'), 'x' => Some('ˣ'), 'y' => Some('ʸ'),
-            'z' => Some('ᶻ'), '+' => Some('⁺'), '-' => Some('⁻'), '=' => Some('⁼'),
-            '(' => Some('⁽'), ')' => Some('⁾'),
-            _ => None
+            'a' => Some('ᵃ'),
+            'b' => Some('ᵇ'),
+            'c' => Some('ᶜ'),
+            'd' => Some('ᵈ'),
+            'e' => Some('ᵉ'),
+            'f' => Some('ᶠ'),
+            'g' => Some('ᵍ'),
+            'h' => Some('ʰ'),
+            'i' => Some('ⁱ'),
+            'j' => Some('ʲ'),
+            'k' => Some('ᵏ'),
+            'l' => Some('ˡ'),
+            'm' => Some('ᵐ'),
+            'n' => Some('ⁿ'),
+            'o' => Some('ᵒ'),
+            'p' => Some('ᵖ'),
+            'r' => Some('ʳ'),
+            's' => Some('ˢ'),
+            't' => Some('ᵗ'),
+            'u' => Some('ᵘ'),
+            'v' => Some('ᵛ'),
+            'w' => Some('ʷ'),
+            'x' => Some('ˣ'),
+            'y' => Some('ʸ'),
+            'z' => Some('ᶻ'),
+            '+' => Some('⁺'),
+            '-' => Some('⁻'),
+            '=' => Some('⁼'),
+            '(' => Some('⁽'),
+            ')' => Some('⁾'),
+            _ => None,
         }
     }
 
@@ -388,8 +429,10 @@ impl Expr {
     fn can_use_unicode_superscript(&self) -> bool {
         match self {
             Expr::Const(n) => *n >= 0.0 && *n <= 9.0 && n.fract() == 0.0,
-            Expr::Var(name) => name.len() == 1 && Self::to_superscript_char(name.chars().next().unwrap()).is_some(),
-            _ => false
+            Expr::Var(name) => {
+                name.len() == 1 && Self::to_superscript_char(name.chars().next().unwrap()).is_some()
+            }
+            _ => false,
         }
     }
 
@@ -404,13 +447,70 @@ impl Expr {
                 let c = name.chars().next().unwrap();
                 Self::to_superscript_char(c).unwrap().to_string()
             }
-            _ => format!("^({})", self)
+            _ => format!("^({})", self),
+        }
+    }
+
+    /// Convert Greek letter names to Unicode symbols
+    fn convert_greek_letters(&self) -> Expr {
+        match self {
+            Expr::Var(name) => {
+                let lower_name = name.to_lowercase();
+                
+                // Check for Greek letters with or without indices
+                for (greek_name, greek_symbol) in [
+                    ("alpha", "α"), ("beta", "β"), ("gamma", "γ"), ("delta", "δ"),
+                    ("epsilon", "ε"), ("zeta", "ζ"), ("eta", "η"), ("theta", "θ"),
+                    ("iota", "ι"), ("kappa", "κ"), ("lambda", "λ"), ("mu", "μ"),
+                    ("nu", "ν"), ("xi", "ξ"), ("omicron", "ο"), ("pi", "π"),
+                    ("rho", "ρ"), ("sigma", "σ"), ("tau", "τ"), ("upsilon", "υ"),
+                    ("phi", "φ"), ("chi", "χ"), ("psi", "ψ"), ("omega", "ω"),
+                ] {
+                    if lower_name.starts_with(greek_name) {
+                        let suffix = &lower_name[greek_name.len()..];
+                        return Expr::Var(format!("{}{}", greek_symbol, suffix));
+                    }
+                }
+                
+                self.clone()
+            }
+            Expr::Add(lhs, rhs) => Expr::Add(
+                Box::new(lhs.convert_greek_letters()),
+                Box::new(rhs.convert_greek_letters()),
+            ),
+            Expr::Sub(lhs, rhs) => Expr::Sub(
+                Box::new(lhs.convert_greek_letters()),
+                Box::new(rhs.convert_greek_letters()),
+            ),
+            Expr::Mul(lhs, rhs) => Expr::Mul(
+                Box::new(lhs.convert_greek_letters()),
+                Box::new(rhs.convert_greek_letters()),
+            ),
+            Expr::Div(lhs, rhs) => Expr::Div(
+                Box::new(lhs.convert_greek_letters()),
+                Box::new(rhs.convert_greek_letters()),
+            ),
+            Expr::Pow(base, exp) => Expr::Pow(
+                Box::new(base.convert_greek_letters()),
+                Box::new(exp.convert_greek_letters()),
+            ),
+            Expr::Exp(expr) => Expr::Exp(Box::new(expr.convert_greek_letters())),
+            Expr::Ln(expr) => Expr::Ln(Box::new(expr.convert_greek_letters())),
+            Expr::sin(expr) => Expr::sin(Box::new(expr.convert_greek_letters())),
+            Expr::cos(expr) => Expr::cos(Box::new(expr.convert_greek_letters())),
+            Expr::tg(expr) => Expr::tg(Box::new(expr.convert_greek_letters())),
+            Expr::ctg(expr) => Expr::ctg(Box::new(expr.convert_greek_letters())),
+            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.convert_greek_letters())),
+            Expr::arccos(expr) => Expr::arccos(Box::new(expr.convert_greek_letters())),
+            Expr::arctg(expr) => Expr::arctg(Box::new(expr.convert_greek_letters())),
+            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.convert_greek_letters())),
+            _ => self.clone(),
         }
     }
 
     /// Pretty print with mathematical formatting
     pub fn pretty_print(&self) -> String {
-        self.pretty_print_internal().join("\n")
+        self.convert_greek_letters().pretty_print_internal().join("\n")
     }
 
     /// Calculate the actual visual width of an expression when pretty printed
@@ -437,9 +537,16 @@ impl Expr {
                     Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) | Expr::Mul(lhs, rhs) => {
                         lhs.visual_width() + 3 + rhs.visual_width() // operator + spaces
                     }
-                    Expr::Exp(_) | Expr::Ln(_) | Expr::sin(_) | Expr::cos(_) 
-                    | Expr::tg(_) | Expr::ctg(_) | Expr::arcsin(_) | Expr::arccos(_) 
-                    | Expr::arctg(_) | Expr::arcctg(_) => {
+                    Expr::Exp(_)
+                    | Expr::Ln(_)
+                    | Expr::sin(_)
+                    | Expr::cos(_)
+                    | Expr::tg(_)
+                    | Expr::ctg(_)
+                    | Expr::arcsin(_)
+                    | Expr::arccos(_)
+                    | Expr::arctg(_)
+                    | Expr::arcctg(_) => {
                         // Function name + parentheses + content
                         let func_name = match self {
                             Expr::Exp(_) => "exp",
@@ -452,24 +559,28 @@ impl Expr {
                             Expr::arccos(_) => "arccos",
                             Expr::arctg(_) => "arctg",
                             Expr::arcctg(_) => "arcctg",
-                            _ => ""
+                            _ => "",
                         };
                         let inner = match self {
-                            Expr::Exp(e) | Expr::Ln(e) | Expr::sin(e) | Expr::cos(e) 
-                            | Expr::tg(e) | Expr::ctg(e) | Expr::arcsin(e) | Expr::arccos(e) 
-                            | Expr::arctg(e) | Expr::arcctg(e) => e.visual_width(),
-                            _ => 0
+                            Expr::Exp(e)
+                            | Expr::Ln(e)
+                            | Expr::sin(e)
+                            | Expr::cos(e)
+                            | Expr::tg(e)
+                            | Expr::ctg(e)
+                            | Expr::arcsin(e)
+                            | Expr::arccos(e)
+                            | Expr::arctg(e)
+                            | Expr::arcctg(e) => e.visual_width(),
+                            _ => 0,
                         };
                         func_name.chars().count() + 2 + inner // name + "()" + content
                     }
-                    _ => 10 // fallback
+                    _ => 10, // fallback
                 }
             }
         }
     }
-
-
-
 
     /// Internal pretty print using level-based layout system
     fn pretty_print_internal(&self) -> Vec<String> {
@@ -478,33 +589,39 @@ impl Expr {
     }
 
     /// Analyze expression with bracket handling and structural awareness
-    fn analyze_levels_with_brackets(&self, current_level: i32, force_brackets: bool) -> LeveledLayout {
+    fn analyze_levels_with_brackets(
+        &self,
+        current_level: i32,
+        force_brackets: bool,
+    ) -> LeveledLayout {
         let mut layout = LeveledLayout::new();
         layout.baseline = current_level;
-        
+
         match self {
             Expr::Var(name) => {
-                let structure_id = layout.create_structure_context(vec!["var".to_string()], None, 0);
+                let structure_id =
+                    layout.create_structure_context(vec!["var".to_string()], None, 0);
                 layout.add_element_with_context(name.clone(), current_level, structure_id);
             }
             Expr::Const(val) => {
-                let structure_id = layout.create_structure_context(vec!["const".to_string()], None, 0);
+                let structure_id =
+                    layout.create_structure_context(vec!["const".to_string()], None, 0);
                 layout.add_element_with_context(format!("{}", val), current_level, structure_id);
             }
             Expr::Add(lhs, rhs) => {
                 let left_needs_brackets = self.needs_brackets_left(lhs);
                 let right_needs_brackets = self.needs_brackets_right(rhs);
-                
+
                 let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
                 let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-                
+
                 if left_needs_brackets {
                     left_layout.add_brackets();
                 }
-                
+
                 layout = left_layout;
                 layout.merge_horizontal(right_layout, "+", current_level, right_needs_brackets);
-                
+
                 if force_brackets {
                     layout.add_brackets();
                 }
@@ -512,17 +629,17 @@ impl Expr {
             Expr::Sub(lhs, rhs) => {
                 let left_needs_brackets = self.needs_brackets_left(lhs);
                 let right_needs_brackets = self.needs_brackets_right(rhs);
-                
+
                 let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
                 let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-                
+
                 if left_needs_brackets {
                     left_layout.add_brackets();
                 }
-                
+
                 layout = left_layout;
                 layout.merge_horizontal(right_layout, "-", current_level, right_needs_brackets);
-                
+
                 if force_brackets {
                     layout.add_brackets();
                 }
@@ -530,17 +647,17 @@ impl Expr {
             Expr::Mul(lhs, rhs) => {
                 let left_needs_brackets = self.needs_brackets_left(lhs);
                 let right_needs_brackets = self.needs_brackets_right(rhs);
-                
+
                 let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
                 let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-                
+
                 if left_needs_brackets {
                     left_layout.add_brackets();
                 }
-                
+
                 layout = left_layout;
                 layout.merge_horizontal(right_layout, "*", current_level, right_needs_brackets);
-                
+
                 if force_brackets {
                     layout.add_brackets();
                 }
@@ -549,10 +666,12 @@ impl Expr {
                 // Use structure-aware level assignment for nested divisions
                 let depth = self.calculate_nesting_depth();
                 let level_offset = if depth > 3 { depth as i32 } else { 1 };
-                
-                let num_layout = num.analyze_levels_with_brackets(current_level + level_offset, false);
-                let den_layout = den.analyze_levels_with_brackets(current_level - level_offset, false);
-                
+
+                let num_layout =
+                    num.analyze_levels_with_brackets(current_level + level_offset, false);
+                let den_layout =
+                    den.analyze_levels_with_brackets(current_level - level_offset, false);
+
                 layout.merge_vertical(num_layout, den_layout, current_level);
             }
             Expr::Pow(base, exp) => {
@@ -563,39 +682,54 @@ impl Expr {
                         base_layout.add_brackets();
                     }
                     layout = base_layout;
-                    let structure_id = layout.create_structure_context(vec!["superscript".to_string()], None, 0);
-                    layout.add_element_with_context(exp.to_unicode_superscript(), current_level, structure_id);
+                    let structure_id =
+                        layout.create_structure_context(vec!["superscript".to_string()], None, 0);
+                    layout.add_element_with_context(
+                        exp.to_unicode_superscript(),
+                        current_level,
+                        structure_id,
+                    );
                 } else {
                     let base_needs_brackets = self.needs_brackets_left(base);
                     let mut base_layout = base.analyze_levels_with_brackets(current_level, false);
                     if base_needs_brackets {
                         base_layout.add_brackets();
                     }
-                    
+
                     // Use isolated level system for complex exponents to prevent conflicts
                     let exp_layout = exp.analyze_levels_with_brackets(0, false);
-                    
+
                     layout = base_layout;
                     layout.merge_power_exponent(exp_layout);
                 }
-                
+
                 if force_brackets {
                     layout.add_brackets();
                 }
             }
             Expr::Exp(expr) => {
                 if expr.can_use_unicode_superscript() {
-                    let structure_id = layout.create_structure_context(vec!["exp".to_string()], None, 0);
-                    layout.add_element_with_context(format!("e{}", expr.to_unicode_superscript()), current_level, structure_id);
+                    let structure_id =
+                        layout.create_structure_context(vec!["exp".to_string()], None, 0);
+                    layout.add_element_with_context(
+                        format!("e{}", expr.to_unicode_superscript()),
+                        current_level,
+                        structure_id,
+                    );
                 } else {
                     let mut base_layout = LeveledLayout::new();
                     base_layout.baseline = current_level;
-                    let structure_id = base_layout.create_structure_context(vec!["exp_base".to_string()], None, 0);
-                    base_layout.add_element_with_context("e".to_string(), current_level, structure_id);
-                    
+                    let structure_id =
+                        base_layout.create_structure_context(vec!["exp_base".to_string()], None, 0);
+                    base_layout.add_element_with_context(
+                        "e".to_string(),
+                        current_level,
+                        structure_id,
+                    );
+
                     // Use isolated level system for exponent to prevent conflicts
                     let exp_layout = expr.analyze_levels_with_brackets(0, false);
-                    
+
                     layout = base_layout;
                     layout.merge_power_exponent(exp_layout);
                 }
@@ -613,47 +747,74 @@ impl Expr {
                     Expr::arcctg(_) => "arcctg",
                     _ => "func",
                 };
-                
+
                 let inner_expr = match self {
-                    Expr::Ln(e) | Expr::sin(e) | Expr::cos(e) | Expr::tg(e) | Expr::ctg(e) |
-                    Expr::arcsin(e) | Expr::arccos(e) | Expr::arctg(e) | Expr::arcctg(e) => e,
+                    Expr::Ln(e)
+                    | Expr::sin(e)
+                    | Expr::cos(e)
+                    | Expr::tg(e)
+                    | Expr::ctg(e)
+                    | Expr::arcsin(e)
+                    | Expr::arccos(e)
+                    | Expr::arctg(e)
+                    | Expr::arcctg(e) => e,
                     _ => return layout,
                 };
-                
+
                 let inner_layout = inner_expr.analyze_levels_with_brackets(current_level, false);
                 let has_multiple_levels = inner_layout.level_heights.len() > 1;
-                
+
                 if has_multiple_levels {
                     layout.merge_function_with_multiline(func_name, inner_layout);
                 } else {
-                    let structure_id = layout.create_structure_context(vec!["func".to_string(), func_name.to_string()], None, 0);
-                    layout.add_element_with_context(format!("{}(", func_name), current_level, structure_id);
+                    let structure_id = layout.create_structure_context(
+                        vec!["func".to_string(), func_name.to_string()],
+                        None,
+                        0,
+                    );
+                    layout.add_element_with_context(
+                        format!("{}(", func_name),
+                        current_level,
+                        structure_id,
+                    );
                     layout.merge_inline(inner_layout);
                     layout.add_element_with_context(")".to_string(), current_level, structure_id);
                 }
             }
         }
-        
+
         layout
     }
-    
+
     /// Calculate nesting depth to determine appropriate level offsets
     fn calculate_nesting_depth(&self) -> usize {
         match self {
             Expr::Var(_) | Expr::Const(_) => 0,
             Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) | Expr::Mul(lhs, rhs) => {
-                1 + lhs.calculate_nesting_depth().max(rhs.calculate_nesting_depth())
+                1 + lhs
+                    .calculate_nesting_depth()
+                    .max(rhs.calculate_nesting_depth())
             }
             Expr::Div(num, den) => {
-                2 + num.calculate_nesting_depth().max(den.calculate_nesting_depth())
+                2 + num
+                    .calculate_nesting_depth()
+                    .max(den.calculate_nesting_depth())
             }
             Expr::Pow(base, exp) => {
-                2 + base.calculate_nesting_depth().max(exp.calculate_nesting_depth())
+                2 + base
+                    .calculate_nesting_depth()
+                    .max(exp.calculate_nesting_depth())
             }
-            Expr::Exp(e) | Expr::Ln(e) | Expr::sin(e) | Expr::cos(e) | Expr::tg(e) | 
-            Expr::ctg(e) | Expr::arcsin(e) | Expr::arccos(e) | Expr::arctg(e) | Expr::arcctg(e) => {
-                1 + e.calculate_nesting_depth()
-            }
+            Expr::Exp(e)
+            | Expr::Ln(e)
+            | Expr::sin(e)
+            | Expr::cos(e)
+            | Expr::tg(e)
+            | Expr::ctg(e)
+            | Expr::arcsin(e)
+            | Expr::arccos(e)
+            | Expr::arctg(e)
+            | Expr::arcctg(e) => 1 + e.calculate_nesting_depth(),
         }
     }
 
@@ -663,8 +824,6 @@ impl Expr {
     fn _needs_brackets_continued(&self, operand: &Expr) -> bool {
         operand.precedence() < self.precedence()
     }
-
-
 
     /// BASIC FEATURES
 
@@ -1169,10 +1328,6 @@ impl Expr {
     }
 }
 
-
-
-
-
 /// Structural context for tracking expression hierarchy and preventing layout conflicts.
 ///
 /// Each layout element belongs to a structural family to enable conflict detection
@@ -1194,17 +1349,17 @@ struct StructuralContext {
 struct LayoutElement {
     /// The actual text content to be rendered (e.g., "x", "+", "sin", "─")
     content: String,
-    
+
     /// Vertical level where this element should be placed.
     /// - Positive levels: above baseline (exponents, numerators)
     /// - Zero level: baseline (main expression)
     /// - Negative levels: below baseline (denominators, subscripts)
     level: i32,
-    
+
     /// Horizontal position (column) where this element starts.
     /// Used for proper alignment when combining multiple elements on the same level.
     position: usize,
-    
+
     /// Unique identifier linking this element to its structural context.
     /// Enables conflict detection and resolution during rendering.
     structure_id: usize,
@@ -1228,23 +1383,23 @@ struct LeveledLayout {
     /// Elements are positioned across multiple levels and will be rendered
     /// into a multi-line string representation.
     elements: Vec<LayoutElement>,
-    
+
     /// The reference level (typically 0) representing the main expression line.
     /// Positive levels are above baseline, negative levels are below.
     baseline: i32,
-    
+
     /// Total horizontal width needed to accommodate all elements.
     /// Used for proper alignment and spacing calculations.
     total_width: usize,
-    
+
     /// Maps each level to its height requirement (typically 1 for text lines).
     /// Used during rendering to determine which levels actually contain content.
     level_heights: std::collections::HashMap<i32, usize>,
-    
+
     /// Maps structure IDs to their contexts for hierarchical tracking.
     /// Enables conflict detection and resolution between different mathematical structures.
     contexts: std::collections::HashMap<usize, StructuralContext>,
-    
+
     /// Counter for generating unique structure IDs.
     /// Ensures each mathematical construct gets a unique identifier.
     next_structure_id: usize,
@@ -1265,7 +1420,7 @@ impl LeveledLayout {
             next_structure_id: 0,
         }
     }
-    
+
     /// Creates a new structural context for tracking expression hierarchy.
     ///
     /// Each mathematical construct (variable, operator, function, etc.) gets its own
@@ -1278,20 +1433,21 @@ impl LeveledLayout {
     ///
     /// # Returns
     /// Unique structure ID for the created context
-    fn create_structure_context(&mut self, _path: Vec<String>, parent_id: Option<usize>, _depth: usize) -> usize {
+    fn create_structure_context(
+        &mut self,
+        _path: Vec<String>,
+        parent_id: Option<usize>,
+        _depth: usize,
+    ) -> usize {
         let structure_id = self.next_structure_id;
         self.next_structure_id += 1;
-        
-        let context = StructuralContext {
-            parent_id,
-        };
-        
+
+        let context = StructuralContext { parent_id };
+
         self.contexts.insert(structure_id, context.clone());
         structure_id
     }
 
-
-    
     /// Adds a text element to the layout with specified structural context.
     ///
     /// Places the element at the current total width position and updates layout metrics.
@@ -1303,15 +1459,16 @@ impl LeveledLayout {
     /// * `structure_id` - ID linking this element to its structural context
     fn add_element_with_context(&mut self, content: String, level: i32, structure_id: usize) {
         let position = self.total_width;
-        
-        self.elements.push(LayoutElement { 
-            content: content.clone(), 
-            level, 
-            position, 
+
+        self.elements.push(LayoutElement {
+            content: content.clone(),
+            level,
+            position,
             structure_id,
         });
         self.total_width += content.chars().count();
-        *self.level_heights.entry(level).or_insert(0) = (*self.level_heights.get(&level).unwrap_or(&0)).max(1);
+        *self.level_heights.entry(level).or_insert(0) =
+            (*self.level_heights.get(&level).unwrap_or(&0)).max(1);
     }
 
     /// Wraps the entire current layout in parentheses.
@@ -1326,25 +1483,25 @@ impl LeveledLayout {
     /// - Closing bracket ")" is added at the end
     /// - Total width increases by 2
     fn add_brackets(&mut self) {
-        let bracket_structure_id = self.create_structure_context(
-            vec!["bracket".to_string()], 
-            None, 
-            0
-        );
-        
+        let bracket_structure_id =
+            self.create_structure_context(vec!["bracket".to_string()], None, 0);
+
         // Shift all existing elements to make room for opening bracket
         for element in &mut self.elements {
             element.position += 1;
         }
-        
+
         // Add opening bracket at the beginning
-        self.elements.insert(0, LayoutElement {
-            content: "(".to_string(),
-            level: self.baseline,
-            position: 0,
-            structure_id: bracket_structure_id,
-        });
-        
+        self.elements.insert(
+            0,
+            LayoutElement {
+                content: "(".to_string(),
+                level: self.baseline,
+                position: 0,
+                structure_id: bracket_structure_id,
+            },
+        );
+
         // Add closing bracket at the end
         self.elements.push(LayoutElement {
             content: ")".to_string(),
@@ -1352,7 +1509,7 @@ impl LeveledLayout {
             position: self.total_width + 1,
             structure_id: bracket_structure_id,
         });
-        
+
         self.total_width += 2;
     }
 
@@ -1374,21 +1531,27 @@ impl LeveledLayout {
     /// 3. Merge structural contexts from both layouts
     /// 4. Offset and add all elements from right layout
     /// 5. Update total width and level heights
-    fn merge_horizontal(&mut self, mut other: LeveledLayout, operator: &str, op_level: i32, right_needs_brackets: bool) {
+    fn merge_horizontal(
+        &mut self,
+        mut other: LeveledLayout,
+        operator: &str,
+        op_level: i32,
+        right_needs_brackets: bool,
+    ) {
         if right_needs_brackets {
             other.add_brackets();
         }
-        
+
         let current_width = self.total_width;
         let op_width = operator.len() + 2; // operator + spaces
-        
+
         // Create operator structure context
         let op_structure_id = self.create_structure_context(
-            vec!["operator".to_string(), operator.to_string()], 
-            None, 
-            0
+            vec!["operator".to_string(), operator.to_string()],
+            None,
+            0,
         );
-        
+
         // Add operator with spacing
         self.elements.push(LayoutElement {
             content: format!(" {} ", operator),
@@ -1396,23 +1559,24 @@ impl LeveledLayout {
             position: current_width,
             structure_id: op_structure_id,
         });
-        
+
         // Merge contexts from other layout
         for (id, context) in other.contexts {
             self.contexts.insert(id, context);
         }
-        
+
         // Add other elements with proper position offset
         for mut element in other.elements {
             element.position += current_width + op_width;
             self.elements.push(element);
         }
-        
+
         self.total_width += op_width + other.total_width;
-        
+
         // Merge level heights
         for (level, height) in other.level_heights {
-            *self.level_heights.entry(level).or_insert(0) = *self.level_heights.get(&level).unwrap_or(&0).max(&height);
+            *self.level_heights.entry(level).or_insert(0) =
+                *self.level_heights.get(&level).unwrap_or(&0).max(&height);
         }
     }
 
@@ -1438,18 +1602,19 @@ impl LeveledLayout {
     /// - Division line width = max(numerator_width, denominator_width, 3)
     /// - Numerator and denominator are centered relative to division line
     /// - All elements maintain their original structural contexts
-    fn merge_vertical(&mut self, num_layout: LeveledLayout, den_layout: LeveledLayout, division_level: i32) {
+    fn merge_vertical(
+        &mut self,
+        num_layout: LeveledLayout,
+        den_layout: LeveledLayout,
+        division_level: i32,
+    ) {
         let max_width = num_layout.total_width.max(den_layout.total_width).max(3);
-        
+
         // Create division structure context
-        let div_structure_id = self.create_structure_context(
-            vec!["division".to_string()], 
-            None, 
-            1
-        );
-        
+        let div_structure_id = self.create_structure_context(vec!["division".to_string()], None, 1);
+
         self.elements.clear();
-        
+
         // Merge contexts from both layouts
         for (id, context) in num_layout.contexts {
             self.contexts.insert(id, context);
@@ -1457,27 +1622,27 @@ impl LeveledLayout {
         for (id, context) in den_layout.contexts {
             self.contexts.insert(id, context);
         }
-        
+
         // Calculate centering offsets for numerator and denominator
         let num_offset = if num_layout.total_width < max_width {
             (max_width - num_layout.total_width) / 2
         } else {
             0
         };
-        
+
         let den_offset = if den_layout.total_width < max_width {
             (max_width - den_layout.total_width) / 2
         } else {
             0
         };
-        
+
         // Add numerator elements with centering and structure isolation
         for mut element in num_layout.elements {
             element.position = num_offset + element.position;
             // Preserve original structure context to prevent interference
             self.elements.push(element);
         }
-        
+
         // Add division line with its own structure
         self.elements.push(LayoutElement {
             content: "─".repeat(max_width),
@@ -1485,30 +1650,30 @@ impl LeveledLayout {
             position: 0,
             structure_id: div_structure_id,
         });
-        
+
         // Add denominator elements with centering and structure isolation
         for mut element in den_layout.elements {
             element.position = den_offset + element.position;
             // Preserve original structure context to prevent interference
             self.elements.push(element);
         }
-        
+
         // Merge level heights properly
         self.level_heights.clear();
-        
+
         // Add numerator levels as-is (they should already be positioned correctly)
         for (&level, &height) in &num_layout.level_heights {
             *self.level_heights.entry(level).or_insert(0) = height;
         }
-        
+
         // Add denominator levels as-is (they should already be positioned correctly)
         for (&level, &height) in &den_layout.level_heights {
             *self.level_heights.entry(level).or_insert(0) = height;
         }
-        
+
         // Add division line level
         *self.level_heights.entry(division_level).or_insert(0) = 1;
-        
+
         self.total_width = max_width;
         self.baseline = division_level;
     }
@@ -1524,12 +1689,13 @@ impl LeveledLayout {
     fn _merge_exponent(&mut self, exp_layout: LeveledLayout) {
         // Add exponent elements
         self.elements.extend(exp_layout.elements);
-        
+
         // Merge level heights
         for (level, height) in exp_layout.level_heights {
-            *self.level_heights.entry(level).or_insert(0) = *self.level_heights.get(&level).unwrap_or(&0).max(&height);
+            *self.level_heights.entry(level).or_insert(0) =
+                *self.level_heights.get(&level).unwrap_or(&0).max(&height);
         }
-        
+
         self.total_width += exp_layout.total_width;
     }
 
@@ -1558,26 +1724,26 @@ impl LeveledLayout {
     fn merge_power_exponent(&mut self, exp_layout: LeveledLayout) {
         let base_width = self.total_width;
         let base_baseline = self.baseline;
-        
+
         // Create power structure context
         let _power_structure_id = self.create_structure_context(
-            vec!["power".to_string(), "exponent".to_string()], 
-            None, 
-            2
+            vec!["power".to_string(), "exponent".to_string()],
+            None,
+            2,
         );
-        
+
         // Merge contexts from exponent layout
         for (id, context) in exp_layout.contexts {
             self.contexts.insert(id, context);
         }
-        
+
         // Find min level in exponent to calculate proper offset
         let exp_min_level = *exp_layout.level_heights.keys().min().unwrap_or(&0);
-        
+
         // Calculate offset to move all exponent levels above the base
         // Ensures exponent appears as superscript without level conflicts
         let level_offset = (base_baseline + 1) - exp_min_level;
-        
+
         // Add exponent elements with level adjustment and structure isolation
         for mut element in exp_layout.elements {
             element.level += level_offset;
@@ -1585,12 +1751,12 @@ impl LeveledLayout {
             // Preserve original structure context but update level
             self.elements.push(element);
         }
-        
+
         // Merge level heights with offset
         for (level, height) in exp_layout.level_heights {
             *self.level_heights.entry(level + level_offset).or_insert(0) = height;
         }
-        
+
         // Update total width to accommodate both base and exponent
         self.total_width = base_width + exp_layout.total_width;
     }
@@ -1612,21 +1778,22 @@ impl LeveledLayout {
     /// 5. Update total width
     fn merge_inline(&mut self, other: LeveledLayout) {
         let current_width = self.total_width;
-        
+
         // Merge contexts from other layout
         for (id, context) in other.contexts {
             self.contexts.insert(id, context);
         }
-        
+
         for mut element in other.elements {
             element.position += current_width;
             self.elements.push(element);
         }
-        
+
         for (level, height) in other.level_heights {
-            *self.level_heights.entry(level).or_insert(0) = *self.level_heights.get(&level).unwrap_or(&0).max(&height);
+            *self.level_heights.entry(level).or_insert(0) =
+                *self.level_heights.get(&level).unwrap_or(&0).max(&height);
         }
-        
+
         self.total_width += other.total_width;
     }
 
@@ -1663,44 +1830,46 @@ impl LeveledLayout {
     fn merge_function_with_multiline(&mut self, func_name: &str, inner_layout: LeveledLayout) {
         // Create function structure context
         let func_structure_id = self.create_structure_context(
-            vec!["function".to_string(), func_name.to_string()], 
-            None, 
-            1
+            vec!["function".to_string(), func_name.to_string()],
+            None,
+            1,
         );
-        
+
         // For multi-line content inside functions, we need special handling
         let min_level = *inner_layout.level_heights.keys().min().unwrap_or(&0);
         let max_level = *inner_layout.level_heights.keys().max().unwrap_or(&0);
-        
+
         // Merge contexts from inner layout
         for (id, context) in inner_layout.contexts {
             self.contexts.insert(id, context);
         }
-        
+
         // Check if inner layout has multiple levels (is truly multi-line)
         if min_level == max_level {
             // Single line - use simple inline approach
-            let content = inner_layout.elements.iter()
+            let content = inner_layout
+                .elements
+                .iter()
                 .map(|e| e.content.clone())
                 .collect::<Vec<_>>()
                 .join("");
             let func_with_content = format!("{}({})", func_name, content);
-            
+
             self.elements.push(LayoutElement {
                 content: func_with_content.clone(),
                 level: self.baseline,
                 position: self.total_width,
                 structure_id: func_structure_id,
             });
-            
+
             self.total_width += func_with_content.chars().count();
             self.level_heights.extend(inner_layout.level_heights);
             return;
         }
-        
+
         // Multi-line case: preserve function structure with isolation
         let current_pos = self.total_width;
-        
+
         // Add function name and opening parenthesis at baseline
         let opening = format!("{}(", func_name);
         self.elements.push(LayoutElement {
@@ -1709,7 +1878,7 @@ impl LeveledLayout {
             position: current_pos,
             structure_id: func_structure_id,
         });
-        
+
         // Add inner elements with proper offset and structure isolation
         let func_offset = opening.chars().count();
         for mut element in inner_layout.elements {
@@ -1717,7 +1886,7 @@ impl LeveledLayout {
             // Preserve original structure context to prevent interference
             self.elements.push(element);
         }
-        
+
         // Add closing parenthesis at baseline
         let inner_width = inner_layout.total_width;
         self.elements.push(LayoutElement {
@@ -1726,7 +1895,7 @@ impl LeveledLayout {
             position: current_pos + func_offset + inner_width,
             structure_id: func_structure_id,
         });
-        
+
         // Update layout properties
         self.level_heights.extend(inner_layout.level_heights);
         self.total_width = current_pos + func_offset + inner_width + 1;
@@ -1780,65 +1949,74 @@ impl LeveledLayout {
 
         let _min_level = *self.level_heights.keys().min().unwrap_or(&0);
         let _max_level = *self.level_heights.keys().max().unwrap_or(&0);
-        
+
         let mut lines = Vec::new();
-        
+
         // Calculate the maximum width needed for proper alignment
-        let max_width = self.elements.iter()
+        let max_width = self
+            .elements
+            .iter()
             .map(|e| e.position + e.content.chars().count())
             .max()
             .unwrap_or(0);
-        
+
         // Group elements by structural families to prevent interference
         let _structural_families = self.group_by_structural_families();
-        
+
         // Collect all levels that actually have content
-        let mut levels_with_content: Vec<i32> = self.level_heights.keys()
+        let mut levels_with_content: Vec<i32> = self
+            .level_heights
+            .keys()
             .filter(|&&level| {
-                self.elements.iter().any(|e| e.level == level && !e.content.trim().is_empty())
+                self.elements
+                    .iter()
+                    .any(|e| e.level == level && !e.content.trim().is_empty())
             })
             .cloned()
             .collect();
         levels_with_content.sort_by(|a, b| b.cmp(a)); // Sort descending (top to bottom)
-        
+
         // Render only levels that have content, with conservative gap reduction
         for (i, level) in levels_with_content.iter().enumerate() {
             // Collect elements at this level, sorted by position and structure
-            let mut level_elements: Vec<&LayoutElement> = self.elements
+            let mut level_elements: Vec<&LayoutElement> = self
+                .elements
                 .iter()
                 .filter(|e| e.level == *level && !e.content.trim().is_empty())
                 .collect();
-            
+
             // Sort by structure family first, then by position to prevent conflicts
             level_elements.sort_by(|a, b| {
                 let family_a = self.get_structure_family(a.structure_id);
                 let family_b = self.get_structure_family(b.structure_id);
                 family_a.cmp(&family_b).then(a.position.cmp(&b.position))
             });
-            
+
             if level_elements.is_empty() {
                 continue;
             }
-            
+
             // Build line with structure-aware positioning
             let mut line_chars: Vec<char> = " ".repeat(max_width).chars().collect();
-            
+
             for element in level_elements {
                 let content = &element.content;
-                
+
                 if content.is_empty() {
                     continue;
                 }
-                
+
                 let start_pos = element.position;
                 let content_chars: Vec<char> = content.chars().collect();
-                
+
                 // Safely place each character with conflict detection
                 for (i, &ch) in content_chars.iter().enumerate() {
                     let pos = start_pos + i;
                     if pos < line_chars.len() {
                         // Check for conflicts with different structural families
-                        if line_chars[pos] != ' ' && !self.are_compatible_structures(element.structure_id, pos) {
+                        if line_chars[pos] != ' '
+                            && !self.are_compatible_structures(element.structure_id, pos)
+                        {
                             // Handle conflict by adjusting position or skipping
                             continue;
                         }
@@ -1846,22 +2024,24 @@ impl LeveledLayout {
                     }
                 }
             }
-            
+
             let line_str: String = line_chars.into_iter().collect();
             lines.push(line_str.trim_end().to_string());
-            
+
             // DIVISION-AWARE GAP MANAGEMENT: Tight spacing for divisions, conservative for others
             if i < levels_with_content.len() - 1 {
                 let current_level = *level;
                 let next_level = levels_with_content[i + 1];
                 let gap = (current_level - next_level).abs();
-                
+
                 // Check if we're in a division context by looking for division lines
-                let has_division_line = self.elements.iter()
-                    .any(|e| e.content.contains('─') && 
-                         (e.level == current_level || e.level == next_level || 
-                          (e.level > next_level && e.level < current_level)));
-                
+                let has_division_line = self.elements.iter().any(|e| {
+                    e.content.contains('─')
+                        && (e.level == current_level
+                            || e.level == next_level
+                            || (e.level > next_level && e.level < current_level))
+                });
+
                 // For divisions: no gaps (tight formatting)
                 // For other expressions: gaps only when > 2
                 if !has_division_line && gap > 2 {
@@ -1869,19 +2049,19 @@ impl LeveledLayout {
                 }
             }
         }
-        
+
         // Remove trailing empty lines
         while lines.last().map_or(false, |line| line.trim().is_empty()) {
             lines.pop();
         }
-        
+
         if lines.is_empty() {
             vec![String::new()]
         } else {
             lines
         }
     }
-    
+
     /// Groups layout elements by their structural families for conflict resolution.
     ///
     /// Elements belonging to the same structural family (sharing a common root structure)
@@ -1896,15 +2076,18 @@ impl LeveledLayout {
     /// don't interfere with each other's positioning and layout.
     fn group_by_structural_families(&self) -> std::collections::HashMap<usize, Vec<usize>> {
         let mut families = std::collections::HashMap::new();
-        
+
         for element in &self.elements {
             let family_id = self.get_structure_family(element.structure_id);
-            families.entry(family_id).or_insert_with(Vec::new).push(element.structure_id);
+            families
+                .entry(family_id)
+                .or_insert_with(Vec::new)
+                .push(element.structure_id);
         }
-        
+
         families
     }
-    
+
     /// Finds the root structure ID for a given structure by traversing parent relationships.
     ///
     /// Walks up the structural hierarchy to find the topmost parent structure.
@@ -1933,7 +2116,7 @@ impl LeveledLayout {
         }
         current_id
     }
-    
+
     /// Checks if two structures can coexist at the same position without conflict.
     ///
     /// Currently implements a permissive policy allowing all structures to coexist.
@@ -1959,8 +2142,6 @@ impl LeveledLayout {
         true
     }
 }
-
-
 
 //___________________________________MACROS____________________________________
 

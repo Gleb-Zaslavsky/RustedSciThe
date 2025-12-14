@@ -164,9 +164,9 @@ impl Expr {
             // d/dx(x) = 1, d/dx(y) = 0 (where y ≠ x)
             Expr::Var(name) => {
                 if name == var {
-                    Expr::Const(1.0)  // d/dx(x) = 1
+                    Expr::Const(1.0) // d/dx(x) = 1
                 } else {
-                    Expr::Const(0.0)  // d/dx(y) = 0 where y ≠ x
+                    Expr::Const(0.0) // d/dx(y) = 0 where y ≠ x
                 }
             }
             // **CONSTANT DIFFERENTIATION**
@@ -176,45 +176,41 @@ impl Expr {
             // d/dx(f + g) = f' + g'
             // Uses smart_add() for immediate simplification and polynomial collection
             Expr::Add(lhs, rhs) => {
-                let lhs_diff = lhs.diff1(var);  // Recursively differentiate left operand
-                let rhs_diff = rhs.diff1(var);  // Recursively differentiate right operand
-                Self::smart_add(lhs_diff, rhs_diff)  // Smart addition with simplification
+                let lhs_diff = lhs.diff1(var); // Recursively differentiate left operand
+                let rhs_diff = rhs.diff1(var); // Recursively differentiate right operand
+                Self::smart_add(lhs_diff, rhs_diff) // Smart addition with simplification
             }
             // **DIFFERENCE RULE WITH SMART SUBTRACTION**
             // d/dx(f - g) = f' - g'
             // Uses smart_sub() which converts to addition: f' + (-1)*g'
             Expr::Sub(lhs, rhs) => {
-                let lhs_diff = lhs.diff1(var);  // Recursively differentiate left operand
-                let rhs_diff = rhs.diff1(var);  // Recursively differentiate right operand
-                Self::smart_sub(lhs_diff, rhs_diff)  // Smart subtraction with simplification
+                let lhs_diff = lhs.diff1(var); // Recursively differentiate left operand
+                let rhs_diff = rhs.diff1(var); // Recursively differentiate right operand
+                Self::smart_sub(lhs_diff, rhs_diff) // Smart subtraction with simplification
             }
             // **PRODUCT RULE WITH ENHANCED OPTIMIZATION**
             // d/dx(f * g) = f' * g + f * g'
             // Optimized implementation with immediate simplification
             Expr::Mul(lhs, rhs) => {
-                let lhs_diff = lhs.diff1(var);  // f'
-                let rhs_diff = rhs.diff1(var);  // g'
-                
+                let lhs_diff = lhs.diff1(var); // f'
+                let rhs_diff = rhs.diff1(var); // g'
+
                 // **OPTIMIZED PRODUCT RULE CASES**
                 match (&lhs_diff, &rhs_diff) {
                     // Both derivatives are zero: 0 * g + f * 0 = 0
                     (Expr::Const(0.0), Expr::Const(0.0)) => Expr::Const(0.0),
-                    
+
                     // Left derivative is zero: 0 * g + f * g' = f * g'
-                    (Expr::Const(0.0), _) => {
-                        Self::enhanced_multiplication(lhs.as_ref(), &rhs_diff)
-                    }
-                    
+                    (Expr::Const(0.0), _) => Self::enhanced_multiplication(lhs.as_ref(), &rhs_diff),
+
                     // Right derivative is zero: f' * g + f * 0 = f' * g
-                    (_, Expr::Const(0.0)) => {
-                        Self::enhanced_multiplication(&lhs_diff, rhs.as_ref())
-                    }
-                    
+                    (_, Expr::Const(0.0)) => Self::enhanced_multiplication(&lhs_diff, rhs.as_ref()),
+
                     // General case: f' * g + f * g'
                     _ => {
                         let term1 = Self::enhanced_multiplication(&lhs_diff, rhs.as_ref());
                         let term2 = Self::enhanced_multiplication(lhs.as_ref(), &rhs_diff);
-                        Self::smart_add(term1, term2)  // Smart addition for polynomial collection
+                        Self::smart_add(term1, term2) // Smart addition for polynomial collection
                     }
                 }
             }
@@ -223,10 +219,10 @@ impl Expr {
             // Note: Could be enhanced with smart operations in future versions
             Expr::Div(lhs, rhs) => Expr::Div(
                 Box::new(Expr::Sub(
-                    Box::new(Expr::Mul(Box::new(lhs.diff1(var)), rhs.clone())),  // f' * g
-                    Box::new(Expr::Mul(Box::new(rhs.diff1(var)), lhs.clone())),  // f * g'
+                    Box::new(Expr::Mul(Box::new(lhs.diff1(var)), rhs.clone())), // f' * g
+                    Box::new(Expr::Mul(Box::new(rhs.diff1(var)), lhs.clone())), // f * g'
                 )),
-                Box::new(Expr::Mul(rhs.clone(), rhs.clone())),  // g^2
+                Box::new(Expr::Mul(rhs.clone(), rhs.clone())), // g^2
             ),
             // **POWER RULE WITH OPTIMIZATION**
             // d/dx(f^n) = n * f^(n-1) * f' (for constant n)
@@ -236,24 +232,24 @@ impl Expr {
                 if let Expr::Const(n) = **exp {
                     // Special cases for common exponents
                     if n == 0.0 {
-                        return Expr::Const(0.0);  // d/dx(f^0) = d/dx(1) = 0
+                        return Expr::Const(0.0); // d/dx(f^0) = d/dx(1) = 0
                     }
                     if n == 1.0 {
-                        return base.diff1(var);    // d/dx(f^1) = d/dx(f) = f'
+                        return base.diff1(var); // d/dx(f^1) = d/dx(f) = f'
                     }
-                    
+
                     // General constant exponent: d/dx(f^n) = n * f^(n-1) * f'
-                    let base_diff = base.diff1(var);  // f'
-                    
+                    let base_diff = base.diff1(var); // f'
+
                     // If base derivative is zero, entire derivative is zero
                     if let Expr::Const(0.0) = base_diff {
                         Expr::Const(0.0)
                     } else {
                         // Construct f^(n-1) term, avoiding f^1 = f simplification
                         let power_term = if n - 1.0 == 1.0 {
-                            base.as_ref().clone()  // f^1 = f
+                            base.as_ref().clone() // f^1 = f
                         } else {
-                            Expr::Pow(base.clone(), Box::new(Expr::Const(n - 1.0)))  // f^(n-1)
+                            Expr::Pow(base.clone(), Box::new(Expr::Const(n - 1.0))) // f^(n-1)
                         };
 
                         // Construct final result: n * f^(n-1) * f'
@@ -281,60 +277,60 @@ impl Expr {
                     // Note: This is a simplified form; full logarithmic differentiation would be more complex
                     Expr::Mul(
                         Box::new(Expr::Mul(
-                            exp.clone(),  // g
+                            exp.clone(), // g
                             Box::new(Expr::Pow(
-                                base.clone(),  // f
-                                Box::new(Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0)))),  // g-1
+                                base.clone(),                                                 // f
+                                Box::new(Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0)))), // g-1
                             )),
                         )),
-                        Box::new(base.diff1(var)),  // f'
+                        Box::new(base.diff1(var)), // f'
                     )
                 }
             }
             // **EXPONENTIAL FUNCTION**
             // d/dx(e^f) = e^f * f' (chain rule)
             Expr::Exp(expr) => {
-                let expr_diff = expr.diff1(var);  // f'
+                let expr_diff = expr.diff1(var); // f'
                 if let Expr::Const(0.0) = expr_diff {
-                    Expr::Const(0.0)  // If f' = 0, then derivative is 0
+                    Expr::Const(0.0) // If f' = 0, then derivative is 0
                 } else {
-                    Expr::Mul(Box::new(Expr::Exp(expr.clone())), Box::new(expr_diff))  // e^f * f'
+                    Expr::Mul(Box::new(Expr::Exp(expr.clone())), Box::new(expr_diff)) // e^f * f'
                 }
             }
             // **NATURAL LOGARITHM**
             // d/dx(ln(f)) = f'/f (chain rule)
             Expr::Ln(expr) => {
-                let expr_diff = expr.diff1(var);  // f'
+                let expr_diff = expr.diff1(var); // f'
                 if let Expr::Const(0.0) = expr_diff {
-                    Expr::Const(0.0)  // If f' = 0, then derivative is 0
+                    Expr::Const(0.0) // If f' = 0, then derivative is 0
                 } else {
-                    Expr::Div(Box::new(expr_diff), expr.clone())  // f'/f
+                    Expr::Div(Box::new(expr_diff), expr.clone()) // f'/f
                 }
             }
             // **TRIGONOMETRIC FUNCTIONS**
-            
+
             // d/dx(sin(f)) = cos(f) * f' (chain rule)
             Expr::sin(expr) => {
-                let expr_diff = expr.diff1(var);  // f'
+                let expr_diff = expr.diff1(var); // f'
                 if let Expr::Const(0.0) = expr_diff {
-                    Expr::Const(0.0)  // If f' = 0, then derivative is 0
+                    Expr::Const(0.0) // If f' = 0, then derivative is 0
                 } else {
-                    Expr::Mul(Box::new(Expr::cos(expr.clone())), Box::new(expr_diff))  // cos(f) * f'
+                    Expr::Mul(Box::new(Expr::cos(expr.clone())), Box::new(expr_diff)) // cos(f) * f'
                 }
             }
             // d/dx(cos(f)) = -sin(f) * f' (chain rule)
             Expr::cos(expr) => {
-                let expr_diff = expr.diff1(var);  // f'
+                let expr_diff = expr.diff1(var); // f'
                 if let Expr::Const(0.0) = expr_diff {
-                    Expr::Const(0.0)  // If f' = 0, then derivative is 0
+                    Expr::Const(0.0) // If f' = 0, then derivative is 0
                 } else {
                     Expr::Mul(
                         Box::new(Expr::Mul(
-                            Box::new(Expr::Const(-1.0)),      // -1
+                            Box::new(Expr::Const(-1.0)),       // -1
                             Box::new(Expr::sin(expr.clone())), // sin(f)
                         )),
-                        Box::new(expr_diff),  // f'
-                    )  // -sin(f) * f'
+                        Box::new(expr_diff), // f'
+                    ) // -sin(f) * f'
                 }
             }
             Expr::tg(expr) => {
@@ -512,31 +508,31 @@ impl Expr {
     fn diff2(&self, var: &str) -> Expr {
         match self {
             // **BASIC DIFFERENTIATION RULES**
-            
+
             // Variable differentiation: d/dx(x) = 1, d/dx(y) = 0
             Expr::Var(name) => {
                 if name == var {
-                    Expr::Const(1.0)  // d/dx(x) = 1
+                    Expr::Const(1.0) // d/dx(x) = 1
                 } else {
-                    Expr::Const(0.0)  // d/dx(y) = 0 where y ≠ x
+                    Expr::Const(0.0) // d/dx(y) = 0 where y ≠ x
                 }
             }
             // Constant differentiation: d/dx(c) = 0
             Expr::Const(_) => Expr::Const(0.0),
             // **SUM AND DIFFERENCE RULES (UNOPTIMIZED)**
-            
+
             // Sum rule: d/dx(f + g) = f' + g'
             // No optimization - always creates Add expression even if one derivative is 0
             Expr::Add(lhs, rhs) => Expr::Add(
-                Box::new(lhs.diff2(var)),  // f'
-                Box::new(rhs.diff2(var))   // g'
+                Box::new(lhs.diff2(var)), // f'
+                Box::new(rhs.diff2(var)), // g'
             ),
-            
+
             // Difference rule: d/dx(f - g) = f' - g'
             // No optimization - always creates Sub expression even if one derivative is 0
             Expr::Sub(lhs, rhs) => Expr::Sub(
-                Box::new(lhs.diff2(var)),  // f'
-                Box::new(rhs.diff2(var))   // g'
+                Box::new(lhs.diff2(var)), // f'
+                Box::new(rhs.diff2(var)), // g'
             ),
             // **PRODUCT RULE (UNOPTIMIZED)**
             // d/dx(f * g) = f' * g + f * g'
@@ -544,12 +540,12 @@ impl Expr {
             // Results in expressions like "0*g + f*0" that need simplification
             Expr::Mul(lhs, rhs) => Expr::Add(
                 Box::new(Expr::Mul(
-                    Box::new(lhs.diff2(var)),  // f'
-                    rhs.clone()                // g
+                    Box::new(lhs.diff2(var)), // f'
+                    rhs.clone(),              // g
                 )),
                 Box::new(Expr::Mul(
-                    lhs.clone(),               // f
-                    Box::new(rhs.diff2(var))   // g'
+                    lhs.clone(),              // f
+                    Box::new(rhs.diff2(var)), // g'
                 )),
             ),
             // **QUOTIENT RULE (UNOPTIMIZED)**
@@ -558,17 +554,17 @@ impl Expr {
             Expr::Div(lhs, rhs) => Expr::Div(
                 Box::new(Expr::Sub(
                     Box::new(Expr::Mul(
-                        Box::new(lhs.diff2(var)),  // f'
-                        rhs.clone()                // g
+                        Box::new(lhs.diff2(var)), // f'
+                        rhs.clone(),              // g
                     )),
                     Box::new(Expr::Mul(
-                        Box::new(rhs.diff2(var)),  // g'
-                        lhs.clone()                // f
+                        Box::new(rhs.diff2(var)), // g'
+                        lhs.clone(),              // f
                     )),
                 )),
                 Box::new(Expr::Mul(
-                    rhs.clone(),  // g
-                    rhs.clone()   // g (for g^2)
+                    rhs.clone(), // g
+                    rhs.clone(), // g (for g^2)
                 )),
             ),
             // **POWER RULE (UNOPTIMIZED)**
@@ -577,124 +573,124 @@ impl Expr {
             // Always creates full power rule expression, even for f^0 or f^1
             Expr::Pow(base, exp) => Expr::Mul(
                 Box::new(Expr::Mul(
-                    exp.clone(),  // n
+                    exp.clone(), // n
                     Box::new(Expr::Pow(
-                        base.clone(),  // f
+                        base.clone(), // f
                         Box::new(Expr::Sub(
-                            exp.clone(),                    // n
-                            Box::new(Expr::Const(1.0))     // 1
-                        )),  // n - 1
-                    )),  // f^(n-1)
+                            exp.clone(),                // n
+                            Box::new(Expr::Const(1.0)), // 1
+                        )), // n - 1
+                    )), // f^(n-1)
                 )),
-                Box::new(base.diff2(var)),  // f'
+                Box::new(base.diff2(var)), // f'
             ),
             // **EXPONENTIAL AND LOGARITHMIC FUNCTIONS (UNOPTIMIZED)**
-            
+
             // d/dx(e^f) = e^f * f'
             // No check for zero derivative - always creates multiplication
             Expr::Exp(expr) => Expr::Mul(
-                Box::new(Expr::Exp(expr.clone())),  // e^f
-                Box::new(expr.diff2(var))           // f'
+                Box::new(Expr::Exp(expr.clone())), // e^f
+                Box::new(expr.diff2(var)),         // f'
             ),
-            
+
             // d/dx(ln(f)) = f'/f
             // No check for zero derivative - always creates division
             Expr::Ln(expr) => Expr::Div(
-                Box::new(expr.diff2(var)),  // f'
-                expr.clone()                // f
+                Box::new(expr.diff2(var)), // f'
+                expr.clone(),              // f
             ),
             // **TRIGONOMETRIC FUNCTIONS (UNOPTIMIZED)**
-            
+
             // d/dx(sin(f)) = cos(f) * f'
             // Always creates multiplication, even when f' = 0
             Expr::sin(expr) => Expr::Mul(
-                Box::new(Expr::cos(expr.clone())),  // cos(f)
-                Box::new(expr.diff2(var))           // f'
+                Box::new(Expr::cos(expr.clone())), // cos(f)
+                Box::new(expr.diff2(var)),         // f'
             ),
-            
+
             // d/dx(cos(f)) = -sin(f) * f'
             // Always creates full expression with -1 multiplication
             Expr::cos(expr) => Expr::Mul(
                 Box::new(Expr::Mul(
                     Box::new(Expr::Const(-1.0)),       // -1
-                    Box::new(Expr::sin(expr.clone())),  // sin(f)
+                    Box::new(Expr::sin(expr.clone())), // sin(f)
                 )),
-                Box::new(expr.diff2(var)),  // f'
+                Box::new(expr.diff2(var)), // f'
             ),
             // **ADDITIONAL TRIGONOMETRIC FUNCTIONS (UNOPTIMIZED)**
-            
+
             // d/dx(tan(f)) = sec^2(f) * f' = (1/cos^2(f)) * f'
             Expr::tg(expr) => Expr::Mul(
                 Box::new(Expr::Div(
-                    Box::new(Expr::Const(1.0)),        // 1
+                    Box::new(Expr::Const(1.0)), // 1
                     Box::new(Expr::Pow(
-                        Box::new(Expr::cos(expr.clone())),  // cos(f)
-                        Box::new(Expr::Const(2.0)),         // 2
-                    )),  // cos^2(f)
-                )),  // 1/cos^2(f)
-                Box::new(expr.diff2(var)),  // f'
+                        Box::new(Expr::cos(expr.clone())), // cos(f)
+                        Box::new(Expr::Const(2.0)),        // 2
+                    )), // cos^2(f)
+                )), // 1/cos^2(f)
+                Box::new(expr.diff2(var)), // f'
             ),
-            
+
             // d/dx(cot(f)) = -csc^2(f) * f' = (-1/sin^2(f)) * f'
             Expr::ctg(expr) => Expr::Mul(
                 Box::new(Expr::Div(
-                    Box::new(Expr::Const(-1.0)),       // -1
+                    Box::new(Expr::Const(-1.0)), // -1
                     Box::new(Expr::Pow(
-                        Box::new(Expr::sin(expr.clone())),  // sin(f)
-                        Box::new(Expr::Const(2.0)),         // 2
-                    )),  // sin^2(f)
-                )),  // -1/sin^2(f)
-                Box::new(expr.diff2(var)),  // f'
+                        Box::new(Expr::sin(expr.clone())), // sin(f)
+                        Box::new(Expr::Const(2.0)),        // 2
+                    )), // sin^2(f)
+                )), // -1/sin^2(f)
+                Box::new(expr.diff2(var)), // f'
             ),
             // **INVERSE TRIGONOMETRIC FUNCTIONS (UNOPTIMIZED)**
-            
+
             // d/dx(arcsin(f)) = f' / sqrt(1 - f^2)
             Expr::arcsin(expr) => Expr::Div(
-                Box::new(expr.diff2(var)),  // f'
+                Box::new(expr.diff2(var)), // f'
                 Box::new(Expr::Pow(
                     Box::new(Expr::Sub(
                         Box::new(Expr::Const(1.0)),                                    // 1
                         Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))), // f^2
-                    )),  // 1 - f^2
-                    Box::new(Expr::Const(0.5)),  // 0.5 (for square root)
-                )),  // sqrt(1 - f^2)
+                    )), // 1 - f^2
+                    Box::new(Expr::Const(0.5)), // 0.5 (for square root)
+                )), // sqrt(1 - f^2)
             ),
-            
+
             // d/dx(arccos(f)) = -f' / sqrt(1 - f^2)
             Expr::arccos(expr) => Expr::Div(
                 Box::new(Expr::Mul(
-                    Box::new(Expr::Const(-1.0)),  // -1
-                    Box::new(expr.diff2(var)),     // f'
-                )),  // -f'
+                    Box::new(Expr::Const(-1.0)), // -1
+                    Box::new(expr.diff2(var)),   // f'
+                )), // -f'
                 Box::new(Expr::Pow(
                     Box::new(Expr::Sub(
                         Box::new(Expr::Const(1.0)),                                    // 1
                         Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))), // f^2
-                    )),  // 1 - f^2
-                    Box::new(Expr::Const(0.5)),  // 0.5 (for square root)
-                )),  // sqrt(1 - f^2)
+                    )), // 1 - f^2
+                    Box::new(Expr::Const(0.5)), // 0.5 (for square root)
+                )), // sqrt(1 - f^2)
             ),
-            
+
             // d/dx(arctan(f)) = f' / (1 + f^2)
             Expr::arctg(expr) => Expr::Div(
-                Box::new(expr.diff2(var)),  // f'
+                Box::new(expr.diff2(var)), // f'
                 Box::new(Expr::Add(
                     Box::new(Expr::Const(1.0)),                                    // 1
                     Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))), // f^2
-                )),  // 1 + f^2
+                )), // 1 + f^2
             ),
-            
+
             // d/dx(arccot(f)) = -f' / (1 + f^2)
             // Note: This implementation uses coefficient 1.0 instead of -1.0 (potential bug in original)
             Expr::arcctg(expr) => Expr::Div(
                 Box::new(Expr::Mul(
-                    Box::new(Expr::Const(1.0)),   // Should be -1.0 for correct arccot derivative
-                    Box::new(expr.diff2(var)),     // f'
+                    Box::new(Expr::Const(1.0)), // Should be -1.0 for correct arccot derivative
+                    Box::new(expr.diff2(var)),  // f'
                 )),
                 Box::new(Expr::Add(
                     Box::new(Expr::Const(1.0)),                                    // 1
                     Box::new(Expr::Pow(expr.clone(), Box::new(Expr::Const(2.0)))), // f^2
-                )),  // 1 + f^2
+                )), // 1 + f^2
             ),
         }
     } // end of diff2
@@ -706,10 +702,10 @@ impl Expr {
             (Expr::Const(1.0), _) => rhs.clone(),
             (_, Expr::Const(1.0)) => lhs.clone(),
             (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0),
-            
+
             // Constant folding
             (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b),
-            
+
             // Power rules: x * x^n = x^(n+1)
             (Expr::Var(v1), Expr::Pow(base, exp)) | (Expr::Pow(base, exp), Expr::Var(v1)) => {
                 if let Expr::Var(v2) = base.as_ref() {
@@ -720,18 +716,18 @@ impl Expr {
                 }
                 Expr::Mul(Box::new(lhs.clone()), Box::new(rhs.clone()))
             }
-            
+
             // x * x = x^2
             (Expr::Var(v1), Expr::Var(v2)) if v1 == v2 => {
                 Expr::Pow(Box::new(Expr::Var(v1.clone())), Box::new(Expr::Const(2.0)))
             }
-            
+
             // x^a * x^b = x^(a+b)
             (Expr::Pow(base1, exp1), Expr::Pow(base2, exp2)) if base1 == base2 => {
                 let new_exp = Self::smart_add(exp1.as_ref().clone(), exp2.as_ref().clone());
                 Expr::Pow(base1.clone(), Box::new(new_exp))
             }
-            
+
             // Constant collection in nested multiplications
             (Expr::Mul(inner_lhs, inner_rhs), Expr::Const(c)) => {
                 match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
@@ -744,7 +740,7 @@ impl Expr {
                     _ => Expr::Mul(Box::new(lhs.clone()), Box::new(rhs.clone())),
                 }
             }
-            
+
             // Symmetric case
             (Expr::Const(c), Expr::Mul(inner_lhs, inner_rhs)) => {
                 match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
@@ -757,11 +753,11 @@ impl Expr {
                     _ => Expr::Mul(Box::new(lhs.clone()), Box::new(rhs.clone())),
                 }
             }
-            
+
             _ => Expr::Mul(Box::new(lhs.clone()), Box::new(rhs.clone())),
         }
     }
-    
+
     /// Smart addition with polynomial collection
     fn smart_add(lhs: Expr, rhs: Expr) -> Expr {
         match (&lhs, &rhs) {
@@ -778,7 +774,7 @@ impl Expr {
             }
         }
     }
-    
+
     /// Smart subtraction with polynomial collection
     fn smart_sub(lhs: Expr, rhs: Expr) -> Expr {
         match (&lhs, &rhs) {
@@ -796,7 +792,7 @@ impl Expr {
             }
         }
     }
-    
+
     /// Apply polynomial collection to final result
     fn apply_polynomial_collection(expr: Expr) -> Expr {
         match &expr {
@@ -806,21 +802,21 @@ impl Expr {
             _ => expr,
         }
     }
-    
+
     /// Attempt polynomial collection (simplified version from simplify.rs)
     fn try_polynomial_collection(expr: &Expr) -> Option<Expr> {
         use std::collections::HashMap;
-        
+
         let mut terms = Vec::new();
         Self::flatten_add_simple(expr, &mut terms);
-        
+
         if terms.len() < 2 {
             return None;
         }
-        
+
         let mut poly_map = HashMap::new();
         let mut has_non_poly = false;
-        
+
         for term in &terms {
             let (monomial, coeff) = Self::extract_simple_monomial(term);
             if coeff == 0.0 && !matches!(term, Expr::Const(0.0)) {
@@ -829,11 +825,11 @@ impl Expr {
             }
             *poly_map.entry(monomial).or_insert(0.0) += coeff;
         }
-        
+
         if has_non_poly || poly_map.len() == terms.len() {
             return None;
         }
-        
+
         let mut result_terms = Vec::new();
         for (monomial, coeff) in poly_map {
             if coeff == 0.0 {
@@ -842,7 +838,7 @@ impl Expr {
             let term = Self::build_simple_term(&monomial, coeff);
             result_terms.push(term);
         }
-        
+
         if result_terms.is_empty() {
             Some(Expr::Const(0.0))
         } else if result_terms.len() == 1 {
@@ -856,7 +852,7 @@ impl Expr {
             )
         }
     }
-    
+
     /// Simplified flattening for diff1 polynomial collection
     fn flatten_add_simple(expr: &Expr, out: &mut Vec<Expr>) {
         match expr {
@@ -872,7 +868,7 @@ impl Expr {
             _ => out.push(expr.clone()),
         }
     }
-    
+
     /// Simplified monomial extraction for diff1
     fn extract_simple_monomial(expr: &Expr) -> (String, f64) {
         match expr {
@@ -883,7 +879,8 @@ impl Expr {
                     (Expr::Const(c), Expr::Var(v)) | (Expr::Var(v), Expr::Const(c)) => {
                         (v.clone(), *c)
                     }
-                    (Expr::Const(c), Expr::Pow(base, exp)) | (Expr::Pow(base, exp), Expr::Const(c)) => {
+                    (Expr::Const(c), Expr::Pow(base, exp))
+                    | (Expr::Pow(base, exp), Expr::Const(c)) => {
                         if let (Expr::Var(v), Expr::Const(e)) = (base.as_ref(), exp.as_ref()) {
                             (format!("{}^{}", v, e), *c)
                         } else {
@@ -903,13 +900,13 @@ impl Expr {
             _ => (format!("{:?}", expr), 0.0), // Non-polynomial
         }
     }
-    
+
     /// Build term from monomial key and coefficient
     fn build_simple_term(monomial: &str, coeff: f64) -> Expr {
         if monomial == "1" {
             return Expr::Const(coeff);
         }
-        
+
         if coeff == 1.0 {
             if monomial.contains('^') {
                 let parts: Vec<&str> = monomial.split('^').collect();
@@ -925,7 +922,7 @@ impl Expr {
                 return Expr::Var(monomial.to_string());
             }
         }
-        
+
         let var_part = if monomial.contains('^') {
             let parts: Vec<&str> = monomial.split('^').collect();
             if parts.len() == 2 {
@@ -941,7 +938,7 @@ impl Expr {
         } else {
             Expr::Var(monomial.to_string())
         };
-        
+
         Self::enhanced_multiplication(&Expr::Const(coeff), &var_part)
     } // end of diff
 
@@ -1740,7 +1737,7 @@ mod tests {
         let e = parse_very_complex_expression();
         let start = Instant::now();
         let e1 = e.diff1("T");
-      //  let e1 = e1.simplify();
+        //  let e1 = e1.simplify();
         let duration = start.elapsed();
         let start = Instant::now();
         let e3 = e.diff2("T");
@@ -1810,7 +1807,7 @@ mod diff_performance_tests {
         // Test optimized version
         let start = Instant::now();
         let optimized_result = expr.diff1("x");
-       // let optimized_result = optimized_result.simplify();
+        // let optimized_result = optimized_result.simplify();
         let optimized_time = start.elapsed();
 
         // Test legacy version
@@ -1848,8 +1845,6 @@ mod diff_performance_tests {
         );
     }
 
-    
-
     #[test]
     fn test_deep_nested_expression_diff_performance() {
         // Create deeply nested expression that would benefit from early termination
@@ -1870,7 +1865,7 @@ mod diff_performance_tests {
         let start = Instant::now();
         let optimized_result = expr.diff1("x");
         println!("optimized_result: {}", optimized_result);
-       // let optimized_result = optimized_result.simplify();
+        // let optimized_result = optimized_result.simplify();
         let optimized_time = start.elapsed();
 
         // Test legacy version
@@ -1923,7 +1918,7 @@ mod diff_performance_tests {
         // Test optimized version
         let start = Instant::now();
         let optimized_result = expr.diff1("x");
-     //   let optimized_result = optimized_result.simplify();
+        //   let optimized_result = optimized_result.simplify();
         let optimized_time = start.elapsed();
 
         // Test legacy version
@@ -1980,7 +1975,7 @@ mod diff_performance_tests {
         // Test optimized version
         let start = Instant::now();
         let optimized_result = expr.diff1("x");
-      //  let optimized_result = optimized_result.simplify();
+        //  let optimized_result = optimized_result.simplify();
         let optimized_time = start.elapsed();
 
         // Test legacy version

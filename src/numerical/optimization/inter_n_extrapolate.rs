@@ -2,8 +2,7 @@ use nalgebra::DVector;
 use std::f64;
 /// Constants for maximum dimensions support
 
-#[allow(dead_code)]
-fn lagrange_interpolate(x: f64, x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> f64 {
+pub fn lagrange_interpolate(x: f64, x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> f64 {
     let n = x_vals.len();
     let mut result = 0.0;
 
@@ -21,8 +20,8 @@ fn lagrange_interpolate(x: f64, x_vals: &DVector<f64>, y_vals: &DVector<f64>) ->
 }
 
 /// Compute Newton divided difference coefficients
-#[allow(dead_code)]
-fn newton_divided_differences(x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> DVector<f64> {
+
+pub fn newton_divided_differences(x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> DVector<f64> {
     let n = x_vals.len();
     let mut coef = y_vals.clone();
 
@@ -36,8 +35,8 @@ fn newton_divided_differences(x_vals: &DVector<f64>, y_vals: &DVector<f64>) -> D
 }
 
 /// Evaluate Newton interpolating polynomial using Horner's method
-#[allow(dead_code)]
-fn newton_interpolate(x: f64, x_vals: &DVector<f64>, coef: &DVector<f64>) -> f64 {
+
+pub fn newton_interpolate(x: f64, x_vals: &DVector<f64>, coef: &DVector<f64>) -> f64 {
     let n = coef.len();
     let mut result = coef[n - 1];
 

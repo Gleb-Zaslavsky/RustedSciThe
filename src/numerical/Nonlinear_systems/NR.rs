@@ -81,7 +81,7 @@ pub struct NR {
 
     pub eq_params: Option<Vec<String>>, // equations may have parameters
     pub eq_params_values: Option<DVector<f64>>,
-    pub max_error: f64,                           // max error
+    pub max_error: f64, // max error
     pub dumping_factor: f64,
     pub i: usize,                     // iteration counter
     pub jac: DMatrix<f64>,            // jacobian matrix
@@ -200,7 +200,7 @@ impl NR {
         initial_guess: Vec<f64>,
         tolerance: f64,
         max_iterations: usize,
-        eq_params: Option<Vec<String>>
+        eq_params: Option<Vec<String>>,
     ) {
         self.eq_params = eq_params;
         let eq_system = eq_system_string
@@ -360,7 +360,7 @@ impl NR {
     }
     /// module NR_LM_Nielsen contains the most advanced version of the LM method.
     /// This code needs many parameters to work properly.
-   pub fn set_additional_params(
+    pub fn set_additional_params(
         &mut self,
         // enum to select the scaling method: Levenberg, Marquardt or More (see LM_utils)
         scaling_method: Option<ScalingMethod>,
@@ -429,7 +429,6 @@ impl NR {
     }
     pub fn set_eq_params(&mut self, eq_params: Vec<String>) {
         self.eq_params = Some(eq_params.clone());
-
     }
     pub fn set_eq_params_values(&mut self, eq_params_values: DVector<f64>) {
         self.eq_params_values = Some(eq_params_values.clone());
@@ -469,7 +468,7 @@ impl NR {
         let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
         Jacobian_instance.set_vector_of_functions(eq_system);
         Jacobian_instance.set_variables(args.clone());
-        if let Some(eq_params) = &self.eq_params{
+        if let Some(eq_params) = &self.eq_params {
             Jacobian_instance.set_params(eq_params.clone());
             Jacobian_instance.calc_jacobian();
             Jacobian_instance.lambdify_jacobian_DMatrix_with_parameters_parallel();
@@ -495,15 +494,14 @@ impl NR {
 
         // Evaluate functions
         self.custom_timer.fun_tic();
-       let residual = 
-        if let Some(eq_params_values) = &self.eq_params_values{
-          let residual =  &self.jacobian.lambdified_function_with_params;
-          residual(eq_params_values, &y_data)
+        let residual = if let Some(eq_params_values) = &self.eq_params_values {
+            let residual = &self.jacobian.lambdified_function_with_params;
+            residual(eq_params_values, &y_data)
         } else {
-           let residual =  &self.jacobian.lambdified_function_DVector;
-          residual(&y_data)
+            let residual = &self.jacobian.lambdified_function_DVector;
+            residual(&y_data)
         };
-   
+
         self.custom_timer.fun_tac();
 
         residual
@@ -512,17 +510,16 @@ impl NR {
         let y_data: DVector<f64> = y;
         // Evaluate jacobian
         self.custom_timer.jac_tic();
-        let jac = 
-        if let Some(eq_params_values) = &self.eq_params_values{
-          let jac =  &self.jacobian.lambdified_jacobian_DMatrix_with_params;
-          jac(eq_params_values, &y_data)
+        let jac = if let Some(eq_params_values) = &self.eq_params_values {
+            let jac = &self.jacobian.lambdified_jacobian_DMatrix_with_params;
+            jac(eq_params_values, &y_data)
         } else {
-           let jac =  &self.jacobian.lambdified_jacobian_DMatrix;
-           jac(&y_data)
+            let jac = &self.jacobian.lambdified_jacobian_DMatrix;
+            jac(&y_data)
         };
-   
+
         self.custom_timer.jac_tac();
-  
+
         // Return cloned values to avoid borrow checker issues
         jac
     }
@@ -531,13 +528,12 @@ impl NR {
         // let previous_step: DVector<f64> = self.step.clone();
 
         // evaluate jacobian and functions
-       let J_k = self.evaluate_jacobian(y.clone());
-       let F_k = self.evaluate_function(y.clone());
-     
+        let J_k = self.evaluate_jacobian(y.clone());
+        let F_k = self.evaluate_function(y.clone());
+
         self.custom_timer.linear_system_tic();
-       
+
         self.jac = J_k.clone();
-  
 
         let undamped_step_k = solve_linear_system(method, &J_k, &F_k).unwrap();
         for el in undamped_step_k.iter() {
@@ -548,7 +544,7 @@ impl NR {
             }
         }
         //    self.step = undamped_step_k.clone();
-         self.custom_timer.linear_system_tac();
+        self.custom_timer.linear_system_tac();
         (undamped_step_k, F_k.clone())
     }
     pub fn simple_newton_step(&mut self) -> (i32, Option<DVector<f64>>) {
@@ -960,7 +956,7 @@ mod tests {
             1e-6,
             1000,
         );
-         NR_instanse.set_solver_params(
+        NR_instanse.set_solver_params(
             Some("info".to_string()),
             None,
             Some(1.0),
@@ -996,7 +992,7 @@ mod tests {
         assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
     }
 
-        #[test]
+    #[test]
     fn test_NR_elem_example_simple_with_params_damping() {
         let vec_of_expressions = vec!["a*x^2+y^2-10", "x-b*y-4"];
 
@@ -1011,11 +1007,11 @@ mod tests {
             1e-6,
             1000,
         );
-                let Bounds = HashMap::from([
+        let Bounds = HashMap::from([
             ("x".to_string(), (-10.0, 10.0)),
             ("y".to_string(), (-10.0, 10.0)),
         ]);
-            NR_instanse.set_solver_params(
+        NR_instanse.set_solver_params(
             Some("info".to_string()),
             None,
             Some(0.1),

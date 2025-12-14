@@ -1,28 +1,51 @@
+//! Symbolic wrapper for Levenberg-Marquardt optimization algorithm.
+//!
+//! This module provides a high-level interface for solving nonlinear least squares problems
+//! using symbolic expressions. It automatically generates analytical Jacobians and provides
+//! logging capabilities similar to the NR solver.
+
 use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
 use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
+use log::info;
 use nalgebra::{DMatrix, DVector};
+use simplelog::*;
 use std::collections::HashMap;
 
-/// A symbolic wrapper for the Levenberg-Marquardt algorithm for solving non-linear least squares problems.
-
+/// Symbolic wrapper for Levenberg-Marquardt algorithm.
+/// Solves nonlinear least squares problems using symbolic expressions with analytical Jacobians.
 pub struct LM {
-    pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
-    pub eq_system: Vec<Expr>, // vector of equations
-    pub values: Vec<String>, // vector of variables
-    pub parameters:  Option<Vec<String>>,
-    pub initial_guess: Vec<f64>, // initial guess
-    pub max_iterations: Option<usize>, // maximum number of iterations
-    pub tolerance: Option<f64>, // tolerance
+    /// Jacobian instance containing symbolic functions and their derivatives
+    pub jacobian: Jacobian,
+    /// Vector of symbolic equations to solve
+    pub eq_system: Vec<Expr>,
+    /// Variable names in the equations
+    pub values: Vec<String>,
+    /// Optional parameter names for parametric equations
+    pub parameters: Option<Vec<String>>,
+    /// Initial guess for the solution
+    pub initial_guess: Vec<f64>,
+    /// Maximum number of iterations
+    pub max_iterations: Option<usize>,
+    /// Convergence tolerance for parameters
+    pub tolerance: Option<f64>,
+    /// Function value tolerance
     pub f_tolerance: Option<f64>,
-    pub g_tolerance: Option<f64>, // gradient tolerance
+    /// Gradient tolerance
+    pub g_tolerance: Option<f64>,
+    /// Whether to scale diagonal elements
     pub scale_diag: Option<bool>,
+    /// Solution vector
     pub result: Option<DVector<f64>>,
+    /// Solution mapped to variable names
     pub map_of_solutions: Option<HashMap<String, f64>>,
+    /// Logging level (debug, info, warn, error, off, none)
+    pub loglevel: Option<String>,
 }
 
 impl LM {
+    /// Creates a new LM solver instance with default settings.
     pub fn new() -> Self {
         LM {
             jacobian: Jacobian::new(),
@@ -37,20 +60,24 @@ impl LM {
             max_iterations: None,
             result: None,
             map_of_solutions: None,
+            loglevel: Some("info".to_string()),
         }
     }
+    pub fn set_loglevel(&mut self, loglevel: String) {
+        self.loglevel = Some(loglevel);
+    }
+    /// Sets up the equation system with unknowns, parameters, and solver options.
     pub fn set_equation_system(
         &mut self,
         eq_system: Vec<Expr>,
         unknowns: Option<Vec<String>>,
-        parameters:  Option<Vec<String>>,
+        parameters: Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: Option<f64>,
         f_tolerance: Option<f64>,
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
-
     ) {
         self.eq_system = eq_system.clone();
         self.initial_guess = initial_guess;
@@ -109,21 +136,20 @@ impl LM {
                 "Function tolerance should be a non-negative number."
             );
         }
-
     }
 
+    /// Parses string equations and sets up the system.
     pub fn eq_generate_from_str(
         &mut self,
         eq_system_string: Vec<String>,
         unknowns: Option<Vec<String>>,
-        parameters:  Option<Vec<String>>,
+        parameters: Option<Vec<String>>,
         initial_guess: Vec<f64>,
         tolerance: Option<f64>, // tolerance: f64
         f_tolerance: Option<f64>,
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>, // max_iterations: usize,
-        
     ) {
         let eq_system = eq_system_string
             .iter()
@@ -139,10 +165,10 @@ impl LM {
             g_tolerance,
             scale_diag,
             max_iterations,
-            
         );
     }
 
+    /// Generates symbolic Jacobian and function representations.
     pub fn eq_generate(&mut self) {
         let eq_system = self.eq_system.clone();
         let mut Jacobian_instance = Jacobian::new();
@@ -160,14 +186,17 @@ impl LM {
         );
         self.jacobian = Jacobian_instance;
     }
+    /// Generates symbolic Jacobian for parametric equations.
     pub fn eq_generate_with_params(&mut self) {
-
-   let eq_system = self.eq_system.clone();
+        let eq_system = self.eq_system.clone();
         let mut Jacobian_instance = Jacobian::new();
         let args = self.values.clone();
         let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
         Jacobian_instance.set_vector_of_functions(eq_system);
-        let params = self.parameters.clone().expect("for a problem with params - params must be set!");
+        let params = self
+            .parameters
+            .clone()
+            .expect("for a problem with params - params must be set!");
         Jacobian_instance.set_params(params);
         Jacobian_instance.set_variables(args.clone());
         Jacobian_instance.calc_jacobian();
@@ -179,20 +208,62 @@ impl LM {
             "Initial guess and vector of variables should have the same length."
         );
         self.jacobian = Jacobian_instance;
-
     }
+    /// Solves the nonlinear system with optional logging.
     pub fn solve(&mut self) {
+        let is_logging_disabled = self
+            .loglevel
+            .as_ref()
+            .map(|level| level == "off" || level == "none")
+            .unwrap_or(false);
+
+        if is_logging_disabled {
+       
+            self.solve_internal();
+        } else {
+            let loglevel = self.loglevel.clone();
+            let log_option = if let Some(level) = loglevel {
+                match level.as_str() {
+                    "debug" => LevelFilter::Info,
+                    "info" => LevelFilter::Info,
+                    "warn" => LevelFilter::Warn,
+                    "error" => LevelFilter::Error,
+                    _ => panic!("loglevel must be debug, info, warn or error"),
+                }
+            } else {
+                LevelFilter::Info
+            };
+
+            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
+                log_option,
+                Config::default(),
+                TerminalMode::Mixed,
+                ColorChoice::Auto,
+            )]);
+
+            match logger_instance {
+                Ok(()) => {
+               
+                    self.solve_internal();
+                    info!("Program ended");
+                }
+                Err(_) => {
+               
+                    self.solve_internal();
+                }
+            }
+        }
+    }
+
+    /// Internal solver implementation without logging setup.
+     fn solve_internal(&mut self) {
         let residual = |x: &DVector<f64>| -> DVector<f64> {
-            let residual = &self
-                .jacobian
-                .lambdified_function_DVector;
+            let residual = &self.jacobian.lambdified_function_DVector;
             let residual = residual(x);
             residual.clone()
         };
         let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
-            let jacobian = &self
-                .jacobian
-                .lambdified_jacobian_DMatrix;
+            let jacobian = &self.jacobian.lambdified_jacobian_DMatrix;
             let jacobian = jacobian(x);
             jacobian.clone()
         };
@@ -227,11 +298,11 @@ impl LM {
             LM
         };
         let (result, report) = LM.minimize(problem);
-        println!("Nonlinear System Example:");
-        println!("Termination: {:?}", report.termination);
-        println!("Evaluations: {}", report.number_of_evaluations);
-        println!("Final objective: {}", report.objective_function);
-        println!("Final params: {:?}", result.params());
+        info!("Nonlinear System Example:");
+        info!("Termination: {:?}", report.termination);
+        info!("Evaluations: {}", report.number_of_evaluations);
+        info!("Final objective: {}", report.objective_function);
+        info!("Final params: {:?}", result.params());
         if report.termination.was_successful() {
             let solution = result.params();
             self.result = Some(solution.clone());
@@ -244,24 +315,24 @@ impl LM {
                 .collect();
 
             let map_of_solutions = map_of_solutions;
-            println!("Map of solutions: {:?}", map_of_solutions);
+            info!("Map of solutions: {:?}", map_of_solutions);
             self.map_of_solutions = Some(map_of_solutions);
         }
     }
 
-    pub fn solve_with_params(&mut self, params: Vec<f64>){
+    /// Solves parametric system without modifying self, returns solution map and vector.
+    pub fn solve_with_params_unmut_internal(
+        &self,
+        params: Vec<f64>,
+    ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
         let params_vec = DVector::from_vec(params);
-        let residual =  |x: &DVector<f64>| -> DVector<f64> {
-                let residual = &self
-                .jacobian
-                .lambdified_function_with_params;
-                residual(&params_vec, x)
-            };
-     
+        let residual = |x: &DVector<f64>| -> DVector<f64> {
+            let residual = &self.jacobian.lambdified_function_with_params;
+            residual(&params_vec, x)
+        };
+
         let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
-            let jacobian = &self
-                .jacobian
-                .lambdified_jacobian_DMatrix_with_params;
+            let jacobian = &self.jacobian.lambdified_jacobian_DMatrix_with_params;
             jacobian(&params_vec, x)
         };
         let problem = NonlinearSystem::new(
@@ -295,15 +366,15 @@ impl LM {
             LM
         };
         let (result, report) = LM.minimize(problem);
-        println!("Nonlinear System Example:");
-        println!("Termination: {:?}", report.termination);
-        println!("Evaluations: {}", report.number_of_evaluations);
-        println!("Final objective: {}", report.objective_function);
-        println!("Final params: {:?}", result.params());
+        info!("Nonlinear System Example:");
+        info!("Termination: {:?}", report.termination);
+        info!("Evaluations: {}", report.number_of_evaluations);
+        info!("Final objective: {}", report.objective_function);
+        info!("Final params: {:?}", result.params());
         if report.termination.was_successful() {
-            let solution = result.params();
-            self.result = Some(solution.clone());
-            let solution: Vec<f64> = solution.data.into();
+            let solution_: DVector<f64> = result.params();
+            // self.result = Some(solution.clone());
+            let solution: Vec<f64> = solution_.clone().data.into();
             let unknowns = self.values.clone();
             let map_of_solutions: HashMap<String, f64> = unknowns
                 .iter()
@@ -311,23 +382,83 @@ impl LM {
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect();
 
-            let map_of_solutions = map_of_solutions;
-            println!("Map of solutions: {:?}", map_of_solutions);
-            self.map_of_solutions = Some(map_of_solutions);
+            let map_of_solutions: HashMap<String, f64> = map_of_solutions;
+            info!("Map of solutions: {:?}", map_of_solutions);
+            return (Some(map_of_solutions), Some(solution_));
+        } else {
+            (None, None)
         }
+    }
 
+    /// Solves parametric system with given parameter values and optional logging.
+    pub fn solve_with_params_unmut(&self, params: Vec<f64>)  -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
+        let is_logging_disabled = self
+            .loglevel
+            .as_ref()
+            .map(|level| level == "off" || level == "none")
+            .unwrap_or(false);
+
+        let (map_of_solutions, solution) = if is_logging_disabled {
+     
+            self.solve_with_params_unmut_internal(params)
+        } else {
+            let loglevel = self.loglevel.clone();
+            let log_option = if let Some(level) = loglevel {
+                match level.as_str() {
+                    "debug" => LevelFilter::Info,
+                    "info" => LevelFilter::Info,
+                    "warn" => LevelFilter::Warn,
+                    "error" => LevelFilter::Error,
+                    _ => panic!("loglevel must be debug, info, warn or error"),
+                }
+            } else {
+                LevelFilter::Info
+            };
+
+            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
+                log_option,
+                Config::default(),
+                TerminalMode::Mixed,
+                ColorChoice::Auto,
+            )]);
+
+            match logger_instance {
+                Ok(()) => {
+            
+                    let result = self.solve_with_params_unmut_internal(params);
+                    info!("Program ended");
+                    result
+                }
+                Err(_) => {
+              
+                    self.solve_with_params_unmut_internal(params)
+                }
+            }
+        };
+     (map_of_solutions, solution)
+    }
+
+    pub fn  solve_with_params(&mut self, params: Vec<f64>){
+
+        let (map_of_solutions, solution) = self.solve_with_params_unmut(params);
+        self.map_of_solutions = map_of_solutions;
+        self.result = solution;
     }
 }
 //generic LeastSquaresProblem implementation that accepts closures for residuals and Jacobian:
 
-// Generic nonlinear system solver that accepts closures for residuals and Jacobian
+/// Generic nonlinear system that wraps residual and Jacobian functions.
+/// Used as adapter between closures and LeastSquaresProblem trait.
 pub struct NonlinearSystem<R, J>
 where
     R: Fn(&DVector<f64>) -> DVector<f64>,
     J: Fn(&DVector<f64>) -> DMatrix<f64>,
 {
+    /// Current parameter values
     params: DVector<f64>,
+    /// Residual function closure
     residuals_fn: R,
+    /// Jacobian function closure
     jacobian_fn: J,
 }
 
@@ -336,7 +467,7 @@ where
     R: Fn(&DVector<f64>) -> DVector<f64>,
     J: Fn(&DVector<f64>) -> DMatrix<f64>,
 {
-    /// Create a new nonlinear system with closures and initial guess
+    /// Creates a new nonlinear system with function closures and initial parameter guess.
     pub fn new(initial_guess: DVector<f64>, residuals_fn: R, jacobian_fn: J) -> Self {
         Self {
             params: initial_guess,
@@ -551,6 +682,7 @@ mod tests2 {
             None,
             None,
         );
+        LM.set_loglevel("info".to_string());
         LM.eq_generate_with_params();
         LM.solve_with_params(vec![1.0, 1.0]);
         let map = LM.map_of_solutions.unwrap();
@@ -596,13 +728,16 @@ mod tests2 {
         full_system_sym.extend(eq_sum_mole_numbers.clone());
         full_system_sym.extend(composition_eq.clone());
 
+        let full_system_sym: Vec<Expr> = full_system_sym.iter().map(|x| x.clone().simplify()).collect();
+
         for eq in &full_system_sym {
-            println!("eq: {}", eq);
+            println!("eq: {}", eq.clone().pretty_print());
         }
         // solver
         let initial_guess = vec![0.1, 0.1, 0.2, 0.3, 2.0, 2.0];
         let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
         let mut LM = LM::new();
+        LM.set_loglevel("none".to_string());
         LM.set_equation_system(
             full_system_sym.clone(),
             Some(unknowns.clone()),
