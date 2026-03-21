@@ -3,7 +3,7 @@
 # RustedSciThe
 is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS: huge performance boost
+PROJECT NEWS: 
 
 
 ## Content
@@ -56,6 +56,9 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
     * Newton-Raphson method
     * Newton-Raphson damped
     * Levenberg-Marquardt method
+    * Levenberg-Marquardt-Nielsen method
+    * trust region method
+    * dogleg
 * solving large banded linear systems with BiCGSTAB and GMRES methods with several preconditioners.
   (ArrayFire C++ library is needed on your machine - see below)
 

@@ -456,22 +456,40 @@ impl Expr {
         match self {
             Expr::Var(name) => {
                 let lower_name = name.to_lowercase();
-                
+
                 // Check for Greek letters with or without indices
                 for (greek_name, greek_symbol) in [
-                    ("alpha", "α"), ("beta", "β"), ("gamma", "γ"), ("delta", "δ"),
-                    ("epsilon", "ε"), ("zeta", "ζ"), ("eta", "η"), ("theta", "θ"),
-                    ("iota", "ι"), ("kappa", "κ"), ("lambda", "λ"), ("mu", "μ"),
-                    ("nu", "ν"), ("xi", "ξ"), ("omicron", "ο"), ("pi", "π"),
-                    ("rho", "ρ"), ("sigma", "σ"), ("tau", "τ"), ("upsilon", "υ"),
-                    ("phi", "φ"), ("chi", "χ"), ("psi", "ψ"), ("omega", "ω"),
+                    ("alpha", "α"),
+                    ("beta", "β"),
+                    ("gamma", "γ"),
+                    ("delta", "δ"),
+                    ("epsilon", "ε"),
+                    ("zeta", "ζ"),
+                    ("eta", "η"),
+                    ("theta", "θ"),
+                    ("iota", "ι"),
+                    ("kappa", "κ"),
+                    ("lambda", "λ"),
+                    ("mu", "μ"),
+                    ("nu", "ν"),
+                    ("xi", "ξ"),
+                    ("omicron", "ο"),
+                    ("pi", "π"),
+                    ("rho", "ρ"),
+                    ("sigma", "σ"),
+                    ("tau", "τ"),
+                    ("upsilon", "υ"),
+                    ("phi", "φ"),
+                    ("chi", "χ"),
+                    ("psi", "ψ"),
+                    ("omega", "ω"),
                 ] {
                     if lower_name.starts_with(greek_name) {
                         let suffix = &lower_name[greek_name.len()..];
                         return Expr::Var(format!("{}{}", greek_symbol, suffix));
                     }
                 }
-                
+
                 self.clone()
             }
             Expr::Add(lhs, rhs) => Expr::Add(
@@ -510,7 +528,9 @@ impl Expr {
 
     /// Pretty print with mathematical formatting
     pub fn pretty_print(&self) -> String {
-        self.convert_greek_letters().pretty_print_internal().join("\n")
+        self.convert_greek_letters()
+            .pretty_print_internal()
+            .join("\n")
     }
 
     /// Calculate the actual visual width of an expression when pretty printed

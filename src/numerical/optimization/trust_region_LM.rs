@@ -3,8 +3,8 @@
 
 use crate::numerical::optimization::qr_LM::LinearLeastSquaresDiagonalProblem;
 use crate::numerical::optimization::utils::{dwarf, enorm};
-use nalgebra::DVector;
 use log::info;
+use nalgebra::DVector;
 pub struct LMParameter {
     pub step: DVector<f64>,
     pub lambda: f64,

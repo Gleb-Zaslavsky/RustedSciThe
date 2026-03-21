@@ -14,7 +14,7 @@ use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
 use crate::numerical::NR_for_ODE::NRODE;
-use crate::numerical::Nonlinear_systems::NR::NR;
+use crate::numerical::Nonlinear_systems::engine::*;
 use crate::numerical::ODE_api::ODEsolver;
 pub mod global;
 
@@ -173,6 +173,7 @@ fn main() {
             );
         }
         5 => {
+            /*
             use crate::numerical::Nonlinear_systems::NR::Method;
             //use the shortest way to solve system of equations
             // first define system of equations and initial guess
@@ -336,6 +337,7 @@ fn main() {
             assert!(d1.abs() < 1e-3);
             assert!(d2.abs() < 1e-2);
             assert!(d3.abs() < 1e-2);
+             */
         }
         6 => {
             // INDEXED VARIABLES

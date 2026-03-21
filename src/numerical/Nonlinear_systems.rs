@@ -1,6 +1,9 @@
-pub mod dogleg;
-
+pub mod LM_Nielsen;
 pub mod LM_utils;
+pub mod LM_vanilla;
+pub mod NR_damped;
+pub mod engine;
+pub mod error;
 ///  Example#1
 /// ```
 ///
@@ -41,9 +44,10 @@ pub mod LM_utils;
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 //
 ///  ```
-pub mod NR;
-pub mod NR_LM;
-pub mod NR_LM_Nielsen;
-pub mod NR_LM_minpack;
-pub mod NR_damped;
-pub mod NR_trust_region;
+pub mod nonlinear_solver_tests;
+pub mod prelude;
+pub mod problem;
+pub mod symbolic;
+pub mod trust_region;
+pub mod trust_region_LM;
+pub mod trust_region_lmpar;

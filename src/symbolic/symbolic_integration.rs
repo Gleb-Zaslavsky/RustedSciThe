@@ -1,5 +1,6 @@
 use crate::symbolic::symbolic_engine::Expr;
-use gauss_quad::{GaussHermite, GaussLaguerre, GaussLegendre};
+use core::num::NonZeroUsize;
+use gauss_quad::{FiniteAboveNegOneF64, GaussHermite, GaussLaguerre, GaussLegendre};
 use std::collections::HashMap;
 impl Expr {
     /// SYMBOLIC INTEGRATION
@@ -823,16 +824,14 @@ impl Expr {
 
         match method {
             QuadMethod::GaussLegendre => {
-                let quad = GaussLegendre::new(degree)
-                    .map_err(|e| format!("Failed to create Gauss-Legendre quadrature: {:?}", e))?;
+                let quad = GaussLegendre::new(NonZeroUsize::new(degree).unwrap());
 
                 let result = quad.integrate(lower, upper, &f);
                 Ok(result)
             }
 
             QuadMethod::GaussHermite => {
-                let quad = GaussHermite::new(degree)
-                    .map_err(|e| format!("Failed to create Gauss-Hermite quadrature: {:?}", e))?;
+                let quad = GaussHermite::new(NonZeroUsize::new(degree).unwrap());
 
                 // Gauss-Hermite is for integrals from -∞ to +∞ with weight e^(-x²)
                 // The user needs to provide a function that already accounts for this
@@ -848,8 +847,10 @@ impl Expr {
 
             QuadMethod::GaussLaguerre => {
                 let alpha = alpha.unwrap_or(0.5);
-                let quad = GaussLaguerre::new(degree, alpha)
-                    .map_err(|e| format!("Failed to create Gauss-Laguerre quadrature: {:?}", e))?;
+                let quad = GaussLaguerre::new(
+                    NonZeroUsize::new(degree).unwrap(),
+                    FiniteAboveNegOneF64::new(alpha).unwrap(),
+                );
 
                 // Gauss-Laguerre is for integrals from 0 to +∞ with weight e^(-x)
                 if lower != 0.0 || upper.is_finite() {

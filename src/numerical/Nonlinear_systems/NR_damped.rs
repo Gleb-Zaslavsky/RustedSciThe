@@ -1,8 +1,12 @@
-use super::NR::{NR, bound_step};
-use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use log::{error, info, warn};
-use nalgebra::DVector;
-use std::time::Instant;
+use nalgebra::{DMatrix, DVector};
+
+use crate::numerical::Nonlinear_systems::engine::{
+    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
+    solve_linear_system,
+};
+use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
+use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 
 /// Damped Newton-Raphson with Clipping
 /// A constrained version of the Newton-Raphson (NR) method that prevents the solution vector from violating bounds (e.g.,
@@ -51,175 +55,427 @@ use std::time::Instant;
 ///     1. Chemical kinetics.
 ///     2. Fluid mechanics.
 ///
+/// Damped Newton method with backtracking.
+#[derive(Debug, Clone, Copy)]
+pub struct DampedNewtonMethod {
+    /// Maximum number of backtracking reductions.
+    pub max_line_search_steps: usize,
+    /// Armijo-like decrease factor.
+    pub sufficient_decrease: f64,
+    /// Step shrink factor.
+    pub shrink_factor: f64,
+}
 
-impl NR {
-    pub fn step_damped(&mut self) -> (i32, Option<DVector<f64>>) {
-        // DAMPED NEWTON STEPS
-        // BOUNDS ARE SET
-        let maxDampIter = self.parameters.clone().unwrap()["maxDampIter"] as usize;
-        let c = 1e-4;
-        // let safeguard_factor: f64 = 1e-1;
-        // let DampFacor: f64 = 0.5;
-        let now = Instant::now();
-        let y_k_minus_1 = self.y.clone();
+impl Default for DampedNewtonMethod {
+    fn default() -> Self {
+        Self {
+            max_line_search_steps: 50,
+            sufficient_decrease: 1e-4,
+            shrink_factor: 0.5,
+        }
+    }
+}
 
+//======================================================================================
+//  Damped Newton method with backtracking.
+//==================================================================================
+impl NonlinearMethod for DampedNewtonMethod {
+    type MethodState = ();
+
+    fn init<P: JacobianProvider>(
+        &self,
+        _problem: &P,
+        _x0: &DVector<f64>,
+        _options: &SolveOptions,
+        _residual: &DVector<f64>,
+        _jacobian: &DMatrix<f64>,
+    ) -> Result<Self::MethodState, SolveError> {
+        if self.max_line_search_steps == 0 {
+            return Err(SolveError::InvalidConfig(
+                "max_line_search_steps must be greater than zero".to_string(),
+            ));
+        }
+        if !(0.0 < self.shrink_factor && self.shrink_factor < 1.0) {
+            return Err(SolveError::InvalidConfig(
+                "shrink_factor must belong to (0, 1)".to_string(),
+            ));
+        }
+        if self.sufficient_decrease <= 0.0 {
+            return Err(SolveError::InvalidConfig(
+                "sufficient_decrease must be positive".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn step<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        _method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+    ) -> Result<StepOutcome, SolveError> {
+        runtime.linear_solves += 1;
         // Compute Newton step:
-        let undamped_step_k_minus_1 = self.step(y_k_minus_1.clone());
-        let (undamped_step_k_minus_1, F_k_minus_1) = undamped_step_k_minus_1.clone();
-        let S_k_minus_1 = F_k_minus_1.norm();
-        info!("\n \n L2 norm of undamped step = {}", S_k_minus_1);
-        self.custom_timer.linear_system_tac();
-        *self
-            .calc_statistics
-            .entry("number of solving linear systems".to_string())
-            .or_insert(0) += 1;
-
-        info!("\n \n y_k-1 = {}", y_k_minus_1,);
-        let fbound = bound_step(&y_k_minus_1, &undamped_step_k_minus_1, &self.bounds_vec);
-        if fbound.is_nan() {
-            error!("\n \n fbound is NaN \n \n");
-            panic!()
+        let newton_step =
+            solve_linear_system(options.linear_solver, &state.jacobian, &state.residual)?;
+        if newton_step.norm() < options.tolerance {
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
-        if fbound.is_infinite() {
-            error!("\n \n fbound is infinite \n \n");
-            panic!()
+
+        let mut alpha: f64 = 1.0;
+        if let Some(bounds) = &options.bounds {
+            alpha = alpha.min(bounds.max_step_scale(&state.x, &(-&newton_step)));
         }
-        // if fbound is very small, then x0 is already close to the boundary and
-        // step0 points out of the allowed domain. In this case, the Newton
-        // algorithm fails, so return an error condition.
-        let mut clipping_flag = false;
-        let mut lambda = if fbound < 1e-10 {
-            log::warn!(
-                "\n  No damped step can be taken without violating solution component bounds."
-            );
-            clipping_flag = true;
-            1.0
-        } else {
-            fbound
-        };
-        // preallocate variables
-        let mut k_: usize = 0;
-        let mut S_k: Option<f64> = None;
-        let mut damped_step_result: Option<DVector<f64>> = None;
-        let mut conv: f64 = 0.0;
+        let current_norm = state.residual_norm;
 
-        let mut k = 0;
-        while k < maxDampIter {
-            info!(
-                "\n____________________________________damping iteration = {}_______________________________________",
-                k
-            );
-            if k > 1 {
-                info!("\n \n damped_step number {} ", k);
-            }
-            info!("\n \n Damping coefficient = {}", lambda);
-            // Compute damped step:
-
-            let damped_step_k_minus_1 = lambda * undamped_step_k_minus_1.clone();
-            info!("damped_step {}", damped_step_k_minus_1);
-            // compute next iteration guess with current damping coefficient
-            let y_k: DVector<f64> = y_k_minus_1.clone() - damped_step_k_minus_1;
-            //dbg!(&y_k);
-            // clip the result vector i.e.
-            let y_k_clipped: DVector<f64> = if clipping_flag == true {
-                self.clip(&y_k, &self.bounds_vec)
+        for _ in 0..self.max_line_search_steps {
+            let trial_x = &state.x - alpha * &newton_step;
+            let trial_x = if let Some(bounds) = &options.bounds {
+                bounds.project(&trial_x)
             } else {
-                y_k
+                trial_x
+            };
+            let trial_norm = problem.residual(&trial_x)?.norm();
+            if trial_norm < current_norm * (1.0 - self.sufficient_decrease * alpha)
+                || trial_norm < options.tolerance
+            {
+                runtime.accepted_steps += 1;
+                return Ok(StepOutcome::Continue {
+                    next_x: trial_x,
+                    accepted: true,
+                });
+            }
+            alpha *= self.shrink_factor;
+            runtime.rejected_steps += 1;
+            if alpha < options.tolerance {
+                return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
+            }
+        }
+
+        Ok(StepOutcome::Terminated(
+            TerminationReason::RejectedStepLimit,
+        ))
+    }
+}
+
+/// Advanced damped Newton method with clipping and bound-aware damping.
+/// Combines bound_step calculation with clipping for constrained problems.
+#[derive(Debug, Clone, Copy)]
+pub struct DampedNewtonMethodAdvanced {
+    /// Maximum number of damping iterations.
+    pub max_damping_iterations: usize,
+    /// Sufficient decrease factor (Armijo-like).
+    pub sufficient_decrease: f64,
+    /// Damping shrink factor.
+    pub shrink_factor: f64,
+}
+
+impl Default for DampedNewtonMethodAdvanced {
+    fn default() -> Self {
+        Self {
+            max_damping_iterations: 50,
+            sufficient_decrease: 1e-4,
+            shrink_factor: 0.5,
+        }
+    }
+}
+
+impl NonlinearMethod for DampedNewtonMethodAdvanced {
+    type MethodState = ();
+
+    fn init<P: JacobianProvider>(
+        &self,
+        _problem: &P,
+        _x0: &DVector<f64>,
+        options: &SolveOptions,
+        _residual: &DVector<f64>,
+        _jacobian: &DMatrix<f64>,
+    ) -> Result<Self::MethodState, SolveError> {
+        if self.max_damping_iterations == 0 {
+            return Err(SolveError::InvalidConfig(
+                "max_damping_iterations must be greater than zero".to_string(),
+            ));
+        }
+        if !(0.0 < self.shrink_factor && self.shrink_factor < 1.0) {
+            return Err(SolveError::InvalidConfig(
+                "shrink_factor must belong to (0, 1)".to_string(),
+            ));
+        }
+        if self.sufficient_decrease <= 0.0 {
+            return Err(SolveError::InvalidConfig(
+                "sufficient_decrease must be positive".to_string(),
+            ));
+        }
+        if options.bounds.is_none() {
+            warn!("DampedNewtonMethodAdvanced works best with bounds specified");
+        }
+        Ok(())
+    }
+
+    fn step<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        _method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+    ) -> Result<StepOutcome, SolveError> {
+        runtime.linear_solves += 1;
+        // Compute Newton step:
+        let newton_step =
+            solve_linear_system(options.linear_solver, &state.jacobian, &state.residual)?;
+
+        if newton_step.norm() < options.tolerance {
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
+        }
+        let current_norm = state.residual_norm;
+        let mut lambda = 1.0;
+
+        if let Some(bounds) = &options.bounds {
+            let fbound = bound_step(&state.x, &newton_step, bounds);
+
+            if fbound.is_nan() || fbound.is_infinite() {
+                return Err(SolveError::NumericalBreakdown(
+                    "bound_step returned invalid value".to_string(),
+                ));
+            }
+
+            if fbound < 1e-10 {
+                warn!(
+                    "Initial step violates bounds severely, fbound = {:.6e}",
+                    fbound
+                );
+            }
+            lambda = fbound.max(1e-10);
+        }
+
+        for k in 0..self.max_damping_iterations {
+            info!("Damping iteration {}, lambda = {:.6e}", k, lambda);
+
+            let damped_step = lambda * &newton_step;
+            let trial_x = &state.x - &damped_step;
+
+            let trial_x = if let Some(bounds) = &options.bounds {
+                bounds.project(&trial_x)
+            } else {
+                trial_x
             };
 
-            //
-            let F_k = self.evaluate_function(y_k_clipped.clone()); //???????????????
+            let trial_norm = problem.residual(&trial_x)?.norm();
 
-            let error = F_k.norm();
-            self.max_error = error;
             info!(
-                "\n \n L2 norm of damped step = {:3}, norm of undamped step = {:3}",
-                error, S_k_minus_1
+                "Trial norm = {:.6e}, current norm = {:.6e}",
+                trial_norm, current_norm
             );
-            let convergence_cond_for_step = self.tolerance;
-            // compute the norm of the undamped step
-            let S_k_temp = error;
-            // If the norm of S_k_plus_1 is less than the norm of S_k, then accept this
+            // If the norm decreases, then accept this
             // damping coefficient. Also accept it if this step would result in a
             // converged solution. Otherwise, decrease the damping coefficient and
             // try again.
-            let elapsed = now.elapsed();
-            elapsed_time(elapsed);
-            if (S_k_temp < S_k_minus_1 * (1.0 - lambda * c))
-                || (S_k_temp < convergence_cond_for_step)
+            // The  criterion for accepting is that the undamped steps decrease in
+            // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
+            if trial_norm < current_norm * (1.0 - lambda * self.sufficient_decrease)
+                || trial_norm < options.tolerance
             {
-                // The  criterion for accepting is that the undamped steps decrease in
-                // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
-
-                k_ = k;
-                S_k = Some(S_k_temp);
-                // update the solution vector
-                damped_step_result = Some(y_k_clipped.clone());
-                conv = convergence_cond_for_step;
-                info!(
-                    "\n \n  Damping coefficient accepted S_k_plus_1_temp < S_k {}, {},",
-                    S_k_temp, S_k_minus_1,
-                );
-                info!(
-                    "norm of undamped step = {} vs convergence criterion = {}",
-                    S_k_temp, convergence_cond_for_step
-                );
-                info!("damped step result = {:?}", &damped_step_result);
-                break;
+                info!("Damping coefficient accepted");
+                runtime.accepted_steps += 1;
+                return Ok(StepOutcome::Continue {
+                    next_x: trial_x,
+                    accepted: true,
+                });
             }
             // if fail this criterion we must reject it and retries the step with a reduced (often halved) damping parameter trying again until
             // criterion is met  or max damping iterations is reached
-
-            // lambda = lambda / (2.0f64.powf(k as f64 + DampFacor));
-            lambda *= 0.5; // Simpler and more controlled decay
-            k_ = k;
-            S_k = Some(S_k_temp);
-
-            k = k + 1;
+            lambda *= self.shrink_factor;
+            runtime.rejected_steps += 1;
         }
 
-        if k_ < maxDampIter {
-            // if there is a damping coefficient found (so max damp steps not exceeded)
-            if S_k.unwrap() > conv {
-                //found damping coefficient but not converged yet
-                info!("\n \n  Damping coefficient found (solution has not converged yet)");
-                info!(
-                    "\n \n  step norm =  {}, weight norm = {}, damped_step_result = {}",
-                    self.max_error,
-                    S_k.unwrap(),
-                    conv
-                );
-                assert!(damped_step_result.is_some());
-                (0, damped_step_result)
-            } else {
-                info!("\n \n  Damping coefficient found (solution has converged)");
-                info!(
-                    "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
-                    self.max_error,
-                    S_k.unwrap(),
-                    conv
-                );
-                (1, damped_step_result)
+        warn!("Max damping iterations reached");
+        Ok(StepOutcome::Terminated(
+            TerminationReason::RejectedStepLimit,
+        ))
+    }
+}
+
+/// Calculates the minimum damping factor to keep the solution within bounds after a Newton step.
+pub fn bound_step(
+    y: &DVector<f64>,
+    step: &DVector<f64>,
+    bounds: &crate::numerical::Nonlinear_systems::problem::Bounds,
+) -> f64 {
+    let mut fbound = 1.0;
+    let limits = bounds.as_slice();
+
+    for (i, &y_i) in y.iter().enumerate() {
+        if i >= limits.len() {
+            break;
+        }
+        let (below, above) = limits[i];
+
+        let s_i = step[i];
+        if y_i <= below + 1e-14 {
+            warn!(
+                "Solution y[{}] = {:.6e} is at lower bound {:.6e}",
+                i, y_i, below
+            );
+        }
+        if y_i >= above - 1e-14 {
+            warn!(
+                "Solution y[{}] = {:.6e} is at upper bound {:.6e}",
+                i, y_i, above
+            );
+        }
+
+        if s_i > f64::max(y_i - below, 0.0) {
+            let temp = (y_i - below) / s_i;
+            if temp < fbound {
+                fbound = temp;
             }
-        } else {
-            //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
-            warn!("\n \n  No damping coefficient found (max damping iterations reached)");
-            return (-2, None);
+        } else if s_i < f64::min(y_i - above, 0.0) {
+            let temp = (y_i - above) / s_i;
+            if temp < fbound {
+                fbound = temp;
+            }
+        }
+    }
+    fbound
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::numerical::Nonlinear_systems::engine::{SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::error::TerminationReason;
+    use crate::numerical::Nonlinear_systems::problem::{
+        Bounds, JacobianProvider, NonlinearProblem,
+    };
+    use crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem;
+    use approx::assert_relative_eq;
+
+    struct BoundedQuadraticProblem;
+
+    impl NonlinearProblem for BoundedQuadraticProblem {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_vec(vec![
+                x[0] * x[0] + x[1] * x[1] - 10.0,
+                x[0] - x[1] - 4.0,
+            ]))
         }
     }
 
-    pub fn clip(&self, y: &DVector<f64>, vec_of_bounds: &Vec<(f64, f64)>) -> DVector<f64> {
-        let mut clipped_y = y.clone();
-        for (i, y_i) in y.iter().enumerate() {
-            let (lower_bound, upper_bound) = vec_of_bounds[i];
-            if y_i.clone() < lower_bound {
-                info!("y[{}] to clip {} with lower bound {}", i, y_i, lower_bound);
-                clipped_y[i] = lower_bound;
-            } else if y_i.clone() > upper_bound {
-                info!("y[{}] to clip {} with upper bound {}", i, y_i, upper_bound);
-                clipped_y[i] = upper_bound;
-            }
+    impl JacobianProvider for BoundedQuadraticProblem {
+        fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::from_row_slice(
+                2,
+                2,
+                &[2.0 * x[0], 2.0 * x[1], 1.0, -1.0],
+            ))
         }
-        clipped_y
+    }
+
+    #[test]
+    fn damped_newton_advanced_converges_with_bounds() {
+        let bounds = Bounds::new(vec![(-5.0, 5.0), (-5.0, 5.0)]).expect("bounds");
+        let options = SolveOptions {
+            bounds: Some(bounds),
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+        let result = SolverEngine::new(DampedNewtonMethodAdvanced::default(), options)
+            .solve(&BoundedQuadraticProblem, DVector::from_vec(vec![1.0, 1.0]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], -1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn damped_newton_advanced_respects_tight_bounds() {
+        let bounds = Bounds::new(vec![(0.0, 2.0), (0.0, 2.0)]).expect("bounds");
+        let options = SolveOptions {
+            bounds: Some(bounds),
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+        let result = SolverEngine::new(DampedNewtonMethodAdvanced::default(), options)
+            .solve(&BoundedQuadraticProblem, DVector::from_vec(vec![1.5, 1.5]))
+            .expect("solve");
+
+        assert!(result.x[0] >= 0.0 && result.x[0] <= 2.0);
+        assert!(result.x[1] >= 0.0 && result.x[1] <= 2.0);
+    }
+
+    #[test]
+    fn damped_newton_advanced_with_symbolic_problem() {
+        let problem = SymbolicNonlinearProblem::from_strings(
+            vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()],
+            Some(vec!["x".to_string(), "y".to_string()]),
+            None,
+            None,
+        )
+        .expect("symbolic problem");
+
+        let bounds = Bounds::new(vec![(-10.0, 10.0), (-10.0, 10.0)]).expect("bounds");
+        let options = SolveOptions {
+            bounds: Some(bounds),
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(DampedNewtonMethodAdvanced::default(), options)
+            .solve(&problem, DVector::from_vec(vec![1.0, 1.0]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], -1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn bound_step_calculates_correct_damping_factor() {
+        let y = DVector::from_vec(vec![1.0, 2.0]);
+        let step = DVector::from_vec(vec![2.0, 3.0]);
+        let bounds = Bounds::new(vec![(0.0, 5.0), (0.0, 6.0)]).expect("bounds");
+
+        let fbound = bound_step(&y, &step, &bounds);
+
+        assert_relative_eq!(fbound, 0.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bound_step_handles_no_violation() {
+        let y = DVector::from_vec(vec![2.0, 3.0]);
+        let step = DVector::from_vec(vec![0.5, 0.5]);
+        let bounds = Bounds::new(vec![(0.0, 10.0), (0.0, 10.0)]).expect("bounds");
+
+        let fbound = bound_step(&y, &step, &bounds);
+
+        assert_relative_eq!(fbound, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn damped_newton_advanced_works_without_bounds() {
+        let options = SolveOptions {
+            bounds: None,
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(DampedNewtonMethodAdvanced::default(), options)
+            .solve(&BoundedQuadraticProblem, DVector::from_vec(vec![1.0, 1.0]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], -1.0, epsilon = 1e-5);
     }
 }

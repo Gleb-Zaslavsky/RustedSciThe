@@ -1,12 +1,162 @@
-use super::NR::solve_linear_system;
 use nalgebra::{DMatrix, DVector};
-/// Nielsen p. 125
+
+use crate::numerical::Nonlinear_systems::engine::{
+    IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, solve_linear_system,
+};
+use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
+use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
+
+/// Trust-region method with a dogleg step.
+#[derive(Debug, Clone, Copy)]
+pub struct TrustRegionMethod {
+    /// Initial radius.
+    pub delta_init: f64,
+    /// Maximum radius.
+    pub delta_max: f64,
+    /// Acceptance threshold.
+    pub eta: f64,
+    /// Radius shrink factor.
+    pub shrink_factor: f64,
+    /// Radius expansion factor.
+    pub expand_factor: f64,
+}
+
+impl Default for TrustRegionMethod {
+    fn default() -> Self {
+        Self {
+            delta_init: 1.0,
+            delta_max: 10.0,
+            eta: 0.1,
+            shrink_factor: 0.25,
+            expand_factor: 2.0,
+        }
+    }
+}
+
+//==============================================================================
+// Trust-region method
+//==============================================================================
+/// Internal trust-region state.
+#[derive(Debug, Clone)]
+pub struct TrustRegionState {
+    delta: f64,
+}
+
+impl NonlinearMethod for TrustRegionMethod {
+    type MethodState = TrustRegionState;
+
+    fn init<P: JacobianProvider>(
+        &self,
+        _problem: &P,
+        _x0: &DVector<f64>,
+        _options: &SolveOptions,
+        _residual: &DVector<f64>,
+        _jacobian: &DMatrix<f64>,
+    ) -> Result<Self::MethodState, SolveError> {
+        if self.delta_init <= 0.0 || self.delta_max < self.delta_init {
+            return Err(SolveError::InvalidConfig(
+                "invalid trust-region radius bounds".to_string(),
+            ));
+        }
+        if !(0.0 <= self.eta && self.eta < 1.0) {
+            return Err(SolveError::InvalidConfig(
+                "eta must belong to [0,1)".to_string(),
+            ));
+        }
+        Ok(TrustRegionState {
+            delta: self.delta_init,
+        })
+    }
+
+    fn step<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+    ) -> Result<StepOutcome, SolveError> {
+        runtime.linear_solves += 1;
+        let newton_step =
+            solve_linear_system(options.linear_solver, &state.jacobian, &(-&state.residual))
+                .unwrap_or_else(|_| DVector::zeros(state.x.len()));
+        let gradient = state.jacobian.transpose() * &state.residual;
+        if gradient.norm_squared() < options.tolerance.powi(2) {
+            return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+        }
+
+        let alpha =
+            gradient.dot(&gradient) / (&state.jacobian * &gradient).norm_squared().max(1e-16);
+        let step = dogleg_step(&newton_step, &(-alpha * gradient.clone()), method_state.delta);
+        if step.norm() < options.tolerance {
+            if state.residual_norm <= 10.0 * options.tolerance
+                || gradient.norm() <= 10.0 * options.tolerance
+            {
+                return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+            }
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
+        }
+
+        let trial_x = if let Some(bounds) = &options.bounds {
+            bounds.project(&(&state.x + &step))
+        } else {
+            &state.x + &step
+        };
+        let trial_residual = problem.residual(&trial_x)?;
+        let actual = state.residual.norm_squared() - trial_residual.norm_squared();
+        let predicted = -2.0 * state.residual.dot(&(&state.jacobian * &step))
+            - step.dot(&(state.jacobian.transpose() * &state.jacobian * &step));
+        let rho = actual / predicted.max(1e-16);
+
+        if rho < 0.25 {
+            method_state.delta *= self.shrink_factor;
+        } else if rho > 0.75 && (step.norm() - method_state.delta).abs() < 1e-10 {
+            method_state.delta = (self.expand_factor * method_state.delta).min(self.delta_max);
+        }
+        if method_state.delta < 1e-14 {
+            return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
+        }
+
+        if rho > self.eta {
+            runtime.accepted_steps += 1;
+            Ok(StepOutcome::Continue {
+                next_x: trial_x,
+                accepted: true,
+            })
+        } else {
+            runtime.rejected_steps += 1;
+            Ok(StepOutcome::Continue {
+                next_x: state.x.clone(),
+                accepted: false,
+            })
+        }
+    }
+}
+
+/// Computes a dogleg step inside a trust region.
+fn dogleg_step(newton_step: &DVector<f64>, cauchy_step: &DVector<f64>, delta: f64) -> DVector<f64> {
+    if newton_step.norm() <= delta {
+        return newton_step.clone();
+    }
+    if cauchy_step.norm() >= delta {
+        return delta / cauchy_step.norm() * cauchy_step;
+    }
+    let direction = newton_step - cauchy_step;
+    let a = direction.dot(&direction);
+    let b = 2.0 * cauchy_step.dot(&direction);
+    let c = cauchy_step.dot(cauchy_step) - delta * delta;
+    let discriminant = (b * b - 4.0 * a * c).max(0.0);
+    cauchy_step + ((-b + discriminant.sqrt()) / (2.0 * a.max(1e-16))) * direction
+}
+
+// Nielsen p. 125
 pub fn Powell_dogleg_method(
     Jy: DMatrix<f64>,
     Fy: DVector<f64>,
     scaling: DVector<f64>,
     delta: f64,
-    solver: String,
+    solver: LinearSolverKind,
 ) -> DVector<f64> {
     // Minimize ||J*p + F||^2 subject to ||scaling.*p|| <= delta
 
@@ -171,6 +321,7 @@ pub enum DoglegError {
 }
 
 /// State structure for the dogleg algorithm
+#[derive(Debug, Clone)]
 pub struct DoglegState {
     /// Number of observations
     n: usize,
@@ -524,6 +675,217 @@ impl DoglegSolver {
     }
 }
 
+//==============================================================================
+// Powell Dogleg Trust Region Method
+//==============================================================================
+/// Powell dogleg trust region method with scaling support.
+/// Based on Nielsen p. 125 and GSL implementation.
+#[derive(Debug, Clone, Copy)]
+pub struct PowellDoglegMethod {
+    /// Initial trust region radius.
+    pub delta_init: f64,
+    /// Maximum trust region radius.
+    pub delta_max: f64,
+    /// Acceptance threshold for rho.
+    pub eta: f64,
+    /// Radius shrink factor.
+    pub shrink_factor: f64,
+    /// Radius expansion factor.
+    pub expand_factor: f64,
+    /// Use double dogleg variant.
+    pub use_double_dogleg: bool,
+    /// Use column scaling.
+    pub use_column_scaling: bool,
+}
+
+impl Default for PowellDoglegMethod {
+    fn default() -> Self {
+        Self {
+            delta_init: 1.0,
+            delta_max: 10.0,
+            eta: 0.1,
+            shrink_factor: 0.25,
+            expand_factor: 2.0,
+            use_double_dogleg: false,
+            use_column_scaling: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PowellDoglegState {
+    delta: f64,
+    dogleg_state: DoglegState,
+    scaling: DVector<f64>,
+}
+
+impl NonlinearMethod for PowellDoglegMethod {
+    type MethodState = PowellDoglegState;
+
+    fn init<P: JacobianProvider>(
+        &self,
+        _problem: &P,
+        x0: &DVector<f64>,
+        _options: &SolveOptions,
+        residual: &DVector<f64>,
+        jacobian: &DMatrix<f64>,
+    ) -> Result<Self::MethodState, SolveError> {
+        if self.delta_init <= 0.0 || self.delta_max < self.delta_init {
+            return Err(SolveError::InvalidConfig(
+                "invalid trust-region radius bounds".to_string(),
+            ));
+        }
+        if !(0.0 <= self.eta && self.eta < 1.0) {
+            return Err(SolveError::InvalidConfig(
+                "eta must belong to [0,1)".to_string(),
+            ));
+        }
+
+        let n = residual.len();
+        let p = x0.len();
+
+        let scaling = if self.use_column_scaling {
+            let mut diag = DVector::zeros(p);
+            for j in 0..p {
+                let col_norm = jacobian.column(j).norm();
+                diag[j] = if col_norm > 1e-12 { col_norm } else { 1.0 };
+            }
+            diag
+        } else {
+            DVector::from_element(p, 1.0)
+        };
+
+        let dogleg_state = DoglegState::new(n, p)
+            .map_err(|_| SolveError::InvalidConfig("failed to create dogleg state".to_string()))?;
+
+        log::info!("Initialized Powell Dogleg Method");
+        log::info!(
+            "  delta_init = {}, use_double_dogleg = {}",
+            self.delta_init,
+            self.use_double_dogleg
+        );
+
+        Ok(PowellDoglegState {
+            delta: self.delta_init,
+            dogleg_state,
+            scaling,
+        })
+    }
+
+    fn step<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+    ) -> Result<StepOutcome, SolveError> {
+        if self.use_column_scaling {
+            for j in 0..method_state.scaling.len() {
+                let col_norm = state.jacobian.column(j).norm();
+                method_state.scaling[j] = if col_norm > 1e-12 { col_norm } else { 1.0 };
+            }
+        }
+
+        let gradient = state.jacobian.transpose() * &state.residual;
+
+        if gradient.norm_squared() < options.tolerance.powi(2) {
+            return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+        }
+
+        method_state
+            .dogleg_state
+            .preloop(
+                &state.jacobian,
+                &state.residual,
+                &gradient,
+                &method_state.scaling,
+            )
+            .map_err(|e| {
+                SolveError::NumericalBreakdown(format!("Dogleg preloop failed: {:?}", e))
+            })?;
+
+        let step = if self.use_double_dogleg {
+            method_state.dogleg_state.double_step(
+                &state.jacobian,
+                &state.residual,
+                &gradient,
+                &method_state.scaling,
+                method_state.delta,
+            )
+        } else {
+            method_state.dogleg_state.step(
+                &state.jacobian,
+                &state.residual,
+                &method_state.scaling,
+                method_state.delta,
+            )
+        }
+        .map_err(|e| SolveError::NumericalBreakdown(format!("Dogleg step failed: {:?}", e)))?;
+
+        runtime.linear_solves += 1;
+
+        if step.norm() < options.tolerance {
+            if state.residual_norm <= 10.0 * options.tolerance
+                || gradient.norm() <= 10.0 * options.tolerance
+            {
+                return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+            }
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
+        }
+
+        let trial_x = if let Some(bounds) = &options.bounds {
+            bounds.project(&(&state.x + &step))
+        } else {
+            &state.x + &step
+        };
+
+        let trial_residual = problem.residual(&trial_x)?;
+        let actual = state.residual.norm_squared() - trial_residual.norm_squared();
+        let predicted = method_state
+            .dogleg_state
+            .predicted_reduction(&state.jacobian, &state.residual, &gradient, &step)
+            .map_err(|e| {
+                SolveError::NumericalBreakdown(format!("Predicted reduction failed: {:?}", e))
+            })?;
+
+        let rho = if predicted.abs() > 1e-16 {
+            actual / predicted
+        } else {
+            0.0
+        };
+
+        if rho < 0.25 {
+            method_state.delta *= self.shrink_factor;
+        } else if rho > 0.75 {
+            let scaled_step_norm = method_state
+                .dogleg_state
+                .scaled_norm(&step, &method_state.scaling);
+            if (scaled_step_norm - method_state.delta).abs() < 1e-10 {
+                method_state.delta = (self.expand_factor * method_state.delta).min(self.delta_max);
+            }
+        }
+
+        if method_state.delta < 1e-14 {
+            return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
+        }
+
+        if rho > self.eta {
+            runtime.accepted_steps += 1;
+            Ok(StepOutcome::Continue {
+                next_x: trial_x,
+                accepted: true,
+            })
+        } else {
+            runtime.rejected_steps += 1;
+            Ok(StepOutcome::Continue {
+                next_x: state.x.clone(),
+                accepted: false,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,7 +1212,250 @@ mod tests {
 
         assert!(step.is_ok());
         println!("Step: {}", step.unwrap());
-        let step1 = Powell_dogleg_method(jacobian, residual, diag, delta, "lu".to_owned());
+        let step1 = Powell_dogleg_method(jacobian, residual, diag, delta, LinearSolverKind::Lu);
         println!("step1: {}", step1);
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use super::*;
+    use crate::numerical::Nonlinear_systems::engine::{SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
+    #[test]
+    fn trust_region_and_plain_backend_work() {
+        struct ScalarQuadraticProblem;
+
+        struct CoupledPlainProblem;
+
+        impl NonlinearProblem for ScalarQuadraticProblem {
+            fn dimension(&self) -> usize {
+                1
+            }
+            fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+                Ok(DVector::from_vec(vec![x[0] * x[0] - 2.0]))
+            }
+        }
+
+        impl JacobianProvider for ScalarQuadraticProblem {
+            fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+                Ok(DMatrix::from_row_slice(1, 1, &[2.0 * x[0]]))
+            }
+        }
+
+        impl NonlinearProblem for CoupledPlainProblem {
+            fn dimension(&self) -> usize {
+                2
+            }
+            fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+                Ok(DVector::from_vec(vec![
+                    x[0] * x[0] + x[1] * x[1] - 1.0,
+                    x[0] - x[1],
+                ]))
+            }
+        }
+
+        impl JacobianProvider for CoupledPlainProblem {
+            fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+                Ok(DMatrix::from_row_slice(
+                    2,
+                    2,
+                    &[2.0 * x[0], 2.0 * x[1], 1.0, -1.0],
+                ))
+            }
+        }
+        let result = SolverEngine::new(TrustRegionMethod::default(), SolveOptions::default())
+            .solve(&CoupledPlainProblem, DVector::from_vec(vec![0.8, 0.3]))
+            .expect("solve");
+        let expected = 1.0 / 2.0_f64.sqrt();
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert!((result.x[0] - expected).abs() < 1e-8);
+        assert!((result.x[1] - expected).abs() < 1e-8);
+    }
+}
+
+#[cfg(test)]
+mod powell_dogleg_tests {
+    use super::*;
+    use crate::numerical::Nonlinear_systems::engine::{SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::problem::{
+        Bounds, JacobianProvider, NonlinearProblem,
+    };
+    use crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem;
+    use approx::assert_relative_eq;
+
+    struct RosenbrockProblem;
+
+    impl NonlinearProblem for RosenbrockProblem {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_vec(vec![
+                10.0 * (x[1] - x[0] * x[0]),
+                1.0 - x[0],
+            ]))
+        }
+    }
+
+    impl JacobianProvider for RosenbrockProblem {
+        fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::from_row_slice(
+                2,
+                2,
+                &[-20.0 * x[0], 10.0, -1.0, 0.0],
+            ))
+        }
+    }
+
+    #[test]
+    fn powell_dogleg_converges_rosenbrock() {
+        let options = SolveOptions {
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+        let result = SolverEngine::new(PowellDoglegMethod::default(), options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_with_double_dogleg() {
+        let mut method = PowellDoglegMethod::default();
+        method.use_double_dogleg = true;
+
+        let options = SolveOptions {
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(method, options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_without_column_scaling() {
+        let mut method = PowellDoglegMethod::default();
+        method.use_column_scaling = false;
+
+        let options = SolveOptions {
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(method, options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_with_bounds() {
+        let bounds = Bounds::new(vec![(0.0, 2.0), (0.0, 2.0)]).expect("bounds");
+        let options = SolveOptions {
+            bounds: Some(bounds),
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(PowellDoglegMethod::default(), options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert!(result.x[0] >= 0.0 && result.x[0] <= 2.0);
+        assert!(result.x[1] >= 0.0 && result.x[1] <= 2.0);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_with_symbolic_problem() {
+        let problem = SymbolicNonlinearProblem::from_strings(
+            vec!["x^2+y^2-10".to_string(), "x-y-4".to_string()],
+            Some(vec!["x".to_string(), "y".to_string()]),
+            None,
+            None,
+        )
+        .expect("symbolic problem");
+
+        let options = SolveOptions {
+            tolerance: 1e-6,
+            max_iterations: 100,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(PowellDoglegMethod::default(), options)
+            .solve(&problem, DVector::from_vec(vec![1.0, 1.0]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], -1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_custom_parameters() {
+        let method = PowellDoglegMethod {
+            delta_init: 0.5,
+            delta_max: 5.0,
+            eta: 0.15,
+            shrink_factor: 0.5,
+            expand_factor: 1.5,
+            use_double_dogleg: false,
+            use_column_scaling: true,
+        };
+
+        let options = SolveOptions {
+            tolerance: 1e-6,
+            max_iterations: 150,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(method, options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn powell_dogleg_double_with_bounds() {
+        let mut method = PowellDoglegMethod::default();
+        method.use_double_dogleg = true;
+
+        let bounds = Bounds::new(vec![(0.0, 2.0), (0.0, 2.0)]).expect("bounds");
+        let options = SolveOptions {
+            bounds: Some(bounds),
+            tolerance: 1e-6,
+            max_iterations: 150,
+            ..SolveOptions::default()
+        };
+
+        let result = SolverEngine::new(method, options)
+            .solve(&RosenbrockProblem, DVector::from_vec(vec![0.5, 0.5]))
+            .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(result.x[1], 1.0, epsilon = 1e-5);
     }
 }

@@ -6,13 +6,14 @@ use crate::symbolic::symbolic_engine::Expr;
 
 use crate::numerical::BE::BE;
 use crate::numerical::NR_for_ODE::NRODE;
-use crate::numerical::Nonlinear_systems::NR::NR;
+
 use crate::numerical::ODE_api::ODEsolver;
 use nalgebra::DVector;
 #[allow(dead_code)]
 pub fn ivp_examples(example: usize) {
     match example {
         0 => {
+            /*
             //use the shortest way to solve system of equations
             // first define system of equations and initial guess
             let mut NR_instanse = NR::new();
@@ -49,6 +50,7 @@ pub fn ivp_examples(example: usize) {
             NR_instanse.solver();
 
             println!("result = {:?} \n", NR_instanse.get_result().unwrap());
+             */
         }
 
         1 => {

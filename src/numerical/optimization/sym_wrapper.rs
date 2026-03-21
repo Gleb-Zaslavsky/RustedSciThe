@@ -218,7 +218,6 @@ impl LM {
             .unwrap_or(false);
 
         if is_logging_disabled {
-       
             self.solve_internal();
         } else {
             let loglevel = self.loglevel.clone();
@@ -243,12 +242,10 @@ impl LM {
 
             match logger_instance {
                 Ok(()) => {
-               
                     self.solve_internal();
                     info!("Program ended");
                 }
                 Err(_) => {
-               
                     self.solve_internal();
                 }
             }
@@ -256,7 +253,7 @@ impl LM {
     }
 
     /// Internal solver implementation without logging setup.
-     fn solve_internal(&mut self) {
+    fn solve_internal(&mut self) {
         let residual = |x: &DVector<f64>| -> DVector<f64> {
             let residual = &self.jacobian.lambdified_function_DVector;
             let residual = residual(x);
@@ -391,7 +388,10 @@ impl LM {
     }
 
     /// Solves parametric system with given parameter values and optional logging.
-    pub fn solve_with_params_unmut(&self, params: Vec<f64>)  -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
+    pub fn solve_with_params_unmut(
+        &self,
+        params: Vec<f64>,
+    ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
         let is_logging_disabled = self
             .loglevel
             .as_ref()
@@ -399,7 +399,6 @@ impl LM {
             .unwrap_or(false);
 
         let (map_of_solutions, solution) = if is_logging_disabled {
-     
             self.solve_with_params_unmut_internal(params)
         } else {
             let loglevel = self.loglevel.clone();
@@ -424,22 +423,17 @@ impl LM {
 
             match logger_instance {
                 Ok(()) => {
-            
                     let result = self.solve_with_params_unmut_internal(params);
                     info!("Program ended");
                     result
                 }
-                Err(_) => {
-              
-                    self.solve_with_params_unmut_internal(params)
-                }
+                Err(_) => self.solve_with_params_unmut_internal(params),
             }
         };
-     (map_of_solutions, solution)
+        (map_of_solutions, solution)
     }
 
-    pub fn  solve_with_params(&mut self, params: Vec<f64>){
-
+    pub fn solve_with_params(&mut self, params: Vec<f64>) {
         let (map_of_solutions, solution) = self.solve_with_params_unmut(params);
         self.map_of_solutions = map_of_solutions;
         self.result = solution;
@@ -728,7 +722,10 @@ mod tests2 {
         full_system_sym.extend(eq_sum_mole_numbers.clone());
         full_system_sym.extend(composition_eq.clone());
 
-        let full_system_sym: Vec<Expr> = full_system_sym.iter().map(|x| x.clone().simplify()).collect();
+        let full_system_sym: Vec<Expr> = full_system_sym
+            .iter()
+            .map(|x| x.clone().simplify())
+            .collect();
 
         for eq in &full_system_sym {
             println!("eq: {}", eq.clone().pretty_print());

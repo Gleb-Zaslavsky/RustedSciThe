@@ -1389,11 +1389,11 @@ mod tests {
         assert_eq!(df_dx, Expr::Const(1.0));
     }
 
-        #[test]
+    #[test]
     fn test_simplify_many_numbers() {
         let exp = Expr::parse_expression("1.0 + 2.0 + 3.0*3.0*x + 4.0 + 5.0*x");
         let simplified = exp.simplify();
-      //  let res = Expr::Const(14.0)*Expr::Var("x".to_string()) + Expr::Const(7.0);
+        //  let res = Expr::Const(14.0)*Expr::Var("x".to_string()) + Expr::Const(7.0);
 
         println!("Simplified: {}", simplified);
     }

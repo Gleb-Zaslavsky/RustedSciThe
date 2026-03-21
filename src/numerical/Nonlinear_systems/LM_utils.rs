@@ -1,20 +1,19 @@
-use super::NR::solve_linear_system;
-
-use log::{error, info};
+use log::info;
 use nalgebra::{DMatrix, DVector};
-use std::fmt::Display;
-use strum_macros::Display;
-#[derive(Debug, Clone, PartialEq, Display)]
 
-pub enum UpdateMethod {
-    Nielsen,
-    Gsl,
-}
+use strum_macros::Display;
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////SCALING METHODS///////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////
+/// Levenberg: D = I (identity)
+
+/// Marquardt: D[j,j] = ||J[:,j]||₂ (column norms)
+
+/// More: D[j,j] = max(||J[:,j]||₂, D[j,j]) (cumulative max)
+///
 ///  Scaling methods for trust region algorithms (GSL scaling.c)
-#[derive(Debug, Clone, PartialEq, Display)]
+#[derive(Debug, Clone, PartialEq, Display, Copy)]
 pub enum ScalingMethod {
     /// Levenberg scaling: D = I (identity matrix)
     Levenberg,
@@ -139,204 +138,14 @@ impl TrustRegionScaling {
         }
         regularization
     }
-    ////////////////////////////////////MISC////////////////////////////////////////////////////////////////
-    /// Store scaling diagonal in scales_vec (DVector)
-    pub fn store_scaling_in_vector(
-        scales_vec: &mut DVector<f64>,
-        diag: &DVector<f64>,
-        iteration: usize,
-    ) {
-        // Resize scales_vec if necessary
-        if scales_vec.len() != diag.len() {
-            if iteration != 0 {
-                error!("scales_vec is not properly initialized")
-            };
-            *scales_vec = DVector::zeros(diag.len());
-        }
-
-        // Copy scaling values
-        scales_vec.copy_from(diag);
-    }
-
-    /// Extract scaling diagonal from scales_vec (DVector)
-    pub fn extract_scaling_from_vector(scales_vec: &DVector<f64>, n_params: usize) -> DVector<f64> {
-        if scales_vec.len() != n_params || scales_vec.len() == 0 {
-            error!("scales_vec is not properly initialized");
-            // Return identity scaling if not properly initialized
-            return DVector::from_element(n_params, 1.0);
-        }
-
-        // Return copy of scales_vec
-        scales_vec.clone()
-    }
 }
 /////////////////////END OF SCALING////////////////////////////////////////////////////////////////////////
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////TRUST REGION SUBPROBLEM/////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-#[derive(Debug, Clone, PartialEq)]
-pub enum SubproblemMethod {
-    Dogleg_simple,
-    Dogleg_gsl,
-    Direct,
-}
-impl Display for SubproblemMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SubproblemMethod::Dogleg_simple => write!(f, "Dogleg_simple"),
-            SubproblemMethod::Dogleg_gsl => write!(f, "Dogleg_gsl"),
-            SubproblemMethod::Direct => write!(f, "Direct"),
-        }
-    }
-}
-pub struct TrustRegionSubproblem;
-impl TrustRegionSubproblem {
-    /// Solve trust region subproblem using specified method
-    /// The Levenberg-Marquardt method does NOT use delta directly in solving the subproblem. Bit dogleg methods do.
-    pub fn solve(
-        jacobian: &DMatrix<f64>,
-        residuals: &DVector<f64>,
-        gradient: &DVector<f64>,
-        scaling: &DVector<f64>,
-        mu: f64,
-        _delta: f64,
-        linear_solver: &str,
-        scaling_method: &ScalingMethod,
-        method: SubproblemMethod,
-    ) -> DVector<f64> {
-        match method {
-            SubproblemMethod::Direct => Self::direct_method(
-                jacobian,
-                residuals,
-                gradient,
-                scaling,
-                mu,
-                linear_solver,
-                scaling_method,
-            ),
-            SubproblemMethod::Dogleg_simple => {
-                unimplemented!()
-                // Self::dogleg_simple_method(jacobian, residuals, gradient, scaling, delta, linear_solver, scaling_method)
-            }
-            SubproblemMethod::Dogleg_gsl => {
-                unimplemented!()
-                // Self::dogleg_gsl_method(jacobian, residuals, gradient, scaling, delta, linear_solver, scaling_method)
-            }
-        }
-    }
-    /// Direct method: Solve regularized normal equations
-    /// This is the standard Levenberg-Marquardt approach (source: Nielsen, p. 122)
-    ///
-    fn direct_method(
-        jacobian: &DMatrix<f64>,
-        _residuals: &DVector<f64>,
-        gradient: &DVector<f64>,
-        scaling: &DVector<f64>,
-        mu: f64,
-        linear_solver: &str,
-        scaling_method: &ScalingMethod,
-    ) -> DVector<f64> {
-        info!("Solving trust region subproblem using Direct method");
-
-        // Compute J^T * J
-        let JtJ = jacobian.transpose() * jacobian;
-
-        // Create scaled regularization matrix (method-specific)
-        let regularization =
-            TrustRegionScaling::create_scaled_regularization(mu, scaling, scaling_method);
-
-        // Form augmented system: A = J^T*J + regularization
-        let A = &JtJ + &regularization;
-
-        // Solve: A * p = -gradient
-        let p = solve_linear_system(linear_solver.to_string(), &A, gradient)
-            .expect("Failed to solve linear system in direct method");
-
-        info!("Direct method step norm: {}", p.norm());
-        p
-    }
-    /// Simple dogleg method: Combines Gauss-Newton and steepest descent directions
-    #[allow(dead_code)]
-    fn dogleg_simple_method(
-        jacobian: &DMatrix<f64>,
-        _residuals: &DVector<f64>,
-        gradient: &DVector<f64>,
-        scaling: &DVector<f64>,
-        delta: f64,
-        linear_solver: &str,
-        scaling_method: &ScalingMethod,
-    ) -> DVector<f64> {
-        info!("Solving trust region subproblem using Simple Dogleg method");
-
-        // 1. Compute Gauss-Newton step (unregularized)
-        let JtJ = jacobian.transpose() * jacobian;
-        let p_gn =
-            solve_linear_system(linear_solver.to_string(), &JtJ, gradient).unwrap_or_else(|_| {
-                // Fallback to regularized system if singular
-                let regularization =
-                    TrustRegionScaling::create_scaled_regularization(1e-6, scaling, scaling_method);
-                let A_reg = &JtJ + &regularization;
-                solve_linear_system(linear_solver.to_string(), &A_reg, gradient)
-                    .expect("Failed to solve regularized system")
-            });
-
-        // 2. Check if Gauss-Newton step is within trust region
-        let scaled_gn_norm = scaled_norm_common(scaling, &p_gn);
-
-        if scaled_gn_norm <= delta {
-            info!("Gauss-Newton step accepted, norm: {}", scaled_gn_norm);
-            return p_gn;
-        }
-
-        // 3. Compute steepest descent step
-        let grad_norm_sq = gradient.norm_squared();
-        let Jg = jacobian * gradient;
-        let alpha = grad_norm_sq / Jg.norm_squared();
-        let p_sd = -alpha * gradient;
-
-        // 4. Find dogleg path intersection with trust region boundary
-        let scaled_sd_norm = scaled_norm_common(scaling, &p_sd);
-
-        if scaled_sd_norm >= delta {
-            // Use scaled steepest descent to boundary
-            let tau = delta / scaled_sd_norm;
-            info!("Using steepest descent step with tau: {}", tau);
-            return tau * p_sd;
-        }
-
-        // 5. Find intersection of dogleg path with trust region
-        // Solve: ||D * (p_sd + t * (p_gn - p_sd))||^2 = delta^2
-        let diff = &p_gn - &p_sd;
-        let scaled_diff = scaling.component_mul(&diff);
-        let scaled_sd = scaling.component_mul(&p_sd);
-
-        let a = scaled_diff.norm_squared();
-        let b = 2.0 * scaled_sd.dot(&scaled_diff);
-        let c = scaled_sd.norm_squared() - delta * delta;
-
-        let discriminant = b * b - 4.0 * a * c;
-        let t = if discriminant >= 0.0 {
-            (-b + discriminant.sqrt()) / (2.0 * a)
-        } else {
-            1.0 // Fallback
-        };
-
-        let t = t.clamp(0.0, 1.0);
-        let p_dogleg = &p_sd + t * diff;
-
-        info!(
-            "Dogleg step with t: {}, norm: {}",
-            t,
-            scaled_norm_common(scaling, &p_dogleg)
-        );
-        p_dogleg
-    }
-}
-/////////////////////////END OF TRUST REGION SUBPROBLEM SOLVERS////////////////////////////////////////////////
-
 ////////////////////////////////REDUCTION RAIO//////////////////////////////////////////////////////////////
-#[derive(Debug, Clone, PartialEq, Display)]
+///  Two approaches for reduction ratio:
+///Nielsen: Simple formula ||f||² - ||f + J*p||²
+///More: GSL formula with ||Jp||²/||f||² + 2μ*||D*p||²/||f||²
+#[derive(Debug, Clone, PartialEq, Display, Copy)]
 pub enum ReductionRatio {
     Nielsen, // Nielsen, p. 120
     More,    // More, p. 108
@@ -375,9 +184,10 @@ impl ReductionRatioSolver {
         p: &DVector<f64>,
     ) -> f64 {
         let actual_reduction = Fy.norm_squared() - Fy_new.norm_squared();
-
+        let predicted_residual = Fy + Jy * p;
         // Method-specific predicted reduction calculation
-        let predicted_reduction = Fy.norm_squared() - (Fy + Jy * p).norm_squared(); // ||F||² - ||F + J*p||²;
+        // Using Nielsen's formula: pred = ||f||² - ||f + J*p||²
+        let predicted_reduction = Fy.norm_squared() - predicted_residual.norm_squared(); // ||F||² - ||F + J*p||²;
 
         let rho = if predicted_reduction.abs() > 1e-12 {
             actual_reduction / predicted_reduction
@@ -773,3 +583,167 @@ pub fn compute_scaled_gradient_norm2(
 
     Some(max_scaled_gradient)
 }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////TRUST REGION SUBPROBLEM/////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubproblemMethod {
+    Dogleg_simple,
+    Dogleg_gsl,
+    Direct,
+}
+impl Display for SubproblemMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubproblemMethod::Dogleg_simple => write!(f, "Dogleg_simple"),
+            SubproblemMethod::Dogleg_gsl => write!(f, "Dogleg_gsl"),
+            SubproblemMethod::Direct => write!(f, "Direct"),
+        }
+    }
+}
+pub struct TrustRegionSubproblem;
+impl TrustRegionSubproblem {
+    /// Solve trust region subproblem using specified method
+    /// The Levenberg-Marquardt method does NOT use delta directly in solving the subproblem. Bit dogleg methods do.
+    pub fn solve(
+        jacobian: &DMatrix<f64>,
+        residuals: &DVector<f64>,
+        gradient: &DVector<f64>,
+        scaling: &DVector<f64>,
+        mu: f64,
+        _delta: f64,
+        linear_solver: &str,
+        scaling_method: &ScalingMethod,
+        method: SubproblemMethod,
+    ) -> DVector<f64> {
+        match method {
+            SubproblemMethod::Direct => Self::direct_method(
+                jacobian,
+                residuals,
+                gradient,
+                scaling,
+                mu,
+                linear_solver,
+                scaling_method,
+            ),
+            SubproblemMethod::Dogleg_simple => {
+                unimplemented!()
+                // Self::dogleg_simple_method(jacobian, residuals, gradient, scaling, delta, linear_solver, scaling_method)
+            }
+            SubproblemMethod::Dogleg_gsl => {
+                unimplemented!()
+                // Self::dogleg_gsl_method(jacobian, residuals, gradient, scaling, delta, linear_solver, scaling_method)
+            }
+        }
+    }
+    /// Direct method: Solve regularized normal equations
+    /// This is the standard Levenberg-Marquardt approach (source: Nielsen, p. 122)
+    ///
+    fn direct_method(
+        jacobian: &DMatrix<f64>,
+        _residuals: &DVector<f64>,
+        gradient: &DVector<f64>,
+        scaling: &DVector<f64>,
+        mu: f64,
+        linear_solver: &str,
+        scaling_method: &ScalingMethod,
+    ) -> DVector<f64> {
+        info!("Solving trust region subproblem using Direct method");
+
+        // Compute J^T * J
+        let JtJ = jacobian.transpose() * jacobian;
+
+        // Create scaled regularization matrix (method-specific)
+        let regularization =
+            TrustRegionScaling::create_scaled_regularization(mu, scaling, scaling_method);
+
+        // Form augmented system: A = J^T*J + regularization
+        let A = &JtJ + &regularization;
+
+        // Solve: A * p = -gradient
+        let p = solve_linear_system(linear_solver.to_string(), &A, gradient)
+            .expect("Failed to solve linear system in direct method");
+
+        info!("Direct method step norm: {}", p.norm());
+        p
+    }
+    /// Simple dogleg method: Combines Gauss-Newton and steepest descent directions
+    #[allow(dead_code)]
+    fn dogleg_simple_method(
+        jacobian: &DMatrix<f64>,
+        _residuals: &DVector<f64>,
+        gradient: &DVector<f64>,
+        scaling: &DVector<f64>,
+        delta: f64,
+        linear_solver: &str,
+        scaling_method: &ScalingMethod,
+    ) -> DVector<f64> {
+        info!("Solving trust region subproblem using Simple Dogleg method");
+
+        // 1. Compute Gauss-Newton step (unregularized)
+        let JtJ = jacobian.transpose() * jacobian;
+        let p_gn =
+            solve_linear_system(linear_solver.to_string(), &JtJ, gradient).unwrap_or_else(|_| {
+                // Fallback to regularized system if singular
+                let regularization =
+                    TrustRegionScaling::create_scaled_regularization(1e-6, scaling, scaling_method);
+                let A_reg = &JtJ + &regularization;
+                solve_linear_system(linear_solver.to_string(), &A_reg, gradient)
+                    .expect("Failed to solve regularized system")
+            });
+
+        // 2. Check if Gauss-Newton step is within trust region
+        let scaled_gn_norm = scaled_norm_common(scaling, &p_gn);
+
+        if scaled_gn_norm <= delta {
+            info!("Gauss-Newton step accepted, norm: {}", scaled_gn_norm);
+            return p_gn;
+        }
+
+        // 3. Compute steepest descent step
+        let grad_norm_sq = gradient.norm_squared();
+        let Jg = jacobian * gradient;
+        let alpha = grad_norm_sq / Jg.norm_squared();
+        let p_sd = -alpha * gradient;
+
+        // 4. Find dogleg path intersection with trust region boundary
+        let scaled_sd_norm = scaled_norm_common(scaling, &p_sd);
+
+        if scaled_sd_norm >= delta {
+            // Use scaled steepest descent to boundary
+            let tau = delta / scaled_sd_norm;
+            info!("Using steepest descent step with tau: {}", tau);
+            return tau * p_sd;
+        }
+
+        // 5. Find intersection of dogleg path with trust region
+        // Solve: ||D * (p_sd + t * (p_gn - p_sd))||^2 = delta^2
+        let diff = &p_gn - &p_sd;
+        let scaled_diff = scaling.component_mul(&diff);
+        let scaled_sd = scaling.component_mul(&p_sd);
+
+        let a = scaled_diff.norm_squared();
+        let b = 2.0 * scaled_sd.dot(&scaled_diff);
+        let c = scaled_sd.norm_squared() - delta * delta;
+
+        let discriminant = b * b - 4.0 * a * c;
+        let t = if discriminant >= 0.0 {
+            (-b + discriminant.sqrt()) / (2.0 * a)
+        } else {
+            1.0 // Fallback
+        };
+
+        let t = t.clamp(0.0, 1.0);
+        let p_dogleg = &p_sd + t * diff;
+
+        info!(
+            "Dogleg step with t: {}, norm: {}",
+            t,
+            scaled_norm_common(scaling, &p_dogleg)
+        );
+        p_dogleg
+    }
+}
+/////////////////////////END OF TRUST REGION SUBPROBLEM SOLVERS////////////////////////////////////////////////
+*/
