@@ -6,6 +6,7 @@ use crate::numerical::Nonlinear_systems::engine::{
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
+use crate::numerical::Nonlinear_systems::trust_region_LM::solve_trust_region_subproblem;
 
 /// CLASSIC LEVENBERG-MARQUARDT ALGORITHM
 
@@ -538,16 +539,19 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             }
         }
 
-        // Determine par and step that satisfies ||D p|| <= delta
-        let solver_kind = options.linear_solver;
+        // Determine par and step with the shared MINPACK-style trust-region solver.
+        let _solver_kind = options.linear_solver;
         runtime.linear_solves += 1;
-        let (pvec, par) = self.find_par(
-            solver_kind,
-            &jtj,
-            &g,
+        let subproblem = solve_trust_region_subproblem(
+            &state.jacobian,
+            &state.residual,
             &method_state.diag,
             method_state.delta,
-        )?;
+            method_state.par,
+        )
+        .map_err(|message| SolveError::LinearSolveFailure(message.to_string()))?;
+        let pvec = subproblem.step;
+        let par = subproblem.lambda;
         method_state.par = par;
 
         // Compute pnorm and xnorm
@@ -560,8 +564,8 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             method_state.delta = method_state.delta.min(pnorm);
         }
 
-        // Trial point (note: MINPACK uses negative wa1; here pvec is the step p)
-        let mut trial_x = &state.x + &pvec;
+        // MINPACK computes a parameter update `p` and applies it as `x_new = x - p`.
+        let mut trial_x = &state.x - &pvec;
         if let Some(bounds) = &options.bounds {
             trial_x = bounds.project(&trial_x);
         }
@@ -638,5 +642,155 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             next_x: state.x.clone(),
             accepted: false,
         })
+    }
+}
+#[cfg(test)]
+mod lm_minpack_tests {
+    use super::*;
+    use crate::numerical::Nonlinear_systems::engine::{SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::error::TerminationReason;
+    use approx::assert_relative_eq;
+    use nalgebra::{DMatrix, DVector};
+
+    // Minimal NonlinearProblem trait alias in your codebase is JacobianProvider.
+    // We'll implement JacobianProvider for simple problems here.
+
+    struct ScalarQuadratic; // f(x) = x^2 - 2 -> root sqrt(2)
+    impl crate::numerical::Nonlinear_systems::problem::NonlinearProblem for ScalarQuadratic {
+        fn dimension(&self) -> usize {
+            1
+        }
+        fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_vec(vec![x[0] * x[0] - 2.0]))
+        }
+    }
+    impl crate::numerical::Nonlinear_systems::problem::JacobianProvider for ScalarQuadratic {
+        fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::from_row_slice(1, 1, &[2.0 * x[0]]))
+        }
+    }
+
+    #[test]
+    fn lm_minpack_scalar_quadratic_converges() {
+        let method = LevenbergMarquardtMinpack {
+            ftol: 1e-10,
+            xtol: 1e-10,
+            gtol: 1e-10,
+            maxfev: 200,
+            mode: 1,
+            factor: 10.0,
+            diag: None,
+        };
+        let options = SolveOptions {
+            tolerance: 1e-8,
+            max_iterations: 50,
+            ..Default::default()
+        };
+        let engine = SolverEngine::new(method, options);
+        let x0 = DVector::from_vec(vec![1.5]);
+        let res = engine.solve(&ScalarQuadratic, x0).expect("solve failed");
+        assert_eq!(res.termination, TerminationReason::Converged);
+        let root = res.x[0];
+        assert!(
+            (root - 2f64.sqrt()).abs() < 1e-6,
+            "root ~= sqrt(2): got {}",
+            root
+        );
+    }
+
+    // 2D system: x^2 + y^2 = 10, x - y = 4 => solutions around (3, -1)
+    struct TwoEq;
+    impl crate::numerical::Nonlinear_systems::problem::NonlinearProblem for TwoEq {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_vec(vec![
+                x[0] * x[0] + x[1] * x[1] - 10.0,
+                x[0] - x[1] - 4.0,
+            ]))
+        }
+    }
+    impl crate::numerical::Nonlinear_systems::problem::JacobianProvider for TwoEq {
+        fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::from_row_slice(
+                2,
+                2,
+                &[2.0 * x[0], 2.0 * x[1], 1.0, -1.0],
+            ))
+        }
+    }
+
+    #[test]
+    fn lm_minpack_two_eq_converges() {
+        let method = LevenbergMarquardtMinpack::default();
+        let options = SolveOptions {
+            tolerance: 1e-8,
+            max_iterations: 100,
+            ..Default::default()
+        };
+        let engine = SolverEngine::new(method, options);
+        let x0 = DVector::from_vec(vec![1.0, 1.0]);
+        let res = engine.solve(&TwoEq, x0).expect("solve failed");
+        assert_eq!(res.termination, TerminationReason::Converged);
+        let x = res.x;
+        assert!((x[0] - 3.0).abs() < 1e-4, "x[0] close to 3: got {}", x[0]);
+        assert!((x[1] + 1.0).abs() < 1e-4, "x[1] close to -1: got {}", x[1]);
+    }
+
+    // Coupled nonlinear example: system with known root
+    // f1 = x^2 + y - 37 = 0
+    // f2 = x - y^2 - 5 = 0
+    // (one solution near x=6, y=1)
+    struct Coupled;
+    impl crate::numerical::Nonlinear_systems::problem::NonlinearProblem for Coupled {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_vec(vec![
+                x[0] * x[0] + x[1] - 37.0,
+                x[0] - x[1] * x[1] - 5.0,
+            ]))
+        }
+    }
+    impl crate::numerical::Nonlinear_systems::problem::JacobianProvider for Coupled {
+        fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::from_row_slice(
+                2,
+                2,
+                &[2.0 * x[0], 1.0, 1.0, -2.0 * x[1]],
+            ))
+        }
+    }
+
+    #[test]
+    fn lm_minpack_coupled_converges() {
+        let method = LevenbergMarquardtMinpack {
+            ftol: 1e-10,
+            xtol: 1e-10,
+            gtol: 1e-10,
+            maxfev: 500,
+            mode: 1,
+            factor: 10.0,
+            diag: None,
+        };
+        let options = SolveOptions {
+            tolerance: 1e-8,
+            max_iterations: 200,
+            ..Default::default()
+        };
+        let engine = SolverEngine::new(method, options);
+        let x0 = DVector::from_vec(vec![6.0, 1.0]);
+        let res = engine.solve(&Coupled, x0).expect("solve failed");
+        assert_eq!(res.termination, TerminationReason::Converged);
+        let x = res.x;
+        println!("x = {:?}", x);
+        assert_relative_eq!(x[0], 6.0, epsilon = 1e-6);
+        assert_relative_eq!(x[1], 1.0, epsilon = 1e-6);
+        assert!((x[0] - 6.0).abs() < 1e-4, "x[0] close to 6: got {}", x[0]);
+        // check equations nearly zero
+        //   let r = Coupled.residual(&x).expect("residual");
+        //   assert!(r[0].abs() < 1e-6 && r[1].abs() < 1e-6, "residuals not small: {:?}", r);
     }
 }

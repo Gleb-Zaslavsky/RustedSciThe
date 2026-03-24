@@ -88,7 +88,11 @@ impl NonlinearMethod for TrustRegionMethod {
 
         let alpha =
             gradient.dot(&gradient) / (&state.jacobian * &gradient).norm_squared().max(1e-16);
-        let step = dogleg_step(&newton_step, &(-alpha * gradient.clone()), method_state.delta);
+        let step = dogleg_step(
+            &newton_step,
+            &(-alpha * gradient.clone()),
+            method_state.delta,
+        );
         if step.norm() < options.tolerance {
             if state.residual_norm <= 10.0 * options.tolerance
                 || gradient.norm() <= 10.0 * options.tolerance
