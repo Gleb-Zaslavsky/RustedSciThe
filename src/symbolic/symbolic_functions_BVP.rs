@@ -1,4 +1,36 @@
-//! # Symbolic Functions for Boundary Value Problems (BVP)
+//! Current BVP symbolic/AOT dataflow.
+//!
+//! This module is the boundary between symbolic BVP construction and
+//! solver-facing execution. It now supports both the long-standing lambdify
+//! path and the newer sparse AOT lifecycle.
+//!
+//! Current sparse mainline:
+//! 1. `Jacobian` receives symbolic residual equations, unknown names,
+//!    optional parameters, discretization settings, and boundary conditions.
+//! 2. `generate_BVP_with_params(...)` discretizes the system and fills the
+//!    symbolic residual cache plus dense/sparse Jacobian caches.
+//! 3. `prepare_sparse_aot_problem(...)` turns the sparse symbolic cache into an
+//!    owned `BvpPreparedSparseAotProblem`.
+//! 4. Backend selection combines requested policy (`Numeric`, `Lambdify`,
+//!    `Aot`) with resolver state and yields a `BvpSparseExecutionPlan`.
+//! 5. The solver then consumes either:
+//!    - `BvpSparseSolverProvider<'_>` / `BvpSparseSolverBundle` for sparse
+//!      lambdify or linked compiled AOT,
+//!    - `BvpLegacySolverBundle` for the remaining compatibility paths.
+//!
+//! Compiled AOT scenario:
+//! - `BvpPreparedSparseAotProblem` converts into a shared
+//!   `PreparedSparseProblem`.
+//! - lifecycle modules can emit/build/register/resolve a generated crate.
+//! - once a linked runtime backend is registered in-process, the exact same
+//!   solver bundle shape becomes callable through compiled callbacks.
+//!
+//! The production-oriented branch in this file is the sparse faer backend
+//! (`SparseColMat` / `Col`). Dense and older sparse matrix backends are kept
+//! for compatibility, validation, and gradual migration of the wider BVP
+//! stack.
+//!
+//! Legacy notes for the original BVP symbolic module layout.
 //!
 //! ## Main Purpose
 //! This module provides high-performance symbolic computation and automatic differentiation
@@ -96,22 +128,34 @@
 #![allow(non_camel_case_types)]
 use crate::global::THRESHOLD as T;
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun,
-    FunEnum,
-    Jac,
-    JacEnum,
-    MatrixType,
-    VectorType,
-    convert_to_fun, // convert_to_jac
+    Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting, convert_to_fun,
+    convert_to_jac,
 };
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
+use crate::symbolic::codegen_aot_resolution::{AotResolver, ResolvedAotArtifact};
+use crate::symbolic::codegen_aot_runtime_link::resolve_linked_sparse_backend;
+use crate::symbolic::codegen_backend_selection::{
+    BackendSelectionPolicy, SelectedBackendKind, select_backend,
+};
+use crate::symbolic::codegen_manifest::PreparedProblemManifest;
+use crate::symbolic::codegen_orchestrator::{ParallelExecutorConfig, ParallelFallbackPolicy};
+use crate::symbolic::codegen_provider_api::{BackendKind, MatrixBackend, PreparedSparseProblem};
+use crate::symbolic::codegen_runtime_api::{
+    ResidualChunkPlan, ResidualChunkingStrategy, ResidualRuntimePlan, SparseJacobianRuntimePlan,
+    SparseJacobianStructure, SparseJacobianValuesChunkPlan,
+    recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
+};
+use crate::symbolic::codegen_tasks::{
+    CodegenOutputLayout, CodegenTaskKind, CodegenTaskPlan, PlannedOutput, SparseChunkingStrategy,
+    SparseExprEntry,
+};
 use crate::symbolic::symbolic_engine::Expr;
 //use crate::symbolic::symbolic_traits::SymbolicType;
 use faer::col::Col;
 use faer::col::ColRef;
 
 use faer::sparse::{SparseColMat, Triplet};
-use log::info;
+use log::{error, info};
 use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector};
 
@@ -119,9 +163,100 @@ use rayon::prelude::*;
 
 use sprs::{CsMat, CsVec};
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
+
+fn normalize_timer_percent(value: &mut f64, total: f64) {
+    if total <= f64::EPSILON {
+        *value = 0.0;
+    } else {
+        *value /= total / 100.0;
+    }
+}
+
+/// High-level backend family used by the BVP symbolic pipeline.
+///
+/// This enum intentionally separates "how the numerical evaluator appears"
+/// from the lower-level matrix storage choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpBackendKind {
+    Numeric,
+    Lambdify,
+    Aot,
+}
+
+/// Matrix/vector backend used by the BVP Jacobian/residual pipeline.
+///
+/// `FaerSparseCol` is the main production-oriented branch in this module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpMatrixBackend {
+    Dense,
+    SprsCsMat,
+    NalgebraCsMatrix,
+    FaerSparseCol,
+}
+
+impl BvpMatrixBackend {
+    pub const fn legacy_method(self) -> &'static str {
+        match self {
+            Self::Dense => "Dense",
+            Self::SprsCsMat => "Sparse_1",
+            Self::NalgebraCsMatrix => "Sparse_2",
+            Self::FaerSparseCol => "Sparse",
+        }
+    }
+
+    pub fn from_legacy_method(method: &str) -> Option<Self> {
+        match method {
+            "Dense" => Some(Self::Dense),
+            "Sparse_1" => Some(Self::SprsCsMat),
+            "Sparse_2" => Some(Self::NalgebraCsMatrix),
+            "Sparse" => Some(Self::FaerSparseCol),
+            _ => None,
+        }
+    }
+
+    pub const fn from_provider_matrix_backend(matrix_backend: MatrixBackend) -> Self {
+        match matrix_backend {
+            MatrixBackend::Dense => Self::Dense,
+            MatrixBackend::SparseCol => Self::FaerSparseCol,
+            MatrixBackend::CsMat => Self::SprsCsMat,
+            MatrixBackend::CsMatrix => Self::NalgebraCsMatrix,
+            MatrixBackend::ValuesOnly => Self::FaerSparseCol,
+        }
+    }
+}
+
+/// User-facing backend selection for BVP symbolic compilation.
+///
+/// For now only the `Lambdify` branch is executed inside this module, while
+/// `Numeric` and `Aot` are reserved for the staged integration layer above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BvpBackendConfig {
+    pub backend_kind: BvpBackendKind,
+    pub matrix_backend: BvpMatrixBackend,
+}
+
+impl BvpBackendConfig {
+    pub const fn new(backend_kind: BvpBackendKind, matrix_backend: BvpMatrixBackend) -> Self {
+        Self {
+            backend_kind,
+            matrix_backend,
+        }
+    }
+
+    pub const fn lambdify(matrix_backend: BvpMatrixBackend) -> Self {
+        Self::new(BvpBackendKind::Lambdify, matrix_backend)
+    }
+}
+
+impl Default for BvpBackendConfig {
+    fn default() -> Self {
+        Self::lambdify(BvpMatrixBackend::FaerSparseCol)
+    }
+}
 /// Core structure for BVP symbolic-to-numerical transformation pipeline.
 ///
 /// This struct represents a Jacobian for BVPs, which is a matrix of partial derivatives of a vector function.
@@ -147,6 +282,12 @@ pub struct Jacobian {
     /// Values: "Dense", "Sparse", "Sparse_1" (sprs), "Sparse_2" (nalgebra), "Sparse_3" (faer)
     pub method: String,
 
+    /// Explicit backend configuration used by the modernized BVP entrypoints.
+    ///
+    /// The legacy `method` string is still kept for compatibility with the
+    /// wider BVP stack, but new code should prefer this field.
+    pub backend_config: BvpBackendConfig,
+
     /// Vector of symbolic variables representing the unknowns in the BVP system.
     /// Contains Expr::Var objects for each discretized variable (e.g., y_0, y_1, ..., y_n)
     pub vector_of_variables: Vec<Expr>,
@@ -155,9 +296,26 @@ pub struct Jacobian {
     /// Used during lambdification and variable processing (e.g., ["y_0", "y_1", "z_0", "z_1"])
     pub variable_string: Vec<String>,
 
+    /// Optional symbolic parameter names that affect evaluation but are not
+    /// Newton unknowns of the BVP system.
+    pub parameters_string: Vec<String>,
+
+    /// Current numeric values for `parameters_string`.
+    ///
+    /// At runtime the residual/Jacobian evaluators flatten arguments in the
+    /// order `[params..., unknowns...]`, while the outer Newton solver still
+    /// passes only the unknown vector.
+    pub parameter_values: Option<Vec<f64>>,
+
     /// 2D matrix of symbolic partial derivatives ∂F_i/∂x_j.
     /// Core of the analytical Jacobian - computed once symbolically, then compiled to numerical functions
     pub symbolic_jacobian: Vec<Vec<Expr>>,
+
+    /// Sparse symbolic Jacobian cache containing only explicit non-zero entries.
+    ///
+    /// This cache is maintained alongside the legacy dense matrix so the BVP
+    /// path can migrate gradually toward sparse-first symbolic storage.
+    pub symbolic_jacobian_sparse: Vec<(usize, usize, Expr)>,
 
     /// Optional single Jacobian element evaluator function.
     /// Legacy field for element-wise Jacobian evaluation - modern code uses `jac_function`
@@ -194,7 +352,1107 @@ pub struct Jacobian {
     pub BC_pos_n_values: Vec<(usize, usize, f64)>,
 }
 
+/// Owned sparse AOT-ready BVP problem produced by the legacy BVP symbolic
+/// builder.
+///
+/// This bridge object keeps symbolic residuals, variable names, parameter
+/// names, and sparse Jacobian entries in owned form so it can later expose a
+/// borrow-based [`PreparedSparseProblem`] without leaking temporary vectors.
+#[derive(Debug, Clone)]
+pub struct BvpPreparedSparseAotProblem {
+    pub residual_fn_name: String,
+    pub jacobian_fn_name: String,
+    pub variable_names: Vec<String>,
+    pub param_names: Vec<String>,
+    pub residuals: Vec<Expr>,
+    pub sparse_entries: Vec<(usize, usize, Expr)>,
+    pub shape: (usize, usize),
+    pub residual_strategy: ResidualChunkingStrategy,
+    pub jacobian_strategy: SparseChunkingStrategy,
+}
+
+/// Owned BVP-side backend selection result for the sparse main path.
+///
+/// This keeps the selected branch together with the owned sparse prepared
+/// problem bridge, allowing the BVP module to consult lifecycle metadata
+/// without leaking borrow-based `PreparedProblem` values across layers.
+#[derive(Debug, Clone)]
+pub struct BvpSelectedSparseBackend {
+    pub prepared_problem: BvpPreparedSparseAotProblem,
+    pub requested_backend: BackendKind,
+    pub effective_backend: SelectedBackendKind,
+    pub matrix_backend: MatrixBackend,
+    pub aot_resolution: Option<ResolvedAotArtifact>,
+}
+
+impl BvpSelectedSparseBackend {
+    /// Returns `true` when the selected path points to a compiled AOT artifact.
+    pub fn is_compiled_aot(&self) -> bool {
+        self.effective_backend == SelectedBackendKind::AotCompiled
+    }
+}
+
+/// BVP-side sparse backend execution plan.
+///
+/// This is the first solver-adjacent use layer on top of backend selection:
+/// - lambdify variants mean `jac_function` / `residiual_function` are ready,
+/// - AOT variants mean lifecycle metadata is resolved and the caller can
+///   continue into the compiled-backend branch,
+/// - numeric remains a reserved integration point.
+#[derive(Debug, Clone)]
+pub enum BvpSparseExecutionPlan {
+    NumericRequested(BvpSelectedSparseBackend),
+    LambdifyReady(BvpSelectedSparseBackend),
+    AotCompiled(BvpSelectedSparseBackend),
+    AotRegisteredButNotBuilt(BvpSelectedSparseBackend),
+    AotMissing(BvpSelectedSparseBackend),
+}
+
+impl BvpSparseExecutionPlan {
+    pub fn selected(&self) -> &BvpSelectedSparseBackend {
+        match self {
+            Self::NumericRequested(selected)
+            | Self::LambdifyReady(selected)
+            | Self::AotCompiled(selected)
+            | Self::AotRegisteredButNotBuilt(selected)
+            | Self::AotMissing(selected) => selected,
+        }
+    }
+}
+
+/// Transitional BVP-side sparse provider bridge for the main faer-oriented path.
+///
+/// This object is intentionally thin:
+/// - for `LambdifyReady`, it can evaluate residuals and sparse Jacobian values
+///   through the already prepared legacy callbacks;
+/// - for `Aot*`, it exposes the resolved metadata and sparse structure needed
+///   by the next lifecycle stage that will attach compiled callbacks.
+///
+/// It lets the solver-facing integration use one object shape before the final
+/// in-process compiled AOT runtime hook is introduced.
+pub struct BvpSparseSolverProvider<'a> {
+    jacobian: &'a mut Jacobian,
+    execution: BvpSparseExecutionPlan,
+    structure: SparseJacobianStructure,
+}
+
+impl<'a> BvpSparseSolverProvider<'a> {
+    /// Returns the already-selected sparse execution plan.
+    ///
+    /// Outer integration layers use this to inspect whether the current path is
+    /// lambdify-ready, compiled AOT, or still missing a built artifact.
+    pub fn execution_plan(&self) -> &BvpSparseExecutionPlan {
+        &self.execution
+    }
+
+    /// Effective backend after policy + resolver selection.
+    pub fn effective_backend(&self) -> SelectedBackendKind {
+        self.execution.selected().effective_backend
+    }
+
+    /// Backend family originally requested by the upper configuration layer.
+    pub fn requested_backend(&self) -> BackendKind {
+        self.execution.selected().requested_backend
+    }
+
+    /// Returns `true` when residual/Jacobian callbacks can be executed right now.
+    ///
+    /// That is true for:
+    /// - `LambdifyReady`
+    /// - `AotCompiled` with a registered linked runtime backend
+    pub fn is_runtime_callable(&self) -> bool {
+        matches!(self.execution, BvpSparseExecutionPlan::LambdifyReady(_))
+            || matches!(self.execution, BvpSparseExecutionPlan::AotCompiled(_))
+                && resolve_linked_sparse_backend(
+                    &self.execution.selected().prepared_problem.problem_key(),
+                )
+                .is_some()
+    }
+
+    /// Returns resolved lifecycle metadata for compiled AOT artifacts, when present.
+    pub fn resolved_aot_artifact(&self) -> Option<&ResolvedAotArtifact> {
+        self.execution.selected().aot_resolution.as_ref()
+    }
+
+    /// Number of residual outputs in the current sparse BVP system.
+    pub fn residual_len(&self) -> usize {
+        self.execution.selected().prepared_problem.shape.0
+    }
+
+    /// Sparse Jacobian shape `(rows, cols)` for the current prepared problem.
+    pub fn jacobian_shape(&self) -> (usize, usize) {
+        self.execution.selected().prepared_problem.shape
+    }
+
+    /// Sparse structural pattern shared by lambdify and linked AOT branches.
+    pub fn jacobian_structure(&self) -> &SparseJacobianStructure {
+        &self.structure
+    }
+
+    /// Casts the raw dense solver vector into the matrix/vector backend
+    /// expected by the legacy callback layer.
+    fn typed_variables_from_args(&self, args: &[f64]) -> Box<dyn VectorType> {
+        let dense = DVector::from_column_slice(args);
+        let backend = BvpMatrixBackend::from_provider_matrix_backend(
+            self.execution.selected().matrix_backend,
+        );
+        Vectors_type_casting(&dense, backend.legacy_method().to_string())
+    }
+
+    /// Evaluates residual outputs into the caller-provided buffer.
+    ///
+    /// The provider keeps one solver-facing contract while internally routing
+    /// either to legacy lambdified callbacks or to linked compiled AOT
+    /// callbacks.
+    pub fn residual_into(&self, args: &[f64], out: &mut [f64]) {
+        assert!(
+            self.is_runtime_callable(),
+            "BvpSparseSolverProvider residual_into is only callable for runtime-ready sparse plans"
+        );
+        assert_eq!(
+            out.len(),
+            self.residual_len(),
+            "residual output length must match residual_len"
+        );
+        match &self.execution {
+            BvpSparseExecutionPlan::LambdifyReady(_) => {
+                let typed = self.typed_variables_from_args(args);
+                let residual = self.jacobian.residiual_function.call(1.0, &*typed);
+                let dense = residual.to_DVectorType();
+                out.copy_from_slice(dense.as_slice());
+            }
+            BvpSparseExecutionPlan::AotCompiled(selected) => {
+                let linked =
+                    resolve_linked_sparse_backend(&selected.prepared_problem.problem_key())
+                        .expect("AotCompiled provider path must resolve a linked backend");
+                let mut flat_args = Vec::with_capacity(
+                    self.jacobian
+                        .parameter_values
+                        .as_ref()
+                        .map_or(0, |params| params.len())
+                        + args.len(),
+                );
+                if let Some(params) = self.jacobian.parameter_values.as_ref() {
+                    flat_args.extend_from_slice(params.as_slice());
+                }
+                flat_args.extend_from_slice(args);
+                (linked.residual_eval)(&flat_args, out);
+            }
+            _ => {
+                unreachable!("runtime-callable provider should only expose lambdify or linked AOT")
+            }
+        }
+    }
+
+    /// Evaluates sparse Jacobian explicit values into the caller-provided buffer.
+    ///
+    /// The output order always follows `jacobian_structure()`, regardless of
+    /// whether the active branch is lambdify or linked compiled AOT.
+    pub fn jacobian_values_into(&mut self, args: &[f64], values_out: &mut [f64]) {
+        assert!(
+            self.is_runtime_callable(),
+            "BvpSparseSolverProvider jacobian_values_into is only callable for runtime-ready sparse plans"
+        );
+        assert_eq!(
+            values_out.len(),
+            self.structure.nnz(),
+            "Jacobian values output length must match sparse structure nnz"
+        );
+        match &mut self.execution {
+            BvpSparseExecutionPlan::LambdifyReady(_) => {
+                let typed = self.typed_variables_from_args(args);
+                let dense = self
+                    .jacobian
+                    .jac_function
+                    .as_mut()
+                    .expect("jacobian callback must exist for LambdifyReady plan")
+                    .call(1.0, &*typed)
+                    .to_DMatrixType();
+
+                for (value, (&row, &col)) in values_out.iter_mut().zip(
+                    self.structure
+                        .row_indices
+                        .iter()
+                        .zip(self.structure.col_indices.iter()),
+                ) {
+                    *value = dense[(row, col)];
+                }
+            }
+            BvpSparseExecutionPlan::AotCompiled(selected) => {
+                let linked =
+                    resolve_linked_sparse_backend(&selected.prepared_problem.problem_key())
+                        .expect("AotCompiled provider path must resolve a linked backend");
+                let mut flat_args = Vec::with_capacity(
+                    self.jacobian
+                        .parameter_values
+                        .as_ref()
+                        .map_or(0, |params| params.len())
+                        + args.len(),
+                );
+                if let Some(params) = self.jacobian.parameter_values.as_ref() {
+                    flat_args.extend_from_slice(params.as_slice());
+                }
+                flat_args.extend_from_slice(args);
+                (linked.jacobian_values_eval)(&flat_args, values_out);
+            }
+            _ => {
+                unreachable!("runtime-callable provider should only expose lambdify or linked AOT")
+            }
+        }
+    }
+}
+
+/// Owned solver-facing sparse BVP bundle.
+///
+/// This is the assembled object the outer solver infrastructure wants to see:
+/// equations/settings go in, and on success it receives one bundle containing:
+/// - the selected backend branch,
+/// - optional residual/Jacobian callbacks ready to use,
+/// - and all solver metadata that used to be read piecemeal from `Jacobian`.
+///
+/// The solver does not need to know whether the callbacks came from lambdify,
+/// AOT, or a future numeric path. It only inspects whether runtime callbacks
+/// are available and uses the exposed metadata consistently.
+pub struct BvpSparseSolverBundle {
+    pub execution: BvpSparseExecutionPlan,
+    pub residual_function: Option<Box<dyn Fun>>,
+    pub jacobian_function: Option<Box<dyn Jac>>,
+    pub variable_string: Vec<String>,
+    pub bounds_vec: Option<Vec<(f64, f64)>>,
+    pub rel_tolerance_vec: Option<Vec<f64>>,
+    pub bandwidth: Option<(usize, usize)>,
+    pub bc_position_and_value: Vec<(usize, usize, f64)>,
+    pub sparse_structure: SparseJacobianStructure,
+}
+
+/// Transitional owned bundle for legacy lambdify/numeric BVP callbacks.
+///
+/// This keeps the remaining compatibility path assembled in one object instead
+/// of forcing solver handoff layers to read multiple `Jacobian` fields
+/// directly. It is intentionally smaller than [`BvpSparseSolverBundle`] and
+/// exists only while non-sparse solver paths are still converging on the same
+/// provider model.
+pub struct BvpLegacySolverBundle {
+    pub residual_function: Box<dyn Fun>,
+    pub jacobian_function: Option<Box<dyn Jac>>,
+    pub variable_string: Vec<String>,
+    pub bounds_vec: Option<Vec<(f64, f64)>>,
+    pub rel_tolerance_vec: Option<Vec<f64>>,
+    pub bandwidth: Option<(usize, usize)>,
+    pub bc_position_and_value: Vec<(usize, usize, f64)>,
+}
+
+/// Fallible wrapper error for the staged BVP backend-selection / AOT path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BvpBackendIntegrationError {
+    /// The BVP pipeline panicked while building or selecting a backend.
+    PipelinePanicked(String),
+    /// The solver was configured with an unsupported logging level string.
+    InvalidLogLevel { level: String },
+    /// The solver could not create the requested log file.
+    LogFileCreationFailed { path: String, message: String },
+    /// A compiled AOT backend was required by the outer policy, but the
+    /// selection layer could not provide a compiled artifact.
+    CompiledAotRequiredButUnavailable {
+        problem_key: String,
+        effective_backend: SelectedBackendKind,
+    },
+    /// The lifecycle policy asked the solver layer to build a missing AOT
+    /// artifact automatically, but that orchestration is not wired here yet.
+    AutomaticAotBuildRequested { problem_key: String },
+    /// The lifecycle policy asked the solver layer to rebuild an AOT artifact,
+    /// but rebuild orchestration is not wired here yet.
+    AutomaticAotRebuildRequested { problem_key: String },
+    /// The lifecycle layer attempted to build a generated AOT crate but the
+    /// nested Cargo build failed.
+    AutomaticAotBuildFailed {
+        problem_key: String,
+        message: String,
+    },
+    /// A compiled AOT artifact was selected, but callable runtime callbacks
+    /// were not available in the current process.
+    CompiledAotRuntimeUnavailable { problem_key: String },
+}
+
+impl BvpSparseSolverBundle {
+    pub fn effective_backend(&self) -> SelectedBackendKind {
+        self.execution.selected().effective_backend
+    }
+
+    pub fn requested_backend(&self) -> BackendKind {
+        self.execution.selected().requested_backend
+    }
+
+    pub fn is_runtime_callable(&self) -> bool {
+        self.residual_function.is_some() && self.jacobian_function.is_some()
+    }
+
+    pub fn resolved_aot_artifact(&self) -> Option<&ResolvedAotArtifact> {
+        self.execution.selected().aot_resolution.as_ref()
+    }
+
+    pub fn residual_len(&self) -> usize {
+        self.execution.selected().prepared_problem.shape.0
+    }
+
+    pub fn jacobian_shape(&self) -> (usize, usize) {
+        self.execution.selected().prepared_problem.shape
+    }
+
+    pub fn residual_call(&self, p: f64, y: &dyn VectorType) -> Option<Box<dyn VectorType>> {
+        self.residual_function.as_ref().map(|fun| fun.call(p, y))
+    }
+
+    pub fn jacobian_call(&mut self, p: f64, y: &dyn VectorType) -> Option<Box<dyn MatrixType>> {
+        self.jacobian_function.as_mut().map(|jac| jac.call(p, y))
+    }
+
+    pub fn into_runtime_callbacks(self) -> Option<(Box<dyn Fun>, Box<dyn Jac>)> {
+        match (self.residual_function, self.jacobian_function) {
+            (Some(fun), Some(jac)) => Some((fun, jac)),
+            _ => None,
+        }
+    }
+
+    /// Rebuilds linked compiled-AOT runtime callbacks with an optional
+    /// parallel execution policy.
+    ///
+    /// This keeps the outer solver-facing bundle shape stable while allowing
+    /// solver-level execution settings to choose between whole-callback and
+    /// chunk-aware linked AOT execution.
+    pub fn rebind_linked_runtime_callbacks(
+        &mut self,
+        parameter_values: Option<&[f64]>,
+        parallel_config: Option<ParallelExecutorConfig>,
+    ) -> bool {
+        if !matches!(self.execution, BvpSparseExecutionPlan::AotCompiled(_)) {
+            return false;
+        }
+
+        let Some((residual, jacobian)) = linked_sparse_runtime_callbacks(
+            &self.execution.selected().prepared_problem,
+            parameter_values,
+            parallel_config,
+        ) else {
+            return false;
+        };
+
+        self.residual_function = Some(residual);
+        self.jacobian_function = Some(jacobian);
+        true
+    }
+}
+
 impl Jacobian {
+    /// Consumes the legacy lambdify/numeric callback fields into one assembled
+    /// compatibility bundle.
+    ///
+    /// This is a transitional helper for non-sparse solver paths while they
+    /// are still being migrated away from direct `Jacobian` field access.
+    pub fn into_legacy_solver_bundle(self) -> BvpLegacySolverBundle {
+        BvpLegacySolverBundle {
+            residual_function: self.residiual_function,
+            jacobian_function: self.jac_function,
+            variable_string: self.variable_string,
+            bounds_vec: self.bounds,
+            rel_tolerance_vec: self.rel_tolerance_vec,
+            bandwidth: self.bandwidth,
+            bc_position_and_value: self.BC_pos_n_values,
+        }
+    }
+
+    /// Builds a legacy lambdify/numeric BVP pipeline and returns the assembled
+    /// compatibility bundle in one step.
+    ///
+    /// This keeps the remaining non-sparse solver handoff on the symbolic
+    /// layer, so outer solver glue does not need to know which internal
+    /// `Jacobian` fields carry callbacks and metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_legacy_solver_bundle_with_params(
+        mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+    ) -> BvpLegacySolverBundle {
+        self.generate_BVP_with_params(
+            eq_system,
+            values,
+            arg,
+            params,
+            t0,
+            param,
+            n_steps,
+            h,
+            mesh,
+            border_conditions,
+            bounds,
+            rel_tolerance,
+            scheme,
+            method,
+            bandwidth,
+        );
+        self.into_legacy_solver_bundle()
+    }
+}
+
+impl BvpPreparedSparseAotProblem {
+    /// Returns the flattened symbolic input ordering used across the sparse
+    /// AOT path: `[params..., variables...]`.
+    fn flattened_input_names(&self) -> Vec<&str> {
+        let mut names = Vec::with_capacity(
+            self.param_names
+                .len()
+                .saturating_add(self.variable_names.len()),
+        );
+        names.extend(self.param_names.iter().map(|name| name.as_str()));
+        names.extend(self.variable_names.iter().map(|name| name.as_str()));
+        names
+    }
+
+    /// Rebuilds borrowed sparse Jacobian entries from the owned cache.
+    ///
+    /// This is the bridge between the owned BVP representation and the shared
+    /// borrow-based codegen/runtime plan layer.
+    fn borrowed_sparse_entries(&self) -> Vec<SparseExprEntry<'_>> {
+        self.sparse_entries
+            .iter()
+            .map(|(row, col, expr)| SparseExprEntry {
+                row: *row,
+                col: *col,
+                expr,
+            })
+            .collect()
+    }
+
+    /// Builds the residual runtime plan used by code generation, manifests,
+    /// and linked runtime rebinding.
+    fn residual_runtime_plan(&self) -> ResidualRuntimePlan<'_> {
+        let chunk_size = match self.residual_strategy {
+            ResidualChunkingStrategy::Whole => self.residuals.len().max(1),
+            ResidualChunkingStrategy::ByTargetChunkCount { target_chunks } => {
+                assert!(target_chunks > 0, "target_chunks must be positive");
+                self.residuals.len().max(1).div_ceil(target_chunks).max(1)
+            }
+            ResidualChunkingStrategy::ByOutputCount {
+                max_outputs_per_chunk,
+            } => {
+                assert!(
+                    max_outputs_per_chunk > 0,
+                    "max_outputs_per_chunk must be positive"
+                );
+                max_outputs_per_chunk
+            }
+        };
+
+        let input_names = self.flattened_input_names();
+        let chunks = self
+            .residuals
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, residuals)| {
+                let output_offset = chunk_index * chunk_size;
+                let fn_name = if chunk_index == 0 && residuals.len() == self.residuals.len() {
+                    self.residual_fn_name.clone()
+                } else {
+                    format!("{}_chunk_{}", self.residual_fn_name, chunk_index)
+                };
+
+                let outputs = residuals
+                    .iter()
+                    .map(|expr| PlannedOutput {
+                        expr,
+                        coordinate: None,
+                    })
+                    .collect();
+
+                ResidualChunkPlan {
+                    fn_name: fn_name.clone(),
+                    output_offset,
+                    residuals,
+                    plan: CodegenTaskPlan {
+                        fn_name: std::borrow::Cow::Owned(fn_name),
+                        kind: CodegenTaskKind::Residual,
+                        input_names: input_names.clone(),
+                        outputs,
+                        layout: CodegenOutputLayout::Vector {
+                            len: residuals.len(),
+                        },
+                    },
+                }
+            })
+            .collect();
+
+        ResidualRuntimePlan {
+            fn_name: self.residual_fn_name.as_str(),
+            output_len: self.residuals.len(),
+            input_names,
+            chunks,
+        }
+    }
+
+    /// Builds the sparse Jacobian runtime plan used by code generation,
+    /// manifests, and linked runtime rebinding.
+    fn sparse_runtime_plan(&self) -> SparseJacobianRuntimePlan<'_> {
+        let all_entries = self.borrowed_sparse_entries();
+        let input_names = self.flattened_input_names();
+
+        let chunked_entries: Vec<(usize, Vec<SparseExprEntry<'_>>)> = match self.jacobian_strategy {
+            SparseChunkingStrategy::Whole => vec![(0usize, all_entries.clone())],
+            SparseChunkingStrategy::ByTargetChunkCount { target_chunks } => {
+                assert!(target_chunks > 0, "target_chunks must be positive");
+                let rows_per_chunk = self.shape.0.max(1).div_ceil(target_chunks).max(1);
+                chunk_sparse_entries_by_rows(&all_entries, rows_per_chunk)
+            }
+            SparseChunkingStrategy::ByNonZeroCount {
+                max_entries_per_chunk,
+            } => {
+                assert!(
+                    max_entries_per_chunk > 0,
+                    "max_entries_per_chunk must be positive"
+                );
+                all_entries
+                    .chunks(max_entries_per_chunk)
+                    .enumerate()
+                    .map(|(chunk_index, entries)| {
+                        (chunk_index * max_entries_per_chunk, entries.to_vec())
+                    })
+                    .collect()
+            }
+            SparseChunkingStrategy::ByRowCount { rows_per_chunk } => {
+                assert!(rows_per_chunk > 0, "rows_per_chunk must be positive");
+                chunk_sparse_entries_by_rows(&all_entries, rows_per_chunk)
+            }
+        };
+
+        let chunks = chunked_entries
+            .into_iter()
+            .enumerate()
+            .map(|(chunk_index, (entry_offset, entries))| {
+                let fn_name = if chunk_index == 0 && entries.len() == all_entries.len() {
+                    self.jacobian_fn_name.clone()
+                } else {
+                    format!("{}_chunk_{}", self.jacobian_fn_name, chunk_index)
+                };
+                let outputs = entries
+                    .iter()
+                    .map(|entry| PlannedOutput {
+                        expr: entry.expr,
+                        coordinate: Some((entry.row, entry.col)),
+                    })
+                    .collect();
+
+                SparseJacobianValuesChunkPlan {
+                    fn_name: fn_name.clone(),
+                    value_offset: entry_offset,
+                    entries: entries.clone(),
+                    plan: CodegenTaskPlan {
+                        fn_name: std::borrow::Cow::Owned(fn_name),
+                        kind: CodegenTaskKind::SparseJacobianValues,
+                        input_names: input_names.clone(),
+                        outputs,
+                        layout: CodegenOutputLayout::SparseValues {
+                            rows: self.shape.0,
+                            cols: self.shape.1,
+                            nnz: entries.len(),
+                        },
+                    },
+                }
+            })
+            .collect();
+
+        SparseJacobianRuntimePlan {
+            fn_name: self.jacobian_fn_name.as_str(),
+            input_names,
+            structure: SparseJacobianStructure {
+                rows: self.shape.0,
+                cols: self.shape.1,
+                row_indices: all_entries.iter().map(|entry| entry.row).collect(),
+                col_indices: all_entries.iter().map(|entry| entry.col).collect(),
+            },
+            chunks,
+        }
+    }
+
+    /// Converts the owned BVP bridge object into the shared sparse prepared
+    /// problem shape used by provider/build/registry layers.
+    pub fn as_prepared_problem(&self) -> PreparedSparseProblem<'_> {
+        PreparedSparseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::SparseCol,
+            self.residual_runtime_plan(),
+            self.sparse_runtime_plan(),
+        )
+    }
+
+    /// Returns the manifest-derived problem key used by lifecycle and linked-backend registries.
+    pub fn problem_key(&self) -> String {
+        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+            self.as_prepared_problem(),
+        );
+        PreparedProblemManifest::from(&prepared).problem_key()
+    }
+}
+
+/// Resolves an in-process linked sparse AOT backend and wraps it into the
+/// legacy solver callback traits used by the BVP runtime.
+///
+/// Dataflow:
+/// 1. resolve a previously registered compiled backend by `problem_key`;
+/// 2. prepend runtime parameter values to the Newton unknown vector;
+/// 3. evaluate either whole-module callbacks or chunked callbacks;
+/// 4. reassemble sparse values back into `SparseColMat` for the solver.
+///
+/// When no linked backend is registered yet, `None` is returned and the caller
+/// remains on the lambdify/fallback branch.
+fn linked_sparse_runtime_callbacks(
+    prepared_problem: &BvpPreparedSparseAotProblem,
+    parameter_values: Option<&[f64]>,
+    parallel_config: Option<ParallelExecutorConfig>,
+) -> Option<(Box<dyn Fun>, Box<dyn Jac>)> {
+    let linked = resolve_linked_sparse_backend(&prepared_problem.problem_key())?;
+    let parameter_values = parameter_values.unwrap_or(&[]).to_vec();
+    let structure = prepared_problem
+        .as_prepared_problem()
+        .jacobian_structure()
+        .clone();
+    let shape = prepared_problem.shape;
+    let residual_len = prepared_problem.shape.0;
+
+    let residual_link = linked.clone();
+    let residual_parameter_values = parameter_values.clone();
+    let residual_parallel_config = parallel_config;
+    let residual_fun = convert_to_fun(Box::new(move |_x: f64, vec: &dyn VectorType| {
+        let dense = vec.to_DVectorType();
+        let mut flat_args = Vec::with_capacity(residual_parameter_values.len() + dense.len());
+        flat_args.extend_from_slice(residual_parameter_values.as_slice());
+        flat_args.extend_from_slice(dense.as_slice());
+        let mut out = vec![0.0; residual_len];
+        eval_linked_residual_outputs(
+            residual_link.clone(),
+            residual_parallel_config,
+            &flat_args,
+            &mut out,
+        );
+        Box::new(ColRef::from_slice(out.as_slice()).to_owned())
+    }));
+
+    let jacobian_link = linked;
+    let jacobian_parameter_values = parameter_values.clone();
+    let jacobian_parallel_config = parallel_config;
+    let jacobian = convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
+        let dense = vec.to_DVectorType();
+        let mut flat_args = Vec::with_capacity(jacobian_parameter_values.len() + dense.len());
+        flat_args.extend_from_slice(jacobian_parameter_values.as_slice());
+        flat_args.extend_from_slice(dense.as_slice());
+        let mut values = vec![0.0; structure.nnz()];
+        eval_linked_sparse_values(
+            jacobian_link.clone(),
+            jacobian_parallel_config,
+            &flat_args,
+            &mut values,
+        );
+        let triplets = structure
+            .row_indices
+            .iter()
+            .zip(structure.col_indices.iter())
+            .zip(values.iter())
+            .map(|((&row, &col), &value)| Triplet::new(row, col, value))
+            .collect::<Vec<_>>();
+        let matrix = SparseColMat::try_new_from_triplets(shape.0, shape.1, triplets.as_slice())
+            .expect("linked sparse backend must return valid sparse values");
+        Box::new(matrix)
+    }));
+
+    Some((residual_fun, jacobian))
+}
+
+const LINKED_MIN_RESIDUAL_OUTPUTS_FOR_PARALLEL: usize = 128;
+const LINKED_MIN_SPARSE_VALUES_FOR_PARALLEL: usize = 256;
+
+/// Splits a contiguous list of chunk descriptors into contiguous job ranges.
+///
+/// This keeps offsets monotonic inside each job, which later allows each worker
+/// to fill one compact temporary buffer and copy it back into the final output.
+fn linked_contiguous_job_ranges(len: usize, max_jobs: usize) -> Vec<std::ops::Range<usize>> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let target_jobs = len.min(max_jobs.max(1));
+    let items_per_job = len.div_ceil(target_jobs);
+    let mut ranges = Vec::with_capacity(target_jobs);
+    let mut start = 0usize;
+    while start < len {
+        let end = (start + items_per_job).min(len);
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+/// Decides whether the linked compiled runtime should fan out work in parallel.
+///
+/// The decision depends on both the configured fallback policy and the actual
+/// workload size so that tiny problems still stay on the cheaper sequential
+/// callback path.
+fn linked_should_parallelize(
+    config: ParallelExecutorConfig,
+    workload: usize,
+    chunk_count: usize,
+    default_threshold: usize,
+    sparse: bool,
+) -> bool {
+    if chunk_count <= 1 {
+        return false;
+    }
+    match config.fallback_policy {
+        ParallelFallbackPolicy::Auto => workload >= default_threshold,
+        ParallelFallbackPolicy::Never => true,
+        ParallelFallbackPolicy::Thresholds {
+            min_residual_outputs,
+            min_sparse_values,
+        } => {
+            if sparse {
+                workload >= min_sparse_values
+            } else {
+                workload >= min_residual_outputs
+            }
+        }
+    }
+}
+
+/// Returns the effective number of parallel jobs allowed for linked compiled
+/// residual or sparse-value evaluation.
+fn linked_max_jobs(config: ParallelExecutorConfig, sparse: bool) -> usize {
+    let workers = rayon::current_num_threads().max(1);
+    let worker_jobs = workers.saturating_mul(config.jobs_per_worker.max(1));
+    if sparse {
+        config.max_sparse_jobs.unwrap_or(worker_jobs).max(1)
+    } else {
+        config.max_residual_jobs.unwrap_or(worker_jobs).max(1)
+    }
+}
+
+/// Evaluates compiled residual outputs, optionally by dispatching contiguous
+/// ranges of residual chunks in parallel.
+///
+/// Sequential and parallel branches must produce identical values; parallelism
+/// only changes scheduling and temporary buffering strategy.
+fn eval_linked_residual_outputs(
+    linked: crate::symbolic::codegen_aot_runtime_link::LinkedSparseAotBackend,
+    parallel_config: Option<ParallelExecutorConfig>,
+    flat_args: &[f64],
+    out: &mut [f64],
+) {
+    let Some(config) = parallel_config else {
+        (linked.residual_eval)(flat_args, out);
+        return;
+    };
+    if linked.residual_chunks.is_empty()
+        || !linked_should_parallelize(
+            config,
+            linked.residual_len,
+            linked.residual_chunks.len(),
+            LINKED_MIN_RESIDUAL_OUTPUTS_FOR_PARALLEL,
+            false,
+        )
+    {
+        (linked.residual_eval)(flat_args, out);
+        return;
+    }
+
+    let job_ranges =
+        linked_contiguous_job_ranges(linked.residual_chunks.len(), linked_max_jobs(config, false));
+    if job_ranges.len() <= 1 {
+        (linked.residual_eval)(flat_args, out);
+        return;
+    }
+
+    let results = std::sync::Mutex::new(Vec::<(usize, Vec<f64>)>::with_capacity(job_ranges.len()));
+    rayon::scope(|scope| {
+        for chunk_range in job_ranges {
+            let chunks = linked.residual_chunks[chunk_range].to_vec();
+            let results = &results;
+            scope.spawn(move |_| {
+                let start = chunks.first().map(|chunk| chunk.output_offset).unwrap_or(0);
+                let end = chunks
+                    .last()
+                    .map(|chunk| chunk.output_offset + chunk.output_len)
+                    .unwrap_or(start);
+                let mut job_out = vec![0.0; end.saturating_sub(start)];
+                for chunk in chunks {
+                    let local_start = chunk.output_offset - start;
+                    let local_end = local_start + chunk.output_len;
+                    (chunk.eval)(flat_args, &mut job_out[local_start..local_end]);
+                }
+                results
+                    .lock()
+                    .expect("linked residual parallel results lock poisoned")
+                    .push((start, job_out));
+            });
+        }
+    });
+    for (start, job_out) in results
+        .into_inner()
+        .expect("linked residual parallel results lock poisoned")
+    {
+        let end = start + job_out.len();
+        out[start..end].copy_from_slice(job_out.as_slice());
+    }
+}
+
+/// Evaluates compiled sparse Jacobian values, optionally by dispatching
+/// contiguous ranges of Jacobian chunks in parallel.
+///
+/// Offsets come from the runtime chunk plan, so the values are written back in
+/// exactly the same order as the symbolic sparse structure advertised to the
+/// solver and lifecycle layers.
+fn eval_linked_sparse_values(
+    linked: crate::symbolic::codegen_aot_runtime_link::LinkedSparseAotBackend,
+    parallel_config: Option<ParallelExecutorConfig>,
+    flat_args: &[f64],
+    values_out: &mut [f64],
+) {
+    let Some(config) = parallel_config else {
+        (linked.jacobian_values_eval)(flat_args, values_out);
+        return;
+    };
+    if linked.jacobian_value_chunks.is_empty()
+        || !linked_should_parallelize(
+            config,
+            linked.nnz,
+            linked.jacobian_value_chunks.len(),
+            LINKED_MIN_SPARSE_VALUES_FOR_PARALLEL,
+            true,
+        )
+    {
+        (linked.jacobian_values_eval)(flat_args, values_out);
+        return;
+    }
+
+    let job_ranges = linked_contiguous_job_ranges(
+        linked.jacobian_value_chunks.len(),
+        linked_max_jobs(config, true),
+    );
+    if job_ranges.len() <= 1 {
+        (linked.jacobian_values_eval)(flat_args, values_out);
+        return;
+    }
+
+    let results = std::sync::Mutex::new(Vec::<(usize, Vec<f64>)>::with_capacity(job_ranges.len()));
+    rayon::scope(|scope| {
+        for chunk_range in job_ranges {
+            let chunks = linked.jacobian_value_chunks[chunk_range].to_vec();
+            let results = &results;
+            scope.spawn(move |_| {
+                let start = chunks.first().map(|chunk| chunk.value_offset).unwrap_or(0);
+                let end = chunks
+                    .last()
+                    .map(|chunk| chunk.value_offset + chunk.value_len)
+                    .unwrap_or(start);
+                let mut job_out = vec![0.0; end.saturating_sub(start)];
+                for chunk in chunks {
+                    let local_start = chunk.value_offset - start;
+                    let local_end = local_start + chunk.value_len;
+                    (chunk.eval)(flat_args, &mut job_out[local_start..local_end]);
+                }
+                results
+                    .lock()
+                    .expect("linked sparse parallel results lock poisoned")
+                    .push((start, job_out));
+            });
+        }
+    });
+    for (start, job_out) in results
+        .into_inner()
+        .expect("linked sparse parallel results lock poisoned")
+    {
+        let end = start + job_out.len();
+        values_out[start..end].copy_from_slice(job_out.as_slice());
+    }
+}
+
+/// Groups sparse symbolic entries by row buckets while preserving the original
+/// value ordering offset expected by sparse runtime/codegen plans.
+///
+/// This helper is used when the sparse Jacobian is chunked by rows or by a
+/// target chunk count that is later translated into row buckets.
+fn chunk_sparse_entries_by_rows<'a>(
+    entries: &[SparseExprEntry<'a>],
+    rows_per_chunk: usize,
+) -> Vec<(usize, Vec<SparseExprEntry<'a>>)> {
+    let mut chunk_entries: Vec<Vec<SparseExprEntry<'a>>> = Vec::new();
+    let mut chunk_offsets: Vec<usize> = Vec::new();
+
+    for (entry_index, entry) in entries.iter().copied().enumerate() {
+        let bucket = entry.row / rows_per_chunk;
+        if bucket >= chunk_entries.len() {
+            chunk_entries.resize_with(bucket + 1, Vec::new);
+            chunk_offsets.resize(bucket + 1, 0);
+        }
+        if chunk_entries[bucket].is_empty() {
+            chunk_offsets[bucket] = entry_index;
+        }
+        chunk_entries[bucket].push(entry);
+    }
+
+    chunk_entries
+        .into_iter()
+        .enumerate()
+        .filter(|(_, entries)| !entries.is_empty())
+        .map(|(chunk_index, entries)| (chunk_offsets[chunk_index], entries))
+        .collect()
+}
+
+impl Jacobian {
+    /// Runs the shared symbolic BVP preparation stage before backend-specific
+    /// lambdify/AOT branching.
+    ///
+    /// This stage performs discretization, symbolic Jacobian construction,
+    /// bandwidth discovery or enforcement, and fills the timer map used by the
+    /// compatibility reporting path.
+    fn prepare_symbolic_bvp_stage_with_params(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+    ) -> (
+        String,
+        Vec<String>,
+        BvpMatrixBackend,
+        HashMap<String, f64>,
+        Instant,
+    ) {
+        let total_start = Instant::now();
+        let mut timer_hash: HashMap<String, f64> = HashMap::new();
+        self.set_params(params);
+        let param = arg.clone();
+        let matrix_backend = BvpMatrixBackend::from_legacy_method(method.as_str())
+            .unwrap_or_else(|| panic!("unknown method: {}", method));
+        self.set_backend_config(BvpBackendConfig::lambdify(matrix_backend));
+
+        let begin = Instant::now();
+        self.discretization_system_BVP_par(
+            eq_system,
+            values,
+            arg,
+            t0,
+            n_steps,
+            h,
+            mesh,
+            BorderConditions,
+            Bounds,
+            rel_tolerance,
+            scheme,
+        );
+        timer_hash.insert(
+            "discretization time".to_string(),
+            begin.elapsed().as_secs_f64(),
+        );
+        info!("system discretized");
+
+        let indexed_values = self.variable_string.clone();
+
+        if let Some(bandwidth_) = bandwidth {
+            let now = Instant::now();
+            self.bandwidth = Some(bandwidth_);
+            info!("Bandwidth provided: {:?}", self.bandwidth);
+            timer_hash.insert(
+                "find bandwidth time".to_string(),
+                now.elapsed().as_secs_f64(),
+            );
+
+            info!("Calculating jacobian");
+            let now = Instant::now();
+            self.calc_jacobian_parallel_smart_optimized_with_given_bandwidth();
+            let elapsed = now.elapsed();
+            info!("Jacobian calculation time:");
+            info!("{:?}", elapsed_time(elapsed));
+            timer_hash.insert("symbolic jacobian time".to_string(), elapsed.as_secs_f64());
+        } else {
+            info!("Calculating jacobian");
+            let now = Instant::now();
+            self.calc_jacobian_parallel_smart_optimized();
+            let elapsed = now.elapsed();
+            info!("Jacobian calculation time:");
+            info!("{:?}", elapsed_time(elapsed));
+            timer_hash.insert("symbolic jacobian time".to_string(), elapsed.as_secs_f64());
+
+            let now = Instant::now();
+            self.find_bandwidths();
+            info!("Bandwidth calculated:");
+            info!("(kl, ku) = {:?}", self.bandwidth);
+            timer_hash.insert(
+                "find bandwidth time".to_string(),
+                now.elapsed().as_secs_f64(),
+            );
+        }
+
+        (
+            param,
+            indexed_values,
+            matrix_backend,
+            timer_hash,
+            total_start,
+        )
+    }
+
+    /// Finalizes the legacy timing table for `generate_BVP*` style entrypoints.
+    ///
+    /// The modern lifecycle path logs through structured stages, while this
+    /// helper keeps the historical human-readable timing summary stable for the
+    /// older BVP APIs and tests that still print it.
+    fn finalize_generate_bvp_timer_table(
+        &self,
+        mut timer_hash: HashMap<String, f64>,
+        total_end: f64,
+    ) {
+        for key in [
+            "discretization time",
+            "symbolic jacobian time",
+            "jacobian lambdify time",
+            "residual functions lambdify time",
+            "find bandwidth time",
+            "sparse AOT preparation time",
+            "backend selection time",
+            "runtime binding time",
+        ] {
+            if let Some(value) = timer_hash.get_mut(key) {
+                normalize_timer_percent(value, total_end);
+            }
+        }
+        timer_hash.insert("total time, sec".to_string(), total_end);
+
+        let mut table = Builder::from(timer_hash.clone()).build();
+        table.with(Style::modern_rounded());
+        println!("{}", table.to_string());
+        info!(
+            "\n \n ____________END OF GENERATE BVP ________________________________________________________________"
+        );
+    }
+
     /// Creates a new Jacobian instance with default values.
     ///
     /// Initializes all fields to empty/default states and sets up a dummy residual function
@@ -211,9 +1469,13 @@ impl Jacobian {
             vector_of_functions: Vec::new(),
             lambdified_functions: Vec::new(),
             method: String::new(),
+            backend_config: BvpBackendConfig::default(),
             vector_of_variables: Vec::new(),
             variable_string: Vec::new(),
+            parameters_string: Vec::new(),
+            parameter_values: None,
             symbolic_jacobian: Vec::new(),
+            symbolic_jacobian_sparse: Vec::new(),
             lambdified_jac_element: None,
             jac_function: None,
             residiual_function: boxed_fun,
@@ -248,6 +1510,696 @@ impl Jacobian {
             Expr::parse_vector_expression(variable_string.iter().map(|s| s.as_str()).collect());
         println!(" {:?}", self.vector_of_functions);
         println!(" {:?}", self.vector_of_variables);
+    }
+
+    /// Sets symbolic parameter names used during residual/Jacobian evaluation.
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.parameters_string = params
+            .map(|params| params.iter().map(|name| (*name).to_string()).collect())
+            .unwrap_or_default();
+    }
+
+    /// Sets current numeric parameter values.
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        if let Some(ref values) = values {
+            assert_eq!(
+                values.len(),
+                self.parameters_string.len(),
+                "parameter_values length must match parameters_string length"
+            );
+        }
+        self.parameter_values = values;
+    }
+
+    /// Returns borrowed sparse symbolic Jacobian entries from the internal
+    /// owned sparse cache.
+    pub fn symbolic_jacobian_sparse_entries(
+        &self,
+    ) -> Vec<crate::symbolic::codegen_tasks::SparseExprEntry<'_>> {
+        self.symbolic_jacobian_sparse
+            .iter()
+            .map(
+                |(row, col, expr)| crate::symbolic::codegen_tasks::SparseExprEntry {
+                    row: *row,
+                    col: *col,
+                    expr,
+                },
+            )
+            .collect()
+    }
+
+    /// Returns owned sparse symbolic Jacobian entries.
+    ///
+    /// This is primarily useful for AOT/performance scaffolding that needs to
+    /// hand sparse expressions to downstream planning code without keeping an
+    /// immutable borrow of `self` alive across later mutable operations.
+    pub fn symbolic_jacobian_sparse_entries_owned(&self) -> Vec<(usize, usize, Expr)> {
+        self.symbolic_jacobian_sparse.clone()
+    }
+
+    /// Builds a sparse AOT-ready prepared problem from the current BVP state.
+    ///
+    /// This is a thin bridge from the legacy BVP symbolic builder to the newer
+    /// AOT lifecycle layers. It does not change how the current numeric or
+    /// lambdify branches execute; it only packages the already-built symbolic
+    /// residual and sparse Jacobian into the common prepared-problem shape.
+    pub fn prepare_sparse_aot_problem(
+        &self,
+        residual_fn_name: &str,
+        jacobian_fn_name: &str,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+    ) -> BvpPreparedSparseAotProblem {
+        BvpPreparedSparseAotProblem {
+            residual_fn_name: residual_fn_name.to_string(),
+            jacobian_fn_name: jacobian_fn_name.to_string(),
+            variable_names: self.variable_string.clone(),
+            param_names: self.parameters_string.clone(),
+            residuals: self.vector_of_functions.clone(),
+            sparse_entries: self.symbolic_jacobian_sparse_entries_owned(),
+            shape: (
+                self.vector_of_functions.len(),
+                self.vector_of_variables.len(),
+            ),
+            residual_strategy,
+            jacobian_strategy,
+        }
+    }
+
+    /// Selects the sparse BVP backend branch through the shared lifecycle
+    /// selection layer while keeping an owned BVP bridge object.
+    ///
+    /// This is the main thin integration entrypoint for the BVP module:
+    /// - symbolic/discretized BVP data stays owned here,
+    /// - the generic lifecycle stack still decides whether AOT is compiled,
+    ///   merely registered, or missing,
+    /// - the caller can then route into lambdify/numeric/AOT execution paths
+    ///   without rebuilding prepared-problem metadata by hand.
+    pub fn select_sparse_backend(
+        &self,
+        residual_fn_name: &str,
+        jacobian_fn_name: &str,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+    ) -> BvpSelectedSparseBackend {
+        let prepared_problem = self.prepare_sparse_aot_problem(
+            residual_fn_name,
+            jacobian_fn_name,
+            residual_strategy,
+            jacobian_strategy,
+        );
+        let prepared_binding = prepared_problem.clone();
+        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+            prepared_binding.as_prepared_problem(),
+        );
+        let selected = select_backend(&prepared, policy, resolver);
+
+        BvpSelectedSparseBackend {
+            prepared_problem,
+            requested_backend: selected.requested_backend,
+            effective_backend: selected.effective_backend,
+            matrix_backend: selected.matrix_backend,
+            aot_resolution: selected.aot_resolution,
+        }
+    }
+
+    fn prepare_sparse_backend_execution_timed(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        residual_fn_name: &str,
+        jacobian_fn_name: &str,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        timer_hash: &mut HashMap<String, f64>,
+    ) -> BvpSparseExecutionPlan {
+        let prepare_started = Instant::now();
+        let prepared_problem = self.prepare_sparse_aot_problem(
+            residual_fn_name,
+            jacobian_fn_name,
+            residual_strategy,
+            jacobian_strategy,
+        );
+        timer_hash.insert(
+            "sparse AOT preparation time".to_string(),
+            prepare_started.elapsed().as_secs_f64(),
+        );
+
+        let selection_started = Instant::now();
+        let prepared_binding = prepared_problem.clone();
+        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+            prepared_binding.as_prepared_problem(),
+        );
+        let selected = select_backend(&prepared, policy, resolver);
+        timer_hash.insert(
+            "backend selection time".to_string(),
+            selection_started.elapsed().as_secs_f64(),
+        );
+
+        let selected = BvpSelectedSparseBackend {
+            prepared_problem,
+            requested_backend: selected.requested_backend,
+            effective_backend: selected.effective_backend,
+            matrix_backend: selected.matrix_backend,
+            aot_resolution: selected.aot_resolution,
+        };
+
+        let binding_started = Instant::now();
+        let execution = match selected.effective_backend {
+            SelectedBackendKind::Numeric => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Numeric,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::NumericRequested(selected)
+            }
+            SelectedBackendKind::Lambdify => {
+                let config = BvpBackendConfig::new(
+                    BvpBackendKind::Lambdify,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                );
+                self.compile_lambdified_problem_with_config(arg, variable_str, config);
+                BvpSparseExecutionPlan::LambdifyReady(selected)
+            }
+            SelectedBackendKind::AotCompiled => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotCompiled(selected)
+            }
+            SelectedBackendKind::AotRegisteredButNotBuilt => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotRegisteredButNotBuilt(selected)
+            }
+            SelectedBackendKind::AotMissing => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotMissing(selected)
+            }
+        };
+        timer_hash.insert(
+            "runtime binding time".to_string(),
+            binding_started.elapsed().as_secs_f64(),
+        );
+        execution
+    }
+
+    /// Builds a sparse BVP execution plan and, when the selected branch is
+    /// lambdify, eagerly prepares the current faer/dense legacy evaluators.
+    pub fn prepare_sparse_backend_execution(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        residual_fn_name: &str,
+        jacobian_fn_name: &str,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+    ) -> BvpSparseExecutionPlan {
+        let selected = self.select_sparse_backend(
+            residual_fn_name,
+            jacobian_fn_name,
+            residual_strategy,
+            jacobian_strategy,
+            policy,
+            resolver,
+        );
+
+        match selected.effective_backend {
+            SelectedBackendKind::Numeric => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Numeric,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::NumericRequested(selected)
+            }
+            SelectedBackendKind::Lambdify => {
+                let config = BvpBackendConfig::new(
+                    BvpBackendKind::Lambdify,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                );
+                self.compile_lambdified_problem_with_config(arg, variable_str, config);
+                BvpSparseExecutionPlan::LambdifyReady(selected)
+            }
+            SelectedBackendKind::AotCompiled => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotCompiled(selected)
+            }
+            SelectedBackendKind::AotRegisteredButNotBuilt => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotRegisteredButNotBuilt(selected)
+            }
+            SelectedBackendKind::AotMissing => {
+                self.set_backend_config(BvpBackendConfig::new(
+                    BvpBackendKind::Aot,
+                    BvpMatrixBackend::from_provider_matrix_backend(selected.matrix_backend),
+                ));
+                BvpSparseExecutionPlan::AotMissing(selected)
+            }
+        }
+    }
+
+    /// Wraps a prepared sparse execution plan into a BVP-side transitional
+    /// solver provider.
+    ///
+    /// For now the returned provider is directly callable only for the main
+    /// `LambdifyReady` sparse path. AOT branches still expose resolved artifact
+    /// metadata and sparse structure through the same object shape so the
+    /// higher-level solver integration can use one route while compiled
+    /// callback hookup is introduced incrementally.
+    pub fn sparse_solver_provider<'a>(
+        &'a mut self,
+        execution: BvpSparseExecutionPlan,
+    ) -> BvpSparseSolverProvider<'a> {
+        let structure = execution
+            .selected()
+            .prepared_problem
+            .as_prepared_problem()
+            .jacobian_structure()
+            .clone();
+
+        BvpSparseSolverProvider {
+            jacobian: self,
+            execution,
+            structure,
+        }
+    }
+
+    /// Consumes the current symbolic BVP object into an assembled
+    /// solver-facing sparse bundle.
+    ///
+    /// This is the main "collected" handoff shape for outer BVP/NR solvers:
+    /// backend selection, runtime callbacks, sparse structure, and solver
+    /// metadata are packaged together instead of being pulled out from several
+    /// `Jacobian` fields manually.
+    pub fn into_sparse_solver_bundle(
+        self,
+        execution: BvpSparseExecutionPlan,
+    ) -> BvpSparseSolverBundle {
+        let selected = execution.selected().clone();
+        let sparse_structure = selected
+            .prepared_problem
+            .as_prepared_problem()
+            .jacobian_structure()
+            .clone();
+        let linked_callbacks = if matches!(execution, BvpSparseExecutionPlan::AotCompiled(_)) {
+            linked_sparse_runtime_callbacks(
+                &selected.prepared_problem,
+                self.parameter_values.as_deref(),
+                None,
+            )
+        } else {
+            None
+        };
+        let callbacks_available = matches!(execution, BvpSparseExecutionPlan::LambdifyReady(_))
+            || linked_callbacks.is_some();
+        let (linked_residual, linked_jacobian) =
+            linked_callbacks.map_or((None, None), |(fun, jac)| (Some(fun), Some(jac)));
+
+        BvpSparseSolverBundle {
+            execution,
+            residual_function: if callbacks_available {
+                if matches!(selected.effective_backend, SelectedBackendKind::Lambdify) {
+                    Some(self.residiual_function)
+                } else {
+                    linked_residual
+                }
+            } else {
+                None
+            },
+            jacobian_function: if callbacks_available {
+                if matches!(selected.effective_backend, SelectedBackendKind::Lambdify) {
+                    self.jac_function
+                } else {
+                    linked_jacobian
+                }
+            } else {
+                None
+            },
+            variable_string: self.variable_string,
+            bounds_vec: self.bounds,
+            rel_tolerance_vec: self.rel_tolerance_vec,
+            bandwidth: self.bandwidth,
+            bc_position_and_value: self.BC_pos_n_values,
+            sparse_structure,
+        }
+    }
+
+    /// Fallible wrapper around `generate_BVP_with_backend_selection`.
+    ///
+    /// This is the first end-to-end error boundary for the new BVP/AOT path:
+    /// unexpected panics in symbolic preparation, backend selection, or
+    /// callback preparation are converted into a typed error so outer solver
+    /// orchestration can log or fall back deliberately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_generate_BVP_with_backend_selection(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+    ) -> Result<BvpSparseExecutionPlan, BvpBackendIntegrationError> {
+        info!(
+            "BVP backend selection started: backend_policy={policy:?}, method={method}, params={}, steps={:?}",
+            params.map_or(0, |p| p.len()),
+            n_steps
+        );
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.generate_BVP_with_backend_selection(
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                param,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+                policy,
+                resolver,
+            )
+        }));
+
+        match result {
+            Ok(execution) => {
+                info!(
+                    "BVP backend selection finished: effective_backend={:?}",
+                    execution.selected().effective_backend
+                );
+                Ok(execution)
+            }
+            Err(payload) => {
+                let message = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                error!("BVP backend selection failed: {message}");
+                Err(BvpBackendIntegrationError::PipelinePanicked(message))
+            }
+        }
+    }
+
+    /// Fallible wrapper returning the assembled solver-facing sparse bundle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_generate_sparse_solver_bundle_with_backend_selection(
+        mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+    ) -> Result<BvpSparseSolverBundle, BvpBackendIntegrationError> {
+        let execution = self.try_generate_BVP_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            params,
+            t0,
+            param,
+            n_steps,
+            h,
+            mesh,
+            BorderConditions,
+            Bounds,
+            rel_tolerance,
+            scheme,
+            method,
+            bandwidth,
+            policy,
+            resolver,
+        )?;
+        Ok(self.into_sparse_solver_bundle(execution))
+    }
+
+    /// Fallible wrapper around `generate_BVP_with_backend_selection_and_chunking`.
+    ///
+    /// This variant allows the outer solver layer to override residual and
+    /// sparse-Jacobian chunk planning instead of relying on the internal BVP
+    /// heuristics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_generate_BVP_with_backend_selection_and_chunking(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+    ) -> Result<BvpSparseExecutionPlan, BvpBackendIntegrationError> {
+        info!(
+            "BVP backend selection with explicit chunking started: backend_policy={policy:?}, method={method}, params={}, steps={:?}, residual_strategy={residual_strategy:?}, jacobian_strategy={jacobian_strategy:?}",
+            params.map_or(0, |p| p.len()),
+            n_steps
+        );
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.generate_BVP_with_backend_selection_and_chunking(
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                param,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+                policy,
+                resolver,
+                residual_strategy,
+                jacobian_strategy,
+            )
+        }));
+
+        match result {
+            Ok(execution) => {
+                info!(
+                    "BVP backend selection with explicit chunking finished: effective_backend={:?}",
+                    execution.selected().effective_backend
+                );
+                Ok(execution)
+            }
+            Err(payload) => {
+                let message = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                error!("BVP backend selection with explicit chunking failed: {message}");
+                Err(BvpBackendIntegrationError::PipelinePanicked(message))
+            }
+        }
+    }
+
+    /// Fallible wrapper returning the assembled solver-facing sparse bundle
+    /// with explicit chunking strategies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_generate_sparse_solver_bundle_with_backend_selection_and_chunking(
+        mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+    ) -> Result<BvpSparseSolverBundle, BvpBackendIntegrationError> {
+        let execution = self.try_generate_BVP_with_backend_selection_and_chunking(
+            eq_system,
+            values,
+            arg,
+            params,
+            t0,
+            param,
+            n_steps,
+            h,
+            mesh,
+            BorderConditions,
+            Bounds,
+            rel_tolerance,
+            scheme,
+            method,
+            bandwidth,
+            policy,
+            resolver,
+            residual_strategy,
+            jacobian_strategy,
+        )?;
+        Ok(self.into_sparse_solver_bundle(execution))
+    }
+
+    fn flattened_argument_names_owned(&self, variable_str: &[&str]) -> Vec<String> {
+        let mut names = Vec::with_capacity(
+            self.parameters_string
+                .len()
+                .saturating_add(variable_str.len()),
+        );
+        names.extend(self.parameters_string.iter().cloned());
+        names.extend(variable_str.iter().map(|name| (*name).to_string()));
+        names
+    }
+
+    /// Sets the modern backend configuration and mirrors the matrix choice into
+    /// the legacy `method` string used by the existing BVP solver stack.
+    pub fn set_backend_config(&mut self, config: BvpBackendConfig) {
+        self.backend_config = config;
+        self.method = config.matrix_backend.legacy_method().to_string();
+    }
+
+    /// Returns the best-known backend configuration for this instance.
+    ///
+    /// If the legacy `method` field was changed directly, this method keeps the
+    /// matrix backend in sync while preserving the currently selected backend
+    /// family (`Numeric`, `Lambdify`, `Aot`).
+    pub fn backend_config(&self) -> BvpBackendConfig {
+        if let Some(matrix_backend) = BvpMatrixBackend::from_legacy_method(self.method.as_str()) {
+            BvpBackendConfig::new(self.backend_config.backend_kind, matrix_backend)
+        } else {
+            self.backend_config
+        }
+    }
+
+    fn compile_jacobian_for_matrix_backend(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        matrix_backend: BvpMatrixBackend,
+    ) {
+        match matrix_backend {
+            BvpMatrixBackend::Dense => self.lambdify_jacobian_DMatrix_par(arg, variable_str),
+            BvpMatrixBackend::SprsCsMat => self.lambdify_jacobian_CsMat(arg, variable_str),
+            BvpMatrixBackend::NalgebraCsMatrix => {
+                self.lambdify_jacobian_CsMatrix(arg, variable_str)
+            }
+            BvpMatrixBackend::FaerSparseCol => {
+                self.lambdify_jacobian_SparseColMat_parallel2(arg, variable_str)
+            }
+        }
+    }
+
+    fn compile_residual_for_matrix_backend(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        matrix_backend: BvpMatrixBackend,
+    ) {
+        match matrix_backend {
+            BvpMatrixBackend::Dense => self.lambdify_residual_DVector(arg, variable_str),
+            BvpMatrixBackend::SprsCsMat => self.lambdify_residual_CsVec(arg, variable_str),
+            BvpMatrixBackend::NalgebraCsMatrix => self.lambdify_residual_DVector(arg, variable_str),
+            BvpMatrixBackend::FaerSparseCol => {
+                self.lambdify_residual_Col_parallel2(arg, variable_str)
+            }
+        }
+    }
+
+    /// Compiles both Jacobian and residual evaluators using an explicit backend
+    /// config while preserving the legacy BVP solver interfaces.
+    pub fn compile_lambdified_problem_with_config(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        config: BvpBackendConfig,
+    ) {
+        match config.backend_kind {
+            BvpBackendKind::Lambdify => {
+                self.set_backend_config(config);
+                self.compile_jacobian_for_matrix_backend(
+                    arg,
+                    variable_str.clone(),
+                    config.matrix_backend,
+                );
+                self.compile_residual_for_matrix_backend(arg, variable_str, config.matrix_backend);
+            }
+            BvpBackendKind::Numeric => {
+                panic!("Numeric backend integration is not wired inside symbolic_functions_BVP yet")
+            }
+            BvpBackendKind::Aot => {
+                panic!("AOT backend integration is not wired inside symbolic_functions_BVP yet")
+            }
+        }
     }
 
     /// Computes the symbolic Jacobian matrix with bandwidth optimization and smart sparsity detection.
@@ -294,7 +2246,8 @@ impl Jacobian {
             .map(|vars| vars.iter().collect())
             .collect();
 
-        let new_jac: Vec<Vec<Expr>> = (0..vector_of_functions_len)
+        let rows_and_sparse: Vec<(Vec<Expr>, Vec<(usize, usize, Expr)>)> = (0
+            ..vector_of_functions_len)
             .into_par_iter()
             .map(|i| {
                 let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
@@ -310,18 +2263,26 @@ impl Jacobian {
                 };
 
                 let mut row = vec![Expr::Const(0.0); vector_of_variables_len];
+                let mut sparse_entries = Vec::new();
                 for j in left_border..right_border {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
                         let mut partial = Expr::diff(&self.vector_of_functions[i], variable);
                         partial = partial.simplify();
+                        if !partial.is_zero() {
+                            sparse_entries.push((i, j, partial.clone()));
+                        }
                         row[j] = partial;
                     }
                 }
-                row
+                (row, sparse_entries)
             })
             .collect();
-        self.symbolic_jacobian = new_jac;
+        self.symbolic_jacobian = rows_and_sparse.iter().map(|(row, _)| row.clone()).collect();
+        self.symbolic_jacobian_sparse = rows_and_sparse
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect();
     }
 
     /// Computes the symbolic Jacobian matrix with smart sparsity detection and HashSet optimization.
@@ -365,7 +2326,7 @@ impl Jacobian {
             .map(|vars| vars.iter().collect())
             .collect();
 
-        let new_jac: Vec<Vec<Expr>> = self
+        let rows_and_sparse: Vec<(Vec<Expr>, Vec<(usize, usize, Expr)>)> = self
             .vector_of_functions
             .par_iter()
             .enumerate()
@@ -373,22 +2334,30 @@ impl Jacobian {
                 // Pre-allocate with exact capacity
                 let mut vector_of_partial_derivatives =
                     Vec::with_capacity(self.vector_of_variables.len());
+                let mut sparse_entries = Vec::new();
 
                 for j in 0..self.vector_of_variables.len() {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
                         let mut partial = Expr::diff(function, variable);
                         partial = partial.simplify();
+                        if !partial.is_zero() {
+                            sparse_entries.push((i, j, partial.clone()));
+                        }
                         vector_of_partial_derivatives.push(partial);
                     } else {
                         vector_of_partial_derivatives.push(Expr::Const(0.0));
                     }
                 }
-                vector_of_partial_derivatives
+                (vector_of_partial_derivatives, sparse_entries)
             })
             .collect();
 
-        self.symbolic_jacobian = new_jac;
+        self.symbolic_jacobian = rows_and_sparse.iter().map(|(row, _)| row.clone()).collect();
+        self.symbolic_jacobian_sparse = rows_and_sparse
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect();
     }
 
     /// Computes the symbolic Jacobian matrix using parallel differentiation with smart sparsity optimization.
@@ -421,12 +2390,13 @@ impl Jacobian {
         );
 
         let variable_string_vec = self.variable_string.clone();
-        let new_jac: Vec<Vec<Expr>> = self
+        let rows_and_sparse: Vec<(Vec<Expr>, Vec<(usize, usize, Expr)>)> = self
             .vector_of_functions
             .par_iter()
             .enumerate()
             .map(|(i, function)| {
                 let mut vector_of_partial_derivatives = Vec::new();
+                let mut sparse_entries = Vec::new();
                 // let function = function.clone();
                 for j in 0..self.vector_of_variables.len() {
                     let variable = &variable_string_vec[j]; // obviously if function does not contain variable its derivative should be 0
@@ -434,16 +2404,23 @@ impl Jacobian {
                     if list_of_vaiables_for_this_eq.contains(variable) {
                         let mut partial = Expr::diff(&function, variable);
                         partial = partial.simplify();
+                        if !partial.is_zero() {
+                            sparse_entries.push((i, j, partial.clone()));
+                        }
                         vector_of_partial_derivatives.push(partial);
                     } else {
                         vector_of_partial_derivatives.push(Expr::Const(0.0));
                     }
                 }
-                vector_of_partial_derivatives
+                (vector_of_partial_derivatives, sparse_entries)
             })
             .collect();
 
-        self.symbolic_jacobian = new_jac;
+        self.symbolic_jacobian = rows_and_sparse.iter().map(|(row, _)| row.clone()).collect();
+        self.symbolic_jacobian_sparse = rows_and_sparse
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect();
     }
     /// Computes the symbolic Jacobian matrix using standard parallel differentiation.
     ///
@@ -472,22 +2449,31 @@ impl Jacobian {
         );
 
         let variable_string_vec = self.variable_string.clone();
-        let new_jac: Vec<Vec<Expr>> = self
+        let rows_and_sparse: Vec<(Vec<Expr>, Vec<(usize, usize, Expr)>)> = self
             .vector_of_functions
             .par_iter()
-            .map(|function| {
+            .enumerate()
+            .map(|(i, function)| {
                 let mut vector_of_partial_derivatives = Vec::new();
+                let mut sparse_entries = Vec::new();
                 // let function = function.clone();
                 for j in 0..self.vector_of_variables.len() {
                     let mut partial = Expr::diff(&function, &variable_string_vec[j]);
                     partial = partial.simplify();
+                    if !partial.is_zero() {
+                        sparse_entries.push((i, j, partial.clone()));
+                    }
                     vector_of_partial_derivatives.push(partial);
                 }
-                vector_of_partial_derivatives
+                (vector_of_partial_derivatives, sparse_entries)
             })
             .collect();
 
-        self.symbolic_jacobian = new_jac;
+        self.symbolic_jacobian = rows_and_sparse.iter().map(|(row, _)| row.clone()).collect();
+        self.symbolic_jacobian_sparse = rows_and_sparse
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect();
     }
     //
 
@@ -703,6 +2689,10 @@ impl Jacobian {
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
         let bandwidth = self.bandwidth;
+        let flattened_argument_names_owned =
+            self.flattened_argument_names_owned(variable_str.as_slice());
+        let parameter_values = self.parameter_values.clone();
+        let parameter_count = self.parameters_string.len();
 
         // Convert to owned strings to avoid lifetime issues
         //  let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
@@ -731,7 +2721,11 @@ impl Jacobian {
                             let compiled_func: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> =
                                 Expr::lambdify_borrowed_thread_safe(
                                     &symbolic_partial_derivative,
-                                    variable_str.as_slice(),
+                                    flattened_argument_names_owned
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .as_slice(),
                                 );
                             Some((i, j, compiled_func))
                         } else {
@@ -743,7 +2737,14 @@ impl Jacobian {
             .collect();
 
         let new_jac = Box::new(move |_x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
+            if parameter_count > 0 {
+                let params = parameter_values.as_ref().unwrap_or_else(|| {
+                    panic!("parameter values must be provided when parameters are configured")
+                });
+                v_vec.extend_from_slice(params.as_slice());
+            }
+            v_vec.extend(v.iter().cloned());
             let mut matrix = DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
             let matrix_mutex = Mutex::new(&mut matrix);
 
@@ -788,9 +2789,11 @@ impl Jacobian {
     /// - Integration with nalgebra-based linear solvers
     pub fn lambdify_residual_DVector(&mut self, arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
+        let parameter_values = self.parameter_values.clone();
+        let parameter_count = self.parameters_string.len();
 
         // Convert to owned strings to avoid lifetime issues
-        let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+        let variable_str_owned = self.flattened_argument_names_owned(variable_str.as_slice());
 
         let compiled_functions: Vec<Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = vector_of_functions
             .par_iter()
@@ -807,7 +2810,14 @@ impl Jacobian {
             .collect();
 
         let fun = Box::new(move |_x: f64, v: &DVector<f64>| -> DVector<f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
+            if parameter_count > 0 {
+                let params = parameter_values.as_ref().unwrap_or_else(|| {
+                    panic!("parameter values must be provided when parameters are configured")
+                });
+                v_vec.extend_from_slice(params.as_slice());
+            }
+            v_vec.extend(v.iter().cloned());
             let result: Vec<_> = compiled_functions
                 .par_iter()
                 .map(|func| func(v_vec.as_slice()))
@@ -1198,6 +3208,10 @@ impl Jacobian {
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
         let bandwidth = self.bandwidth;
+        let flattened_argument_names_owned =
+            self.flattened_argument_names_owned(variable_str.as_slice());
+        let parameter_values = self.parameter_values.clone();
+        let parameter_count = self.parameters_string.len();
 
         // Convert to owned strings to avoid lifetime issues
         //  let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
@@ -1207,7 +3221,7 @@ impl Jacobian {
             ..vector_of_functions_len)
             .into_par_iter()
             .flat_map(|i| {
-                let variable_str = variable_str.clone();
+                let flattened_argument_names_owned = flattened_argument_names_owned.clone();
                 let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
                     let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
                     let left_border = if i as i32 - (kl as i32) - 1 < 0 {
@@ -1227,7 +3241,11 @@ impl Jacobian {
                             let compiled_func: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> =
                                 Expr::lambdify_borrowed_thread_safe(
                                     &symbolic_partial_derivative,
-                                    variable_str.as_slice(),
+                                    flattened_argument_names_owned
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .as_slice(),
                                 );
                             Some((i, j, compiled_func))
                         } else {
@@ -1239,7 +3257,14 @@ impl Jacobian {
             .collect();
 
         let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
+            if parameter_count > 0 {
+                let params = parameter_values.as_ref().unwrap_or_else(|| {
+                    panic!("parameter values must be provided when parameters are configured")
+                });
+                v_vec.extend_from_slice(params.as_slice());
+            }
+            v_vec.extend(v.iter().cloned());
             let triplets_mutex = std::sync::Mutex::new(Vec::new());
 
             // Compile and evaluate in parallel without storing closures
@@ -1338,9 +3363,11 @@ impl Jacobian {
     /// - Production code requiring optimal memory usage
     pub fn lambdify_residual_Col_parallel2(&mut self, _arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
+        let parameter_values = self.parameter_values.clone();
+        let parameter_count = self.parameters_string.len();
 
         // Convert to owned strings to avoid lifetime issues
-        let variable_str_owned: Vec<String> = variable_str.iter().map(|s| s.to_string()).collect();
+        let variable_str_owned = self.flattened_argument_names_owned(variable_str.as_slice());
 
         let compiled_functions: Vec<Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = vector_of_functions
             .into_par_iter()
@@ -1358,7 +3385,14 @@ impl Jacobian {
             .collect();
 
         let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
+            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
+            if parameter_count > 0 {
+                let params = parameter_values.as_ref().unwrap_or_else(|| {
+                    panic!("parameter values must be provided when parameters are configured")
+                });
+                v_vec.extend_from_slice(params.as_slice());
+            }
+            v_vec.extend(v.iter().cloned());
             let result: Vec<_> = compiled_functions
                 .par_iter()
                 .map(|func| func(v_vec.as_slice()))
@@ -1798,12 +3832,18 @@ impl Jacobian {
 
         // timing
         let total_end = total_start.elapsed().as_millis() as f64;
-        *timer_hash.get_mut("bc handling").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("discretization of equations").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("BC application").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("flat list creation").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("consistency test").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("bounds and tolerances").unwrap() /= total_end / 100.0;
+        normalize_timer_percent(timer_hash.get_mut("bc handling").unwrap(), total_end);
+        normalize_timer_percent(
+            timer_hash.get_mut("discretization of equations").unwrap(),
+            total_end,
+        );
+        normalize_timer_percent(timer_hash.get_mut("BC application").unwrap(), total_end);
+        normalize_timer_percent(timer_hash.get_mut("flat list creation").unwrap(), total_end);
+        normalize_timer_percent(timer_hash.get_mut("consistency test").unwrap(), total_end);
+        normalize_timer_percent(
+            timer_hash.get_mut("bounds and tolerances").unwrap(),
+            total_end,
+        );
         timer_hash.insert("total time, sec".to_string(), total_end);
 
         let mut table = Builder::from(timer_hash.clone()).build();
@@ -1942,20 +3982,13 @@ impl Jacobian {
         method: String,
         bandwidth: Option<(usize, usize)>,
     ) {
-        let total_start = Instant::now();
-        let mut timer_hash: HashMap<String, f64> = HashMap::new();
-        let param = if let Some(param) = param {
-            param
-        } else {
-            arg.clone()
-        };
-        self.method = method.clone();
-        let begin = Instant::now();
-        self.discretization_system_BVP_par(
+        self.generate_BVP_with_params(
             eq_system,
-            values.clone(),
-            arg.clone(),
+            values,
+            arg,
+            None,
             t0,
+            param,
             n_steps,
             h,
             mesh,
@@ -1963,69 +3996,57 @@ impl Jacobian {
             Bounds,
             rel_tolerance,
             scheme,
+            method,
+            bandwidth,
         );
-        timer_hash.insert(
-            "discretization time".to_string(),
-            begin.elapsed().as_secs_f64(),
-        );
-        info!("system discretized");
-        let v = self.variable_string.clone();
-        /*
-        info!(
-            "VECTOR OF FUNCTIONS \n \n  {:?},  length: {} \n \n",
-            &self.vector_of_functions,
-            &self.vector_of_functions.len()
-        );
-        */
-        // println!("INDEXED VARIABLES {:?}, length:  {} \n \n", &v, &v.len());
-        let indexed_values: Vec<&str> = v.iter().map(|x| x.as_str()).collect();
+    }
 
-        if let Some(bandwidth_) = bandwidth {
-            let now = Instant::now();
-            self.bandwidth = Some(bandwidth_);
-            info!("Bandwidth provided: {:?}", self.bandwidth);
-            timer_hash.insert(
-                "find bandwidth time".to_string(),
-                now.elapsed().as_secs_f64(),
+    /// Same as `generate_BVP`, but with explicit symbolic parameter names that
+    /// affect evaluation without becoming Newton unknowns.
+    pub fn generate_BVP_with_params(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+    ) {
+        let (arg_name, indexed_values_owned, matrix_backend, mut timer_hash, total_start) = self
+            .prepare_symbolic_bvp_stage_with_params(
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
             );
+        let param = param.unwrap_or(arg_name);
+        let indexed_values: Vec<&str> = indexed_values_owned.iter().map(|x| x.as_str()).collect();
 
-            info!("Calculating jacobian");
-            let now = Instant::now();
-            self.calc_jacobian_parallel_smart_optimized_with_given_bandwidth(); //calculate the symbolic Jacobian matrix.
-            info!("Jacobian calculation time:");
-            let elapsed = now.elapsed();
-            info!("{:?}", elapsed_time(elapsed));
-            timer_hash.insert("symbolic jacobian time".to_string(), elapsed.as_secs_f64());
-        } else {
-            info!("Calculating jacobian");
-            let now = Instant::now();
-            self.calc_jacobian_parallel_smart_optimized(); //calculate the symbolic Jacobian matrix.
-            info!("Jacobian calculation time:");
-            let elapsed = now.elapsed();
-            info!("{:?}", elapsed_time(elapsed));
-            timer_hash.insert("symbolic jacobian time".to_string(), elapsed.as_secs_f64());
-
-            let now = Instant::now();
-            self.find_bandwidths(); //  determine the bandwidth of the Jacobian matrix.
-            info!("Bandwidth calculated:");
-            info!("(kl, ku) = {:?}", self.bandwidth);
-            timer_hash.insert(
-                "find bandwidth time".to_string(),
-                now.elapsed().as_secs_f64(),
-            );
-        }
-
-        //  println!("symbolic Jacbian created {:?}", &self.symbolic_jacobian);
         let now = Instant::now();
-        match method.as_str() {
-            // transform the symbolic Jacobian into a numerical function
-            "Dense" => self.lambdify_jacobian_DMatrix_par(param.as_str(), indexed_values.clone()),
-            "Sparse_1" => self.lambdify_jacobian_CsMat(param.as_str(), indexed_values.clone()),
-            "Sparse_2" => self.lambdify_jacobian_CsMatrix(param.as_str(), indexed_values.clone()),
-            "Sparse" => self
-                .lambdify_jacobian_SparseColMat_parallel2(param.as_str(), indexed_values.clone()),
-            _ => panic!("unknown method: {}", method),
-        }
+        self.compile_jacobian_for_matrix_backend(
+            param.as_str(),
+            indexed_values.clone(),
+            matrix_backend,
+        );
         timer_hash.insert(
             "jacobian lambdify time".to_string(),
             now.elapsed().as_secs_f64(),
@@ -2035,230 +4056,150 @@ impl Jacobian {
         for (_i, vec_s) in self.symbolic_jacobian.iter().enumerate() {
             assert_eq!(vec_s.len(), *n, "jacobian not square ");
         }
-        // println!("functioon Jacobian created");
+
         let now = Instant::now();
-        match method.as_str() {
-            // transform the symbolic residual vector-function into a numerical function
-            "Dense" => self.lambdify_residual_DVector(param.as_str(), indexed_values.clone()),
-            "Sparse_1" => self.lambdify_residual_CsVec(param.as_str(), indexed_values.clone()),
-            "Sparse_2" => self.lambdify_residual_DVector(param.as_str(), indexed_values.clone()),
-            "Sparse" => {
-                self.lambdify_residual_Col_parallel2(param.as_str(), indexed_values.clone())
-            }
-            _ => panic!("unknown method: {}", method),
-        }
+        self.compile_residual_for_matrix_backend(param.as_str(), indexed_values, matrix_backend);
         timer_hash.insert(
             "residual functions lambdify time".to_string(),
             now.elapsed().as_secs_f64(),
         );
         info!("Residuals vector lambdified");
-        /*
-        if let Some(bounds_) = self.bounds.clone() {
-            println!(
-                "\n \n bounds vector {:?}, of lengh {}",
-                bounds_,
-                bounds_.len()
-            )
 
-        }
-        if let Some(rel_tolerance) = self.rel_tolerance_vec.clone() {
-            println!(
-                "\n \n abs_tolerance vector {:?}, of lengh {}",
-                rel_tolerance,
-                rel_tolerance.len()
-            )
-        }
-        */
         let total_end = total_start.elapsed().as_secs_f64();
-        *timer_hash.get_mut("discretization time").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("symbolic jacobian time").unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("jacobian lambdify time").unwrap() /= total_end / 100.0;
-        *timer_hash
-            .get_mut("residual functions lambdify time")
-            .unwrap() /= total_end / 100.0;
-        *timer_hash.get_mut("find bandwidth time").unwrap() /= total_end / 100.0;
-        timer_hash.insert("total time, sec".to_string(), total_end);
+        self.finalize_generate_bvp_timer_table(timer_hash, total_end);
+    }
 
-        let mut table = Builder::from(timer_hash.clone()).build();
-        table.with(Style::modern_rounded());
-        println!("{}", table.to_string());
-        //   panic!("END OF GENERATE BVP");
-        info!(
-            "\n \n ____________END OF GENERATE BVP ________________________________________________________________"
+    /// Same symbolic/discretization path as `generate_BVP_with_params`, but the
+    /// numerical backend branch is selected through the shared lifecycle layer.
+    ///
+    /// This is a thin staged integration entrypoint:
+    /// - the legacy faer/lambdify path remains the main execution path,
+    /// - AOT selection metadata is returned when an artifact is registered or compiled,
+    /// - the caller can decide whether to continue with lambdify fallback or a
+    ///   compiled AOT branch above this module.
+    pub fn generate_BVP_with_backend_selection(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+    ) -> BvpSparseExecutionPlan {
+        let (arg_name, indexed_values_owned, _matrix_backend, mut timer_hash, total_start) = self
+            .prepare_symbolic_bvp_stage_with_params(
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+            );
+        let effective_arg_name = param.unwrap_or(arg_name);
+        let residual_strategy =
+            recommended_residual_chunking_for_parallelism(self.vector_of_functions.len(), 4);
+        let jacobian_strategy =
+            recommended_row_chunking_for_parallelism(self.vector_of_functions.len(), 4);
+
+        let execution = self.prepare_sparse_backend_execution_timed(
+            effective_arg_name.as_str(),
+            indexed_values_owned
+                .iter()
+                .map(|name| name.as_str())
+                .collect(),
+            "eval_bvp_residual",
+            "eval_bvp_sparse_values",
+            residual_strategy,
+            jacobian_strategy,
+            policy,
+            resolver,
+            &mut timer_hash,
         );
+        let total_end = total_start.elapsed().as_secs_f64();
+        self.finalize_generate_bvp_timer_table(timer_hash, total_end);
+        execution
+    }
+
+    /// Same as `generate_BVP_with_backend_selection`, but with explicit
+    /// residual and sparse-Jacobian chunking strategies supplied by the outer
+    /// solver layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_BVP_with_backend_selection_and_chunking(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        params: Option<&[&str]>,
+        t0: f64,
+        param: Option<String>,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        scheme: String,
+        method: String,
+        bandwidth: Option<(usize, usize)>,
+        policy: BackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        residual_strategy: ResidualChunkingStrategy,
+        jacobian_strategy: SparseChunkingStrategy,
+    ) -> BvpSparseExecutionPlan {
+        let (arg_name, indexed_values_owned, _matrix_backend, mut timer_hash, total_start) = self
+            .prepare_symbolic_bvp_stage_with_params(
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+            );
+        let effective_arg_name = param.unwrap_or(arg_name);
+
+        let execution = self.prepare_sparse_backend_execution_timed(
+            effective_arg_name.as_str(),
+            indexed_values_owned
+                .iter()
+                .map(|name| name.as_str())
+                .collect(),
+            "eval_bvp_residual",
+            "eval_bvp_sparse_values",
+            residual_strategy,
+            jacobian_strategy,
+            policy,
+            resolver,
+            &mut timer_hash,
+        );
+        let total_end = total_start.elapsed().as_secs_f64();
+        self.finalize_generate_bvp_timer_table(timer_hash, total_end);
+        execution
     }
 } // end of impl
-
-////////////////////////////////////////////////////////////////
-// TESTS
-////////////////////////////////////////////////////////////////
-
-#[cfg(test)]
-
-mod tests {
-    use super::*;
-    use crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting;
-    /*
-    #[test]
-    fn generate_IVP_test() {
-        let mut Jacobian_instance = Jacobian::new();
-        let x = Expr::Var("x".to_string());
-        let y = Expr::Var("y".to_string());
-        let z: Expr = Expr::Var("z".to_string());
-        //eq = z*x +exp(y);
-        let eq1: Expr = z.clone() * x.clone() + Expr::exp(y.clone());
-        // eq2 = x + ln(z) + y
-        let eq2: Expr = x + Expr::ln(z) + y;
-        let eq_system = vec![eq1, eq2];
-        let values = vec!["y".to_string(), "z".to_string()];
-        let arg = "x".to_string();
-        // expecting Jac:
-        Jacobian_instance.generate_IVP(eq_system, values, arg);
-        // J= {{e^y, 10}, {1, 1/z}}
-        //
-        Jacobian_instance.evaluate_func_jacobian_DMatrix_IVP(10.0, vec![0.0, 1.0]);
-        println!(
-            "Jacobian_instance.evaluated_jacobian_DMatrix = {:?}",
-            Jacobian_instance.evaluated_jacobian_DMatrix
-        );
-        assert_eq!(
-            Jacobian_instance.evaluated_jacobian_DMatrix,
-            DMatrix::from_row_slice(2, 2, &[1.0, 10.0, 1.0, 1.0])
-        );
-        Jacobian_instance.evaluate_funvector_lambdified_DVector_IVP(10.0, vec![0.0, 1.0]);
-        println!(
-            "Jacobian_instance.evaluated_functions_DVector = {:?}",
-            Jacobian_instance.evaluated_functions_DVector
-        );
-        assert_eq!(
-            Jacobian_instance.evaluated_functions_DVector,
-            DVector::from_vec(vec![11.0, 10.0])
-        );
-    }
-     */
-    #[test]
-    fn generate_Jac_test() {
-        let Jacobian_instance = &mut Jacobian::new();
-
-        let y = Expr::Var("y".to_string());
-        let z: Expr = Expr::Var("z".to_string());
-        //eq = z*10.0 +exp(y);
-        let eq1: Expr = z.clone() * Expr::Const(10.0) + Expr::exp(y.clone());
-        // eq2 = x + ln(z) + y
-        let eq2: Expr = Expr::ln(z.clone()) + y.clone();
-        let eq_system = vec![eq1, eq2];
-        let values = vec!["y".to_string(), "z".to_string()];
-        //  let arg = "x".to_string();
-        Jacobian_instance.from_vectors(eq_system, values);
-        Jacobian_instance.calc_jacobian_parallel();
-        println!(
-            "Jacobian_instance.evaluated_jacobian_DMatrix = {:?}",
-            Jacobian_instance.symbolic_jacobian
-        );
-        // expecting Jac: | exp(y) ; 10.0  |
-        //                 | 1     ;  1/z|
-        let vect = &DVector::from_vec(vec![0.0, 1.0]);
-        let expexted_jac = DMatrix::from_row_slice(2, 2, &[1.0, 10.0, 1.0, 1.0]);
-        // cast type to deisred crate type
-        // FAER CRATE
-        Jacobian_instance.lambdify_jacobian_SparseColMat_modified("x", vec!["y", "z"]);
-
-        let variables = &*Vectors_type_casting(vect, "Sparse".to_string());
-        let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_SparseColMat = jac.call(1.0, variables);
-        assert_eq!(
-            result_SparseColMat.to_DMatrixType(),
-            expexted_jac,
-            "FAER CRATE jac error"
-        );
-        // NALGEBRA CRATE
-        Jacobian_instance.lambdify_jacobian_DMatrix_par("x", vec!["y", "z"]);
-        let variables = &*Vectors_type_casting(vect, "Dense".to_string());
-        let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_DMatrix = jac.call(1.0, variables);
-        assert_eq!(
-            result_DMatrix.to_DMatrixType(),
-            expexted_jac,
-            "nalagebra jac error"
-        );
-
-        // NALGEBRA SPARSE CRATE
-        Jacobian_instance.lambdify_jacobian_CsMatrix("x", vec!["y", "z"]);
-        let variables = &*Vectors_type_casting(vect, "Sparse_2".to_string());
-        let jac = Jacobian_instance.jac_function.as_mut().unwrap();
-        let result_CsMatrix = jac.call(1.0, variables);
-        assert_eq!(
-            result_CsMatrix.to_DMatrixType(),
-            expexted_jac,
-            "sprs jac error"
-        );
-        //SPRS CRATE
-        /*
-               Jacobian_instance.lambdify_jacobian_CsMat(  "x", vec!("y", "z"));
-               let variables = &*Vectors_type_casting(vect, "Sparse_1".to_string());
-               let jac =   Jacobian_instance.jac_function.as_mut().unwrap();
-               let result_CsMat = jac.call(1.0,  variables.clone());
-               println!("RES {:?}, EXPECTED {}", result_CsMat, expexted_jac);
-               assert_eq!(result_CsMat.to_DMatrixType(),   expexted_jac);
-
-        */
-    }
-    #[test]
-    fn CsMat_test() {}
-}
-
-/*
-#[test]
-fn test_jacobian_new() {
-    let jac = Jacobian::new();
-    assert_eq!(jac.vector_of_functions.len(), 0);
-    assert_eq!(jac.vector_of_variables.len(), 0);
-    assert_eq!(jac.variable_string.len(), 0);
-    assert_eq!(jac.symbolic_jacobian.len(), 0);
-    assert_eq!(jac.readable_jacobian.len(), 0);
-    assert_eq!(jac.function_jacobian.len(), 0);
-}
-
-#[test]
-fn test_jacobian_from_vectors() {
-    let funcs = vec![Expr::parse_expression("x^2 + y^2"), Expr::parse_expression("log(x) + exp(y)")];
-    let vars = vec![Expr::parse_expression("x"), Expr::parse_expression("y")];
-    let jac = Jacobian::from_vectors(funcs, vars);
-    assert_eq!(jac.vector_of_functions.len(), 2);
-    assert_eq!(jac.vector_of_variables.len(), 2);
-    assert_eq!(jac.variable_string.len(), 0);
-    assert_eq!(jac.symbolic_jacobian.len(), 2);
-    assert_eq!(jac.readable_jacobian.len(), 2);
-    assert_eq!(jac.function_jacobian.len(), 2);
-}
-
-#[test]
-fn test_jacobian_calc_jacobian() {
-    let mut jac = Jacobian::new();
-    jac.set_vector_of_functions(vec![Expr::parse_expression("x^2 + y^2"), Expr::parse_expression("sin(x) + cos(y)")]);
-    jac.set_vector_of_variables(vec![Expr::parse_expression("x"), Expr::parse_expression("y")]);
-    jac.set_varvecor_from_str("x, y");
-    jac.calc_jacobian();
-    let expected_jacobian = vec![
-        vec![Expr::parse_expression("2*x"), Expr::parse_expression("2*y")],
-        vec![Expr::parse_expression("cos(x)"), Expr::parse_expression("-sin(y)")],
-    ];
-    assert_eq!(jac.symbolic_jacobian, expected_jacobian);
-}
-
-#[test]
-fn test_jacobian_calc_jacobian_fun() {
-    let mut jac = Jacobian::new();
-    jac.set_vector_of_functions(vec![Expr::parse_expression("x^2 + y^2"), Expr::parse_expression("sin(x) + cos(y)")]);
-    jac.set_vector_of_variables(vec![Expr::parse_expression("x"), Expr::parse_expression("y")]);
-    jac.set_varvecor_from_str("x, y");
-    jac.calc_jacobian();
-    jac.calc_jacobian_fun();
-    let x = vec![1.0, 2.0];
-    let expected_result = vec![
-        vec![2.0, 4.0],
-        vec![0.5403023058681398, -0.4161468365471424],
-    ];
-  //  assert_eq!(jac.evaluate_func_jacobian(&x), expected_result);
-}
-*/

@@ -42,7 +42,6 @@
 //! - TWOPNT Fortran solver ("The Twopnt Program for Boundary Value Problems" by J. F. Grcar)
 //! - Chemkin Theory Manual p.261
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions_BVP::Jacobian;
 use chrono::Local;
 
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
@@ -56,6 +55,14 @@ use crate::numerical::BVP_Damp::BVP_utils::{
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step_Cantera2, convergence_condition, if_initial_guess_inside_bounds, jac_recalc,
 };
+use crate::numerical::BVP_Damp::generated_solver_handoff::{
+    AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyDampedGeneratedSolverState,
+    BuildDampedSolverRequest, DampedGeneratedSolverState, DampedSolverBuildRequest,
+    GeneratedBackendConfig, SparseGeneratedBackendMode, try_generate_and_apply_damped_solver_state,
+};
+use crate::symbolic::codegen_aot_resolution::AotResolver;
+use crate::symbolic::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use core::panic;
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
@@ -102,6 +109,167 @@ impl Default for SolverParams {
             max_damp_iter: Some(5),
             damp_factor: Some(0.5),
             adaptive: None,
+        }
+    }
+}
+
+/// User-facing setup options for the damped BVP solver.
+#[derive(Clone)]
+pub struct DampedSolverOptions {
+    /// Discretization scheme name.
+    pub scheme: String,
+    /// Nonlinear solver strategy name.
+    pub strategy: String,
+    /// Optional detailed strategy configuration.
+    pub strategy_params: Option<SolverParams>,
+    /// Optional linear-system method override.
+    pub linear_sys_method: Option<String>,
+    /// Matrix backend/method selector.
+    pub method: String,
+    /// Absolute convergence tolerance.
+    pub abs_tolerance: f64,
+    /// Optional per-variable relative tolerances.
+    pub rel_tolerance: Option<HashMap<String, f64>>,
+    /// Maximum nonlinear iterations.
+    pub max_iterations: usize,
+    /// Optional per-variable bounds.
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
+    /// Optional logging level.
+    pub loglevel: Option<String>,
+    /// Generated-backend configuration used by sparse solver paths.
+    pub generated_backend_config: GeneratedBackendConfig,
+}
+
+impl DampedSolverOptions {
+    /// Creates damped solver options from explicit values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> Self {
+        Self {
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            bounds,
+            loglevel,
+            generated_backend_config: GeneratedBackendConfig::default(),
+        }
+    }
+
+    /// Attaches an explicit generated-backend configuration.
+    pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Overrides detailed nonlinear strategy parameters.
+    pub fn with_strategy_params(mut self, strategy_params: Option<SolverParams>) -> Self {
+        self.strategy_params = strategy_params;
+        self
+    }
+
+    /// Overrides the absolute convergence tolerance.
+    pub fn with_abs_tolerance(mut self, abs_tolerance: f64) -> Self {
+        self.abs_tolerance = abs_tolerance;
+        self
+    }
+
+    /// Overrides per-variable relative tolerances.
+    pub fn with_rel_tolerance(mut self, rel_tolerance: HashMap<String, f64>) -> Self {
+        self.rel_tolerance = Some(rel_tolerance);
+        self
+    }
+
+    /// Overrides the nonlinear iteration limit.
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Overrides per-variable bounds.
+    pub fn with_bounds(mut self, bounds: HashMap<String, (f64, f64)>) -> Self {
+        self.bounds = Some(bounds);
+        self
+    }
+
+    /// Overrides the solver log level.
+    pub fn with_loglevel(mut self, loglevel: Option<String>) -> Self {
+        self.loglevel = loglevel;
+        self
+    }
+
+    /// Attaches a high-level sparse generated-backend mode.
+    pub fn with_sparse_generated_backend_mode(mut self, mode: SparseGeneratedBackendMode) -> Self {
+        self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+        self
+    }
+
+    /// Creates production-oriented sparse damped solver options with standard defaults.
+    ///
+    /// This is the preferred starting point for most BVP users:
+    /// - `forward` discretization
+    /// - `Damped` nonlinear strategy
+    /// - `Sparse` matrix backend
+    /// - generated backend defaults that prefer AOT and fall back to lambdify
+    pub fn sparse_damped() -> Self {
+        Self::default().with_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults)
+    }
+
+    /// Creates production-oriented dense damped solver options with standard defaults.
+    ///
+    /// This is the preferred starting point for dense BVP users that do not
+    /// need sparse/AOT-specific behavior.
+    pub fn dense_damped() -> Self {
+        Self {
+            method: "Dense".to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// Uses the standard sparse generated-backend defaults.
+    pub fn with_sparse_generated_backend_defaults(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults)
+    }
+
+    /// Requires a prebuilt sparse generated backend.
+    pub fn with_sparse_aot_require_prebuilt(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::RequirePrebuilt)
+    }
+
+    /// Builds a sparse release AOT backend on demand.
+    pub fn with_sparse_aot_build_if_missing_release(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::BuildIfMissingRelease)
+    }
+}
+
+impl Default for DampedSolverOptions {
+    fn default() -> Self {
+        Self {
+            scheme: "forward".to_string(),
+            strategy: "Damped".to_string(),
+            strategy_params: Some(SolverParams::default()),
+            linear_sys_method: None,
+            method: "Sparse".to_string(),
+            abs_tolerance: 1e-6,
+            rel_tolerance: None,
+            max_iterations: 25,
+            bounds: None,
+            loglevel: None,
+            generated_backend_config: GeneratedBackendConfig::default(),
         }
     }
 }
@@ -159,12 +327,80 @@ pub struct NRBVP {
     grid_refinemens: usize,      //
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
+    generated_backend_config: GeneratedBackendConfig, // generated backend selection config
     calc_statistics: HashMap<String, usize>,
     nodes_added: Vec<usize>,
     custom_timer: CustomTimer,
 }
 
+impl ApplyDampedGeneratedSolverState for NRBVP {
+    fn apply_generated_solver_state(&mut self, state: DampedGeneratedSolverState) {
+        if let Some(updated_resolver) = state.updated_resolver.clone() {
+            self.generated_backend_config.resolver = Some(updated_resolver);
+        }
+        self.fun = state.fun;
+        self.jac = state.jac;
+        self.bounds_vec = state.bounds_vec;
+        self.rel_tolerance_vec = state.rel_tolerance_vec;
+        self.variable_string = state.variable_string;
+        self.bandwidth = state.bandwidth;
+        self.BC_position_and_value = state.bc_position_and_value;
+    }
+}
+
+impl BuildDampedSolverRequest for NRBVP {
+    fn build_solver_request(
+        &mut self,
+        mesh_: Option<Vec<f64>>,
+        bandwidth: Option<(usize, usize)>,
+    ) -> DampedSolverBuildRequest {
+        let (h, n_steps, mesh) = if mesh_.is_none() {
+            let h = Some((self.t_end - self.t0) / self.n_steps as f64);
+            let n_steps = Some(self.n_steps);
+            (h, n_steps, None)
+        } else {
+            self.x_mesh = DVector::from_vec(mesh_.clone().unwrap());
+            (None, None, mesh_)
+        };
+
+        DampedSolverBuildRequest {
+            eq_system: self.eq_system.clone(),
+            values: self.values.clone(),
+            arg: self.arg.clone(),
+            t0: self.t0,
+            n_steps,
+            h,
+            mesh,
+            border_conditions: self.BorderConditions.clone(),
+            bounds: self.Bounds.clone(),
+            rel_tolerance: self.rel_tolerance.clone(),
+            scheme: self.scheme.clone(),
+            method: self.method.clone(),
+            bandwidth,
+            backend_policy: self
+                .generated_backend_config
+                .effective_backend_policy(&self.method),
+            resolver: self.generated_backend_config.resolver.clone(),
+            aot_execution_policy: self.generated_backend_config.aot_execution_policy.clone(),
+            aot_build_policy: self.generated_backend_config.aot_build_policy,
+            aot_chunking_policy: self.generated_backend_config.aot_chunking_policy,
+        }
+    }
+}
+
 impl NRBVP {
+    fn parse_log_level(&self) -> Result<LevelFilter, BvpBackendIntegrationError> {
+        match self.loglevel.as_deref() {
+            Some("debug") | Some("info") => Ok(LevelFilter::Info),
+            Some("warn") => Ok(LevelFilter::Warn),
+            Some("error") => Ok(LevelFilter::Error),
+            Some(level) => Err(BvpBackendIntegrationError::InvalidLogLevel {
+                level: level.to_string(),
+            }),
+            None => Ok(LevelFilter::Info),
+        }
+    }
+
     /// Creates a new NRBVP solver instance
     ///
     /// # Arguments
@@ -272,6 +508,7 @@ impl NRBVP {
             grid_refinemens: 0,
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
+            generated_backend_config: GeneratedBackendConfig::default(),
             calc_statistics: Hashmap_statistics,
             nodes_added: Vec::new(),
             custom_timer: CustomTimer::new(),
@@ -299,6 +536,197 @@ impl NRBVP {
             None,
         )
     }
+
+    /// Creates a new solver instance with an explicit generated-backend configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_generated_backend_config(
+        eq_system: Vec<Expr>,
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+        generated_backend_config: GeneratedBackendConfig,
+    ) -> NRBVP {
+        Self::new(
+            eq_system,
+            initial_guess,
+            values,
+            arg,
+            BorderConditions,
+            t0,
+            t_end,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        )
+        .with_generated_backend_config(generated_backend_config)
+    }
+
+    /// Creates a new solver instance with a high-level sparse generated-backend mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_sparse_generated_backend_mode(
+        eq_system: Vec<Expr>,
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+        mode: SparseGeneratedBackendMode,
+    ) -> NRBVP {
+        Self::new_with_generated_backend_config(
+            eq_system,
+            initial_guess,
+            values,
+            arg,
+            BorderConditions,
+            t0,
+            t_end,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+            GeneratedBackendConfig::from_sparse_mode(mode),
+        )
+    }
+
+    /// Creates a solver from a grouped options object instead of many positional arguments.
+    ///
+    /// This is the preferred public construction path for new code. The other
+    /// constructor variants are retained as compatibility entrypoints.
+    pub fn new_with_options(
+        eq_system: Vec<Expr>,
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        BorderConditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        options: DampedSolverOptions,
+    ) -> NRBVP {
+        Self::new_with_generated_backend_config(
+            eq_system,
+            initial_guess,
+            values,
+            arg,
+            BorderConditions,
+            t0,
+            t_end,
+            n_steps,
+            options.scheme,
+            options.strategy,
+            options.strategy_params,
+            options.linear_sys_method,
+            options.method,
+            options.abs_tolerance,
+            options.rel_tolerance,
+            options.max_iterations,
+            options.bounds,
+            options.loglevel,
+            options.generated_backend_config,
+        )
+    }
+
+    /// Returns a solver configured with the provided generated-backend settings.
+    pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Returns a solver configured with a high-level sparse generated-backend mode.
+    pub fn with_sparse_generated_backend_mode(mut self, mode: SparseGeneratedBackendMode) -> Self {
+        self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+        self
+    }
+
+    /// Returns a solver configured with the standard sparse generated-backend defaults.
+    pub fn with_sparse_generated_backend_defaults(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults)
+    }
+
+    /// Returns a solver configured to require a prebuilt sparse AOT backend.
+    pub fn with_sparse_aot_require_prebuilt(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::RequirePrebuilt)
+    }
+
+    /// Returns a solver configured to build a sparse release AOT backend on demand.
+    pub fn with_sparse_aot_build_if_missing_release(self) -> Self {
+        self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::BuildIfMissingRelease)
+    }
+
+    /// Returns a solver with an explicit generated-backend policy override.
+    pub fn with_backend_policy_override(
+        mut self,
+        backend_policy: Option<BackendSelectionPolicy>,
+    ) -> Self {
+        self.generated_backend_config.backend_policy_override = backend_policy;
+        self
+    }
+
+    /// Returns a solver with an explicit generated-backend resolver snapshot.
+    pub fn with_aot_resolver(mut self, resolver: Option<AotResolver>) -> Self {
+        self.generated_backend_config.resolver = resolver;
+        self
+    }
+
+    /// Returns a solver with an explicit solver-level AOT execution policy.
+    pub fn with_aot_execution_policy(mut self, policy: AotExecutionPolicy) -> Self {
+        self.generated_backend_config.aot_execution_policy = policy;
+        self
+    }
+
+    /// Returns a solver with an explicit solver-level AOT build policy.
+    pub fn with_aot_build_policy(mut self, policy: AotBuildPolicy) -> Self {
+        self.generated_backend_config.aot_build_policy = policy;
+        self
+    }
+
+    /// Returns a solver with explicit solver-level AOT chunking overrides.
+    pub fn with_aot_chunking_policy(mut self, policy: AotChunkingPolicy) -> Self {
+        self.generated_backend_config.aot_chunking_policy = policy;
+        self
+    }
+
     pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
         let h = (t_end - t0) / n_steps as f64;
         let T_list: Vec<f64> = (0..n_steps + 1)
@@ -398,56 +826,28 @@ impl NRBVP {
     /// # Arguments
     /// * `mesh_` - Optional custom mesh points (if None, uniform mesh is used)
     /// * `bandwidth` - Optional Jacobian bandwidth for sparse matrices
-    pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>, bandwidth: Option<(usize, usize)>) {
-        // check if memory is enough for
+    pub fn try_eq_generate(
+        &mut self,
+        mesh_: Option<Vec<f64>>,
+        bandwidth: Option<(usize, usize)>,
+    ) -> Result<(), BvpBackendIntegrationError> {
         task_check_mem(self.n_steps, self.values.len(), &self.method);
-        // check if user specified task is correct
         self.task_check();
-        // strategy_check(&self.strategy, &self.strategy_params);
-        let mut jacobian_instance = Jacobian::new();
-        // mesh of t's can be defined directly or by size of step -h, and number of points
-        let (h, n_steps, mesh) = if mesh_.is_none() {
-            // case of mesh not defined directly
-            let h = Some((self.t_end - self.t0) / self.n_steps as f64);
-            let n_steps = Some(self.n_steps);
-            (h, n_steps, None)
-        } else {
-            // case of mesh defined directly
-            self.x_mesh = DVector::from_vec(mesh_.clone().unwrap());
-            (None, None, mesh_)
-        };
-        let scheme = self.scheme.clone();
-
-        jacobian_instance.generate_BVP(
-            self.eq_system.clone(),
-            self.values.clone(),
-            self.arg.clone(),
-            self.t0.clone(),
-            None,
-            n_steps.clone(),
-            h,
-            mesh,
-            self.BorderConditions.clone(),
-            self.Bounds.clone(),
-            self.rel_tolerance.clone(),
-            scheme.clone(),
-            self.method.clone(),
+        try_generate_and_apply_damped_solver_state(
+            self,
+            mesh_,
             bandwidth,
-        );
+            "building damped BVP generated solver state",
+        )
+    }
 
-        //     info("Jacobian = {:?}", jacobian_instance.readable_jacobian);
-        let fun = jacobian_instance.residiual_function;
-
-        let jac = jacobian_instance.jac_function;
-
-        self.fun = fun;
-
-        self.jac = jac;
-        self.bounds_vec = jacobian_instance.bounds.unwrap();
-        self.rel_tolerance_vec = jacobian_instance.rel_tolerance_vec.unwrap();
-        self.variable_string = jacobian_instance.variable_string;
-        self.bandwidth = jacobian_instance.bandwidth.unwrap();
-        self.BC_position_and_value = jacobian_instance.BC_pos_n_values;
+    /// Compatibility-only wrapper over [`NRBVP::try_eq_generate`].
+    ///
+    /// Prefer the fallible `try_*` entrypoint in new code so backend/build/runtime
+    /// errors stay typed all the way to the caller.
+    pub fn eq_generate(&mut self, mesh_: Option<Vec<f64>>, bandwidth: Option<(usize, usize)>) {
+        self.try_eq_generate(mesh_, bandwidth)
+            .unwrap_or_else(|err| panic!("BVP generated solver state build failed: {err:?}"));
     } // end of method eq_generate
     /// Updates solver state for new iteration step
     ///
@@ -462,6 +862,76 @@ impl NRBVP {
     pub fn set_p(&mut self, p: f64) {
         self.p = p;
     }
+
+    /// Installs an optional compiled AOT resolver used by backend selection.
+    pub fn set_aot_resolver(&mut self, resolver: Option<AotResolver>) {
+        self.generated_backend_config.resolver = resolver;
+    }
+
+    /// Installs the solver-level AOT execution policy.
+    pub fn set_aot_execution_policy(&mut self, policy: AotExecutionPolicy) {
+        self.generated_backend_config.aot_execution_policy = policy;
+    }
+
+    /// Returns the configured solver-level AOT execution policy.
+    pub fn aot_execution_policy(&self) -> &AotExecutionPolicy {
+        &self.generated_backend_config.aot_execution_policy
+    }
+
+    /// Installs the solver-level AOT build policy.
+    pub fn set_aot_build_policy(&mut self, policy: AotBuildPolicy) {
+        self.generated_backend_config.aot_build_policy = policy;
+    }
+
+    /// Returns the configured solver-level AOT build policy.
+    pub fn aot_build_policy(&self) -> AotBuildPolicy {
+        self.generated_backend_config.aot_build_policy
+    }
+
+    /// Installs explicit solver-level AOT chunking overrides.
+    pub fn set_aot_chunking_policy(&mut self, policy: AotChunkingPolicy) {
+        self.generated_backend_config.aot_chunking_policy = policy;
+    }
+
+    /// Returns the configured solver-level AOT chunking overrides.
+    pub fn aot_chunking_policy(&self) -> AotChunkingPolicy {
+        self.generated_backend_config.aot_chunking_policy
+    }
+
+    /// Returns the configured compiled AOT resolver, if present.
+    pub fn aot_resolver(&self) -> Option<&AotResolver> {
+        self.generated_backend_config.resolver.as_ref()
+    }
+
+    /// Installs an explicit generated-backend selection policy override.
+    pub fn set_backend_policy_override(&mut self, backend_policy: Option<BackendSelectionPolicy>) {
+        self.generated_backend_config.backend_policy_override = backend_policy;
+    }
+
+    /// Returns the configured generated-backend selection policy override, if present.
+    pub fn backend_policy_override(&self) -> Option<BackendSelectionPolicy> {
+        self.generated_backend_config.backend_policy_override
+    }
+
+    /// Installs the complete generated-backend configuration in one call.
+    pub fn set_generated_backend_config(&mut self, config: GeneratedBackendConfig) {
+        self.generated_backend_config = config;
+    }
+
+    /// Installs a high-level sparse generated-backend mode on an existing solver.
+    pub fn set_sparse_generated_backend_mode(&mut self, mode: SparseGeneratedBackendMode) {
+        self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+    }
+
+    /// Installs the standard sparse generated-backend defaults.
+    pub fn set_sparse_generated_backend_defaults(&mut self) {
+        self.set_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults);
+    }
+
+    /// Returns the full generated-backend configuration.
+    pub fn generated_backend_config(&self) -> &GeneratedBackendConfig {
+        &self.generated_backend_config
+    }
     /////////////////////
     /// Computes Newton step using cached inverse Jacobian
     ///
@@ -469,7 +939,11 @@ impl NRBVP {
     pub fn step_with_inv_Jac(&self, p: f64, y: &dyn VectorType) -> Box<dyn VectorType> {
         let fun = &self.fun;
         let F_k = fun.call(p, y);
-        let inv_J_k = self.old_jac.as_ref().unwrap().clone_box();
+        let inv_J_k = self
+            .old_jac
+            .as_ref()
+            .expect("Damped BVP inverse-Jacobian step requires a cached Jacobian factor")
+            .clone_box();
         let undamped_step_k: Box<dyn VectorType> = inv_J_k.mul(&*F_k);
         undamped_step_k
     }
@@ -482,7 +956,9 @@ impl NRBVP {
             let p = self.p;
             let y = &*self.y;
             log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
-            let jac_function = self.jac.as_mut().unwrap();
+            let jac_function = self.jac.as_mut().expect(
+                "Damped BVP Jacobian recalculation requires an installed Jacobian callback",
+            );
             let jac_matrix = jac_function.call(p, y);
             let inv_J_k = jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations);
             self.old_jac = Some(inv_J_k);
@@ -505,7 +981,9 @@ impl NRBVP {
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let begin = Instant::now();
             self.custom_timer.jac_tic();
-            let jac_function = self.jac.as_mut().unwrap();
+            let jac_function = self.jac.as_mut().expect(
+                "Damped BVP timed Jacobian recalculation requires an installed Jacobian callback",
+            );
             let jac_matrix = jac_function.call(p, y);
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             info!("jacobian recalculation time: ");
@@ -542,7 +1020,10 @@ impl NRBVP {
         let fun = &self.fun;
         let F_k = fun.call(p, y);
         let fun_time_end = fun_time_start.elapsed();
-        let J_k = self.old_jac.as_ref().unwrap();
+        let J_k = self
+            .old_jac
+            .as_ref()
+            .expect("Damped BVP Newton step requires a cached Jacobian matrix");
         assert_eq!(
             F_k.len(),
             J_k.shape().0,
@@ -570,7 +1051,7 @@ impl NRBVP {
         for el in F_k.iterate() {
             if el.is_nan() {
                 error!("\n \n NaN in undamped step residual function \n \n");
-                panic!()
+                panic!("Damped BVP step failed: residual vector contains NaN before linear solve")
             }
         }
         // solving equation J_k*dy_k=-F_k for undamped dy_k, but Lambda*dy_k - is dumped step
@@ -588,7 +1069,7 @@ impl NRBVP {
         for el in undamped_step_k.iterate() {
             if el.is_nan() {
                 log::error!("\n \n NaN in damped step deltaY \n \n");
-                panic!()
+                panic!("Damped BVP step failed: Newton update contains NaN after linear solve")
             }
         }
         let pair_of_times = (fun_time_end, linear_sys_time_end);
@@ -635,11 +1116,11 @@ impl NRBVP {
         let fbound = bound_step_Cantera2(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
             error!("\n \n fbound is NaN \n \n");
-            panic!()
+            panic!("Damped BVP damping failed: boundary step factor is NaN")
         }
         if fbound.is_infinite() {
             error!("\n \n fbound is infinite \n \n");
-            panic!()
+            panic!("Damped BVP damping failed: boundary step factor is infinite")
         }
         // let fbound =1.0;
         info!("\n \n fboundary  = {}", fbound);
@@ -725,24 +1206,23 @@ impl NRBVP {
         }
 
         if k < maxDampIter {
+            let step_norm = S_k.expect(
+                "Damped BVP damping invariant violated: accepted damping step did not record a step norm",
+            );
             // if there is a damping coefficient found (so max damp steps not exceeded)
-            if S_k.unwrap() > conv {
+            if step_norm > conv {
                 //found damping coefficient but not converged yet
                 info!("\n \n  Damping coefficient found (solution has not converged yet)");
                 info!(
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
-                    self.error_old,
-                    S_k.unwrap(),
-                    conv
+                    self.error_old, step_norm, conv
                 );
                 (0, damped_step_result)
             } else {
                 info!("\n \n  Damping coefficient found (solution has converged)");
                 info!(
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
-                    self.error_old,
-                    S_k.unwrap(),
-                    conv
+                    self.error_old, step_norm, conv
                 );
                 (1, damped_step_result)
             }
@@ -768,6 +1248,15 @@ impl NRBVP {
     /// # Returns
     /// Solution vector if converged, None if failed
     pub fn main_loop_damped(&mut self) -> Option<DVector<f64>> {
+        self.try_main_loop_damped().unwrap_or_else(|err| {
+            panic!("Damped BVP main loop failed during fallible runtime path: {err:?}")
+        })
+    }
+
+    /// Fallible internal Newton loop used by [`NRBVP::try_solver`].
+    pub fn try_main_loop_damped(
+        &mut self,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         ////////////////////////////////////////////////////////////////////////
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         info!("{:?}", self.initial_guess.shape());
@@ -808,7 +1297,9 @@ impl NRBVP {
                     Some(y_k_plus_1) => y_k_plus_1,
                     _ => {
                         error!("\n \n y_k_plus_1 is None");
-                        panic!()
+                        panic!(
+                            "Damped BVP main loop invariant violated: accepted step returned no updated state"
+                        )
                     }
                 };
                 self.y = y_k_plus_1;
@@ -822,7 +1313,9 @@ impl NRBVP {
                 let y_k_plus_1 = match damped_step_result {
                     Some(y_k_plus_1) => y_k_plus_1,
                     _ => {
-                        panic!(" \n \n y_k_plus_1 is None")
+                        panic!(
+                            "Damped BVP main loop invariant violated: converged step returned no updated state"
+                        )
                     }
                 };
                 let resid_norm = self.calc_residual(y_k_plus_1.clone_box());
@@ -843,12 +1336,12 @@ impl NRBVP {
                         .map_or(false, |p| p.adaptive.is_some())
                 {
                     info!("solving with new grid!");
-                    self.solve_with_new_grid()
+                    return self.try_solve_with_new_grid();
                 } else {
                     // if adapive is None then we just return the result
                     info!("returning the result");
 
-                    return result;
+                    return Ok(result);
                 };
             //  self.max_error = error; // ???
             }
@@ -886,10 +1379,10 @@ impl NRBVP {
                 .map_or(false, |p| p.adaptive.is_some())
         {
             info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
-            self.solve_with_new_grid()
+            return self.try_solve_with_new_grid();
         }
 
-        None
+        Ok(None)
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                      functions to create a new grid and recalculate with new grid
@@ -916,7 +1409,9 @@ impl NRBVP {
                             true
                         }
                     }
-                    _ => panic!("Unsupported adaptive version"),
+                    _ => panic!(
+                        "Damped BVP adaptive grid refinement failed: unsupported adaptive version"
+                    ),
                 };
 
                 if adaptive_config.max_refinements <= self.grid_refinemens {
@@ -1013,7 +1508,9 @@ impl NRBVP {
     /// Continues solving on refined grid
     ///
     /// Updates solver state with new mesh and restarts Newton iterations
-    fn solve_with_new_grid(&mut self) {
+    fn try_solve_with_new_grid(
+        &mut self,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let (new_mesh, initial_guess, number_of_nonzero_keys) = self.create_new_grid();
         self.custom_timer.grid_refinement_tac();
         self.number_of_refined_intervals = number_of_nonzero_keys;
@@ -1062,14 +1559,14 @@ impl NRBVP {
 
             self.custom_timer.symbolic_operations_tic();
             // Regenerate system with new grid - no need to recalculate bandwidth
-            self.eq_generate(Some(new_mesh), Some(self.bandwidth));
+            self.try_eq_generate(Some(new_mesh), Some(self.bandwidth))?;
             self.custom_timer.symbolic_operations_tac();
         } else {
             info!("no new grid needed - returning to main loop");
-            return;
+            return Ok(None);
         }
         self.jac_recalc = true;
-        self.main_loop_damped();
+        self.try_main_loop_damped()
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                       main functions to start the solver
@@ -1084,13 +1581,18 @@ impl NRBVP {
     ///
     /// # Returns
     /// Solution vector if successful, None if failed
-    pub fn solver(&mut self) -> Option<DVector<f64>> {
+    /// Fallible solve path without logging setup.
+    ///
+    /// This is the preferred entrypoint for internal/runtime callers that want
+    /// typed backend and execution errors but do not need the higher-level
+    /// logging wrapper provided by [`NRBVP::try_solve`].
+    pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         self.custom_timer.start();
         self.custom_timer.symbolic_operations_tic();
-        self.eq_generate(None, None);
+        self.try_eq_generate(None, None)?;
         self.custom_timer.symbolic_operations_tac();
         let begin = Instant::now();
-        let res = self.main_loop_damped();
+        let res = self.try_main_loop_damped()?;
         let end = begin.elapsed();
         elapsed_time(end);
         let time = end.as_secs_f64() as usize;
@@ -1099,7 +1601,16 @@ impl NRBVP {
             .insert("time elapsed, s".to_string(), time);
         self.calc_statistics();
         self.custom_timer.get_all();
-        res
+        Ok(res)
+    }
+
+    /// Compatibility-only wrapper over [`NRBVP::try_solver`].
+    ///
+    /// New production-facing code should call [`NRBVP::try_solver`] or
+    /// [`NRBVP::try_solve`] instead.
+    pub fn solver(&mut self) -> Option<DVector<f64>> {
+        self.try_solver()
+            .unwrap_or_else(|err| panic!("BVP solver failed before Newton loop: {err:?}"))
     }
 
     /// Main public interface for solving BVP
@@ -1109,7 +1620,7 @@ impl NRBVP {
     ///
     /// # Returns
     /// Solution vector if successful, None if failed
-    pub fn solve(&mut self) -> Option<DVector<f64>> {
+    pub fn try_solve(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let is_logging_disabled = self
             .loglevel
             .as_ref()
@@ -1117,21 +1628,9 @@ impl NRBVP {
             .unwrap_or(false);
 
         if is_logging_disabled {
-            let res = self.solver();
-            res
+            self.try_solver()
         } else {
-            let loglevel = self.loglevel.clone();
-            let log_option = if let Some(level) = loglevel {
-                match level.as_str() {
-                    "debug" => LevelFilter::Info,
-                    "info" => LevelFilter::Info,
-                    "warn" => LevelFilter::Warn,
-                    "error" => LevelFilter::Error,
-                    _ => panic!("loglevel must be debug, info, warn or error"),
-                }
-            } else {
-                LevelFilter::Info
-            };
+            let log_option = self.parse_log_level()?;
             let logger_instance = if self.no_reports {
                 // don't want to save txt report
                 let logger_instance = CombinedLogger::init(vec![TermLogger::new(
@@ -1145,6 +1644,12 @@ impl NRBVP {
                 // want to save txt report
                 let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
                 let name = format!("log_{}.txt", date_and_time);
+                let file = File::create(&name).map_err(|err| {
+                    BvpBackendIntegrationError::LogFileCreationFailed {
+                        path: name.clone(),
+                        message: err.to_string(),
+                    }
+                })?;
                 let logger_instance = CombinedLogger::init(vec![
                     TermLogger::new(
                         log_option,
@@ -1152,22 +1657,28 @@ impl NRBVP {
                         TerminalMode::Mixed,
                         ColorChoice::Auto,
                     ),
-                    WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
+                    WriteLogger::new(log_option, Config::default(), file),
                 ]);
                 logger_instance
             };
             match logger_instance {
                 Ok(()) => {
-                    let res = self.solver();
+                    let res = self.try_solver()?;
                     info!(" \n \n Program ended");
-                    res
+                    Ok(res)
                 }
-                Err(_) => {
-                    let res = self.solver();
-                    res
-                } //end Error
+                Err(_) => self.try_solver(), //end Error
             } // end mat 
         }
+    }
+
+    /// Compatibility-only wrapper over [`NRBVP::try_solve`].
+    ///
+    /// New code should prefer [`NRBVP::try_solve`] so AOT/logging/runtime failures
+    /// remain typed instead of turning into a panic.
+    pub fn solve(&mut self) -> Option<DVector<f64>> {
+        self.try_solve()
+            .unwrap_or_else(|err| panic!("BVP solve failed before convergence loop: {err:?}"))
     }
     pub fn dont_save_log(&mut self, dont_save_log: bool) {
         self.no_reports = dont_save_log;
@@ -1185,7 +1696,9 @@ impl NRBVP {
         } else {
             "result.txt".to_string()
         };
-        let result_DMatrix = self.get_result().unwrap();
+        let result_DMatrix = self
+            .get_result()
+            .expect("Damped BVP save_to_file requires a computed full solution matrix");
         let _ = save_matrix_to_file(
             &result_DMatrix,
             &self.values,
@@ -1205,7 +1718,9 @@ impl NRBVP {
         } else {
             "result_table".to_string()
         };
-        let result_DMatrix = self.get_result().unwrap();
+        let result_DMatrix = self
+            .get_result()
+            .expect("Damped BVP save_to_csv requires a computed full solution matrix");
         let _ = save_matrix_to_csv(
             &result_DMatrix,
             &self.values,
@@ -1230,7 +1745,11 @@ impl NRBVP {
     pub fn handle_result(&mut self) {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
-        let vector_of_results = self.result.clone().unwrap().clone();
+        let vector_of_results = self
+            .result
+            .clone()
+            .expect("Damped BVP handle_result requires a converged solution vector")
+            .clone();
 
         let BC_position_and_value = self.BC_position_and_value.clone();
         let full_results_vector = construct_full_solution(vector_of_results, BC_position_and_value);
@@ -1247,7 +1766,10 @@ impl NRBVP {
     /// Generates publication-quality plots of the solution
     /// Requires gnuplot to be installed and in PATH
     pub fn gnuplot_result(&self) {
-        let permutted_results = self.full_result.clone().unwrap();
+        let permutted_results = self
+            .full_result
+            .clone()
+            .expect("Damped BVP gnuplot_result requires a computed full solution matrix");
         plots_gnulot(
             self.arg.clone(),
             self.values.clone(),
@@ -1261,7 +1783,10 @@ impl NRBVP {
     ///
     /// Generates solution plots with embedded Rust plotting
     pub fn plot_result(&self) {
-        let permutted_results = self.full_result.clone().unwrap();
+        let permutted_results = self
+            .full_result
+            .clone()
+            .expect("Damped BVP plot_result requires a computed full solution matrix");
         plots(
             self.arg.clone(),
             self.values.clone(),
@@ -1271,7 +1796,10 @@ impl NRBVP {
         info!("result plotted");
     }
     pub fn plot_result_in_terminal(&self) {
-        let permutted_results = self.full_result.clone().unwrap();
+        let permutted_results = self
+            .full_result
+            .clone()
+            .expect("Damped BVP plot_result_in_terminal requires a computed full solution matrix");
         plots_terminal(
             self.arg.clone(),
             self.values.clone(),
@@ -1286,7 +1814,11 @@ impl NRBVP {
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         if let Some(jac) = &self.old_jac {
-            let jac_shape = self.old_jac.as_ref().unwrap().shape();
+            let jac_shape = self
+                .old_jac
+                .as_ref()
+                .expect("Damped BVP calc_statistics requires a cached Jacobian when statistics say one is available")
+                .shape();
             let matrix_weight = checkmem(&**jac);
             stats.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
             stats.insert(
@@ -1332,4 +1864,504 @@ impl NRBVP {
     }
 }
 
-/* */
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::numerical::BVP_Damp::generated_solver_handoff::{
+        AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
+        GeneratedBackendConfig, SparseGeneratedBackendMode,
+    };
+    use crate::symbolic::codegen_aot_registry::AotRegistry;
+    use crate::symbolic::codegen_aot_resolution::AotResolver;
+    use crate::symbolic::codegen_aot_runtime_link::{
+        LinkedSparseAotBackend, register_linked_sparse_backend, unregister_linked_sparse_backend,
+    };
+    use crate::symbolic::codegen_backend_selection::BackendSelectionPolicy;
+    use crate::symbolic::codegen_orchestrator::{ParallelExecutorConfig, ParallelFallbackPolicy};
+    use crate::symbolic::codegen_runtime_api::ResidualChunkingStrategy;
+    use crate::symbolic::codegen_tasks::SparseChunkingStrategy;
+    use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
+    use faer::Col;
+    use nalgebra::DMatrix;
+    use std::sync::Arc;
+
+    fn sparse_surface_test_solver() -> NRBVP {
+        NRBVP::new_with_options(
+            vec![Expr::parse_expression("z"), Expr::parse_expression("-y")],
+            DMatrix::from_element(2, 4, 0.1),
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            HashMap::from([
+                ("y".to_string(), vec![(0, 0.0)]),
+                ("z".to_string(), vec![(0, 1.0)]),
+            ]),
+            0.0,
+            1.0,
+            4,
+            DampedSolverOptions::sparse_damped(),
+        )
+    }
+
+    fn sparse_surface_test_solver_with_tolerances() -> NRBVP {
+        let bounds = HashMap::from([
+            ("z".to_string(), (-10.0, 10.0)),
+            ("y".to_string(), (-10.0, 10.0)),
+        ]);
+        let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
+        let options = DampedSolverOptions {
+            strategy_params: Some(SolverParams::default()),
+            abs_tolerance: 1e-6,
+            rel_tolerance: Some(rel_tolerance),
+            max_iterations: 10,
+            bounds: Some(bounds),
+            ..DampedSolverOptions::sparse_damped()
+        };
+        NRBVP::new_with_options(
+            vec![Expr::parse_expression("y-z"), Expr::parse_expression("-z")],
+            DMatrix::from_element(2, 5, 0.25),
+            vec!["z".to_string(), "y".to_string()],
+            "x".to_string(),
+            HashMap::from([
+                ("z".to_string(), vec![(0usize, 1.0f64)]),
+                ("y".to_string(), vec![(1usize, 1.0f64)]),
+            ]),
+            0.0,
+            1.0,
+            5,
+            options,
+        )
+    }
+
+    #[test]
+    fn generated_backend_surface_builder_methods_update_solver_config() {
+        let solver = sparse_surface_test_solver()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
+            .with_aot_execution_policy(AotExecutionPolicy::SequentialOnly)
+            .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt)
+            .with_aot_chunking_policy(AotChunkingPolicy::with_parts(
+                Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
+                Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
+            ));
+
+        assert_eq!(
+            solver.backend_policy_override(),
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            solver.aot_execution_policy(),
+            &AotExecutionPolicy::SequentialOnly
+        );
+        assert_eq!(solver.aot_build_policy(), AotBuildPolicy::RequirePrebuilt);
+        assert_eq!(
+            solver.aot_chunking_policy(),
+            AotChunkingPolicy::with_parts(
+                Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
+                Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
+            )
+        );
+    }
+
+    #[test]
+    fn sparse_generated_backend_presets_are_exposed_on_solver_surface() {
+        let solver = sparse_surface_test_solver().with_sparse_aot_build_if_missing_release();
+
+        assert_eq!(
+            solver.backend_policy_override(),
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            solver.aot_build_policy(),
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+    }
+
+    #[test]
+    fn sparse_generated_backend_mode_is_exposed_on_solver_surface() {
+        let mut solver = sparse_surface_test_solver()
+            .with_sparse_generated_backend_mode(SparseGeneratedBackendMode::RequirePrebuilt);
+
+        assert_eq!(
+            solver.backend_policy_override(),
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(solver.aot_build_policy(), AotBuildPolicy::RequirePrebuilt);
+
+        solver.set_sparse_generated_backend_mode(SparseGeneratedBackendMode::BuildIfMissingRelease);
+        assert_eq!(
+            solver.aot_build_policy(),
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+    }
+
+    #[test]
+    fn sparse_damped_options_preset_sets_production_defaults() {
+        let options = DampedSolverOptions::sparse_damped();
+
+        assert_eq!(options.scheme, "forward");
+        assert_eq!(options.strategy, "Damped");
+        assert_eq!(options.method, "Sparse");
+        assert_eq!(
+            options.generated_backend_config.backend_policy_override,
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_build_policy,
+            AotBuildPolicy::UseIfAvailable
+        );
+    }
+
+    #[test]
+    fn dense_damped_options_preset_sets_dense_defaults() {
+        let options = DampedSolverOptions::dense_damped();
+
+        assert_eq!(options.scheme, "forward");
+        assert_eq!(options.strategy, "Damped");
+        assert_eq!(options.method, "Dense");
+    }
+
+    #[test]
+    fn constructor_style_sparse_generated_backend_mode_sets_solver_config() {
+        let solver = NRBVP::new_with_sparse_generated_backend_mode(
+            vec![Expr::parse_expression("z"), Expr::parse_expression("-y")],
+            DMatrix::from_element(2, 4, 0.1),
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            HashMap::from([
+                ("y".to_string(), vec![(0, 0.0)]),
+                ("z".to_string(), vec![(0, 1.0)]),
+            ]),
+            0.0,
+            1.0,
+            4,
+            "forward".to_string(),
+            "Damped".to_string(),
+            None,
+            None,
+            "Sparse".to_string(),
+            1e-6,
+            None,
+            10,
+            None,
+            None,
+            SparseGeneratedBackendMode::RequirePrebuilt,
+        );
+
+        assert_eq!(
+            solver.backend_policy_override(),
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(solver.aot_build_policy(), AotBuildPolicy::RequirePrebuilt);
+    }
+
+    #[test]
+    fn options_style_solver_setup_sets_sparse_generated_backend_mode() {
+        let options = DampedSolverOptions::sparse_damped().with_sparse_aot_require_prebuilt();
+
+        let solver = NRBVP::new_with_options(
+            vec![Expr::parse_expression("z"), Expr::parse_expression("-y")],
+            DMatrix::from_element(2, 4, 0.1),
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            HashMap::from([
+                ("y".to_string(), vec![(0, 0.0)]),
+                ("z".to_string(), vec![(0, 1.0)]),
+            ]),
+            0.0,
+            1.0,
+            4,
+            options,
+        );
+
+        assert_eq!(
+            solver.backend_policy_override(),
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(solver.aot_build_policy(), AotBuildPolicy::RequirePrebuilt);
+    }
+
+    #[test]
+    fn sparse_eq_generate_uses_bundle_handoff_without_breaking_metadata() {
+        let values = vec!["z".to_string(), "y".to_string()];
+        let n_steps = 5;
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+
+        solver
+            .try_eq_generate(None, None)
+            .expect("sparse handoff should generate through the fallible API");
+
+        assert!(solver.jac.is_some());
+        assert!(!solver.variable_string.is_empty());
+        assert!(!solver.BC_position_and_value.is_empty());
+        assert_eq!(solver.bounds_vec.len(), values.len() * n_steps);
+        assert_eq!(solver.rel_tolerance_vec.len(), values.len() * n_steps);
+        let _ = &solver.fun;
+    }
+
+    #[test]
+    fn build_solver_request_carries_optional_aot_resolver() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_aot_resolver(Some(AotResolver::new(AotRegistry::new())));
+
+        let request = solver.build_solver_request(None, None);
+        assert!(request.resolver.is_some());
+    }
+
+    #[test]
+    fn build_solver_request_uses_backend_policy_override_when_present() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+
+        let request = solver.build_solver_request(None, None);
+        assert_eq!(request.backend_policy, BackendSelectionPolicy::NumericOnly);
+    }
+
+    #[test]
+    fn generated_backend_config_is_exposed_as_user_facing_solver_setting() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+
+        let config = GeneratedBackendConfig::with_parts(
+            Some(BackendSelectionPolicy::NumericOnly),
+            Some(AotResolver::new(AotRegistry::new())),
+        );
+        solver.set_generated_backend_config(config);
+
+        let request = solver.build_solver_request(None, None);
+        assert_eq!(request.backend_policy, BackendSelectionPolicy::NumericOnly);
+        assert!(request.resolver.is_some());
+        assert_eq!(
+            solver.generated_backend_config().backend_policy_override,
+            Some(BackendSelectionPolicy::NumericOnly)
+        );
+    }
+
+    #[test]
+    fn generated_backend_config_can_be_applied_during_solver_construction() {
+        let solver = sparse_surface_test_solver_with_tolerances().with_generated_backend_config(
+            GeneratedBackendConfig::with_parts(
+                Some(BackendSelectionPolicy::NumericOnly),
+                Some(AotResolver::new(AotRegistry::new())),
+            ),
+        );
+
+        assert_eq!(
+            solver.generated_backend_config().backend_policy_override,
+            Some(BackendSelectionPolicy::NumericOnly)
+        );
+        assert!(solver.generated_backend_config().resolver.is_some());
+    }
+
+    #[test]
+    fn build_solver_request_carries_surface_aot_policies() {
+        let config = GeneratedBackendConfig::new()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
+            .with_resolver(Some(AotResolver::new(AotRegistry::new())))
+            .with_aot_execution_policy(AotExecutionPolicy::Parallel(ParallelExecutorConfig {
+                jobs_per_worker: 2,
+                max_residual_jobs: Some(4),
+                max_sparse_jobs: Some(2),
+                fallback_policy: ParallelFallbackPolicy::Never,
+            }))
+            .with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release,
+            })
+            .with_aot_chunking_policy(AotChunkingPolicy::with_parts(
+                Some(ResidualChunkingStrategy::ByOutputCount {
+                    max_outputs_per_chunk: 8,
+                }),
+                Some(SparseChunkingStrategy::ByRowCount { rows_per_chunk: 4 }),
+            ));
+
+        let mut solver =
+            sparse_surface_test_solver_with_tolerances().with_generated_backend_config(config);
+
+        let request = solver.build_solver_request(None, None);
+        assert_eq!(
+            request.aot_build_policy,
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+        assert_eq!(
+            request.aot_chunking_policy.residual,
+            Some(ResidualChunkingStrategy::ByOutputCount {
+                max_outputs_per_chunk: 8
+            })
+        );
+        assert_eq!(
+            request.aot_chunking_policy.sparse_jacobian,
+            Some(SparseChunkingStrategy::ByRowCount { rows_per_chunk: 4 })
+        );
+        match request.aot_execution_policy {
+            AotExecutionPolicy::Parallel(inner) => {
+                assert_eq!(inner.jobs_per_worker, 2);
+                assert_eq!(inner.max_residual_jobs, Some(4));
+                assert_eq!(inner.max_sparse_jobs, Some(2));
+            }
+            other => std::panic!("expected parallel execution policy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eq_generate_build_if_missing_saves_compiled_resolver_for_next_request() {
+        let mut solver = sparse_surface_test_solver_with_tolerances()
+            .with_generated_backend_config(
+                GeneratedBackendConfig::new()
+                    .with_backend_policy_override(Some(
+                        BackendSelectionPolicy::PreferAotThenLambdify,
+                    ))
+                    .with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
+                        profile: AotBuildProfile::Release,
+                    }),
+            );
+
+        solver
+            .try_eq_generate(None, None)
+            .expect("build-if-missing path should generate through the fallible API");
+
+        let saved_resolver = solver
+            .generated_backend_config()
+            .resolver
+            .as_ref()
+            .expect("first build-if-missing run should save updated resolver");
+        assert!(
+            !saved_resolver.registry().is_empty(),
+            "first build-if-missing run should register at least one compiled artifact"
+        );
+
+        let updated_config = solver
+            .generated_backend_config()
+            .clone()
+            .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+        solver.set_generated_backend_config(updated_config);
+
+        let next_request = solver.build_solver_request(None, None);
+        assert!(next_request.resolver.is_some());
+
+        let err = next_request.generate().err().expect(
+            "next request should now see compiled artifact and fail only at runtime linking",
+        );
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::CompiledAotRuntimeUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn second_eq_generate_reuses_saved_resolver_and_runs_linked_compiled_backend() {
+        let values = vec!["z".to_string(), "y".to_string()];
+        let n_steps = 5;
+        let mut solver = sparse_surface_test_solver_with_tolerances()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
+            .with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release,
+            });
+
+        solver
+            .try_eq_generate(None, None)
+            .expect("first sparse generation should succeed through the fallible API");
+        let saved_resolver = solver
+            .generated_backend_config()
+            .resolver
+            .clone()
+            .expect("first build-if-missing run should save updated resolver");
+
+        let y = Col::from_fn(values.len() * n_steps, |index| 0.2 + index as f64 * 0.01);
+        let baseline = solver.fun.call(0.0, &y).to_DVectorType();
+
+        let problem_keys = saved_resolver.registry().problem_keys();
+        assert_eq!(
+            problem_keys.len(),
+            1,
+            "build-if-missing should register exactly one artifact for this isolated test"
+        );
+        let problem_key = problem_keys[0].clone();
+        let resolved = saved_resolver.resolve_by_problem_key(&problem_key);
+        assert!(
+            resolved.is_compiled(),
+            "saved resolver should see compiled artifact"
+        );
+
+        let baseline_values: Vec<f64> = baseline.iter().copied().collect();
+        register_linked_sparse_backend(LinkedSparseAotBackend::new(
+            problem_key.clone(),
+            resolved.registered.manifest.io.residual_len,
+            (
+                resolved.registered.manifest.io.jacobian_rows,
+                resolved.registered.manifest.io.jacobian_cols,
+            ),
+            resolved.registered.manifest.io.jacobian_nnz.unwrap_or(0),
+            Arc::new(move |_args, out| {
+                for (dst, src) in out.iter_mut().zip(baseline_values.iter()) {
+                    *dst = *src + 123.0;
+                }
+            }),
+            Arc::new(move |_args, out| {
+                for (index, value) in out.iter_mut().enumerate() {
+                    *value = 700.0 + index as f64;
+                }
+            }),
+        ));
+
+        solver.set_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+        solver
+            .try_eq_generate(None, None)
+            .expect("second sparse generation should reuse resolver through the fallible API");
+        let residual = solver.fun.call(0.0, &y).to_DVectorType();
+
+        for (actual, expected) in residual.iter().zip(baseline.iter()) {
+            assert!((actual - (expected + 123.0)).abs() < 1e-10);
+        }
+
+        unregister_linked_sparse_backend(&problem_key);
+    }
+
+    #[test]
+    fn try_eq_generate_surfaces_missing_prebuilt_aot_as_typed_error() {
+        let mut solver =
+            sparse_surface_test_solver_with_tolerances().with_sparse_aot_require_prebuilt();
+
+        let err = solver
+            .try_eq_generate(None, None)
+            .expect_err("try_eq_generate should return a typed AOT availability error");
+
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::CompiledAotRequiredButUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn try_solve_surfaces_missing_prebuilt_aot_as_typed_error() {
+        let mut solver =
+            sparse_surface_test_solver_with_tolerances().with_sparse_aot_require_prebuilt();
+        solver.dont_save_log(true);
+
+        let err = solver
+            .try_solve()
+            .expect_err("try_solve should return a typed AOT availability error");
+
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::CompiledAotRequiredButUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn try_solve_surfaces_invalid_loglevel_as_typed_error() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.loglevel = Some("trace".to_string());
+
+        let err = solver
+            .try_solve()
+            .expect_err("invalid loglevel should be returned as a typed error");
+
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::InvalidLogLevel { ref level } if level == "trace"
+        ));
+    }
+}

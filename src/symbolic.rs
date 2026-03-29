@@ -162,17 +162,93 @@ pub mod symbolic_functions2;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 //pub mod symbolic_functions_BVP_;
+pub mod CodegenIR;
+/// build-step request/result metadata for separately compiled generated AOT crates
+pub mod codegen_aot_build;
+/// writer for tiny separately compiled generated AOT crates
+pub mod codegen_aot_crate;
+/// prepared-problem -> CodegenModule / generated-crate driver helpers
+pub mod codegen_aot_driver;
+/// registry of materialized generated AOT crates and artifact metadata
+pub mod codegen_aot_registry;
+/// resolution of registered generated AOT artifacts back into solver-facing metadata
+pub mod codegen_aot_resolution;
+/// process-local registry of statically linked generated AOT backends
+pub mod codegen_aot_runtime_link;
+/// backend preference selection layer above prepared problems and AOT resolution
+pub mod codegen_backend_selection;
+// Shared test-only layers used by the staged AOT slices.
+#[cfg(test)]
+pub(crate) mod codegen_adapters;
+#[cfg(test)]
+mod codegen_aot_lifecycle_tests;
+#[cfg(test)]
+mod codegen_bvp_performance_tests;
+#[cfg(test)]
+mod codegen_dense_performance_tests;
+#[cfg(test)]
+pub(crate) mod codegen_generated_fixtures;
+#[cfg(test)]
+mod codegen_ivp_performance_tests;
+/// owned metadata manifests for prepared AOT problems
+pub mod codegen_manifest;
+/// sequential and future parallel orchestration over generated chunk functions
+pub mod codegen_orchestrator;
+#[cfg(test)]
+mod codegen_parameterized_ivp_tests;
+#[cfg(test)]
+mod codegen_parameterized_tests;
+#[cfg(test)]
+mod codegen_pipeline_comparison_tests;
+/// solver-facing provider traits and backend metadata for future AOT lifecycle
+pub mod codegen_provider_api;
+/// solver-facing runtime plans for AOT-generated residuals and Jacobians
+pub mod codegen_runtime_api;
+/// scenario and task descriptions for symbolic code generation
+pub mod codegen_tasks;
+#[cfg(test)]
+pub(crate) mod codegen_test_support;
 mod lambdify_performance_tests;
+pub mod pretty_print;
 mod symbolic_engine_tests;
+#[cfg(test)]
+mod symbolic_functions_BVP_tests;
 /// basic functionality for symbolic integration (only elementary functions)
 /// also numerical integration of symbolic functions
 pub mod symbolic_integration;
+pub(crate) mod symbolic_ir;
 pub mod symbolic_lambdify;
+pub(crate) mod symbolic_metadata;
 pub mod symbolic_simd;
 mod symbolic_simplify;
 pub mod symbolic_traits;
 /// matrices and vectors of symbolic expressions
 pub mod symbolic_vectors;
+// Checked-in generated fixtures used by codegen correctness/perf tests.
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_bvp_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_bvp_huge_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_bvp_large_chunk_variants;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_bvp_large_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_bvp_large_superblock_variants;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_dense_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_ivp_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_parameterized_dense_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_parameterized_ivp_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_stress_above_threshold_bvp_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_stress_bvp_fixtures;
+#[cfg(test)]
+pub(crate) mod test_codegen_generated_stress_large_bvp_fixtures;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding
 /// _____________________________________________________________________________________________________________________________________________

@@ -72,7 +72,7 @@ pub enum NonlinEquation {
     TwoPointBVP,
 }
 
-const A: f64 = 1.0;
+const A: f64 = 4.0;
 impl NonlinEquation {
     pub fn setup(&self) -> Vec<Expr> {
         match self {
@@ -96,8 +96,12 @@ impl NonlinEquation {
             }
             NonlinEquation::TwoPointBVP => {
                 let _values = vec!["y".to_string(), "z".to_string()];
-                let eqs = vec!["z", "-(2.0/4.0)*(1+2.0*ln( (y) ))*y"];
-                let vec_eqs: Vec<Expr> = Expr::parse_vector_expression(eqs);
+                let eqs = vec![
+                    "z".to_string(),
+                    format!("-({:.1}/{:.1})*(1+2.0*ln((y)))*y", 2.0, A),
+                ];
+                let vec_eqs: Vec<Expr> =
+                    Expr::parse_vector_expression(eqs.iter().map(|s| s.as_str()).collect());
                 vec_eqs
             }
         } // end match
@@ -204,7 +208,7 @@ impl NonlinEquation {
                 } else {
                     100
                 };
-                let ressult = " exp(-x^2/1.0) ".to_string(); //
+                let ressult = format!(" exp(-x^2/{}) ", A); //
                 let expr = Expr::parse_expression(&ressult);
                 let y = Expr::lambdify1D_from_linspace(&expr, start, end, num_values);
                 plot_from_expr(ressult, "x", "y_exact", start, end, num_values);

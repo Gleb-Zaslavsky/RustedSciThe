@@ -29,7 +29,7 @@
 //! - Memoization-friendly design for repeated simplification calls
 
 use crate::symbolic::symbolic_engine::Expr;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 impl Expr {
     //___________________________________SIMPLIFICATION____________________________________
@@ -113,6 +113,240 @@ impl Expr {
             Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.nozeros())),
         }
     } // nozeros
+
+    /// Normalize an addition pair using the shared simplification rules.
+    pub(crate) fn normalize_add_pair(lhs: Expr, rhs: Expr) -> Expr {
+        match (&lhs, &rhs) {
+            (Expr::Const(a), Expr::Const(b)) => Expr::Const(a + b),
+            (Expr::Const(0.0), _) => rhs,
+            (_, Expr::Const(0.0)) => lhs,
+            _ => {
+                let expr = Expr::Add(Box::new(lhs), Box::new(rhs));
+                let normalized = Self::simplify_polynomial(&expr).unwrap_or(expr);
+                Self::canonicalize_addition(normalized)
+            }
+        }
+    }
+
+    /// Normalize a subtraction pair using the shared simplification rules.
+    pub(crate) fn normalize_sub_pair(lhs: Expr, rhs: Expr) -> Expr {
+        match (&lhs, &rhs) {
+            (Expr::Const(a), Expr::Const(b)) => Expr::Const(a - b),
+            (_, Expr::Const(0.0)) => lhs,
+            _ if lhs == rhs => Expr::Const(0.0),
+            _ => {
+                let neg_rhs = Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(rhs)).simplify_();
+                let add_expr = Expr::Add(Box::new(lhs), Box::new(neg_rhs));
+                let normalized = Self::simplify_polynomial(&add_expr).unwrap_or(add_expr);
+                Self::normalize_basic(normalized)
+            }
+        }
+    }
+
+    /// Normalize a multiplication pair using the shared simplification rules.
+    pub(crate) fn normalize_mul_pair(lhs: Expr, rhs: Expr) -> Expr {
+        match (&lhs, &rhs) {
+            (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b),
+            (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0),
+            (Expr::Const(1.0), _) => rhs,
+            (_, Expr::Const(1.0)) => lhs,
+            _ => Self::normalize_basic(Expr::Mul(Box::new(lhs), Box::new(rhs))),
+        }
+    }
+
+    /// Normalize a division pair using the shared simplification rules.
+    pub(crate) fn normalize_div_pair(lhs: Expr, rhs: Expr) -> Expr {
+        match (&lhs, &rhs) {
+            (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b),
+            (Expr::Const(0.0), _) => Expr::Const(0.0),
+            (_, Expr::Const(1.0)) => lhs,
+            _ if lhs == rhs => Expr::Const(1.0),
+            _ => {
+                let (lhs_coeff, mut lhs_factors) = collect_factor_powers(&lhs);
+                let (rhs_coeff, rhs_factors) = collect_factor_powers(&rhs);
+
+                if rhs_coeff == 0.0 {
+                    return Expr::Div(Box::new(lhs), Box::new(rhs));
+                }
+
+                let mut denominator_factors = Vec::new();
+                let mut cancelled_anything = lhs_coeff != 1.0 || rhs_coeff != 1.0;
+
+                for (rhs_base, rhs_exp) in rhs_factors {
+                    if let Some((_, lhs_exp)) = lhs_factors
+                        .iter_mut()
+                        .find(|(lhs_base, _)| *lhs_base == rhs_base)
+                    {
+                        *lhs_exp = Self::normalize_sub_pair(lhs_exp.clone(), rhs_exp);
+                        cancelled_anything = true;
+                    } else {
+                        denominator_factors.push((rhs_base, rhs_exp));
+                    }
+                }
+
+                if !cancelled_anything {
+                    return Expr::Div(Box::new(lhs), Box::new(rhs));
+                }
+
+                let numerator = Self::build_factor_product(lhs_coeff / rhs_coeff, lhs_factors);
+                let denominator = Self::build_factor_product(1.0, denominator_factors);
+
+                match denominator {
+                    Expr::Const(1.0) => numerator,
+                    _ => Expr::Div(Box::new(numerator), Box::new(denominator)),
+                }
+            }
+        }
+    }
+
+    /// Normalize a power pair using the shared simplification rules.
+    pub(crate) fn normalize_pow_pair(base: Expr, exp: Expr) -> Expr {
+        match (&base, &exp) {
+            (Expr::Const(a), Expr::Const(b)) => Expr::Const(a.powf(*b)),
+            (_, Expr::Const(0.0)) => Expr::Const(1.0),
+            (_, Expr::Const(1.0)) => base,
+            (Expr::Const(0.0), _) => Expr::Const(0.0),
+            (Expr::Const(1.0), _) => Expr::Const(1.0),
+            (Expr::Pow(inner_base, inner_exp), _) => {
+                let new_exp = Self::normalize_mul_pair(inner_exp.as_ref().clone(), exp);
+                Self::normalize_pow_pair(inner_base.as_ref().clone(), new_exp)
+            }
+            _ => Expr::Pow(Box::new(base), Box::new(exp)),
+        }
+    }
+
+    /// Apply the shared local normalization pass to a single expression node.
+    ///
+    /// This pass is intentionally lightweight: it assumes child nodes were
+    /// already simplified and only canonicalizes the current operation. It is
+    /// the common entry point for binary local normalization so `Add`, `Sub`,
+    /// `Mul`, `Div`, and `Pow` all go through one dispatch layer.
+    pub(crate) fn normalize_basic(expr: Expr) -> Expr {
+        match expr {
+            Expr::Add(lhs, rhs) => Self::normalize_add_pair(*lhs, *rhs),
+            Expr::Sub(lhs, rhs) => Self::normalize_sub_pair(*lhs, *rhs),
+            Expr::Mul(_, _) => Self::canonicalize_multiplication(expr),
+            Expr::Div(lhs, rhs) => Self::normalize_div_pair(*lhs, *rhs),
+            Expr::Pow(base, exp) => Self::normalize_pow_pair(*base, *exp),
+            other => other,
+        }
+    }
+
+    /// Canonicalize an addition tree into a deterministic expression form.
+    ///
+    /// This helper flattens nested additions, folds constant terms, sorts the
+    /// remaining terms in a stable order, and rebuilds the result using `Add`
+    /// and `Sub` so that negative terms keep a readable sign.
+    fn canonicalize_addition(expr: Expr) -> Expr {
+        let mut terms = Vec::new();
+        flatten_add(&expr, &mut terms);
+
+        let mut constant_sum = 0.0;
+        let mut non_constant_terms = Vec::new();
+
+        for term in terms {
+            match term {
+                Expr::Const(value) => constant_sum += value,
+                other => non_constant_terms.push(other),
+            }
+        }
+
+        non_constant_terms.retain(|term| *term != Expr::Const(0.0));
+        non_constant_terms.sort_by_key(add_term_sort_key);
+
+        if constant_sum != 0.0 || non_constant_terms.is_empty() {
+            non_constant_terms.push(Expr::Const(constant_sum));
+        }
+
+        Self::build_addition_chain(non_constant_terms)
+    }
+
+    /// Build an addition chain with stable sign handling.
+    ///
+    /// Positive terms are appended with `Add`. Negative terms after the first
+    /// position are appended with `Sub` so the final display stays readable.
+    fn build_addition_chain(terms: Vec<Expr>) -> Expr {
+        let mut iter = terms.into_iter();
+        let mut result = iter.next().unwrap_or(Expr::Const(0.0));
+
+        for term in iter {
+            if let Some(positive_term) = extract_negative_term(&term) {
+                result = Expr::Sub(Box::new(result), Box::new(positive_term));
+            } else {
+                result = Expr::Add(Box::new(result), Box::new(term));
+            }
+        }
+
+        result
+    }
+
+    /// Canonicalize a multiplication tree into a flattened deterministic form.
+    ///
+    /// The method collects all numeric coefficients into one leading constant,
+    /// combines repeated factors with the same base into powers, sorts the
+    /// resulting factors, and then rebuilds a stable multiplication chain.
+    fn canonicalize_multiplication(expr: Expr) -> Expr {
+        let (coefficient, mut power_factors) = collect_factor_powers(&expr);
+
+        if coefficient == 0.0 {
+            return Expr::Const(0.0);
+        }
+
+        power_factors.sort_by_key(|(base, exp)| mul_factor_sort_key(base, exp));
+
+        let mut canonical_factors = Vec::new();
+        if coefficient != 1.0 || power_factors.is_empty() {
+            canonical_factors.push(Expr::Const(coefficient));
+        }
+
+        for (base, exp) in power_factors {
+            match exp {
+                Expr::Const(0.0) => {}
+                Expr::Const(1.0) => canonical_factors.push(base),
+                other_exp => canonical_factors.push(Self::normalize_pow_pair(base, other_exp)),
+            }
+        }
+
+        if canonical_factors.is_empty() {
+            Expr::Const(1.0)
+        } else {
+            canonical_factors
+                .into_iter()
+                .reduce(|lhs, rhs| Expr::Mul(Box::new(lhs), Box::new(rhs)))
+                .unwrap()
+        }
+    }
+
+    /// Rebuild a product from a numeric coefficient and symbolic power factors.
+    ///
+    /// The resulting expression keeps the same canonical factor order as the
+    /// multiplication normalizer and drops neutral factors such as exponent `0`
+    /// and coefficient `1` when possible.
+    fn build_factor_product(coefficient: f64, mut power_factors: Vec<(Expr, Expr)>) -> Expr {
+        if coefficient == 0.0 {
+            return Expr::Const(0.0);
+        }
+
+        power_factors.retain(|(_, exp)| *exp != Expr::Const(0.0));
+        power_factors.sort_by_key(|(base, exp)| mul_factor_sort_key(base, exp));
+
+        let mut factors = Vec::new();
+        if coefficient != 1.0 || power_factors.is_empty() {
+            factors.push(Expr::Const(coefficient));
+        }
+
+        for (base, exp) in power_factors {
+            match exp {
+                Expr::Const(1.0) => factors.push(base),
+                other_exp => factors.push(Self::normalize_pow_pair(base, other_exp)),
+            }
+        }
+
+        factors
+            .into_iter()
+            .reduce(Self::normalize_mul_pair)
+            .unwrap_or(Expr::Const(1.0))
+    }
 
     /// Simplifies expressions by evaluating constant arithmetic operations.
     ///
@@ -262,197 +496,26 @@ impl Expr {
         match self {
             Expr::Var(_) => self.clone(),
             Expr::Const(_) => self.clone(),
-            Expr::Add(lhs, rhs) => {
-                let lhs = lhs.simplify_();
-                let rhs = rhs.simplify_();
-                match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a + b), // (a) + (b) = (a + b)
-                    (Expr::Const(0.0), _) => rhs,                           // 0 + x = x
-                    (_, Expr::Const(0.0)) => lhs,                           // x + 0 = x
-                    _ => {
-                        let expr = Expr::Add(Box::new(lhs), Box::new(rhs));
-                        Self::simplify_polynomial(&expr).unwrap_or(expr)
-                    }
-                }
-            }
-            Expr::Sub(lhs, rhs) => {
-                let lhs = lhs.simplify_();
-                let rhs = rhs.simplify_();
-                match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a - b), // (a) - (b) = (a - b)
-                    (_, Expr::Const(0.0)) => lhs,                           // x - 0 = x
-                    // Handle x - x = 0
-                    _ if lhs == rhs => Expr::Const(0.0),
-                    _ => {
-                        // Convert subtraction to addition: a - b = a + (-1)*b
-                        let neg_rhs =
-                            Expr::Mul(Box::new(Expr::Const(-1.0)), Box::new(rhs)).simplify_();
-                        let add_expr = Expr::Add(Box::new(lhs), Box::new(neg_rhs));
-                        Self::simplify_polynomial(&add_expr).unwrap_or(add_expr)
-                    }
-                }
-            }
-            Expr::Mul(lhs, rhs) => {
-                let lhs = lhs.simplify_();
-                let rhs = rhs.simplify_();
-                match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a * b), // (a) * (b) = (a * b)
-                    (Expr::Const(0.0), _) | (_, Expr::Const(0.0)) => Expr::Const(0.0), // 0 * x = 0
-                    (Expr::Const(1.0), _) => rhs,                           // 1 * x = x
-                    (_, Expr::Const(1.0)) => lhs,                           // x * 1 = x
-                    // Power rules: x^a * x^b = x^(a+b)
-                    (Expr::Pow(base1, exp1), Expr::Pow(base2, exp2)) if base1 == base2 => {
-                        let new_exp = Expr::Add(exp1.clone(), exp2.clone()).simplify_();
-                        Expr::Pow(base1.clone(), Box::new(new_exp))
-                    }
-                    (Expr::Var(v1), Expr::Pow(base, exp))
-                    | (Expr::Pow(base, exp), Expr::Var(v1)) => {
-                        if let Expr::Var(v2) = base.as_ref() {
-                            if v1 == v2 {
-                                let new_exp =
-                                    Expr::Add(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
-                                return Expr::Pow(
-                                    Box::new(Expr::Var(v1.clone())),
-                                    Box::new(new_exp),
-                                );
-                            }
-                        }
-                        Expr::Mul(Box::new(lhs), Box::new(rhs))
-                    }
-                    (Expr::Var(v1), Expr::Var(v2)) if v1 == v2 => {
-                        Expr::Pow(Box::new(Expr::Var(v1.clone())), Box::new(Expr::Const(2.0)))
-                    }
-                    // Handle nested multiplications with constants: (c1 * expr) * c2 = (c1 * c2) * expr
-                    // This is crucial for collecting constants in expressions like (2 * x) * 3 = 6 * x
-                    (Expr::Mul(inner_lhs, inner_rhs), Expr::Const(c)) => {
-                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
-                            (Expr::Const(c1), _) => {
-                                // Pattern: (c1 * expr) * c2 = (c1 * c2) * expr
-                                Expr::Mul(Box::new(Expr::Const(c1 * c)), inner_rhs.clone())
-                                    .simplify_()
-                            }
-                            (_, Expr::Const(c1)) => {
-                                // Pattern: (expr * c1) * c2 = (c1 * c2) * expr
-                                Expr::Mul(Box::new(Expr::Const(c1 * c)), inner_lhs.clone())
-                                    .simplify_()
-                            }
-                            _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                        }
-                    }
-                    // Symmetric case: c2 * (c1 * expr) = (c1 * c2) * expr
-                    (Expr::Const(c), Expr::Mul(inner_lhs, inner_rhs)) => {
-                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
-                            (Expr::Const(c1), _) => {
-                                // Pattern: c2 * (c1 * expr) = (c2 * c1) * expr
-                                Expr::Mul(Box::new(Expr::Const(c * c1)), inner_rhs.clone())
-                                    .simplify_()
-                            }
-                            (_, Expr::Const(c1)) => {
-                                // Pattern: c2 * (expr * c1) = (c2 * c1) * expr
-                                Expr::Mul(Box::new(Expr::Const(c * c1)), inner_lhs.clone())
-                                    .simplify_()
-                            }
-                            _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                        }
-                    }
-                    _ => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                }
-            }
-            Expr::Div(lhs, rhs) => {
-                let lhs = lhs.simplify_();
-                let rhs = rhs.simplify_();
-                match (&lhs, &rhs) {
-                    (Expr::Const(a), Expr::Const(b)) if *b != 0.0 => Expr::Const(a / b), // (a) / (b) = (a / b)
-                    (Expr::Const(0.0), _) => Expr::Const(0.0), // 0 / x = 0
-                    (_, Expr::Const(1.0)) => lhs,              // x / 1 = x
-                    // Power rules: x^a / x^b = x^(a-b)
-                    (Expr::Pow(base1, exp1), Expr::Pow(base2, exp2)) if base1 == base2 => {
-                        let new_exp = Expr::Sub(exp1.clone(), exp2.clone()).simplify_();
-                        match new_exp {
-                            Expr::Const(0.0) => Expr::Const(1.0),
-                            _ => Expr::Pow(base1.clone(), Box::new(new_exp)),
-                        }
-                    }
-                    (Expr::Var(v1), Expr::Pow(base, exp)) => {
-                        if let Expr::Var(v2) = base.as_ref() {
-                            if v1 == v2 {
-                                let new_exp =
-                                    Expr::Sub(Box::new(Expr::Const(1.0)), exp.clone()).simplify_();
-                                match new_exp {
-                                    Expr::Const(0.0) => return Expr::Const(1.0),
-                                    _ => {
-                                        return Expr::Pow(
-                                            Box::new(Expr::Var(v1.clone())),
-                                            Box::new(new_exp),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Expr::Div(Box::new(lhs), Box::new(rhs))
-                    }
-                    (Expr::Pow(base, exp), Expr::Var(v2)) => {
-                        if let Expr::Var(v1) = base.as_ref() {
-                            if v1 == v2 {
-                                let new_exp =
-                                    Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0))).simplify_();
-                                match new_exp {
-                                    Expr::Const(0.0) => return Expr::Const(1.0),
-                                    _ => {
-                                        return Expr::Pow(
-                                            Box::new(Expr::Var(v1.clone())),
-                                            Box::new(new_exp),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Expr::Div(Box::new(lhs), Box::new(rhs))
-                    }
-                    (Expr::Var(v1), Expr::Var(v2)) if v1 == v2 => Expr::Const(1.0),
-                    // Handle division of multiplication by constant: (c1 * expr) / c2 = (c1/c2) * expr
-                    (Expr::Mul(inner_lhs, inner_rhs), Expr::Const(c)) if *c != 0.0 => {
-                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
-                            (Expr::Const(c1), _) => {
-                                Expr::Mul(Box::new(Expr::Const(c1 / c)), inner_rhs.clone())
-                                    .simplify_()
-                            }
-                            (_, Expr::Const(c1)) => {
-                                Expr::Mul(Box::new(Expr::Const(c1 / c)), inner_lhs.clone())
-                                    .simplify_()
-                            }
-                            _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
-                        }
-                    }
-                    // Handle division by multiplication: expr / (c1 * c2) = expr / (c1*c2)
-                    (_, Expr::Mul(inner_lhs, inner_rhs)) => {
-                        match (inner_lhs.as_ref(), inner_rhs.as_ref()) {
-                            (Expr::Const(c1), Expr::Const(c2)) => {
-                                Expr::Div(Box::new(lhs), Box::new(Expr::Const(c1 * c2))).simplify_()
-                            }
-                            _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
-                        }
-                    }
-                    _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
-                }
-            }
-            Expr::Pow(base, exp) => {
-                let base = base.simplify_();
-                let exp = exp.simplify_();
-                match (&base, &exp) {
-                    (Expr::Const(a), Expr::Const(b)) => Expr::Const(a.powf(*b)), // (a) ^ (b) = (a ^ b)
-                    (_, Expr::Const(0.0)) => Expr::Const(1.0),                   // x ^ 0 = 1
-                    (_, Expr::Const(1.0)) => base,                               // x ^ 1 = x
-                    (Expr::Const(0.0), _) => Expr::Const(0.0),                   // 0 ^ x = 0
-                    (Expr::Const(1.0), _) => Expr::Const(1.0),                   // 1 ^ x = 1
-                    // (x^a)^b = x^(a*b)
-                    (Expr::Pow(inner_base, inner_exp), _) => {
-                        let new_exp = Expr::Mul(inner_exp.clone(), Box::new(exp)).simplify_();
-                        Expr::Pow(inner_base.clone(), Box::new(new_exp))
-                    }
-                    _ => Expr::Pow(Box::new(base), Box::new(exp)),
-                }
-            }
+            Expr::Add(lhs, rhs) => Self::normalize_basic(Expr::Add(
+                Box::new(lhs.simplify_()),
+                Box::new(rhs.simplify_()),
+            )),
+            Expr::Sub(lhs, rhs) => Self::normalize_basic(Expr::Sub(
+                Box::new(lhs.simplify_()),
+                Box::new(rhs.simplify_()),
+            )),
+            Expr::Mul(lhs, rhs) => Self::normalize_basic(Expr::Mul(
+                Box::new(lhs.simplify_()),
+                Box::new(rhs.simplify_()),
+            )),
+            Expr::Div(lhs, rhs) => Self::normalize_basic(Expr::Div(
+                Box::new(lhs.simplify_()),
+                Box::new(rhs.simplify_()),
+            )),
+            Expr::Pow(base, exp) => Self::normalize_basic(Expr::Pow(
+                Box::new(base.simplify_()),
+                Box::new(exp.simplify_()),
+            )),
             Expr::Exp(expr) => {
                 let expr = expr.simplify_();
                 match &expr {
@@ -584,7 +647,7 @@ impl Expr {
     /// # Returns
     /// * `Some(simplified_expr)` - If polynomial simplification was successful
     /// * `None` - If expression is not polynomial or no simplification possible
-    fn simplify_polynomial(expr: &Expr) -> Option<Expr> {
+    pub(crate) fn simplify_polynomial(expr: &Expr) -> Option<Expr> {
         let mut terms = Vec::new();
         flatten_add(expr, &mut terms);
         if terms.len() < 2 {
@@ -860,7 +923,7 @@ fn flatten_mul(expr: &Expr, out: &mut Vec<Expr>) {
 ///
 /// ## Algorithm
 ///
-/// 1. **Initialize**: Create empty HashMap for monomial → coefficient mapping
+/// 1. **Initialize**: Create empty ordered map for monomial → coefficient mapping
 /// 2. **Process Each Term**: Extract monomial and coefficient using `extract_monomial`
 /// 3. **Accumulate**: Add coefficient to existing entry or create new entry
 /// 4. **Return**: Complete mapping of monomials to their total coefficients
@@ -879,9 +942,9 @@ fn flatten_mul(expr: &Expr, out: &mut Vec<Expr>) {
 /// * `terms` - List of terms to collect
 ///
 /// # Returns
-/// HashMap mapping each unique monomial to its total coefficient
-fn collect_add_terms(terms: &[Expr]) -> HashMap<MonomialKey, f64> {
-    let mut poly = HashMap::new();
+/// Ordered map mapping each unique monomial to its total coefficient
+fn collect_add_terms(terms: &[Expr]) -> BTreeMap<MonomialKey, f64> {
+    let mut poly = BTreeMap::new();
     for t in terms {
         let (mon, coeff) = extract_monomial(t);
         *poly.entry(mon).or_insert(0.0) += coeff;
@@ -889,7 +952,143 @@ fn collect_add_terms(terms: &[Expr]) -> HashMap<MonomialKey, f64> {
     poly
 }
 
+/// Build a stable sort key for addition terms.
+///
+/// Polynomial terms are ordered before general symbolic terms. Pure constants
+/// are always placed last. Within polynomial terms, higher total degree comes
+/// first and ties are resolved lexicographically by monomial structure.
+fn add_term_sort_key(expr: &Expr) -> (u8, i32, String) {
+    let (monomial, coeff) = extract_monomial(expr);
+    if coeff != 0.0 {
+        if monomial.0.is_empty() {
+            (2, 0, format!("{}", expr))
+        } else {
+            let degree = monomial.0.values().sum::<i32>();
+            (0, -degree, format!("{:?}", monomial))
+        }
+    } else {
+        (1, 0, format!("{}", expr))
+    }
+}
+
+/// Split a factor into `base^exponent` form.
+///
+/// Plain factors are treated as exponent `1`, while explicit powers keep their
+/// stored base and exponent unchanged.
+fn split_power_factor(expr: Expr) -> (Expr, Expr) {
+    match expr {
+        Expr::Pow(base, exp) => (*base, *exp),
+        other => (other, Expr::Const(1.0)),
+    }
+}
+
+/// Collect a product into a numeric coefficient and symbolic power factors.
+///
+/// This helper is the shared low-level decomposition used by multiplication
+/// canonicalization and monomial extraction. It flattens nested `Mul` nodes,
+/// multiplies all numeric constants together, and rewrites every non-constant
+/// factor into `base^exponent` form.
+fn collect_factor_powers(expr: &Expr) -> (f64, Vec<(Expr, Expr)>) {
+    let mut factors = Vec::new();
+    flatten_mul(expr, &mut factors);
+
+    let mut coefficient = 1.0;
+    let mut power_factors = Vec::new();
+
+    for factor in factors {
+        match factor {
+            Expr::Const(value) => coefficient *= value,
+            other => {
+                let (base, exp) = split_power_factor(other);
+                merge_power_factor(&mut power_factors, base, exp);
+            }
+        }
+    }
+
+    (coefficient, power_factors)
+}
+
+/// Merge one power factor into the current collection.
+///
+/// When the same base already exists, the exponents are added using the shared
+/// normalization rules. This works for variables and for more complex bases
+/// such as `(x + y)` or `sin(x)`.
+fn merge_power_factor(power_factors: &mut Vec<(Expr, Expr)>, base: Expr, exp: Expr) {
+    if let Some((_, existing_exp)) = power_factors
+        .iter_mut()
+        .find(|(existing_base, _)| *existing_base == base)
+    {
+        *existing_exp = Expr::normalize_add_pair(existing_exp.clone(), exp);
+    } else {
+        power_factors.push((base, exp));
+    }
+}
+
+/// Build a stable sort key for multiplication factors.
+///
+/// The canonical order keeps variables and powers before other symbolic terms
+/// and pushes additive bases to the end so the rebuilt form stays readable.
+fn mul_factor_sort_key(base: &Expr, exp: &Expr) -> (u8, String, String) {
+    let class = match base {
+        Expr::Var(_) => 0,
+        Expr::Add(_, _) | Expr::Sub(_, _) => 2,
+        _ => 1,
+    };
+
+    (class, format!("{}", base), format!("{}", exp))
+}
+
+/// Extract the positive part of a negative term.
+///
+/// This is used when rebuilding addition chains so `x + (-2*y)` becomes
+/// `x - 2*y` instead of keeping an explicit negative coefficient in the sum.
+fn extract_negative_term(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::Const(value) if *value < 0.0 => Some(Expr::Const(-value)),
+        Expr::Mul(lhs, rhs) => match (lhs.as_ref(), rhs.as_ref()) {
+            (Expr::Const(value), other) if *value < 0.0 => {
+                if *value == -1.0 {
+                    Some(other.clone())
+                } else {
+                    Some(Expr::Mul(
+                        Box::new(Expr::Const(-value)),
+                        Box::new(other.clone()),
+                    ))
+                }
+            }
+            (other, Expr::Const(value)) if *value < 0.0 => {
+                if *value == -1.0 {
+                    Some(other.clone())
+                } else {
+                    Some(Expr::Mul(
+                        Box::new(Expr::Const(-value)),
+                        Box::new(other.clone()),
+                    ))
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Extract a monomial from an expression if it’s a product of constants and variables/powers
+/// Convert a constant exponent into an exact polynomial degree when possible.
+///
+/// Only finite integer exponents are accepted. Non-integer powers such as
+/// `x^2.5` are rejected so they cannot be treated as polynomial monomials.
+fn exponent_to_integer(exp: &Expr) -> Option<i32> {
+    match exp {
+        Expr::Const(value) if value.is_finite() && value.fract() == 0.0 => Some(*value as i32),
+        _ => None,
+    }
+}
+
+/// Extract a polynomial monomial and its numeric coefficient from an expression.
+///
+/// This helper accepts products of numeric constants and variable powers with
+/// integer exponents. General symbolic factors are rejected and reported as a
+/// zero coefficient so polynomial collection can safely skip them.
 fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
     match expr {
         Expr::Const(c) => (MonomialKey(BTreeMap::new()), *c),
@@ -898,66 +1097,45 @@ fn extract_monomial(expr: &Expr) -> (MonomialKey, f64) {
             m.insert(v.clone(), 1);
             (MonomialKey(m), 1.0)
         }
-        Expr::Mul(lhs, rhs) => {
-            // Handle simple cases first - this is the fast path for common patterns
-            match (lhs.as_ref(), rhs.as_ref()) {
-                // Pattern: -1 * something or something * -1
-                // Critical for handling negated terms from distributive property
-                (Expr::Const(-1.0), other) | (other, Expr::Const(-1.0)) => {
-                    let (mon, coeff) = extract_monomial(other);
-                    (mon, -coeff) // Negate the coefficient
-                }
-                // Pattern: constant * something or something * constant
-                // Handles simple coefficient extraction like 3 * x
-                (Expr::Const(c), other) | (other, Expr::Const(c)) => {
-                    let (mon, coeff) = extract_monomial(other);
-                    (mon, c * coeff) // Multiply coefficients
-                }
-                _ => {
-                    // Fall back to flattening approach
-                    let mut factors = Vec::new();
-                    flatten_mul(expr, &mut factors);
-                    let mut coeff = 1.0;
-                    let mut map = BTreeMap::new();
-                    let mut has_non_poly = false;
+        Expr::Mul(lhs, rhs) => match (lhs.as_ref(), rhs.as_ref()) {
+            (Expr::Const(-1.0), other) | (other, Expr::Const(-1.0)) => {
+                let (mon, coeff) = extract_monomial(other);
+                (mon, -coeff)
+            }
+            (Expr::Const(c), other) | (other, Expr::Const(c)) => {
+                let (mon, coeff) = extract_monomial(other);
+                (mon, c * coeff)
+            }
+            _ => {
+                let (coeff, power_factors) = collect_factor_powers(expr);
+                let mut map = BTreeMap::new();
+                let mut has_non_poly = false;
 
-                    for f in factors {
-                        match f {
-                            Expr::Const(c) => coeff *= c,
-                            Expr::Var(v) => *map.entry(v).or_insert(0) += 1,
-                            Expr::Pow(base, exp) => {
-                                if let Expr::Var(v) = *base {
-                                    if let Expr::Const(n) = *exp {
-                                        *map.entry(v).or_insert(0) += n as i32;
-                                    } else {
-                                        has_non_poly = true;
-                                    }
-                                } else {
-                                    has_non_poly = true;
-                                }
-                            }
-                            _ => has_non_poly = true,
-                        }
+                for (base, exp) in power_factors {
+                    match (base, exponent_to_integer(&exp)) {
+                        (Expr::Var(v), Some(power)) => *map.entry(v).or_insert(0) += power,
+                        _ => has_non_poly = true,
                     }
+                }
 
-                    if has_non_poly {
-                        (MonomialKey(BTreeMap::new()), 0.0)
-                    } else {
-                        (MonomialKey(map), coeff)
-                    }
+                if has_non_poly {
+                    (MonomialKey(BTreeMap::new()), 0.0)
+                } else {
+                    (MonomialKey(map), coeff)
                 }
             }
-        }
+        },
         Expr::Pow(base, exp) => {
-            if let (Expr::Var(v), Expr::Const(n)) = (base.as_ref(), exp.as_ref()) {
+            if let (Expr::Var(v), Some(power)) = (base.as_ref(), exponent_to_integer(exp.as_ref()))
+            {
                 let mut m = BTreeMap::new();
-                m.insert(v.clone(), *n as i32);
+                m.insert(v.clone(), power);
                 (MonomialKey(m), 1.0)
             } else {
                 (MonomialKey(BTreeMap::new()), 0.0)
             }
         }
-        _ => (MonomialKey(BTreeMap::new()), 0.0), // non-poly term ignored
+        _ => (MonomialKey(BTreeMap::new()), 0.0),
     }
 }
 

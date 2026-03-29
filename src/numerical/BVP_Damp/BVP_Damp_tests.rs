@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
+    use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
+        DampedSolverOptions, NRBVP as NRBDVPd, SolverParams,
+    };
     use crate::numerical::Examples_and_utils::NonlinEquation;
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
@@ -23,11 +25,7 @@ mod tests {
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 10; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string(); //
         let strategy_params = Some(SolverParams::default());
-        let scheme = "forward".to_string();
-        let method = "Dense".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.0; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -40,7 +38,13 @@ mod tests {
         ]);
         let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
         assert_eq!(&eq_system.len(), &2);
-        let mut nr = NRBDVPd::new(
+        let options = DampedSolverOptions::dense_damped()
+            .with_strategy_params(strategy_params)
+            .with_abs_tolerance(tolerance)
+            .with_rel_tolerance(rel_tolerance)
+            .with_max_iterations(max_iterations)
+            .with_bounds(Bounds);
+        let mut nr = NRBDVPd::new_with_options(
             eq_system,
             initial_guess,
             values,
@@ -49,20 +53,12 @@ mod tests {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
-        nr.solve();
+        nr.try_solve()
+            .expect("dense damped BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap();
         let (n, _m) = solution.shape();
         assert_eq!(n, n_steps + 1);
@@ -127,7 +123,8 @@ mod tests {
             );
 
             println!("solving system");
-            nr.solve();
+            nr.try_solve()
+                .expect("enumerated dense damped BVP should solve through the fallible API");
             let solution = nr.get_result().unwrap().clone();
             let y_numer = solution.column(0);
             let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();

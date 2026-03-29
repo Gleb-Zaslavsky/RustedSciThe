@@ -1,4 +1,5 @@
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ir::{CompiledBatch, compile_many};
 use std::f64::consts::PI;
 const LAMBDIFY_METHOD: usize = 0;
 
@@ -233,6 +234,24 @@ impl Expr {
         let closure = compiled.as_closure();
         Box::new(closure)
     } // end of lambdify
+
+    /// Compile one expression into the internal instruction-based IR.
+    ///
+    /// This IR is currently used as a batch-oriented internal representation.
+    /// The single-output hot path still uses the generated closure backend in
+    /// `lambdify2()`, because repeated Jacobian/residual evaluation is dominated
+    /// by runtime rather than compile-time convenience.
+    pub(crate) fn compile_ir(&self, vars: &[&str]) -> CompiledBatch {
+        compile_many(std::slice::from_ref(self), vars)
+    }
+
+    /// Compile several expressions into one instruction tape.
+    ///
+    /// The current implementation is a minimal batch compiler without CSE. It is
+    /// kept crate-private while the Phase 2 API settles.
+    pub(crate) fn compile_many_ir(exprs: &[Expr], vars: &[&str]) -> CompiledBatch {
+        compile_many(exprs, vars)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +488,33 @@ mod tests {
         let expr = x.clone() * x.clone() + x.clone() * Expr::Const(2.0) + Expr::Const(1.0); // x^2 + 2x + 1
         let func = expr.lambdify_wrapped();
         assert_eq!(func(vec![3.0]), 16.0); // 9 + 6 + 1 = 16
+    }
+
+    #[test]
+    fn test_lambdify2_matches_closure_backend_results() {
+        let expr = Expr::parse_expression("sin(x) + x*y + 1");
+        let func1 = expr.lambdify1(&["x", "y"]);
+        let func2 = expr.lambdify2(&["x", "y"]);
+        let args = [1.25, -0.5];
+
+        assert!((func1(&args) - func2(&args)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compile_many_ir_matches_single_output_evaluations() {
+        let exprs = vec![
+            Expr::parse_expression("x + y"),
+            Expr::parse_expression("x*y + cos(y)"),
+            Expr::parse_expression("exp(x) - ln(y)"),
+        ];
+        let compiled = Expr::compile_many_ir(&exprs, &["x", "y"]);
+        let args = [1.5, 2.0];
+        let values = compiled.eval(&args);
+
+        for (expr, value) in exprs.iter().zip(values.iter()) {
+            let direct = expr.lambdify1(&["x", "y"]);
+            assert!((direct(&args) - value).abs() < 1e-12);
+        }
     }
     #[test]
     fn lambdify1d_comapare() {

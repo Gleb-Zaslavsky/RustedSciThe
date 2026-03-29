@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 
-//use crate::symbolic::shared_expr::Expr;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::utils::{find_char_positions_outside_brackets, find_pair_to_this_bracket};
-/// a module turns a String expression into a symbolic expression
-///# Example
+/// Parse a mathematical string into a symbolic [`Expr`] tree.
+///
+/// The parser supports arithmetic operators, powers, parentheses,
+/// elementary functions, and unary minus.
+///
+/// # Example
 /// ```
 /// use RustedSciThe::symbolic::symbolic_engine::Expr;
-///let input = "x^2.3* log(x+y+y^2.6)"; //log(x)/y-x^2.3 log(x+y+y^2.6)-exp(x-y)/(x+y)
+/// let input = "x^2.3 * log(x + y + y^2.6)";
 /// let parsed_expression = Expr::parse_expression(input);
-///println!(" parsed_expression {}", parsed_expression);
-/// let parsed_function = parsed_expression.lambdify_borrowed_thread_safe( &["x","y"]);
-/// println!("{}, Rust function: {}  \n",input,  parsed_function(&[1.0,2.0])    );
-///  
+/// let parsed_function = parsed_expression.lambdify_borrowed_thread_safe(&["x", "y"]);
+/// let value = parsed_function(&[1.0, 2.0]);
+/// assert!(value.is_finite());
 /// ```
 //                  search recursion diagram
 //                "y^2+exp(x)+log(x)/y-x^2.3"       |
@@ -37,15 +39,7 @@ use crate::symbolic::utils::{find_char_positions_outside_brackets, find_pair_to_
 //                |             x          |        |
 //                |_____________Ok________\|/_______|
 //                  etc...
-#[allow(dead_code)]
-fn proc_negative<'a>(left: String, flg: usize) -> String {
-    let new_left: String = format!("(-1.0)*{}", left.clone());
-    let left_ = if flg == 2 { new_left } else { left };
-    left_
-}
-
-// function to find the rightmost occurrence of operators at the same precedence level,
-
+/// Find the rightmost operator outside parentheses for the given precedence level.
 fn find_rightmost_operator_outside_brackets(
     input: &str,
     operators: &[char],
@@ -68,9 +62,13 @@ fn find_rightmost_operator_outside_brackets(
 
     last_op_pos.map(|pos| (pos, last_op_char))
 }
+
+/// Parse a string expression into a symbolic tree.
+///
+/// The `flg` parameter is an internal parsing mode used for bracketed
+/// expressions and unary minus handling.
 pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
     let input = input.trim();
-    println!("input: {} flag {} \n", input, flg);
     let mut brac_end = 0;
     let mut brac_start = 0;
     // Обработка выражений в скобках
@@ -97,28 +95,15 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
         // bracket proceeding: if flg==0, the input expression not in brackets - bracket processing is not needed
         // if flg==1, the input expression in brackets - bracket processing is needed.
         if let Some(end) = bracket_end {
-            println!(
-                " start bracket: {}, end bracket: {:?}, input: {}",
-                bracket_start, end, input
-            );
             brac_end = end;
             brac_start = bracket_start;
 
             if flg == 1 {
-                println!("found in brackets: {}", input);
                 let inner_str = &input[brac_start + 1..brac_end];
-                let inner = parse_expression_func(0, inner_str)?;
-                println!("content in brackets parsed");
-                let remaining_right = &input[brac_end + 1..];
-                let remaining_left = &input[..brac_start];
-                println!(
-                    "inner brackets expression: {}, remaining content left: {}, remaining content right: {} ",
-                    inner, remaining_left, remaining_right
-                );
+                let _ = parse_expression_func(0, inner_str)?;
             }
         }
     } // end if brackets
-    println!("went out of brackets proceeding with input: {}", input);
     if flg == 2 { // перехват случаев с отрицательными величинами
     }
 
@@ -128,11 +113,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             let mut left = &input[..pos].trim();
             let right = &input[pos + 1..].trim();
 
-            println!(
-                "SIGN '{}' found at position {}: left: {}, right: {}",
-                op, pos, left, right
-            );
-
             // Handle negative flag
             let a = left.to_string();
             let new_left = format!("(-1.0)*{}", a);
@@ -141,7 +121,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
 
             // Handle unary minus
             if left.is_empty() && op == '-' {
-                println!("negative values found");
                 if right.starts_with("(") && right.ends_with(")") {
                     return Ok(Expr::Mul(
                         Box::new(Expr::Const(-1.)),
@@ -197,11 +176,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
         if let Some(pos) = find_char_positions_outside_brackets(input, '*') {
             let mut left = &input[..pos].trim();
             let right = &input[pos + 1..].trim();
-            println!("SIGN '*' at positions {}-{}", pos, pos + 1);
-            println!(
-                "brackets found in posistions: {} - {},",
-                brac_start, brac_end
-            );
 
             let a = left.to_string();
             let new_left = format!("(-1.0)*{}", a);
@@ -210,7 +184,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             return if (left.starts_with("(") & left.ends_with(")"))
                 && !(right.starts_with("(") && right.ends_with(")"))
             {
-                println!("left in brackets");
                 Ok(Expr::Mul(
                     Box::new(parse_expression_func(1, left)?),
                     Box::new(parse_expression_func(0, right)?),
@@ -218,7 +191,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             } else if (right.starts_with("(") && right.ends_with(")"))
                 && !(left.starts_with("(") && left.ends_with(")"))
             {
-                println!("right in brackets");
                 Ok(Expr::Mul(
                     Box::new(parse_expression_func(0, left)?),
                     Box::new(parse_expression_func(1, right)?),
@@ -226,13 +198,11 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             } else if (left.starts_with("(") && left.ends_with(")"))
                 && (right.starts_with("(") && right.ends_with(")"))
             {
-                println!("both sides have brackets");
                 Ok(Expr::Mul(
                     Box::new(parse_expression_func(1, left)?),
                     Box::new(parse_expression_func(1, right)?),
                 ))
             } else {
-                println!("neither in brackets");
                 Ok(Expr::Mul(
                     Box::new(parse_expression_func(0, left)?),
                     Box::new(parse_expression_func(0, right)?),
@@ -241,7 +211,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
         } else if let Some(pos) = find_char_positions_outside_brackets(input, '/') {
             let mut left = &input[..pos].trim();
             let right = &input[pos + 1..].trim();
-            println!("SIGN '/' at positions {}-{}", pos, pos + 1);
 
             let a = left.to_string();
             let new_left = format!("(-1.0)*{}", a);
@@ -250,7 +219,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             return if (left.starts_with("(") && left.ends_with(")"))
                 && !(right.starts_with("(") && right.ends_with(")"))
             {
-                println!("left in brackets");
                 Ok(Expr::Div(
                     Box::new(parse_expression_func(1, left)?),
                     Box::new(parse_expression_func(0, right)?),
@@ -258,7 +226,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             } else if (right.starts_with("(") && right.ends_with(")"))
                 && !(left.starts_with("(") && left.ends_with(")"))
             {
-                println!("right in brackets");
                 Ok(Expr::Div(
                     Box::new(parse_expression_func(0, left)?),
                     Box::new(parse_expression_func(1, right)?),
@@ -267,28 +234,22 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
                 && left.ends_with(")")
                 && (right.starts_with("(") && right.ends_with(")"))
             {
-                println!("both sides have brackets");
                 Ok(Expr::Div(
                     Box::new(parse_expression_func(1, left)?),
                     Box::new(parse_expression_func(1, right)?),
                 ))
             } else {
-                println!("neither in brackets");
                 Ok(Expr::Div(
                     Box::new(parse_expression_func(0, left)?),
                     Box::new(parse_expression_func(0, right)?),
                 ))
             };
-        } else {
-            println!("no matches among +, -, *, /")
         };
         // Обработка возведения в степень
         if let Some(pos) = find_char_positions_outside_brackets(input, '^') {
             let base = &input[..pos].trim();
             let exponent = &input[pos + 1..].trim();
-            println!("SIGN '^' at positions {}-{}", pos, pos + 1);
             let base_expr = if base.chars().all(char::is_alphanumeric) {
-                println!("base of power: {}", base);
                 Expr::Var(base.to_string())
             } else {
                 parse_expression_func(0, base)?
@@ -313,21 +274,14 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
             //let  fisrt_brac_end = input.find(')').unwrap();
             let inner = &input[4..fisrt_brac_end].trim();
-            println!(
-                "SIGN 'exp' at positions {}-{}",
-                fisrt_brac_end - 4,
-                fisrt_brac_end
-            );
             return Ok(Expr::Exp(Box::new(parse_expression_func(0, inner)?)));
-        } else if input.starts_with("log(") || input.starts_with("ln(") && input.ends_with(')') {
+        } else if (input.starts_with("log(") || input.starts_with("ln(")) && input.ends_with(')') {
             let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
-            // let  fisrt_brac_end = input.find(')').unwrap();
-            println!(
-                "SIGN 'log' at positions {}-{}",
-                fisrt_brac_end - 4,
-                fisrt_brac_end
-            );
-            let inner = &input[4..fisrt_brac_end].trim();
+            let inner = if input.starts_with("ln(") {
+                &input[3..fisrt_brac_end].trim()
+            } else {
+                &input[4..fisrt_brac_end].trim()
+            };
             return Ok(Expr::Ln(Box::new(parse_expression_func(0, inner)?)));
         }
 
@@ -396,14 +350,12 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
 
         // Обработка констант и переменных
         if let Ok(value) = input.parse::<f64>() {
-            println!("found constant: {}", value);
             return if flg != 2 {
                 Ok(Expr::Const(value))
             } else {
                 Ok(Expr::Const(-value))
             };
         } else if input.chars().all(char::is_alphanumeric) {
-            println!("found variable: {}", input);
             return if flg != 2 {
                 Ok(Expr::Var(input.to_string()))
             } else {
@@ -417,8 +369,6 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
         if input.starts_with("(") && input.ends_with(')') {
             let inner_str = &input[brac_start + 1..brac_end];
             let inner = parse_expression_func(0, inner_str)?;
-
-            println!("found expression that is ALL in brackets: {:?}", inner);
             return Ok(inner);
         }
     }
@@ -572,6 +522,12 @@ mod tests {
     #[test]
     fn test_parse_logarithm() {
         let expr = parse_expression_func(0, "log(x)").unwrap();
+        assert_eq!(expr, Expr::Ln(Box::new(Expr::Var("x".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_ln() {
+        let expr = parse_expression_func(0, "ln(x)").unwrap();
         assert_eq!(expr, Expr::Ln(Box::new(Expr::Var("x".to_string()))));
     }
 

@@ -2,6 +2,8 @@
 mod BVP_Damp_tests;
 /// tests for BVP_Damp module
 mod BVP_Damp_tests2;
+/// production-style AOT acceptance tests for BVP_Damp module
+mod BVP_Damp_tests3;
 /// interface  abstracting lineat algebra operations and solvers
 pub mod BVP_traits;
 /// utilities for BVP solver in general
@@ -16,6 +18,8 @@ pub mod NR_Damp_solver_frozen;
 pub mod adaptive_grid_basic;
 /// module for more advanced adaptive grid for NR method
 pub mod adaptive_grid_twopoint;
+/// shared solver handoff types for generated residual/Jacobian callbacks
+pub mod generated_solver_handoff;
 /// module of interface for creating a new grid
 pub mod grid_api;
 /// module for linear system solvers

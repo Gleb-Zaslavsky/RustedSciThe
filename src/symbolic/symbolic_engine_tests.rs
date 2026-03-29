@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_metadata::structural_signature;
     use crate::{indexed_var, indexed_var_2d, indexed_vars, symbols};
     use approx;
     use std::f64;
@@ -328,8 +329,8 @@ mod tests {
         let expr2 = x.clone() * n6 * n3 / (n2 * n9) - n1.clone();
         let simplified_expr = expr2.simplify();
         println!("{}", simplified_expr);
-        // After simplification: x * 6 * 3 / (2 * 9) - 1 = x * 1 - 1 = x + (-1)
-        let expected_result = x + Expr::Const(-1.0);
+        // After simplification the sign is represented canonically as subtraction: x - 1
+        let expected_result = x - Expr::Const(1.0);
 
         assert_eq!(simplified_expr, expected_result);
     }
@@ -624,6 +625,47 @@ mod tests {
     }
 
     #[test]
+    fn test_power_rule_symbolic_exponents() {
+        let x = Expr::Var("x".to_string());
+        let a = Expr::Var("a".to_string());
+        let b = Expr::Var("b".to_string());
+
+        // x^a * x^b = x^(a + b)
+        let expr = x.clone().pow(a.clone()) * x.clone().pow(b.clone());
+        let simplified = expr.simplify();
+        let expected = x.pow(a + b);
+
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_power_rule_general_base_multiplication() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let base = x.clone() + y.clone();
+
+        // (x + y)^2 * (x + y)^3 = (x + y)^5
+        let expr = base.clone().pow(Expr::Const(2.0)) * base.clone().pow(Expr::Const(3.0));
+        let simplified = expr.simplify();
+        let expected = base.pow(Expr::Const(5.0));
+
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_power_rule_general_factor_repetition() {
+        let x = Expr::Var("x".to_string());
+        let repeated = Expr::sin(Box::new(x.clone()));
+
+        // sin(x) * sin(x) = sin(x)^2
+        let expr = repeated.clone() * repeated.clone();
+        let simplified = expr.simplify();
+        let expected = repeated.pow(Expr::Const(2.0));
+
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
     fn test_power_rule_same_var() {
         let x = Expr::Var("x".to_string());
         // x * x = x^2
@@ -640,6 +682,47 @@ mod tests {
         let expr = x.clone().pow(Expr::Const(5.0)) / x.clone().pow(Expr::Const(2.0));
         let simplified = expr.simplify();
         let expected = x.pow(Expr::Const(3.0));
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_power_rule_general_base_division() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let base = x.clone() + y.clone();
+
+        // (x + y)^5 / (x + y)^2 = (x + y)^3
+        let expr = base.clone().pow(Expr::Const(5.0)) / base.clone().pow(Expr::Const(2.0));
+        let simplified = expr.simplify();
+        let expected = base.pow(Expr::Const(3.0));
+
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_power_rule_general_base_division_same_expression() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let base = x.clone() + y.clone();
+
+        // (x + y) / (x + y) = 1
+        let expr = base.clone() / base.clone();
+        let simplified = expr.simplify();
+        let expected = Expr::Const(1.0);
+
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_power_rule_function_base_division_same_expression() {
+        let x = Expr::Var("x".to_string());
+        let base = Expr::sin(Box::new(x.clone()));
+
+        // sin(x) / sin(x) = 1
+        let expr = base.clone() / base.clone();
+        let simplified = expr.simplify();
+        let expected = Expr::Const(1.0);
+
         assert_eq!(simplified, expected);
     }
 
@@ -670,6 +753,20 @@ mod tests {
         let expr = x.clone().pow(Expr::Const(2.0)).pow(Expr::Const(3.0));
         let simplified = expr.simplify();
         let expected = x.pow(Expr::Const(6.0));
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_nested_power_rule_symbolic_exponents() {
+        let x = Expr::Var("x".to_string());
+        let a = Expr::Var("a".to_string());
+        let b = Expr::Var("b".to_string());
+
+        // (x^a)^b = x^(a*b)
+        let expr = x.clone().pow(a.clone()).pow(b.clone());
+        let simplified = expr.simplify();
+        let expected = x.pow(a * b);
+
         assert_eq!(simplified, expected);
     }
 
@@ -760,6 +857,18 @@ mod tests {
         let simplified = expr.simplify();
         let expected = x.pow(Expr::Const(-2.0));
         assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_non_integer_exponents_are_not_collected_as_polynomials() {
+        let x = Expr::Var("x".to_string());
+        let expr =
+            x.clone().pow(Expr::Const(2.5)) + Expr::Const(2.0) * x.clone().pow(Expr::Const(2.5));
+        let simplified = expr.simplify();
+        let wrong_polynomial = Expr::Const(3.0) * x.clone().pow(Expr::Const(2.0));
+
+        assert_ne!(simplified, wrong_polynomial);
+        assert!(format!("{}", simplified).contains("2.5"));
     }
 
     #[test]
@@ -1251,7 +1360,7 @@ mod tests {
         let simplified = expr.simplify();
 
         // Expected result: x - 1
-        let expected = x + Expr::Const(-1.0);
+        let expected = x - Expr::Const(1.0);
 
         assert_eq!(
             simplified, expected,
@@ -1296,6 +1405,69 @@ mod tests {
         assert_eq!(
             simplified, expected,
             "x*(2*3)/(4*1) should simplify to 1.5*x"
+        );
+    }
+
+    #[test]
+    fn test_division_cancels_common_symbolic_factor() {
+        let x = Expr::Var("x".to_owned());
+        let y = Expr::Var("y".to_owned());
+
+        // Test: (2*x*y)/(4*x) should simplify to 0.5*y
+        let expr = (Expr::Const(2.0) * x.clone() * y.clone()) / (Expr::Const(4.0) * x.clone());
+        let simplified = expr.simplify();
+        let expected = Expr::Const(0.5) * y.clone();
+
+        assert_eq!(
+            simplified, expected,
+            "(2*x*y)/(4*x) should simplify to 0.5*y"
+        );
+    }
+
+    #[test]
+    fn test_division_keeps_remaining_denominator_after_cancellation() {
+        let x = Expr::Var("x".to_owned());
+        let y = Expr::Var("y".to_owned());
+        let z = Expr::Var("z".to_owned());
+
+        // Test: (2*x*y)/(4*x*z) should simplify to (0.5*y)/z
+        let expr =
+            (Expr::Const(2.0) * x.clone() * y.clone()) / (Expr::Const(4.0) * x.clone() * z.clone());
+        let simplified = expr.simplify();
+        let expected = (Expr::Const(0.5) * y.clone()) / z.clone();
+
+        assert_eq!(
+            simplified, expected,
+            "(2*x*y)/(4*x*z) should simplify to (0.5*y)/z"
+        );
+    }
+
+    #[test]
+    fn test_simplify_reorders_commutative_multiplication_deterministically() {
+        let x = Expr::Var("x".to_owned());
+        let y = Expr::Var("y".to_owned());
+
+        let expr = y.clone() * Expr::Const(2.0) * x.clone();
+        let simplified = expr.simplify();
+        let expected = Expr::Const(2.0) * x * y;
+
+        assert_eq!(
+            simplified, expected,
+            "commutative multiplication should use a stable canonical order"
+        );
+    }
+
+    #[test]
+    fn test_simplify_merges_repeated_variable_factors() {
+        let x = Expr::Var("x".to_owned());
+
+        let expr = x.clone() * x.clone();
+        let simplified = expr.simplify();
+        let expected = x.pow(Expr::Const(2.0));
+
+        assert_eq!(
+            simplified, expected,
+            "repeated variable factors should collapse into a power"
         );
     }
 
@@ -1350,6 +1522,15 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_returns_normalized_result_without_explicit_simplify() {
+        let x = Expr::Var("x".to_string());
+        let f = Expr::Const(5.0) * x.clone();
+        let df_dx = f.diff("x");
+
+        assert_eq!(df_dx, Expr::Const(5.0));
+    }
+
+    #[test]
     fn test_diff_early_termination() {
         let _x = Expr::Var("x".to_string());
         let y = Expr::Var("y".to_string());
@@ -1376,6 +1557,16 @@ mod tests {
         let f = x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone() + Expr::Const(5.0);
         let df_dx = f.diff("x").simplify();
         let expected = Expr::Const(2.0) * x.clone() + Expr::Const(3.0);
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_diff_polynomial_is_normalized_without_explicit_simplify() {
+        let x = Expr::Var("x".to_string());
+        let f = x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone() + Expr::Const(5.0);
+        let df_dx = f.diff("x");
+        let expected = Expr::Const(2.0) * x.clone() + Expr::Const(3.0);
+
         assert_eq!(df_dx, expected);
     }
 
@@ -1433,6 +1624,66 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_zero_elimination_in_complex_expr_without_explicit_simplify() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let z = Expr::Var("z".to_string());
+
+        let f = x.clone().pow(Expr::Const(2.0))
+            + y.clone() * z.clone()
+            + Expr::sin(Box::new(y.clone()))
+            + Expr::Const(42.0);
+
+        let df_dx = f.diff("x");
+        let expected = Expr::Const(2.0) * x.clone();
+
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_cached_variable_collection_matches_expected_output() {
+        let expr = Expr::parse_expression("x^2 + y*z + x + sin(z)");
+        let vars = expr.all_arguments_are_variables();
+
+        assert_eq!(
+            vars,
+            vec!["x".to_string(), "y".to_string(), "z".to_string()]
+        );
+        assert!(expr.contains_variable("x"));
+        assert!(expr.contains_variable("z"));
+        assert!(!expr.contains_variable("w"));
+    }
+
+    #[test]
+    fn test_structural_signature_matches_for_canonicalized_commutative_expression() {
+        let left = Expr::parse_expression("x + y").simplify();
+        let right = Expr::parse_expression("y + x").simplify();
+
+        assert_eq!(left, right);
+        assert_eq!(structural_signature(&left), structural_signature(&right));
+    }
+
+    #[test]
+    fn test_structural_signature_distinguishes_different_expressions() {
+        let left = Expr::parse_expression("x + y").simplify();
+        let right = Expr::parse_expression("x - y").simplify();
+
+        assert_ne!(left, right);
+        assert_ne!(structural_signature(&left), structural_signature(&right));
+    }
+
+    #[test]
+    fn test_extract_variables_from_nested_expression_uses_cached_metadata() {
+        let expr = Expr::parse_expression("exp(x + y*z) + ln(z)");
+        let (_positions, vars) = expr.extract_variables();
+
+        assert_eq!(
+            vars,
+            vec!["x".to_string(), "y".to_string(), "z".to_string()]
+        );
+    }
+
+    #[test]
     fn test_diff_simplify_multiplication_edge_cases() {
         let x = Expr::Var("x".to_string());
 
@@ -1445,6 +1696,29 @@ mod tests {
         let df2_dx = f2.diff("x").simplify();
         assert_eq!(df2_dx, Expr::Const(1.0));
     }
+
+    #[test]
+    fn test_diff_arcctg_has_negative_sign() {
+        let x = Expr::Var("x".to_string());
+        let f = Expr::arcctg(Box::new(x.clone()));
+        let df_dx = f.diff("x").simplify();
+        let expected =
+            (Expr::Const(-1.0) / (Expr::Const(1.0) + x.clone().pow(Expr::Const(2.0)))).simplify();
+
+        assert_eq!(df_dx, expected);
+    }
+
+    #[test]
+    fn test_diff_arcctg_is_normalized_without_explicit_simplify() {
+        let x = Expr::Var("x".to_string());
+        let f = Expr::arcctg(Box::new(x.clone()));
+        let df_dx = f.diff("x");
+        let expected =
+            (Expr::Const(-1.0) / (Expr::Const(1.0) + x.clone().pow(Expr::Const(2.0)))).simplify();
+
+        assert_eq!(df_dx, expected);
+    }
+
     // DISPLAY FORMATTING TESTS - Testing bracket placement rules
 
     #[test]

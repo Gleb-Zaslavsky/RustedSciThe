@@ -8,6 +8,15 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tabled::{builder::Builder, settings::Style};
+
+fn percent_of_total(part: f64, total: f64) -> f64 {
+    if total <= f64::EPSILON {
+        0.0
+    } else {
+        100.0 * part / total
+    }
+}
+
 pub fn elapsed_time(elapsed: Duration) -> (String, f64) {
     let time = elapsed.as_millis();
     if time < 1000 {
@@ -120,22 +129,23 @@ impl CustomTimer {
 
         let jac_total_string = elapsed_time(self.jac);
         let jac_total = self.jac.as_nanos() as f64;
-        let jac_time_percent = 100.0 * jac_total / total_time;
+        let jac_time_percent = percent_of_total(jac_total, total_time);
 
         let fun_total = self.fun.as_nanos() as f64;
-        let fun_time_percent = 100.0 * fun_total / total_time;
+        let fun_time_percent = percent_of_total(fun_total, total_time);
         let fun_total_string = elapsed_time(self.fun);
 
         let linear_system_total = self.linear_system.as_nanos() as f64;
-        let linear_system_time_percent = 100.0 * linear_system_total / total_time;
+        let linear_system_time_percent = percent_of_total(linear_system_total, total_time);
         let linear_system_total_string = elapsed_time(self.linear_system);
 
         let symbolic_operations_total = self.symbolic_operations.as_nanos() as f64;
-        let symbolic_operations_time_percent = 100.0 * symbolic_operations_total / total_time;
+        let symbolic_operations_time_percent =
+            percent_of_total(symbolic_operations_total, total_time);
         let symbolic_operations_total_string = elapsed_time(self.symbolic_operations);
 
         let grid_refinement_total = self.grid_refinement.as_nanos() as f64;
-        let grid_refinement_time_percent = 100.0 * grid_refinement_total / total_time;
+        let grid_refinement_time_percent = percent_of_total(grid_refinement_total, total_time);
         let grid_refinement_total_string = elapsed_time(self.grid_refinement);
 
         let other = total_time
@@ -145,7 +155,7 @@ impl CustomTimer {
             - symbolic_operations_total
             - grid_refinement_total;
 
-        let other_percent = 100.0 * other / total_time;
+        let other_percent = percent_of_total(other, total_time);
 
         if other_percent > 0.5 {
             timer_data.insert(
@@ -657,5 +667,16 @@ mod tests {
         let extracted = extract_unknown_variables(full_matrix, &bc_position_and_value, 0);
 
         assert_eq!(solution, extracted);
+    }
+
+    #[test]
+    fn custom_timer_get_all_does_not_emit_nan_percentages() {
+        let timer = CustomTimer::new();
+        let data = timer.get_all();
+
+        assert!(
+            data.values().all(|value| !value.contains("NaN")),
+            "timer output should not contain NaN values: {data:?}"
+        );
     }
 }

@@ -117,7 +117,6 @@ pub fn find_char_positions_outside_brackets(s: &str, c: char) -> Option<usize> {
 }
 // code finds the position of
 pub fn find_pair_to_this_bracket(input: &str, bracket_start: usize) -> usize {
-    println!("finding closing bracket of {}", input);
     let mut stack = bracket_start;
     let mut bracket_end = None;
     //    let mut inner_expr: Option<Expr> = None;

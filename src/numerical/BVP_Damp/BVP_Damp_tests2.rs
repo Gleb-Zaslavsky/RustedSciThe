@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tets {
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
-        AdaptiveGridConfig, NRBVP, SolverParams,
+        AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
     };
     use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
     use crate::numerical::Examples_and_utils::NonlinEquation;
@@ -10,6 +10,24 @@ mod tets {
     use prettytable::{Table, row};
     use std::collections::HashMap;
     use std::time::Instant;
+
+    fn sparse_damped_options(
+        strategy_params: Option<SolverParams>,
+        abs_tolerance: f64,
+        rel_tolerance: HashMap<String, f64>,
+        max_iterations: usize,
+        bounds: HashMap<String, (f64, f64)>,
+        loglevel: Option<String>,
+    ) -> DampedSolverOptions {
+        DampedSolverOptions::sparse_damped()
+            .with_strategy_params(strategy_params)
+            .with_abs_tolerance(abs_tolerance)
+            .with_rel_tolerance(rel_tolerance)
+            .with_max_iterations(max_iterations)
+            .with_bounds(bounds)
+            .with_loglevel(loglevel)
+    }
+
     #[test]
     fn test_direct_eq2() {
         let start = Instant::now();
@@ -155,13 +173,16 @@ mod tets {
         let max_iterations = 100;
         let abs_tolerance = 1e-6;
         let loglevel = Some("info".to_string());
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string();
-        let strategy = "Damped".to_string();
-        let linear_sys_method = None;
+        let options = sparse_damped_options(
+            Some(strategy_params),
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        );
 
-        // Using the new tolerance helper - much simpler!
-        let mut bvp = NRBVP::new(
+        let mut bvp = NRBVP::new_with_options(
             eqs.clone(),
             initial_guess,
             unhnowns_Str,
@@ -170,19 +191,11 @@ mod tets {
             0.0,
             1.0,
             n_steps,
-            scheme,
-            strategy,
-            Some(strategy_params),
-            linear_sys_method,
-            method,
-            abs_tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            loglevel,
+            options,
         );
         bvp.dont_save_log(true);
-        bvp.solve();
+        bvp.try_solve()
+            .expect("combustion benchmark BVP should solve through the fallible API");
         //   bvp.plot_result_in_terminal();
         //  bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
@@ -337,13 +350,16 @@ mod tets {
         let max_iterations = 100;
         let abs_tolerance = 1e-6;
         let loglevel = Some("info".to_string());
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string();
-        let strategy = "Damped".to_string();
-        let linear_sys_method = None;
+        let options = sparse_damped_options(
+            strategy_params,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        );
 
-        // Using the new tolerance helper - much simpler!
-        let mut bvp = NRBVP::new(
+        let mut bvp = NRBVP::new_with_options(
             eqs.clone(),
             initial_guess,
             unhnowns_Str,
@@ -352,19 +368,11 @@ mod tets {
             0.0,
             1.0,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            abs_tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            loglevel,
+            options,
         );
         bvp.dont_save_log(true);
-        bvp.solve();
+        bvp.try_solve()
+            .expect("adaptive combustion BVP should solve through the fallible API");
         //  bvp.gnuplot_result();
         let solution = bvp.get_result().unwrap();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
@@ -457,8 +465,6 @@ mod tets {
         let t0 = 0.0;
         let t_end = 1.0;
         let n_steps = 5; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string();
-
         let grid_method = GridRefinementMethod::GrcarSmooke(0.6, 0.6, 1.5);
         //:Pearson(0.5);
         // GridRefinementMethod::TwoPoint(0.3, 0.5, 1.2);
@@ -474,9 +480,6 @@ mod tets {
             damp_factor: None,
             adaptive: Some(config),
         });
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.0; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -489,7 +492,15 @@ mod tets {
         ]);
         let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
         assert_eq!(&eq_system.len(), &2);
-        let mut nr = NRBVP::new(
+        let options = sparse_damped_options(
+            strategy_params,
+            tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            None,
+        );
+        let mut nr = NRBVP::new_with_options(
             eq_system,
             initial_guess,
             values,
@@ -498,21 +509,13 @@ mod tets {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
         nr.dont_save_log(true);
-        nr.solve();
+        nr.try_solve()
+            .expect("test_BVP_Damp1 should solve through the fallible API");
         let solution = nr.get_result().unwrap();
 
         // assert_eq!(n, n_steps + 1);
@@ -532,11 +535,7 @@ mod tets {
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 1300; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string(); //
         let strategy_params = Some(SolverParams::default());
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.7; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -550,7 +549,16 @@ mod tets {
 
         let rel_tolerance = ne.rel_tolerance();
 
-        let mut nr = NRBVP::new(
+        let options = sparse_damped_options(
+            strategy_params,
+            tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            None,
+        );
+
+        let mut nr = NRBVP::new_with_options(
             eq_system,
             initial_guess,
             values.clone(),
@@ -559,21 +567,13 @@ mod tets {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
         nr.dont_save_log(true);
-        nr.solve();
+        nr.try_solve()
+            .expect("TwoPointBVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
 
         let y_numer: DVector<f64> = solution.column(0).into();
@@ -582,16 +582,14 @@ mod tets {
         let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
         println!("solution: {:?}", y_numer.len());
         println!("x len {}", x_mesh.len());
-        //    nr.gnuplot_result();
-        //compare with exact solution
-        let y_exact = ne.exact_solution(None, None, Some(n_steps + 2));
-        for i in 0..y_exact.len() {
-            // let y_exact_ = f64::exp(-(x_mesh[i] as f64).powf(2.0));
+        // Compare against the exact solution on the actual solver mesh.
+        for i in 0..x_mesh.len() {
+            let y_exact = f64::exp(-x_mesh[i].powi(2) / 4.0);
             assert!(
-                (y_exact[i] - y_numer[i]).abs() < 1e-2,
+                (y_exact - y_numer[i]).abs() < 1e-2,
                 "i {}, y_exact: {} y_numer: {}",
                 i,
-                y_exact[i],
+                y_exact,
                 y_numer[i]
             );
         }
@@ -609,11 +607,7 @@ mod tets {
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 300; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string(); //
         let strategy_params = Some(SolverParams::default());
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.7; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -627,7 +621,16 @@ mod tets {
 
         let rel_tolerance = ne.rel_tolerance();
 
-        let mut nr = NRBVP::new(
+        let options = sparse_damped_options(
+            strategy_params,
+            tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            None,
+        );
+
+        let mut nr = NRBVP::new_with_options(
             eq_system,
             initial_guess,
             values.clone(),
@@ -636,21 +639,13 @@ mod tets {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
         nr.dont_save_log(true);
-        nr.solve();
+        nr.try_solve()
+            .expect("Clairaut BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
 
         let y_numer: DVector<f64> = solution.column(0).into();
@@ -690,8 +685,6 @@ mod tets {
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 40; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string(); //
-
         let refmethod = AdaptiveGridConfig {
             version: 1,
             max_refinements: 10,
@@ -704,9 +697,6 @@ mod tets {
             adaptive: Some(refmethod),
         };
         let strategy_params = Some(strategy_params);
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.7; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -720,7 +710,16 @@ mod tets {
 
         let rel_tolerance = ne.rel_tolerance();
 
-        let mut nr = NRBVP::new(
+        let options = sparse_damped_options(
+            strategy_params,
+            tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            None,
+        );
+
+        let mut nr = NRBVP::new_with_options(
             eq_system,
             initial_guess,
             values.clone(),
@@ -729,21 +728,13 @@ mod tets {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
         nr.dont_save_log(true);
-        nr.solve();
+        nr.try_solve()
+            .expect("Parachute BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
         let y_numer: DVector<f64> = solution.column(0).into();
         let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();
@@ -795,8 +786,6 @@ mod tets {
         let t0 = ne.span(None, None).0;
         let t_end = ne.span(None, None).1;
         let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-        let strategy = "Damped".to_string(); //
-
         let refmethod = AdaptiveGridConfig {
             version: 1,
             max_refinements: 10,
@@ -809,9 +798,6 @@ mod tets {
             adaptive: Some(refmethod),
         };
         let strategy_params = Some(strategy_params);
-        let scheme = "forward".to_string();
-        let method = "Sparse".to_string(); // or  "Dense"
-        let linear_sys_method = None;
         let ones = vec![0.7; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
@@ -825,7 +811,16 @@ mod tets {
 
         let rel_tolerance = ne.rel_tolerance();
 
-        let mut nr = NRBVP::new(
+        let options = sparse_damped_options(
+            strategy_params,
+            tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            None,
+        );
+
+        let mut nr = NRBVP::new_with_options(
             eq_system,
             initial_guess,
             values.clone(),
@@ -834,21 +829,13 @@ mod tets {
             t0,
             t_end,
             n_steps,
-            scheme,
-            strategy,
-            strategy_params,
-            linear_sys_method,
-            method,
-            tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            None,
+            options,
         );
 
         println!("solving system");
         nr.dont_save_log(true);
-        nr.solve();
+        nr.try_solve()
+            .expect("Lane-Emden BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
         let y_numer: DVector<f64> = solution.column(0).into();
         let y_numer: Vec<f64> = y_numer.iter().map(|x| *x).collect();

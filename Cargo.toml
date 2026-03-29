@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.3.33"
+version = "0.3.35"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing written under the influence of SciPy and Sympy:symbolic calculations,nonlinear systems,IVP and BVP,optimization,fitting,etc"
 author = "Gleb Zasllavsky"
@@ -71,7 +71,7 @@ strum = "0.28.0"
 strum_macros = "0.27.2"
 simplelog = "0.12.2"
 log = "0.4.29"
-chrono = "0.4.44"
+chrono = "0.4.41"
 loc = "0.5.0"
 toml = "0.9.8"
 sysinfo = "0.38.4"
@@ -88,7 +88,7 @@ prettytable = "0.10.0"
 textplots = "0.8.7"
 wide = "1.2.0"
 bevy = "0.18.1"
+
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }
-
 
