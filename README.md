@@ -42,6 +42,8 @@ At first, this code was part of the KiThe crate, where it was supposed to serve 
   * damped Newton-Raphson method (several versions available)
   * Newton-Raphson 4th order collocation algorithm with residual control
   * Shooting method for solving BVP 
+  * symbolic, lambdify and AOT-generated residual/Jacobian backends for sparse BVP systems
+  * sequential and parallel execution of generated sparse residual/Jacobian modules
 * Optimization with (if needed) analytical Jacobian:
     * curve fitting
     * Levergang-Marquardt method with trust region
@@ -156,6 +158,26 @@ kernel for Gauss-Seidel preconditioner via nvcc compiler from CUDA library )
 In the ‘Book’ folder of the project (on github) there is an in-depth scientific manual as well as a developer's and user's manual in English and Russian. So far a chapter on BVP solution has been added. The chapter is under development and may contain some errors and omissions.
 
 The project folder ‘Examples’ contains working examples of code usage.
+
+## AOT pipeline
+
+`AOT` means `ahead-of-time`. In simple words, RustedSciThe can take symbolic equations, differentiate them, simplify the result, and generate a separate Rust module with ready numerical code before the solver starts the main calculation.
+
+Why this is useful:
+- the solver does not need to carry symbolic work during the expensive runtime part;
+- the generated residual and Jacobian are close to what a very careful human would write by hand after differentiating a huge system and simplifying it;
+- for large sparse BVP problems the generated code can be executed sequentially or in parallel.
+
+This is the main idea: imagine that a person manually differentiated one thousand functions by one thousand variables, removed zero terms, reused repeated subexpressions, and then wrote all final formulas into an optimized Rust file. That would be possible in theory, but painfully slow, error-prone, and almost impossible to maintain. The AOT pipeline automates exactly this kind of work.
+
+In practice the pipeline does the following:
+1. takes equations, variables, optional parameters, boundary conditions, and backend settings;
+2. discretizes the BVP and constructs the symbolic residual and symbolic Jacobian;
+3. lowers them into an internal code generation form;
+4. generates Rust source code for residual and Jacobian functions;
+5. lets the solver use the generated module through the same high-level solver interface.
+
+That is why AOT is powerful here: it combines the convenience of symbolic mathematics with runtime behavior that is much closer to carefully hand-written optimized numerical code.
 
 ## Usage
 - parse string expression of multiple arguments to a symbolic representation/function and then differentiate it and "lamdufy" it (transform it into a regular rust function). Compare analytical derivative to a numerical one. Calculate the vector of partials derivatives. Solve IVP and BVP problems.
