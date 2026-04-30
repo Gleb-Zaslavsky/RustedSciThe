@@ -290,6 +290,8 @@ pub mod BVP_api;
 pub mod BVP_sci;
 ///  a collection of test examples of exect solutions of BVPs for testing purposes
 pub mod Examples_and_utils;
+pub mod LSODE;
+pub mod LSODE2;
 /// RK45 and Dormand-Prince methods
 pub mod NonStiff_api;
 /// solvers of nonlinear algebraic equations

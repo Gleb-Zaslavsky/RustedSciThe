@@ -45,6 +45,16 @@ pub enum SolveError {
     ResidualEvaluation(String),
     /// Jacobian evaluation failed.
     JacobianEvaluation(String),
+    /// Compiled AOT artifact was selected, but no linked in-process runtime was available.
+    CompiledAotRuntimeUnavailable(String),
+    /// A compiled AOT artifact was required, but no registered artifact exists.
+    CompiledAotArtifactMissing(String),
+    /// A generated AOT crate is known, but the compiled artifact is not built yet.
+    CompiledAotArtifactNotBuilt(String),
+    /// Automatic AOT build was requested without an output directory.
+    AotBuildOutputDirMissing,
+    /// Automatic AOT build failed.
+    AotBuildFailed(String),
     /// Linear system solve failed.
     LinearSolveFailure(String),
     /// Jacobian is singular or too ill-conditioned.
@@ -79,6 +89,22 @@ impl Display for SolveError {
             ),
             SolveError::ResidualEvaluation(msg) => write!(f, "residual evaluation failed: {msg}"),
             SolveError::JacobianEvaluation(msg) => write!(f, "jacobian evaluation failed: {msg}"),
+            SolveError::CompiledAotRuntimeUnavailable(msg) => {
+                write!(f, "compiled AOT runtime unavailable: {msg}")
+            }
+            SolveError::CompiledAotArtifactMissing(msg) => {
+                write!(f, "compiled AOT artifact missing: {msg}")
+            }
+            SolveError::CompiledAotArtifactNotBuilt(msg) => {
+                write!(f, "compiled AOT artifact not built: {msg}")
+            }
+            SolveError::AotBuildOutputDirMissing => {
+                write!(
+                    f,
+                    "automatic AOT build requested without an output directory"
+                )
+            }
+            SolveError::AotBuildFailed(msg) => write!(f, "automatic AOT build failed: {msg}"),
             SolveError::LinearSolveFailure(msg) => write!(f, "linear solve failed: {msg}"),
             SolveError::SingularJacobian => write!(f, "jacobian is singular or ill-conditioned"),
             SolveError::NumericalBreakdown(msg) => write!(f, "numerical breakdown: {msg}"),

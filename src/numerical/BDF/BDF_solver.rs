@@ -110,6 +110,8 @@ use crate::numerical::BDF::common::{
     NumberOrVec, check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
     validate_first_step, validate_max_step, validate_tol,
 };
+use crate::somelinalg::banded::storage::Banded;
+use faer::sparse::Triplet;
 use std::fmt::Debug;
 use std::fmt::Display;
 const MAX_ORDER: usize = 5;
@@ -117,6 +119,250 @@ const NEWTON_MAXITER: usize = 4;
 const MIN_FACTOR: f64 = 0.2;
 const MAX_FACTOR: f64 = 10.0;
 const SPARSE: f64 = 0.01;
+
+/// Factorized Newton matrix used by one BDF correction step.
+///
+/// This intentionally mirrors the narrow operation BDF needs from linear
+/// algebra: solve `[I - cJ] * x = rhs`.  Keeping the interface this small lets
+/// LSODE2 later plug in `faer` sparse LU or faithful LAPACK-style banded LU
+/// without changing the BDF predictor/corrector mathematics.
+pub trait BdfLinearFactorization {
+    fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>>;
+}
+
+/// Backend that factorizes BDF Newton matrices.
+pub trait BdfLinearBackend {
+    fn factor(&mut self, matrix: &DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>>;
+
+    /// Factorizes the Newton matrix `[I - cJ]` from the Jacobian representation.
+    ///
+    /// The default implementation preserves the legacy dense path.  Native
+    /// sparse/banded backends can override this method and avoid materializing a
+    /// dense Newton matrix.
+    fn factor_shifted_jacobian(
+        &mut self,
+        c: f64,
+        jacobian: &BdfJacobian,
+    ) -> Option<Box<dyn BdfLinearFactorization>> {
+        let matrix = jacobian.to_shifted_dense(c)?;
+        self.factor(&matrix)
+    }
+}
+
+/// Jacobian storage accepted by BDF linear backends.
+///
+/// This is deliberately a solver-facing representation, not a symbolic API.
+/// Existing BDF users still provide dense `DMatrix` Jacobians; LSODE2 can grow
+/// native sparse/banded Jacobian routes by producing these variants directly.
+#[derive(Clone, Debug)]
+pub enum BdfJacobian {
+    Dense(DMatrix<f64>),
+    SparseTriplets {
+        n: usize,
+        triplets: Vec<Triplet<usize, usize, f64>>,
+    },
+    Banded(Banded<f64>),
+}
+
+impl BdfJacobian {
+    pub fn from_dense(matrix: DMatrix<f64>) -> Self {
+        Self::Dense(matrix)
+    }
+
+    pub fn n(&self) -> usize {
+        match self {
+            Self::Dense(matrix) => matrix.nrows(),
+            Self::SparseTriplets { n, .. } => *n,
+            Self::Banded(matrix) => matrix.n(),
+        }
+    }
+
+    pub fn shape(&self) -> (usize, usize) {
+        let n = self.n();
+        (n, n)
+    }
+
+    pub fn to_shifted_dense(&self, c: f64) -> Option<DMatrix<f64>> {
+        let n = self.n();
+        let mut out = DMatrix::identity(n, n);
+        match self {
+            Self::Dense(matrix) => {
+                if matrix.nrows() != matrix.ncols() {
+                    return None;
+                }
+                out -= c * matrix;
+            }
+            Self::SparseTriplets { triplets, .. } => {
+                for triplet in triplets {
+                    if triplet.row >= n || triplet.col >= n {
+                        return None;
+                    }
+                    out[(triplet.row, triplet.col)] -= c * triplet.val;
+                }
+            }
+            Self::Banded(matrix) => {
+                for j in 0..n {
+                    let i0 = j.saturating_sub(matrix.ku());
+                    let i1 = (j + matrix.kl() + 1).min(n);
+                    for i in i0..i1 {
+                        out[(i, j)] -= c * matrix[(i, j)];
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    pub fn to_shifted_sparse_triplets(&self, c: f64) -> Option<Vec<Triplet<usize, usize, f64>>> {
+        let n = self.n();
+        let mut triplets = Vec::new();
+        let mut diagonal = vec![1.0; n];
+
+        match self {
+            Self::Dense(matrix) => {
+                if matrix.nrows() != matrix.ncols() {
+                    return None;
+                }
+                for j in 0..n {
+                    for i in 0..n {
+                        let value = matrix[(i, j)];
+                        if value != 0.0 {
+                            if i == j {
+                                diagonal[i] -= c * value;
+                            } else {
+                                triplets.push(Triplet::new(i, j, -c * value));
+                            }
+                        }
+                    }
+                }
+            }
+            Self::SparseTriplets {
+                n: sparse_n,
+                triplets: sparse_triplets,
+            } => {
+                if *sparse_n != n {
+                    return None;
+                }
+                for triplet in sparse_triplets {
+                    if triplet.row >= n || triplet.col >= n {
+                        return None;
+                    }
+                    if triplet.row == triplet.col {
+                        diagonal[triplet.row] -= c * triplet.val;
+                    } else {
+                        triplets.push(Triplet::new(triplet.row, triplet.col, -c * triplet.val));
+                    }
+                }
+            }
+            Self::Banded(matrix) => {
+                for j in 0..n {
+                    let i0 = j.saturating_sub(matrix.ku());
+                    let i1 = (j + matrix.kl() + 1).min(n);
+                    for i in i0..i1 {
+                        let value = matrix[(i, j)];
+                        if value != 0.0 {
+                            if i == j {
+                                diagonal[i] -= c * value;
+                            } else {
+                                triplets.push(Triplet::new(i, j, -c * value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (i, value) in diagonal.into_iter().enumerate() {
+            if value != 0.0 {
+                triplets.push(Triplet::new(i, i, value));
+            }
+        }
+
+        Some(triplets)
+    }
+
+    pub fn to_shifted_banded(&self, c: f64) -> Option<Banded<f64>> {
+        match self {
+            Self::Banded(matrix) => {
+                let n = matrix.n();
+                let mut out = Banded::<f64>::zeros(n, matrix.kl(), matrix.ku()).ok()?;
+                out.fill_from_dense(|i, j| {
+                    let identity = if i == j { 1.0 } else { 0.0 };
+                    identity - c * matrix[(i, j)]
+                });
+                Some(out)
+            }
+            Self::Dense(matrix) => dense_shifted_to_banded(matrix, c),
+            Self::SparseTriplets { n, triplets } => {
+                let mut kl = 0usize;
+                let mut ku = 0usize;
+                for triplet in triplets {
+                    if triplet.row >= *n || triplet.col >= *n {
+                        return None;
+                    }
+                    kl = kl.max(triplet.row.saturating_sub(triplet.col));
+                    ku = ku.max(triplet.col.saturating_sub(triplet.row));
+                }
+                let mut out = Banded::<f64>::zeros(*n, kl, ku).ok()?;
+                for i in 0..*n {
+                    out.set(i, i, 1.0).ok()?;
+                }
+                for triplet in triplets {
+                    let current = *out.get(triplet.row, triplet.col).unwrap_or(&0.0);
+                    out.set(triplet.row, triplet.col, current - c * triplet.val)
+                        .ok()?;
+                }
+                Some(out)
+            }
+        }
+    }
+}
+
+fn dense_shifted_to_banded(matrix: &DMatrix<f64>, c: f64) -> Option<Banded<f64>> {
+    if matrix.nrows() != matrix.ncols() {
+        return None;
+    }
+
+    let n = matrix.nrows();
+    let mut kl = 0usize;
+    let mut ku = 0usize;
+    for j in 0..n {
+        for i in 0..n {
+            let shifted = if i == j { 1.0 } else { 0.0 } - c * matrix[(i, j)];
+            if shifted != 0.0 {
+                kl = kl.max(i.saturating_sub(j));
+                ku = ku.max(j.saturating_sub(i));
+            }
+        }
+    }
+
+    let mut out = Banded::<f64>::zeros(n, kl, ku).ok()?;
+    out.fill_from_dense(|i, j| {
+        let identity = if i == j { 1.0 } else { 0.0 };
+        identity - c * matrix[(i, j)]
+    });
+    Some(out)
+}
+
+struct DenseNalgebraFactorization {
+    lu: LU<f64, Dyn, Dyn>,
+}
+
+impl BdfLinearFactorization for DenseNalgebraFactorization {
+    fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>> {
+        self.lu.solve(rhs)
+    }
+}
+
+struct DenseNalgebraLinearBackend;
+
+impl BdfLinearBackend for DenseNalgebraLinearBackend {
+    fn factor(&mut self, matrix: &DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>> {
+        Some(Box::new(DenseNalgebraFactorization {
+            lu: LU::new(matrix.clone()),
+        }))
+    }
+}
 /// Computes cumulative product along columns of a matrix.
 ///
 /// For each column j, computes the cumulative product:
@@ -249,9 +495,8 @@ fn solve_bdf_system<F>(
     y_predict: &DVector<f64>,
     c: f64,
     psi: &DVector<f64>,
-    lumatrx: LU<f64, Dyn, Dyn>,
-    solve_lu: &mut Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>, //&dyn Fn(&CsMat<f64>, &DVector<f64>) -> DVector<f64>,
-    scale: &DVector<f64>,                                                             // scale
+    linear_factorization: &dyn BdfLinearFactorization,
+    scale: &DVector<f64>, // scale
     tol: f64,
 ) -> (bool, usize, DVector<f64>, DVector<f64>)
 where
@@ -269,7 +514,9 @@ where
             break;
         }
         // The dy vector represents the change in the solution vector y at each iteration of the Newton-Raphson method
-        let dy = solve_lu(&lumatrx, &(c * &f - psi - &d));
+        let Some(dy) = linear_factorization.solve(&(c * &f - psi - &d)) else {
+            break;
+        };
         // The dy_norm value is then used to determine the convergence of the Newton-Raphson method and to adjust the step size in the BDF method
         let dy_norm = norm(&(dy.component_div(scale)));
         // Calculate the rate of convergence for the Newton-Raphson method
@@ -346,18 +593,18 @@ pub struct BDF {
     error_norm_old: Option<f64>,
     newton_tol: f64,
     jac_factor: Option<DVector<f64>>,
-    jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
-    J: DMatrix<f64>,
+    jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>,
+    J: BdfJacobian,
     I: DMatrix<f64>,
-    lu: Box<dyn FnMut(&DMatrix<f64>) -> LU<f64, Dyn, Dyn>>,
-    solve_lu: Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>,
+    linear_backend: Box<dyn BdfLinearBackend>,
     gamma: DVector<f64>,
     alpha: DVector<f64>,
     error_const: DVector<f64>,
     D: DMatrix<f64>,
     order: usize,
+    max_order_cap: usize,
     n_equal_steps: usize,
-    LU: Option<LU<f64, Dyn, Dyn>>,
+    linear_factorization: Option<Box<dyn BdfLinearFactorization>>,
     nlu: usize,
     nfev: usize,
     njev: usize,
@@ -393,7 +640,11 @@ impl Debug for BDF {
             .field("error_const", &self.error_const)
             .field("D", &self.D)
             .field("order", &self.order)
-            .field("LU", &self.LU)
+            .field("max_order_cap", &self.max_order_cap)
+            .field(
+                "linear_factorization_cached",
+                &self.linear_factorization.is_some(),
+            )
             .field("nlu", &self.nlu)
             .field("nfev", &self.nfev)
             .field("njev", &self.njev)
@@ -448,21 +699,17 @@ impl BDF {
             newton_tol: 0.0,
             jac_factor: None,
             jac: None,
-            J: DMatrix::zeros(0, 0),
+            J: BdfJacobian::from_dense(DMatrix::zeros(0, 0)),
             I: DMatrix::zeros(0, 0),
-            lu: Box::new(|J: &DMatrix<f64>| LU::new(J.clone())),
-
-            solve_lu: Box::new(|_lu: &LU<f64, Dyn, Dyn>, dv: &DVector<f64>| {
-                // implementation of the function
-                dv.clone()
-            }),
+            linear_backend: Box::new(DenseNalgebraLinearBackend),
             gamma: DVector::zeros(0),
             alpha: DVector::zeros(0),
             error_const: DVector::zeros(0),
             D: DMatrix::zeros(0, 0),
             order: 1,
+            max_order_cap: MAX_ORDER,
             n_equal_steps: 0,
-            LU: None,
+            linear_factorization: None,
             nlu: 0,
             direction: 1.0,
             nfev: 0,
@@ -470,6 +717,72 @@ impl BDF {
             n: 0,
             t_old: None,
         }
+    }
+
+    pub fn counters(&self) -> (usize, usize, usize) {
+        (self.nfev, self.njev, self.nlu)
+    }
+
+    /// Caps adaptive BDF order selection.
+    ///
+    /// The implementation keeps coefficient storage for the full tested BDF
+    /// range, but LSODE2 can use this hook to expose LSODE-style algorithm
+    /// policy without forking the BDF stepper.
+    pub fn set_max_order_cap(&mut self, max_order_cap: usize) {
+        assert!(
+            (1..=MAX_ORDER).contains(&max_order_cap),
+            "BDF max order cap must be in 1..={MAX_ORDER}, got {max_order_cap}"
+        );
+        self.max_order_cap = max_order_cap;
+        if self.order > self.max_order_cap {
+            self.order = self.max_order_cap;
+            self.linear_factorization = None;
+            self.n_equal_steps = 0;
+        }
+    }
+
+    pub fn max_order_cap(&self) -> usize {
+        self.max_order_cap
+    }
+
+    pub fn current_order(&self) -> usize {
+        self.order
+    }
+
+    pub fn equal_step_count(&self) -> usize {
+        self.n_equal_steps
+    }
+
+    /// Replaces the Newton linear backend and drops any cached factorization.
+    ///
+    /// This is the intentional extension point for LSODE2.  The BDF stepper
+    /// still builds the same Newton matrix `[I - cJ]`; only the factor/solve
+    /// implementation changes.
+    pub fn set_linear_backend(&mut self, backend: Box<dyn BdfLinearBackend>) {
+        self.linear_backend = backend;
+        self.linear_factorization = None;
+    }
+
+    /// Replaces the Jacobian evaluator with a native-storage evaluator.
+    ///
+    /// Existing BDF callers still use dense Jacobian closures through
+    /// `set_initial`.  LSODE2 can use this hook to install sparse triplet or
+    /// banded Jacobian evaluators and let the selected linear backend form
+    /// `[I - cJ]` without a dense round-trip.
+    pub fn set_native_jacobian(
+        &mut self,
+        mut jacobian: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
+    ) {
+        let initial = jacobian(self.t, &self.y);
+        assert_eq!(
+            initial.shape(),
+            (self.n, self.n),
+            "native Jacobian shape is not equal to solver dimension"
+        );
+        self.jac = Some(jacobian);
+        self.J = initial;
+        self.linear_factorization = None;
+        self.njev += 1;
     }
 
     /// Initializes the BDF solver with problem-specific parameters.
@@ -593,7 +906,7 @@ impl BDF {
 
         self.order = 1;
         self.n_equal_steps = 0;
-        self.LU = None;
+        self.linear_factorization = None;
         self.create_funct();
         self.validate_jac(jac, jac_sparsity);
     }
@@ -608,52 +921,13 @@ impl BDF {
     /// - **Dense**: Uses standard dense LU factorization
     /// - **Identity matrix**: Creates I for Newton system [I - c*J]
     fn create_funct(&mut self) {
-        if is_sparse(&self.J, SPARSE) {
-            // realization more efficient for sparse matrices
-            let lu = |A: &DMatrix<f64>| {
-                //   self.nlu += 1;
-                A.clone().lu()
-            };
-            let solve_lu = |LU: &LU<f64, Dyn, Dyn>, b: &DVector<f64>| -> DVector<f64> {
-                let linear_solution: DVector<f64> = LU.solve(b).unwrap();
-                linear_solution
-            };
-            #[allow(unused)]
-            fn solve_lu_f(LU: &LU<f64, Dyn, Dyn>, b: &DVector<f64>) -> DVector<f64> {
-                let linear_solution = LU.solve(b).unwrap();
-                linear_solution
-            }
-
-            self.lu = Box::new(lu) as Box<dyn FnMut(&DMatrix<f64>) -> LU<f64, Dyn, Dyn>>;
-            self.solve_lu = Box::new(solve_lu)
-                as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
-            self.I = DMatrix::identity(self.n, self.n);
-        } else {
-            // realization more efficient for dense matrices
-
-            // The type LU<f64, R, C> represents a LU decomposition of a matrix, where f64 is the element type,
-            // R and C are the row and column indices, respectively - they are generic parameters.
-            let lu = |A: &DMatrix<f64>| {
-                //   self.nlu += 1;
-                A.clone().lu()
-            };
-            let solve_lu = |LU: &LU<f64, Dyn, Dyn>, b: &DVector<f64>| -> DVector<f64> {
-                let linear_solution: DVector<f64> = LU.solve(b).unwrap();
-                linear_solution
-            };
-            #[allow(dead_code)]
-            fn solve_lu_f(LU: &LU<f64, Dyn, Dyn>, b: &DVector<f64>) -> DVector<f64> {
-                let linear_solution = LU.solve(b).unwrap();
-                linear_solution
-            }
-
-            self.lu = Box::new(lu) as Box<dyn FnMut(&DMatrix<f64>) -> LU<f64, Dyn, Dyn>>;
-            self.solve_lu = Box::new(solve_lu)
-                as Box<dyn FnMut(&LU<f64, Dyn, Dyn>, &DVector<f64>) -> DVector<f64>>;
-            self.I = DMatrix::identity(self.n, self.n);
-
-            info!("functions creation: done");
-        };
+        // Milestone 1 keeps the tested dense nalgebra path as the default
+        // backend.  The trait boundary is deliberately here, next to the
+        // Newton matrix cache, so LSODE2 can install sparse/banded backends
+        // without rewriting the BDF stepper.
+        self.linear_backend = Box::new(DenseNalgebraLinearBackend);
+        self.I = DMatrix::identity(self.n, self.n);
+        info!("linear backend creation: dense nalgebra");
     }
     /// Performs initial setup and validation of solver parameters.
     ///
@@ -751,16 +1025,16 @@ impl BDF {
                 let J = jac(t0, &y0);
                 self.njev += 1;
 
-                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
+                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> =
                     if is_sparse(&J, SPARSE) {
-                        Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                        Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                             // self.njev += 1;
-                            jac(t, &y)
+                            BdfJacobian::from_dense(jac(t, &y))
                         })
                     } else {
-                        Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                        Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                             //   self.njev += 1;
-                            jac(t, &y)
+                            BdfJacobian::from_dense(jac(t, &y))
                         })
                     };
                 /*
@@ -773,10 +1047,10 @@ impl BDF {
                         ),
                     )));
                 }
-                 */
+                */
                 //  ( Some(jac_wrapped), J)
                 self.jac = Some(jac_wrapped);
-                self.J = J.clone();
+                self.J = BdfJacobian::from_dense(J.clone());
             }
             _ => {
                 let _new_sparsity: Option<(DMatrix<f64>, Vec<usize>)> =
@@ -851,7 +1125,10 @@ impl BDF {
         };
 
         let order = self.order;
-        assert!(order <= MAX_ORDER, "Order cannot exceed MAX_ORDER");
+        assert!(
+            order <= self.max_order_cap,
+            "Order cannot exceed configured max order cap"
+        );
         assert!(
             order < self.alpha.len(),
             "Order must be within alpha bounds"
@@ -860,8 +1137,8 @@ impl BDF {
         let alpha = &self.alpha;
         let gamma = &self.gamma;
         let error_const = &self.error_const;
-        let J = self.J.clone();
-        let mut LU = self.LU.clone();
+        let mut J = self.J.clone();
+        let mut linear_factorization = self.linear_factorization.take();
         let mut current_jac = self.jac.is_none();
         let mut step_accepted = false;
         // scale preallocation
@@ -892,7 +1169,7 @@ impl BDF {
 
                 change_D(&mut D, order, (t_new - t).abs() / h_abs);
                 self.n_equal_steps = 0;
-                LU = None;
+                linear_factorization = None;
             }
             t_new = t_new_;
 
@@ -908,11 +1185,17 @@ impl BDF {
             let c = h / alpha[order];
 
             while !converged {
-                if LU.clone().is_none() {
-                    let eye: DMatrix<f64> = DMatrix::identity(self.n, self.n);
-                    assert_eq!(eye.shape(), J.shape(), "J shape is not equal to eye shape");
-                    let x = &(eye - c * J.clone());
-                    LU = Some((self.lu)(x));
+                if linear_factorization.is_none() {
+                    assert_eq!(
+                        J.shape(),
+                        (self.n, self.n),
+                        "J shape is not equal to solver dimension"
+                    );
+                    linear_factorization = self.linear_backend.factor_shifted_jacobian(c, &J);
+                    self.nlu += 1;
+                    if linear_factorization.is_none() {
+                        break;
+                    }
                 }
 
                 let (conv, n_iter_, y_new_, d_) = solve_bdf_system(
@@ -921,8 +1204,7 @@ impl BDF {
                     &y_predict.clone(),
                     c,
                     &psi.clone(),
-                    LU.clone().unwrap(),
-                    &mut self.solve_lu,
+                    linear_factorization.as_ref().unwrap().as_ref(),
                     &scale.clone(),
                     self.newton_tol,
                 );
@@ -934,8 +1216,9 @@ impl BDF {
                     if current_jac {
                         break;
                     }
-                    let _J = self.jac.as_mut().unwrap()(t_new, &y_predict);
-                    LU = None;
+                    J = self.jac.as_mut().unwrap()(t_new, &y_predict);
+                    self.njev += 1;
+                    linear_factorization = None;
                     current_jac = true;
                 }
             }
@@ -945,7 +1228,7 @@ impl BDF {
                 h_abs *= factor;
                 change_D(&mut D, order, factor);
                 self.n_equal_steps = 0;
-                LU = None;
+                linear_factorization = None;
                 continue;
             }
 
@@ -973,7 +1256,7 @@ impl BDF {
         self.y = y_new;
         self.h_abs = h_abs;
         self.J = J;
-        self.LU = LU;
+        self.linear_factorization = linear_factorization;
         let D_ = D.clone();
         D.set_row(order + 2, &(d.clone().transpose() - D_.row(order + 1)));
 
@@ -997,7 +1280,7 @@ impl BDF {
             f64::INFINITY
         };
 
-        let error_p_norm = if order < MAX_ORDER {
+        let error_p_norm = if order < self.max_order_cap {
             let error_p = error_const[order + 1] * D.row(order + 2);
 
             norm(&(error_p.transpose().component_div(&scale)))
@@ -1017,7 +1300,9 @@ impl BDF {
         // This gives delta_order ∈ {-1, 0, 1} since factors has 3 elements
         let argmax_index = factors.argmax().0;
         let delta_order = (argmax_index as i32) - 1; // Can be -1, 0, or 1
-        let new_order = ((order as i32) + delta_order).max(1).min(MAX_ORDER as i32) as usize;
+        let new_order = ((order as i32) + delta_order)
+            .max(1)
+            .min(self.max_order_cap as i32) as usize;
         self.order = new_order;
 
         let factor = (safety * factors.max()).min(MAX_FACTOR);
@@ -1025,7 +1310,7 @@ impl BDF {
 
         change_D(&mut D, self.order, factor);
         self.n_equal_steps = 0;
-        self.LU = None;
+        self.linear_factorization = None;
         self.D = D;
 
         (true, None)

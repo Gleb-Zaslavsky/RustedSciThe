@@ -17,6 +17,7 @@
 //!
 //! ## Module Structure
 //! - `BVP_sci_faer`: Core BVP solver using faer linear algebra (recommended for performance)
+//! - `BVP_sci_numerical`: Pure numerical no-symbolic user-facing API on top of the faer core
 //! - `BVP_sci_nalgebra`: Alternative implementation using nalgebra
 //! - `BVP_sci_symb`: High-level symbolic wrapper for easy problem setup
 //! - `BVP_sci_symbolic_functions`: Symbolic-to-numerical conversion utilities
@@ -36,12 +37,17 @@
 //! - Memory-efficient mesh handling
 //! - Adaptive error control
 //!
+pub mod BVP_sci_aot;
+mod BVP_sci_aot_tests;
 ///BVP solver using faer crate for matrix&vector operations
 pub mod BVP_sci_faer;
 mod BVP_sci_faer_tests;
+mod BVP_sci_generated_compare_tests;
 /// BVP solver using nalgebra crate for matrix&vector operations
 pub mod BVP_sci_nalgebra;
 mod BVP_sci_nalgebra_tests;
+pub mod BVP_sci_numerical;
+mod BVP_sci_numerical_tests;
 pub mod BVP_sci_symb;
 mod BVP_sci_symb_tests;
 mod BVP_sci_symb_tests2;

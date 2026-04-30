@@ -57,12 +57,16 @@ use crate::numerical::BVP_Damp::BVP_utils_damped::{
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyDampedGeneratedSolverState,
-    BuildDampedSolverRequest, DampedGeneratedSolverState, DampedSolverBuildRequest,
-    GeneratedBackendConfig, SparseGeneratedBackendMode, try_generate_and_apply_damped_solver_state,
+    BandedGeneratedBackendMode, BuildDampedSolverRequest, DampedGeneratedSolverState,
+    DampedSolverBuildRequest, GeneratedBackendConfig, SparseGeneratedBackendMode,
+    try_generate_and_apply_damped_solver_state,
 };
-use crate::symbolic::codegen_aot_resolution::AotResolver;
-use crate::symbolic::codegen_backend_selection::BackendSelectionPolicy;
-use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
+use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
+use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::symbolic_functions_BVP::{
+    BvpBackendIntegrationError, BvpSymbolicAssemblyBackend,
+};
 use core::panic;
 use nalgebra::{DMatrix, DVector};
 use simplelog::LevelFilter;
@@ -140,6 +144,12 @@ pub struct DampedSolverOptions {
     pub generated_backend_config: GeneratedBackendConfig,
 }
 
+#[derive(Clone, Debug)]
+pub struct DampedBvpStatistics {
+    pub counters: HashMap<String, usize>,
+    pub timers: HashMap<String, String>,
+}
+
 impl DampedSolverOptions {
     /// Creates damped solver options from explicit values.
     #[allow(clippy::too_many_arguments)]
@@ -173,6 +183,14 @@ impl DampedSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Overrides the native linear solver configuration used by generated banded callbacks.
+    pub fn with_banded_linear_solver_config(mut self, config: LinearSolverConfig) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_banded_linear_solver_config(config);
         self
     }
 
@@ -218,6 +236,24 @@ impl DampedSolverOptions {
         self
     }
 
+    /// Attaches a high-level banded generated-backend mode.
+    ///
+    /// Banded modes keep the outer nonlinear solver unchanged, but route the
+    /// generated callback stack through native `Banded` matrix assembly and the
+    /// faithful LAPACK-style banded LU linear solver with `refine = 0`.
+    pub fn with_banded_generated_backend_mode(mut self, mode: BandedGeneratedBackendMode) -> Self {
+        self.generated_backend_config = GeneratedBackendConfig::from_banded_mode(mode);
+        self
+    }
+
+    /// Selects the symbolic assembly backend used before lambdify/AOT lowering.
+    pub fn with_symbolic_assembly_backend(mut self, backend: BvpSymbolicAssemblyBackend) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_symbolic_assembly_backend(backend);
+        self
+    }
+
     /// Creates production-oriented sparse damped solver options with standard defaults.
     ///
     /// This is the preferred starting point for most BVP users:
@@ -227,6 +263,15 @@ impl DampedSolverOptions {
     /// - generated backend defaults that prefer AOT and fall back to lambdify
     pub fn sparse_damped() -> Self {
         Self::default().with_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults)
+    }
+
+    /// Creates production-oriented banded damped solver options with standard defaults.
+    ///
+    /// This selects generated `Banded` matrix callbacks and faithful
+    /// LAPACK-style native banded LU (`refine = 0`) while preserving the
+    /// regular damped Newton nonlinear strategy.
+    pub fn banded_damped() -> Self {
+        Self::default().with_banded_generated_backend_mode(BandedGeneratedBackendMode::Defaults)
     }
 
     /// Creates production-oriented dense damped solver options with standard defaults.
@@ -245,6 +290,21 @@ impl DampedSolverOptions {
         self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults)
     }
 
+    /// Uses the standard banded generated-backend defaults.
+    pub fn with_banded_generated_backend_defaults(self) -> Self {
+        self.with_banded_generated_backend_mode(BandedGeneratedBackendMode::Defaults)
+    }
+
+    /// Uses lambdify callbacks with generated `Banded` matrix assembly.
+    pub fn with_banded_lambdify(self) -> Self {
+        self.with_banded_generated_backend_mode(BandedGeneratedBackendMode::Lambdify)
+    }
+
+    /// Builds a banded release AOT backend on demand.
+    pub fn with_banded_aot_build_if_missing_release(self) -> Self {
+        self.with_banded_generated_backend_mode(BandedGeneratedBackendMode::BuildIfMissingRelease)
+    }
+
     /// Requires a prebuilt sparse generated backend.
     pub fn with_sparse_aot_require_prebuilt(self) -> Self {
         self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::RequirePrebuilt)
@@ -253,6 +313,59 @@ impl DampedSolverOptions {
     /// Builds a sparse release AOT backend on demand.
     pub fn with_sparse_aot_build_if_missing_release(self) -> Self {
         self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::BuildIfMissingRelease)
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `gcc`-compiled sparse C AOT.
+    ///
+    /// Prefer this when runtime throughput matters more than startup latency.
+    pub fn with_sparse_atomview_c_gcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc(),
+        )
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `tcc`-compiled sparse C AOT.
+    ///
+    /// Prefer this for practical repeated-solve workflows on the same large BVP.
+    pub fn with_sparse_atomview_c_tcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(),
+        )
+    }
+
+    /// User-facing alias for the currently recommended repeated-solve compiled path.
+    pub fn with_sparse_atomview_for_repeated_solves(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_for_repeated_solves(),
+        )
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `gcc`-compiled banded C AOT.
+    pub fn with_banded_atomview_c_gcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_gcc(),
+        )
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `tcc`-compiled banded C AOT.
+    pub fn with_banded_atomview_c_tcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(),
+        )
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand Zig-compiled banded AOT.
+    pub fn with_banded_atomview_zig(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_zig(),
+        )
+    }
+
+    /// User-facing alias for the currently recommended repeated-solve banded path.
+    pub fn with_banded_atomview_for_repeated_solves(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::banded_atomview_for_repeated_solves(),
+        )
     }
 }
 
@@ -303,6 +416,8 @@ pub struct NRBVP {
     pub max_error: f64,
     pub Bounds: Option<HashMap<String, (f64, f64)>>, // hashmap where keys are variable names and values are tuples with lower and upper bounds.
     pub loglevel: Option<String>,
+    pub param_names: Vec<String>, // symbolic parameter names used by RHS but not solved by Newton
+    pub param_values: Option<Vec<f64>>, // current numeric values for param_names
     no_reports: bool,
     // thets all user defined  parameters
     //
@@ -362,10 +477,13 @@ impl BuildDampedSolverRequest for NRBVP {
             self.x_mesh = DVector::from_vec(mesh_.clone().unwrap());
             (None, None, mesh_)
         };
+        let effective_method = self.generated_backend_config.effective_method(&self.method);
 
         DampedSolverBuildRequest {
             eq_system: self.eq_system.clone(),
             values: self.values.clone(),
+            param_names: (!self.param_names.is_empty()).then(|| self.param_names.clone()),
+            param_values: self.param_values.clone(),
             arg: self.arg.clone(),
             t0: self.t0,
             n_steps,
@@ -375,15 +493,21 @@ impl BuildDampedSolverRequest for NRBVP {
             bounds: self.Bounds.clone(),
             rel_tolerance: self.rel_tolerance.clone(),
             scheme: self.scheme.clone(),
-            method: self.method.clone(),
+            method: effective_method.clone(),
             bandwidth,
             backend_policy: self
                 .generated_backend_config
-                .effective_backend_policy(&self.method),
+                .effective_backend_policy(&effective_method),
             resolver: self.generated_backend_config.resolver.clone(),
             aot_execution_policy: self.generated_backend_config.aot_execution_policy.clone(),
             aot_build_policy: self.generated_backend_config.aot_build_policy,
+            aot_compile_config: self.generated_backend_config.aot_compile_config.clone(),
+            aot_codegen_backend: self.generated_backend_config.aot_codegen_backend,
+            aot_c_compiler: self.generated_backend_config.aot_c_compiler.clone(),
             aot_chunking_policy: self.generated_backend_config.aot_chunking_policy,
+            symbolic_assembly_backend: self.generated_backend_config.symbolic_assembly_backend,
+            matrix_backend_override: self.generated_backend_config.matrix_backend_override,
+            banded_linear_solver_config: self.generated_backend_config.banded_linear_solver_config,
         }
     }
 }
@@ -486,6 +610,8 @@ impl NRBVP {
             max_error: 0.0,
             Bounds,
             loglevel,
+            param_names: Vec::new(),
+            param_values: None,
             no_reports: false,
             result: None,
             full_result: None,
@@ -673,9 +799,43 @@ impl NRBVP {
         self
     }
 
+    /// Sets symbolic parameter names used by RHS evaluation but not solved by Newton.
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.param_names = params
+            .map(|names| names.iter().map(|name| (*name).to_string()).collect())
+            .unwrap_or_default();
+        if let Some(values) = self.param_values.as_ref() {
+            assert_eq!(
+                values.len(),
+                self.param_names.len(),
+                "param_values length must match param_names length"
+            );
+        }
+    }
+
+    /// Sets current numeric parameter values used by compiled/lambdified callbacks.
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        if let Some(ref values) = values {
+            assert_eq!(
+                values.len(),
+                self.param_names.len(),
+                "param_values length must match param_names length"
+            );
+        }
+        self.param_values = values;
+    }
+
     /// Returns a solver configured with a high-level sparse generated-backend mode.
     pub fn with_sparse_generated_backend_mode(mut self, mode: SparseGeneratedBackendMode) -> Self {
         self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+        self
+    }
+
+    /// Returns a solver configured with the selected symbolic assembly backend.
+    pub fn with_symbolic_assembly_backend(mut self, backend: BvpSymbolicAssemblyBackend) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_symbolic_assembly_backend(backend);
         self
     }
 
@@ -692,6 +852,27 @@ impl NRBVP {
     /// Returns a solver configured to build a sparse release AOT backend on demand.
     pub fn with_sparse_aot_build_if_missing_release(self) -> Self {
         self.with_sparse_generated_backend_mode(SparseGeneratedBackendMode::BuildIfMissingRelease)
+    }
+
+    /// Returns a solver configured for AtomView symbolic assembly plus `gcc`-compiled sparse C AOT.
+    pub fn with_sparse_atomview_c_gcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc(),
+        )
+    }
+
+    /// Returns a solver configured for AtomView symbolic assembly plus `tcc`-compiled sparse C AOT.
+    pub fn with_sparse_atomview_c_tcc(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(),
+        )
+    }
+
+    /// Returns a solver configured for the recommended repeated-solve compiled path.
+    pub fn with_sparse_atomview_for_repeated_solves(self) -> Self {
+        self.with_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_for_repeated_solves(),
+        )
     }
 
     /// Returns a solver with an explicit generated-backend policy override.
@@ -918,6 +1099,14 @@ impl NRBVP {
         self.generated_backend_config = config;
     }
 
+    /// Sets the symbolic assembly backend used before lambdify/AOT lowering.
+    pub fn set_symbolic_assembly_backend(&mut self, backend: BvpSymbolicAssemblyBackend) {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .clone()
+            .with_symbolic_assembly_backend(backend);
+    }
+
     /// Installs a high-level sparse generated-backend mode on an existing solver.
     pub fn set_sparse_generated_backend_mode(&mut self, mode: SparseGeneratedBackendMode) {
         self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
@@ -928,9 +1117,56 @@ impl NRBVP {
         self.set_sparse_generated_backend_mode(SparseGeneratedBackendMode::Defaults);
     }
 
+    /// Installs AtomView symbolic assembly plus `gcc`-compiled sparse C AOT.
+    pub fn set_sparse_atomview_c_gcc(&mut self) {
+        self.set_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc(),
+        );
+    }
+
+    /// Installs AtomView symbolic assembly plus `tcc`-compiled sparse C AOT.
+    pub fn set_sparse_atomview_c_tcc(&mut self) {
+        self.set_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(),
+        );
+    }
+
+    /// Installs the recommended repeated-solve compiled path.
+    pub fn set_sparse_atomview_for_repeated_solves(&mut self) {
+        self.set_generated_backend_config(
+            GeneratedBackendConfig::sparse_atomview_for_repeated_solves(),
+        );
+    }
+
     /// Returns the full generated-backend configuration.
     pub fn generated_backend_config(&self) -> &GeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    /// Returns accumulated nonlinear/callback/linear-solve statistics for the current solver.
+    pub fn get_statistics(&self) -> DampedBvpStatistics {
+        let mut counters = self.calc_statistics.clone();
+        if let Some(jac) = &self.old_jac {
+            let jac_shape = jac.shape();
+            let matrix_weight = checkmem(&**jac);
+            counters.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
+            counters.insert(
+                "number of jacobian elements".to_string(),
+                jac_shape.0 * jac_shape.1,
+            );
+        }
+        counters.insert("length of y vector".to_string(), self.y.len() as usize);
+        counters.insert(
+            "number of grid points".to_string(),
+            self.x_mesh.len() as usize,
+        );
+        let timers = self.custom_timer.get_all();
+        DampedBvpStatistics { counters, timers }
+    }
+
+    /// Returns the selected symbolic assembly backend.
+    pub fn symbolic_assembly_backend(&self) -> BvpSymbolicAssemblyBackend {
+        self.generated_backend_config.symbolic_assembly_backend
     }
     /////////////////////
     /// Computes Newton step using cached inverse Jacobian
@@ -1668,7 +1904,7 @@ impl NRBVP {
                     Ok(res)
                 }
                 Err(_) => self.try_solver(), //end Error
-            } // end mat 
+            } // end mat
         }
     }
 
@@ -1871,15 +2107,17 @@ mod tests {
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
         GeneratedBackendConfig, SparseGeneratedBackendMode,
     };
-    use crate::symbolic::codegen_aot_registry::AotRegistry;
-    use crate::symbolic::codegen_aot_resolution::AotResolver;
-    use crate::symbolic::codegen_aot_runtime_link::{
+    use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+    use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
+    use crate::symbolic::codegen::codegen_aot_runtime_link::{
         LinkedSparseAotBackend, register_linked_sparse_backend, unregister_linked_sparse_backend,
     };
-    use crate::symbolic::codegen_backend_selection::BackendSelectionPolicy;
-    use crate::symbolic::codegen_orchestrator::{ParallelExecutorConfig, ParallelFallbackPolicy};
-    use crate::symbolic::codegen_runtime_api::ResidualChunkingStrategy;
-    use crate::symbolic::codegen_tasks::SparseChunkingStrategy;
+    use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+    use crate::symbolic::codegen::codegen_orchestrator::{
+        ParallelExecutorConfig, ParallelFallbackPolicy,
+    };
+    use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+    use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
     use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
     use faer::Col;
     use nalgebra::DMatrix;
@@ -1958,6 +2196,31 @@ mod tests {
                 Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
             )
+        );
+    }
+
+    #[test]
+    fn symbolic_assembly_backend_is_exposed_on_solver_surface() {
+        let mut solver = sparse_surface_test_solver()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+
+        assert_eq!(
+            solver.symbolic_assembly_backend(),
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
+            solver.generated_backend_config().symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+
+        solver.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::ExprLegacy);
+        assert_eq!(
+            solver.symbolic_assembly_backend(),
+            BvpSymbolicAssemblyBackend::ExprLegacy
+        );
+        assert_eq!(
+            solver.generated_backend_config().symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::ExprLegacy
         );
     }
 
@@ -2111,6 +2374,28 @@ mod tests {
     }
 
     #[test]
+    fn build_solver_request_carries_parameter_names_and_values() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_params(Some(&["alpha", "beta"]));
+        solver.set_param_values(Some(vec![1.5, -0.25]));
+
+        let request = solver.build_solver_request(None, None);
+        assert_eq!(
+            request.param_names,
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        );
+        assert_eq!(request.param_values, Some(vec![1.5, -0.25]));
+    }
+
+    #[test]
+    #[should_panic(expected = "param_values length must match param_names length")]
+    fn solver_surface_rejects_parameter_value_length_mismatch() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_params(Some(&["alpha", "beta"]));
+        solver.set_param_values(Some(vec![1.5]));
+    }
+
+    #[test]
     fn build_solver_request_uses_backend_policy_override_when_present() {
         let mut solver = sparse_surface_test_solver_with_tolerances();
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
@@ -2241,13 +2526,13 @@ mod tests {
         let next_request = solver.build_solver_request(None, None);
         assert!(next_request.resolver.is_some());
 
-        let err = next_request.generate().err().expect(
-            "next request should now see compiled artifact and fail only at runtime linking",
+        let next_state = next_request.generate().expect(
+            "next request should reuse the saved compiled resolver and generate successfully",
         );
-        assert!(matches!(
-            err,
-            BvpBackendIntegrationError::CompiledAotRuntimeUnavailable { .. }
-        ));
+        assert!(
+            next_state.jac.is_some(),
+            "successful generation through the saved resolver should still provide a Jacobian callback"
+        );
     }
 
     #[test]

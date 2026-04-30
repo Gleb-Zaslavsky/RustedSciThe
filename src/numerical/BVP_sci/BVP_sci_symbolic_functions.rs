@@ -24,6 +24,10 @@ use crate::numerical::BVP_sci::BVP_sci_faer::{
     ODEFunction, ODEJacobian, faer_col, faer_dense_mat, faer_mat,
 };
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_functions_BVP::{
+    bvp_symbolic_bandwidth, bvp_symbolic_jacobian_smart, bvp_symbolic_parse_variables,
+    bvp_symbolic_variables_for_functions,
+};
 use faer::mat::Mat;
 use log::info;
 use std::collections::HashMap;
@@ -45,6 +49,8 @@ pub struct Jacobian_sci_faer {
     pub variable_string: Vec<String>,
     /// Symbolic Jacobian matrix (df/dy)
     pub symbolic_jacobian: Vec<Vec<Expr>>,
+    /// Sparse symbolic Jacobian entries (row, col, expr) for nonzero df/dy
+    pub symbolic_jacobian_sparse: Vec<(usize, usize, Expr)>,
     /// Numerical Jacobian function closure
     pub jac_function: Option<Box<ODEJacobian>>,
     /// Numerical residual function closure
@@ -62,6 +68,7 @@ impl Jacobian_sci_faer {
             vector_of_variables: vec![],
             variable_string: vec![],
             symbolic_jacobian: vec![],
+            symbolic_jacobian_sparse: vec![],
             jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             bandwidth: None,
@@ -75,20 +82,14 @@ impl Jacobian_sci_faer {
     /// * `vector_of_functions` - Vector of symbolic ODE expressions
     /// * `variable_string` - Names of unknown variables
     pub fn from_vectors(&mut self, vector_of_functions: Vec<Expr>, variable_string: Vec<String>) {
-        self.vector_of_functions = vector_of_functions.clone();
-        self.variable_string = variable_string.clone();
-        self.vector_of_variables =
-            Expr::parse_vector_expression(variable_string.iter().map(|s| s.as_str()).collect());
-
-        // varaibles from every expression in the system
-        let vars_from_flat: Vec<Vec<String>> = vector_of_functions
-            .clone()
-            .iter()
-            .map(|exp_i| Expr::all_arguments_are_variables(exp_i))
-            .collect();
-        self.variables_for_all_eq = vars_from_flat.clone();
-        println!(" {:?}", self.vector_of_functions);
-        println!(" {:?}", self.vector_of_variables);
+        self.vector_of_functions = vector_of_functions;
+        self.variable_string = variable_string;
+        self.vector_of_variables = bvp_symbolic_parse_variables(&self.variable_string);
+        self.variables_for_all_eq = bvp_symbolic_variables_for_functions(&self.vector_of_functions);
+        info!(
+            "Initialized BVP symbolic functions for {} equations",
+            self.vector_of_functions.len()
+        );
     }
     /// Calculate symbolic Jacobian matrix using parallel differentiation
     ///
@@ -105,85 +106,43 @@ impl Jacobian_sci_faer {
             "vector_of_variables is empty"
         );
 
-        let variable_string_vec = self.variable_string.clone();
-        let new_jac: Vec<Vec<Expr>> = self
-            .vector_of_functions
-            .par_iter()
-            .enumerate()
-            .map(|(i, function)| {
-                let mut vector_of_partial_derivatives = Vec::new();
-                // let function = function.clone();
-                for j in 0..self.vector_of_variables.len() {
-                    let variable = &variable_string_vec[j]; // obviously if function does not contain variable its derivative should be 0
-                    let list_of_variables_for_this_eq = &self.variables_for_all_eq[i]; // so we can only calculate derivative for variables that are used in this equation
-                    if list_of_variables_for_this_eq.contains(variable) {
-                        let mut partial = Expr::diff(&function, variable);
-                        partial = partial.simplify();
-                        vector_of_partial_derivatives.push(partial);
-                    } else {
-                        vector_of_partial_derivatives.push(Expr::Const(0.0));
-                    }
-                }
-                vector_of_partial_derivatives
-            })
-            .collect();
-
-        self.symbolic_jacobian = new_jac;
+        let (symbolic_jacobian, symbolic_sparse) = bvp_symbolic_jacobian_smart(
+            &self.vector_of_functions,
+            self.vector_of_variables.len(),
+            &self.variable_string,
+            &self.variables_for_all_eq,
+        );
+        self.symbolic_jacobian = symbolic_jacobian;
+        self.symbolic_jacobian_sparse = symbolic_sparse;
     }
     /// Determine Jacobian matrix bandwidth for sparse storage optimization
     ///
     /// Calculates the number of sub/super-diagonals (kl, ku) in the Jacobian
     /// to optimize sparse matrix operations.
-    fn find_bandwidths(&mut self) {
-        let A = &self.symbolic_jacobian;
-        let n = A.len();
-        let mut kl = 0; // Number of subdiagonals
-        let mut ku = 0; // Number of superdiagonals
-
-        /*
-            Matrix Iteration: The function find_bandwidths iterates through each element of the matrix A.
-        Subdiagonal Width (kl): For each non-zero element below the main diagonal (i.e., i > j), it calculates the distance from the diagonal and updates
-        kl if this distance is greater than the current value of kl.
-        Superdiagonal Width (ku): Similarly, for each non-zero element above the main diagonal (i.e., j > i), it calculates the distance from the diagonal
-         and updates ku if this distance is greater than the current value of ku.
-             */
-        for i in 0..n {
-            for j in 0..n {
-                if A[i][j] != Expr::Const(0.0) {
-                    if j > i {
-                        ku = std::cmp::max(ku, j - i);
-                    } else if i > j {
-                        kl = std::cmp::max(kl, i - j);
-                    }
-                }
-            }
-        }
-
-        self.bandwidth = Some((kl, ku));
+    pub(crate) fn find_bandwidths(&mut self) {
+        self.bandwidth = Some(bvp_symbolic_bandwidth(&self.symbolic_jacobian));
     }
-    /// Convert symbolic vector to BVP residual function closure
-    /// Convert symbolic expressions to numerical residual function closure
-    ///
-    /// Creates a closure that evaluates the ODE system at mesh points.
-    ///
-    /// # Arguments
-    /// * `arg` - Independent variable name (e.g., "x")
-    /// * `var_names` - Unknown variable names
-    /// * `par_names` - Parameter names
-    pub fn symbolic_to_ode_function2(
-        &mut self,
+    fn compile_residual_function(
+        &self,
         arg: String,
         var_names: Vec<String>,
         par_names: Vec<String>,
-        Bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
-    ) {
-        let vector_of_functions = self.vector_of_functions.clone();
-        //let var_names: Vec<String> = variable_names.iter().map(|s| s.to_string()).collect();
-        //let par_names: Vec<String> = param_names.iter().map(|s| s.to_string()).collect();
-        let residual = Box::new(
+        bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
+    ) -> Box<ODEFunction> {
+        let mut all_var_names = vec![arg.as_str()];
+        all_var_names.extend(var_names.iter().map(|s| s.as_str()));
+        all_var_names.extend(par_names.iter().map(|s| s.as_str()));
+        let compiled_functions: Vec<_> = self
+            .vector_of_functions
+            .iter()
+            .map(|func| Expr::lambdify_borrowed_thread_safe(func, all_var_names.as_slice()))
+            .collect();
+        Box::new(
             move |x: &faer_col, y: &faer_dense_mat, p: &faer_col| -> faer_dense_mat {
                 let (n, m) = (y.nrows(), y.ncols());
                 let mut result = faer_dense_mat::zeros(n, m);
+                let bounds_ref = bounds.as_ref();
+                let var_names_ref = var_names.as_slice();
 
                 let columns: Vec<Vec<f64>> = (0..m) // m is the number of time steps
                     .into_par_iter()
@@ -193,20 +152,16 @@ impl Jacobian_sci_faer {
                         for i in 0..n {
                             let y = *y.get(i, j);
                             let bounded_value =
-                                Self::handle_bounds(i, y, Bounds.clone(), var_names.clone());
+                                Self::handle_bounds(i, y, bounds_ref, var_names_ref);
                             args.push(bounded_value);
                         }
                         for i in 0..p.nrows() {
                             args.push(p[i]);
                         }
 
-                        let mut all_var_names = vec![arg.as_str()];
-                        all_var_names.extend(var_names.iter().map(|s| s.as_str()));
-                        all_var_names.extend(par_names.iter().map(|s| s.as_str()));
-
-                        vector_of_functions
+                        compiled_functions
                             .iter()
-                            .map(|func| func.eval_expression(all_var_names.as_slice(), &args))
+                            .map(|func| func(args.as_slice()))
                             .collect()
                     })
                     .collect();
@@ -222,8 +177,25 @@ impl Jacobian_sci_faer {
 
                 result
             },
-        );
-        self.residual_function = residual;
+        )
+    }
+
+    /// Convert symbolic expressions to numerical residual function closure
+    ///
+    /// Creates a closure that evaluates the ODE system at mesh points.
+    ///
+    /// # Arguments
+    /// * `arg` - Independent variable name (e.g., "x")
+    /// * `var_names` - Unknown variable names
+    /// * `par_names` - Parameter names
+    pub fn symbolic_to_ode_function(
+        &mut self,
+        arg: String,
+        var_names: Vec<String>,
+        par_names: Vec<String>,
+        Bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
+    ) {
+        self.residual_function = self.compile_residual_function(arg, var_names, par_names, Bounds);
     }
 
     /// Apply variable bounds to residual values to prevent numerical issues
@@ -237,76 +209,12 @@ impl Jacobian_sci_faer {
     ///
     /// # Returns
     /// Bounded value within specified limits
-    ///
-    pub fn symbolic_to_ode_function(
-        &mut self,
-        arg: String,
-        var_names: Vec<String>,
-        par_names: Vec<String>,
-        Bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
-    ) {
-        let vector_of_functions = self.vector_of_functions.clone();
-        //let var_names: Vec<String> = variable_names.iter().map(|s| s.to_string()).collect();
-        //let par_names: Vec<String> = param_names.iter().map(|s| s.to_string()).collect();
-        let residual = Box::new(
-            move |x: &faer_col, y: &faer_dense_mat, p: &faer_col| -> faer_dense_mat {
-                let (n, m) = (y.nrows(), y.ncols());
-                let mut result = faer_dense_mat::zeros(n, m);
-
-                let columns: Vec<Vec<f64>> = (0..m) // m is the number of time steps
-                    .into_par_iter()
-                    .map(|j| {
-                        let mut args = Vec::with_capacity(1 + n + p.nrows()); // n is the number of variables and p is the number of parameters
-                        args.push(x[j]);
-                        for i in 0..n {
-                            let y = *y.get(i, j);
-                            let bounded_value =
-                                Self::handle_bounds(i, y, Bounds.clone(), var_names.clone());
-                            args.push(bounded_value);
-                        }
-                        for i in 0..p.nrows() {
-                            args.push(p[i]);
-                        }
-
-                        let mut all_var_names = vec![arg.as_str()];
-                        all_var_names.extend(var_names.iter().map(|s| s.as_str()));
-                        all_var_names.extend(par_names.iter().map(|s| s.as_str()));
-
-                        let result: Vec<_> = vector_of_functions
-                            .iter()
-                            .map(|func| {
-                                let func = Expr::lambdify_borrowed_thread_safe(
-                                    &func,
-                                    all_var_names.as_slice(),
-                                );
-
-                                func(args.as_slice())
-                            })
-                            .collect();
-                        result
-                    })
-                    .collect();
-
-                for (j, col) in columns.iter().enumerate() {
-                    // j is the index of the time step
-                    for (i, value) in col.iter().enumerate() {
-                        // i is the index of the variable
-                        // let bounded_value = Self::handle_bounds(i, *value, Bounds.clone(), var_names.clone());
-                        *result.get_mut(i, j) = *value;
-                    }
-                }
-
-                result
-            },
-        );
-        self.residual_function = residual;
-    }
 
     pub fn handle_bounds(
         var_index: usize,
         value: f64,
-        bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
-        var_names: Vec<String>,
+        bounds: Option<&HashMap<String, Vec<(usize, f64)>>>,
+        var_names: &[String],
     ) -> f64 {
         let Some(bounds) = bounds else { return value };
 
@@ -323,15 +231,135 @@ impl Jacobian_sci_faer {
                 0 => bounded_value.max(bound_val), // minimum bound
                 1 => bounded_value.min(bound_val), // maximum bound
                 _ => {
-                    eprintln!(
+                    log::warn!(
                         "Warning: Unknown bound type {} for variable {}",
-                        bound_type, var_name
+                        bound_type,
+                        var_name
                     );
                     bounded_value
                 }
             };
         }
         bounded_value
+    }
+
+    fn bounded_runtime_args_for_column(
+        x: &faer_col,
+        y: &faer_dense_mat,
+        p: &faer_col,
+        column: usize,
+        variable_names: &[String],
+        bounds: &Option<HashMap<String, Vec<(usize, f64)>>>,
+    ) -> Vec<f64> {
+        let n = y.nrows();
+        let k = p.nrows();
+        let mut args = Vec::with_capacity(1 + n + k);
+        args.push(x[column]);
+        let bounds_ref = bounds.as_ref();
+        for row in 0..n {
+            let y_val = *y.get(row, column);
+            let bounded_y = Self::handle_bounds(row, y_val, bounds_ref, variable_names);
+            args.push(bounded_y);
+        }
+        for param in 0..k {
+            args.push(p[param]);
+        }
+        args
+    }
+
+    fn compile_sparse_entry_evaluators(
+        jacobian: &[Vec<Expr>],
+        row_range_for_bandwidth: Option<&[(usize, usize)]>,
+        input_names: &[String],
+    ) -> Vec<Vec<(usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>)>> {
+        let input_name_refs: Vec<&str> = input_names.iter().map(|s| s.as_str()).collect();
+        jacobian
+            .iter()
+            .enumerate()
+            .map(|(row_idx, row)| {
+                let (left_border, right_border) = row_range_for_bandwidth
+                    .map(|ranges| ranges[row_idx])
+                    .unwrap_or((0, row.len()));
+                (left_border..right_border)
+                    .filter_map(|col_idx| {
+                        let expr = &row[col_idx];
+                        if expr.is_zero() {
+                            None
+                        } else {
+                            Some((
+                                col_idx,
+                                Expr::lambdify_borrowed_thread_safe(
+                                    expr,
+                                    input_name_refs.as_slice(),
+                                ),
+                            ))
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn compile_sparse_triplet_evaluators(
+        entries: &[(usize, usize, Expr)],
+        input_names: &[String],
+    ) -> Vec<(usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>)> {
+        let input_name_refs: Vec<&str> = input_names.iter().map(|s| s.as_str()).collect();
+        entries
+            .iter()
+            .map(|(row, col, expr)| {
+                (
+                    *row,
+                    *col,
+                    Expr::lambdify_borrowed_thread_safe(expr, input_name_refs.as_slice()),
+                )
+            })
+            .collect()
+    }
+
+    fn sparse_entries_from_dense(symbolic_matrix: &[Vec<Expr>]) -> Vec<(usize, usize, Expr)> {
+        symbolic_matrix
+            .iter()
+            .enumerate()
+            .flat_map(|(row, dense_row)| {
+                dense_row.iter().enumerate().filter_map(move |(col, expr)| {
+                    if expr.is_zero() {
+                        None
+                    } else {
+                        Some((row, col, expr.clone()))
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn build_symbolic_param_jacobian_sparse(
+        equations: &[Expr],
+        param_names: &[String],
+    ) -> Option<Vec<(usize, usize, Expr)>> {
+        if param_names.is_empty() {
+            return None;
+        }
+
+        Some(
+            equations
+                .iter()
+                .enumerate()
+                .flat_map(|(row, expr)| {
+                    param_names
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(col, parameter)| {
+                            let partial = expr.diff(parameter).simplify();
+                            if partial.is_zero() {
+                                None
+                            } else {
+                                Some((row, col, partial))
+                            }
+                        })
+                })
+                .collect(),
+        )
     }
     /// Generate sparse Jacobian function with parallel evaluation
     ///
@@ -355,6 +383,33 @@ impl Jacobian_sci_faer {
         bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
     ) -> Box<dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> (Vec<faer_mat>, Option<Vec<faer_mat>>)>
     {
+        let mut all_var_names = vec![arg];
+        all_var_names.extend(variable_str.iter().cloned());
+        all_var_names.extend(param_str.iter().cloned());
+        let row_ranges_for_bandwidth: Option<Vec<(usize, usize)>> = bandwidth.map(|(kl, ku)| {
+            let n = jac_dy.len();
+            (0..n)
+                .map(|i| {
+                    let right_border = std::cmp::min(i + ku + 1, n);
+                    let left_border = if i == 0 { 0 } else { i.saturating_sub(kl + 1) };
+                    (left_border, right_border)
+                })
+                .collect()
+        });
+        let compiled_jac_dy = Self::compile_sparse_entry_evaluators(
+            &jac_dy,
+            row_ranges_for_bandwidth.as_deref(),
+            all_var_names.as_slice(),
+        );
+        let compiled_jac_dp = jac_dp.as_ref().map(|jac_dp_vec| {
+            Self::compile_sparse_entry_evaluators(jac_dp_vec, None, all_var_names.as_slice())
+        });
+        let nnz_dy_capacity: usize = compiled_jac_dy.iter().map(Vec::len).sum();
+        let nnz_dp_capacity: usize = compiled_jac_dp
+            .as_ref()
+            .map(|rows| rows.iter().map(Vec::len).sum())
+            .unwrap_or(0);
+
         Box::new(
             move |x: &faer_col,
                   y: &faer_dense_mat,
@@ -366,97 +421,48 @@ impl Jacobian_sci_faer {
                 let df_dy: Vec<faer_mat> = (0..m)
                     .into_par_iter()
                     .map(|j| {
-                        let mut triplets = Vec::new();
-                        let triplets_mutex = std::sync::Mutex::new(&mut triplets);
-
-                        (0..n).into_par_iter().for_each(|i| {
-                            let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                                let right_border = std::cmp::min(i + ku + 1, n);
-                                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                                    0
-                                } else {
-                                    i - kl - 1
-                                };
-                                (right_border, left_border)
-                            } else {
-                                (n, 0)
-                            };
-
-                            for col in left_border..right_border {
-                                if !jac_dy[i][col].is_zero() {
-                                    let mut args = Vec::with_capacity(1 + n + k);
-                                    args.push(x[j]);
-                                    for row in 0..n {
-                                        let y_val = *y.get(row, j);
-                                        let bounded_y = Self::handle_bounds(
-                                            row,
-                                            y_val,
-                                            bounds.clone(),
-                                            variable_str.clone(),
-                                        );
-                                        args.push(bounded_y);
-                                    }
-                                    for param in 0..k {
-                                        args.push(p[param]);
-                                    }
-
-                                    let mut all_var_names = vec![arg.as_str()];
-                                    all_var_names.extend(variable_str.iter().map(|s| s.as_str()));
-                                    all_var_names.extend(param_str.iter().map(|s| s.as_str()));
-
-                                    let value = jac_dy[i][col]
-                                        .eval_expression(all_var_names.as_slice(), &args);
-                                    if value.abs() > 1e-15 {
-                                        triplets_mutex
-                                            .lock()
-                                            .unwrap()
-                                            .push(Triplet::new(i, col, value));
-                                    }
+                        let args = Self::bounded_runtime_args_for_column(
+                            x,
+                            y,
+                            p,
+                            j,
+                            variable_str.as_slice(),
+                            &bounds,
+                        );
+                        let mut triplets = Vec::with_capacity(nnz_dy_capacity);
+                        for (i, row_entries) in compiled_jac_dy.iter().enumerate() {
+                            for (col_idx, evaluator) in row_entries {
+                                let value = evaluator(args.as_slice());
+                                if value.abs() > 1e-15 {
+                                    triplets.push(Triplet::new(i, *col_idx, value));
                                 }
                             }
-                        });
+                        }
 
                         SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
                     })
                     .collect();
 
-                let df_dp = if let Some(jac_dp_vec) = &jac_dp {
+                let df_dp = if let Some(compiled_jac_dp_rows) = &compiled_jac_dp {
                     Some(
                         (0..m)
                             .into_par_iter()
                             .map(|j| {
-                                let mut triplets = Vec::new();
+                                let args = Self::bounded_runtime_args_for_column(
+                                    x,
+                                    y,
+                                    p,
+                                    j,
+                                    variable_str.as_slice(),
+                                    &bounds,
+                                );
+                                let mut triplets = Vec::with_capacity(nnz_dp_capacity);
 
-                                for i in 0..n {
-                                    for param_idx in 0..k {
-                                        if !jac_dp_vec[i][param_idx].is_zero() {
-                                            let mut args = Vec::with_capacity(1 + n + k);
-                                            args.push(x[j]);
-                                            for row in 0..n {
-                                                let y_val = *y.get(row, j);
-                                                let bounded_y = Self::handle_bounds(
-                                                    row,
-                                                    y_val,
-                                                    bounds.clone(),
-                                                    variable_str.clone(),
-                                                );
-                                                args.push(bounded_y);
-                                            }
-                                            for param in 0..k {
-                                                args.push(p[param]);
-                                            }
-
-                                            let mut all_var_names = vec![arg.as_str()];
-                                            all_var_names
-                                                .extend(variable_str.iter().map(|s| s.as_str()));
-                                            all_var_names
-                                                .extend(param_str.iter().map(|s| s.as_str()));
-
-                                            let value = jac_dp_vec[i][param_idx]
-                                                .eval_expression(all_var_names.as_slice(), &args);
-                                            if value.abs() > 1e-15 {
-                                                triplets.push(Triplet::new(i, param_idx, value));
-                                            }
+                                for (i, row_entries) in compiled_jac_dp_rows.iter().enumerate() {
+                                    for (param_idx, evaluator) in row_entries {
+                                        let value = evaluator(args.as_slice());
+                                        if value.abs() > 1e-15 {
+                                            triplets.push(Triplet::new(i, *param_idx, value));
                                         }
                                     }
                                 }
@@ -468,6 +474,89 @@ impl Jacobian_sci_faer {
                 } else {
                     None
                 };
+
+                (df_dy, df_dp)
+            },
+        )
+    }
+
+    pub fn jacobian_generate_SparseColMat_par_sci_from_sparse_entries(
+        jac_dy_sparse: Vec<(usize, usize, Expr)>,
+        jac_dp_sparse: Option<Vec<(usize, usize, Expr)>>,
+        variable_str: Vec<String>,
+        param_str: Vec<String>,
+        arg: String,
+        bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
+    ) -> Box<dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> (Vec<faer_mat>, Option<Vec<faer_mat>>)>
+    {
+        let mut all_var_names = vec![arg];
+        all_var_names.extend(variable_str.iter().cloned());
+        all_var_names.extend(param_str.iter().cloned());
+        let compiled_jac_dy = Self::compile_sparse_triplet_evaluators(
+            jac_dy_sparse.as_slice(),
+            all_var_names.as_slice(),
+        );
+        let compiled_jac_dp = jac_dp_sparse.as_ref().map(|entries| {
+            Self::compile_sparse_triplet_evaluators(entries.as_slice(), all_var_names.as_slice())
+        });
+        let nnz_dp_capacity = compiled_jac_dp
+            .as_ref()
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+
+        Box::new(
+            move |x: &faer_col,
+                  y: &faer_dense_mat,
+                  p: &faer_col|
+                  -> (Vec<faer_mat>, Option<Vec<faer_mat>>) {
+                let (n, m) = (y.nrows(), y.ncols());
+                let k = p.nrows();
+
+                let df_dy: Vec<faer_mat> = (0..m)
+                    .into_par_iter()
+                    .map(|j| {
+                        let args = Self::bounded_runtime_args_for_column(
+                            x,
+                            y,
+                            p,
+                            j,
+                            variable_str.as_slice(),
+                            &bounds,
+                        );
+                        let mut triplets = Vec::with_capacity(compiled_jac_dy.len());
+                        for (row, col, evaluator) in &compiled_jac_dy {
+                            let value = evaluator(args.as_slice());
+                            if value.abs() > 1e-15 {
+                                triplets.push(Triplet::new(*row, *col, value));
+                            }
+                        }
+                        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+                    })
+                    .collect();
+
+                let df_dp = compiled_jac_dp.as_ref().map(|compiled_param_entries| {
+                    (0..m)
+                        .into_par_iter()
+                        .map(|j| {
+                            let args = Self::bounded_runtime_args_for_column(
+                                x,
+                                y,
+                                p,
+                                j,
+                                variable_str.as_slice(),
+                                &bounds,
+                            );
+                            let mut triplets = Vec::with_capacity(nnz_dp_capacity);
+                            for (row, col, evaluator) in compiled_param_entries {
+                                let value = evaluator(args.as_slice());
+                                if value.abs() > 1e-15 {
+                                    triplets.push(Triplet::new(*row, *col, value));
+                                }
+                            }
+                            SparseColMat::try_new_from_triplets(n, k, &triplets).unwrap()
+                        })
+                        .collect()
+                });
 
                 (df_dy, df_dp)
             },
@@ -489,15 +578,36 @@ impl Jacobian_sci_faer {
         arg: String,
         bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
     ) {
-        self.jac_function = Some(Self::jacobian_generate_SparseColMat_par_sci(
-            self.symbolic_jacobian.clone(),
-            jac_dp,
+        let jac_dp_sparse = jac_dp
+            .as_ref()
+            .map(|dense_param_jacobian| Self::sparse_entries_from_dense(dense_param_jacobian));
+        self.symbolic_to_ode_jacobian_from_sparse_entries(
+            jac_dp_sparse,
             variable_names,
             param_names,
             arg,
-            self.bandwidth,
             bounds,
-        ));
+        );
+    }
+
+    pub fn symbolic_to_ode_jacobian_from_sparse_entries(
+        &mut self,
+        jac_dp_sparse: Option<Vec<(usize, usize, Expr)>>,
+        variable_names: Vec<String>,
+        param_names: Vec<String>,
+        arg: String,
+        bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
+    ) {
+        self.jac_function = Some(
+            Self::jacobian_generate_SparseColMat_par_sci_from_sparse_entries(
+                self.symbolic_jacobian_sparse.clone(),
+                jac_dp_sparse,
+                variable_names,
+                param_names,
+                arg,
+                bounds,
+            ),
+        );
     }
 
     // main function of this module
@@ -553,8 +663,10 @@ impl Jacobian_sci_faer {
         //  println!("symbolic Jacbian created {:?}", &self.symbolic_jacobian);
         let now = Instant::now();
 
-        self.symbolic_to_ode_jacobian(
-            Some(self.symbolic_jacobian.clone()),
+        let symbolic_param_jacobian_sparse =
+            Self::build_symbolic_param_jacobian_sparse(&self.vector_of_functions, &param);
+        self.symbolic_to_ode_jacobian_from_sparse_entries(
+            symbolic_param_jacobian_sparse,
             self.variable_string.clone(),
             param.clone(),
             arg.clone(),
@@ -589,7 +701,7 @@ impl Jacobian_sci_faer {
 
         let mut table = Builder::from(timer_hash.clone()).build();
         table.with(Style::modern_rounded());
-        println!("{}", table.to_string());
+        info!("{}", table.to_string());
         //   panic!("END OF GENERATE BVP");
         info!(
             "\n \n ____________END OF GENERATE BVP ________________________________________________________________"
@@ -614,6 +726,7 @@ mod tests {
             vector_of_variables: vec![],
             variable_string: vec![],
             symbolic_jacobian: vec![],
+            symbolic_jacobian_sparse: vec![],
             jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             bandwidth: None,
@@ -671,6 +784,7 @@ mod tests {
             vector_of_variables: vec![],
             variable_string: vec![],
             symbolic_jacobian: vec![],
+            symbolic_jacobian_sparse: vec![],
             jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             bandwidth: None,
@@ -714,6 +828,7 @@ mod tests {
                 vec![Expr::Const(0.0), Expr::Const(1.0)],
                 vec![Expr::Const(-1.0), Expr::Const(0.0)],
             ],
+            symbolic_jacobian_sparse: vec![(0, 1, Expr::Const(1.0)), (1, 0, Expr::Const(-1.0))],
             jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             bandwidth: None,
@@ -778,6 +893,10 @@ mod tests {
                 vec![Expr::Const(0.0), Expr::Var("a".to_string())],
                 vec![-Expr::Var("b".to_string()), Expr::Const(0.0)],
             ],
+            symbolic_jacobian_sparse: vec![
+                (0, 1, Expr::Var("a".to_string())),
+                (1, 0, -Expr::Var("b".to_string())),
+            ],
             jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             bandwidth: None,
@@ -814,6 +933,62 @@ mod tests {
         let df_dp_unwrap = df_dp.unwrap();
         assert!((df_dp_unwrap[0].get(0, 0).unwrap() - 3.0).abs() < 1e-10);
         assert!((df_dp_unwrap[0].get(1, 1).unwrap() - (-2.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparse_entry_jacobian_builder_matches_dense_builder() {
+        let jac_dy = vec![
+            vec![Expr::Const(0.0), Expr::Var("a".to_string())],
+            vec![-Expr::Var("b".to_string()), Expr::Const(0.0)],
+        ];
+        let jac_dp_dense = Some(vec![
+            vec![Expr::Var("z".to_string()), Expr::Const(0.0)],
+            vec![Expr::Const(0.0), -Expr::Var("y".to_string())],
+        ]);
+        let jac_dy_sparse = vec![
+            (0, 1, Expr::Var("a".to_string())),
+            (1, 0, -Expr::Var("b".to_string())),
+        ];
+        let jac_dp_sparse = Some(vec![
+            (0, 0, Expr::Var("z".to_string())),
+            (1, 1, -Expr::Var("y".to_string())),
+        ]);
+
+        let dense_builder = Jacobian_sci_faer::jacobian_generate_SparseColMat_par_sci(
+            jac_dy,
+            jac_dp_dense,
+            vec!["y".to_string(), "z".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+            "x".to_string(),
+            None,
+            None,
+        );
+        let sparse_builder =
+            Jacobian_sci_faer::jacobian_generate_SparseColMat_par_sci_from_sparse_entries(
+                jac_dy_sparse,
+                jac_dp_sparse,
+                vec!["y".to_string(), "z".to_string()],
+                vec!["a".to_string(), "b".to_string()],
+                "x".to_string(),
+                None,
+            );
+
+        let x = faer_col::from_fn(1, |_| 0.0);
+        let mut y = faer_dense_mat::zeros(2, 1);
+        *y.get_mut(0, 0) = 2.0;
+        *y.get_mut(1, 0) = 3.0;
+        let p = faer_col::from_fn(2, |i| if i == 0 { 1.5 } else { 2.5 });
+
+        let (dense_dy, dense_dp) = dense_builder(&x, &y, &p);
+        let (sparse_dy, sparse_dp) = sparse_builder(&x, &y, &p);
+
+        assert!((dense_dy[0].get(0, 1).unwrap() - sparse_dy[0].get(0, 1).unwrap()).abs() < 1e-12);
+        assert!((dense_dy[0].get(1, 0).unwrap() - sparse_dy[0].get(1, 0).unwrap()).abs() < 1e-12);
+
+        let dense_dp = dense_dp.expect("dense builder should produce df/dp");
+        let sparse_dp = sparse_dp.expect("sparse builder should produce df/dp");
+        assert!((dense_dp[0].get(0, 0).unwrap() - sparse_dp[0].get(0, 0).unwrap()).abs() < 1e-12);
+        assert!((dense_dp[0].get(1, 1).unwrap() - sparse_dp[0].get(1, 1).unwrap()).abs() < 1e-12);
     }
 
     #[test]
@@ -932,11 +1107,11 @@ mod tests {
         let var_names = vec!["y".to_string(), "z".to_string()];
 
         // Test minimum bound enforcement
-        let result = Jacobian_sci_faer::handle_bounds(0, -1.0, bounds.clone(), var_names.clone());
+        let result = Jacobian_sci_faer::handle_bounds(0, -1.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 1e-10);
 
         // Test value above minimum
-        let result = Jacobian_sci_faer::handle_bounds(0, 5.0, bounds, var_names);
+        let result = Jacobian_sci_faer::handle_bounds(0, 5.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 5.0);
     }
 
@@ -948,11 +1123,11 @@ mod tests {
         let var_names = vec!["y".to_string(), "z".to_string()];
 
         // Test maximum bound enforcement
-        let result = Jacobian_sci_faer::handle_bounds(1, 200.0, bounds.clone(), var_names.clone());
+        let result = Jacobian_sci_faer::handle_bounds(1, 200.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 100.0);
 
         // Test value below maximum
-        let result = Jacobian_sci_faer::handle_bounds(1, 50.0, bounds, var_names);
+        let result = Jacobian_sci_faer::handle_bounds(1, 50.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 50.0);
     }
 
@@ -964,15 +1139,15 @@ mod tests {
         let var_names = vec!["y".to_string()];
 
         // Test minimum enforcement
-        let result = Jacobian_sci_faer::handle_bounds(0, -5.0, bounds.clone(), var_names.clone());
+        let result = Jacobian_sci_faer::handle_bounds(0, -5.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 1e-10);
 
         // Test maximum enforcement
-        let result = Jacobian_sci_faer::handle_bounds(0, 15.0, bounds.clone(), var_names.clone());
+        let result = Jacobian_sci_faer::handle_bounds(0, 15.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 10.0);
 
         // Test value within bounds
-        let result = Jacobian_sci_faer::handle_bounds(0, 5.0, bounds, var_names);
+        let result = Jacobian_sci_faer::handle_bounds(0, 5.0, bounds.as_ref(), &var_names);
         assert_eq!(result, 5.0);
     }
 

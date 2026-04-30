@@ -1,30 +1,33 @@
 #![cfg(test)]
 
 use crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting;
-use crate::symbolic::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
-use crate::symbolic::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
-use crate::symbolic::codegen_aot_registry::AotRegistry;
-use crate::symbolic::codegen_aot_resolution::AotResolver;
-use crate::symbolic::codegen_aot_runtime_link::{
+use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
+use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
+use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
+use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedSparseAotBackend, register_linked_sparse_backend, unregister_linked_sparse_backend,
 };
-use crate::symbolic::codegen_backend_selection::{BackendSelectionPolicy, SelectedBackendKind};
-use crate::symbolic::codegen_manifest::PreparedProblemManifest;
-use crate::symbolic::codegen_provider_api::{BackendKind, MatrixBackend};
-use crate::symbolic::codegen_runtime_api::{
+use crate::symbolic::codegen::codegen_backend_selection::{BackendSelectionPolicy, SelectedBackendKind};
+use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
+use crate::symbolic::codegen::codegen_orchestrator::AutoExecutionMode;
+use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend, PreparedProblem};
+use crate::symbolic::codegen::codegen_runtime_api::{
     ResidualChunkingStrategy, recommended_residual_chunking_for_parallelism,
     recommended_row_chunking_for_parallelism,
 };
-use crate::symbolic::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
-    BvpBackendConfig, BvpBackendKind, BvpMatrixBackend, BvpSparseExecutionPlan, Jacobian,
+    BvpBackendConfig, BvpBackendKind, BvpMatrixBackend, BvpSparseExecutionPlan,
+    BvpSymbolicAssemblyBackend, Jacobian,
 };
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::numerical::Examples_and_utils::NonlinEquation;
 
 fn build_small_symbolic_case() -> Jacobian {
     let mut jacobian = Jacobian::new();
@@ -76,6 +79,31 @@ fn build_bandwidth_symbolic_case() -> Jacobian {
     jacobian
 }
 
+fn build_node_major_banded_symbolic_case() -> Jacobian {
+    let mut jacobian = Jacobian::new();
+    jacobian.vector_of_functions = vec![
+        Expr::Var("y_0".to_string()) + Expr::Var("z_0".to_string()),
+        Expr::Const(2.0) * Expr::Var("z_0".to_string()) - Expr::Var("y_0".to_string()),
+        Expr::Var("y_1".to_string()) + Expr::Const(3.0) * Expr::Var("z_1".to_string()),
+        Expr::Const(4.0) * Expr::Var("z_1".to_string()) - Expr::Var("y_1".to_string()),
+    ];
+    jacobian.vector_of_variables = vec![
+        Expr::Var("y_0".to_string()),
+        Expr::Var("z_0".to_string()),
+        Expr::Var("y_1".to_string()),
+        Expr::Var("z_1".to_string()),
+    ];
+    jacobian.variable_string = vec![
+        "y_0".to_string(),
+        "z_0".to_string(),
+        "y_1".to_string(),
+        "z_1".to_string(),
+    ];
+    jacobian.bandwidth = Some((3, 3));
+    jacobian.calc_jacobian_parallel();
+    jacobian
+}
+
 fn real_bvp_inputs() -> (
     Vec<Expr>,
     Vec<String>,
@@ -106,6 +134,11 @@ fn bvp_matrix_backend_roundtrip_preserves_legacy_sparse_mapping() {
         BvpBackendConfig::default(),
         BvpBackendConfig::lambdify(BvpMatrixBackend::FaerSparseCol)
     );
+    assert_eq!(
+        BvpMatrixBackend::from_legacy_method("Banded"),
+        Some(BvpMatrixBackend::Banded)
+    );
+    assert_eq!(BvpMatrixBackend::Banded.legacy_method(), "Banded");
 }
 
 #[test]
@@ -117,6 +150,17 @@ fn set_backend_config_updates_legacy_method_string() {
 
     assert_eq!(jacobian.method, "Dense");
     assert_eq!(jacobian.backend_config(), config);
+}
+
+#[test]
+fn symbolic_assembly_backend_can_switch_to_atom_view() {
+    let mut jacobian = Jacobian::new();
+    jacobian.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+
+    assert_eq!(
+        jacobian.symbolic_assembly_backend(),
+        BvpSymbolicAssemblyBackend::AtomView
+    );
 }
 
 #[test]
@@ -184,6 +228,37 @@ fn compile_lambdified_problem_with_dense_backend_and_params_matches_expected_val
     let jac = jacobian.jac_function.as_mut().unwrap();
     let jacobian_value = jac.call(1.0, &variables);
 
+    assert_eq!(residual.to_DVectorType(), expected_residual);
+    assert_eq!(jacobian_value.to_DMatrixType(), expected_jacobian);
+}
+
+#[test]
+fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
+    let mut jacobian = build_node_major_banded_symbolic_case();
+    let variables = DVector::from_vec(vec![2.0, 3.0, 4.0, 5.0]);
+    let expected_residual = DVector::from_vec(vec![5.0, 4.0, 19.0, 16.0]);
+    let expected_jacobian = DMatrix::from_row_slice(
+        4,
+        4,
+        &[
+            1.0, 1.0, 0.0, 0.0, //
+            -1.0, 2.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 3.0, //
+            0.0, 0.0, -1.0, 4.0,
+        ],
+    );
+
+    jacobian.compile_lambdified_problem_with_config(
+        "x",
+        vec!["y_0", "z_0", "y_1", "z_1"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::Banded),
+    );
+
+    let residual = jacobian.residiual_function.call(1.0, &variables);
+    let jac = jacobian.jac_function.as_mut().unwrap();
+    let jacobian_value = jac.call(1.0, &variables);
+
+    assert_eq!(jacobian.backend_config().matrix_backend, BvpMatrixBackend::Banded);
     assert_eq!(residual.to_DVectorType(), expected_residual);
     assert_eq!(jacobian_value.to_DMatrixType(), expected_jacobian);
 }
@@ -276,6 +351,88 @@ fn prepare_sparse_aot_problem_uses_sparse_cache_and_bvp_input_order() {
 }
 
 #[test]
+fn prepare_sparse_aot_problem_can_export_banded_prepared_problem() {
+    let jacobian = build_node_major_banded_symbolic_case();
+    let prepared_bridge = jacobian.prepare_sparse_aot_problem(
+        "fixture_residual",
+        "fixture_sparse_values",
+        ResidualChunkingStrategy::Whole,
+        SparseChunkingStrategy::Whole,
+    );
+
+    let prepared = prepared_bridge.as_prepared_problem_for_matrix_backend(MatrixBackend::Banded);
+    let PreparedProblem::Banded(prepared) = prepared else {
+        panic!("expected banded prepared problem");
+    };
+
+    assert_eq!(prepared.backend_kind, BackendKind::Aot);
+    assert_eq!(prepared.matrix_backend, MatrixBackend::Banded);
+    assert_eq!(prepared.input_names(), &["y_0", "z_0", "y_1", "z_1"]);
+    assert_eq!(prepared.residual_len(), 4);
+    assert_eq!(prepared.jacobian_shape(), (4, 4));
+    assert_eq!(prepared.jacobian_plan.nnz(), 8);
+    assert_eq!(prepared.jacobian_plan.structure.kl, 3);
+    assert_eq!(prepared.jacobian_plan.structure.ku, 3);
+    assert_eq!(
+        prepared.jacobian_plan.structure.diagonal_offsets,
+        vec![-1, -1, 0, 0, 0, 0, 1, 1]
+    );
+}
+
+#[test]
+fn prepared_problem_keys_differ_between_sparse_and_banded_backends() {
+    let jacobian = build_node_major_banded_symbolic_case();
+    let prepared_bridge = jacobian.prepare_sparse_aot_problem(
+        "fixture_residual",
+        "fixture_sparse_values",
+        ResidualChunkingStrategy::Whole,
+        SparseChunkingStrategy::Whole,
+    );
+
+    let sparse_key = prepared_bridge.problem_key_for_matrix_backend(MatrixBackend::SparseCol);
+    let banded_key = prepared_bridge.problem_key_for_matrix_backend(MatrixBackend::Banded);
+
+    assert_ne!(sparse_key, banded_key);
+}
+
+#[test]
+fn prepared_sparse_aot_problem_exposes_machine_aware_auto_parallel_plan() {
+    let mut jacobian = build_parameterized_symbolic_case();
+    jacobian.calc_jacobian_parallel_smart_optimized();
+
+    let prepared_bridge = jacobian.prepare_sparse_aot_problem(
+        "fixture_residual",
+        "fixture_sparse_values",
+        ResidualChunkingStrategy::Whole,
+        SparseChunkingStrategy::Whole,
+    );
+
+    let auto_plan = prepared_bridge.auto_parallel_plan();
+
+    assert!(auto_plan.workers >= 1);
+    assert!(auto_plan.min_work_per_job >= 1);
+    assert_eq!(auto_plan.executor_config, prepared_bridge.auto_parallel_executor_config());
+    match auto_plan.execution_mode {
+        AutoExecutionMode::Sequential => {
+            assert!(auto_plan.executor_config.is_none());
+            assert_eq!(auto_plan.residual_chunking, ResidualChunkingStrategy::Whole);
+            assert_eq!(auto_plan.sparse_chunking, SparseChunkingStrategy::Whole);
+        }
+        AutoExecutionMode::Parallel => {
+            assert!(auto_plan.executor_config.is_some());
+            assert!(matches!(
+                auto_plan.residual_chunking,
+                ResidualChunkingStrategy::ByOutputCount { .. }
+            ));
+            assert!(matches!(
+                auto_plan.sparse_chunking,
+                SparseChunkingStrategy::ByRowCount { .. }
+            ));
+        }
+    }
+}
+
+#[test]
 fn select_sparse_backend_falls_back_to_lambdify_when_aot_is_missing() {
     let mut jacobian = build_parameterized_symbolic_case();
     jacobian.calc_jacobian_parallel_smart_optimized();
@@ -307,7 +464,7 @@ fn select_sparse_backend_prefers_compiled_aot_when_registered_artifact_exists() 
         ResidualChunkingStrategy::Whole,
         SparseChunkingStrategy::Whole,
     );
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);
@@ -415,7 +572,7 @@ fn prepare_sparse_backend_execution_preserves_compiled_aot_selection_metadata() 
         ResidualChunkingStrategy::Whole,
         SparseChunkingStrategy::Whole,
     );
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);
@@ -561,6 +718,548 @@ fn generate_bvp_with_backend_selection_matches_main_lambdify_sparse_path() {
 }
 
 #[test]
+fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
+    let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
+    let mut legacy = Jacobian::new();
+    legacy.generate_BVP_with_params(
+        eq_system.clone(),
+        values.clone(),
+        arg.clone(),
+        None,
+        0.0,
+        None,
+        Some(6),
+        None,
+        None,
+        border_conditions.clone(),
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    atom.generate_BVP_with_params(
+        eq_system,
+        values,
+        arg,
+        None,
+        0.0,
+        None,
+        Some(6),
+        None,
+        None,
+        border_conditions,
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let args = DVector::from_vec(
+        (0..atom.variable_string.len())
+            .map(|index| 0.2 + index as f64 * 0.01)
+            .collect(),
+    );
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+
+    let legacy_residual = legacy.residiual_function.call(1.0, typed).to_DVectorType();
+    let atom_residual = atom.residiual_function.call(1.0, typed).to_DVectorType();
+    let legacy_jacobian = legacy
+        .jac_function
+        .as_mut()
+        .expect("legacy jacobian should exist")
+        .call(1.0, typed)
+        .to_DMatrixType();
+    let atom_jacobian = atom
+        .jac_function
+        .as_mut()
+        .expect("atom jacobian should exist")
+        .call(1.0, typed)
+        .to_DMatrixType();
+
+    assert_eq!(atom.variable_string, legacy.variable_string);
+    let mut atom_bc = atom.BC_pos_n_values.clone();
+    let mut legacy_bc = legacy.BC_pos_n_values.clone();
+    atom_bc.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    legacy_bc.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(atom_bc, legacy_bc);
+    assert_eq!(atom.variables_for_all_disrete, legacy.variables_for_all_disrete);
+    assert_eq!(atom_residual.nrows(), legacy_residual.nrows());
+    for index in 0..atom_residual.len() {
+        assert!(
+            (atom_residual[index] - legacy_residual[index]).abs() < 1e-10,
+            "residual mismatch at index {index}: atom={}, legacy={}",
+            atom_residual[index],
+            legacy_residual[index]
+        );
+    }
+    assert_eq!(atom_jacobian.nrows(), legacy_jacobian.nrows());
+    assert_eq!(atom_jacobian.ncols(), legacy_jacobian.ncols());
+    for row in 0..atom_jacobian.nrows() {
+        for col in 0..atom_jacobian.ncols() {
+            let atom_value = atom_jacobian[(row, col)];
+            let legacy_value = legacy_jacobian[(row, col)];
+            assert!(
+                (atom_value - legacy_value).abs() < 1e-10,
+                "jacobian mismatch at ({row}, {col}): atom={atom_value}, legacy={legacy_value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn atom_two_point_residual_row_diagnostics() {
+    let ne = NonlinEquation::TwoPointBVP;
+    let eq_system = ne.setup();
+    let values = ne.values();
+    let arg = "x".to_string();
+    let border_conditions = ne.boundary_conditions();
+
+    let mut legacy = Jacobian::new();
+    legacy.generate_BVP_with_params(
+        eq_system.clone(),
+        values.clone(),
+        arg.clone(),
+        None,
+        -1.0,
+        None,
+        Some(24),
+        None,
+        None,
+        border_conditions.clone(),
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    atom.generate_BVP_with_params(
+        eq_system,
+        values,
+        arg,
+        None,
+        -1.0,
+        None,
+        Some(24),
+        None,
+        None,
+        border_conditions,
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let args = DVector::from_element(atom.variable_string.len(), 0.7);
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+    let legacy_residual = legacy.residiual_function.call(1.0, typed).to_DVectorType();
+    let atom_residual = atom.residiual_function.call(1.0, typed).to_DVectorType();
+
+    let mut max_diff = 0.0f64;
+    let mut max_index = 0usize;
+    for index in 0..legacy_residual.len() {
+        let diff = (legacy_residual[index] - atom_residual[index]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    println!(
+        "[two-point residual row diagnostics] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
+        max_index,
+        max_diff,
+        legacy_residual[max_index],
+        atom_residual[max_index]
+    );
+
+    for index in 0..legacy_residual.len().min(8) {
+        println!(
+            "[two-point residual row diagnostics] row={index}, legacy={:.6e}, atom={:.6e}, diff={:.6e}",
+            legacy_residual[index],
+            atom_residual[index],
+            (legacy_residual[index] - atom_residual[index]).abs()
+        );
+    }
+}
+
+#[test]
+fn atom_two_point_sparse_bundle_residual_diagnostics() {
+    let ne = NonlinEquation::TwoPointBVP;
+    let eq_system = ne.setup();
+    let values = ne.values();
+    let arg = "x".to_string();
+    let border_conditions = ne.boundary_conditions();
+
+    let  legacy = Jacobian::new();
+    let legacy_bundle = legacy
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            None,
+            -1.0,
+            None,
+            Some(24),
+            None,
+            None,
+            border_conditions.clone(),
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("legacy sparse bundle should build");
+
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    let atom_bundle = atom
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            None,
+            -1.0,
+            None,
+            Some(24),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("atom sparse bundle should build");
+
+    let args = DVector::from_element(atom_bundle.variable_string.len(), 0.7);
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+    let legacy_residual = legacy_bundle
+        .residual_function
+        .as_ref()
+        .expect("legacy sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+    let atom_residual = atom_bundle
+        .residual_function
+        .as_ref()
+        .expect("atom sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+
+    let mut max_diff = 0.0f64;
+    let mut max_index = 0usize;
+    for index in 0..legacy_residual.len() {
+        let diff = (legacy_residual[index] - atom_residual[index]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    println!(
+        "[two-point sparse bundle diagnostics] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
+        max_index,
+        max_diff,
+        legacy_residual[max_index],
+        atom_residual[max_index]
+    );
+}
+
+#[test]
+fn atom_two_point_sparse_bundle_residual_diagnostics_large_grid() {
+    let ne = NonlinEquation::TwoPointBVP;
+    let eq_system = ne.setup();
+    let values = ne.values();
+    let arg = "x".to_string();
+    let border_conditions = ne.boundary_conditions();
+
+    let  legacy = Jacobian::new();
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+
+    let legacy_bundle = legacy
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            None,
+            -1.0,
+            None,
+            Some(72),
+            None,
+            None,
+            border_conditions.clone(),
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("legacy sparse bundle should build");
+
+    let atom_bundle = atom
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            None,
+            -1.0,
+            None,
+            Some(72),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("atom sparse bundle should build");
+
+    let args = DVector::from_vec(
+        (0..atom_bundle.variable_string.len())
+            .map(|index| 0.2 + index as f64 * 0.01)
+            .collect(),
+    );
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+    let legacy_residual = legacy_bundle
+        .residual_function
+        .as_ref()
+        .expect("legacy sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+    let atom_residual = atom_bundle
+        .residual_function
+        .as_ref()
+        .expect("atom sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+
+    let mut max_diff = 0.0f64;
+    let mut max_index = 0usize;
+    for index in 0..legacy_residual.len() {
+        let diff = (legacy_residual[index] - atom_residual[index]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    println!(
+        "[two-point sparse bundle diagnostics large-grid] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
+        max_index,
+        max_diff,
+        legacy_residual[max_index],
+        atom_residual[max_index]
+    );
+}
+
+#[test]
+fn atom_two_point_sparse_bundle_residual_diagnostics_with_explicit_h() {
+    let ne = NonlinEquation::TwoPointBVP;
+    let eq_system = ne.setup();
+    let values = ne.values();
+    let arg = "x".to_string();
+    let border_conditions = ne.boundary_conditions();
+    let t0 = -1.0;
+    let t_end = 1.0;
+    let n_steps = 72usize;
+    let h = (t_end - t0) / n_steps as f64;
+
+    let  legacy = Jacobian::new();
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+
+    let legacy_bundle = legacy
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            None,
+            t0,
+            None,
+            Some(n_steps),
+            Some(h),
+            None,
+            border_conditions.clone(),
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("legacy sparse bundle should build");
+
+    let atom_bundle = atom
+        .try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            None,
+            t0,
+            None,
+            Some(n_steps),
+            Some(h),
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("atom sparse bundle should build");
+
+    let args = DVector::from_vec(
+        (0..atom_bundle.variable_string.len())
+            .map(|index| 0.2 + index as f64 * 0.01)
+            .collect(),
+    );
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+    let legacy_residual = legacy_bundle
+        .residual_function
+        .as_ref()
+        .expect("legacy sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+    let atom_residual = atom_bundle
+        .residual_function
+        .as_ref()
+        .expect("atom sparse bundle should have residual callback")
+        .call(1.0, typed)
+        .to_DVectorType();
+
+    let mut max_diff = 0.0f64;
+    let mut max_index = 0usize;
+    for index in 0..legacy_residual.len() {
+        let diff = (legacy_residual[index] - atom_residual[index]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    println!(
+        "[two-point sparse bundle diagnostics explicit-h] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
+        max_index,
+        max_diff,
+        legacy_residual[max_index],
+        atom_residual[max_index]
+    );
+}
+
+#[test]
+fn atom_two_point_direct_generate_residual_diagnostics_with_explicit_h() {
+    let ne = NonlinEquation::TwoPointBVP;
+    let eq_system = ne.setup();
+    let values = ne.values();
+    let arg = "x".to_string();
+    let border_conditions = ne.boundary_conditions();
+    let t0 = -1.0;
+    let t_end = 1.0;
+    let n_steps = 72usize;
+    let h = (t_end - t0) / n_steps as f64;
+
+    let mut legacy = Jacobian::new();
+    legacy.generate_BVP_with_params(
+        eq_system.clone(),
+        values.clone(),
+        arg.clone(),
+        None,
+        t0,
+        None,
+        Some(n_steps),
+        Some(h),
+        None,
+        border_conditions.clone(),
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    atom.generate_BVP_with_params(
+        eq_system,
+        values,
+        arg,
+        None,
+        t0,
+        None,
+        Some(n_steps),
+        Some(h),
+        None,
+        border_conditions,
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    let args = DVector::from_vec(
+        (0..atom.variable_string.len())
+            .map(|index| 0.2 + index as f64 * 0.01)
+            .collect(),
+    );
+    let typed = &*Vectors_type_casting(&args, "Sparse".to_string());
+    let legacy_residual = legacy.residiual_function.call(1.0, typed).to_DVectorType();
+    let atom_residual = atom.residiual_function.call(1.0, typed).to_DVectorType();
+
+    let mut max_diff = 0.0f64;
+    let mut max_index = 0usize;
+    for index in 0..legacy_residual.len() {
+        let diff = (legacy_residual[index] - atom_residual[index]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    println!(
+        "[two-point direct generate explicit-h] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
+        max_index,
+        max_diff,
+        legacy_residual[max_index],
+        atom_residual[max_index]
+    );
+    println!(
+        "[two-point direct generate explicit-h] legacy_row_expr={}",
+        legacy.vector_of_functions[max_index]
+    );
+    println!(
+        "[two-point direct generate explicit-h] atom_row_expr={}",
+        atom.vector_of_functions[max_index]
+    );
+}
+
+#[test]
 fn generate_bvp_with_backend_selection_reports_compiled_aot_for_real_bvp() {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
     let mut staged = Jacobian::new();
@@ -589,7 +1288,7 @@ fn generate_bvp_with_backend_selection_reports_compiled_aot_for_real_bvp() {
         residual_strategy,
         jacobian_strategy,
     );
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);
@@ -742,7 +1441,7 @@ fn sparse_solver_provider_exposes_compiled_aot_metadata_for_real_bvp() {
         residual_strategy,
         jacobian_strategy,
     );
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);
@@ -869,7 +1568,7 @@ fn sparse_solver_provider_executes_linked_compiled_aot_backend_for_real_bvp() {
         }),
     ));
 
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);
@@ -1061,7 +1760,7 @@ fn sparse_solver_bundle_collects_real_bvp_compiled_aot_metadata() {
         residual_strategy,
         jacobian_strategy,
     );
-    let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
+    let prepared = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::sparse(
         prepared_bridge.as_prepared_problem(),
     );
     let manifest = PreparedProblemManifest::from(&prepared);

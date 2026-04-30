@@ -10,6 +10,24 @@ mod tests {
 
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
+
+    fn expect_exprlegacy_callbacks(
+        solver: &mut BVPwrap,
+    ) -> (
+        Option<Box<crate::numerical::BVP_sci::BVP_sci_faer::ODEJacobian>>,
+        Box<crate::numerical::BVP_sci::BVP_sci_faer::ODEFunction>,
+        Option<Box<crate::numerical::BVP_sci::BVP_sci_faer::BCFunction>>,
+    ) {
+        solver
+            .try_eq_generate()
+            .expect("ExprLegacy callback generation should succeed")
+    }
+
+    fn quiet_exprlegacy_solver(solver: BVPwrap) -> BVPwrap {
+        let mut solver = solver.with_expr_legacy_smart_sparse();
+        solver.set_additional_parameters(None, None, Some("off".to_string()));
+        solver
+    }
     #[test]
     fn test_bc_closure_creater_simple() {
         let mut boundary_conditions = HashMap::new();
@@ -105,7 +123,7 @@ mod tests {
         let x_mesh = DVector::from_vec(vec![0.0, 0.5, 1.0]);
         let initial_guess = DMatrix::from_fn(2, 3, |i, j| (i + j) as f64);
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -119,9 +137,9 @@ mod tests {
             1e-6,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian, residual_function, bc_func) = bvp_wrap.eq_generate();
+        let (jacobian, residual_function, bc_func) = expect_exprlegacy_callbacks(&mut bvp_wrap);
 
         // Test that functions were generated
         assert!(jacobian.is_some());
@@ -164,7 +182,7 @@ mod tests {
         let x_mesh = DVector::from_vec(vec![0.0, 1.0]);
         let initial_guess = DMatrix::from_fn(2, 2, |i, j| (i + j) as f64);
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -178,9 +196,9 @@ mod tests {
             1e-6,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian, residual_function, bc_func) = bvp_wrap.eq_generate();
+        let (jacobian, residual_function, bc_func) = expect_exprlegacy_callbacks(&mut bvp_wrap);
 
         // Test that functions were generated
         assert!(jacobian.is_some());
@@ -218,7 +236,7 @@ mod tests {
         let x_mesh = DVector::from_vec(vec![0.0, 1.0]);
         let initial_guess = DMatrix::zeros(2, 2);
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -232,9 +250,9 @@ mod tests {
             1e-6,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian_opt, _, _) = bvp_wrap.eq_generate();
+        let (jacobian_opt, _, _) = expect_exprlegacy_callbacks(&mut bvp_wrap);
         let jacobian = jacobian_opt.unwrap();
 
         // Test Jacobian evaluation
@@ -245,14 +263,15 @@ mod tests {
         let (df_dy, df_dp) = jacobian(&x, &y, &p);
 
         // For dy/dx = y, dz/dx = z, Jacobian should be [[1, 0], [0, 1]]
-        println!("Jacobian df_dy: {:?}", df_dy);
-        println!("Jacobian df_dp: {:?}", df_dp);
         assert_eq!(df_dy.len(), 1); // One mesh point
         assert!((df_dy[0].get(0, 0).unwrap() - 1.0).abs() < 1e-10);
         assert!((df_dy[0].get(1, 1).unwrap() - 1.0).abs() < 1e-10);
-        assert_eq!(df_dy[0].get(0, 1).is_none(), true); // No cross terms
-        assert_eq!(df_dy[0].get(1, 0).is_none(), true); // No cross terms
-        assert!(df_dp.unwrap()[0].compute_nnz() == 0); // No parameters
+        assert!(df_dy[0].get(0, 1).is_none()); // No cross terms
+        assert!(df_dy[0].get(1, 0).is_none()); // No cross terms
+        assert!(
+            df_dp.is_none(),
+            "df/dp should be absent when no parameters are declared"
+        );
     }
 
     #[test]
@@ -281,7 +300,7 @@ mod tests {
             }
         });
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -295,13 +314,13 @@ mod tests {
             1e-6,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian, residual_function, bc_func) = bvp_wrap.eq_generate();
+        let (jacobian, residual_function, bc_func) = expect_exprlegacy_callbacks(&mut bvp_wrap);
 
         // Test solve_bvp_wrap
         let x = bvp_wrap.x_mesh_col.clone();
-        let y = bvp_wrap.initial_guess_mat.clone();
+        let y = bvp_wrap.runtime_initial_guess_mat();
         let custom_timer = CustomTimer::new();
 
         bvp_wrap.solve_bvp_wrap(
@@ -353,7 +372,7 @@ mod tests {
             }
         });
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -367,12 +386,12 @@ mod tests {
             1e-8,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian, residual_function, bc_func) = bvp_wrap.eq_generate();
+        let (jacobian, residual_function, bc_func) = expect_exprlegacy_callbacks(&mut bvp_wrap);
 
         let x = bvp_wrap.x_mesh_col.clone();
-        let y = bvp_wrap.initial_guess_mat.clone();
+        let y = bvp_wrap.runtime_initial_guess_mat();
         let custom_timer = CustomTimer::new();
 
         bvp_wrap.solve_bvp_wrap(
@@ -426,7 +445,7 @@ mod tests {
             }
         });
 
-        let mut bvp_wrap = BVPwrap::new(
+        let mut bvp_wrap = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh),
             None,
             None,
@@ -440,13 +459,13 @@ mod tests {
             1e-6,
             1000,
             initial_guess,
-        );
+        ));
 
-        let (jacobian, residual_function, bc_func) = bvp_wrap.eq_generate();
+        let (jacobian, residual_function, bc_func) = expect_exprlegacy_callbacks(&mut bvp_wrap);
 
         let x = bvp_wrap.x_mesh_col.clone();
-        let y = bvp_wrap.initial_guess_mat.clone();
-        let p = bvp_wrap.param_col.clone();
+        let y = bvp_wrap.runtime_initial_guess_mat();
+        let p = bvp_wrap.runtime_param_col();
         let custom_timer = CustomTimer::new();
 
         bvp_wrap.solve_bvp_wrap(
@@ -501,7 +520,7 @@ mod tests {
         });
 
         // Use new method to create solver instance
-        let mut bvp_solver = BVPwrap::new(
+        let mut bvp_solver = quiet_exprlegacy_solver(BVPwrap::new(
             Some(x_mesh.clone()),
             None,
             None,
@@ -515,7 +534,7 @@ mod tests {
             1e-8,
             1000,
             initial_guess,
-        );
+        ));
 
         // Use solve method to start solver
         bvp_solver.solve();
@@ -528,14 +547,6 @@ mod tests {
             let x_val = bvp_solver.result.x[i];
             let y_numerical = bvp_solver.result.y.get(0, i);
             let y_analytic = x_val * (1.0 - x_val);
-
-            println!(
-                "x = {:.3}, y_num = {:.6}, y_exact = {:.6}, error = {:.2e}",
-                x_val,
-                y_numerical,
-                y_analytic,
-                (y_numerical - y_analytic).abs()
-            );
 
             assert!(
                 (y_numerical - y_analytic).abs() < 1e-6,

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 pub mod Examples;
 pub mod symbolic;
+pub mod command_interpreter;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use crate::symbolic::symbolic_functions_BVP::Jacobian as JacobianBVP;

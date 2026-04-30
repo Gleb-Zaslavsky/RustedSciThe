@@ -1,10 +1,79 @@
+use crate::numerical::Radau::Radau_main::RadauStatistics;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, PreparedSymbolicIvpProblem, SharedIvpParameterValues,
+    SymbolicIvpProblemOptions,
+};
+use crate::symbolic::symbolic_ivp_generated::{
+    DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
+};
 use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 impl Jacobian {
+    pub fn jacobian_generate_IVP_Radau_mode(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<String>,
+        parameters: Vec<String>,
+        parallel: bool,
+    ) {
+        if parallel {
+            self.jacobian_generate_IVP_Radau_parallel(arg, variable_str, parameters);
+        } else {
+            self.jacobian_generate_IVP_Radau(arg, variable_str, parameters);
+        }
+    }
+
+    pub fn lambdify_funcvector_with_parameters_mode(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        parameters: Vec<&str>,
+        parallel: bool,
+    ) {
+        if parallel {
+            self.lambdify_funcvector_with_parameters_parallel(arg, variable_str, parameters);
+        } else {
+            self.lambdify_funcvector_with_parameters(arg, variable_str, parameters);
+        }
+    }
+
+    pub fn vector_funvector_with_parameters_DVector_mode(
+        &mut self,
+        arg: &str,
+        variable_str: Vec<&str>,
+        parameters: Vec<&str>,
+        parallel: bool,
+    ) {
+        if parallel {
+            self.vector_funvector_with_parameters_DVector_parallel(arg, variable_str, parameters);
+        } else {
+            self.vector_funvector_with_parameters_DVector(arg, variable_str, parameters);
+        }
+    }
+
+    pub fn generate_NR_solver_for_Radau_mode(
+        &mut self,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        parameters: Vec<String>,
+        arg: String,
+        parallel: bool,
+    ) {
+        if parallel {
+            self.generate_NR_solver_for_Radau_parallel(eq_system, values, parameters, arg);
+        } else {
+            self.generate_NR_solver_for_Radau(eq_system, values, parameters, arg);
+        }
+    }
+
     pub fn generate_NR_solver_for_Radau(
         &mut self,
         eq_system: Vec<Expr>,
@@ -19,18 +88,25 @@ impl Jacobian {
         let ncols = self.symbolic_jacobian.len();
         let nrows = self.symbolic_jacobian[0].len();
         assert!(nrows == ncols);
-        self.jacobian_generate_IVP_Radau(arg.as_str(), values.clone(), parameters.clone());
+        self.jacobian_generate_IVP_Radau_mode(
+            arg.as_str(),
+            values.clone(),
+            parameters.clone(),
+            false,
+        );
         let values_str = values.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
         let parameters_str = parameters.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
-        self.lambdify_funcvector_with_parameters(
+        self.lambdify_funcvector_with_parameters_mode(
             arg.as_str(),
             values_str.clone(),
             parameters_str.clone(),
+            false,
         );
-        self.vector_funvector_with_parameters_DVector(
+        self.vector_funvector_with_parameters_DVector_mode(
             arg.as_str(),
             values_str.clone(),
             parameters_str.clone(),
+            false,
         );
     }
     pub fn jacobian_generate_IVP_Radau(
@@ -68,44 +144,47 @@ impl Jacobian {
         arg: String,
         bandwidth: (usize, usize),
     ) -> Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> {
-        let mut variables_and_parameters: Vec<String> = variable_str.clone();
-        variables_and_parameters.extend(parameters.clone());
+        let mut variables_and_parameters: Vec<String> = variable_str;
+        variables_and_parameters.extend(parameters);
+        let variable_refs: Vec<&str> = variables_and_parameters
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
 
         let (kl, ku) = bandwidth;
-        Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
-            let mut new_function_jacobian: DMatrix<f64> =
-                DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
-            let variales_and_parameters: Vec<&str> = variables_and_parameters
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            for i in 0..vector_of_functions_len {
-                let (right_border, left_border) = if kl == 0 && ku == 0 {
-                    let right_border = vector_of_variables_len;
-                    let left_border = 0;
-                    (right_border, left_border)
+        let mut jacobian_positions: Vec<(usize, usize, Box<dyn Fn(f64, Vec<f64>) -> f64>)> =
+            Vec::new();
+        for i in 0..vector_of_functions_len {
+            let (right_border, left_border) = if kl == 0 && ku == 0 {
+                (vector_of_variables_len, 0)
+            } else {
+                let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
+                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
+                    0
                 } else {
-                    let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                    let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                        0
-                    } else {
-                        i - kl - 1
-                    };
-                    (right_border, left_border)
+                    i - kl - 1
                 };
-                for j in left_border..right_border {
+                (right_border, left_border)
+            };
+
+            for j in left_border..right_border {
+                if !jac[i][j].is_zero() {
                     let partial_func = Expr::lambdify_IVP_owned(
                         jac[i][j].clone(),
                         arg.as_str(),
-                        variales_and_parameters.clone(),
+                        variable_refs.clone(),
                     );
-                    let v_vec: Vec<f64> = v.iter().cloned().collect();
-                    new_function_jacobian[(i, j)] = if jac[i][j].clone() == Expr::Const(0.0) {
-                        0.0
-                    } else {
-                        partial_func(x, v_vec.clone())
-                    };
+                    jacobian_positions.push((i, j, partial_func));
                 }
+            }
+        }
+
+        Box::new(move |x: f64, v: &DVector<f64>| -> DMatrix<f64> {
+            let v_vec: Vec<f64> = v.iter().copied().collect();
+            let mut new_function_jacobian =
+                DMatrix::zeros(vector_of_functions_len, vector_of_variables_len);
+            for (i, j, partial_func) in &jacobian_positions {
+                new_function_jacobian[(*i, *j)] = partial_func(x, v_vec.clone());
             }
             new_function_jacobian
         })
@@ -119,7 +198,6 @@ impl Jacobian {
     ) {
         let mut variable_and_parameters: Vec<&str> = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
-        println!("variable_and_parameters = {:?} \n", variable_and_parameters);
         let mut result: Vec<Box<dyn Fn(f64, Vec<f64>) -> f64>> = Vec::new();
         for func in self.vector_of_functions.clone() {
             let func = Expr::lambdify_IVP_owned(func, arg, variable_and_parameters.clone());
@@ -134,41 +212,23 @@ impl Jacobian {
         variable_str: Vec<&str>,
         parameters: Vec<&str>,
     ) {
-        let vector_of_functions = &self.vector_of_functions;
-        fn f(
-            vector_of_functions: Vec<Expr>,
-            arg: String,
-            variable_and_parameters: Vec<String>,
-        ) -> Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + 'static> {
-            Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
-                let mut result: DVector<f64> = DVector::zeros(vector_of_functions.len());
-                for (i, func) in vector_of_functions.iter().enumerate() {
-                    let func = Expr::lambdify_IVP_owned(
-                        func.to_owned(),
-                        arg.as_str(),
-                        variable_and_parameters
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .clone(),
-                    );
-                    result[i] = func(x, v.iter().cloned().collect());
-                }
-                result
-            }) //enf of box
-        } // end of function
         let mut variable_and_parameters = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
+        let compiled_functions: Vec<Box<dyn Fn(f64, Vec<f64>) -> f64>> = self
+            .vector_of_functions
+            .iter()
+            .cloned()
+            .map(|func| Expr::lambdify_IVP_owned(func, arg, variable_and_parameters.clone()))
+            .collect();
 
-        self.lambdified_functions_IVP_DVector = f(
-            vector_of_functions.to_owned(),
-            arg.to_string(),
-            variable_and_parameters
-                .clone()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
+        self.lambdified_functions_IVP_DVector =
+            Box::new(move |x: f64, v: &DVector<f64>| -> DVector<f64> {
+                let v_vec: Vec<f64> = v.iter().copied().collect();
+                DVector::from_iterator(
+                    compiled_functions.len(),
+                    compiled_functions.iter().map(|func| func(x, v_vec.clone())),
+                )
+            });
     }
 }
 
@@ -200,6 +260,9 @@ pub struct RadauNewton {
     pub fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
     pub n: usize,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    statistics: Arc<Mutex<RadauStatistics>>,
 }
 
 impl RadauNewton {
@@ -213,6 +276,32 @@ impl RadauNewton {
         max_iterations: usize,
         n_vars: usize,
         n_stages: usize,
+    ) -> RadauNewton {
+        Self::new_with_statistics(
+            eq_system,
+            k_variables,
+            initial_guess,
+            parameters,
+            arg,
+            tolerance,
+            max_iterations,
+            n_vars,
+            n_stages,
+            Arc::new(Mutex::new(RadauStatistics::default())),
+        )
+    }
+
+    pub fn new_with_statistics(
+        eq_system: Vec<Expr>,
+        k_variables: Vec<String>,
+        initial_guess: Option<DVector<f64>>,
+        parameters: Vec<String>,
+        arg: String,
+        tolerance: f64,
+        max_iterations: usize,
+        n_vars: usize,
+        n_stages: usize,
+        statistics: Arc<Mutex<RadauStatistics>>,
     ) -> RadauNewton {
         let initial_guess = initial_guess.unwrap_or_else(|| DVector::zeros(k_variables.len()));
 
@@ -236,48 +325,160 @@ impl RadauNewton {
             fun: Box::new(|_t, y| y.clone()),
             jac: None,
             n: k_variables.len(),
+            parameter_values_handle: None,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            statistics,
         }
+    }
+
+    pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
+        self.generated_backend_config = config;
+        self.jac = None;
+        self.parameter_values_handle = None;
+    }
+
+    pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
+        &self.generated_backend_config
+    }
+
+    pub fn set_dense_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.set_generated_backend_config(config);
+    }
+
+    pub fn set_dense_generated_backend_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        );
+    }
+
+    pub fn set_dense_generated_backend_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        );
+    }
+
+    pub fn set_dense_generated_backend_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        );
+    }
+
+    pub fn set_dense_generated_backend_for_repeated_solves(
+        &mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        );
+    }
+
+    pub fn with_dense_generated_backend_c_tcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_tcc(output_parent_dir);
+        self
+    }
+
+    pub fn with_dense_generated_backend_c_gcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_gcc(output_parent_dir);
+        self
+    }
+
+    pub fn with_dense_generated_backend_zig(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_zig(output_parent_dir);
+        self
+    }
+
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_for_repeated_solves(output_parent_dir);
+        self
+    }
+
+    pub(crate) fn install_prepared_backend(&mut self, prepared: PreparedSymbolicIvpProblem) {
+        self.jacobian_symbolic = Some(prepared.symbolic_jacobian.clone());
+        self.parameter_values_handle = prepared.parameter_values_handle();
+
+        let n = self.k_variables.len();
+        let residual = prepared.residual;
+        let jacobian = prepared.jacobian;
+        let stats_for_fun = Arc::clone(&self.statistics);
+        self.fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let k_only = DVector::from_iterator(n, y.iter().take(n).copied());
+            let out = residual(t, &k_only);
+            stats_for_fun
+                .lock()
+                .expect("Radau statistics lock poisoned")
+                .record_residual_ms(start.elapsed().as_secs_f64() * 1_000.0);
+            out
+        });
+
+        let stats_for_jac = Arc::clone(&self.statistics);
+        self.jac = Some(Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+            let start = Instant::now();
+            let k_only = DVector::from_iterator(n, y.iter().take(n).copied());
+            let out = jacobian(t, &k_only);
+            stats_for_jac
+                .lock()
+                .expect("Radau statistics lock poisoned")
+                .record_jacobian_ms(start.elapsed().as_secs_f64() * 1_000.0);
+            out
+        }));
+        self.n = self.eq_system.len();
+    }
+
+    pub fn try_eq_generate(&mut self) -> Result<(), IvpBackendError> {
+        info!("Generating Radau Newton equations and jacobian");
+        let start = Instant::now();
+        let mut options = SymbolicIvpProblemOptions::new()
+            .with_equation_parameters(self.parameters.clone())
+            .with_equation_parameter_values(DVector::zeros(self.parameters.len()))
+            .with_aot_options(self.generated_backend_config.aot_options);
+        let prepared = prepare_generated_symbolic_ivp_problem(
+            self.eq_system.clone(),
+            self.k_variables.clone(),
+            self.arg.clone(),
+            std::mem::take(&mut options),
+            self.generated_backend_config.clone(),
+        )
+        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+            message: err.to_string(),
+        })?;
+        self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+        self.install_prepared_backend(prepared.into_problem());
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .record_backend_prepare_ms(start.elapsed().as_secs_f64() * 1_000.0);
+        Ok(())
     }
 
     /// Generate function and Jacobian closures using the infrastructure
     pub fn eq_generate(&mut self) {
-        info!("Generating Radau Newton equations and jacobian");
-        let mut jacobian_instance = Jacobian::new();
-        match self.parallel {
-            true => {
-                println!("\n Parallel version enabled \n");
-                jacobian_instance.generate_NR_solver_for_Radau_parallel(
-                    self.eq_system.clone(),
-                    self.k_variables.clone(),
-                    self.parameters.clone(),
-                    self.arg.clone(),
-                );
-            }
-            false => {
-                jacobian_instance.generate_NR_solver_for_Radau(
-                    self.eq_system.clone(),
-                    self.k_variables.clone(),
-                    self.parameters.clone(),
-                    self.arg.clone(),
-                );
-            }
-        }
-
-        self.jacobian_symbolic = Some(jacobian_instance.symbolic_jacobian.clone());
-        // Extract the lambdified functions and Jacobian
-        let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
-            jacobian_instance.lambdified_functions_IVP_DVector;
-
-        let jac = jacobian_instance.function_jacobian_IVP_DMatrix;
-
-        let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
-            Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> { jac(t, &y) });
-
-        self.fun = fun;
-        self.jac = Some(jac_wrapped);
-        self.n = self.eq_system.len();
-
-        info!("Radau Newton functions generated successfully");
+        self.try_eq_generate()
+            .expect("Radau symbolic IVP backend generation should succeed");
     }
 
     /// Set parameters for the current Newton solve (y_n, h, t_n)
@@ -285,6 +486,17 @@ impl RadauNewton {
         self.y_n = y_n;
         self.h = h;
         self.t_n = t_n;
+        if let Some(handle) = self.parameter_values_handle.as_ref() {
+            let mut slot = handle
+                .write()
+                .expect("shared IVP parameter state lock poisoned");
+            let mut values = DVector::zeros(self.y_n.len() + 1);
+            for (idx, value) in self.y_n.iter().copied().enumerate() {
+                values[idx] = value;
+            }
+            values[self.y_n.len()] = self.h;
+            *slot = values;
+        }
 
         info!(
             "Setting Radau Newton parameters: t_n = {:.6}, h = {:.6}",
@@ -303,24 +515,33 @@ impl RadauNewton {
 
     /// Perform one Newton-Raphson iteration
     pub fn iteration(&mut self) -> DVector<f64> {
-        //  assert!(!self.initial_guess.is_empty(), "initial guess is empty");
-
         let t = self.t_n;
-        let y_n: DVector<f64> = self.y_n.clone();
-        // Create parameter vector: [K_variables, y_n_variables, h]
-        let k_vector: DVector<f64> = self.k_values.clone();
+        let k_vector = self.k_values.clone();
         info!("Radau Newton iteration: k_vector = {:?}", k_vector);
-        let mut param_vector: DVector<f64> = k_vector.clone();
-        param_vector.extend(y_n.iter().cloned());
-        let param_vector: DVector<f64> = param_vector.push(self.h);
+        let param_vector = DVector::from_iterator(
+            k_vector.len() + self.y_n.len() + 1,
+            k_vector
+                .iter()
+                .copied()
+                .chain(self.y_n.iter().copied())
+                .chain(std::iter::once(self.h)),
+        );
 
         let f = (self.fun)(t, &param_vector);
-        let new_j = &self.jac.as_mut().unwrap()(t, &param_vector);
+        let new_j = self.jac.as_mut().unwrap()(t, &param_vector);
 
         // For Radau, we solve: J * delta_k = -f
         // where J is the Jacobian w.r.t. K variables only
-        let lu = new_j.clone().lu();
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .lu_factorizations += 1;
+        let lu = new_j.lu();
         let neg_f = -1.0 * f;
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .linear_solves += 1;
         let delta_k = lu.solve(&neg_f).expect("Jacobian should be invertible");
         info!("Radau Newton iteration: step = {:?}", delta_k);
         let new_k = k_vector + delta_k;
@@ -333,15 +554,17 @@ impl RadauNewton {
             "Starting Radau Newton solve with {} unknowns",
             self.k_values.len()
         );
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .newton_solve_calls += 1;
 
         let mut k = self.k_values.clone();
         let mut iteration_count = 0;
 
         while iteration_count < self.max_iterations {
             info!("Radau Newton iteration {}", iteration_count);
-            // Update initial_guess for iteration method
-
-            self.k_values = k.clone();
+            self.k_values.copy_from(&k);
 
             let k_new = self.iteration();
             info!(
@@ -350,6 +573,10 @@ impl RadauNewton {
             );
             let delta_k = &k_new - &k;
             let error = Matrix::norm(&delta_k);
+            self.statistics
+                .lock()
+                .expect("Radau statistics lock poisoned")
+                .newton_iterations_total += 1;
 
             info!(
                 "Radau Newton iteration {}: error = {:.2e}",
@@ -377,6 +604,13 @@ impl RadauNewton {
 
     pub fn get_result(&self) -> Option<DVector<f64>> {
         self.result.clone()
+    }
+
+    pub fn statistics(&self) -> RadauStatistics {
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .clone()
     }
 }
 

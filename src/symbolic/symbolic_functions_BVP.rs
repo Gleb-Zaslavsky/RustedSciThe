@@ -1,10 +1,11 @@
-//! Current BVP symbolic/AOT dataflow.
+//! Symbolic BVP assembly and runtime preparation.
 //!
-//! This module is the boundary between symbolic BVP construction and
-//! solver-facing execution. It now supports both the long-standing lambdify
-//! path and the newer sparse AOT lifecycle.
+//! This module is the main bridge between symbolic BVP construction and the
+//! solver-facing residual/Jacobian callback layer. It owns discretization,
+//! symbolic Jacobian preparation, lambdify/AOT runtime wiring, and sparse
+//! backend selection.
 //!
-//! Current sparse mainline:
+//! Current practical sparse mainline:
 //! 1. `Jacobian` receives symbolic residual equations, unknown names,
 //!    optional parameters, discretization settings, and boundary conditions.
 //! 2. `generate_BVP_with_params(...)` discretizes the system and fills the
@@ -30,7 +31,10 @@
 //! for compatibility, validation, and gradual migration of the wider BVP
 //! stack.
 //!
-//! Legacy notes for the original BVP symbolic module layout.
+//! Historical reference below:
+//! the remaining long-form notes describe the original symbolic BVP module
+//! layout and older backends. They are kept as reference only; the concise
+//! summary above reflects the current pipeline.
 //!
 //! ## Main Purpose
 //! This module provides high-performance symbolic computation and automatic differentiation
@@ -128,29 +132,43 @@
 #![allow(non_camel_case_types)]
 use crate::global::THRESHOLD as T;
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting, convert_to_fun,
-    convert_to_jac,
+    BandedMatrixType, Fun, FunEnum, Jac, JacEnum, MatrixType, VectorType, Vectors_type_casting,
+    convert_to_fun, convert_to_jac,
 };
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
-use crate::symbolic::codegen_aot_resolution::{AotResolver, ResolvedAotArtifact};
-use crate::symbolic::codegen_aot_runtime_link::resolve_linked_sparse_backend;
-use crate::symbolic::codegen_backend_selection::{
+use crate::somelinalg::banded::{LinearSolverConfig, NodeMajorLayout};
+use crate::symbolic::symbolic_functions_BVP2::BandedLambdifyConfig;
+use crate::symbolic::codegen::codegen_aot_resolution::{AotResolver, ResolvedAotArtifact};
+use crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_sparse_backend;
+use crate::symbolic::codegen::codegen_aot_driver::{AotCodegenBackend, GeneratedAotArtifact};
+use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
+use crate::symbolic::codegen::CodegenIR::CodegenModule;
+use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind, select_backend,
 };
-use crate::symbolic::codegen_manifest::PreparedProblemManifest;
-use crate::symbolic::codegen_orchestrator::{ParallelExecutorConfig, ParallelFallbackPolicy};
-use crate::symbolic::codegen_provider_api::{BackendKind, MatrixBackend, PreparedSparseProblem};
-use crate::symbolic::codegen_runtime_api::{
-    ResidualChunkPlan, ResidualChunkingStrategy, ResidualRuntimePlan, SparseJacobianRuntimePlan,
-    SparseJacobianStructure, SparseJacobianValuesChunkPlan,
+use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
+use crate::symbolic::codegen::codegen_orchestrator::{
+    recommended_sparse_auto_parallel_plan, ParallelExecutorConfig, ParallelFallbackPolicy,
+    SparseAutoParallelPlan,
+};
+use crate::symbolic::codegen::codegen_provider_api::{
+    BackendKind, MatrixBackend, PreparedBandedProblem, PreparedProblem, PreparedSparseProblem,
+};
+use crate::symbolic::codegen::codegen_runtime_api::{
+    BandedJacobianRuntimePlan, ResidualChunkPlan, ResidualChunkingStrategy, ResidualRuntimePlan,
+    SparseJacobianRuntimePlan, SparseJacobianStructure, SparseJacobianValuesChunkPlan,
+    recommended_banded_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
 };
-use crate::symbolic::codegen_tasks::{
-    CodegenOutputLayout, CodegenTaskKind, CodegenTaskPlan, PlannedOutput, SparseChunkingStrategy,
-    SparseExprEntry,
+use crate::symbolic::codegen::codegen_tasks::{
+    BandedChunkingStrategy, BandedExprEntry, CodegenOutputLayout, CodegenTaskKind,
+    CodegenTaskPlan, PlannedOutput, SparseChunkingStrategy, SparseExprEntry,
 };
+use crate::symbolic::View::bvp::discretization_system_bvp_par_atom;
+use crate::symbolic::View::bvp::DiscretizedBvpAtomSystem;
+use crate::symbolic::View::bvp_codegen::prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown;
+use crate::symbolic::View::conversions::atom_to_expr;
 use crate::symbolic::symbolic_engine::Expr;
-//use crate::symbolic::symbolic_traits::SymbolicType;
 use faer::col::Col;
 use faer::col::ColRef;
 
@@ -176,6 +194,16 @@ fn normalize_timer_percent(value: &mut f64, total: f64) {
     }
 }
 
+fn flatten_runtime_args(parameter_values: Option<&[f64]>, unknowns: &[f64]) -> Vec<f64> {
+    let mut flat_args =
+        Vec::with_capacity(parameter_values.map_or(0, |params| params.len()) + unknowns.len());
+    if let Some(params) = parameter_values {
+        flat_args.extend_from_slice(params);
+    }
+    flat_args.extend_from_slice(unknowns);
+    flat_args
+}
+
 /// High-level backend family used by the BVP symbolic pipeline.
 ///
 /// This enum intentionally separates "how the numerical evaluator appears"
@@ -196,6 +224,7 @@ pub enum BvpMatrixBackend {
     SprsCsMat,
     NalgebraCsMatrix,
     FaerSparseCol,
+    Banded,
 }
 
 impl BvpMatrixBackend {
@@ -205,6 +234,7 @@ impl BvpMatrixBackend {
             Self::SprsCsMat => "Sparse_1",
             Self::NalgebraCsMatrix => "Sparse_2",
             Self::FaerSparseCol => "Sparse",
+            Self::Banded => "Banded",
         }
     }
 
@@ -214,6 +244,7 @@ impl BvpMatrixBackend {
             "Sparse_1" => Some(Self::SprsCsMat),
             "Sparse_2" => Some(Self::NalgebraCsMatrix),
             "Sparse" => Some(Self::FaerSparseCol),
+            "Banded" => Some(Self::Banded),
             _ => None,
         }
     }
@@ -221,6 +252,7 @@ impl BvpMatrixBackend {
     pub const fn from_provider_matrix_backend(matrix_backend: MatrixBackend) -> Self {
         match matrix_backend {
             MatrixBackend::Dense => Self::Dense,
+            MatrixBackend::Banded => Self::Banded,
             MatrixBackend::SparseCol => Self::FaerSparseCol,
             MatrixBackend::CsMat => Self::SprsCsMat,
             MatrixBackend::CsMatrix => Self::NalgebraCsMatrix,
@@ -257,6 +289,99 @@ impl Default for BvpBackendConfig {
         Self::lambdify(BvpMatrixBackend::FaerSparseCol)
     }
 }
+
+pub(crate) fn bvp_symbolic_variables_for_functions(
+    vector_of_functions: &[Expr],
+) -> Vec<Vec<String>> {
+    vector_of_functions
+        .iter()
+        .map(Expr::all_arguments_are_variables)
+        .collect()
+}
+
+pub(crate) fn bvp_symbolic_parse_variables(variable_string: &[String]) -> Vec<Expr> {
+    Expr::parse_vector_expression(variable_string.iter().map(|s| s.as_str()).collect())
+}
+
+pub(crate) fn bvp_symbolic_jacobian_smart(
+    vector_of_functions: &[Expr],
+    vector_of_variables_len: usize,
+    variable_string: &[String],
+    variables_for_all_discrete: &[Vec<String>],
+) -> (Vec<Vec<Expr>>, Vec<(usize, usize, Expr)>) {
+    let rows_and_sparse: Vec<(Vec<Expr>, Vec<(usize, usize, Expr)>)> = vector_of_functions
+        .par_iter()
+        .enumerate()
+        .map(|(i, function)| {
+            let mut vector_of_partial_derivatives = Vec::new();
+            let mut sparse_entries = Vec::new();
+            for j in 0..vector_of_variables_len {
+                let variable = &variable_string[j];
+                let list_of_variables_for_this_eq = &variables_for_all_discrete[i];
+                if list_of_variables_for_this_eq.contains(variable) {
+                    let mut partial = Expr::diff(function, variable);
+                    partial = partial.simplify();
+                    if !partial.is_zero() {
+                        sparse_entries.push((i, j, partial.clone()));
+                    }
+                    vector_of_partial_derivatives.push(partial);
+                } else {
+                    vector_of_partial_derivatives.push(Expr::Const(0.0));
+                }
+            }
+            (vector_of_partial_derivatives, sparse_entries)
+        })
+        .collect();
+
+    let symbolic_jacobian = rows_and_sparse.iter().map(|(row, _)| row.clone()).collect();
+    let symbolic_jacobian_sparse = rows_and_sparse
+        .into_iter()
+        .flat_map(|(_, entries)| entries)
+        .collect();
+    (symbolic_jacobian, symbolic_jacobian_sparse)
+}
+
+pub(crate) fn bvp_symbolic_bandwidth(symbolic_jacobian: &[Vec<Expr>]) -> (usize, usize) {
+    let n = symbolic_jacobian.len();
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut row_kl = 0;
+            let mut row_ku = 0;
+            for j in 0..n {
+                if symbolic_jacobian[i][j] != Expr::Const(0.0) {
+                    if j > i {
+                        row_ku = std::cmp::max(row_ku, j - i);
+                    } else if i > j {
+                        row_kl = std::cmp::max(row_kl, i - j);
+                    }
+                }
+            }
+            (row_kl, row_ku)
+        })
+        .reduce(
+            || (0, 0),
+            |acc, row| (std::cmp::max(acc.0, row.0), std::cmp::max(acc.1, row.1)),
+        )
+}
+
+/// Symbolic assembly backend used before lambdify/AOT runtime selection.
+///
+/// This controls how the discretized residual equations are assembled:
+/// - `ExprLegacy` keeps the historical boxed-expression path,
+/// - `AtomView` performs residual assembly on the packed View path and only
+///   materializes back to `Expr` at the integration boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpSymbolicAssemblyBackend {
+    ExprLegacy,
+    AtomView,
+}
+
+impl Default for BvpSymbolicAssemblyBackend {
+    fn default() -> Self {
+        Self::ExprLegacy
+    }
+}
 /// Core structure for BVP symbolic-to-numerical transformation pipeline.
 ///
 /// This struct represents a Jacobian for BVPs, which is a matrix of partial derivatives of a vector function.
@@ -287,6 +412,13 @@ pub struct Jacobian {
     /// The legacy `method` string is still kept for compatibility with the
     /// wider BVP stack, but new code should prefer this field.
     pub backend_config: BvpBackendConfig,
+
+    /// Native linear solver configuration used by the banded runtime path.
+    pub banded_linear_solver_config: LinearSolverConfig,
+
+    /// Symbolic assembly path used for residual discretization before Jacobian
+    /// generation begins.
+    pub symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
 
     /// Vector of symbolic variables representing the unknowns in the BVP system.
     /// Contains Expr::Var objects for each discretized variable (e.g., y_0, y_1, ..., y_n)
@@ -350,6 +482,17 @@ pub struct Jacobian {
     /// Contains (position_in_full_vector, boundary_value) pairs to insert BC values
     /// back into the solution vector of unknowns to create the complete solution.
     pub BC_pos_n_values: Vec<(usize, usize, f64)>,
+
+    /// Raw stage timings from the last `generate_BVP*` symbolic build.
+    ///
+    /// Values are kept in wall-clock seconds before percentage normalization so
+    /// diagnostics can compare backend stages directly.
+    pub last_generate_timer_snapshot: Option<HashMap<String, f64>>,
+
+    /// Optional packed View-side discretized system kept for atom-native AOT
+    /// lowering. Lambdify/runtime compatibility paths still use the materialized
+    /// `Expr` fields, but AOT can keep this snapshot on the packed path longer.
+    pub atom_discretized_system: Option<DiscretizedBvpAtomSystem>,
 }
 
 /// Owned sparse AOT-ready BVP problem produced by the legacy BVP symbolic
@@ -369,6 +512,41 @@ pub struct BvpPreparedSparseAotProblem {
     pub shape: (usize, usize),
     pub residual_strategy: ResidualChunkingStrategy,
     pub jacobian_strategy: SparseChunkingStrategy,
+    pub bandwidth: Option<(usize, usize)>,
+    pub symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    pub atom_discretized_system: Option<DiscretizedBvpAtomSystem>,
+}
+
+/// Fine-grained timing breakdown for BVP generated AOT crate assembly.
+///
+/// This is primarily used to diagnose where time is spent between the symbolic
+/// sparse problem and the final emitted Rust source:
+/// - building/reusing the sparse Jacobian representation,
+/// - lowering it into a `CodegenModule`,
+/// - and rendering the final source string.
+#[derive(Clone, Debug, Default)]
+pub struct BvpGeneratedAotCrateBreakdown {
+    pub jacobian_prepare_ms: f64,
+    pub atom_sparse_lookup_prepare_ms: f64,
+    pub atom_sparse_jacobian_build_ms: f64,
+    pub atom_finalize_codegen_plan_ms: f64,
+    pub atom_sparse_nnz: usize,
+    pub atom_residual_view_collect_ms: f64,
+    pub atom_residual_lower_many_ms: f64,
+    pub atom_residual_peephole_ms: f64,
+    pub atom_residual_reuse_temps_ms: f64,
+    pub atom_sparse_view_collect_ms: f64,
+    pub atom_sparse_lower_many_ms: f64,
+    pub atom_sparse_peephole_ms: f64,
+    pub atom_sparse_reuse_temps_ms: f64,
+    pub module_build_ms: f64,
+    pub source_emit_ms: f64,
+    pub source_kb: f64,
+    pub module_blocks: usize,
+    pub total_block_instructions: usize,
+    pub total_block_temps: usize,
+    pub max_block_instructions: usize,
+    pub total_block_outputs: usize,
 }
 
 /// Owned BVP-side backend selection result for the sparse main path.
@@ -389,6 +567,13 @@ impl BvpSelectedSparseBackend {
     /// Returns `true` when the selected path points to a compiled AOT artifact.
     pub fn is_compiled_aot(&self) -> bool {
         self.effective_backend == SelectedBackendKind::AotCompiled
+    }
+
+    /// Returns the manifest-derived problem key for the currently selected
+    /// matrix backend.
+    pub fn problem_key(&self) -> String {
+        self.prepared_problem
+            .problem_key_for_matrix_backend(self.matrix_backend)
     }
 }
 
@@ -463,10 +648,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
     pub fn is_runtime_callable(&self) -> bool {
         matches!(self.execution, BvpSparseExecutionPlan::LambdifyReady(_))
             || matches!(self.execution, BvpSparseExecutionPlan::AotCompiled(_))
-                && resolve_linked_sparse_backend(
-                    &self.execution.selected().prepared_problem.problem_key(),
-                )
-                .is_some()
+                && resolve_linked_sparse_backend(&self.execution.selected().problem_key()).is_some()
     }
 
     /// Returns resolved lifecycle metadata for compiled AOT artifacts, when present.
@@ -522,20 +704,10 @@ impl<'a> BvpSparseSolverProvider<'a> {
                 out.copy_from_slice(dense.as_slice());
             }
             BvpSparseExecutionPlan::AotCompiled(selected) => {
-                let linked =
-                    resolve_linked_sparse_backend(&selected.prepared_problem.problem_key())
-                        .expect("AotCompiled provider path must resolve a linked backend");
-                let mut flat_args = Vec::with_capacity(
-                    self.jacobian
-                        .parameter_values
-                        .as_ref()
-                        .map_or(0, |params| params.len())
-                        + args.len(),
-                );
-                if let Some(params) = self.jacobian.parameter_values.as_ref() {
-                    flat_args.extend_from_slice(params.as_slice());
-                }
-                flat_args.extend_from_slice(args);
+                let linked = resolve_linked_sparse_backend(&selected.problem_key())
+                    .expect("AotCompiled provider path must resolve a linked backend");
+                let flat_args =
+                    flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
                 (linked.residual_eval)(&flat_args, out);
             }
             _ => {
@@ -579,20 +751,10 @@ impl<'a> BvpSparseSolverProvider<'a> {
                 }
             }
             BvpSparseExecutionPlan::AotCompiled(selected) => {
-                let linked =
-                    resolve_linked_sparse_backend(&selected.prepared_problem.problem_key())
-                        .expect("AotCompiled provider path must resolve a linked backend");
-                let mut flat_args = Vec::with_capacity(
-                    self.jacobian
-                        .parameter_values
-                        .as_ref()
-                        .map_or(0, |params| params.len())
-                        + args.len(),
-                );
-                if let Some(params) = self.jacobian.parameter_values.as_ref() {
-                    flat_args.extend_from_slice(params.as_slice());
-                }
-                flat_args.extend_from_slice(args);
+                let linked = resolve_linked_sparse_backend(&selected.problem_key())
+                    .expect("AotCompiled provider path must resolve a linked backend");
+                let flat_args =
+                    flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
                 (linked.jacobian_values_eval)(&flat_args, values_out);
             }
             _ => {
@@ -617,7 +779,9 @@ pub struct BvpSparseSolverBundle {
     pub execution: BvpSparseExecutionPlan,
     pub residual_function: Option<Box<dyn Fun>>,
     pub jacobian_function: Option<Box<dyn Jac>>,
+    pub banded_linear_solver_config: LinearSolverConfig,
     pub variable_string: Vec<String>,
+    pub parameter_values: Option<Vec<f64>>,
     pub bounds_vec: Option<Vec<(f64, f64)>>,
     pub rel_tolerance_vec: Option<Vec<f64>>,
     pub bandwidth: Option<(usize, usize)>,
@@ -729,10 +893,13 @@ impl BvpSparseSolverBundle {
             return false;
         }
 
-        let Some((residual, jacobian)) = linked_sparse_runtime_callbacks(
+        let selected = self.execution.selected();
+        let Some((residual, jacobian)) = linked_runtime_callbacks_for_matrix_backend(
             &self.execution.selected().prepared_problem,
-            parameter_values,
+            selected.matrix_backend,
+            parameter_values.or(self.parameter_values.as_deref()),
             parallel_config,
+            self.banded_linear_solver_config,
         ) else {
             return false;
         };
@@ -808,6 +975,42 @@ impl Jacobian {
 }
 
 impl BvpPreparedSparseAotProblem {
+    /// Infers the node-major block layout expected by the native banded BVP
+    /// solver path.
+    ///
+    /// Variable names in the discretized BVP follow a node-major convention
+    /// like `y_0, z_0, y_1, z_1, ...`. Counting distinct base names across the
+    /// flattened variable list gives the number of variables per node.
+    fn infer_node_major_layout(&self) -> Result<NodeMajorLayout, String> {
+        if self.variable_names.is_empty() || self.shape.0 == 0 || self.shape.0 != self.shape.1 {
+            return Err("prepared BVP problem must describe a non-empty square system".into());
+        }
+
+        fn base_variable_name(name: &str) -> &str {
+            name.rsplit_once('_')
+                .and_then(|(base, suffix)| suffix.parse::<usize>().ok().map(|_| base))
+                .unwrap_or(name)
+        }
+
+        let mut seen = HashSet::new();
+        let mut vars_per_node = 0usize;
+        for name in &self.variable_names {
+            if seen.insert(base_variable_name(name).to_string()) {
+                vars_per_node += 1;
+            }
+        }
+
+        if vars_per_node == 0 || self.shape.1 % vars_per_node != 0 {
+            return Err(format!(
+                "node-major layout inference failed: unknowns={} vars_per_node={vars_per_node}",
+                self.shape.1
+            ));
+        }
+
+        let n_nodes = self.shape.1 / vars_per_node;
+        NodeMajorLayout::new(n_nodes, vars_per_node).map_err(|err| err.to_string())
+    }
+
     /// Returns the flattened symbolic input ordering used across the sparse
     /// AOT path: `[params..., variables...]`.
     fn flattened_input_names(&self) -> Vec<&str> {
@@ -834,6 +1037,66 @@ impl BvpPreparedSparseAotProblem {
                 expr,
             })
             .collect()
+    }
+
+    /// Rebuilds borrowed banded Jacobian entries from the owned sparse cache.
+    ///
+    /// The banded runtime/codegen path expects diagonal-major ordering with an
+    /// explicit per-diagonal position. We derive that ordering once here so the
+    /// upper prepared-problem bridge can stay backend-aware while the owned BVP
+    /// cache remains simple and sparse-entry-based.
+    fn inferred_bandwidth_from_sparse_entries(&self) -> (usize, usize) {
+        self.sparse_entries.iter().fold((0usize, 0usize), |(kl, ku), (row, col, _)| {
+            if row >= col {
+                (kl.max(row - col), ku)
+            } else {
+                (kl, ku.max(col - row))
+            }
+        })
+    }
+
+    /// Returns the explicit band width when it was cached during symbolic
+    /// assembly, or infers it lazily from the sparse entry structure when the
+    /// legacy path did not populate `self.bandwidth`.
+    fn effective_bandwidth(&self) -> (usize, usize) {
+        self.bandwidth
+            .unwrap_or_else(|| self.inferred_bandwidth_from_sparse_entries())
+    }
+
+    fn borrowed_banded_entries(&self) -> Vec<BandedExprEntry<'_>> {
+        let (kl, ku) = self.effective_bandwidth();
+        let mut entries: Vec<(usize, usize, isize, &Expr)> = self
+            .sparse_entries
+            .iter()
+            .map(|(row, col, expr)| {
+                let diag_offset = *col as isize - *row as isize;
+                (*row, *col, diag_offset, expr)
+            })
+            .collect();
+
+        entries.sort_by(|lhs, rhs| {
+            lhs.2
+                .cmp(&rhs.2)
+                .then_with(|| lhs.0.cmp(&rhs.0))
+                .then_with(|| lhs.1.cmp(&rhs.1))
+        });
+
+        let mut banded_entries = Vec::with_capacity(entries.len());
+        for (row, col, diag_offset, expr) in entries {
+            assert!(
+                diag_offset >= -(kl as isize) && diag_offset <= ku as isize,
+                "sparse Jacobian entry ({row}, {col}) lies outside declared banded width"
+            );
+            let diag_position = if diag_offset >= 0 { row } else { col };
+            banded_entries.push(BandedExprEntry {
+                row,
+                col,
+                diag_offset,
+                diag_position,
+                expr,
+            });
+        }
+        banded_entries
     }
 
     /// Builds the residual runtime plan used by code generation, manifests,
@@ -985,6 +1248,125 @@ impl BvpPreparedSparseAotProblem {
         }
     }
 
+    /// Derives a diagonal-oriented chunking strategy for the native banded
+    /// runtime plan.
+    ///
+    /// Historically this bridge stored only sparse chunking hints. For the
+    /// banded export we map those hints into a diagonal-based strategy so the
+    /// generated callbacks remain bandwidth-aware and avoid fragmenting one
+    /// diagonal across many tiny chunks.
+    fn banded_chunking_strategy(&self) -> BandedChunkingStrategy {
+        match self.jacobian_strategy {
+            SparseChunkingStrategy::Whole => BandedChunkingStrategy::Whole,
+            SparseChunkingStrategy::ByTargetChunkCount { target_chunks } => {
+                BandedChunkingStrategy::ByTargetChunkCount { target_chunks }
+            }
+            SparseChunkingStrategy::ByNonZeroCount { max_entries_per_chunk } => {
+                let chunks_per_worker = max_entries_per_chunk.max(1);
+                let (kl, ku) = self.effective_bandwidth();
+                recommended_banded_chunking_for_parallelism(
+                    kl.saturating_add(ku).saturating_add(1),
+                    chunks_per_worker,
+                )
+            }
+            SparseChunkingStrategy::ByRowCount { rows_per_chunk } => {
+                let target_chunks = self.shape.0.max(1).div_ceil(rows_per_chunk.max(1));
+                BandedChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: target_chunks.max(1),
+                }
+            }
+        }
+    }
+
+    /// Builds the banded Jacobian runtime plan used by manifests and backend
+    /// selection.
+    fn banded_runtime_plan(&self) -> BandedJacobianRuntimePlan<'_> {
+        let (kl, ku) = self.effective_bandwidth();
+        let all_entries = self.borrowed_banded_entries();
+        let input_names = self.flattened_input_names();
+        let total_diagonals = kl + ku + 1;
+        let diagonals_per_chunk = match self.banded_chunking_strategy() {
+            BandedChunkingStrategy::Whole => total_diagonals.max(1),
+            BandedChunkingStrategy::ByTargetChunkCount { target_chunks } => {
+                assert!(target_chunks > 0, "target_chunks must be positive");
+                total_diagonals.max(1).div_ceil(target_chunks).max(1)
+            }
+            BandedChunkingStrategy::ByDiagonalCount { diagonals_per_chunk } => {
+                assert!(
+                    diagonals_per_chunk > 0,
+                    "diagonals_per_chunk must be positive"
+                );
+                diagonals_per_chunk
+            }
+        };
+        let mut chunk_entries: Vec<Vec<BandedExprEntry<'_>>> = Vec::new();
+        let mut chunk_offsets: Vec<usize> = Vec::new();
+
+        for (entry_index, entry) in all_entries.iter().copied().enumerate() {
+            let bucket = ((entry.diag_offset + kl as isize) as usize) / diagonals_per_chunk;
+            if bucket >= chunk_entries.len() {
+                chunk_entries.resize_with(bucket + 1, Vec::new);
+                chunk_offsets.resize(bucket + 1, 0);
+            }
+            if chunk_entries[bucket].is_empty() {
+                chunk_offsets[bucket] = entry_index;
+            }
+            chunk_entries[bucket].push(entry);
+        }
+
+        let chunk_count = chunk_entries.iter().filter(|entries| !entries.is_empty()).count();
+        let chunks = chunk_entries
+            .into_iter()
+            .enumerate()
+            .filter(|(_, entries)| !entries.is_empty())
+            .map(|(chunk_index, entries)| {
+                let fn_name = if chunk_index == 0 && chunk_count == 1 {
+                    self.jacobian_fn_name.clone()
+                } else {
+                    format!("{}_chunk_{}", self.jacobian_fn_name, chunk_index)
+                };
+                let outputs = entries
+                    .iter()
+                    .map(|entry| PlannedOutput {
+                        expr: entry.expr,
+                        coordinate: Some((entry.row, entry.col)),
+                    })
+                    .collect();
+
+                crate::symbolic::codegen::codegen_runtime_api::BandedJacobianValuesChunkPlan {
+                    fn_name: fn_name.clone(),
+                    value_offset: chunk_offsets[chunk_index],
+                    entries: entries.clone(),
+                    plan: CodegenTaskPlan {
+                        fn_name: std::borrow::Cow::Owned(fn_name),
+                        kind: CodegenTaskKind::BandedJacobianValues,
+                        input_names: input_names.clone(),
+                        outputs,
+                        layout: CodegenOutputLayout::SparseValues {
+                            rows: self.shape.0,
+                            cols: self.shape.1,
+                            nnz: entries.len(),
+                        },
+                    },
+                }
+            })
+            .collect();
+
+        BandedJacobianRuntimePlan {
+            fn_name: self.jacobian_fn_name.as_str(),
+            input_names,
+            structure: crate::symbolic::codegen::codegen_runtime_api::BandedJacobianStructure {
+                rows: self.shape.0,
+                cols: self.shape.1,
+                kl,
+                ku,
+                diagonal_offsets: all_entries.iter().map(|entry| entry.diag_offset).collect(),
+                diagonal_positions: all_entries.iter().map(|entry| entry.diag_position).collect(),
+            },
+            chunks,
+        }
+    }
+
     /// Converts the owned BVP bridge object into the shared sparse prepared
     /// problem shape used by provider/build/registry layers.
     pub fn as_prepared_problem(&self) -> PreparedSparseProblem<'_> {
@@ -996,12 +1378,272 @@ impl BvpPreparedSparseAotProblem {
         )
     }
 
+    /// Converts the owned BVP bridge object into a shared banded prepared
+    /// problem when a native banded Jacobian backend is requested.
+    pub fn as_prepared_banded_problem(&self) -> PreparedBandedProblem<'_> {
+        PreparedBandedProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Banded,
+            self.residual_runtime_plan(),
+            self.banded_runtime_plan(),
+        )
+    }
+
+    /// Converts the owned bridge object into a backend-aware prepared problem.
+    ///
+    /// This is the main handoff for correctness/performance tests: the same
+    /// symbolic cache can now be emitted as either sparse or banded prepared
+    /// runtime metadata without rebuilding the BVP from scratch.
+    pub fn as_prepared_problem_for_matrix_backend(
+        &self,
+        matrix_backend: MatrixBackend,
+    ) -> PreparedProblem<'_> {
+        match matrix_backend {
+            MatrixBackend::Banded => PreparedProblem::banded(self.as_prepared_banded_problem()),
+            _ => PreparedProblem::sparse(self.as_prepared_problem()),
+        }
+    }
+
     /// Returns the manifest-derived problem key used by lifecycle and linked-backend registries.
     pub fn problem_key(&self) -> String {
-        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
-            self.as_prepared_problem(),
-        );
+        self.problem_key_for_matrix_backend(MatrixBackend::SparseCol)
+    }
+
+    /// Returns the manifest-derived problem key for a specific matrix backend.
+    pub fn problem_key_for_matrix_backend(&self, matrix_backend: MatrixBackend) -> String {
+        let prepared = self.as_prepared_problem_for_matrix_backend(matrix_backend);
         PreparedProblemManifest::from(&prepared).problem_key()
+    }
+
+    /// Builds the emitted `CodegenModule` for this sparse BVP bridge and
+    /// returns a timing/size breakdown before crate materialization.
+    pub fn codegen_module_with_breakdown(
+        &self,
+        module_name: &str,
+    ) -> (CodegenModule, BvpGeneratedAotCrateBreakdown) {
+        self.codegen_module_with_breakdown_for_matrix_backend(module_name, MatrixBackend::SparseCol)
+    }
+
+    /// Builds the emitted `CodegenModule` for the selected matrix backend and
+    /// returns a timing/size breakdown before crate materialization.
+    pub fn codegen_module_with_breakdown_for_matrix_backend(
+        &self,
+        module_name: &str,
+        matrix_backend: MatrixBackend,
+    ) -> (CodegenModule, BvpGeneratedAotCrateBreakdown) {
+        let prepared = self.as_prepared_problem_for_matrix_backend(matrix_backend);
+        if self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::AtomView {
+            if matrix_backend != MatrixBackend::Banded {
+                if let Some(discretized) = self.atom_discretized_system.as_ref() {
+                let jacobian_begin = Instant::now();
+                let (atom_codegen, atom_breakdown) =
+                    prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown(
+                    discretized,
+                    &self.residual_fn_name,
+                    &self.jacobian_fn_name,
+                    self.param_names.clone(),
+                    self.bandwidth,
+                    self.residual_strategy,
+                    self.jacobian_strategy,
+                );
+                let jacobian_prepare_ms = jacobian_begin.elapsed().as_secs_f64() * 1_000.0;
+
+                let module_begin = Instant::now();
+                let (module, atom_module_breakdown) =
+                    atom_codegen.codegen_module_with_breakdown(module_name);
+                let module_build_ms = module_begin.elapsed().as_secs_f64() * 1_000.0;
+
+                let emit_begin = Instant::now();
+                let source_kb = module.emit_source().len() as f64 / 1024.0;
+                let source_emit_ms = emit_begin.elapsed().as_secs_f64() * 1_000.0;
+
+                let breakdown = BvpGeneratedAotCrateBreakdown {
+                    jacobian_prepare_ms,
+                    atom_sparse_lookup_prepare_ms: atom_breakdown.sparse_lookup_prepare_ms,
+                    atom_sparse_jacobian_build_ms: atom_breakdown.sparse_jacobian_build_ms,
+                    atom_finalize_codegen_plan_ms: atom_breakdown.finalize_codegen_plan_ms,
+                    atom_sparse_nnz: atom_breakdown.sparse_nnz,
+                    atom_residual_view_collect_ms: atom_module_breakdown.residual_view_collect_ms,
+                    atom_residual_lower_many_ms: atom_module_breakdown.residual_lower_many_ms,
+                    atom_residual_peephole_ms: atom_module_breakdown.residual_peephole_ms,
+                    atom_residual_reuse_temps_ms: atom_module_breakdown.residual_reuse_temps_ms,
+                    atom_sparse_view_collect_ms: atom_module_breakdown.sparse_view_collect_ms,
+                    atom_sparse_lower_many_ms: atom_module_breakdown.sparse_lower_many_ms,
+                    atom_sparse_peephole_ms: atom_module_breakdown.sparse_peephole_ms,
+                    atom_sparse_reuse_temps_ms: atom_module_breakdown.sparse_reuse_temps_ms,
+                    module_build_ms,
+                    source_emit_ms,
+                    source_kb,
+                    module_blocks: module.block_count(),
+                    total_block_instructions: module.total_block_instruction_count(),
+                    total_block_temps: module.total_block_temp_count(),
+                    max_block_instructions: module.max_block_instruction_count(),
+                    total_block_outputs: module.total_block_output_count(),
+                };
+                return (module, breakdown);
+            }
+            }
+        }
+
+        let module_begin = Instant::now();
+        let module = crate::symbolic::codegen::codegen_aot_driver::codegen_module_from_prepared_problem(
+            module_name,
+            &prepared,
+        );
+        let module_build_ms = module_begin.elapsed().as_secs_f64() * 1_000.0;
+
+        let emit_begin = Instant::now();
+        let source_kb = module.emit_source().len() as f64 / 1024.0;
+        let source_emit_ms = emit_begin.elapsed().as_secs_f64() * 1_000.0;
+
+        let breakdown = BvpGeneratedAotCrateBreakdown {
+            jacobian_prepare_ms: 0.0,
+            atom_sparse_lookup_prepare_ms: 0.0,
+            atom_sparse_jacobian_build_ms: 0.0,
+            atom_finalize_codegen_plan_ms: 0.0,
+            atom_sparse_nnz: 0,
+            atom_residual_view_collect_ms: 0.0,
+            atom_residual_lower_many_ms: 0.0,
+            atom_residual_peephole_ms: 0.0,
+            atom_residual_reuse_temps_ms: 0.0,
+            atom_sparse_view_collect_ms: 0.0,
+            atom_sparse_lower_many_ms: 0.0,
+            atom_sparse_peephole_ms: 0.0,
+            atom_sparse_reuse_temps_ms: 0.0,
+            module_build_ms,
+            source_emit_ms,
+            source_kb,
+            module_blocks: module.block_count(),
+            total_block_instructions: module.total_block_instruction_count(),
+            total_block_temps: module.total_block_temp_count(),
+            max_block_instructions: module.max_block_instruction_count(),
+            total_block_outputs: module.total_block_output_count(),
+        };
+        (module, breakdown)
+    }
+
+    /// Builds one backend-selected AOT artifact and returns a timing breakdown
+    /// for the major stages of artifact assembly.
+    pub fn generated_aot_artifact_with_breakdown(
+        &self,
+        artifact_name: impl Into<String>,
+        module_name: &str,
+        backend: AotCodegenBackend,
+    ) -> (GeneratedAotArtifact, BvpGeneratedAotCrateBreakdown) {
+        self.generated_aot_artifact_with_breakdown_for_matrix_backend(
+            artifact_name,
+            module_name,
+            backend,
+            MatrixBackend::SparseCol,
+        )
+    }
+
+    /// Builds one backend-selected AOT artifact for the requested matrix
+    /// backend and returns a timing breakdown for the major stages of artifact
+    /// assembly.
+    pub fn generated_aot_artifact_with_breakdown_for_matrix_backend(
+        &self,
+        artifact_name: impl Into<String>,
+        module_name: &str,
+        backend: AotCodegenBackend,
+        matrix_backend: MatrixBackend,
+    ) -> (GeneratedAotArtifact, BvpGeneratedAotCrateBreakdown) {
+        let artifact_name = artifact_name.into();
+        let prepared = self.as_prepared_problem_for_matrix_backend(matrix_backend);
+        let (mut module, mut breakdown) =
+            self.codegen_module_with_breakdown_for_matrix_backend(module_name, matrix_backend);
+        module.set_language(match backend {
+            AotCodegenBackend::Rust => crate::symbolic::codegen::CodegenIR::CodegenLanguage::Rust,
+            AotCodegenBackend::C => crate::symbolic::codegen::CodegenIR::CodegenLanguage::C,
+            AotCodegenBackend::Zig => crate::symbolic::codegen::CodegenIR::CodegenLanguage::Zig,
+        });
+        let emit_begin = Instant::now();
+        let module_source = module.emit_source();
+        breakdown.source_emit_ms = emit_begin.elapsed().as_secs_f64() * 1_000.0;
+        breakdown.source_kb = module_source.len() as f64 / 1024.0;
+
+        let artifact = match backend {
+            AotCodegenBackend::Rust => GeneratedAotArtifact::Rust(GeneratedAotCrate::new(
+                artifact_name,
+                module_name,
+                module_source,
+                PreparedProblemManifest::from(&prepared),
+            )),
+            AotCodegenBackend::C => GeneratedAotArtifact::C(
+                crate::symbolic::codegen::c_backend::codegen_c_aot_library::GeneratedCAotLibrary::from_prepared_problem(
+                    artifact_name,
+                    &prepared,
+                    &module,
+                ),
+            ),
+            AotCodegenBackend::Zig => GeneratedAotArtifact::Zig(
+                crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::GeneratedZigAotLibrary::from_prepared_problem(
+                    artifact_name,
+                    &prepared,
+                    &module,
+                ),
+            ),
+        };
+
+        (artifact, breakdown)
+    }
+
+    /// Builds a generated Rust AOT crate from this BVP bridge object.
+    ///
+    /// This wrapper keeps existing BVP lifecycle callers stable while the
+    /// underlying bridge moves to a backend-agnostic artifact API.
+    pub fn generated_aot_crate(
+        &self,
+        crate_name: impl Into<String>,
+        module_name: &str,
+    ) -> GeneratedAotCrate {
+        self.generated_aot_crate_with_breakdown(crate_name, module_name).0
+    }
+
+    /// Builds a generated Rust AOT crate and returns a timing breakdown for the
+    /// major stages of crate assembly.
+    pub fn generated_aot_crate_with_breakdown(
+        &self,
+        crate_name: impl Into<String>,
+        module_name: &str,
+    ) -> (GeneratedAotCrate, BvpGeneratedAotCrateBreakdown) {
+        let (artifact, breakdown) =
+            self.generated_aot_artifact_with_breakdown(crate_name, module_name, AotCodegenBackend::Rust);
+        (
+            artifact
+                .into_rust_crate()
+                .expect("Rust backend must return GeneratedAotCrate"),
+            breakdown,
+        )
+    }
+
+    /// Derives a complete machine-aware `Auto` recommendation for the current
+    /// sparse BVP problem.
+    ///
+    /// The recommendation combines:
+    /// - measured rayon overhead on the current machine,
+    /// - coarse workload size of the prepared residual/Jacobian,
+    /// - recommended residual/sparse chunking for future code generation,
+    /// - and grouped runtime jobs for already compiled linked backends.
+    ///
+    /// This is intentionally an opt-in recommendation: existing explicit
+    /// chunking defaults stay stable so previously generated AOT artifacts keep
+    /// their current `problem_key`.
+    pub fn auto_parallel_plan(&self) -> SparseAutoParallelPlan {
+        recommended_sparse_auto_parallel_plan(
+            self.residuals.len(),
+            self.shape.0,
+            self.sparse_entries.len(),
+        )
+    }
+
+    /// Derives a machine-aware runtime parallel config for the current sparse
+    /// BVP problem.
+    ///
+    /// Returns `None` when the measured machine overhead and current workload
+    /// suggest that sequential execution is still the cheaper runtime path.
+    pub fn auto_parallel_executor_config(&self) -> Option<ParallelExecutorConfig> {
+        self.auto_parallel_plan().executor_config
     }
 }
 
@@ -1016,17 +1658,17 @@ impl BvpPreparedSparseAotProblem {
 ///
 /// When no linked backend is registered yet, `None` is returned and the caller
 /// remains on the lambdify/fallback branch.
-fn linked_sparse_runtime_callbacks(
+fn linked_runtime_callbacks_for_matrix_backend(
     prepared_problem: &BvpPreparedSparseAotProblem,
+    matrix_backend: MatrixBackend,
     parameter_values: Option<&[f64]>,
     parallel_config: Option<ParallelExecutorConfig>,
+    banded_linear_solver_config: LinearSolverConfig,
 ) -> Option<(Box<dyn Fun>, Box<dyn Jac>)> {
-    let linked = resolve_linked_sparse_backend(&prepared_problem.problem_key())?;
+    let linked = resolve_linked_sparse_backend(
+        &prepared_problem.problem_key_for_matrix_backend(matrix_backend),
+    )?;
     let parameter_values = parameter_values.unwrap_or(&[]).to_vec();
-    let structure = prepared_problem
-        .as_prepared_problem()
-        .jacobian_structure()
-        .clone();
     let shape = prepared_problem.shape;
     let residual_len = prepared_problem.shape.0;
 
@@ -1035,9 +1677,8 @@ fn linked_sparse_runtime_callbacks(
     let residual_parallel_config = parallel_config;
     let residual_fun = convert_to_fun(Box::new(move |_x: f64, vec: &dyn VectorType| {
         let dense = vec.to_DVectorType();
-        let mut flat_args = Vec::with_capacity(residual_parameter_values.len() + dense.len());
-        flat_args.extend_from_slice(residual_parameter_values.as_slice());
-        flat_args.extend_from_slice(dense.as_slice());
+        let flat_args =
+            flatten_runtime_args(Some(residual_parameter_values.as_slice()), dense.as_slice());
         let mut out = vec![0.0; residual_len];
         eval_linked_residual_outputs(
             residual_link.clone(),
@@ -1051,29 +1692,66 @@ fn linked_sparse_runtime_callbacks(
     let jacobian_link = linked;
     let jacobian_parameter_values = parameter_values.clone();
     let jacobian_parallel_config = parallel_config;
-    let jacobian = convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
-        let dense = vec.to_DVectorType();
-        let mut flat_args = Vec::with_capacity(jacobian_parameter_values.len() + dense.len());
-        flat_args.extend_from_slice(jacobian_parameter_values.as_slice());
-        flat_args.extend_from_slice(dense.as_slice());
-        let mut values = vec![0.0; structure.nnz()];
-        eval_linked_sparse_values(
-            jacobian_link.clone(),
-            jacobian_parallel_config,
-            &flat_args,
-            &mut values,
-        );
-        let triplets = structure
-            .row_indices
-            .iter()
-            .zip(structure.col_indices.iter())
-            .zip(values.iter())
-            .map(|((&row, &col), &value)| Triplet::new(row, col, value))
-            .collect::<Vec<_>>();
-        let matrix = SparseColMat::try_new_from_triplets(shape.0, shape.1, triplets.as_slice())
-            .expect("linked sparse backend must return valid sparse values");
-        Box::new(matrix)
-    }));
+    let jacobian: Box<dyn Jac> = match matrix_backend {
+        MatrixBackend::Banded => {
+            let structure = prepared_problem
+                .as_prepared_banded_problem()
+                .jacobian_structure()
+                .clone();
+            let layout = prepared_problem
+                .infer_node_major_layout()
+                .expect("linked banded backend requires node-major compatible layout");
+            convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
+                let dense = vec.to_DVectorType();
+                let flat_args = flatten_runtime_args(
+                    Some(jacobian_parameter_values.as_slice()),
+                    dense.as_slice(),
+                );
+                let mut values = vec![0.0; structure.nnz()];
+                eval_linked_sparse_values(
+                    jacobian_link.clone(),
+                    jacobian_parallel_config,
+                    &flat_args,
+                    &mut values,
+                );
+                let assembly = structure.assemble_banded_assembly(values.as_slice());
+                let matrix = BandedMatrixType::new(
+                    assembly,
+                    layout.clone(),
+                    banded_linear_solver_config,
+                );
+                Box::new(matrix) as Box<dyn MatrixType>
+            }))
+        }
+        _ => {
+            let structure = prepared_problem.as_prepared_problem().jacobian_structure().clone();
+            convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
+                let dense = vec.to_DVectorType();
+                let flat_args = flatten_runtime_args(
+                    Some(jacobian_parameter_values.as_slice()),
+                    dense.as_slice(),
+                );
+                let mut values = vec![0.0; structure.nnz()];
+                eval_linked_sparse_values(
+                    jacobian_link.clone(),
+                    jacobian_parallel_config,
+                    &flat_args,
+                    &mut values,
+                );
+                let triplets = structure
+                    .row_indices
+                    .iter()
+                    .zip(structure.col_indices.iter())
+                    .zip(values.iter())
+                    .map(|((&row, &col), &value)| Triplet::new(row, col, value))
+                    .collect::<Vec<_>>();
+                let matrix =
+                    SparseColMat::try_new_from_triplets(shape.0, shape.1, triplets.as_slice())
+                        .expect("linked sparse backend must return valid sparse values");
+                Box::new(matrix) as Box<dyn MatrixType>
+            }))
+        }
+    };
 
     Some((residual_fun, jacobian))
 }
@@ -1150,7 +1828,7 @@ fn linked_max_jobs(config: ParallelExecutorConfig, sparse: bool) -> usize {
 /// Sequential and parallel branches must produce identical values; parallelism
 /// only changes scheduling and temporary buffering strategy.
 fn eval_linked_residual_outputs(
-    linked: crate::symbolic::codegen_aot_runtime_link::LinkedSparseAotBackend,
+    linked: crate::symbolic::codegen::codegen_aot_runtime_link::LinkedSparseAotBackend,
     parallel_config: Option<ParallelExecutorConfig>,
     flat_args: &[f64],
     out: &mut [f64],
@@ -1219,7 +1897,7 @@ fn eval_linked_residual_outputs(
 /// exactly the same order as the symbolic sparse structure advertised to the
 /// solver and lifecycle layers.
 fn eval_linked_sparse_values(
-    linked: crate::symbolic::codegen_aot_runtime_link::LinkedSparseAotBackend,
+    linked: crate::symbolic::codegen::codegen_aot_runtime_link::LinkedSparseAotBackend,
     parallel_config: Option<ParallelExecutorConfig>,
     flat_args: &[f64],
     values_out: &mut [f64],
@@ -1348,25 +2026,44 @@ impl Jacobian {
         let total_start = Instant::now();
         let mut timer_hash: HashMap<String, f64> = HashMap::new();
         self.set_params(params);
+        self.atom_discretized_system = None;
         let param = arg.clone();
         let matrix_backend = BvpMatrixBackend::from_legacy_method(method.as_str())
             .unwrap_or_else(|| panic!("unknown method: {}", method));
         self.set_backend_config(BvpBackendConfig::lambdify(matrix_backend));
 
         let begin = Instant::now();
-        self.discretization_system_BVP_par(
-            eq_system,
-            values,
-            arg,
-            t0,
-            n_steps,
-            h,
-            mesh,
-            BorderConditions,
-            Bounds,
-            rel_tolerance,
-            scheme,
-        );
+        match self.symbolic_assembly_backend {
+            BvpSymbolicAssemblyBackend::ExprLegacy => self.discretization_system_BVP_par(
+                eq_system,
+                values,
+                arg,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+            ),
+            BvpSymbolicAssemblyBackend::AtomView => {
+                let discretized = discretization_system_bvp_par_atom(
+                    eq_system,
+                    values,
+                    arg,
+                    t0,
+                    n_steps,
+                    h,
+                    mesh,
+                    BorderConditions,
+                    Bounds,
+                    rel_tolerance,
+                    scheme,
+                );
+                self.install_atom_discretized_system(discretized);
+            }
+        }
         timer_hash.insert(
             "discretization time".to_string(),
             begin.elapsed().as_secs_f64(),
@@ -1425,10 +2122,13 @@ impl Jacobian {
     /// helper keeps the historical human-readable timing summary stable for the
     /// older BVP APIs and tests that still print it.
     fn finalize_generate_bvp_timer_table(
-        &self,
+        &mut self,
         mut timer_hash: HashMap<String, f64>,
         total_end: f64,
     ) {
+        let mut raw_snapshot = timer_hash.clone();
+        raw_snapshot.insert("total time, sec".to_string(), total_end);
+        self.last_generate_timer_snapshot = Some(raw_snapshot);
         for key in [
             "discretization time",
             "symbolic jacobian time",
@@ -1470,6 +2170,8 @@ impl Jacobian {
             lambdified_functions: Vec::new(),
             method: String::new(),
             backend_config: BvpBackendConfig::default(),
+            banded_linear_solver_config: LinearSolverConfig::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             vector_of_variables: Vec::new(),
             variable_string: Vec::new(),
             parameters_string: Vec::new(),
@@ -1484,7 +2186,14 @@ impl Jacobian {
             bandwidth: None,
             variables_for_all_disrete: Vec::new(),
             BC_pos_n_values: Vec::new(),
+            last_generate_timer_snapshot: None,
+            atom_discretized_system: None,
         }
+    }
+
+    /// Sets the native linear solver configuration used by banded runtime callbacks.
+    pub fn set_banded_linear_solver_config(&mut self, config: LinearSolverConfig) {
+        self.banded_linear_solver_config = config;
     }
 
     /// Initializes the Jacobian with a vector of symbolic functions and variable names.
@@ -1531,15 +2240,58 @@ impl Jacobian {
         self.parameter_values = values;
     }
 
+    /// Selects the symbolic assembly backend used during BVP discretization.
+    pub fn set_symbolic_assembly_backend(&mut self, backend: BvpSymbolicAssemblyBackend) {
+        self.symbolic_assembly_backend = backend;
+    }
+
+    /// Returns the currently selected symbolic assembly backend.
+    pub fn symbolic_assembly_backend(&self) -> BvpSymbolicAssemblyBackend {
+        self.symbolic_assembly_backend
+    }
+
+    /// Returns the raw stage timings produced by the most recent symbolic BVP
+    /// generation path.
+    pub fn last_generate_timer_snapshot(&self) -> Option<&HashMap<String, f64>> {
+        self.last_generate_timer_snapshot.as_ref()
+    }
+
+    fn install_atom_discretized_system(
+        &mut self,
+        discretized: crate::symbolic::View::bvp::DiscretizedBvpAtomSystem,
+    ) {
+        self.atom_discretized_system = Some(discretized.clone());
+        let timer_table = discretized.render_timer_table();
+        self.vector_of_functions = discretized
+            .vector_of_functions
+            .iter()
+            .map(atom_to_expr)
+            .collect();
+        self.vector_of_variables = discretized
+            .vector_of_variables
+            .iter()
+            .map(atom_to_expr)
+            .collect();
+        self.variable_string = discretized.variable_string;
+        self.variables_for_all_disrete = discretized.variables_for_all_discrete;
+        self.BC_pos_n_values = discretized.bc_pos_n_values;
+        self.bounds = discretized.bounds;
+        self.rel_tolerance_vec = discretized.rel_tolerance_vec;
+        info!(
+            "Atom/View BVP discretization timing:\n{}",
+            timer_table
+        );
+    }
+
     /// Returns borrowed sparse symbolic Jacobian entries from the internal
     /// owned sparse cache.
     pub fn symbolic_jacobian_sparse_entries(
         &self,
-    ) -> Vec<crate::symbolic::codegen_tasks::SparseExprEntry<'_>> {
+    ) -> Vec<crate::symbolic::codegen::codegen_tasks::SparseExprEntry<'_>> {
         self.symbolic_jacobian_sparse
             .iter()
             .map(
-                |(row, col, expr)| crate::symbolic::codegen_tasks::SparseExprEntry {
+                |(row, col, expr)| crate::symbolic::codegen::codegen_tasks::SparseExprEntry {
                     row: *row,
                     col: *col,
                     expr,
@@ -1583,6 +2335,9 @@ impl Jacobian {
             ),
             residual_strategy,
             jacobian_strategy,
+            bandwidth: self.bandwidth,
+            symbolic_assembly_backend: self.symbolic_assembly_backend,
+            atom_discretized_system: self.atom_discretized_system.clone(),
         }
     }
 
@@ -1611,9 +2366,15 @@ impl Jacobian {
             jacobian_strategy,
         );
         let prepared_binding = prepared_problem.clone();
-        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
-            prepared_binding.as_prepared_problem(),
-        );
+        let requested_matrix_backend = match self.backend_config().matrix_backend {
+            BvpMatrixBackend::Dense => MatrixBackend::Dense,
+            BvpMatrixBackend::Banded => MatrixBackend::Banded,
+            BvpMatrixBackend::FaerSparseCol => MatrixBackend::SparseCol,
+            BvpMatrixBackend::SprsCsMat => MatrixBackend::CsMat,
+            BvpMatrixBackend::NalgebraCsMatrix => MatrixBackend::CsMatrix,
+        };
+        let prepared =
+            prepared_binding.as_prepared_problem_for_matrix_backend(requested_matrix_backend);
         let selected = select_backend(&prepared, policy, resolver);
 
         BvpSelectedSparseBackend {
@@ -1651,9 +2412,15 @@ impl Jacobian {
 
         let selection_started = Instant::now();
         let prepared_binding = prepared_problem.clone();
-        let prepared = crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
-            prepared_binding.as_prepared_problem(),
-        );
+        let requested_matrix_backend = match self.backend_config().matrix_backend {
+            BvpMatrixBackend::Dense => MatrixBackend::Dense,
+            BvpMatrixBackend::Banded => MatrixBackend::Banded,
+            BvpMatrixBackend::FaerSparseCol => MatrixBackend::SparseCol,
+            BvpMatrixBackend::SprsCsMat => MatrixBackend::CsMat,
+            BvpMatrixBackend::NalgebraCsMatrix => MatrixBackend::CsMatrix,
+        };
+        let prepared =
+            prepared_binding.as_prepared_problem_for_matrix_backend(requested_matrix_backend);
         let selected = select_backend(&prepared, policy, resolver);
         timer_hash.insert(
             "backend selection time".to_string(),
@@ -1820,10 +2587,12 @@ impl Jacobian {
             .jacobian_structure()
             .clone();
         let linked_callbacks = if matches!(execution, BvpSparseExecutionPlan::AotCompiled(_)) {
-            linked_sparse_runtime_callbacks(
+            linked_runtime_callbacks_for_matrix_backend(
                 &selected.prepared_problem,
+                selected.matrix_backend,
                 self.parameter_values.as_deref(),
                 None,
+                self.banded_linear_solver_config,
             )
         } else {
             None
@@ -1853,7 +2622,9 @@ impl Jacobian {
             } else {
                 None
             },
+            banded_linear_solver_config: self.banded_linear_solver_config,
             variable_string: self.variable_string,
+            parameter_values: self.parameter_values,
             bounds_vec: self.bounds,
             rel_tolerance_vec: self.rel_tolerance_vec,
             bandwidth: self.bandwidth,
@@ -2156,6 +2927,7 @@ impl Jacobian {
             BvpMatrixBackend::FaerSparseCol => {
                 self.lambdify_jacobian_SparseColMat_parallel2(arg, variable_str)
             }
+            BvpMatrixBackend::Banded => self.lambdify_jacobian_Banded(arg, variable_str),
         }
     }
 
@@ -2172,6 +2944,7 @@ impl Jacobian {
             BvpMatrixBackend::FaerSparseCol => {
                 self.lambdify_residual_Col_parallel2(arg, variable_str)
             }
+            BvpMatrixBackend::Banded => self.lambdify_residual_Banded(arg, variable_str),
         }
     }
 
@@ -2267,8 +3040,8 @@ impl Jacobian {
                 for j in left_border..right_border {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
-                        let mut partial = Expr::diff(&self.vector_of_functions[i], variable);
-                        partial = partial.simplify();
+                        let  partial = Expr::diff(&self.vector_of_functions[i], variable);
+                      //  partial = partial.simplify();
                         if !partial.is_zero() {
                             sparse_entries.push((i, j, partial.clone()));
                         }
@@ -2339,8 +3112,8 @@ impl Jacobian {
                 for j in 0..self.vector_of_variables.len() {
                     let variable = &variable_string_vec[j];
                     if variable_sets[i].contains(variable) {
-                        let mut partial = Expr::diff(function, variable);
-                        partial = partial.simplify();
+                        let partial = Expr::diff(function, variable);
+                        //partial = partial.simplify();
                         if !partial.is_zero() {
                             sparse_entries.push((i, j, partial.clone()));
                         }
@@ -2621,19 +3394,15 @@ impl Jacobian {
 
     /// Compiles the symbolic Jacobian using the generic trait-based backend system.
     ///
-    /// This method creates a generic Jacobian function that works with any matrix type
-    /// implementing the MatrixType trait. Currently incomplete due to Send+Sync trait limitations.
+    /// Prepares the generic Jacobian builder but intentionally does not install
+    /// it as the active solver callback.
     ///
     /// # Arguments
     /// * `arg` - Independent variable name
     /// * `variable_str` - Vector of variable names as string slices
     ///
-    /// # Status
-    /// This method is currently incomplete and commented out due to trait object limitations.
-    /// The generic backend system needs further development for full functionality.
-    ///
     /// # Note
-    /// For production use, prefer the specific backend methods like `lambdify_jacobian_DMatrix_par()`.
+    /// Production BVP paths should use one of the concrete backend installers.
     pub fn lambdify_jacobian_generic(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -2649,11 +3418,6 @@ impl Jacobian {
             arg.to_string(),
             bandwidth,
         );
-        //  let mut boxed_jacobian: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = Box::new(|arg, variable_str_| {
-        //    DMatrix::from_rows(&new_jac) }) ;
-        // TODO! Send + Sync trait is not implemented
-        //   let boxed_jac: Box<dyn Jac> = convert_to_jac(new_jac);
-        //  self.jac_function = Some(boxed_jac);
     }
 
     ////////////////////////////////////////////////////////////////////////////////////
@@ -2684,7 +3448,7 @@ impl Jacobian {
     /// - Small to medium systems (< 1000 variables)
     /// - Dense or moderately sparse Jacobians
     /// - When nalgebra ecosystem integration is important
-    pub fn lambdify_jacobian_DMatrix_par(&mut self, arg: &str, variable_str: Vec<&str>) {
+    pub fn lambdify_jacobian_DMatrix_par(&mut self, _arg: &str, variable_str: Vec<&str>) {
         let jac = self.symbolic_jacobian.clone();
         let vector_of_functions_len = self.vector_of_functions.len();
         let vector_of_variables_len = self.vector_of_variables.len();
@@ -2787,7 +3551,7 @@ impl Jacobian {
     /// - Dense vector operations with nalgebra
     /// - Small to medium systems where dense storage is acceptable
     /// - Integration with nalgebra-based linear solvers
-    pub fn lambdify_residual_DVector(&mut self, arg: &str, variable_str: Vec<&str>) {
+    pub fn lambdify_residual_DVector(&mut self, _arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
         let parameter_values = self.parameter_values.clone();
         let parameter_count = self.parameters_string.len();
@@ -3087,85 +3851,6 @@ impl Jacobian {
     ///         FAER SPARSE CRATE
     ////////////////////////////////////////////////////////////////////////////////////////
 
-    /// Compiles the symbolic Jacobian to a faer SparseColMat evaluator (sequential version).
-    ///
-    /// Creates a high-performance sparse Jacobian evaluator using the faer crate's SparseColMat.
-    /// This version pre-compiles all functions sequentially to avoid thread safety issues.
-    ///
-    /// # Arguments
-    /// * `_arg` - Independent variable name (unused)
-    /// * `variable_str` - Vector of variable names as string slices
-    ///
-    /// # Performance Features
-    /// - **Pre-compilation**: All non-zero derivatives compiled once during setup
-    /// - **Bandwidth optimization**: Respects sparse matrix bandwidth if set
-    /// - **Zero filtering**: Only compiles and stores non-zero symbolic derivatives
-    /// - **Triplet assembly**: Uses faer's efficient triplet-based sparse matrix construction
-    /// - **Sequential safety**: Avoids Send+Sync issues by compiling sequentially
-    ///
-    /// # Matrix Format
-    /// Uses faer::sparse::SparseColMat (Compressed Sparse Column format) for optimal performance.
-    ///
-    /// # When to Use
-    /// - Large sparse systems where faer's performance is critical
-    /// - When thread safety during compilation is a concern
-    /// - Systems with well-defined sparsity patterns
-    pub fn lambdify_jacobian_SparseColMat_modified(&mut self, _arg: &str, variable_str: Vec<&str>) {
-        let symbolic_jacobian = self.symbolic_jacobian.clone();
-        let vector_of_functions_len = self.vector_of_functions.len();
-        let vector_of_variables_len = self.vector_of_variables.len();
-        let bandwidth = self.bandwidth;
-
-        // Pre-compile all non-zero jacobian elements sequentially to avoid Send issues
-        let mut compiled_jacobian_elements = Vec::new();
-        for i in 0..vector_of_functions_len {
-            let (right_border, left_border) = if let Some((kl, ku)) = bandwidth {
-                let right_border = std::cmp::min(i + ku + 1, vector_of_variables_len);
-                let left_border = if i as i32 - (kl as i32) - 1 < 0 {
-                    0
-                } else {
-                    i - kl - 1
-                };
-                (right_border, left_border)
-            } else {
-                (vector_of_variables_len, 0)
-            };
-
-            for j in left_border..right_border {
-                let symbolic_partial_derivative = &symbolic_jacobian[i][j];
-                if !symbolic_partial_derivative.is_zero() {
-                    let compiled_func = Expr::lambdify_borrowed_thread_safe(
-                        &symbolic_partial_derivative,
-                        variable_str.as_slice(),
-                    );
-                    compiled_jacobian_elements.push((i, j, compiled_func));
-                }
-            }
-        }
-
-        let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
-
-            let mut vector_of_triplets = Vec::new();
-            for (i, j, func) in &compiled_jacobian_elements {
-                let P = func(v_vec.as_slice());
-                if P.abs() > T {
-                    vector_of_triplets.push(Triplet::new(*i, *j, P));
-                }
-            }
-
-            SparseColMat::try_new_from_triplets(
-                vector_of_functions_len,
-                vector_of_variables_len,
-                vector_of_triplets.as_slice(),
-            )
-            .unwrap()
-        });
-
-        let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_3(new_jac));
-        self.jac_function = Some(boxed_jac);
-    }
-
     /// Compiles the symbolic Jacobian to a faer SparseColMat evaluator (parallel version 2 - RECOMMENDED).
     ///
     /// Creates the most efficient parallel sparse Jacobian evaluator using outer loop parallelization.
@@ -3257,14 +3942,18 @@ impl Jacobian {
             .collect();
 
         let new_jac = Box::new(move |_x: f64, v: &Col<f64>| -> SparseColMat<usize, f64> {
-            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
-            if parameter_count > 0 {
-                let params = parameter_values.as_ref().unwrap_or_else(|| {
-                    panic!("parameter values must be provided when parameters are configured")
-                });
-                v_vec.extend_from_slice(params.as_slice());
-            }
-            v_vec.extend(v.iter().cloned());
+            let dense_values: Vec<f64> = v.iter().cloned().collect();
+            let params = if parameter_count > 0 {
+                Some(
+                    parameter_values.as_ref().unwrap_or_else(|| {
+                        panic!("parameter values must be provided when parameters are configured")
+                    })
+                    .as_slice(),
+                )
+            } else {
+                None
+            };
+            let v_vec = flatten_runtime_args(params, dense_values.as_slice());
             let triplets_mutex = std::sync::Mutex::new(Vec::new());
 
             // Compile and evaluate in parallel without storing closures
@@ -3291,50 +3980,6 @@ impl Jacobian {
         self.jac_function = Some(boxed_jac);
     }
     ////////////////////////////////RESIDUAL LAMBDIFICATION/////////////////////////////////////////////////////////
-
-    /// Compiles residual functions to a faer Col evaluator (sequential pre-compilation version).
-    ///
-    /// Creates an optimized residual function evaluator using faer's Col vector format.
-    /// This version pre-compiles all functions sequentially for maximum efficiency.
-    ///
-    /// # Arguments
-    /// * `_arg` - Independent variable name (unused)
-    /// * `variable_str` - Vector of variable names as string slices
-    ///
-    /// # Performance Features
-    /// - **Pre-compilation**: All residual functions compiled once during setup (CRITICAL optimization)
-    /// - **Sequential compilation**: Avoids thread safety issues during function compilation
-    /// - **Efficient evaluation**: Direct vector construction without intermediate collections
-    /// - **Memory efficient**: Uses `ColRef::from_slice().to_owned()` for zero-copy construction
-    ///
-    /// # Why Pre-compilation Matters
-    /// This is the most significant optimization - compiling symbolic functions once during setup
-    /// instead of on every evaluation provides 10-100x speedup for repeated evaluations.
-    ///
-    /// # When to Use
-    /// - Production code where maximum performance is critical
-    /// - Systems with frequent residual evaluations
-    /// - When thread safety during compilation is a concern
-    pub fn lambdify_residual_Col_modified(&mut self, _arg: &str, variable_str: Vec<&str>) {
-        let vector_of_functions = &self.vector_of_functions;
-
-        // Pre-compile all functions once (most significant optimization)
-        let compiled_functions: Vec<_> = vector_of_functions
-            .iter()
-            .map(|func| Expr::lambdify_borrowed_thread_safe(&func, variable_str.as_slice()))
-            .collect();
-
-        let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-            let v_vec: Vec<f64> = v.iter().cloned().collect();
-            let result: Vec<_> = compiled_functions
-                .iter()
-                .map(|func| func(v_vec.as_slice()))
-                .collect();
-            ColRef::from_slice(result.as_slice()).to_owned()
-        });
-        let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
-        self.residiual_function = boxed_fun;
-    }
 
     /// Compiles residual functions to a faer Col evaluator (parallel version 2 - RECOMMENDED).
     ///
@@ -3385,14 +4030,18 @@ impl Jacobian {
             .collect();
 
         let fun = Box::new(move |_x: f64, v: &Col<f64>| -> Col<f64> {
-            let mut v_vec = Vec::with_capacity(parameter_count + v.len());
-            if parameter_count > 0 {
-                let params = parameter_values.as_ref().unwrap_or_else(|| {
-                    panic!("parameter values must be provided when parameters are configured")
-                });
-                v_vec.extend_from_slice(params.as_slice());
-            }
-            v_vec.extend(v.iter().cloned());
+            let dense_values: Vec<f64> = v.iter().cloned().collect();
+            let params = if parameter_count > 0 {
+                Some(
+                    parameter_values.as_ref().unwrap_or_else(|| {
+                        panic!("parameter values must be provided when parameters are configured")
+                    })
+                    .as_slice(),
+                )
+            } else {
+                None
+            };
+            let v_vec = flatten_runtime_args(params, dense_values.as_slice());
             let result: Vec<_> = compiled_functions
                 .par_iter()
                 .map(|func| func(v_vec.as_slice()))
@@ -3401,6 +4050,64 @@ impl Jacobian {
         });
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Sparse_3(fun));
         self.residiual_function = boxed_fun;
+    }
+
+    /// Compiles the symbolic Jacobian into the native banded storage path.
+    ///
+    /// This branch reuses the sparse symbolic Jacobian cache from
+    /// `symbolic_jacobian_sparse`, compiles each nonzero entry once, and returns
+    /// a runtime callback that builds `BandedAssembly` directly. The outer BVP
+    /// solver still talks to the legacy trait-object API, but the matrix payload
+    /// now carries banded layout metadata all the way to the linear solve.
+    pub fn lambdify_jacobian_Banded(&mut self, _arg: &str, _variable_str: Vec<&str>) {
+        let plan = self
+            .infer_banded_structure_plan()
+            .expect("banded backend requires node-major compatible Jacobian structure");
+        let config = BandedLambdifyConfig {
+            linear_solver_config: self.banded_linear_solver_config,
+            ..BandedLambdifyConfig::default()
+        };
+        let evaluator = self
+            .generate_banded_jacobian_assembly_parallel(&config)
+            .expect("failed to compile banded jacobian evaluator");
+        let layout = plan.layout;
+        let solver_config = config.linear_solver_config;
+
+        let jacobian = convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
+            // Accept any runtime vector storage that can be losslessly exposed as a dense
+            // state vector. This keeps the banded backend compatible with both legacy
+            // lambdify callers and generated handoff paths that may still pass faer columns.
+            let dense = vec.to_DVectorType();
+            let assembly = evaluator(dense.as_slice())
+                .expect("banded jacobian evaluation failed for current iterate");
+            Box::new(BandedMatrixType::new(assembly, layout, solver_config)) as Box<dyn MatrixType>
+        }));
+
+        self.jac_function = Some(jacobian);
+    }
+
+    /// Compiles the residual vector for the banded backend.
+    ///
+    /// Even though the Jacobian storage is banded, the residual itself remains a
+    /// plain dense vector. This keeps the outer Newton/damping logic unchanged
+    /// while still letting the expensive linear algebra run through the new
+    /// banded path.
+    pub fn lambdify_residual_Banded(&mut self, _arg: &str, _variable_str: Vec<&str>) {
+        let evaluator = self
+            .generate_banded_residual_parallel()
+            .expect("failed to compile banded residual evaluator");
+
+        let residual = convert_to_fun(Box::new(move |_x: f64, vec: &dyn VectorType| {
+            // Residual evaluation should not care whether the outer runtime stores the
+            // iterate as a DVector or a faer column. Normalize once here instead of
+            // forcing every caller to guess the exact vector contract.
+            let dense = vec.to_DVectorType();
+            let values = evaluator(dense.as_slice())
+                .expect("banded residual evaluation failed for current iterate");
+            Box::new(DVector::from_vec(values)) as Box<dyn VectorType>
+        }));
+
+        self.residiual_function = residual;
     }
     ///////////////////////////////////////////////////////////////////////////
     ///              DISCRETIZED FUNCTIONS
@@ -3748,7 +4455,10 @@ impl Jacobian {
                             }
                         }
 
-                        (res_ij.simplify(), vars_in_equation)
+                        (
+                            res_ij.simplify(),
+                            vars_in_equation,
+                        )
                     })
                     .collect::<Vec<_>>()
             })

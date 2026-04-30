@@ -1,22 +1,47 @@
 use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac};
-use crate::symbolic::codegen_aot_build::{
-    AotBuildProfile as LifecycleBuildProfile, AotBuildRequest,
+use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
+    CAotBuildProfile, CAotBuildRequest, CAotCompileConfig,
 };
-use crate::symbolic::codegen_aot_driver::generated_aot_crate_from_prepared_sparse_problem;
-use crate::symbolic::codegen_aot_registry::AotRegistry;
-use crate::symbolic::codegen_aot_resolution::AotResolver;
-use crate::symbolic::codegen_backend_selection::{BackendSelectionPolicy, SelectedBackendKind};
-use crate::symbolic::codegen_manifest::PreparedProblemManifest;
-use crate::symbolic::codegen_orchestrator::ParallelExecutorConfig;
-use crate::symbolic::codegen_runtime_api::ResidualChunkingStrategy;
-use crate::symbolic::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
+use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
+    register_generated_c_banded_backend, register_generated_c_sparse_backend,
+};
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
+use crate::symbolic::codegen::codegen_aot_runtime_link::{
+    register_generated_banded_cdylib_backend, register_generated_sparse_cdylib_backend,
+    resolve_linked_sparse_backend, unregister_linked_sparse_backend,
+};
+use crate::symbolic::codegen::codegen_backend_selection::{
+    BackendSelectionPolicy, SelectedBackendKind,
+};
+use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
+use crate::symbolic::codegen::codegen_orchestrator::ParallelExecutorConfig;
+use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
+    AotBuildProfile as LifecycleBuildProfile, AotBuildRequest,
+    AotCompileConfig as LifecycleAotCompileConfig,
+};
+use crate::symbolic::codegen::zig_backend::codegen_zig_aot_build::{
+    ZigAotBuildProfile, ZigAotBuildRequest,
+};
+use crate::symbolic::codegen::zig_backend::codegen_zig_aot_registry::register_zig_build_in_registry;
+use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
+    register_generated_zig_banded_backend, register_generated_zig_sparse_backend,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
-    BvpBackendIntegrationError, BvpLegacySolverBundle, BvpSparseSolverBundle, Jacobian,
+    BvpBackendIntegrationError, BvpLegacySolverBundle, BvpSparseSolverBundle,
+    BvpSymbolicAssemblyBackend, Jacobian,
 };
 use log::{error, info};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Unified callback/metadata handoff for the damped sparse BVP solver.
 pub struct DampedGeneratedSolverState {
@@ -87,6 +112,9 @@ pub enum AotBuildProfile {
     Release,
     Debug,
 }
+
+/// Solver-facing rustc/codegen configuration for generated AOT crate builds.
+pub type AotCompileConfig = LifecycleAotCompileConfig;
 
 /// Solver-level build policy for generated AOT artifacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -172,8 +200,20 @@ pub struct GeneratedBackendConfig {
     pub aot_execution_policy: AotExecutionPolicy,
     /// Solver-level build policy for generated AOT artifacts.
     pub aot_build_policy: AotBuildPolicy,
+    /// Optional compile-time rustc/codegen overrides for generated AOT artifacts.
+    pub aot_compile_config: AotCompileConfig,
+    /// Codegen backend used to emit generated AOT artifacts.
+    pub aot_codegen_backend: AotCodegenBackend,
+    /// Optional explicit C compiler for C AOT backends, e.g. `gcc` or `tcc`.
+    pub aot_c_compiler: Option<String>,
     /// Optional chunking overrides for residual and sparse Jacobian generation.
     pub aot_chunking_policy: AotChunkingPolicy,
+    /// Symbolic assembly backend used before lambdify/AOT lowering.
+    pub symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    /// Optional matrix backend override for the modern generated BVP path.
+    pub matrix_backend_override: Option<MatrixBackend>,
+    /// Native linear solver configuration used by the generated banded runtime path.
+    pub banded_linear_solver_config: LinearSolverConfig,
 }
 
 /// High-level sparse generated-backend modes exposed at solver setup level.
@@ -205,17 +245,49 @@ impl SparseGeneratedBackendMode {
     }
 }
 
+/// High-level banded generated-backend modes exposed at solver setup level.
+///
+/// These presets select the `Banded` matrix backend and route native linear
+/// solves to the faithful LAPACK-style banded LU solver with `refine = 0`.
+/// Advanced users can still override compiler, chunking, build policy, or the
+/// native linear solver through [`GeneratedBackendConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BandedGeneratedBackendMode {
+    /// Prefer compiled AOT when available and otherwise fall back to lambdify.
+    #[default]
+    Defaults,
+    /// Force the lambdify callback path while keeping the native banded matrix
+    /// and faithful LAPACK-style linear solver backend.
+    Lambdify,
+    /// Build a release AOT artifact when it is missing.
+    BuildIfMissingRelease,
+}
+
+impl BandedGeneratedBackendMode {
+    /// Converts the high-level banded mode into a concrete generated-backend configuration.
+    pub fn generated_backend_config(self) -> GeneratedBackendConfig {
+        match self {
+            Self::Defaults => GeneratedBackendConfig::banded_defaults(),
+            Self::Lambdify => GeneratedBackendConfig::banded_lambdify_defaults(),
+            Self::BuildIfMissingRelease => {
+                GeneratedBackendConfig::banded_build_if_missing_release()
+            }
+        }
+    }
+}
+
 impl GeneratedBackendConfig {
     /// Creates an empty generated-backend configuration.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Creates the default sparse/BVP production-oriented generated-backend configuration.
+    /// Creates the default sparse/BVP generated-backend configuration.
     ///
-    /// This prefers compiled AOT when available and otherwise falls back to the
-    /// established lambdify path without requiring the caller to know the exact
-    /// backend-selection enum variant.
+    /// Practical guidance:
+    /// - good general default when you do not want to commit to a specific backend,
+    /// - still prefers compiled AOT when available,
+    /// - otherwise falls back to the established lambdify path.
     pub fn sparse_defaults() -> Self {
         Self::new()
             .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
@@ -227,14 +299,60 @@ impl GeneratedBackendConfig {
     }
 
     /// Creates a sparse generated-backend configuration that builds a release artifact on demand.
+    ///
+    /// Practical guidance:
+    /// - best fit for interactive "build on first use" workflows,
+    /// - defaults to the fast `DevFastest` compile preset,
+    /// - still backend-agnostic until you explicitly choose Rust/C/Zig.
     pub fn sparse_build_if_missing_release() -> Self {
-        Self::sparse_defaults().with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
-            profile: AotBuildProfile::Release,
-        })
+        Self::sparse_defaults()
+            .with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release,
+            })
+            // Build-if-missing is primarily an interactive/on-demand workflow, so default to
+            // the fastest practical compile preset instead of the heaviest production codegen.
+            .with_aot_compile_dev_fastest()
     }
 
     /// Creates a generated-backend configuration from a high-level sparse mode.
     pub fn from_sparse_mode(mode: SparseGeneratedBackendMode) -> Self {
+        mode.generated_backend_config()
+    }
+
+    /// Creates the default banded/BVP generated-backend configuration.
+    ///
+    /// Practical guidance:
+    /// - selects the generated `Banded` matrix path,
+    /// - uses faithful LAPACK-style banded LU as the native linear solver,
+    /// - keeps `refine = 0` because current BVP workloads do not benefit from
+    ///   the extra correction pass,
+    /// - prefers compiled AOT when available and falls back to lambdify.
+    pub fn banded_defaults() -> Self {
+        Self::sparse_defaults()
+            .with_matrix_backend_override(MatrixBackend::Banded)
+            .with_banded_linear_solver_config(LinearSolverConfig::faithful_banded())
+    }
+
+    /// Creates a banded configuration that explicitly uses lambdify callbacks.
+    ///
+    /// This is the simple interpreted path: generated `Banded` matrix assembly
+    /// plus faithful LAPACK-style native banded solves.
+    pub fn banded_lambdify_defaults() -> Self {
+        Self::banded_defaults()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
+    }
+
+    /// Creates a banded configuration that builds a release AOT artifact on demand.
+    pub fn banded_build_if_missing_release() -> Self {
+        Self::banded_defaults()
+            .with_aot_build_policy(AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release,
+            })
+            .with_aot_compile_dev_fastest()
+    }
+
+    /// Creates a generated-backend configuration from a high-level banded mode.
+    pub fn from_banded_mode(mode: BandedGeneratedBackendMode) -> Self {
         mode.generated_backend_config()
     }
 
@@ -248,7 +366,13 @@ impl GeneratedBackendConfig {
             resolver,
             aot_execution_policy: AotExecutionPolicy::Auto,
             aot_build_policy: AotBuildPolicy::UseIfAvailable,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         }
     }
 
@@ -279,10 +403,151 @@ impl GeneratedBackendConfig {
         self
     }
 
+    /// Sets compile-time rustc/codegen overrides for generated AOT artifacts.
+    pub fn with_aot_compile_config(mut self, config: AotCompileConfig) -> Self {
+        self.aot_compile_config = config;
+        self
+    }
+
+    /// Selects the backend used to emit generated AOT artifacts.
+    pub fn with_aot_codegen_backend(mut self, backend: AotCodegenBackend) -> Self {
+        self.aot_codegen_backend = backend;
+        self
+    }
+
+    /// Selects an explicit C compiler for C AOT backends.
+    pub fn with_aot_c_compiler(mut self, compiler: impl Into<String>) -> Self {
+        self.aot_c_compiler = Some(compiler.into());
+        self
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `gcc`-compiled C AOT.
+    ///
+    /// Practical guidance:
+    /// - strong choice when runtime throughput matters more than bootstrap latency,
+    /// - especially useful for repeated solves on the same symbolic problem.
+    pub fn sparse_atomview_build_if_missing_release_gcc() -> Self {
+        Self::sparse_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::C)
+            .with_aot_c_compiler("gcc")
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `tcc`-compiled C AOT.
+    ///
+    /// Practical guidance:
+    /// - strongest compiled choice for low-latency bootstrap,
+    /// - currently the most practical repeated-solve backend once you expect
+    ///   roughly `2-3` solves or more on large combustion-style BVPs.
+    pub fn sparse_atomview_build_if_missing_release_tcc() -> Self {
+        Self::sparse_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::C)
+            .with_aot_c_compiler("tcc")
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand Zig-compiled sparse AOT.
+    pub fn sparse_atomview_build_if_missing_release_zig() -> Self {
+        Self::sparse_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::Zig)
+    }
+
+    /// User-facing alias for the practical repeated-solve recommendation:
+    /// AtomView symbolic assembly plus `tcc`-compiled C AOT.
+    pub fn sparse_atomview_for_repeated_solves() -> Self {
+        Self::sparse_atomview_build_if_missing_release_tcc()
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `gcc`-compiled banded C AOT.
+    pub fn banded_atomview_build_if_missing_release_gcc() -> Self {
+        Self::banded_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::C)
+            .with_aot_c_compiler("gcc")
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand `tcc`-compiled banded C AOT.
+    ///
+    /// This is usually the quickest compiled bootstrap path for large BVP
+    /// experiments when the C toolchain is available.
+    pub fn banded_atomview_build_if_missing_release_tcc() -> Self {
+        Self::banded_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::C)
+            .with_aot_c_compiler("tcc")
+    }
+
+    /// Uses AtomView symbolic assembly plus on-demand Zig-compiled banded AOT.
+    pub fn banded_atomview_build_if_missing_release_zig() -> Self {
+        Self::banded_build_if_missing_release()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_aot_codegen_backend(AotCodegenBackend::Zig)
+    }
+
+    /// User-facing alias for the practical repeated-solve banded recommendation:
+    /// AtomView symbolic assembly plus `tcc`-compiled C AOT, backed by faithful
+    /// LAPACK-style native banded LU.
+    pub fn banded_atomview_for_repeated_solves() -> Self {
+        Self::banded_atomview_build_if_missing_release_tcc()
+    }
+
+    /// Uses the default production-oriented compile settings for generated AOT artifacts.
+    pub fn with_aot_compile_production(self) -> Self {
+        self.with_aot_compile_config(AotCompileConfig::production())
+    }
+
+    /// Uses the faster-build compromise preset for generated AOT artifacts.
+    pub fn with_aot_compile_fast_build(self) -> Self {
+        self.with_aot_compile_config(AotCompileConfig::fast_build())
+    }
+
+    /// Uses the fastest developer-oriented compile preset for generated AOT artifacts.
+    pub fn with_aot_compile_dev_fastest(self) -> Self {
+        self.with_aot_compile_config(AotCompileConfig::dev_fastest())
+    }
+
     /// Sets solver-level chunking overrides for generated AOT plans.
     pub fn with_aot_chunking_policy(mut self, policy: AotChunkingPolicy) -> Self {
         self.aot_chunking_policy = policy;
         self
+    }
+
+    /// Sets the symbolic assembly backend used before backend lowering.
+    pub fn with_symbolic_assembly_backend(mut self, backend: BvpSymbolicAssemblyBackend) -> Self {
+        self.symbolic_assembly_backend = backend;
+        self
+    }
+
+    /// Overrides the matrix backend used by the generated BVP path.
+    ///
+    /// This keeps the outer solver method stable (`Sparse` on the user-facing
+    /// options surface) while allowing the generated symbolic/codegen stack to
+    /// target a different matrix representation such as native `Banded`.
+    pub fn with_matrix_backend_override(mut self, backend: MatrixBackend) -> Self {
+        self.matrix_backend_override = Some(backend);
+        self
+    }
+
+    /// Overrides the native linear solver configuration used by generated banded callbacks.
+    pub fn with_banded_linear_solver_config(mut self, config: LinearSolverConfig) -> Self {
+        self.banded_linear_solver_config = config;
+        self
+    }
+
+    /// Resolves the effective legacy method string seen by the symbolic BVP
+    /// preparation layer.
+    pub fn effective_method(&self, fallback_method: &str) -> String {
+        self.matrix_backend_override
+            .map(|backend| match backend {
+                MatrixBackend::Banded => "Banded",
+                MatrixBackend::Dense => "Dense",
+                MatrixBackend::CsMat => "Sparse_1",
+                MatrixBackend::CsMatrix => "Sparse_2",
+                MatrixBackend::SparseCol | MatrixBackend::ValuesOnly => "Sparse",
+            })
+            .unwrap_or(fallback_method)
+            .to_string()
     }
 
     /// Returns the effective backend policy for a given solver method.
@@ -298,6 +563,10 @@ pub struct DampedSolverBuildRequest {
     pub eq_system: Vec<Expr>,
     /// Names of unknown variables.
     pub values: Vec<String>,
+    /// Optional symbolic parameter names that affect evaluation but are not Newton unknowns.
+    pub param_names: Option<Vec<String>>,
+    /// Current numeric values for `param_names`.
+    pub param_values: Option<Vec<f64>>,
     /// Independent variable name.
     pub arg: String,
     /// Left boundary value of the independent variable.
@@ -328,8 +597,20 @@ pub struct DampedSolverBuildRequest {
     pub aot_execution_policy: AotExecutionPolicy,
     /// Solver-level build policy carried into generated backend setup.
     pub aot_build_policy: AotBuildPolicy,
+    /// Optional compile-time rustc/codegen overrides carried into generated backend setup.
+    pub aot_compile_config: AotCompileConfig,
+    /// Codegen backend used to emit generated AOT artifacts.
+    pub aot_codegen_backend: AotCodegenBackend,
+    /// Optional explicit C compiler for C AOT backends.
+    pub aot_c_compiler: Option<String>,
     /// Optional chunking overrides carried into generated backend setup.
     pub aot_chunking_policy: AotChunkingPolicy,
+    /// Symbolic assembly backend used before lambdify/AOT lowering.
+    pub symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    /// Optional explicit matrix backend override for generated sparse/banded handoff.
+    pub matrix_backend_override: Option<MatrixBackend>,
+    /// Native linear solver configuration used by the generated banded runtime path.
+    pub banded_linear_solver_config: LinearSolverConfig,
 }
 
 impl DampedSolverBuildRequest {
@@ -338,6 +619,8 @@ impl DampedSolverBuildRequest {
         generate_damped_solver_state(
             self.eq_system,
             self.values,
+            self.param_names,
+            self.param_values,
             self.arg,
             self.t0,
             self.n_steps,
@@ -353,7 +636,13 @@ impl DampedSolverBuildRequest {
             self.resolver.as_ref(),
             self.aot_execution_policy,
             self.aot_build_policy,
+            self.aot_compile_config,
+            self.aot_codegen_backend,
+            self.aot_c_compiler,
             self.aot_chunking_policy,
+            self.symbolic_assembly_backend,
+            self.matrix_backend_override,
+            self.banded_linear_solver_config,
         )
     }
 }
@@ -422,6 +711,10 @@ pub struct FrozenSolverBuildRequest {
     pub values: Vec<String>,
     /// Independent variable name.
     pub arg: String,
+    /// Optional symbolic parameter names used by residual/Jacobian generation.
+    pub param_names: Option<Vec<String>>,
+    /// Current numeric values for `param_names`.
+    pub param_values: Option<Vec<f64>>,
     /// Left boundary value of the independent variable.
     pub t0: f64,
     /// Number of discretization steps when a uniform mesh is used.
@@ -446,8 +739,20 @@ pub struct FrozenSolverBuildRequest {
     pub aot_execution_policy: AotExecutionPolicy,
     /// Solver-level build policy carried into generated backend setup.
     pub aot_build_policy: AotBuildPolicy,
+    /// Optional compile-time rustc/codegen overrides carried into generated backend setup.
+    pub aot_compile_config: AotCompileConfig,
+    /// Codegen backend used to emit generated AOT artifacts.
+    pub aot_codegen_backend: AotCodegenBackend,
+    /// Optional explicit C compiler for C AOT backends.
+    pub aot_c_compiler: Option<String>,
     /// Optional chunking overrides carried into generated backend setup.
     pub aot_chunking_policy: AotChunkingPolicy,
+    /// Symbolic assembly backend used before lambdify/AOT lowering.
+    pub symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    /// Optional explicit matrix backend override for generated sparse/banded handoff.
+    pub matrix_backend_override: Option<MatrixBackend>,
+    /// Native linear solver configuration used by the generated banded runtime path.
+    pub banded_linear_solver_config: LinearSolverConfig,
 }
 
 impl FrozenSolverBuildRequest {
@@ -457,6 +762,8 @@ impl FrozenSolverBuildRequest {
             self.eq_system,
             self.values,
             self.arg,
+            self.param_names,
+            self.param_values,
             self.t0,
             self.n_steps,
             self.h,
@@ -469,7 +776,13 @@ impl FrozenSolverBuildRequest {
             self.resolver.as_ref(),
             self.aot_execution_policy,
             self.aot_build_policy,
+            self.aot_compile_config,
+            self.aot_codegen_backend,
+            self.aot_c_compiler,
             self.aot_chunking_policy,
+            self.symbolic_assembly_backend,
+            self.matrix_backend_override,
+            self.banded_linear_solver_config,
         )
     }
 }
@@ -534,6 +847,8 @@ pub fn generate_and_apply_frozen_solver_state<
 pub fn generate_damped_solver_state(
     eq_system: Vec<Expr>,
     values: Vec<String>,
+    param_names: Option<Vec<String>>,
+    param_values: Option<Vec<f64>>,
     arg: String,
     t0: f64,
     n_steps: Option<usize>,
@@ -549,71 +864,70 @@ pub fn generate_damped_solver_state(
     resolver: Option<&AotResolver>,
     aot_execution_policy: AotExecutionPolicy,
     aot_build_policy: AotBuildPolicy,
+    aot_compile_config: AotCompileConfig,
+    aot_codegen_backend: AotCodegenBackend,
+    aot_c_compiler: Option<String>,
     aot_chunking_policy: AotChunkingPolicy,
+    symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    matrix_backend_override: Option<MatrixBackend>,
+    banded_linear_solver_config: LinearSolverConfig,
 ) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
-    if method == "Sparse" {
-        let jacobian_instance = Jacobian::new();
+    let param_name_refs = parameter_name_refs(param_names.as_ref());
+    if matches!(method.as_str(), "Sparse" | "Banded")
+        || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
+    {
+        let jacobian_instance = prepared_bvp_jacobian(
+            symbolic_assembly_backend,
+            param_name_refs.as_deref(),
+            param_values.clone(),
+            banded_linear_solver_config,
+        );
         let backend_policy = effective_backend_policy_for_build(backend_policy, aot_build_policy);
-        let bundle = match (
-            aot_chunking_policy.residual,
-            aot_chunking_policy.sparse_jacobian,
-        ) {
-            (None, None) => jacobian_instance
-                .try_generate_sparse_solver_bundle_with_backend_selection(
-                    eq_system,
-                    values,
-                    arg,
-                    None,
-                    t0,
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    border_conditions,
-                    bounds,
-                    rel_tolerance,
-                    scheme,
-                    method,
-                    bandwidth,
-                    backend_policy,
-                    resolver,
-                )?,
-            (residual, sparse_jacobian) => jacobian_instance
-                .try_generate_sparse_solver_bundle_with_backend_selection_and_chunking(
-                    eq_system,
-                    values,
-                    arg,
-                    None,
-                    t0,
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    border_conditions,
-                    bounds,
-                    rel_tolerance,
-                    scheme,
-                    method,
-                    bandwidth,
-                    backend_policy,
-                    resolver,
-                    residual.unwrap_or(ResidualChunkingStrategy::Whole),
-                    sparse_jacobian.unwrap_or(SparseChunkingStrategy::Whole),
-                )?,
-        };
-        let (bundle, updated_resolver) =
-            enforce_build_policy_on_sparse_bundle(bundle, resolver, aot_build_policy)?;
+        let bundle = try_generate_sparse_bundle(
+            jacobian_instance,
+            eq_system,
+            values,
+            arg,
+            param_name_refs.as_deref(),
+            t0,
+            n_steps,
+            h,
+            mesh,
+            border_conditions,
+            bounds,
+            rel_tolerance,
+            scheme,
+            method,
+            bandwidth,
+            backend_policy,
+            resolver,
+            aot_chunking_policy,
+        )?;
+        let (bundle, updated_resolver) = enforce_build_policy_on_sparse_bundle(
+            bundle,
+            resolver,
+            aot_build_policy,
+            aot_compile_config,
+            aot_codegen_backend,
+            aot_c_compiler,
+        )?;
         let bundle = apply_execution_policy_to_sparse_bundle(bundle, aot_execution_policy)?;
         Ok(damped_state_from_sparse_solver_bundle(
             bundle,
             updated_resolver,
         ))
     } else {
-        let legacy_bundle = Jacobian::new().generate_legacy_solver_bundle_with_params(
+        let jacobian_instance = prepared_bvp_jacobian(
+            symbolic_assembly_backend,
+            param_name_refs.as_deref(),
+            param_values,
+            banded_linear_solver_config,
+        );
+        let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,
             values,
             arg,
-            None,
+            param_name_refs.as_deref(),
             t0,
             None,
             n_steps,
@@ -639,6 +953,8 @@ pub fn generate_frozen_solver_state(
     eq_system: Vec<Expr>,
     values: Vec<String>,
     arg: String,
+    param_names: Option<Vec<String>>,
+    param_values: Option<Vec<f64>>,
     t0: f64,
     n_steps: Option<usize>,
     h: Option<f64>,
@@ -651,71 +967,70 @@ pub fn generate_frozen_solver_state(
     resolver: Option<&AotResolver>,
     aot_execution_policy: AotExecutionPolicy,
     aot_build_policy: AotBuildPolicy,
+    aot_compile_config: AotCompileConfig,
+    aot_codegen_backend: AotCodegenBackend,
+    aot_c_compiler: Option<String>,
     aot_chunking_policy: AotChunkingPolicy,
+    symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    matrix_backend_override: Option<MatrixBackend>,
+    banded_linear_solver_config: LinearSolverConfig,
 ) -> Result<FrozenGeneratedSolverState, BvpBackendIntegrationError> {
-    if method == "Sparse" {
-        let jacobian_instance = Jacobian::new();
+    let param_name_refs = parameter_name_refs(param_names.as_ref());
+    if matches!(method.as_str(), "Sparse" | "Banded")
+        || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
+    {
+        let jacobian_instance = prepared_bvp_jacobian(
+            symbolic_assembly_backend,
+            param_name_refs.as_deref(),
+            param_values.clone(),
+            banded_linear_solver_config,
+        );
         let backend_policy = effective_backend_policy_for_build(backend_policy, aot_build_policy);
-        let bundle = match (
-            aot_chunking_policy.residual,
-            aot_chunking_policy.sparse_jacobian,
-        ) {
-            (None, None) => jacobian_instance
-                .try_generate_sparse_solver_bundle_with_backend_selection(
-                    eq_system,
-                    values,
-                    arg,
-                    None,
-                    t0,
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    border_conditions,
-                    None,
-                    None,
-                    scheme,
-                    method,
-                    bandwidth,
-                    backend_policy,
-                    resolver,
-                )?,
-            (residual, sparse_jacobian) => jacobian_instance
-                .try_generate_sparse_solver_bundle_with_backend_selection_and_chunking(
-                    eq_system,
-                    values,
-                    arg,
-                    None,
-                    t0,
-                    None,
-                    n_steps,
-                    h,
-                    mesh,
-                    border_conditions,
-                    None,
-                    None,
-                    scheme,
-                    method,
-                    bandwidth,
-                    backend_policy,
-                    resolver,
-                    residual.unwrap_or(ResidualChunkingStrategy::Whole),
-                    sparse_jacobian.unwrap_or(SparseChunkingStrategy::Whole),
-                )?,
-        };
-        let (bundle, updated_resolver) =
-            enforce_build_policy_on_sparse_bundle(bundle, resolver, aot_build_policy)?;
+        let bundle = try_generate_sparse_bundle(
+            jacobian_instance,
+            eq_system,
+            values,
+            arg,
+            param_name_refs.as_deref(),
+            t0,
+            n_steps,
+            h,
+            mesh,
+            border_conditions,
+            None,
+            None,
+            scheme,
+            method,
+            bandwidth,
+            backend_policy,
+            resolver,
+            aot_chunking_policy,
+        )?;
+        let (bundle, updated_resolver) = enforce_build_policy_on_sparse_bundle(
+            bundle,
+            resolver,
+            aot_build_policy,
+            aot_compile_config,
+            aot_codegen_backend,
+            aot_c_compiler,
+        )?;
         let bundle = apply_execution_policy_to_sparse_bundle(bundle, aot_execution_policy)?;
         Ok(frozen_state_from_sparse_solver_bundle(
             bundle,
             updated_resolver,
         ))
     } else {
-        let legacy_bundle = Jacobian::new().generate_legacy_solver_bundle_with_params(
+        let jacobian_instance = prepared_bvp_jacobian(
+            symbolic_assembly_backend,
+            param_name_refs.as_deref(),
+            param_values,
+            banded_linear_solver_config,
+        );
+        let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,
             values,
             arg,
-            None,
+            param_name_refs.as_deref(),
             t0,
             None,
             n_steps,
@@ -771,6 +1086,93 @@ fn effective_backend_policy_for_build(
     }
 }
 
+fn parameter_name_refs(param_names: Option<&Vec<String>>) -> Option<Vec<&str>> {
+    param_names.map(|names| names.iter().map(|name| name.as_str()).collect())
+}
+
+fn prepared_bvp_jacobian(
+    symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
+    param_name_refs: Option<&[&str]>,
+    param_values: Option<Vec<f64>>,
+    banded_linear_solver_config: LinearSolverConfig,
+) -> Jacobian {
+    let mut jacobian_instance = Jacobian::new();
+    jacobian_instance.set_symbolic_assembly_backend(symbolic_assembly_backend);
+    jacobian_instance.set_params(param_name_refs);
+    jacobian_instance.set_param_values(param_values);
+    jacobian_instance.set_banded_linear_solver_config(banded_linear_solver_config);
+    jacobian_instance
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_generate_sparse_bundle(
+    jacobian_instance: Jacobian,
+    eq_system: Vec<Expr>,
+    values: Vec<String>,
+    arg: String,
+    param_name_refs: Option<&[&str]>,
+    t0: f64,
+    n_steps: Option<usize>,
+    h: Option<f64>,
+    mesh: Option<Vec<f64>>,
+    border_conditions: HashMap<String, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+    method: String,
+    bandwidth: Option<(usize, usize)>,
+    backend_policy: BackendSelectionPolicy,
+    resolver: Option<&AotResolver>,
+    aot_chunking_policy: AotChunkingPolicy,
+) -> Result<BvpSparseSolverBundle, BvpBackendIntegrationError> {
+    match (
+        aot_chunking_policy.residual,
+        aot_chunking_policy.sparse_jacobian,
+    ) {
+        (None, None) => jacobian_instance.try_generate_sparse_solver_bundle_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            param_name_refs,
+            t0,
+            None,
+            n_steps,
+            h,
+            mesh,
+            border_conditions,
+            bounds,
+            rel_tolerance,
+            scheme,
+            method,
+            bandwidth,
+            backend_policy,
+            resolver,
+        ),
+        (residual, sparse_jacobian) => jacobian_instance
+            .try_generate_sparse_solver_bundle_with_backend_selection_and_chunking(
+                eq_system,
+                values,
+                arg,
+                param_name_refs,
+                t0,
+                None,
+                n_steps,
+                h,
+                mesh,
+                border_conditions,
+                bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+                backend_policy,
+                resolver,
+                residual.unwrap_or(ResidualChunkingStrategy::Whole),
+                sparse_jacobian.unwrap_or(SparseChunkingStrategy::Whole),
+            ),
+    }
+}
+
 fn sanitize_generated_name(input: &str) -> String {
     input
         .chars()
@@ -788,6 +1190,15 @@ fn build_output_parent_for_problem(problem_key: &str) -> PathBuf {
         .join(sanitize_generated_name(problem_key))
 }
 
+fn unique_build_output_parent_for_problem(problem_key: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    build_output_parent_for_problem(problem_key)
+        .join(format!("build-{}-{nonce}", std::process::id()))
+}
+
 fn to_lifecycle_build_profile(profile: AotBuildProfile) -> LifecycleBuildProfile {
     match profile {
         AotBuildProfile::Release => LifecycleBuildProfile::Release,
@@ -795,81 +1206,387 @@ fn to_lifecycle_build_profile(profile: AotBuildProfile) -> LifecycleBuildProfile
     }
 }
 
+fn to_c_build_profile(profile: AotBuildProfile) -> CAotBuildProfile {
+    match profile {
+        AotBuildProfile::Release => CAotBuildProfile::Release,
+        AotBuildProfile::Debug => CAotBuildProfile::Debug,
+    }
+}
+
+fn to_zig_build_profile(profile: AotBuildProfile) -> ZigAotBuildProfile {
+    match profile {
+        AotBuildProfile::Release => ZigAotBuildProfile::ReleaseFast,
+        AotBuildProfile::Debug => ZigAotBuildProfile::Debug,
+    }
+}
+
+fn to_c_compile_config(compile_config: &AotCompileConfig) -> CAotCompileConfig {
+    if *compile_config == AotCompileConfig::dev_fastest() {
+        CAotCompileConfig::dev_fastest()
+    } else if *compile_config == AotCompileConfig::fast_build() {
+        CAotCompileConfig::fast_build()
+    } else {
+        CAotCompileConfig::production()
+    }
+}
+
+fn register_sparse_runtime_from_registered_artifact(
+    artifact: &crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact,
+    matrix_backend: MatrixBackend,
+    backend: AotCodegenBackend,
+) -> Result<(), String> {
+    match backend {
+        AotCodegenBackend::Rust => match matrix_backend {
+            MatrixBackend::Banded => register_generated_banded_cdylib_backend(artifact).map(|_| ()),
+            _ => register_generated_sparse_cdylib_backend(artifact).map(|_| ()),
+        },
+        AotCodegenBackend::C => match matrix_backend {
+            MatrixBackend::Banded => register_generated_c_banded_backend(artifact).map(|_| ()),
+            _ => register_generated_c_sparse_backend(artifact).map(|_| ()),
+        },
+        AotCodegenBackend::Zig => match matrix_backend {
+            MatrixBackend::Banded => register_generated_zig_banded_backend(artifact).map(|_| ()),
+            _ => register_generated_zig_sparse_backend(artifact).map(|_| ()),
+        },
+    }
+}
+
+fn rust_sparse_aot_build_request(
+    bundle: &BvpSparseSolverBundle,
+    problem_key: &str,
+    profile: AotBuildProfile,
+    compile_config: AotCompileConfig,
+) -> AotBuildRequest {
+    let selected = bundle.execution.selected();
+    let backend_label = match selected.matrix_backend {
+        MatrixBackend::Banded => "banded",
+        _ => "sparse",
+    };
+    let crate_name = format!(
+        "generated_bvp_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let module_name = format!(
+        "generated_bvp_module_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let output_parent_dir = unique_build_output_parent_for_problem(problem_key);
+    AotBuildRequest::new(
+        selected
+            .prepared_problem
+            .generated_aot_artifact_with_breakdown_for_matrix_backend(
+                &crate_name,
+                &module_name,
+                AotCodegenBackend::Rust,
+                selected.matrix_backend,
+            )
+            .0
+            .into_rust_crate()
+            .expect("Rust backend must emit GeneratedAotCrate"),
+        output_parent_dir,
+        to_lifecycle_build_profile(profile),
+    )
+    .with_compile_config(compile_config)
+}
+
+fn c_sparse_aot_build_request(
+    bundle: &BvpSparseSolverBundle,
+    problem_key: &str,
+    profile: AotBuildProfile,
+    compile_config: CAotCompileConfig,
+) -> CAotBuildRequest {
+    let selected = bundle.execution.selected();
+    let backend_label = match selected.matrix_backend {
+        MatrixBackend::Banded => "banded",
+        _ => "sparse",
+    };
+    let library_name = format!(
+        "generated_bvp_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let module_name = format!(
+        "generated_bvp_module_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let output_parent_dir = unique_build_output_parent_for_problem(problem_key);
+    let library_spec = match selected
+        .prepared_problem
+        .generated_aot_artifact_with_breakdown_for_matrix_backend(
+            &library_name,
+            &module_name,
+            AotCodegenBackend::C,
+            selected.matrix_backend,
+        )
+        .0
+    {
+        crate::symbolic::codegen::codegen_aot_driver::GeneratedAotArtifact::C(library) => library,
+        _ => unreachable!("C backend must emit GeneratedCAotLibrary"),
+    };
+    CAotBuildRequest::new(library_spec, output_parent_dir, to_c_build_profile(profile))
+        .with_compile_config(compile_config)
+}
+
+fn zig_sparse_aot_build_request(
+    bundle: &BvpSparseSolverBundle,
+    problem_key: &str,
+    profile: AotBuildProfile,
+) -> ZigAotBuildRequest {
+    let selected = bundle.execution.selected();
+    let backend_label = match selected.matrix_backend {
+        MatrixBackend::Banded => "banded",
+        _ => "sparse",
+    };
+    let library_name = format!(
+        "generated_bvp_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let module_name = format!(
+        "generated_bvp_module_{}_{}",
+        backend_label,
+        sanitize_generated_name(problem_key)
+    );
+    let output_parent_dir = unique_build_output_parent_for_problem(problem_key);
+    let library_spec = match selected
+        .prepared_problem
+        .generated_aot_artifact_with_breakdown_for_matrix_backend(
+            &library_name,
+            &module_name,
+            AotCodegenBackend::Zig,
+            selected.matrix_backend,
+        )
+        .0
+    {
+        crate::symbolic::codegen::codegen_aot_driver::GeneratedAotArtifact::Zig(library) => library,
+        _ => unreachable!("Zig backend must emit GeneratedZigAotLibrary"),
+    };
+    ZigAotBuildRequest::new(
+        library_spec,
+        output_parent_dir,
+        to_zig_build_profile(profile),
+    )
+}
+
 fn try_materialize_and_build_sparse_aot_bundle(
     bundle: &BvpSparseSolverBundle,
     resolver: Option<&AotResolver>,
     profile: AotBuildProfile,
+    compile_config: AotCompileConfig,
+    aot_codegen_backend: AotCodegenBackend,
+    aot_c_compiler: Option<String>,
 ) -> Result<AotResolver, BvpBackendIntegrationError> {
     let selected = bundle.execution.selected();
-    let problem_key = selected.prepared_problem.problem_key();
-    let crate_name = format!(
-        "generated_bvp_sparse_{}",
-        sanitize_generated_name(&problem_key)
+    let problem_key = selected.problem_key();
+    let manifest = PreparedProblemManifest::from(
+        &selected
+            .prepared_problem
+            .as_prepared_problem_for_matrix_backend(selected.matrix_backend),
     );
-    let module_name = format!(
-        "generated_bvp_module_{}",
-        sanitize_generated_name(&problem_key)
-    );
-    let output_parent_dir = build_output_parent_for_problem(&problem_key);
-    let crate_spec = generated_aot_crate_from_prepared_sparse_problem(
-        &crate_name,
-        &module_name,
-        &selected.prepared_problem.as_prepared_problem(),
-    );
-    let request = AotBuildRequest::new(
-        crate_spec,
-        output_parent_dir,
-        to_lifecycle_build_profile(profile),
-    );
-    info!(
-        "materializing sparse AOT crate for problem_key={} with build_profile={:?}",
-        problem_key, profile
-    );
-    let build = request.materialize().map_err(|err| {
-        BvpBackendIntegrationError::AutomaticAotBuildFailed {
-            problem_key: problem_key.clone(),
-            message: err.to_string(),
-        }
-    })?;
-    info!(
-        "executing sparse AOT build for problem_key={} in crate_dir={}",
-        problem_key,
-        build.written.crate_dir.display()
-    );
-    let executed =
-        build
-            .execute()
-            .map_err(|err| BvpBackendIntegrationError::AutomaticAotBuildFailed {
-                problem_key: problem_key.clone(),
-                message: err.to_string(),
+    let mut registry = resolver
+        .map(|existing| existing.registry().clone())
+        .unwrap_or_else(AotRegistry::new);
+    match aot_codegen_backend {
+        AotCodegenBackend::Rust => {
+            let request =
+                rust_sparse_aot_build_request(bundle, &problem_key, profile, compile_config);
+            info!(
+                "materializing sparse Rust AOT crate for problem_key={} with build_profile={:?}",
+                problem_key, profile
+            );
+            let build = request.materialize().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
             })?;
-    if executed.succeeded() {
-        info!(
-            "sparse AOT build succeeded for problem_key={} with profile={:?}",
-            problem_key, profile
-        );
-        let manifest = PreparedProblemManifest::from(
-            &crate::symbolic::codegen_provider_api::PreparedProblem::sparse(
-                selected.prepared_problem.as_prepared_problem(),
-            ),
-        );
-        let mut registry = resolver
-            .map(|existing| existing.registry().clone())
-            .unwrap_or_else(AotRegistry::new);
-        registry.register_materialized_build(manifest, &build);
-        Ok(AotResolver::new(registry))
-    } else {
-        error!(
-            "sparse AOT build failed for problem_key={} with status={:?}",
-            problem_key, executed.status_code
-        );
-        Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
-            problem_key,
-            message: format!(
-                "cargo build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-                executed.status_code, executed.stdout, executed.stderr
-            ),
-        })
+            info!(
+                "executing sparse Rust AOT build for problem_key={} in crate_dir={}",
+                problem_key,
+                build.written.crate_dir.display()
+            );
+            let executed = build.execute().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            if !executed.succeeded() {
+                error!(
+                    "sparse Rust AOT build failed for problem_key={} with status={:?}",
+                    problem_key, executed.status_code
+                );
+                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key,
+                    message: format!(
+                        "cargo build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                        executed.status_code, executed.stdout, executed.stderr
+                    ),
+                });
+            }
+            let registered = registry
+                .register_materialized_build(manifest, &build)
+                .clone();
+            let runtime_registration = match selected.matrix_backend {
+                MatrixBackend::Banded => register_generated_banded_cdylib_backend(&registered),
+                _ => register_generated_sparse_cdylib_backend(&registered),
+            };
+            if let Err(err) = runtime_registration {
+                error!(
+                    "{:?} Rust AOT build succeeded for problem_key={} but runtime cdylib registration failed: {}",
+                    selected.matrix_backend, problem_key, err
+                );
+            }
+        }
+        AotCodegenBackend::C => {
+            let mut c_compile = match profile {
+                AotBuildProfile::Debug => CAotCompileConfig::dev_fastest(),
+                AotBuildProfile::Release => to_c_compile_config(&compile_config),
+            };
+            if let Some(compiler) = aot_c_compiler {
+                c_compile = c_compile.with_compiler(compiler);
+            }
+            let request = c_sparse_aot_build_request(bundle, &problem_key, profile, c_compile);
+            info!(
+                "materializing sparse C AOT library for problem_key={} with build_profile={:?}",
+                problem_key, profile
+            );
+            let build = request.materialize().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            info!(
+                "executing sparse C AOT build for problem_key={} in library_dir={}",
+                problem_key,
+                build.written.library_dir.display()
+            );
+            let executed = build.execute().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            if !executed.succeeded() {
+                error!(
+                    "sparse C AOT build failed for problem_key={} with status={:?}",
+                    problem_key, executed.status_code
+                );
+                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key,
+                    message: format!(
+                        "C build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                        executed.status_code, executed.stdout, executed.stderr
+                    ),
+                });
+            }
+            let registered = register_c_build_in_registry(&mut registry, manifest, &build).clone();
+            let runtime_registration = match selected.matrix_backend {
+                MatrixBackend::Banded => register_generated_c_banded_backend(&registered),
+                _ => register_generated_c_sparse_backend(&registered),
+            };
+            if let Err(err) = runtime_registration {
+                error!(
+                    "{:?} C AOT build succeeded for problem_key={} but runtime registration failed: {}",
+                    selected.matrix_backend, problem_key, err
+                );
+            }
+        }
+        AotCodegenBackend::Zig => {
+            let request = zig_sparse_aot_build_request(bundle, &problem_key, profile);
+            info!(
+                "materializing sparse Zig AOT library for problem_key={} with build_profile={:?}",
+                problem_key, profile
+            );
+            let build = request.materialize().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            info!(
+                "executing sparse Zig AOT build for problem_key={} in library_dir={}",
+                problem_key,
+                build.written.library_dir.display()
+            );
+            let executed = build.execute().map_err(|err| {
+                BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key: problem_key.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            if !executed.succeeded() {
+                error!(
+                    "sparse Zig AOT build failed for problem_key={} with status={:?}",
+                    problem_key, executed.status_code
+                );
+                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
+                    problem_key,
+                    message: format!(
+                        "Zig build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                        executed.status_code, executed.stdout, executed.stderr
+                    ),
+                });
+            }
+            let registered =
+                register_zig_build_in_registry(&mut registry, manifest, &build).clone();
+            let runtime_registration = match selected.matrix_backend {
+                MatrixBackend::Banded => register_generated_zig_banded_backend(&registered),
+                _ => register_generated_zig_sparse_backend(&registered),
+            };
+            if let Err(err) = runtime_registration {
+                error!(
+                    "{:?} Zig AOT build succeeded for problem_key={} but runtime registration failed: {}",
+                    selected.matrix_backend, problem_key, err
+                );
+            }
+        }
+    }
+    info!(
+        "sparse {:?} AOT build succeeded for problem_key={} with profile={:?}",
+        aot_codegen_backend, problem_key, profile
+    );
+    Ok(AotResolver::new(registry))
+}
+
+fn try_link_sparse_runtime_from_resolution(
+    bundle: &BvpSparseSolverBundle,
+    resolver: Option<&AotResolver>,
+    aot_codegen_backend: AotCodegenBackend,
+) -> bool {
+    let problem_key = bundle.execution.selected().problem_key();
+    if resolve_linked_sparse_backend(problem_key.as_str()).is_some() {
+        return true;
+    }
+
+    let resolved = bundle
+        .resolved_aot_artifact()
+        .cloned()
+        .or_else(|| resolver.map(|value| value.resolve_by_problem_key(problem_key.as_str())));
+    let Some(resolved) = resolved else {
+        return false;
+    };
+    if !resolved.is_compiled() {
+        return false;
+    }
+
+    match register_sparse_runtime_from_registered_artifact(
+        &resolved.registered,
+        bundle.execution.selected().matrix_backend,
+        aot_codegen_backend,
+    ) {
+        Ok(_) => true,
+        Err(err) => {
+            error!(
+                "failed to register sparse generated {:?} runtime for problem_key={}: {}",
+                aot_codegen_backend, problem_key, err
+            );
+            false
+        }
     }
 }
 
@@ -877,8 +1594,11 @@ fn enforce_build_policy_on_sparse_bundle(
     bundle: BvpSparseSolverBundle,
     resolver: Option<&AotResolver>,
     build_policy: AotBuildPolicy,
+    compile_config: AotCompileConfig,
+    aot_codegen_backend: AotCodegenBackend,
+    aot_c_compiler: Option<String>,
 ) -> Result<(BvpSparseSolverBundle, Option<AotResolver>), BvpBackendIntegrationError> {
-    let problem_key = bundle.execution.selected().prepared_problem.problem_key();
+    let problem_key = bundle.execution.selected().problem_key();
     let effective_backend = bundle.effective_backend();
     info!(
         "enforcing sparse AOT build policy {} for problem_key={} with effective_backend={:?}",
@@ -889,9 +1609,14 @@ fn enforce_build_policy_on_sparse_bundle(
 
     match build_policy {
         AotBuildPolicy::UseIfAvailable => {
-            if matches!(effective_backend, SelectedBackendKind::AotCompiled)
-                && !bundle.is_runtime_callable()
-            {
+            let runtime_available = bundle.is_runtime_callable()
+                || (matches!(effective_backend, SelectedBackendKind::AotCompiled)
+                    && try_link_sparse_runtime_from_resolution(
+                        &bundle,
+                        resolver,
+                        aot_codegen_backend,
+                    ));
+            if matches!(effective_backend, SelectedBackendKind::AotCompiled) && !runtime_available {
                 error!(
                     "compiled sparse AOT backend resolved for problem_key={} but runtime callbacks are unavailable",
                     problem_key
@@ -906,6 +1631,13 @@ fn enforce_build_policy_on_sparse_bundle(
             }
         }
         AotBuildPolicy::RequirePrebuilt => {
+            let runtime_available = bundle.is_runtime_callable()
+                || (matches!(effective_backend, SelectedBackendKind::AotCompiled)
+                    && try_link_sparse_runtime_from_resolution(
+                        &bundle,
+                        resolver,
+                        aot_codegen_backend,
+                    ));
             if !matches!(effective_backend, SelectedBackendKind::AotCompiled) {
                 error!(
                     "RequirePrebuilt requested for problem_key={} but compiled backend is not available: {:?}",
@@ -917,7 +1649,7 @@ fn enforce_build_policy_on_sparse_bundle(
                         effective_backend,
                     },
                 )
-            } else if !bundle.is_runtime_callable() {
+            } else if !runtime_available {
                 error!(
                     "RequirePrebuilt succeeded in resolution for problem_key={} but runtime callbacks are unavailable",
                     problem_key
@@ -932,9 +1664,14 @@ fn enforce_build_policy_on_sparse_bundle(
             }
         }
         AotBuildPolicy::BuildIfMissing { .. } => {
-            if matches!(effective_backend, SelectedBackendKind::AotCompiled)
-                && bundle.is_runtime_callable()
-            {
+            let runtime_available = bundle.is_runtime_callable()
+                || (matches!(effective_backend, SelectedBackendKind::AotCompiled)
+                    && try_link_sparse_runtime_from_resolution(
+                        &bundle,
+                        resolver,
+                        aot_codegen_backend,
+                    ));
+            if matches!(effective_backend, SelectedBackendKind::AotCompiled) && runtime_available {
                 info!(
                     "compiled sparse AOT backend already callable for problem_key={}, skipping build",
                     problem_key
@@ -945,13 +1682,29 @@ fn enforce_build_policy_on_sparse_bundle(
                     AotBuildPolicy::BuildIfMissing { profile } => profile,
                     _ => unreachable!(),
                 };
+                // On Windows, an already loaded generated cdylib keeps the .dll file locked.
+                // If the compiled artifact is present but not currently callable for this bundle,
+                // drop any stale linked backend before rebuilding so cargo can overwrite it.
+                let _ = unregister_linked_sparse_backend(problem_key.as_str());
                 info!(
                     "compiled sparse AOT backend missing or not callable for problem_key={}, building with profile={:?}",
                     problem_key, profile
                 );
-                let updated_resolver =
-                    try_materialize_and_build_sparse_aot_bundle(&bundle, resolver, profile)?;
-                if bundle.is_runtime_callable() {
+                let updated_resolver = try_materialize_and_build_sparse_aot_bundle(
+                    &bundle,
+                    resolver,
+                    profile,
+                    compile_config.clone(),
+                    aot_codegen_backend,
+                    aot_c_compiler.clone(),
+                )?;
+                if bundle.is_runtime_callable()
+                    || try_link_sparse_runtime_from_resolution(
+                        &bundle,
+                        Some(&updated_resolver),
+                        aot_codegen_backend,
+                    )
+                {
                     info!(
                         "compiled sparse AOT backend became callable after BuildIfMissing for problem_key={}",
                         problem_key
@@ -971,13 +1724,28 @@ fn enforce_build_policy_on_sparse_bundle(
                 AotBuildPolicy::RebuildAlways { profile } => profile,
                 _ => unreachable!(),
             };
+            // Forced rebuild must also unload any previously linked generated cdylib;
+            // otherwise Windows denies replacing the existing .dll on disk.
+            let _ = unregister_linked_sparse_backend(problem_key.as_str());
             info!(
                 "forcing sparse AOT rebuild for problem_key={} with profile={:?}",
                 problem_key, profile
             );
-            let updated_resolver =
-                try_materialize_and_build_sparse_aot_bundle(&bundle, resolver, profile)?;
-            if bundle.is_runtime_callable() {
+            let updated_resolver = try_materialize_and_build_sparse_aot_bundle(
+                &bundle,
+                resolver,
+                profile,
+                compile_config,
+                aot_codegen_backend,
+                aot_c_compiler,
+            )?;
+            if bundle.is_runtime_callable()
+                || try_link_sparse_runtime_from_resolution(
+                    &bundle,
+                    Some(&updated_resolver),
+                    aot_codegen_backend,
+                )
+            {
                 info!(
                     "compiled sparse AOT backend remains callable after forced rebuild for problem_key={}",
                     problem_key
@@ -998,7 +1766,7 @@ fn apply_execution_policy_to_sparse_bundle(
     mut bundle: BvpSparseSolverBundle,
     policy: AotExecutionPolicy,
 ) -> Result<BvpSparseSolverBundle, BvpBackendIntegrationError> {
-    let problem_key = bundle.execution.selected().prepared_problem.problem_key();
+    let problem_key = bundle.execution.selected().problem_key();
     info!(
         "applying sparse AOT execution policy {} for problem_key={} with effective_backend={:?}",
         policy.as_str(),
@@ -1007,10 +1775,44 @@ fn apply_execution_policy_to_sparse_bundle(
     );
     match policy {
         AotExecutionPolicy::Auto => {
-            info!(
-                "keeping default sparse runtime callback binding for problem_key={}",
-                problem_key
-            );
+            if matches!(bundle.effective_backend(), SelectedBackendKind::AotCompiled) {
+                let auto_plan = bundle
+                    .execution
+                    .selected()
+                    .prepared_problem
+                    .auto_parallel_plan();
+                if let Some(config) = auto_plan.executor_config {
+                    if !bundle.rebind_linked_runtime_callbacks(None, Some(config)) {
+                        return Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
+                            problem_key,
+                        });
+                    }
+                    info!(
+                        "auto-selected sparse parallel runtime binding for problem_key={} with residual_jobs={:?}, sparse_jobs={:?}, residual_chunking={:?}, sparse_chunking={:?}, min_work_per_job={}, workers={}",
+                        problem_key,
+                        config.max_residual_jobs,
+                        config.max_sparse_jobs,
+                        auto_plan.residual_chunking,
+                        auto_plan.sparse_chunking,
+                        auto_plan.min_work_per_job,
+                        auto_plan.workers
+                    );
+                } else if !bundle.rebind_linked_runtime_callbacks(None, None) {
+                    return Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
+                        problem_key,
+                    });
+                } else {
+                    info!(
+                        "auto-selected sequential sparse runtime binding for problem_key={} with min_work_per_job={} and workers={}",
+                        problem_key, auto_plan.min_work_per_job, auto_plan.workers
+                    );
+                }
+            } else {
+                info!(
+                    "keeping default sparse runtime callback binding for problem_key={}",
+                    problem_key
+                );
+            }
         }
         AotExecutionPolicy::SequentialOnly => {
             if matches!(bundle.effective_backend(), SelectedBackendKind::AotCompiled)
@@ -1138,27 +1940,38 @@ pub fn frozen_state_from_legacy_solver_bundle(
         updated_resolver: None,
     }
 }
-
+//=============================================================================================
+// TESTS
+//=============================================================================================
 #[cfg(test)]
 mod tests {
     use super::{
-        AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, DampedSolverBuildRequest,
-        FrozenSolverBuildRequest, build_output_parent_for_problem, sanitize_generated_name,
+        AotBuildPolicy, AotChunkingPolicy, AotCompileConfig, AotExecutionPolicy,
+        BandedGeneratedBackendMode, DampedSolverBuildRequest, FrozenSolverBuildRequest,
+        GeneratedBackendConfig,
     };
-    use crate::symbolic::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
-    use crate::symbolic::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
-    use crate::symbolic::codegen_aot_registry::AotRegistry;
-    use crate::symbolic::codegen_aot_resolution::AotResolver;
-    use crate::symbolic::codegen_aot_runtime_link::{
+    use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+    use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+    use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
+    use crate::symbolic::codegen::codegen_aot_runtime_link::{
         LinkedResidualChunk, LinkedSparseAotBackend, LinkedSparseJacobianChunk,
         register_linked_sparse_backend, unregister_linked_sparse_backend,
     };
-    use crate::symbolic::codegen_backend_selection::{BackendSelectionPolicy, SelectedBackendKind};
-    use crate::symbolic::codegen_manifest::PreparedProblemManifest;
-    use crate::symbolic::codegen_orchestrator::{ParallelExecutorConfig, ParallelFallbackPolicy};
-    use crate::symbolic::codegen_provider_api::PreparedProblem;
+    use crate::symbolic::codegen::codegen_backend_selection::{
+        BackendSelectionPolicy, SelectedBackendKind,
+    };
+    use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
+    use crate::symbolic::codegen::codegen_orchestrator::{
+        ParallelExecutorConfig, ParallelFallbackPolicy,
+    };
+    use crate::symbolic::codegen::codegen_provider_api::PreparedProblem;
+    use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
+        AotBuildProfile, AotBuildRequest,
+    };
     use crate::symbolic::symbolic_engine::Expr;
-    use crate::symbolic::symbolic_functions_BVP::{BvpBackendIntegrationError, Jacobian};
+    use crate::symbolic::symbolic_functions_BVP::{
+        BvpBackendIntegrationError, BvpSymbolicAssemblyBackend, Jacobian,
+    };
     use faer::Col;
     use std::collections::HashMap;
     use std::fs;
@@ -1181,6 +1994,39 @@ mod tests {
         (eq_system, values, arg, border_conditions)
     }
 
+    fn parameterized_bvp_inputs() -> (
+        Vec<Expr>,
+        Vec<String>,
+        String,
+        Vec<String>,
+        HashMap<String, Vec<(usize, f64)>>,
+    ) {
+        let eq_system = vec![
+            Expr::parse_expression("a*(y-z)"),
+            Expr::parse_expression("a*z^3"),
+        ];
+        let values = vec!["y".to_string(), "z".to_string()];
+        let arg = "x".to_string();
+        let params = vec!["a".to_string()];
+        let mut border_conditions = HashMap::new();
+        border_conditions.insert("y".to_string(), vec![(0, 0.0), (1, 0.0)]);
+        border_conditions.insert("z".to_string(), vec![(0, 1.0), (1, 1.0)]);
+        (eq_system, values, arg, params, border_conditions)
+    }
+
+    #[test]
+    fn sparse_build_if_missing_release_defaults_to_dev_fastest_compile_preset() {
+        let config = super::GeneratedBackendConfig::sparse_build_if_missing_release();
+        assert_eq!(
+            config.aot_build_policy,
+            super::AotBuildPolicy::BuildIfMissing {
+                profile: super::AotBuildProfile::Release,
+            }
+        );
+        assert_eq!(config.aot_compile_config, AotCompileConfig::dev_fastest());
+        assert_eq!(config.aot_codegen_backend, AotCodegenBackend::Rust);
+    }
+
     fn baseline_sparse_residual(args: &Col<f64>) -> Vec<f64> {
         let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
         let mut staged = Jacobian::new();
@@ -1201,11 +2047,11 @@ mod tests {
         let prepared_bridge = staged.prepare_sparse_aot_problem(
             "eval_bvp_residual",
             "eval_bvp_sparse_values",
-            crate::symbolic::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
-            crate::symbolic::codegen_runtime_api::recommended_row_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
@@ -1279,11 +2125,11 @@ mod tests {
         let prepared_bridge = staged.prepare_sparse_aot_problem(
             "eval_bvp_residual",
             "eval_bvp_sparse_values",
-            crate::symbolic::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
-            crate::symbolic::codegen_runtime_api::recommended_row_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
@@ -1388,16 +2234,108 @@ mod tests {
         let dir = unique_test_artifact_dir(&problem_key);
         fs::create_dir_all(&dir).expect("workspace test dir should be creatable");
         let build = AotBuildRequest::new(
-            generated_aot_crate_from_prepared_problem(
+            prepared_bridge.generated_aot_crate(
                 "generated_bvp_solver_handoff_fixture",
                 "generated_bvp_solver_handoff_module",
-                &prepared,
             ),
             dir.as_path(),
             AotBuildProfile::Release,
         )
         .materialize()
         .expect("build request should materialize");
+        fs::create_dir_all(&build.artifact_dir).expect("artifact dir should be creatable");
+        fs::write(&build.expected_rlib, b"fake rlib").expect("expected rlib should be writable");
+
+        let mut registry = AotRegistry::new();
+        registry.register_materialized_build(manifest, &build);
+        (AotResolver::new(registry), problem_key)
+    }
+
+    fn register_parameterized_linked_backend() -> (AotResolver, String) {
+        let (eq_system, values, arg, params, border_conditions) = parameterized_bvp_inputs();
+        let param_refs = params.iter().map(|name| name.as_str()).collect::<Vec<_>>();
+        let mut staged = Jacobian::new();
+        staged.set_params(Some(param_refs.as_slice()));
+        staged.discretization_system_BVP_par(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            Some(6),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+        staged.calc_jacobian_parallel_smart_optimized();
+        let prepared_bridge = staged.prepare_sparse_aot_problem(
+            "eval_bvp_residual",
+            "eval_bvp_sparse_values",
+            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
+                staged.vector_of_functions.len(),
+                4,
+            ),
+            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
+                staged.vector_of_functions.len(),
+                4,
+            ),
+        );
+        let problem_key = prepared_bridge.problem_key();
+        let input_name_strings = prepared_bridge
+            .param_names
+            .iter()
+            .chain(prepared_bridge.variable_names.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let residual_input_name_strings = input_name_strings.clone();
+        let jacobian_input_name_strings = input_name_strings.clone();
+        let residual_exprs = prepared_bridge.residuals.clone();
+        let sparse_exprs = prepared_bridge.sparse_entries.clone();
+        let residual_len = prepared_bridge.shape.0;
+        let shape = prepared_bridge.shape;
+        let nnz = sparse_exprs.len();
+
+        register_linked_sparse_backend(LinkedSparseAotBackend::new(
+            problem_key.clone(),
+            residual_len,
+            shape,
+            nnz,
+            Arc::new(move |args, out| {
+                let input_names = residual_input_name_strings
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>();
+                for (slot, expr) in out.iter_mut().zip(residual_exprs.iter()) {
+                    *slot = expr.lambdify_borrowed_thread_safe(&input_names)(args);
+                }
+            }),
+            Arc::new(move |args, out| {
+                let input_names = jacobian_input_name_strings
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>();
+                for (slot, (_, _, expr)) in out.iter_mut().zip(sparse_exprs.iter()) {
+                    *slot = expr.lambdify_borrowed_thread_safe(&input_names)(args);
+                }
+            }),
+        ));
+
+        let prepared = PreparedProblem::sparse(prepared_bridge.as_prepared_problem());
+        let manifest = PreparedProblemManifest::from(&prepared);
+        let dir = unique_test_artifact_dir(&problem_key);
+        fs::create_dir_all(&dir).expect("workspace test dir should be creatable");
+        let build = AotBuildRequest::new(
+            prepared_bridge.generated_aot_crate(
+                "generated_bvp_solver_parameterized_fixture",
+                "generated_bvp_solver_parameterized_module",
+            ),
+            dir.as_path(),
+            AotBuildProfile::Release,
+        )
+        .materialize()
+        .expect("parameterized build request should materialize");
         fs::create_dir_all(&build.artifact_dir).expect("artifact dir should be creatable");
         fs::write(&build.expected_rlib, b"fake rlib").expect("expected rlib should be writable");
 
@@ -1436,12 +2374,14 @@ mod tests {
         );
         assert_eq!(
             execution.selected().effective_backend,
-            crate::symbolic::codegen_backend_selection::SelectedBackendKind::AotCompiled
+            crate::symbolic::codegen::codegen_backend_selection::SelectedBackendKind::AotCompiled
         );
         let request = DampedSolverBuildRequest {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1456,7 +2396,13 @@ mod tests {
             resolver: Some(resolver.clone()),
             aot_execution_policy: AotExecutionPolicy::Auto,
             aot_build_policy: AotBuildPolicy::UseIfAvailable,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let state = request.generate().expect("damped handoff should build");
@@ -1504,12 +2450,14 @@ mod tests {
         );
         assert_eq!(
             execution.selected().effective_backend,
-            crate::symbolic::codegen_backend_selection::SelectedBackendKind::AotCompiled
+            crate::symbolic::codegen::codegen_backend_selection::SelectedBackendKind::AotCompiled
         );
         let request = FrozenSolverBuildRequest {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1522,7 +2470,13 @@ mod tests {
             resolver: Some(resolver.clone()),
             aot_execution_policy: AotExecutionPolicy::Auto,
             aot_build_policy: AotBuildPolicy::UseIfAvailable,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let state = request.generate().expect("frozen handoff should build");
@@ -1549,6 +2503,8 @@ mod tests {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1568,7 +2524,13 @@ mod tests {
                 fallback_policy: ParallelFallbackPolicy::Never,
             }),
             aot_build_policy: AotBuildPolicy::UseIfAvailable,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let state = request
@@ -1594,6 +2556,8 @@ mod tests {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1608,7 +2572,13 @@ mod tests {
             resolver: None,
             aot_execution_policy: AotExecutionPolicy::Auto,
             aot_build_policy: AotBuildPolicy::RequirePrebuilt,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let err = request
@@ -1622,6 +2592,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn generated_backend_config_can_select_non_rust_codegen_backend() {
+        let config = super::GeneratedBackendConfig::sparse_build_if_missing_release()
+            .with_aot_codegen_backend(AotCodegenBackend::C);
+
+        assert_eq!(config.aot_codegen_backend, AotCodegenBackend::C);
+        assert_eq!(
+            config.aot_build_policy,
+            AotBuildPolicy::BuildIfMissing {
+                profile: super::AotBuildProfile::Release,
+            }
+        );
+    }
+
+    #[test]
+    fn banded_generated_backend_defaults_select_faithful_lapack_without_refinement() {
+        let config = GeneratedBackendConfig::from_banded_mode(BandedGeneratedBackendMode::Defaults);
+
+        assert_eq!(
+            config.matrix_backend_override,
+            Some(crate::symbolic::codegen::codegen_provider_api::MatrixBackend::Banded)
+        );
+        assert_eq!(
+            config.banded_linear_solver_config.policy,
+            crate::somelinalg::banded::LinearSolverPolicy::ForceBanded
+        );
+        assert_eq!(
+            config
+                .banded_linear_solver_config
+                .iterative_refinement_steps,
+            0
+        );
+        assert_eq!(config.effective_method("Sparse"), "Banded");
+        assert_eq!(
+            config.effective_backend_policy("Banded"),
+            BackendSelectionPolicy::PreferAotThenLambdify
+        );
+    }
+
+    #[test]
+    fn banded_lambdify_preset_keeps_banded_matrix_backend() {
+        let config = GeneratedBackendConfig::from_banded_mode(BandedGeneratedBackendMode::Lambdify);
+
+        assert_eq!(config.effective_method("Sparse"), "Banded");
+        assert_eq!(
+            config.effective_backend_policy("Banded"),
+            BackendSelectionPolicy::LambdifyOnly
+        );
+        assert_eq!(
+            config
+                .banded_linear_solver_config
+                .iterative_refinement_steps,
+            0
+        );
     }
 
     #[test]
@@ -1645,11 +2671,11 @@ mod tests {
         let prepared_bridge = staged.prepare_sparse_aot_problem(
             "eval_bvp_residual",
             "eval_bvp_sparse_values",
-            crate::symbolic::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
-            crate::symbolic::codegen_runtime_api::recommended_row_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
@@ -1659,6 +2685,8 @@ mod tests {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1674,7 +2702,13 @@ mod tests {
                 profile:
                     crate::numerical::BVP_Damp::generated_solver_handoff::AotBuildProfile::Release,
             },
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let state = request
@@ -1694,16 +2728,7 @@ mod tests {
             "updated resolver should see the freshly built compiled artifact"
         );
 
-        let build_dir = build_output_parent_for_problem(&problem_key);
-        let crate_name = format!(
-            "generated_bvp_sparse_{}",
-            sanitize_generated_name(&problem_key)
-        );
-        let expected_rlib = build_dir
-            .join(&crate_name)
-            .join("target")
-            .join("release")
-            .join(format!("lib{crate_name}.rlib"));
+        let expected_rlib = &resolved.registered.expected_rlib;
         assert!(
             expected_rlib.exists(),
             "build-if-missing should produce compiled rlib at {}",
@@ -1732,11 +2757,11 @@ mod tests {
         let prepared_bridge = staged.prepare_sparse_aot_problem(
             "eval_bvp_residual",
             "eval_bvp_sparse_values",
-            crate::symbolic::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
-            crate::symbolic::codegen_runtime_api::recommended_row_chunking_for_parallelism(
+            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
                 staged.vector_of_functions.len(),
                 4,
             ),
@@ -1746,10 +2771,9 @@ mod tests {
         let dir = unique_test_artifact_dir(&prepared_bridge.problem_key());
         fs::create_dir_all(&dir).expect("workspace test dir should be creatable");
         let build = AotBuildRequest::new(
-            generated_aot_crate_from_prepared_problem(
+            prepared_bridge.generated_aot_crate(
                 "generated_bvp_solver_registered_only_fixture",
                 "generated_bvp_solver_registered_only_module",
-                &prepared,
             ),
             dir.as_path(),
             AotBuildProfile::Release,
@@ -1765,6 +2789,8 @@ mod tests {
             eq_system,
             values,
             arg,
+            param_names: None,
+            param_values: None,
             t0: 0.0,
             n_steps: Some(6),
             h: None,
@@ -1779,7 +2805,13 @@ mod tests {
             resolver: Some(resolver),
             aot_execution_policy: AotExecutionPolicy::Auto,
             aot_build_policy: AotBuildPolicy::RequirePrebuilt,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
             aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
         };
 
         let err = request
@@ -1793,5 +2825,149 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn damped_solver_handoff_reuses_compiled_backend_when_only_param_values_change() {
+        let (resolver, problem_key) = register_parameterized_linked_backend();
+        let (eq_system, values, arg, params, border_conditions) = parameterized_bvp_inputs();
+        let param_refs = params.iter().map(|name| name.as_str()).collect::<Vec<_>>();
+
+        let mut probe_a = Jacobian::new();
+        probe_a.set_params(Some(param_refs.as_slice()));
+        probe_a.set_param_values(Some(vec![1.0]));
+        let execution_a = probe_a.generate_BVP_with_backend_selection(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            Some(param_refs.as_slice()),
+            0.0,
+            None,
+            Some(6),
+            None,
+            None,
+            border_conditions.clone(),
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            Some((2, 2)),
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            Some(&resolver),
+        );
+
+        let mut probe_b = Jacobian::new();
+        probe_b.set_params(Some(param_refs.as_slice()));
+        probe_b.set_param_values(Some(vec![3.0]));
+        let execution_b = probe_b.generate_BVP_with_backend_selection(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            Some(param_refs.as_slice()),
+            0.0,
+            None,
+            Some(6),
+            None,
+            None,
+            border_conditions.clone(),
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            Some((2, 2)),
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            Some(&resolver),
+        );
+
+        assert_eq!(
+            execution_a.selected().prepared_problem.problem_key(),
+            problem_key
+        );
+        assert_eq!(
+            execution_b.selected().prepared_problem.problem_key(),
+            problem_key
+        );
+
+        let request_a = DampedSolverBuildRequest {
+            eq_system: eq_system.clone(),
+            values: values.clone(),
+            arg: arg.clone(),
+            param_names: Some(params.clone()),
+            param_values: Some(vec![1.0]),
+            t0: 0.0,
+            n_steps: Some(6),
+            h: None,
+            mesh: None,
+            border_conditions: border_conditions.clone(),
+            bounds: None,
+            rel_tolerance: None,
+            scheme: "forward".to_string(),
+            method: "Sparse".to_string(),
+            bandwidth: Some((2, 2)),
+            backend_policy: BackendSelectionPolicy::PreferAotThenLambdify,
+            resolver: Some(resolver.clone()),
+            aot_execution_policy: AotExecutionPolicy::Auto,
+            aot_build_policy: AotBuildPolicy::RequirePrebuilt,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
+            aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+        };
+
+        let request_b = DampedSolverBuildRequest {
+            eq_system,
+            values,
+            arg,
+            param_names: Some(params),
+            param_values: Some(vec![3.0]),
+            t0: 0.0,
+            n_steps: Some(6),
+            h: None,
+            mesh: None,
+            border_conditions,
+            bounds: None,
+            rel_tolerance: None,
+            scheme: "forward".to_string(),
+            method: "Sparse".to_string(),
+            bandwidth: Some((2, 2)),
+            backend_policy: BackendSelectionPolicy::PreferAotThenLambdify,
+            resolver: Some(resolver),
+            aot_execution_policy: AotExecutionPolicy::Auto,
+            aot_build_policy: AotBuildPolicy::RequirePrebuilt,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
+            aot_chunking_policy: AotChunkingPolicy::default(),
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+        };
+
+        let state_a = request_a
+            .generate()
+            .expect("parameterized prebuilt backend should be callable for first param set");
+        let state_b = request_b
+            .generate()
+            .expect("parameterized prebuilt backend should be callable for second param set");
+
+        let y = Col::from_fn(state_a.variable_string.len(), |index| {
+            0.2 + index as f64 * 0.01
+        });
+        let residual_a = state_a.fun.call(0.0, &y).to_DVectorType();
+        let residual_b = state_b.fun.call(0.0, &y).to_DVectorType();
+        let max_diff = residual_a
+            .iter()
+            .zip(residual_b.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff > 1e-8,
+            "changing only param_values should change residuals without rebuild"
+        );
+
+        unregister_linked_sparse_backend(&problem_key);
     }
 }

@@ -744,7 +744,7 @@ impl MatrixType for faer_mat {
 
                         let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
 
-                        let res = ColRef::from_slice(res_vec.as_slice()).to_owned(); // TODO! find more idiomatic 
+                        let res = ColRef::from_slice(res_vec.as_slice()).to_owned(); // TODO! find more idiomatic
 
                         Box::new(res)
                     }

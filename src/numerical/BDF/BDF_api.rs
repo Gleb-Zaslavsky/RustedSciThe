@@ -125,9 +125,15 @@
 //! - Automatic step size reduction for difficult regions
 //! - Clear error messages for debugging
 
-use crate::numerical::BDF::BDF_solver::BDF;
+use crate::numerical::BDF::BDF_solver::{BDF, BdfJacobian, BdfLinearBackend};
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, SharedIvpParameterValues, SymbolicIvpProblemOptions,
+};
+use crate::symbolic::symbolic_ivp_generated::{
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
+};
 extern crate nalgebra as na;
 use crate::Utils::plots::plots;
 use crate::numerical::BDF::common::NumberOrVec;
@@ -135,7 +141,164 @@ use na::{DMatrix, DVector};
 
 use csv::Writer;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+type BdfNativeJacobianFactory =
+    dyn Fn(Option<SharedIvpParameterValues>) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>;
+
+/// Grouped setup for one symbolic BDF solve.
+#[derive(Clone)]
+pub struct BdfSolverOptions {
+    pub eq_system: Vec<Expr>,
+    pub values: Vec<String>,
+    pub arg: String,
+    pub method: String,
+    pub t0: f64,
+    pub y0: DVector<f64>,
+    pub t_bound: f64,
+    pub max_step: f64,
+    pub rtol: f64,
+    pub atol: f64,
+    pub jac_sparsity: Option<DMatrix<f64>>,
+    pub vectorized: bool,
+    pub first_step: Option<f64>,
+    pub max_bdf_order: usize,
+    pub equation_parameters: Option<Vec<String>>,
+    pub equation_parameter_values: Option<DVector<f64>>,
+    pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+}
+
+impl BdfSolverOptions {
+    /// Creates grouped BDF options.
+    pub fn new(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        method: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+        jac_sparsity: Option<DMatrix<f64>>,
+        vectorized: bool,
+        first_step: Option<f64>,
+    ) -> Self {
+        Self {
+            eq_system,
+            values,
+            arg,
+            method,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol,
+            atol,
+            jac_sparsity,
+            vectorized,
+            first_step,
+            max_bdf_order: 5,
+            equation_parameters: None,
+            equation_parameter_values: None,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+        }
+    }
+
+    /// Applies one explicit generated-backend config.
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Declares symbolic parameter names used by the IVP right-hand side.
+    pub fn with_equation_parameters(mut self, parameters: Vec<String>) -> Self {
+        self.equation_parameters = Some(parameters);
+        self
+    }
+
+    /// Installs initial numeric values for declared symbolic parameters.
+    pub fn with_equation_parameter_values(mut self, values: DVector<f64>) -> Self {
+        self.equation_parameter_values = Some(values);
+        self
+    }
+
+    /// Caps adaptive BDF order selection.
+    ///
+    /// Valid values are `1..=5`, matching the tested variable-order BDF range.
+    pub fn with_max_bdf_order(mut self, max_bdf_order: usize) -> Self {
+        self.max_bdf_order = max_bdf_order;
+        self
+    }
+
+    /// Applies one high-level dense generated backend mode.
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    ///
+    /// Practical note:
+    /// for `BDF` this is an optional optimization, not a universal default.
+    /// Many BDF scenarios stay residual-dominated, so benchmark against
+    /// `Lambdify` before assuming the generated path will win.
+    pub fn with_dense_generated_backend_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` when runtime throughput matters more.
+    ///
+    /// Practical note:
+    /// this is the runtime-oriented dense IVP option. It is worth trying on
+    /// larger repeated runs, but for `BDF` the dominant cost is often still the
+    /// residual path rather than Jacobian generation itself.
+    pub fn with_dense_generated_backend_c_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn with_dense_generated_backend_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        )
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    ///
+    /// For `BDF`, treat this as a "benchmark me on your problem" preset rather
+    /// than a blanket replacement for `Lambdify`.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        )
+    }
+}
 
 /// High-level ODE solver interface with symbolic expression support.
 ///
@@ -181,6 +344,8 @@ pub struct ODEsolver {
     vectorized: bool,
     /// Optional initial step size (auto-selected if None)
     first_step: Option<f64>,
+    /// Maximum adaptive BDF order allowed for the low-level BDF engine.
+    max_bdf_order: usize,
 
     /// Current integration status: "running", "finished", "failed", "stopped_by_condition"
     status: String,
@@ -195,6 +360,23 @@ pub struct ODEsolver {
     y_result: DMatrix<f64>,
     /// Optional stop conditions: variable_name → target_value
     stop_condition: Option<HashMap<String, f64>>,
+    /// Optional symbolic equation parameters used by `f(t, y, p)`.
+    equation_parameters: Option<Vec<String>>,
+    /// Current numeric values for `equation_parameters`.
+    equation_parameter_values: Option<DVector<f64>>,
+    /// Shared parameter storage reused by params-aware symbolic closures.
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    /// Whether the current symbolic backend has already been prepared.
+    backend_prepared: bool,
+    /// High-level generated-backend orchestration config reused across solves.
+    generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    statistics: Arc<Mutex<IvpBackendStatistics>>,
+    /// Optional factory for replacing the default dense Newton linear backend
+    /// after each generated BDF instance is initialized.
+    bdf_linear_backend_factory: Option<Box<dyn Fn() -> Box<dyn BdfLinearBackend>>>,
+    /// Optional factory for replacing the dense generated Jacobian callback
+    /// with a native sparse/banded Jacobian callback.
+    bdf_native_jacobian_factory: Option<Box<BdfNativeJacobianFactory>>,
 }
 impl ODEsolver {
     /// Creates a new ODE solver with the specified parameters.
@@ -260,6 +442,7 @@ impl ODEsolver {
             jac_sparsity,
             vectorized,
             first_step,
+            max_bdf_order: 5,
             status: "running".to_string(),
             Solver_instance: New,
             message: None,
@@ -267,7 +450,232 @@ impl ODEsolver {
             t_result: DVector::zeros(1),
             y_result: DMatrix::zeros(1, 1),
             stop_condition: None,
+            equation_parameters: None,
+            equation_parameter_values: None,
+            parameter_values_handle: None,
+            backend_prepared: false,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
+            bdf_linear_backend_factory: None,
+            bdf_native_jacobian_factory: None,
         }
+    }
+
+    /// Preferred grouped setup path for symbolic BDF solves.
+    pub fn new_with_options(options: BdfSolverOptions) -> Self {
+        let mut solver = Self::new(
+            options.eq_system,
+            options.values,
+            options.arg,
+            options.method,
+            options.t0,
+            options.y0,
+            options.t_bound,
+            options.max_step,
+            options.rtol,
+            options.atol,
+            options.jac_sparsity,
+            options.vectorized,
+            options.first_step,
+        )
+        .with_generated_backend_config(options.generated_backend_config);
+        solver.max_bdf_order = options.max_bdf_order;
+        solver.equation_parameters = options.equation_parameters;
+        solver.equation_parameter_values = options.equation_parameter_values;
+        solver
+    }
+
+    /// Installs one high-level generated-backend orchestration config.
+    pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
+        self.generated_backend_config = config;
+        self.backend_prepared = false;
+    }
+
+    /// Returns the current generated-backend orchestration config.
+    pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
+        &self.generated_backend_config
+    }
+
+    pub fn get_statistics(&self) -> IvpBackendStatistics {
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .clone()
+    }
+
+    pub fn statistics_report(&self) -> String {
+        self.get_statistics().table_report()
+    }
+
+    pub fn bdf_max_order_cap(&self) -> usize {
+        self.Solver_instance.max_order_cap()
+    }
+
+    pub fn bdf_current_order(&self) -> usize {
+        self.Solver_instance.current_order()
+    }
+
+    pub fn bdf_equal_step_count(&self) -> usize {
+        self.Solver_instance.equal_step_count()
+    }
+
+    /// Installs a factory for the BDF Newton linear backend.
+    ///
+    /// `ODEsolver::try_generate` creates a fresh low-level BDF instance, so a
+    /// factory is used instead of a single backend object.  This is the bridge
+    /// LSODE2 will use for sparse/banded Newton solves while preserving the
+    /// existing symbolic/generated IVP setup path.
+    pub fn set_bdf_linear_backend_factory<F>(&mut self, factory: F)
+    where
+        F: Fn() -> Box<dyn BdfLinearBackend> + 'static,
+    {
+        self.bdf_linear_backend_factory = Some(Box::new(factory));
+        self.backend_prepared = false;
+    }
+
+    /// Builder-style alias for [`Self::set_bdf_linear_backend_factory`].
+    pub fn with_bdf_linear_backend_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> Box<dyn BdfLinearBackend> + 'static,
+    {
+        self.set_bdf_linear_backend_factory(factory);
+        self
+    }
+
+    /// Installs a factory for native BDF Jacobian evaluators.
+    ///
+    /// The regular IVP path still prepares dense Jacobian closures. This hook
+    /// lets LSODE2 override that closure with a sparse triplet or banded
+    /// evaluator after the low-level BDF instance has been initialized.
+    pub fn set_bdf_native_jacobian_factory<F>(&mut self, factory: F)
+    where
+        F: Fn(
+                Option<SharedIvpParameterValues>,
+            ) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>
+            + 'static,
+    {
+        self.bdf_native_jacobian_factory = Some(Box::new(factory));
+        self.backend_prepared = false;
+    }
+
+    /// Builder-style alias for [`Self::set_bdf_native_jacobian_factory`].
+    pub fn with_bdf_native_jacobian_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(
+                Option<SharedIvpParameterValues>,
+            ) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>
+            + 'static,
+    {
+        self.set_bdf_native_jacobian_factory(factory);
+        self
+    }
+
+    /// Builder-style generated backend setup.
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.set_generated_backend_config(config);
+        self
+    }
+
+    /// Applies one high-level dense generated backend mode.
+    pub fn set_dense_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.set_generated_backend_config(config);
+    }
+
+    /// Builder-style preset for the dense generated backend mode.
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        self.set_dense_generated_backend_mode(mode);
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    ///
+    /// In `BDF` this is primarily a low-startup native option to compare
+    /// against `Lambdify`, not an always-better default.
+    pub fn set_dense_generated_backend_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` for runtime-oriented repeated solves.
+    ///
+    /// Prefer this only when you expect enough repeated dense residual work to
+    /// amortize native build/setup cost.
+    pub fn set_dense_generated_backend_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn set_dense_generated_backend_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        );
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    ///
+    /// `BDF` often remains residual-dominated, so keep `Lambdify` in mind as a
+    /// strong baseline when end-to-end latency is the priority.
+    pub fn set_dense_generated_backend_for_repeated_solves(
+        &mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        );
+    }
+
+    /// Builder-style alias for `C + tcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_tcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_tcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for `C + gcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_gcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_gcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for Zig dense generated backend setup.
+    pub fn with_dense_generated_backend_zig(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_zig(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for the recommended repeated-solve IVP preset.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_for_repeated_solves(output_parent_dir);
+        self
     }
 
     /// Sets stop conditions for early termination of integration.
@@ -286,6 +694,40 @@ impl ODEsolver {
     /// ```
     pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
         self.stop_condition = Some(stop_condition);
+    }
+
+    /// Declares symbolic parameter names used by the IVP right-hand side.
+    pub fn set_equation_parameters(&mut self, params: Option<&[&str]>) {
+        self.equation_parameters =
+            params.map(|params| params.iter().map(|p| (*p).to_string()).collect());
+        self.backend_prepared = false;
+    }
+
+    /// Updates numeric values of symbolic equation parameters without recompiling
+    /// already prepared closures.
+    pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), IvpBackendError> {
+        if let Some(parameters) = self.equation_parameters.as_ref() {
+            if parameters.len() != values.len() {
+                return Err(IvpBackendError::ParameterCountMismatch {
+                    expected: parameters.len(),
+                    actual: values.len(),
+                });
+            }
+        } else if !values.is_empty() {
+            return Err(IvpBackendError::ParameterCountMismatch {
+                expected: 0,
+                actual: values.len(),
+            });
+        }
+
+        if let Some(handle) = self.parameter_values_handle.as_ref() {
+            let mut slot = handle
+                .write()
+                .expect("shared IVP parameter state lock poisoned");
+            *slot = values.clone();
+        }
+        self.equation_parameter_values = Some(values);
+        Ok(())
     }
 
     /// Checks if any stop condition has been met.
@@ -320,32 +762,176 @@ impl ODEsolver {
     /// # Implementation Details
     /// Uses the symbolic engine to automatically compute ∂f/∂y analytically,
     /// which is crucial for stiff problem performance.
-    pub fn generate(&mut self) {
-        let mut Jacobian_instance = Jacobian::new();
-        Jacobian_instance.generate_IVP_ODEsolver(
+    pub fn try_generate(&mut self) -> Result<(), IvpBackendError> {
+        let start = Instant::now();
+        let mut options = SymbolicIvpProblemOptions::new();
+        if let Some(parameters) = self.equation_parameters.clone() {
+            options = options.with_equation_parameters(parameters);
+        }
+        if let Some(values) = self.equation_parameter_values.clone() {
+            options = options.with_equation_parameter_values(values);
+        }
+
+        if self.bdf_native_jacobian_factory.is_some() {
+            return self.try_generate_with_native_jacobian(start, options);
+        }
+
+        let prepared = prepare_generated_symbolic_ivp_problem(
             self.eq_system.clone(),
             self.values.clone(),
             self.arg.clone(),
-        );
-        let fun = Jacobian_instance.lambdified_functions_IVP_DVector;
-        let jac = Jacobian_instance.function_jacobian_IVP_DMatrix;
+            options.with_aot_options(self.generated_backend_config.aot_options),
+            self.generated_backend_config.clone(),
+        )
+        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+            message: err.to_string(),
+        })?;
+        self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+        let prepared_problem = prepared.into_problem();
+        let parameter_values_handle = prepared_problem.parameter_values_handle();
+        let fun = prepared_problem.residual;
+        let jac = prepared_problem.jacobian;
+        let stats_for_fun = Arc::clone(&self.statistics);
+        let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let out = fun(t, y);
+            stats_for_fun
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_residual_duration(start.elapsed());
+            out
+        });
+        let stats_for_jac = Arc::clone(&self.statistics);
+        let wrapped_jac = Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+            let start = Instant::now();
+            let out = jac(t, y);
+            stats_for_jac
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_jacobian_duration(start.elapsed());
+            out
+        });
+        self.parameter_values_handle = parameter_values_handle.clone();
+
         if self.method == "BDF" {
             let mut Solver_instance = BDF::new();
+            Solver_instance.set_max_order_cap(self.max_bdf_order);
             Solver_instance.set_initial(
-                fun,
+                wrapped_fun,
                 self.t0,
                 self.y0.clone(),
                 self.t_bound,
                 self.max_step,
                 NumberOrVec::Number(self.rtol),
                 NumberOrVec::Number(self.atol),
-                Some(jac),
+                Some(wrapped_jac),
                 None,
                 self.vectorized,
                 self.first_step,
             );
+            if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
+                Solver_instance.set_native_jacobian(
+                    self.timed_native_jacobian(factory(parameter_values_handle.clone())),
+                );
+            }
+            if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
+                Solver_instance.set_linear_backend(factory());
+            }
             self.Solver_instance = Solver_instance;
         }
+        self.backend_prepared = true;
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .record_backend_prepare_duration(start.elapsed());
+        Ok(())
+    }
+
+    fn try_generate_with_native_jacobian(
+        &mut self,
+        start: std::time::Instant,
+        options: SymbolicIvpProblemOptions,
+    ) -> Result<(), IvpBackendError> {
+        let prepared = prepare_generated_symbolic_ivp_residual_problem(
+            self.eq_system.clone(),
+            self.values.clone(),
+            self.arg.clone(),
+            options.with_aot_options(self.generated_backend_config.aot_options),
+            self.generated_backend_config.clone(),
+        )
+        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+            message: err.to_string(),
+        })?;
+        self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+        let prepared_problem = prepared.into_problem();
+        let parameter_values_handle = prepared_problem.parameter_values_handle();
+        let fun = prepared_problem.residual;
+        let stats_for_fun = Arc::clone(&self.statistics);
+        let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let out = fun(t, y);
+            stats_for_fun
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_residual_duration(start.elapsed());
+            out
+        });
+        self.parameter_values_handle = parameter_values_handle.clone();
+
+        if self.method == "BDF" {
+            let mut solver_instance = BDF::new();
+            solver_instance.set_max_order_cap(self.max_bdf_order);
+            solver_instance.set_initial(
+                wrapped_fun,
+                self.t0,
+                self.y0.clone(),
+                self.t_bound,
+                self.max_step,
+                NumberOrVec::Number(self.rtol),
+                NumberOrVec::Number(self.atol),
+                None,
+                None,
+                self.vectorized,
+                self.first_step,
+            );
+            if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
+                solver_instance.set_native_jacobian(
+                    self.timed_native_jacobian(factory(parameter_values_handle.clone())),
+                );
+            }
+            if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
+                solver_instance.set_linear_backend(factory());
+            }
+            self.Solver_instance = solver_instance;
+        }
+
+        self.backend_prepared = true;
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .record_backend_prepare_duration(start.elapsed());
+        Ok(())
+    }
+
+    fn timed_native_jacobian(
+        &self,
+        mut jacobian: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
+    ) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> {
+        let stats_for_jac = Arc::clone(&self.statistics);
+        Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+            let start = Instant::now();
+            let out = jacobian(t, y);
+            stats_for_jac
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_jacobian_duration(start.elapsed());
+            out
+        })
+    }
+
+    pub fn generate(&mut self) {
+        self.try_generate()
+            .expect("BDF symbolic IVP backend generation should succeed");
     }
     /// Performs a single integration step.
     ///
@@ -414,8 +1000,13 @@ impl ODEsolver {
         let mut y: Vec<DVector<f64>> = Vec::new();
         let mut t: Vec<f64> = Vec::new();
         let mut _i: i64 = 0;
+        let (nfev_before, njev_before, nlu_before) = self.Solver_instance.counters();
         while integr_status.is_none() {
             self.step();
+            self.statistics
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .step_calls += 1;
             let _status: i8 = 0;
             _i += 1;
             if self.status == "finished".to_string() {
@@ -445,6 +1036,15 @@ impl ODEsolver {
         let t_res = DVector::from_vec(t);
         let duration = start.elapsed();
         println!("Program took {} milliseconds to run", duration.as_millis());
+        let (nfev_after, njev_after, nlu_after) = self.Solver_instance.counters();
+        let mut stats = self
+            .statistics
+            .lock()
+            .expect("IVP statistics lock poisoned");
+        stats.record_solve_duration(duration);
+        stats.bdf_nfev_total += nfev_after.saturating_sub(nfev_before);
+        stats.bdf_njev_total += njev_after.saturating_sub(njev_before);
+        stats.bdf_nlu_total += nlu_after.saturating_sub(nlu_before);
 
         self.t_result = t_res.clone();
         self.y_result = y_res.clone();
@@ -464,7 +1064,9 @@ impl ODEsolver {
     /// let (t_result, y_result) = solver.get_result();
     /// ```
     pub fn solve(&mut self) -> () {
-        self.generate();
+        if !self.backend_prepared {
+            self.generate();
+        }
         self.main_loop();
     }
 
@@ -563,7 +1165,118 @@ impl ODEsolver {
 mod tests {
     use super::*;
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
     use std::collections::HashMap;
+
+    #[test]
+    fn bdf_new_with_options_installs_generated_backend_mode() {
+        let solver = ODEsolver::new_with_options(
+            BdfSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                "BDF".to_string(),
+                0.0,
+                DVector::from_vec(vec![1.0]),
+                1.0,
+                0.1,
+                1e-6,
+                1e-8,
+                None,
+                false,
+                None,
+            )
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease),
+        );
+
+        assert_eq!(
+            solver.generated_backend_config().build_policy,
+            SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                profile: crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Release
+            }
+        );
+    }
+
+    #[test]
+    fn generated_backend_surface_mode_updates_bdf_config() {
+        let solver = ODEsolver::new(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "BDF".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            None,
+            false,
+            None,
+        )
+        .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::RequirePrebuilt);
+
+        assert_eq!(
+            solver.generated_backend_config().build_policy,
+            SymbolicIvpAotBuildPolicy::RequirePrebuilt
+        );
+    }
+
+    #[test]
+    fn bdf_generated_backend_surface_keeps_selected_zig_backend() {
+        let solver = ODEsolver::new(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "BDF".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            None,
+            false,
+            None,
+        )
+        .with_dense_generated_backend_zig("target/generated-ivp-tests")
+        .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease);
+
+        assert_eq!(
+            solver.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::Zig
+        );
+        assert_eq!(solver.generated_backend_config().aot_c_compiler, None);
+    }
+
+    #[test]
+    fn bdf_generated_backend_repeated_solves_alias_prefers_c_gcc() {
+        let solver = ODEsolver::new(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "BDF".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            None,
+            false,
+            None,
+        )
+        .with_dense_generated_backend_for_repeated_solves("target/generated-ivp-tests");
+
+        assert_eq!(
+            solver.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+        );
+        assert_eq!(
+            solver.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("gcc")
+        );
+    }
 
     #[test]
     fn test_bdf_riccati_equation() {

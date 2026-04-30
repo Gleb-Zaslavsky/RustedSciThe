@@ -1388,3 +1388,789 @@ mod tests_stop_conditions {
         assert!((final_y - 1.5).abs() <= tolerance);
     }
 }
+
+#[cfg(test)]
+mod tests_statistics_and_options {
+    use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions};
+    use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+    use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_ivp_generated::DenseIvpGeneratedBackendMode;
+    use nalgebra::DMatrix;
+    use nalgebra::DVector;
+    use std::process::Command;
+    use std::time::Instant;
+
+    struct RadauComparisonRow {
+        label: &'static str,
+        total_ms: f64,
+        prepare_ms: f64,
+        solve_ms: f64,
+        residual_ms_avg: f64,
+        jacobian_ms_avg: f64,
+        step_calls: usize,
+        newton_solves: usize,
+        newton_iters_avg: f64,
+    }
+
+    fn stiff_radau_options(parallel: bool) -> RadauSolverOptions {
+        let eq_system = vec![
+            Expr::parse_expression("-1000.0*y1 + y2"),
+            Expr::parse_expression("y1 - y2"),
+        ];
+        let values = vec!["y1".to_string(), "y2".to_string()];
+
+        RadauSolverOptions::new(
+            RadauOrder::Order5,
+            eq_system,
+            values,
+            "t".to_string(),
+            1e-6,
+            100,
+            Some(0.01),
+            0.0,
+            0.1,
+            DVector::from_vec(vec![1.0, 1.0]),
+        )
+        .with_parallel(parallel)
+    }
+
+    fn linear_decay_radau_options(parallel: bool) -> RadauSolverOptions {
+        let eq_system = vec![Expr::parse_expression("-y")];
+        let values = vec!["y".to_string()];
+
+        RadauSolverOptions::new(
+            RadauOrder::Order5,
+            eq_system,
+            values,
+            "t".to_string(),
+            1e-6,
+            50,
+            Some(0.01),
+            0.0,
+            1.0,
+            DVector::from_vec(vec![1.0]),
+        )
+        .with_parallel(parallel)
+    }
+
+    fn solve_with_measurement(
+        label: &'static str,
+        options: RadauSolverOptions,
+    ) -> RadauComparisonRow {
+        let mut solver = Radau::new_with_options(options);
+        let total_start = Instant::now();
+        solver.solve();
+        let total_ms = total_start.elapsed().as_secs_f64() * 1_000.0;
+        let stats = solver.get_statistics();
+
+        assert_eq!(
+            solver.get_status(),
+            "finished",
+            "Radau comparison scenario `{label}` should finish successfully"
+        );
+
+        RadauComparisonRow {
+            label,
+            total_ms,
+            prepare_ms: stats.backend_prepare_ms_total,
+            solve_ms: stats.solve_ms_total,
+            residual_ms_avg: stats.avg_residual_ms().unwrap_or(0.0),
+            jacobian_ms_avg: stats.avg_jacobian_ms().unwrap_or(0.0),
+            step_calls: stats.step_calls,
+            newton_solves: stats.newton_solve_calls,
+            newton_iters_avg: stats.avg_newton_iterations().unwrap_or(0.0),
+        }
+    }
+
+    fn print_comparison_table(scenario: &str, rows: &[RadauComparisonRow]) {
+        println!(
+            "[Radau compare] scenario={}, variants={}",
+            scenario,
+            rows.len()
+        );
+        println!(
+            "variant        | total_ms | setup_ms | solve_ms | residual_ms(avg) | jacobian_ms(avg) | steps | newton_solves | newton_iters(avg)"
+        );
+        println!(
+            "---------------------------------------------------------------------------------------------------------------------------------"
+        );
+        for row in rows {
+            println!(
+                "{:<14} | {:>8.3} | {:>8.3} | {:>8.3} | {:>16.6} | {:>16.6} | {:>5} | {:>13} | {:>16.3}",
+                row.label,
+                row.total_ms,
+                row.prepare_ms,
+                row.solve_ms,
+                row.residual_ms_avg,
+                row.jacobian_ms_avg,
+                row.step_calls,
+                row.newton_solves,
+                row.newton_iters_avg,
+            );
+        }
+    }
+
+    fn tcc_is_available() -> bool {
+        if let Ok(explicit) = std::env::var("RUSTEDSCITHE_TCC") {
+            return std::path::Path::new(&explicit).is_file();
+        }
+        Command::new("tcc").arg("-v").output().is_ok()
+    }
+
+    #[test]
+    fn test_radau_new_with_options_preserves_parallel_flag() {
+        let eq_system = vec![Expr::parse_expression("-y")];
+        let values = vec!["y".to_string()];
+        let options = RadauSolverOptions::new(
+            RadauOrder::Order3,
+            eq_system,
+            values,
+            "t".to_string(),
+            1e-6,
+            25,
+            Some(0.1),
+            0.0,
+            0.5,
+            DVector::from_vec(vec![1.0]),
+        )
+        .with_parallel(true);
+
+        let solver = Radau::new_with_options(options);
+        assert!(solver.parallel);
+        assert!(solver.newton.parallel);
+    }
+
+    #[test]
+    fn test_radau_statistics_are_collected_after_solve() {
+        let eq_system = vec![Expr::parse_expression("-y")];
+        let values = vec!["y".to_string()];
+        let options = RadauSolverOptions::new(
+            RadauOrder::Order3,
+            eq_system,
+            values,
+            "t".to_string(),
+            1e-6,
+            25,
+            Some(0.1),
+            0.0,
+            0.5,
+            DVector::from_vec(vec![1.0]),
+        );
+
+        let mut solver = Radau::new_with_options(options);
+        solver.solve();
+
+        let stats = solver.get_statistics();
+        let report = solver.statistics_report();
+        assert!(stats.backend_prepare_calls >= 1);
+        assert!(stats.solve_calls >= 1);
+        assert!(stats.step_calls >= 1);
+        assert!(stats.newton_solve_calls >= 1);
+        assert!(stats.newton_iterations_total >= 1);
+        assert!(stats.residual_calls >= 1);
+        assert!(stats.jacobian_calls >= 1);
+        assert!(stats.linear_solves >= 1);
+        assert!(stats.lu_factorizations >= 1);
+        assert!(report.contains("prepare_calls="));
+        assert!(report.contains("newton_solves="));
+    }
+
+    #[test]
+    fn test_radau_statistics_report_for_stiff_system() {
+        let mut solver = Radau::new_with_options(stiff_radau_options(false));
+        solver.solve();
+
+        let stats = solver.get_statistics();
+        let report = solver.statistics_report();
+        println!("[Radau stats] sequential stiff-system => {}", report);
+
+        assert_eq!(solver.get_status(), "finished");
+        assert!(stats.backend_prepare_ms_total >= 0.0);
+        assert!(stats.solve_ms_total > 0.0);
+        assert!(stats.step_calls > 0);
+        assert!(stats.newton_solve_calls >= stats.step_calls);
+        assert!(stats.newton_iterations_total >= stats.newton_solve_calls);
+        assert!(stats.residual_calls >= stats.newton_iterations_total);
+        assert!(stats.jacobian_calls >= stats.newton_iterations_total);
+        assert!(stats.avg_residual_ms().unwrap_or(0.0) >= 0.0);
+        assert!(stats.avg_jacobian_ms().unwrap_or(0.0) >= 0.0);
+        assert!(report.contains("residual_ms_avg="));
+        assert!(report.contains("jacobian_ms_avg="));
+    }
+
+    #[test]
+    fn test_radau_parallel_and_sequential_statistics_remain_consistent() {
+        let mut sequential = Radau::new_with_options(stiff_radau_options(false));
+        sequential.solve();
+        let sequential_stats = sequential.get_statistics();
+        let (_, sequential_result) = sequential.get_result();
+        let sequential_y: DMatrix<f64> = sequential_result.expect("sequential result must exist");
+
+        let mut parallel = Radau::new_with_options(stiff_radau_options(true));
+        parallel.solve();
+        let parallel_stats = parallel.get_statistics();
+        let (_, parallel_result) = parallel.get_result();
+        let parallel_y: DMatrix<f64> = parallel_result.expect("parallel result must exist");
+
+        println!(
+            "[Radau stats] sequential => {}",
+            sequential.statistics_report()
+        );
+        println!(
+            "[Radau stats] parallel   => {}",
+            parallel.statistics_report()
+        );
+
+        assert_eq!(sequential.get_status(), "finished");
+        assert_eq!(parallel.get_status(), "finished");
+        assert_eq!(sequential_y.shape(), parallel_y.shape());
+        assert_eq!(sequential_stats.step_calls, parallel_stats.step_calls);
+        assert_eq!(
+            sequential_stats.newton_solve_calls,
+            parallel_stats.newton_solve_calls
+        );
+        assert_eq!(
+            sequential_stats.residual_calls,
+            parallel_stats.residual_calls
+        );
+        assert_eq!(
+            sequential_stats.jacobian_calls,
+            parallel_stats.jacobian_calls
+        );
+
+        let max_solution_diff = sequential_y
+            .iter()
+            .zip(parallel_y.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_solution_diff < 1e-8,
+            "parallel and sequential Radau should stay numerically aligned, diff={max_solution_diff:e}"
+        );
+    }
+
+    #[test]
+    fn test_radau_solver_facing_comparison_table() {
+        let linear_rows = vec![
+            solve_with_measurement("seq-linear", linear_decay_radau_options(false)),
+            solve_with_measurement("par-linear", linear_decay_radau_options(true)),
+        ];
+        print_comparison_table("linear-decay-1", &linear_rows);
+
+        let stiff_rows = vec![
+            solve_with_measurement("seq-stiff", stiff_radau_options(false)),
+            solve_with_measurement("par-stiff", stiff_radau_options(true)),
+        ];
+        print_comparison_table("stiff-2", &stiff_rows);
+
+        assert_eq!(linear_rows.len(), 2);
+        assert_eq!(stiff_rows.len(), 2);
+        assert!(linear_rows.iter().all(|row| row.step_calls > 0));
+        assert!(stiff_rows.iter().all(|row| row.newton_solves > 0));
+    }
+
+    #[test]
+    fn test_radau_generated_backend_surface_keeps_selected_c_backend() {
+        let solver = Radau::new(RadauOrder::Order5)
+            .with_dense_generated_backend_c_tcc("target/generated-ivp-tests")
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease);
+
+        assert_eq!(
+            solver.generated_backend_config().aot_codegen_backend,
+            AotCodegenBackend::C
+        );
+        assert_eq!(
+            solver.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("tcc")
+        );
+    }
+
+    #[test]
+    fn test_radau_new_with_options_installs_generated_backend_mode() {
+        let solver = Radau::new_with_options(
+            linear_decay_radau_options(false)
+                .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::RequirePrebuilt),
+        );
+
+        assert_eq!(
+            solver.generated_backend_config().build_policy,
+            crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy::RequirePrebuilt
+        );
+        assert_eq!(
+            solver.newton.generated_backend_config().build_policy,
+            crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy::RequirePrebuilt
+        );
+    }
+
+    #[test]
+    fn test_radau_generated_backend_ctcc_smoke_solve() {
+        if !tcc_is_available() {
+            println!("[Radau generated backend] skipping C-tcc smoke test: compiler not available");
+            return;
+        }
+
+        let mut solver = Radau::new_with_options(
+            linear_decay_radau_options(false)
+                .with_dense_generated_backend_c_tcc("target/generated-radau-tests"),
+        );
+
+        solver
+            .try_solve()
+            .expect("Radau generated backend C-tcc smoke solve should succeed");
+
+        assert_eq!(solver.get_status(), "finished");
+        assert!(solver.get_statistics().backend_prepare_calls >= 1);
+    }
+}
+
+#[cfg(test)]
+mod tests_generated_backend_compare {
+    use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions};
+    use crate::symbolic::symbolic_engine::Expr;
+    use nalgebra::DVector;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct RadauScenario {
+        label: &'static str,
+        equations: Vec<Expr>,
+        values: Vec<String>,
+        y0: DVector<f64>,
+        tolerance: f64,
+        max_iterations: usize,
+        h: f64,
+        t0: f64,
+        t_bound: f64,
+    }
+
+    struct RadauBackendCompareRow {
+        variant: &'static str,
+        total: Duration,
+        setup_ms: f64,
+        solve_ms: f64,
+        residual_ms_avg: f64,
+        jacobian_ms_avg: f64,
+        residual_calls: usize,
+        jacobian_calls: usize,
+        step_calls: usize,
+        newton_solves: usize,
+        newton_iters_avg: f64,
+        max_abs_solution: f64,
+        solution_diff: f64,
+        status: &'static str,
+    }
+
+    fn stiff_2_scenario() -> RadauScenario {
+        RadauScenario {
+            label: "stiff-2",
+            equations: vec![
+                Expr::parse_expression("-1000.0*y1 + y2"),
+                Expr::parse_expression("y1 - y2"),
+            ],
+            values: vec!["y1".to_string(), "y2".to_string()],
+            y0: DVector::from_vec(vec![1.0, 1.0]),
+            tolerance: 1e-6,
+            max_iterations: 100,
+            h: 0.01,
+            t0: 0.0,
+            t_bound: 0.1,
+        }
+    }
+
+    fn robertson_3_scenario() -> RadauScenario {
+        RadauScenario {
+            label: "robertson-3",
+            equations: vec![
+                Expr::parse_expression("-0.04*y1 + 1.0e4*y2*y3"),
+                Expr::parse_expression("0.04*y1 - 1.0e4*y2*y3 - 3.0e7*y2^2"),
+                Expr::parse_expression("3.0e7*y2^2"),
+            ],
+            values: vec!["y1".to_string(), "y2".to_string(), "y3".to_string()],
+            y0: DVector::from_vec(vec![1.0, 0.0, 0.0]),
+            tolerance: 1e-9,
+            max_iterations: 100,
+            h: 0.0025,
+            t0: 0.0,
+            t_bound: 20.0,
+        }
+    }
+
+    fn hires_8_scenario() -> RadauScenario {
+        RadauScenario {
+            label: "hires-8",
+            equations: vec![
+                Expr::parse_expression("-1.71*y1 + 0.43*y2 + 8.32*y3 + 0.0007"),
+                Expr::parse_expression("1.71*y1 - 8.75*y2"),
+                Expr::parse_expression("-10.03*y3 + 0.43*y4 + 0.035*y5"),
+                Expr::parse_expression("8.32*y2 + 1.71*y3 - 1.12*y4"),
+                Expr::parse_expression("-1.745*y5 + 0.43*y6 + 0.43*y7"),
+                Expr::parse_expression("-280.0*y6*y8 + 0.69*y4 + 1.71*y5 - 0.43*y6 + 0.69*y7"),
+                Expr::parse_expression("280.0*y6*y8 - 1.81*y7"),
+                Expr::parse_expression("-280.0*y6*y8 + 1.81*y7"),
+            ],
+            values: vec![
+                "y1".to_string(),
+                "y2".to_string(),
+                "y3".to_string(),
+                "y4".to_string(),
+                "y5".to_string(),
+                "y6".to_string(),
+                "y7".to_string(),
+                "y8".to_string(),
+            ],
+            y0: DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0057]),
+            tolerance: 1e-8,
+            max_iterations: 120,
+            h: 0.005,
+            t0: 0.0,
+            t_bound: 20.0,
+        }
+    }
+
+    fn scenario_options(scenario: &RadauScenario) -> RadauSolverOptions {
+        RadauSolverOptions::new(
+            RadauOrder::Order5,
+            scenario.equations.clone(),
+            scenario.values.clone(),
+            "t".to_string(),
+            scenario.tolerance,
+            scenario.max_iterations,
+            Some(scenario.h),
+            scenario.t0,
+            scenario.t_bound,
+            scenario.y0.clone(),
+        )
+    }
+
+    fn command_exists(cmd: &str, probe_arg: &str) -> bool {
+        Command::new(cmd).arg(probe_arg).output().is_ok()
+    }
+
+    fn tcc_available() -> bool {
+        if let Ok(explicit) = std::env::var("RUSTEDSCITHE_TCC") {
+            return std::path::Path::new(&explicit).is_file();
+        }
+        command_exists("tcc", "-v")
+    }
+
+    fn gcc_available() -> bool {
+        if let Ok(explicit) = std::env::var("RUSTEDSCITHE_GCC") {
+            return std::path::Path::new(&explicit).is_file();
+        }
+        command_exists("gcc", "--version")
+    }
+
+    fn zig_available() -> bool {
+        command_exists("zig", "version")
+    }
+
+    fn make_solver_quiet(mut solver: Radau) -> Radau {
+        solver.set_console_logging(false);
+        solver.disable_logging();
+        solver
+    }
+
+    fn max_abs_vector(v: &DVector<f64>) -> f64 {
+        v.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()))
+    }
+
+    fn max_abs_diff(a: &DVector<f64>, b: &DVector<f64>) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .fold(0.0_f64, |acc, (lhs, rhs)| acc.max((lhs - rhs).abs()))
+    }
+
+    fn run_solver(
+        label: &'static str,
+        solver: &mut Radau,
+        baseline_solution: Option<&DVector<f64>>,
+    ) -> (RadauBackendCompareRow, DVector<f64>) {
+        let total_start = Instant::now();
+        let outcome = solver.try_solve();
+        let total = total_start.elapsed();
+        let stats = solver.get_statistics();
+        let (_, result) = solver.get_result();
+        let final_solution = result
+            .and_then(|matrix| {
+                if matrix.nrows() == 0 {
+                    None
+                } else {
+                    Some(matrix.row(matrix.nrows() - 1).transpose().into_owned())
+                }
+            })
+            .unwrap_or_else(|| DVector::from_element(solver.y.len(), f64::NAN));
+        let max_abs_solution = max_abs_vector(&final_solution);
+        let solution_diff = baseline_solution
+            .map(|baseline| max_abs_diff(&final_solution, baseline))
+            .unwrap_or(0.0);
+
+        (
+            RadauBackendCompareRow {
+                variant: label,
+                total,
+                setup_ms: stats.backend_prepare_ms_total,
+                solve_ms: stats.solve_ms_total,
+                residual_ms_avg: stats.avg_residual_ms().unwrap_or(0.0),
+                jacobian_ms_avg: stats.avg_jacobian_ms().unwrap_or(0.0),
+                residual_calls: stats.residual_calls,
+                jacobian_calls: stats.jacobian_calls,
+                step_calls: stats.step_calls,
+                newton_solves: stats.newton_solve_calls,
+                newton_iters_avg: stats.avg_newton_iterations().unwrap_or(0.0),
+                max_abs_solution,
+                solution_diff,
+                status: if outcome.is_ok() && solver.get_status() == "finished" {
+                    "finished"
+                } else {
+                    "failed"
+                },
+            },
+            final_solution,
+        )
+    }
+
+    fn print_compare_table(scenario: &RadauScenario, rows: &[RadauBackendCompareRow]) {
+        println!(
+            "[Radau backend compare] scenario={}, vars={}, variants={}",
+            scenario.label,
+            scenario.values.len(),
+            rows.len()
+        );
+        println!(
+            "variant      |   total_ms |   setup_ms |   solve_ms | residual_ms(avg) | jacobian_ms(avg) | max_abs_solution | status"
+        );
+        println!(
+            "----------------------------------------------------------------------------------------------------------------------"
+        );
+        for row in rows {
+            println!(
+                "{:<12} | {:>10.3} | {:>10.3} | {:>10.3} | {:>16.6} | {:>16.6} | {:>16.6e} | {}",
+                row.variant,
+                row.total.as_secs_f64() * 1_000.0,
+                row.setup_ms,
+                row.solve_ms,
+                row.residual_ms_avg,
+                row.jacobian_ms_avg,
+                row.max_abs_solution,
+                row.status,
+            );
+        }
+        println!(
+            "{:<12} | {:>14} | {:>16} | {:>10} | {:>14} | {:>16}",
+            "variant",
+            "solution_diff",
+            "speedup_vs_lambdify",
+            "steps",
+            "newton_solves",
+            "newton_iters(avg)"
+        );
+        println!(
+            "----------------------------------------------------------------------------------------------------------------------"
+        );
+        let lambdify_total_ms = rows
+            .iter()
+            .find(|row| row.variant == "Lambdify")
+            .map(|row| row.total.as_secs_f64() * 1_000.0)
+            .unwrap_or(0.0);
+        for row in rows {
+            let speedup = if row.variant == "Lambdify" {
+                1.0
+            } else {
+                lambdify_total_ms / (row.total.as_secs_f64() * 1_000.0)
+            };
+            println!(
+                "{:<12} | {:>14.6e} | {:>15.3}x | {:>10} | {:>14} | {:>16.3}",
+                row.variant,
+                row.solution_diff,
+                speedup,
+                row.step_calls,
+                row.newton_solves,
+                row.newton_iters_avg,
+            );
+        }
+        println!(
+            "{:<12} | {:>10} | {:>10} | {:>16} | {:>16}",
+            "variant", "res_calls", "jac_calls", "residual_ms(total)", "jacobian_ms(total)"
+        );
+        println!(
+            "----------------------------------------------------------------------------------------------------------------------"
+        );
+        for row in rows {
+            println!(
+                "{:<12} | {:>10} | {:>10} | {:>16.3} | {:>16.3}",
+                row.variant,
+                row.residual_calls,
+                row.jacobian_calls,
+                row.residual_ms_avg * row.residual_calls as f64,
+                row.jacobian_ms_avg * row.jacobian_calls as f64,
+            );
+        }
+        if let Some(lambdify) = rows.iter().find(|row| row.variant == "Lambdify") {
+            let residual_total = lambdify.residual_ms_avg * lambdify.residual_calls as f64;
+            let jacobian_total = lambdify.jacobian_ms_avg * lambdify.jacobian_calls as f64;
+            let dominant = if residual_total > 2.0 * jacobian_total {
+                "residual-dominated"
+            } else if jacobian_total > 2.0 * residual_total {
+                "jacobian-dominated"
+            } else {
+                "mixed"
+            };
+            let best_total = rows
+                .iter()
+                .min_by(|lhs, rhs| lhs.total.cmp(&rhs.total))
+                .expect("rows should not be empty");
+            let best_solve = rows
+                .iter()
+                .min_by(|lhs, rhs| lhs.solve_ms.total_cmp(&rhs.solve_ms))
+                .expect("rows should not be empty");
+            println!(
+                "[Radau backend compare] summary: dominant_hot_path={}, best_total={}, best_solve={}, baseline_residual_ms_total={:.3}, baseline_jacobian_ms_total={:.3}",
+                dominant, best_total.variant, best_solve.variant, residual_total, jacobian_total
+            );
+        }
+        println!(
+            "[Radau backend compare] finished scenario `{}`",
+            scenario.label
+        );
+    }
+
+    fn run_compare_for_scenario(scenario: &RadauScenario) {
+        let mut rows = Vec::new();
+
+        let mut lambdify = make_solver_quiet(Radau::new_with_options(scenario_options(scenario)));
+        let (lambdify_row, baseline_solution) = run_solver("Lambdify", &mut lambdify, None);
+        rows.push(lambdify_row);
+
+        if gcc_available() {
+            let mut gcc_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_c_gcc("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("C-gcc", &mut gcc_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        if tcc_available() {
+            let mut tcc_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_c_tcc("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("C-tcc", &mut tcc_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        if zig_available() {
+            let mut zig_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_zig("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("Zig", &mut zig_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        print_compare_table(scenario, &rows);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.status == "finished"));
+    }
+
+    fn print_production_like_table(scenario: &RadauScenario, rows: &[RadauBackendCompareRow]) {
+        println!(
+            "[Radau production-like] scenario={}, vars={}, variants={}",
+            scenario.label,
+            scenario.values.len(),
+            rows.len()
+        );
+        println!(
+            "variant      |     total_ms | max_abs_solution | solution_diff_vs_lambdify | status"
+        );
+        println!(
+            "--------------------------------------------------------------------------------------"
+        );
+        for row in rows {
+            println!(
+                "{:<12} | {:>12.3} | {:>16.6e} | {:>24.6e} | {}",
+                row.variant,
+                row.total.as_secs_f64() * 1_000.0,
+                row.max_abs_solution,
+                row.solution_diff,
+                row.status,
+            );
+        }
+        if let Some(best_total) = rows.iter().min_by(|lhs, rhs| lhs.total.cmp(&rhs.total)) {
+            println!(
+                "[Radau production-like] best_total={} scenario={}",
+                best_total.variant, scenario.label
+            );
+        }
+        println!(
+            "[Radau production-like] finished scenario `{}`",
+            scenario.label
+        );
+    }
+
+    fn run_production_like_for_scenario(scenario: &RadauScenario) {
+        let mut rows = Vec::new();
+
+        let mut lambdify = make_solver_quiet(Radau::new_with_options(scenario_options(scenario)));
+        let (lambdify_row, baseline_solution) = run_solver("Lambdify", &mut lambdify, None);
+        rows.push(lambdify_row);
+
+        if gcc_available() {
+            let mut gcc_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_c_gcc("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("C-gcc", &mut gcc_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        if tcc_available() {
+            let mut tcc_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_c_tcc("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("C-tcc", &mut tcc_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        if zig_available() {
+            let mut zig_solver = make_solver_quiet(
+                Radau::new_with_options(scenario_options(scenario))
+                    .with_dense_generated_backend_zig("target/generated-radau-tests"),
+            );
+            let (row, _) = run_solver("Zig", &mut zig_solver, Some(&baseline_solution));
+            rows.push(row);
+        }
+
+        print_production_like_table(scenario, &rows);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.status == "finished"));
+    }
+
+    #[test]
+    #[ignore]
+    fn radau_generated_backend_end_to_end_compare_table() {
+        let scenarios = vec![
+            stiff_2_scenario(),
+            robertson_3_scenario(),
+            hires_8_scenario(),
+        ];
+        for scenario in scenarios {
+            run_compare_for_scenario(&scenario);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn radau_production_like_end_to_end_compare_table() {
+        let scenarios = vec![
+            stiff_2_scenario(),
+            robertson_3_scenario(),
+            hires_8_scenario(),
+        ];
+        for scenario in scenarios {
+            run_production_like_for_scenario(&scenario);
+        }
+    }
+}

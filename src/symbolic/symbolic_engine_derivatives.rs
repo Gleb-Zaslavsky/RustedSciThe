@@ -347,6 +347,7 @@ impl Expr {
     /// This is the current bridge toward the `differentiate_raw ->
     /// normalize_basic` architecture. It applies calculus rules directly and
     /// intentionally leaves algebraic cleanup to the shared simplifier.
+    #[allow(dead_code)]
     fn differentiate_raw(&self, var: &str) -> Expr {
         match self {
             Expr::Var(name) => {
@@ -583,6 +584,7 @@ impl Expr {
     ///
     /// # Returns
     /// Unsimplified symbolic expression representing the derivative
+    #[allow(dead_code)]
     fn diff2(&self, var: &str) -> Expr {
         self.differentiate_raw(var)
     }
@@ -915,18 +917,8 @@ impl Expr {
     /// - Parentheses for grouping
     pub fn parse_expression(input: &str) -> Expr {
         let expr = match parse_expression_func(0, input) {
-            Ok(expr) => {
-                println!("\n \n found expression: {:?}", expr);
-                println!(
-                    "\n \n in human readable format {:?} \n \n ",
-                    &expr.clone().sym_to_str("x")
-                );
-                Ok(expr)
-            }
-            Err(err) => {
-                println!("Error: {}", err);
-                Err(err)
-            }
+            Ok(expr) => Ok(expr),
+            Err(err) => Err(err),
         };
         expr.unwrap()
     }
@@ -948,18 +940,8 @@ impl Expr {
         let mut exprs = Vec::new();
         for i in input {
             let expr = match parse_expression_func(0, i) {
-                Ok(expr) => {
-                    println!("\n \n found expression: {:?}", expr);
-                    println!(
-                        "\n \n in human readable format {:?} \n \n ",
-                        &expr.clone().sym_to_str("x")
-                    );
-                    Ok(expr)
-                }
-                Err(err) => {
-                    println!("Error: {}", err);
-                    Err(err)
-                }
+                Ok(expr) => Ok(expr),
+                Err(err) => Err(err),
             };
             exprs.push(expr.unwrap());
         }

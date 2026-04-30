@@ -5,6 +5,10 @@ use core::fmt::Display;
 /// Newton-Raphson calculation on each step is made using analytic jacobian
 use crate::numerical::Radau::Radau_newton::RadauNewton;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::IvpBackendError;
+use crate::symbolic::symbolic_ivp_generated::{
+    DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
+};
 use crate::symbolic::symbolic_vectors::ExprVector;
 use crate::{Utils::plots::plots, symbolic::symbolic_vectors::ExprMatrix};
 use log::{info, warn};
@@ -13,6 +17,8 @@ use rayon::prelude::*;
 use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Radau IIA method orders and corresponding coefficients
@@ -81,6 +87,208 @@ impl RadauCoefficients {
     }
 }
 
+/// Grouped setup for one Radau solve.
+///
+/// Practical backend guidance for Radau based on solver-facing comparisons:
+/// - small systems: `Lambdify` is often already good enough;
+/// - medium/heavy stiff systems: `C + tcc` is the most practical compiled
+///   default because it keeps setup low while making Newton callbacks much
+///   faster;
+/// - `Zig` can also perform very well end-to-end on some stiff systems;
+/// - `C + gcc` usually gives strong runtime callbacks, but its compile/setup
+///   cost is much larger and is best suited to long-lived reused artifacts.
+#[derive(Clone)]
+pub struct RadauSolverOptions {
+    pub order: RadauOrder,
+    pub eq_system: Vec<Expr>,
+    pub values: Vec<String>,
+    pub arg: String,
+    pub tolerance: f64,
+    pub max_iterations: usize,
+    pub h: Option<f64>,
+    pub t0: f64,
+    pub t_bound: f64,
+    pub y0: DVector<f64>,
+    pub parallel: bool,
+    pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+}
+
+impl RadauSolverOptions {
+    pub fn new(
+        order: RadauOrder,
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        tolerance: f64,
+        max_iterations: usize,
+        h: Option<f64>,
+        t0: f64,
+        t_bound: f64,
+        y0: DVector<f64>,
+    ) -> Self {
+        Self {
+            order,
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+            parallel: false,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+        }
+    }
+
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
+        self
+    }
+
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Prefer this for practical compiled Radau solves on stiff systems.
+    ///
+    /// In release comparisons this backend usually gave the best overall
+    /// end-to-end tradeoff for Robertson/HIRES-class problems.
+    pub fn with_dense_generated_backend_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        )
+    }
+
+    /// Prefer this when the generated artifact will be reused many times and
+    /// higher compile/setup cost is acceptable.
+    pub fn with_dense_generated_backend_c_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        )
+    }
+
+    /// Alternative compiled backend for Radau.
+    ///
+    /// In some stiff scenarios `Zig` achieved the best end-to-end time, but it
+    /// is less conservative as a default than `C + tcc`.
+    pub fn with_dense_generated_backend_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        )
+    }
+
+    /// User-facing convenience alias for the recommended compiled Radau path.
+    ///
+    /// Today this maps to `C + tcc`, which is the best practical default for
+    /// repeated stiff Radau solves in this crate.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        )
+    }
+}
+
+/// Aggregated runtime/setup statistics for one Radau solver instance.
+#[derive(Debug, Clone, Default)]
+pub struct RadauStatistics {
+    pub backend_prepare_calls: usize,
+    pub backend_prepare_ms_total: f64,
+    pub solve_calls: usize,
+    pub solve_ms_total: f64,
+    pub step_calls: usize,
+    pub newton_solve_calls: usize,
+    pub newton_iterations_total: usize,
+    pub residual_calls: usize,
+    pub residual_ms_total: f64,
+    pub jacobian_calls: usize,
+    pub jacobian_ms_total: f64,
+    pub linear_solves: usize,
+    pub lu_factorizations: usize,
+}
+
+impl RadauStatistics {
+    pub fn record_backend_prepare_ms(&mut self, ms: f64) {
+        self.backend_prepare_calls += 1;
+        self.backend_prepare_ms_total += ms;
+    }
+
+    pub fn record_solve_ms(&mut self, ms: f64) {
+        self.solve_calls += 1;
+        self.solve_ms_total += ms;
+    }
+
+    pub fn record_residual_ms(&mut self, ms: f64) {
+        self.residual_calls += 1;
+        self.residual_ms_total += ms;
+    }
+
+    pub fn record_jacobian_ms(&mut self, ms: f64) {
+        self.jacobian_calls += 1;
+        self.jacobian_ms_total += ms;
+    }
+
+    pub fn avg_residual_ms(&self) -> Option<f64> {
+        (self.residual_calls > 0).then(|| self.residual_ms_total / self.residual_calls as f64)
+    }
+
+    pub fn avg_jacobian_ms(&self) -> Option<f64> {
+        (self.jacobian_calls > 0).then(|| self.jacobian_ms_total / self.jacobian_calls as f64)
+    }
+
+    pub fn avg_newton_iterations(&self) -> Option<f64> {
+        (self.newton_solve_calls > 0)
+            .then(|| self.newton_iterations_total as f64 / self.newton_solve_calls as f64)
+    }
+
+    pub fn table_report(&self) -> String {
+        format!(
+            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} steps={} newton_solves={} newton_iters_total={} newton_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} lu_factorizations={} linear_solves={}",
+            self.backend_prepare_calls,
+            self.backend_prepare_ms_total,
+            self.solve_calls,
+            self.solve_ms_total,
+            self.step_calls,
+            self.newton_solve_calls,
+            self.newton_iterations_total,
+            self.avg_newton_iterations().unwrap_or(0.0),
+            self.residual_calls,
+            self.residual_ms_total,
+            self.avg_residual_ms().unwrap_or(0.0),
+            self.jacobian_calls,
+            self.jacobian_ms_total,
+            self.avg_jacobian_ms().unwrap_or(0.0),
+            self.lu_factorizations,
+            self.linear_solves,
+        )
+    }
+}
+
 //#[derive(Debug)]
 pub struct Radau {
     pub newton: RadauNewton,
@@ -122,6 +330,8 @@ pub struct Radau {
     // Stop condition
     pub stop_condition: Option<HashMap<String, f64>>,
     pub tolerance: f64,
+    generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    statistics: Arc<Mutex<RadauStatistics>>,
 }
 
 impl Display for Radau {
@@ -138,9 +348,10 @@ impl Radau {
     pub fn new(order: RadauOrder) -> Radau {
         let coefficients = RadauCoefficients::new(order.clone());
         let stages = coefficients.stages;
+        let statistics = Arc::new(Mutex::new(RadauStatistics::default()));
 
         // Create empty RadauNewton solver
-        let nr_new = RadauNewton::new(
+        let nr_new = RadauNewton::new_with_statistics(
             Vec::new(),
             Vec::new(),
             None,
@@ -150,6 +361,7 @@ impl Radau {
             50,
             0,
             0,
+            Arc::clone(&statistics),
         );
 
         Radau {
@@ -179,7 +391,28 @@ impl Radau {
             log_to_console: true,
             stop_condition: None,
             tolerance: 1e-6,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            statistics,
         }
+    }
+
+    /// Preferred grouped setup path for Radau.
+    pub fn new_with_options(options: RadauSolverOptions) -> Self {
+        let mut solver = Self::new(options.order.clone());
+        solver.set_initial(
+            options.eq_system,
+            options.values,
+            options.arg,
+            options.tolerance,
+            options.max_iterations,
+            options.h,
+            options.t0,
+            options.t_bound,
+            options.y0,
+        );
+        solver.set_generated_backend_config(options.generated_backend_config);
+        solver.set_parallel(options.parallel);
+        solver
     }
 
     pub fn set_initial(
@@ -233,7 +466,7 @@ impl Radau {
         // Create the nonlinear system for Radau method
         let radau_system = self.construct_radau_system(eq_system, values.clone(), arg.clone());
         // Create Newton solver to fint the stage values
-        let nr = RadauNewton::new(
+        let nr = RadauNewton::new_with_statistics(
             radau_system,
             radau_variables,
             None,
@@ -243,9 +476,13 @@ impl Radau {
             max_iterations,
             n_vars,
             n_stages,
+            Arc::clone(&self.statistics),
         );
 
         self.newton = nr;
+        self.newton
+            .set_generated_backend_config(self.generated_backend_config.clone());
+        self.newton.set_parallel(self.parallel);
         self.t0 = t0;
         self.t_bound = t_bound;
         self.y0 = y0.clone();
@@ -297,6 +534,115 @@ impl Radau {
             if parallel { "enabled" } else { "disabled" }
         );
     }
+
+    pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
+        self.generated_backend_config = config.clone();
+        self.newton.set_generated_backend_config(config);
+    }
+
+    pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
+        &self.generated_backend_config
+    }
+
+    pub fn set_dense_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.set_generated_backend_config(config);
+    }
+
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        self.set_dense_generated_backend_mode(mode);
+        self
+    }
+
+    /// Prefer this for practical compiled Radau solves on stiff systems.
+    pub fn set_dense_generated_backend_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        );
+    }
+
+    /// Use this when runtime throughput matters more than setup latency.
+    pub fn set_dense_generated_backend_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        );
+    }
+
+    /// Alternative compiled backend that can perform very well on some stiff
+    /// systems.
+    pub fn set_dense_generated_backend_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        );
+    }
+
+    /// Convenience alias for the recommended compiled Radau path.
+    pub fn set_dense_generated_backend_for_repeated_solves(
+        &mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        );
+    }
+
+    /// Builder-style variant of [`Radau::set_dense_generated_backend_c_tcc`].
+    pub fn with_dense_generated_backend_c_tcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_tcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style variant of [`Radau::set_dense_generated_backend_c_gcc`].
+    pub fn with_dense_generated_backend_c_gcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_gcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style variant of [`Radau::set_dense_generated_backend_zig`].
+    pub fn with_dense_generated_backend_zig(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_zig(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for the recommended compiled Radau path.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_for_repeated_solves(output_parent_dir);
+        self
+    }
+
+    pub fn get_statistics(&self) -> RadauStatistics {
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .clone()
+    }
+
+    pub fn statistics_report(&self) -> String {
+        self.get_statistics().table_report()
+    }
     /// Construct the nonlinear system for Radau method
     /// For s stages, we need to solve: K_i - f(t_n + c_i*h, y_n + h*sum(a_ij*K_j)) = 0
     /// where K_i are the stage derivatives we're solving for
@@ -332,8 +678,7 @@ impl Radau {
                 info!("variable {} replaced by  {}", y_vector_str[i], &y_i[i]);
                 f_expr = f_expr.substitute(&values[i], &y_i[i]);
             }
-            info!("RHS for Newton equations:");
-            f_expr.show();
+            info!("constructed RHS for Newton equations");
             f_expr
         };
         // For each stage i and each variable j, create equation:
@@ -458,47 +803,16 @@ impl Radau {
         info!("Radau Newton solver converged {:?}", k_solution.as_slice());
         // Extract stage derivatives from solution vector
         self.k_stages = DMatrix::zeros(n_vars, n_stages);
-        let stage_data: Vec<(usize, usize, f64)> = (0..n_vars)
-            .into_par_iter()
-            .flat_map(|var_j| {
-                let k_solution = k_solution.clone();
-                (0..n_stages).into_par_iter().map(move |stage_i| {
-                    let idx = var_j * n_stages + stage_i;
-                    (var_j, stage_i, k_solution[idx])
-                })
-            })
-            .collect();
-
-        for (var_j, stage_i, value) in stage_data {
-            self.k_stages[(var_j, stage_i)] = value;
+        for var_j in 0..n_vars {
+            for stage_i in 0..n_stages {
+                let idx = var_j * n_stages + stage_i;
+                self.k_stages[(var_j, stage_i)] = k_solution[idx];
+            }
         }
 
-        // Compute stage values Y_i = y_n + h * sum(a_{i,j} * K_j)
-        let y_vec = self.y.clone();
-        let coefficients_a = self.coefficients.a.clone();
-        let k_stages = self.k_stages.clone();
-
-        let stage_values: Vec<(usize, usize, f64)> = (0..n_stages)
-            .into_par_iter()
-            .flat_map(|stage_i| {
-                let y_vec = y_vec.clone();
-                let coefficients_a = coefficients_a.clone();
-                let k_stages = k_stages.clone();
-                (0..n_vars).into_par_iter().map(move |var_j| {
-                    let mut y_stage = y_vec[var_j];
-                    for stage_k in 0..n_stages {
-                        let a_ik = coefficients_a[(stage_i, stage_k)];
-                        let k_k = k_stages[(var_j, stage_k)];
-                        y_stage += dt * a_ik * k_k;
-                    }
-                    (var_j, stage_i, y_stage)
-                })
-            })
-            .collect();
-
-        for (var_j, stage_i, value) in stage_values {
-            self.y_stages[(var_j, stage_i)] = value;
-        }
+        // Compute stage values and final update through shared helpers to
+        // avoid extra cloned matrices/vectors in the hot path.
+        self.update_Y_stages(dt, n_stages, n_vars);
 
         // Compute final solution: y_{n+1} = y_n + h * sum(b_i * K_i)
         let mut y_new = self.y.clone();
@@ -507,11 +821,7 @@ impl Radau {
             self.k_stages.nrows() == y_new.len(),
             "y_new.len() != k_stages.nrows()"
         );
-        for i in 0..n_stages {
-            let k_i = self.k_stages.column(i);
-            let b_i = self.coefficients.b[i];
-            y_new.axpy(dt * b_i, &k_i, 1.0); // y_new += h * b_i * k_i
-        }
+        self.update_y(&mut y_new, dt, n_stages, n_vars);
         /*
         the same as:
         let mut y_new = self.y.clone();
@@ -651,6 +961,10 @@ impl Radau {
 
         while integr_status.is_none() {
             self.step();
+            self.statistics
+                .lock()
+                .expect("Radau statistics lock poisoned")
+                .step_calls += 1;
             iteration_count += 1;
 
             info!(
@@ -777,13 +1091,22 @@ impl Radau {
             Some(-1) => info!("Radau integration failed"),
             _ => info!("Radau integration status unknown"),
         }
+
+        self.statistics
+            .lock()
+            .expect("Radau statistics lock poisoned")
+            .record_solve_ms(start.elapsed().as_secs_f64() * 1_000.0);
     }
 
     pub fn solve(&mut self) -> () {
+        self.try_solve()
+            .expect("Radau symbolic IVP backend generation should succeed");
+    }
+
+    pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
         info!("Initializing Radau solver with {:?} order", self.order);
 
-        // Generate equations and jacobian for Newton solver
-        self.newton.eq_generate();
+        self.newton.try_eq_generate()?;
 
         // Run the main integration loop
         self.main_loop();
@@ -800,6 +1123,7 @@ impl Radau {
             }
             _ => info!("Radau solver finished with status: {}", self.status),
         }
+        Ok(())
     }
 
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {

@@ -452,4 +452,39 @@ mod tests {
         //  assert_abs_diff_eq!(boundpoint[0], 0.0, epsilon = 1e-5);
         // assert_abs_diff_eq!(boundpoint[1], -1.0, epsilon = 1e-5);
     }
+
+    #[test]
+    fn test_solve_with_bdf_modern_universal_facade() {
+        use crate::numerical::ODE_api2::SolverType;
+        init_logger();
+
+        // y'' = 0, y(0) = 0, y(1) = 1 (solution: y = x)
+        let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("0")];
+        let values = vec!["y0".to_string(), "y1".to_string()];
+        let arg = "x".to_string();
+
+        let mut boundary_conditions = HashMap::new();
+        boundary_conditions.insert("y0".to_string(), vec![(0, 0.0), (1, 1.0)]);
+
+        let mut bvp = BVPShooting::new(eq_vec, values, arg, boundary_conditions, (0.0, 1.0));
+
+        bvp.solve_with_certain_ivp_modern(0.5, 1e-8, 100, 0.001, SolverType::BDF, |mut solver| {
+            solver.set_rtol(1e-6);
+            solver.set_atol(1e-8);
+            solver.set_max_step(1e-3);
+            solver
+        });
+
+        let sol = bvp.get_solution();
+        let x_mesh = bvp.get_x();
+        let y_mesh = bvp.get_y();
+        let y0: DVector<f64> = y_mesh.row(0).transpose().into_owned();
+        let y1: DVector<f64> = y_mesh.row(1).transpose().into_owned();
+
+        for i in 0..x_mesh.len() {
+            assert_abs_diff_eq!(y0[i], x_mesh[i], epsilon = 1e-2);
+            assert_abs_diff_eq!(y1[i], 1.0, epsilon = 1e-2);
+        }
+        assert_abs_diff_eq!(sol.bound_values[0], 1.0, epsilon = 1e-2);
+    }
 }

@@ -1,5 +1,10 @@
 #![allow(non_camel_case_types)] //
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
+use crate::somelinalg::banded::{
+    LinearSystemRef, NodeMajorLayout, banded_assembly::BandedAssembly,
+    linear_solver::build_solver_for_system, solver_policy::LinearSolverConfig,
+    solver_traits::DirectLinearSolver,
+};
 use crate::somelinalg::iterative_solvers_cpu::LUsolver::invers_Mat_LU;
 use crate::somelinalg::iterative_solvers_cpu::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
 use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
@@ -101,11 +106,8 @@ impl VectorType for YEnum {
     fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType> {
         match self {
             YEnum::Dense(vec) => {
-                if let Some(d_vec) = other.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(vec - d_vec)
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
+                let other_dense = other.to_DVectorType();
+                Box::new(vec - other_dense)
             }
             YEnum::Sparse_1(vec) => {
                 if let Some(c_vec) = other.as_any().downcast_ref::<CsVec<f64>>() {
@@ -115,13 +117,11 @@ impl VectorType for YEnum {
                 }
             }
             YEnum::Sparse_3(vec) => {
-                if let Some(d_vec) = other.as_any().downcast_ref::<faer_col>() {
-                    assert_eq!(vec.len(), d_vec.len());
-                    let subs = vec.sub(d_vec);
-                    Box::new(subs)
-                } else {
-                    panic!("Type mismatch: expected DVector")
-                }
+                let other_dense = other.to_DVectorType();
+                assert_eq!(vec.len(), other_dense.len());
+                let other_faer = faer_col::from_fn(other_dense.len(), |i| other_dense[i]);
+                let subs = vec.sub(&other_faer);
+                Box::new(subs)
             }
 
             _ => panic!("Type mismatch: expected DVector or CsVec"),
@@ -267,6 +267,7 @@ impl VectorType for YEnum {
         }
     }
 } //end impl
+
 ////////////////////////////////////////////////////////////////
 //           NALGEBRA CRATE
 ////////////////////////////////////////////////////////////////
@@ -395,12 +396,11 @@ impl VectorType for faer_col {
         self
     }
     fn subtract(&self, other: &dyn VectorType) -> Box<dyn VectorType> {
-        if let Some(d_vec) = other.as_any().downcast_ref::<faer_col>() {
-            let subs = self.sub(d_vec);
-            Box::new(subs)
-        } else {
-            panic!("Type mismatch: expected DVector")
-        }
+        let other_dense = other.to_DVectorType();
+        assert_eq!(self.nrows(), other_dense.len());
+        let other_faer = faer_col::from_fn(other_dense.len(), |i| other_dense[i]);
+        let subs = self.sub(&other_faer);
+        Box::new(subs)
     }
     fn norm(&self) -> f64 {
         self.norm_l2()
@@ -595,6 +595,33 @@ pub enum JacTypes {
     Sparse_2(CsMatrix<f64>),
     Sparse_3(faer_mat),
 }
+
+/// Runtime matrix wrapper for the native banded BVP backend.
+///
+/// We keep the fast assembly storage (`BandedAssembly`) together with the
+/// node-major layout metadata required to convert into the block-tridiagonal
+/// factorization format right before the linear solve.
+#[derive(Clone, Debug)]
+pub struct BandedMatrixType {
+    pub assembly: BandedAssembly,
+    pub layout: NodeMajorLayout,
+    pub solver_config: LinearSolverConfig,
+}
+
+impl BandedMatrixType {
+    pub fn new(
+        assembly: BandedAssembly,
+        layout: NodeMajorLayout,
+        solver_config: LinearSolverConfig,
+    ) -> Self {
+        Self {
+            assembly,
+            layout,
+            solver_config,
+        }
+    }
+}
+
 pub trait MatrixType: Any {
     fn as_any(&self) -> &dyn Any;
     fn inverse(self) -> Box<dyn MatrixType>; // inverse
@@ -827,7 +854,7 @@ impl MatrixType for faer_mat {
 
                         let res_vec: Vec<f64> = res.row_iter().map(|x| x[0]).collect();
 
-                        let res = ColRef::from_slice(res_vec.as_slice()).to_owned(); // TODO! find more idiomatic 
+                        let res = ColRef::from_slice(res_vec.as_slice()).to_owned(); // TODO! find more idiomatic
 
                         Box::new(res)
                     }
@@ -872,6 +899,86 @@ impl MatrixType for faer_mat {
     }
 } //impl
 
+impl MatrixType for BandedMatrixType {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn inverse(self) -> Box<dyn MatrixType> {
+        // The damped solver mostly uses direct solves instead of explicit
+        // inverses. When an inverse is requested through the legacy API, fall
+        // back to a dense inverse to preserve correctness.
+        let dense = self.to_DMatrixType();
+        let inverse = dense
+            .try_inverse()
+            .expect("banded matrix inverse requested for a singular matrix");
+        Box::new(inverse)
+    }
+
+    fn mul(&self, vec: &dyn VectorType) -> Box<dyn VectorType> {
+        let dense = self.to_DMatrixType();
+        if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
+            Box::new(&dense * d_vec)
+        } else {
+            let dense_vec = vec.to_DVectorType();
+            Box::new(&dense * dense_vec)
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn MatrixType> {
+        Box::new(self.clone())
+    }
+
+    fn solve_sys(
+        &self,
+        vec: &dyn VectorType,
+        _linear_sys_method: Option<String>,
+        _tol: f64,
+        _max_iter: usize,
+        _bandwidth: (usize, usize),
+        _old_vec: &dyn VectorType,
+    ) -> Box<dyn VectorType> {
+        let solver = build_solver_for_system(
+            LinearSystemRef::NodeMajorAssembly {
+                assembly: &self.assembly,
+                layout: self.layout,
+            },
+            self.solver_config,
+        )
+        .expect("banded linear solver factorization failed");
+        let mut rhs = vec.to_DVectorType().as_slice().to_vec();
+
+        solver
+            .solve_in_place(rhs.as_mut_slice())
+            .expect("banded linear solver failed");
+
+        Box::new(DVector::from_vec(rhs))
+    }
+
+    fn shape(&self) -> (usize, usize) {
+        (self.assembly.n(), self.assembly.n())
+    }
+
+    fn to_DMatrixType(&self) -> DMatrix<f64> {
+        let n = self.assembly.n();
+        let mut dense = DMatrix::zeros(n, n);
+
+        for offset in self.assembly.min_offset()..=self.assembly.max_offset() {
+            if let Some(diag) = self.assembly.diag(offset) {
+                for (pos, value) in diag.iter().enumerate() {
+                    let (i, j) = self
+                        .assembly
+                        .diag_pos_to_ij(offset, pos)
+                        .expect("banded diagonal position must stay in bounds");
+                    dense[(i, j)] = *value;
+                }
+            }
+        }
+
+        dense
+    }
+}
+
 impl Debug for dyn MatrixType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(dense) = self.as_any().downcast_ref::<DMatrix<f64>>() {
@@ -882,6 +989,8 @@ impl Debug for dyn MatrixType {
             write!(f, "{:?}", cs_matrix)
         } else if let Some(faer_mat) = self.as_any().downcast_ref::<faer_mat>() {
             write!(f, "{:?}", faer_mat)
+        } else if let Some(banded) = self.as_any().downcast_ref::<BandedMatrixType>() {
+            write!(f, "{:?}", banded)
         } else {
             write!(f, "Unknown MatrixType")
         }
@@ -1117,6 +1226,10 @@ impl Clone for Box<dyn Y> {
 //___________________________________________________________________
 pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn VectorType> {
     let res: Box<dyn VectorType> = if desired_type == "Dense".to_string() {
+        Box::new(YEnum::Dense(vec.clone()))
+    } else if desired_type == "Banded".to_string() {
+        // Banded Jacobians still solve against dense Newton vectors. Reuse the
+        // dense storage here so the outer solver can stay unchanged.
         Box::new(YEnum::Dense(vec.clone()))
     } else if desired_type == "Sparse_1".to_string() {
         //sprs crate

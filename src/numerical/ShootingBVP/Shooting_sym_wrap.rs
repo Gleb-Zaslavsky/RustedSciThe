@@ -323,6 +323,56 @@ impl BVPShooting {
             }
         }
     }
+
+    /// Solve the BVP using the shooting method with a modern typed IVP
+    /// configurator instead of the legacy `HashMap<String, SolverParam>` bag.
+    pub fn solve_with_certain_ivp_modern<F>(
+        &mut self,
+        initial_guess: f64,
+        tolerance: f64,
+        max_iterations: usize,
+        step_size: f64,
+        ivp_solver: SolverType,
+        configure: F,
+    ) where
+        F: Fn(UniversalODESolver) -> UniversalODESolver + Clone + 'static,
+    {
+        let ode_system = self.generate_eq_closure();
+        let (t0, tend) = self.borders;
+        let (left_bc, right_bc) = self.BC_create();
+
+        let problem = BoundaryValueProblem::new(ode_system, t0, tend, left_bc, right_bc);
+        let ivp_closure = Self::creating_IVP_closure_modern(
+            self.eq_vec.clone(),
+            self.values.clone(),
+            self.arg.clone(),
+            ivp_solver.clone(),
+            configure,
+        );
+
+        let mut solver = ShootingMethodSolver {
+            initial_guess,
+            tolerance,
+            max_iterations,
+            step_size,
+            result: ShootingMethodResult::default(),
+        };
+
+        let result = solver.solve(&problem, |x0, y0, x_end, h| {
+            let (y_matrix, x_vec) = ivp_closure(x0, y0, x_end, h);
+            (y_matrix, x_vec)
+        });
+
+        match result {
+            Ok(result_struct) => {
+                self.full_sol = result_struct.clone();
+                self.solution = result_struct.y;
+            }
+            Err(e) => {
+                println!("Error: {}", e);
+            }
+        }
+    }
     /// Get the complete solution result including mesh, solution matrix, and boundary values.
     pub fn get_solution(&self) -> ShootingMethodResult {
         return self.full_sol.clone();
@@ -349,17 +399,50 @@ impl BVPShooting {
         step: f64,
     ) -> Result<(DVector<f64>, DMatrix<f64>), String> {
         let mut solver =
-            UniversalODESolver::new(eq_system, values, arg, solver_type, t0, y0, t_bound);
+            UniversalODESolver::new_legacy(eq_system, values, arg, solver_type, t0, y0, t_bound);
         let mut params = params;
         let add_step_size = HashMap::from([("step_size".to_string(), SolverParam::Float(step))]);
         params.extend(add_step_size);
         info!("solving with params {:?}", params);
-        solver.set_parameters(params);
-        solver.initialize();
-        solver.solve();
+        solver.set_parameters_legacy(params);
+        solver
+            .try_initialize()
+            .map_err(|e| format!("failed to initialize universal IVP solver: {e}"))?;
+        solver
+            .try_solve()
+            .map_err(|e| format!("failed to solve universal IVP problem: {e}"))?;
         let (x, y) = solver.get_result();
         match (x, y) {
             (Some(x_vec), Some(y_mat)) => Ok((x_vec, y_mat)),
+            _ => Err("IVP solver failed to produce results".to_string()),
+        }
+    }
+
+    pub fn IVP_solver_modern<F>(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        solver_type: SolverType,
+        configure: F,
+    ) -> Result<(DVector<f64>, DMatrix<f64>, Option<String>), String>
+    where
+        F: FnOnce(UniversalODESolver) -> UniversalODESolver,
+    {
+        let solver = UniversalODESolver::new(eq_system, values, arg, solver_type, t0, y0, t_bound);
+        let mut solver = configure(solver);
+        solver
+            .try_initialize()
+            .map_err(|e| format!("failed to initialize universal IVP solver: {e}"))?;
+        solver
+            .try_solve()
+            .map_err(|e| format!("failed to solve universal IVP problem: {e}"))?;
+        let stats_report = solver.statistics_report();
+        let (x, y) = solver.get_result();
+        match (x, y) {
+            (Some(x_vec), Some(y_mat)) => Ok((x_vec, y_mat, stats_report)),
             _ => Err("IVP solver failed to produce results".to_string()),
         }
     }
@@ -398,6 +481,44 @@ impl BVPShooting {
                 },
             );
         f
+    }
+
+    pub fn creating_IVP_closure_modern<F>(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        solver_type: SolverType,
+        configure: F,
+    ) -> Box<dyn Fn(f64, DVector<f64>, f64, f64) -> (DMatrix<f64>, DVector<f64>)>
+    where
+        F: Fn(UniversalODESolver) -> UniversalODESolver + Clone + 'static,
+    {
+        Box::new(
+            move |t0: f64, ivp_initial_condition: DVector<f64>, t_end, _step| {
+                info!("\n ivp_initial_condition: {:}", ivp_initial_condition);
+                match Self::IVP_solver_modern(
+                    eq_system.clone(),
+                    values.clone(),
+                    arg.clone(),
+                    t0,
+                    ivp_initial_condition,
+                    t_end,
+                    solver_type.clone(),
+                    configure.clone(),
+                ) {
+                    Ok((x_vec, y_mat, stats_report)) => {
+                        if let Some(stats_report) = stats_report {
+                            debug!("IVP stats: {}", stats_report);
+                        }
+                        (y_mat.transpose(), x_vec)
+                    }
+                    Err(e) => {
+                        eprintln!("IVP solver error: {}", e);
+                        panic!("IVP solver failed: {}", e);
+                    }
+                }
+            },
+        )
     }
 }
 #[allow(dead_code)]

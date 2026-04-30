@@ -1246,7 +1246,7 @@ mod tests_vector {
         let dot = v1.dot(&v2);
 
         // Expected: 2*x + 0*y = 2*x
-        let expected = Expr::Var("x".to_string()) * Expr::Const(2.0);
+        let expected = Expr::Const(2.0) * Expr::Var("x".to_string());
 
         assert_eq!(dot, expected);
     }
@@ -1300,7 +1300,7 @@ mod tests_vector {
         let expected = ExprVector::new(vec![
             Expr::Var("alpha".to_string()) * Expr::Var("x".to_string())
                 + Expr::Var("y".to_string()),
-            Expr::Var("alpha".to_string()) * Expr::Const(2.0) + Expr::Const(1.0),
+            Expr::Const(2.0) * Expr::Var("alpha".to_string()) + Expr::Const(1.0),
         ]);
 
         assert_eq!(y, expected);
@@ -1320,7 +1320,7 @@ mod tests_vector {
         let expected = ExprVector::new(vec![
             Expr::Var("k".to_string()) * Expr::Var("x".to_string()),
             Expr::Var("k".to_string()) * (Expr::Var("y".to_string()) + Expr::Const(1.0)),
-            Expr::Var("k".to_string()) * Expr::Const(3.0),
+            Expr::Const(3.0) * Expr::Var("k".to_string()),
         ]);
 
         assert_eq!(v, expected);
@@ -1571,14 +1571,14 @@ mod tests_exprmatrix {
         // Expected: [[a + 3b, 2a + 4b], [c + 3d, 2c + 4d]]
         let expected = ExprMatrix::new(vec![
             vec![
-                Expr::Var("a".to_string()) + Expr::Var("b".to_string()) * Expr::Const(3.0),
-                Expr::Var("a".to_string()) * Expr::Const(2.0)
-                    + Expr::Var("b".to_string()) * Expr::Const(4.0),
+                Expr::Var("a".to_string()) + Expr::Const(3.0) * Expr::Var("b".to_string()),
+                Expr::Const(2.0) * Expr::Var("a".to_string())
+                    + Expr::Const(4.0) * Expr::Var("b".to_string()),
             ],
             vec![
-                Expr::Var("c".to_string()) + Expr::Var("d".to_string()) * Expr::Const(3.0),
-                Expr::Var("c".to_string()) * Expr::Const(2.0)
-                    + Expr::Var("d".to_string()) * Expr::Const(4.0),
+                Expr::Var("c".to_string()) + Expr::Const(3.0) * Expr::Var("d".to_string()),
+                Expr::Const(2.0) * Expr::Var("c".to_string())
+                    + Expr::Const(4.0) * Expr::Var("d".to_string()),
             ],
         ]);
 
@@ -1645,10 +1645,7 @@ mod tests_exprmatrix {
 
         // Expected: ad - bc
         let expected = Expr::Var("a".to_string()) * Expr::Var("d".to_string())
-            + Expr::Mul(
-                Box::new(Expr::Const(-1.0)),
-                Box::new(Expr::Var("b".to_string()) * Expr::Var("c".to_string())),
-            );
+            + Expr::Const(-1.0) * Expr::Var("b".to_string()) * Expr::Var("c".to_string());
 
         assert_eq!(det, expected);
     }
@@ -1801,12 +1798,12 @@ mod tests_exprmatrix {
 
         let expected = ExprMatrix::new(vec![
             vec![
-                Expr::Var("a".to_string()) * Expr::Const(2.0),
+                Expr::Const(2.0) * Expr::Var("a".to_string()),
                 Expr::Var("b".to_string()) * Expr::Var("x".to_string()),
             ],
             vec![
                 Expr::Var("c".to_string()) * Expr::Var("y".to_string()),
-                Expr::Var("d".to_string()) * Expr::Const(3.0),
+                Expr::Const(3.0) * Expr::Var("d".to_string()),
             ],
         ]);
 

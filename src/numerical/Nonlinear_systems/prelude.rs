@@ -55,7 +55,22 @@ pub use crate::numerical::Nonlinear_systems::trust_region_LM::{
 };
 
 // Symbolic problem adapter
-pub use crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem;
+pub use crate::numerical::Nonlinear_systems::symbolic::{
+    PreparedSymbolicNonlinearAotProblem, SymbolicBackendConfig, SymbolicBackendKind,
+    SymbolicDenseAotOptions, SymbolicNonlinearProblem, SymbolicProblemOptions,
+};
+pub use crate::numerical::Nonlinear_systems::symbolic_aot::{
+    generated_aot_crate_from_symbolic_nonlinear_problem, materialize_symbolic_nonlinear_aot_build,
+    prepared_problem_from_symbolic_nonlinear_problem,
+};
+pub use crate::numerical::Nonlinear_systems::symbolic_backend::{
+    SelectedSymbolicNonlinearBackend, SelectedSymbolicNonlinearBackendKind,
+    SymbolicBackendSelectionPolicy, select_symbolic_nonlinear_backend,
+};
+pub use crate::numerical::Nonlinear_systems::symbolic_generated::{
+    DenseGeneratedBackendMode, PreparedGeneratedSymbolicProblem, SymbolicAotBuildPolicy,
+    SymbolicGeneratedBackendConfig,
+};
 
 /// User-facing wrapper around every nonlinear-system solver exported by the prelude.
 ///

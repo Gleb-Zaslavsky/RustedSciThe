@@ -130,7 +130,7 @@
 //! solver.set_postpocessing_from_hashmap(&mut parser);
 //! ```
 
-use crate::Utils::task_parser::{DocumentMap, DocumentParser};
+use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use nalgebra::DVector;

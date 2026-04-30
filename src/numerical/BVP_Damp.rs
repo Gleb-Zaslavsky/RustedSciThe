@@ -1,9 +1,13 @@
+/// focused backend comparison diagnostics for solver-facing BVP generated pipelines
+mod BVP_Damp_codegen_compare_tests;
 /// tests for BVP_Damp module
 mod BVP_Damp_tests;
 /// tests for BVP_Damp module
 mod BVP_Damp_tests2;
 /// production-style AOT acceptance tests for BVP_Damp module
 mod BVP_Damp_tests3;
+/// end-to-end race tables for BVP_Damp sparse/banded generated backends
+mod BVP_Damp_tests4;
 /// interface  abstracting lineat algebra operations and solvers
 pub mod BVP_traits;
 /// utilities for BVP solver in general

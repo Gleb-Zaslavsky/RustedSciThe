@@ -5,14 +5,138 @@ use crate::Utils::plots::plots;
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 use crate::numerical::NR_for_Euler::NRE;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::IvpBackendError;
+use crate::symbolic::symbolic_ivp_generated::{
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
+};
 use nalgebra::{DMatrix, DVector};
 //use ndarray_linalg::Norm;
 use log::info;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 pub enum Equation {
     LHS(Vec<Expr>),
     RHS(Vec<Expr>),
+}
+
+/// Grouped setup for one Backward Euler solve.
+#[derive(Clone)]
+pub struct BeSolverOptions {
+    pub eq_system: Vec<Expr>,
+    pub values: Vec<String>,
+    pub arg: String,
+    pub tolerance: f64,
+    pub max_iterations: usize,
+    pub h: Option<f64>,
+    pub t0: f64,
+    pub t_bound: f64,
+    pub y0: DVector<f64>,
+    pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+}
+
+impl BeSolverOptions {
+    /// Creates grouped Backward Euler options.
+    pub fn new(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        tolerance: f64,
+        max_iterations: usize,
+        h: Option<f64>,
+        t0: f64,
+        t_bound: f64,
+        y0: DVector<f64>,
+    ) -> Self {
+        Self {
+            eq_system,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            h,
+            t0,
+            t_bound,
+            y0,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+        }
+    }
+
+    /// Applies one explicit generated-backend config.
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Applies one high-level dense generated backend mode.
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    ///
+    /// Practical note:
+    /// for Backward Euler this is usually the first compiled backend worth
+    /// trying once the nonlinear system stops being toy-sized. Current IVP
+    /// comparisons show that `C + tcc` is often the best practical compromise
+    /// for medium and larger stiff systems because setup stays cheap while the
+    /// generated Jacobian/residual path becomes faster than `Lambdify`.
+    pub fn with_dense_generated_backend_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` when runtime throughput matters more.
+    ///
+    /// Practical note:
+    /// this is the "pay a larger setup cost for stronger native code" option.
+    /// It is worth trying for long repeated Backward Euler runs when startup
+    /// latency is secondary.
+    pub fn with_dense_generated_backend_c_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn with_dense_generated_backend_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        )
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    ///
+    /// For `BE` the practical recommendation is:
+    /// - small systems: keep `Lambdify`;
+    /// - larger stiff systems: try this preset first;
+    /// - if startup latency becomes a problem, drop to explicit `C + tcc`.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        )
+    }
 }
 //#[derive(Debug)]
 pub struct BE {
@@ -31,6 +155,8 @@ pub struct BE {
     global_timestepping: bool,
     stop_condition: Option<HashMap<String, f64>>,
     neighborhood_check: f64,
+    generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    statistics: IvpBackendStatistics,
 }
 impl Display for BE {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,7 +197,163 @@ impl BE {
             global_timestepping: true,
             stop_condition: None,
             neighborhood_check: 1e-6,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            statistics: IvpBackendStatistics::default(),
         }
+    }
+
+    /// Preferred grouped setup path for Backward Euler.
+    pub fn new_with_options(options: BeSolverOptions) -> Self {
+        let mut solver =
+            Self::new().with_generated_backend_config(options.generated_backend_config);
+        solver.set_initial(
+            options.eq_system,
+            options.values,
+            options.arg,
+            options.tolerance,
+            options.max_iterations,
+            options.h,
+            options.t0,
+            options.t_bound,
+            options.y0,
+        );
+        solver
+    }
+
+    /// Installs one high-level generated-backend orchestration config.
+    pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
+        self.generated_backend_config = config;
+        self.newton.jac = None;
+    }
+
+    /// Returns the current generated-backend orchestration config.
+    pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
+        &self.generated_backend_config
+    }
+
+    pub fn get_statistics(&self) -> IvpBackendStatistics {
+        let mut stats = self.statistics.clone();
+        let newton_stats = self.newton.statistics();
+        stats.nonlinear_solve_calls = newton_stats.nonlinear_solve_calls;
+        stats.nonlinear_iterations_total = newton_stats.nonlinear_iterations_total;
+        stats.residual_calls = newton_stats.residual_calls;
+        stats.residual_ms_total = newton_stats.residual_ms_total;
+        stats.jacobian_calls = newton_stats.jacobian_calls;
+        stats.jacobian_ms_total = newton_stats.jacobian_ms_total;
+        stats
+    }
+
+    pub fn statistics_report(&self) -> String {
+        self.get_statistics().table_report()
+    }
+
+    /// Builder-style generated backend setup.
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.set_generated_backend_config(config);
+        self
+    }
+
+    /// Applies one high-level dense generated backend mode.
+    pub fn set_dense_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.set_generated_backend_config(config);
+    }
+
+    /// Builder-style preset for the dense generated backend mode.
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        self.set_dense_generated_backend_mode(mode);
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    ///
+    /// This is often the most practical compiled `BE` choice once the problem
+    /// is large enough for Jacobian throughput to matter.
+    pub fn set_dense_generated_backend_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` for runtime-oriented repeated solves.
+    ///
+    /// Prefer this when you expect many repeated Backward Euler solves on the
+    /// same symbolic problem and startup latency is acceptable.
+    pub fn set_dense_generated_backend_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn set_dense_generated_backend_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        );
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    ///
+    /// For `BE` this points to the runtime-oriented generated path. Benchmark
+    /// against `Lambdify` on small systems before enabling it by default in
+    /// application code.
+    pub fn set_dense_generated_backend_for_repeated_solves(
+        &mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        );
+    }
+
+    /// Builder-style alias for `C + tcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_tcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_tcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for `C + gcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_gcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_gcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for Zig dense generated backend setup.
+    pub fn with_dense_generated_backend_zig(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_zig(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for the recommended repeated-solve IVP preset.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_for_repeated_solves(output_parent_dir);
+        self
     }
     pub fn set_initial(
         &mut self,
@@ -126,6 +408,15 @@ impl BE {
 
     pub fn set_stop_condition(&mut self, stop_condition: HashMap<String, f64>) {
         self.stop_condition = Some(stop_condition);
+    }
+
+    pub fn set_equation_parameters(&mut self, params: Option<&[&str]>) {
+        self.newton.set_equation_parameters(params);
+        self.newton.jac = None;
+    }
+
+    pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), IvpBackendError> {
+        self.newton.set_parameter_values(values)
     }
 
     pub fn set_neighborhood_check(&mut self, tolerance: f64) {
@@ -235,6 +526,7 @@ impl BE {
         let mut _i: i64 = 0;
         while integr_status.is_none() {
             self.step();
+            self.statistics.step_calls += 1;
             let _status: i8 = 0;
             //   info("\n iteration: {}", i);
             //if i == 100 {panic!()}
@@ -271,13 +563,44 @@ impl BE {
         //info("y  {:?}, len {:?}", &y_res, y_res.shape());
         let duration = start.elapsed();
         info!("Program took {} milliseconds to run", duration.as_millis());
+        self.statistics.record_solve_duration(duration);
         self.t_result = t_res.clone();
         self.y_result = y_res.clone();
     } //
 
-    pub fn solve(&mut self) -> () {
-        self.newton.eq_generate();
+    pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
+        if self.newton.jac.is_none() {
+            let start = Instant::now();
+            let mut options = crate::symbolic::symbolic_ivp::SymbolicIvpProblemOptions::new();
+            if let Some(parameters) = self.newton.equation_parameters.clone() {
+                options = options.with_equation_parameters(parameters);
+            }
+            if let Some(values) = self.newton.equation_parameter_values.clone() {
+                options = options.with_equation_parameter_values(values);
+            }
+            let prepared = prepare_generated_symbolic_ivp_problem(
+                self.newton.eq_system.clone(),
+                self.newton.values.clone(),
+                self.newton.arg.clone(),
+                options.with_aot_options(self.generated_backend_config.aot_options),
+                self.generated_backend_config.clone(),
+            )
+            .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+                message: err.to_string(),
+            })?;
+            self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+            self.newton
+                .install_prepared_backend(prepared.into_problem());
+            self.statistics
+                .record_backend_prepare_duration(start.elapsed());
+        }
         self.main_loop();
+        Ok(())
+    }
+
+    pub fn solve(&mut self) -> () {
+        self.try_solve()
+            .expect("Backward Euler symbolic IVP backend generation should succeed");
     }
     pub fn plot_result(&self) -> () {
         plots(
@@ -300,7 +623,76 @@ impl BE {
 
 mod tests {
     use super::*;
+    use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
     use std::collections::HashMap;
+
+    #[test]
+    fn be_new_with_options_installs_generated_backend_mode() {
+        let solver = BE::new_with_options(
+            BeSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                1e-6,
+                20,
+                Some(0.1),
+                0.0,
+                1.0,
+                DVector::from_vec(vec![1.0]),
+            )
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::RequirePrebuilt),
+        );
+
+        assert_eq!(
+            solver.generated_backend_config().build_policy,
+            SymbolicIvpAotBuildPolicy::RequirePrebuilt
+        );
+        assert_eq!(solver.newton.values, vec!["y".to_string()]);
+    }
+
+    #[test]
+    fn generated_backend_surface_mode_updates_be_config() {
+        let solver = BE::new()
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease);
+
+        assert_eq!(
+            solver.generated_backend_config().build_policy,
+            SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                profile: crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Release
+            }
+        );
+    }
+
+    #[test]
+    fn be_generated_backend_surface_keeps_selected_c_backend() {
+        let solver = BE::new()
+            .with_dense_generated_backend_c_tcc("target/generated-ivp-tests")
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease);
+
+        assert_eq!(
+            solver.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+        );
+        assert_eq!(
+            solver.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("tcc")
+        );
+    }
+
+    #[test]
+    fn be_generated_backend_repeated_solves_alias_prefers_c_gcc() {
+        let solver = BE::new()
+            .with_dense_generated_backend_for_repeated_solves("target/generated-ivp-tests");
+
+        assert_eq!(
+            solver.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+        );
+        assert_eq!(
+            solver.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("gcc")
+        );
+    }
 
     #[test]
     fn test_newton_raphson_solver_for_Euler_1() {

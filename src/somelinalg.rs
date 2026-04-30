@@ -9,4 +9,5 @@ pub mod linear_sys_diagnostics;
 
 pub mod RustedLINPACK;
 
+pub mod banded;
 pub mod iterative_solvers_gpu;

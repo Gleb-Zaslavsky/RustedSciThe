@@ -1,10 +1,126 @@
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, PreparedSymbolicIvpProblem, SharedIvpParameterValues,
+    SymbolicIvpProblemOptions,
+};
+use crate::symbolic::symbolic_ivp_generated::{
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
+};
 use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 // solve algebraic nonlinear system with free parameter t
 //#[derive(Debug)]
+#[derive(Clone)]
+pub struct NreSolverOptions {
+    pub eq_system: Vec<Expr>,
+    pub initial_guess: DVector<f64>,
+    pub values: Vec<String>,
+    pub arg: String,
+    pub tolerance: f64,
+    pub max_iterations: usize,
+    pub dt: f64,
+    pub global_timestepping: bool,
+    pub t_bound: Option<f64>,
+    pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+}
+
+impl NreSolverOptions {
+    pub fn new(
+        eq_system: Vec<Expr>,
+        initial_guess: DVector<f64>,
+        values: Vec<String>,
+        arg: String,
+        tolerance: f64,
+        max_iterations: usize,
+        dt: f64,
+        global_timestepping: bool,
+        t_bound: Option<f64>,
+    ) -> Self {
+        Self {
+            eq_system,
+            initial_guess,
+            values,
+            arg,
+            tolerance,
+            max_iterations,
+            dt,
+            global_timestepping,
+            t_bound,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+        }
+    }
+
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.generated_backend_config = config;
+        self
+    }
+
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.generated_backend_config = config;
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    ///
+    /// This is usually the first compiled backend worth trying for larger stiff
+    /// Backward Euler problems.
+    pub fn with_dense_generated_backend_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` when runtime throughput matters more.
+    ///
+    /// Prefer this when repeated dense Newton solves matter more than startup
+    /// latency.
+    pub fn with_dense_generated_backend_c_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        )
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn with_dense_generated_backend_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        )
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    ///
+    /// For Backward Euler this is a reasonable compiled preset once the system
+    /// is large enough that Jacobian throughput starts to matter.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        )
+    }
+}
+
 pub struct NRE {
     pub eq_system: Vec<Expr>,        //
     pub initial_guess: DVector<f64>, // initial guess
@@ -17,12 +133,17 @@ pub struct NRE {
     pub jacobian: Option<Vec<Vec<Expr>>>,
     pub fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     pub jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
+    pub equation_parameters: Option<Vec<String>>,
+    pub equation_parameter_values: Option<DVector<f64>>,
     pub t: f64,
     pub y: DVector<f64>,
     pub dt: f64,
     n: usize,
     pub global_timestepping: bool,
     pub t_bound: Option<f64>,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    statistics: Arc<Mutex<IvpBackendStatistics>>,
 }
 
 impl Display for NRE {
@@ -65,39 +186,247 @@ impl NRE {
             jacobian: None,
             fun: Box::new(|_t, y| y.clone()),
             jac: None,
+            equation_parameters: None,
+            equation_parameter_values: None,
             t: 0.0,
             y: initial_guess.clone(),
             max_error: 1e-3,
             n: 0,
+            parameter_values_handle: None,
+            generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
         }
+    }
+
+    /// Preferred grouped setup path for Newton-Raphson-for-Euler backend.
+    pub fn new_with_options(options: NreSolverOptions) -> Self {
+        Self::new(
+            options.eq_system,
+            options.initial_guess,
+            options.values,
+            options.arg,
+            options.tolerance,
+            options.max_iterations,
+            options.dt,
+            options.global_timestepping,
+            options.t_bound,
+        )
+        .with_generated_backend_config(options.generated_backend_config)
+    }
+
+    pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
+        self.generated_backend_config = config;
+        self.jac = None;
+    }
+
+    pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
+        &self.generated_backend_config
+    }
+
+    pub fn statistics(&self) -> IvpBackendStatistics {
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn statistics_handle(&self) -> Arc<Mutex<IvpBackendStatistics>> {
+        Arc::clone(&self.statistics)
+    }
+
+    pub fn with_generated_backend_config(
+        mut self,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> Self {
+        self.set_generated_backend_config(config);
+        self
+    }
+
+    pub fn set_dense_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
+        let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
+        config.resolver = self.generated_backend_config.resolver.clone();
+        config.aot_options = self.generated_backend_config.aot_options;
+        config.aot_codegen_backend = self.generated_backend_config.aot_codegen_backend;
+        config.aot_c_compiler = self.generated_backend_config.aot_c_compiler.clone();
+        config.output_parent_dir = self.generated_backend_config.output_parent_dir.clone();
+        config.crate_name_override = self.generated_backend_config.crate_name_override.clone();
+        config.module_name_override = self.generated_backend_config.module_name_override.clone();
+        self.set_generated_backend_config(config);
+    }
+
+    pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
+        self.set_dense_generated_backend_mode(mode);
+        self
+    }
+
+    /// Uses compiled dense IVP path via `C + tcc` when startup latency matters most.
+    pub fn set_dense_generated_backend_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_tcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via `C + gcc` for runtime-oriented repeated solves.
+    pub fn set_dense_generated_backend_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_c_gcc(),
+        );
+    }
+
+    /// Uses compiled dense IVP path via Zig.
+    pub fn set_dense_generated_backend_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .with_zig(),
+        );
+    }
+
+    /// Recommended generated-backend preset for dense IVP repeated solves.
+    pub fn set_dense_generated_backend_for_repeated_solves(
+        &mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) {
+        self.set_generated_backend_config(
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+                .for_repeated_solves(),
+        );
+    }
+
+    /// Builder-style alias for `C + tcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_tcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_tcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for `C + gcc` dense generated backend setup.
+    pub fn with_dense_generated_backend_c_gcc(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_c_gcc(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for Zig dense generated backend setup.
+    pub fn with_dense_generated_backend_zig(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_zig(output_parent_dir);
+        self
+    }
+
+    /// Builder-style alias for the recommended repeated-solve IVP preset.
+    pub fn with_dense_generated_backend_for_repeated_solves(
+        mut self,
+        output_parent_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.set_dense_generated_backend_for_repeated_solves(output_parent_dir);
+        self
     }
     /// Basic methods to set the equation system
 
     ///Set system of equations with vector of symbolic expressions
-    pub fn eq_generate(&mut self) {
+    pub fn set_equation_parameters(&mut self, params: Option<&[&str]>) {
+        self.equation_parameters =
+            params.map(|params| params.iter().map(|p| (*p).to_string()).collect());
+        self.jac = None;
+    }
+
+    pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), IvpBackendError> {
+        if let Some(parameters) = self.equation_parameters.as_ref() {
+            if parameters.len() != values.len() {
+                return Err(IvpBackendError::ParameterCountMismatch {
+                    expected: parameters.len(),
+                    actual: values.len(),
+                });
+            }
+        } else if !values.is_empty() {
+            return Err(IvpBackendError::ParameterCountMismatch {
+                expected: 0,
+                actual: values.len(),
+            });
+        }
+
+        if let Some(handle) = self.parameter_values_handle.as_ref() {
+            let mut slot = handle
+                .write()
+                .expect("shared IVP parameter state lock poisoned");
+            *slot = values.clone();
+        }
+        self.equation_parameter_values = Some(values);
+        Ok(())
+    }
+
+    pub(crate) fn install_prepared_backend(&mut self, prepared: PreparedSymbolicIvpProblem) {
+        self.jacobian = Some(prepared.symbolic_jacobian.clone());
+        self.parameter_values_handle = prepared.parameter_values_handle();
+        self.equation_parameters = prepared.equation_parameters.clone();
+
+        let residual = prepared.residual;
+        let jacobian = prepared.jacobian;
+        let stats_for_residual = self.statistics_handle();
+        self.fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let out = residual(t, y);
+            stats_for_residual
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_residual_duration(start.elapsed());
+            out
+        });
+        let stats_for_jacobian = self.statistics_handle();
+        self.jac = Some(Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+            let start = Instant::now();
+            let out = jacobian(t, y);
+            stats_for_jacobian
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_jacobian_duration(start.elapsed());
+            out
+        }));
+        self.n = self.eq_system.len();
+    }
+
+    pub fn try_eq_generate(&mut self) -> Result<(), IvpBackendError> {
         info!("generating equations and jacobian");
-        let mut jacobian_instance = Jacobian::new();
-        jacobian_instance.generate_IVP_ODEsolver(
+        let start = Instant::now();
+        let mut options = SymbolicIvpProblemOptions::new();
+        if let Some(parameters) = self.equation_parameters.clone() {
+            options = options.with_equation_parameters(parameters);
+        }
+        if let Some(values) = self.equation_parameter_values.clone() {
+            options = options.with_equation_parameter_values(values);
+        }
+
+        let prepared = prepare_generated_symbolic_ivp_problem(
             self.eq_system.clone(),
             self.values.clone(),
             self.arg.clone(),
-        );
-        self.jacobian = Some(jacobian_instance.symbolic_jacobian);
-        // println!("Jacobian = {:?}", jacobian_instance.symbolic_jacobian);
-        let fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
-            jacobian_instance.lambdified_functions_IVP_DVector;
-
-        let jac = jacobian_instance.function_jacobian_IVP_DMatrix;
-
-        let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
-            Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> { jac(t, &y) });
-
-        self.fun = fun;
-        self.jac = Some(jac_wrapped);
-        self.n = self.eq_system.len();
+            options.with_aot_options(self.generated_backend_config.aot_options),
+            self.generated_backend_config.clone(),
+        )
+        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+            message: err.to_string(),
+        })?;
+        self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+        self.install_prepared_backend(prepared.into_problem());
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .record_backend_prepare_duration(start.elapsed());
         assert_eq!(&self.eq_system.len(), &self.n);
-        // assert_eq!(&(self.jac.unwrap()).is_empty(), &false, "jac is empty");
-        //assert_eq!(&(self.fun).is_empty(), &false, "fun is empty");
+        Ok(())
+    }
+
+    pub fn eq_generate(&mut self) {
+        self.try_eq_generate()
+            .expect("NR_for_Euler symbolic IVP backend generation should succeed");
     }
 
     pub fn set_new_step(&mut self, t: f64, y: DVector<f64>, initial_guess: DVector<f64>) {
@@ -162,6 +491,10 @@ impl NRE {
 
     pub fn solve(&mut self) -> Option<DVector<f64>> {
         //  println!("solving system of equations with Newton-Raphson method");
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .nonlinear_solve_calls += 1;
         let mut y: DVector<f64> = self.initial_guess.clone();
         self.y = y.clone();
         let mut i = 0;
@@ -176,6 +509,10 @@ impl NRE {
                 //  println!("converged in {} iterations", i);
                 self.result = Some(new_y.clone());
                 self.max_error = error;
+                self.statistics
+                    .lock()
+                    .expect("IVP statistics lock poisoned")
+                    .nonlinear_iterations_total += i + 1;
                 return Some(new_y);
             } else {
                 y = new_y.clone();
@@ -185,6 +522,10 @@ impl NRE {
                 //  println!("\n \n iteration = {}, error = {}", i, error)
             }
         }
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .nonlinear_iterations_total += i;
         None
     }
 
@@ -197,6 +538,84 @@ impl NRE {
 mod tests {
     use super::*;
     use nalgebra::DVector;
+
+    #[test]
+    fn nre_new_with_options_installs_generated_backend_mode() {
+        let nr = NRE::new_with_options(
+            NreSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                DVector::from_vec(vec![1.0]),
+                vec!["y".to_string()],
+                "t".to_string(),
+                1e-6,
+                20,
+                1e-3,
+                true,
+                None,
+            )
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::RequirePrebuilt),
+        );
+
+        assert_eq!(
+            nr.generated_backend_config().build_policy,
+            crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy::RequirePrebuilt
+        );
+    }
+
+    #[test]
+    fn nre_generated_backend_surface_keeps_selected_c_backend() {
+        let nr = NRE::new_with_options(
+            NreSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                DVector::from_vec(vec![1.0]),
+                vec!["y".to_string()],
+                "t".to_string(),
+                1e-6,
+                20,
+                1e-3,
+                true,
+                None,
+            )
+            .with_dense_generated_backend_c_gcc("target/generated-ivp-tests")
+            .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease),
+        );
+
+        assert_eq!(
+            nr.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("gcc")
+        );
+    }
+
+    #[test]
+    fn nre_generated_backend_repeated_solves_alias_prefers_c_gcc() {
+        let nr = NRE::new_with_options(
+            NreSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                DVector::from_vec(vec![1.0]),
+                vec!["y".to_string()],
+                "t".to_string(),
+                1e-6,
+                20,
+                1e-3,
+                true,
+                None,
+            )
+            .with_dense_generated_backend_for_repeated_solves("target/generated-ivp-tests"),
+        );
+
+        assert_eq!(
+            nr.generated_backend_config().aot_codegen_backend,
+            crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("gcc")
+        );
+    }
 
     #[test]
     fn test_newton_raphson_solver_for_Euler() {

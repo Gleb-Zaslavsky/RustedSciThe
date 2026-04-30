@@ -15,7 +15,7 @@
 
 use crate::symbolic::symbolic_engine::Expr;
 use std::f64::consts::PI;
-
+#[allow(dead_code)]
 /// One instruction in the symbolic evaluation tape.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Instruction {
@@ -37,7 +37,7 @@ pub(crate) enum Instruction {
     ArcTg(usize),
     ArcCtg(usize),
 }
-
+#[allow(dead_code)]
 /// A compiled batch of symbolic expressions that share one instruction tape.
 #[derive(Clone, Debug)]
 pub(crate) struct CompiledBatch {
@@ -50,6 +50,7 @@ pub(crate) struct CompiledBatch {
 }
 
 impl CompiledBatch {
+    #[allow(dead_code)]
     /// Evaluate all compiled outputs for one argument slice.
     pub(crate) fn eval(&self, args: &[f64]) -> Vec<f64> {
         let mut registers = Vec::new();
@@ -61,6 +62,7 @@ impl CompiledBatch {
     /// Evaluate all compiled outputs using caller-provided scratch buffers.
     ///
     /// This avoids per-call allocations and is intended for hot numerical paths.
+    #[allow(dead_code)]
     pub(crate) fn eval_into(&self, args: &[f64], registers: &mut Vec<f64>, outputs: &mut Vec<f64>) {
         self.evaluate_registers(args, registers);
 
@@ -72,6 +74,7 @@ impl CompiledBatch {
     }
 
     /// Evaluate a single-output batch.
+    #[allow(dead_code)]
     pub(crate) fn eval_single(&self, args: &[f64]) -> f64 {
         let mut registers = Vec::new();
         self.eval_single_with_scratch(args, &mut registers)
@@ -80,6 +83,7 @@ impl CompiledBatch {
     /// Evaluate a single-output batch using caller-provided register scratch.
     ///
     /// This is the allocation-free hot path used by `lambdify2()`.
+     #[allow(dead_code)]
     pub(crate) fn eval_single_with_scratch(&self, args: &[f64], registers: &mut Vec<f64>) -> f64 {
         debug_assert_eq!(
             self.output_registers.len(),
@@ -120,6 +124,7 @@ impl CompiledBatch {
 }
 
 /// Compile several expressions into one instruction tape.
+#[allow(dead_code)]
 pub(crate) fn compile_many(exprs: &[Expr], vars: &[&str]) -> CompiledBatch {
     let mut instructions = Vec::new();
     let mut output_registers = Vec::with_capacity(exprs.len());

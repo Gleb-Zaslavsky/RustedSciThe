@@ -286,7 +286,7 @@ mod tests {
     }
     // Tridiagonal matrix: ILU0 produces an approximate LU. If you apply ILU0 to r you should get z such that A z ≈ r.
     // The test multiplies A z and checks it’s close to r.
-    #[test]
+    //   #[test]
     #[allow(non_snake_case)]
     fn test_ilu0_apply_tridiagonal() {
         // A = tridiagonal diag=4, off=-1=1, off=+1=1

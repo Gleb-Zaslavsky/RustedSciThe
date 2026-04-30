@@ -22,18 +22,25 @@ impl Jacobian {
         let ncols = self.symbolic_jacobian.len();
         let nrows = self.symbolic_jacobian[0].len();
         assert!(nrows == ncols);
-        self.jacobian_generate_IVP_Radau_parallel(arg.as_str(), values.clone(), parameters.clone());
+        self.jacobian_generate_IVP_Radau_mode(
+            arg.as_str(),
+            values.clone(),
+            parameters.clone(),
+            true,
+        );
         let values_str = values.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
         let parameters_str = parameters.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
-        self.lambdify_funcvector_with_parameters_parallel(
+        self.lambdify_funcvector_with_parameters_mode(
             arg.as_str(),
             values_str.clone(),
             parameters_str.clone(),
+            true,
         );
-        self.vector_funvector_with_parameters_DVector_parallel(
+        self.vector_funvector_with_parameters_DVector_mode(
             arg.as_str(),
             values_str.clone(),
             parameters_str.clone(),
+            true,
         );
     }
 
@@ -157,7 +164,6 @@ impl Jacobian {
     ) {
         let mut variable_and_parameters: Vec<&str> = variable_str.clone();
         variable_and_parameters.extend(parameters.clone());
-        println!("variable_and_parameters = {:?} \n", variable_and_parameters);
 
         // Create thread-safe lambdified functions
         let lambdified_funcs: Vec<_> = self
@@ -223,56 +229,15 @@ impl Jacobian {
 }
 // Update the RadauNewton implementation
 impl RadauNewton {
-    /// Generate parallel function and Jacobian closures with proper thread safety
+    /// Legacy compatibility entry for the parallel Radau generation path.
+    ///
+    /// The actual backend selection now lives in `RadauNewton::eq_generate()`,
+    /// which already dispatches to the parallel Jacobian/function generation
+    /// path when `self.parallel` is enabled. Keeping this thin wrapper avoids a
+    /// second independently evolving solver pipeline.
     pub fn eq_generate_parallel(&mut self) {
-        info!("Generating parallel Radau Newton equations and jacobian");
-        let mut jacobian_instance = Jacobian::new();
-
-        jacobian_instance.set_vector_of_functions(self.eq_system.clone());
-        jacobian_instance.set_variables(self.k_variables.iter().map(|x| x.as_str()).collect());
-        jacobian_instance.calc_jacobian();
-        jacobian_instance.find_bandwidths();
-        let values_str = self
-            .k_variables
-            .iter()
-            .map(|x| x.as_str())
-            .collect::<Vec<&str>>();
-        let parameters_str = self
-            .parameters
-            .iter()
-            .map(|x| x.as_str())
-            .collect::<Vec<&str>>();
-
-        // Use the safe parallel jacobian generation
-        let symbolic_jacobian = jacobian_instance.symbolic_jacobian.clone();
-        let new_jac = Jacobian::calc_jacobian_fun_with_parameters_parallel(
-            symbolic_jacobian,
-            jacobian_instance.vector_of_functions.len(),
-            jacobian_instance.vector_of_variables.len(),
-            self.k_variables.clone(),
-            self.parameters.clone(),
-            self.arg.clone(),
-            jacobian_instance.bandwidth.unwrap(),
-        );
-
-        // Use the safe parallel vector function generation
-        jacobian_instance.vector_funvector_with_parameters_DVector_parallel(
-            self.arg.as_str(),
-            values_str.clone(),
-            parameters_str.clone(),
-        );
-
-        self.jacobian_symbolic = Some(jacobian_instance.symbolic_jacobian.clone());
-
-        let fun = jacobian_instance.lambdified_functions_IVP_DVector;
-        let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> =
-            Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> { new_jac(t, y) });
-
-        self.fun = fun;
-        self.jac = Some(jac_wrapped);
-        self.n = self.eq_system.len();
-
-        info!("Parallel Radau Newton functions generated successfully");
+        self.set_parallel(true);
+        self.eq_generate();
     }
 }
 

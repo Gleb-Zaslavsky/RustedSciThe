@@ -1,0 +1,2513 @@
+use super::{error::BandedError, ops::banded_matvec, storage::Banded};
+
+/// Unblocked LAPACK-style LU factorization for a square banded matrix.
+///
+/// Storage follows the LAPACK GB workspace idea:
+///   ldab = 2*kl + ku + 1
+///   kv   = kl + ku
+///
+/// Physical A(i, j) is stored at:
+///   ab[kv + i - j, j]
+///
+/// This workspace is larger than compact band storage because the upper
+/// fill-in created by row pivoting must be preserved.
+#[derive(Clone, Debug)]
+pub struct LapackStyleBandedLu {
+    n: usize,
+    kl: usize,
+    ku: usize,
+    kv: usize,
+    ldab: usize,
+    ab: Vec<f64>,     // column-major: row + col * ldab
+    ipiv: Vec<usize>, // 0-based pivot rows
+    is_factorized: bool,
+    pivot_epsilon: f64,
+}
+
+impl LapackStyleBandedLu {
+    pub fn new(n: usize, kl: usize, ku: usize) -> Result<Self, BandedError> {
+        if n == 0 {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let kv = kl.checked_add(ku).ok_or(BandedError::DimensionMismatch)?;
+        let ldab = kl
+            .checked_mul(2)
+            .and_then(|x| x.checked_add(ku))
+            .and_then(|x| x.checked_add(1))
+            .ok_or(BandedError::DimensionMismatch)?;
+
+        let len = ldab.checked_mul(n).ok_or(BandedError::DimensionMismatch)?;
+
+        Ok(Self {
+            n,
+            kl,
+            ku,
+            kv,
+            ldab,
+            ab: vec![0.0; len],
+            ipiv: vec![0; n],
+            is_factorized: false,
+            pivot_epsilon: 1e-14,
+        })
+    }
+
+    #[inline]
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    #[inline]
+    pub fn kl(&self) -> usize {
+        self.kl
+    }
+
+    #[inline]
+    pub fn ku(&self) -> usize {
+        self.ku
+    }
+
+    #[inline]
+    pub fn kv(&self) -> usize {
+        self.kv
+    }
+
+    #[inline]
+    pub fn ldab(&self) -> usize {
+        self.ldab
+    }
+
+    #[inline]
+    pub fn ipiv(&self) -> &[usize] {
+        &self.ipiv
+    }
+
+    #[inline]
+    pub fn is_factorized(&self) -> bool {
+        self.is_factorized
+    }
+
+    #[inline]
+    pub fn set_pivot_epsilon(&mut self, eps: f64) {
+        self.pivot_epsilon = eps;
+    }
+
+    #[inline]
+    fn ab_index(&self, row: usize, col: usize) -> usize {
+        row + col * self.ldab
+    }
+
+    #[inline]
+    fn get_ab(&self, row: usize, col: usize) -> f64 {
+        self.ab[self.ab_index(row, col)]
+    }
+
+    #[inline]
+    fn set_ab(&mut self, row: usize, col: usize, value: f64) {
+        let idx = self.ab_index(row, col);
+        self.ab[idx] = value;
+    }
+
+    #[inline]
+    pub fn workspace(&self) -> &[f64] {
+        &self.ab
+    }
+
+    #[inline]
+    pub fn workspace_mut(&mut self) -> &mut [f64] {
+        &mut self.ab
+    }
+
+    /// Map physical matrix entry A(i, j) to workspace row index.
+    ///
+    /// Returns None if the entry lies outside the representable LU band workspace.
+    #[inline]
+    fn phys_to_ab_row(&self, i: usize, j: usize) -> Option<usize> {
+        let row = self.kv as isize + i as isize - j as isize;
+        if row < 0 || row >= self.ldab as isize {
+            None
+        } else {
+            Some(row as usize)
+        }
+    }
+
+    /// Returns whether physical A(i,j) is storable in the current workspace.
+    #[inline]
+    fn is_representable(&self, i: usize, j: usize) -> bool {
+        self.phys_to_ab_row(i, j).is_some()
+    }
+
+    #[inline]
+    pub fn get_phys(&self, i: usize, j: usize) -> f64 {
+        self.phys_to_ab_row(i, j)
+            .map(|row| self.get_ab(row, j))
+            .unwrap_or(0.0)
+    }
+
+    #[inline]
+    pub fn set_phys(&mut self, i: usize, j: usize, value: f64) {
+        if let Some(row) = self.phys_to_ab_row(i, j) {
+            self.set_ab(row, j, value);
+        }
+    }
+
+    /// Zero whole workspace and load a compact banded matrix into LAPACK-style GB workspace.
+    ///
+    /// Compact Banded<f64> stores A(i,j) only on the original band.
+    /// Here we place it into rows kv + i - j.
+    pub fn load_from_banded(&mut self, a: &Banded<f64>) -> Result<(), BandedError> {
+        if a.n() != self.n || a.kl() != self.kl || a.ku() != self.ku {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        self.ab.fill(0.0);
+        self.ipiv.fill(0);
+        self.is_factorized = false;
+
+        let n = self.n;
+        for j in 0..n {
+            let i0 = j.saturating_sub(self.ku);
+            let i1 = (j + self.kl + 1).min(n);
+
+            for i in i0..i1 {
+                let v = a[(i, j)];
+                self.set_phys(i, j, v);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn solve_in_place_with_refinement<F>(
+        &self,
+        rhs: &mut [f64],
+        max_iters: usize,
+        tol: f64,
+        mut matvec: F,
+    ) -> Result<usize, BandedError>
+    where
+        F: FnMut(&[f64], &mut [f64]) -> Result<(), BandedError>,
+    {
+        if rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let b = rhs.to_vec();
+        self.solve_in_place(rhs)?;
+
+        let n = rhs.len();
+        let b_norm = vec_linf_norm(&b).max(1.0);
+        let mut current_rr = f64::INFINITY;
+        let mut residual = vec![0.0; n];
+        let mut ax = vec![0.0; n];
+        let mut delta = vec![0.0; n];
+        let mut x_trial = vec![0.0; n];
+        let mut accepted_steps = 0usize;
+
+        for _ in 0..max_iters {
+            ax.fill(0.0);
+            matvec(rhs, &mut ax)?;
+
+            let mut r_norm: f64 = 0.0;
+            for i in 0..n {
+                residual[i] = b[i] - ax[i];
+                r_norm = r_norm.max(residual[i].abs());
+            }
+
+            let rel_res = r_norm / b_norm;
+            if rel_res < tol {
+                break;
+            }
+            if !current_rr.is_finite() {
+                current_rr = rel_res;
+            }
+
+            delta.copy_from_slice(&residual);
+            self.solve_in_place(&mut delta)?;
+
+            x_trial.copy_from_slice(rhs);
+            for i in 0..n {
+                x_trial[i] += delta[i];
+            }
+
+            ax.fill(0.0);
+            matvec(&x_trial, &mut ax)?;
+
+            let mut trial_r_norm: f64 = 0.0;
+            for i in 0..n {
+                trial_r_norm = trial_r_norm.max((b[i] - ax[i]).abs());
+            }
+
+            let trial_rr = trial_r_norm / b_norm;
+            if !trial_rr.is_finite() || trial_rr >= current_rr {
+                break;
+            }
+
+            rhs.copy_from_slice(&x_trial);
+            current_rr = trial_rr;
+            accepted_steps += 1;
+        }
+
+        Ok(accepted_steps)
+    }
+
+    pub fn solve_banded_in_place_with_refinement(
+        &self,
+        a: &Banded<f64>,
+        rhs: &mut [f64],
+        max_iters: usize,
+        tol: f64,
+    ) -> Result<usize, BandedError> {
+        if a.n() != self.n || a.kl() != self.kl || a.ku() != self.ku || rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        self.solve_in_place_with_refinement(rhs, max_iters, tol, |x, ax| {
+            let y = banded_matvec(a, x)?;
+            if y.len() != ax.len() {
+                return Err(BandedError::DimensionMismatch);
+            }
+            ax.copy_from_slice(&y);
+            Ok(())
+        })
+    }
+
+    /// For debugging: reconstruct the currently stored physical matrix from workspace.
+    ///
+    /// This includes fill-in currently present in the GB workspace, not just the original band.
+    pub fn reconstruct_dense_from_workspace(&self) -> Vec<Vec<f64>> {
+        let mut out = vec![vec![0.0; self.n]; self.n];
+
+        for j in 0..self.n {
+            // rows represented in this column by the workspace
+            let i0 = j.saturating_sub(self.kv);
+            let i1 = (j + (self.ldab - 1 - self.kv) + 1).min(self.n);
+
+            for i in i0..i1 {
+                if let Some(row) = self.phys_to_ab_row(i, j) {
+                    out[i][j] = self.get_ab(row, j);
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Original compact-band interpretation only (useful before factorization).
+    pub fn reconstruct_original_band_dense(&self) -> Vec<Vec<f64>> {
+        let mut out = vec![vec![0.0; self.n]; self.n];
+
+        for j in 0..self.n {
+            let i0 = j.saturating_sub(self.ku);
+            let i1 = (j + self.kl + 1).min(self.n);
+
+            for i in i0..i1 {
+                out[i][j] = self.get_phys(i, j);
+            }
+        }
+
+        out
+    }
+
+    /// Row swap restricted to columns where at least one of the rows is represented.
+    ///
+    /// This is intentionally simple and debug-friendly for the first unblocked implementation.
+    fn swap_phys_rows_in_active_window(
+        &mut self,
+        r1: usize,
+        r2: usize,
+        col_lo: usize,
+        col_hi: usize,
+    ) {
+        if r1 == r2 {
+            return;
+        }
+
+        for col in col_lo..=col_hi {
+            let x = self.get_phys(r1, col);
+            let y = self.get_phys(r2, col);
+            self.set_phys(r1, col, y);
+            self.set_phys(r2, col, x);
+        }
+    }
+
+    /// Zero the fill-in region of column `j_fill` that LAPACK keeps available above the original band.
+    ///
+    /// For the first version this is a simple helper; correctness is more important than elegance.
+    fn zero_fill_column(&mut self, j_fill: usize) {
+        if j_fill >= self.n {
+            return;
+        }
+
+        // Top KL rows of the workspace are fill rows.
+        for row in 0..self.kl {
+            self.set_ab(row, j_fill, 0.0);
+        }
+    }
+
+    /// Find pivot in column j among rows j..min(j+kl, n-1).
+    ///
+    /// Returns offset jp such that pivot row = j + jp.
+    fn pivot_offset_in_column(&self, j: usize) -> usize {
+        let km = (self.n - 1 - j).min(self.kl);
+
+        let mut best_off = 0usize;
+        let mut best_val = self.get_phys(j, j).abs();
+
+        for off in 1..=km {
+            let val = self.get_phys(j + off, j).abs();
+            if val > best_val {
+                best_val = val;
+                best_off = off;
+            }
+        }
+
+        best_off
+    }
+
+    /// Unblocked in-band LU with partial pivoting.
+    ///
+    /// This is the Rust "DGBTF2-style" first target, not the blocked DGBTRF mirror.
+    pub fn factor_from(&mut self, a: &Banded<f64>) -> Result<(), BandedError> {
+        self.load_from_banded(a)?;
+
+        let n = self.n;
+        let kl = self.kl;
+        let ku = self.ku;
+        let kv = self.kv;
+
+        let mut ju = 0usize;
+
+        for j in 0..n {
+            let j_kv = j + kv;
+            if j_kv < n {
+                self.zero_fill_column(j_kv);
+            }
+
+            let km = (n - 1 - j).min(kl);
+            let jp = self.pivot_offset_in_column(j);
+            let piv_row = j + jp;
+            self.ipiv[j] = piv_row;
+
+            let pivot = self.get_phys(piv_row, j);
+            if pivot.abs() <= self.pivot_epsilon {
+                return Err(BandedError::ZeroPivot {
+                    index: j,
+                    value: pivot,
+                });
+            }
+
+            ju = ju.max((j + ku + jp).min(n - 1));
+
+            if piv_row != j {
+                let col_lo = j.saturating_sub(kv);
+                let col_hi = ju;
+                self.swap_phys_rows_in_active_window(j, piv_row, col_lo, col_hi);
+            }
+
+            let pivot_now = self.get_phys(j, j);
+
+            // multipliers
+            for off in 1..=km {
+                let i = j + off;
+                let lij = self.get_phys(i, j) / pivot_now;
+                self.set_phys(i, j, lij);
+            }
+
+            // rank-1 update inside active band region
+            for col in (j + 1)..=ju {
+                let u_jc = self.get_phys(j, col);
+                if u_jc == 0.0 {
+                    continue;
+                }
+
+                let i_hi = (j + km).min(n - 1);
+                for i in (j + 1)..=i_hi {
+                    let lij = self.get_phys(i, j);
+                    if lij != 0.0 {
+                        let new_val = self.get_phys(i, col) - lij * u_jc;
+                        self.set_phys(i, col, new_val);
+                    }
+                }
+            }
+        }
+
+        self.is_factorized = true;
+        Ok(())
+    }
+    pub fn debug_dump_dense(&self) -> Vec<Vec<f64>> {
+        self.reconstruct_dense_from_workspace()
+    }
+
+    /// Reconstruct dense lower triangular factor L.
+    ///
+    /// L has unit diagonal and at most KL subdiagonals.
+    pub fn reconstruct_l_dense(&self) -> Result<Vec<Vec<f64>>, BandedError> {
+        if !self.is_factorized {
+            return Err(BandedError::NotFactorized);
+        }
+
+        let n = self.n;
+        let mut l = vec![vec![0.0; n]; n];
+
+        for i in 0..n {
+            l[i][i] = 1.0;
+        }
+
+        for j in 0..n {
+            let i_hi = (j + self.kl).min(n - 1);
+            for i in (j + 1)..=i_hi {
+                l[i][j] = self.get_phys(i, j);
+            }
+        }
+
+        Ok(l)
+    }
+
+    /// Reconstruct dense upper factor U.
+    ///
+    /// U may have up to KV = KL + KU superdiagonals because of fill-in.
+    pub fn reconstruct_u_dense(&self) -> Result<Vec<Vec<f64>>, BandedError> {
+        if !self.is_factorized {
+            return Err(BandedError::NotFactorized);
+        }
+
+        let n = self.n;
+        let mut u = vec![vec![0.0; n]; n];
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(self.kv);
+            let i1 = j.min(n - 1);
+
+            for i in i0..=i1 {
+                u[i][j] = self.get_phys(i, j);
+            }
+        }
+
+        Ok(u)
+    }
+
+    /// Apply the recorded row pivots to the original matrix A and return P*A.
+    ///
+    /// This uses the same sequential swap interpretation as the factorization loop.
+    pub fn reconstruct_pa_dense(&self, a: &Banded<f64>) -> Result<Vec<Vec<f64>>, BandedError> {
+        if a.n() != self.n || a.kl() != self.kl || a.ku() != self.ku {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let n = self.n;
+        let mut pa = vec![vec![0.0; n]; n];
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(self.ku);
+            let i1 = (j + self.kl + 1).min(n);
+
+            for i in i0..i1 {
+                pa[i][j] = a[(i, j)];
+            }
+        }
+
+        if self.is_factorized {
+            for j in 0..n {
+                let p = self.ipiv[j];
+                if p != j {
+                    pa.swap(j, p);
+                }
+            }
+        }
+
+        Ok(pa)
+    }
+
+    pub fn factor_residual_inf(&self, a: &Banded<f64>) -> Result<f64, BandedError> {
+        let pa = self.reconstruct_pa_dense(a)?;
+        let l = self.reconstruct_l_dense()?;
+        let u = self.reconstruct_u_dense()?;
+        let lu = dense_matmul(&l, &u);
+
+        Ok(dense_linf_diff(&pa, &lu))
+    }
+
+    pub fn factor_residual_relative(&self, a: &Banded<f64>) -> Result<f64, BandedError> {
+        let pa = self.reconstruct_pa_dense(a)?;
+        let l = self.reconstruct_l_dense()?;
+        let u = self.reconstruct_u_dense()?;
+        let lu = dense_matmul(&l, &u);
+
+        let num = dense_linf_diff(&pa, &lu);
+        let den = dense_linf_norm(&pa).max(dense_linf_norm(&lu)).max(1.0);
+
+        Ok(num / den)
+    }
+
+    fn apply_row_interchanges_rhs_in_place(&self, rhs: &mut [f64]) -> Result<(), BandedError> {
+        if rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        for j in 0..self.n {
+            let p = self.ipiv[j];
+            if p != j {
+                rhs.swap(j, p);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn forward_solve_l_in_place(&self, rhs: &mut [f64]) -> Result<(), BandedError> {
+        if rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let n = self.n;
+        let kl = self.kl;
+
+        if kl == 0 || n <= 1 {
+            return Ok(());
+        }
+
+        for j in 0..(n - 1) {
+            let lm = kl.min(n - 1 - j);
+            let bj = rhs[j];
+
+            if bj == 0.0 {
+                continue;
+            }
+
+            for off in 1..=lm {
+                let i = j + off;
+                let lij = self.get_phys(i, j);
+                if lij != 0.0 {
+                    rhs[i] -= lij * bj;
+                }
+            }
+        }
+
+        Ok(())
+    }
+    fn backward_solve_u_in_place(&self, rhs: &mut [f64]) -> Result<(), BandedError> {
+        if rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let n = self.n;
+        let kv = self.kv;
+
+        for i in (0..n).rev() {
+            let j_hi = (i + kv).min(n - 1);
+
+            let mut sum = rhs[i];
+            for j in (i + 1)..=j_hi {
+                let uij = self.get_phys(i, j);
+                if uij != 0.0 {
+                    sum -= uij * rhs[j];
+                }
+            }
+
+            let uii = self.get_phys(i, i);
+            if uii.abs() <= self.pivot_epsilon {
+                return Err(BandedError::ZeroPivot {
+                    index: i,
+                    value: uii,
+                });
+            }
+
+            rhs[i] = sum / uii;
+        }
+
+        Ok(())
+    }
+    pub fn solve_in_place(&self, rhs: &mut [f64]) -> Result<(), BandedError> {
+        if !self.is_factorized {
+            return Err(BandedError::NotFactorized);
+        }
+        if rhs.len() != self.n {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        self.apply_row_interchanges_rhs_in_place(rhs)?;
+        self.forward_solve_l_in_place(rhs)?;
+        self.backward_solve_u_in_place(rhs)?;
+
+        Ok(())
+    }
+
+    pub fn solve_multiple_in_place(
+        &self,
+        rhs: &mut [f64],
+        nrhs: usize,
+        ldb: usize,
+    ) -> Result<(), BandedError> {
+        if !self.is_factorized {
+            return Err(BandedError::NotFactorized);
+        }
+        if ldb < self.n || rhs.len() < nrhs.saturating_mul(ldb) {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        for col in 0..nrhs {
+            let start = col * ldb;
+            let end = start + self.n;
+            self.solve_in_place(&mut rhs[start..end])?;
+        }
+
+        Ok(())
+    }
+
+    pub fn solve_with_refinement(
+        &self,
+        a: &Banded<f64>, // нужна для matvec
+        b: &[f64],
+        max_iters: usize,
+        tol: f64,
+    ) -> Result<Vec<f64>, BandedError> {
+        let n = b.len();
+
+        // 1. initial solve
+        let mut x = b.to_vec();
+        self.solve_in_place(&mut x)?;
+
+        let mut r = vec![0.0; n];
+        let mut delta = vec![0.0; n];
+
+        for _ in 0..max_iters {
+            // r = b - A x
+            let ax = banded_matvec(a, &x).unwrap();
+
+            let mut r_norm: f64 = 0.0;
+            let mut b_norm: f64 = 0.0;
+
+            for i in 0..n {
+                r[i] = b[i] - ax[i];
+                r_norm = r_norm.max(r[i].abs());
+                b_norm = b_norm.max(b[i].abs());
+            }
+
+            let rel_res = r_norm / b_norm.max(1.0);
+
+            // stop condition
+            if rel_res < tol {
+                break;
+            }
+
+            // solve A δ = r
+            delta.copy_from_slice(&r);
+            self.solve_in_place(&mut delta)?;
+
+            // x += δ
+            for i in 0..n {
+                x[i] += delta[i];
+            }
+        }
+
+        Ok(x)
+    }
+
+    fn max_abs_multiplier_in_column(&self, j: usize) -> f64 {
+        let km = (self.n - 1 - j).min(self.kl);
+        let mut m: f64 = 0.0;
+
+        for off in 1..=km {
+            let i = j + off;
+            m = m.max(self.get_phys(i, j).abs());
+        }
+
+        m
+    }
+
+    fn max_abs_in_active_region(
+        &self,
+        row_lo: usize,
+        row_hi: usize,
+        col_lo: usize,
+        col_hi: usize,
+    ) -> f64 {
+        let mut m: f64 = 0.0;
+
+        for col in col_lo..=col_hi {
+            for row in row_lo..=row_hi {
+                m = m.max(self.get_phys(row, col).abs());
+            }
+        }
+
+        m
+    }
+
+    pub fn factor_from_with_diagnostics(
+        &mut self,
+        a: &Banded<f64>,
+    ) -> Result<Vec<FactorStepDiagnostics>, BandedError> {
+        self.load_from_banded(a)?;
+
+        let n = self.n;
+        let kl = self.kl;
+        let ku = self.ku;
+        let kv = self.kv;
+
+        let mut ju = 0usize;
+        let mut diag = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let j_kv = j + kv;
+            if j_kv < n {
+                self.zero_fill_column(j_kv);
+            }
+
+            let km = (n - 1 - j).min(kl);
+            let jp = self.pivot_offset_in_column(j);
+            let piv_row = j + jp;
+            self.ipiv[j] = piv_row;
+
+            let pivot_before_swap = self.get_phys(piv_row, j);
+            if pivot_before_swap.abs() <= self.pivot_epsilon {
+                return Err(BandedError::ZeroPivot {
+                    index: j,
+                    value: pivot_before_swap,
+                });
+            }
+
+            ju = ju.max((j + ku + jp).min(n - 1));
+
+            if piv_row != j {
+                let col_lo = j.saturating_sub(kv);
+                let col_hi = ju;
+                self.swap_phys_rows_in_active_window(j, piv_row, col_lo, col_hi);
+            }
+
+            let pivot_now = self.get_phys(j, j);
+
+            for off in 1..=km {
+                let i = j + off;
+                let lij = self.get_phys(i, j) / pivot_now;
+                self.set_phys(i, j, lij);
+            }
+
+            for col in (j + 1)..=ju {
+                let u_jc = self.get_phys(j, col);
+                if u_jc == 0.0 {
+                    continue;
+                }
+
+                let i_hi = (j + km).min(n - 1);
+                for i in (j + 1)..=i_hi {
+                    let lij = self.get_phys(i, j);
+                    if lij != 0.0 {
+                        let new_val = self.get_phys(i, col) - lij * u_jc;
+                        self.set_phys(i, col, new_val);
+                    }
+                }
+            }
+
+            let max_abs_multiplier = self.max_abs_multiplier_in_column(j);
+            let row_hi = (j + km).min(n - 1);
+            let max_abs_active_entry = if j < ju {
+                self.max_abs_in_active_region(j, row_hi, j, ju)
+            } else {
+                self.get_phys(j, j).abs()
+            };
+
+            diag.push(FactorStepDiagnostics {
+                step: j,
+                pivot_row: piv_row,
+                ju,
+                pivot_value: pivot_now,
+                max_abs_multiplier,
+                max_abs_active_entry,
+                workspace_linf: slice_linf_norm(&self.ab),
+            });
+        }
+
+        self.is_factorized = true;
+        Ok(diag)
+    }
+}
+//=======================================================================================================
+// helpers
+
+fn dense_matmul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = a.len();
+    let mut c = vec![vec![0.0; n]; n];
+
+    for i in 0..n {
+        for k in 0..n {
+            let aik = a[i][k];
+            if aik == 0.0 {
+                continue;
+            }
+            for j in 0..n {
+                c[i][j] += aik * b[k][j];
+            }
+        }
+    }
+
+    c
+}
+
+fn dense_linf_diff(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
+    let n = a.len();
+    let mut m: f64 = 0.0;
+
+    for i in 0..n {
+        for j in 0..n {
+            m = m.max((a[i][j] - b[i][j]).abs());
+        }
+    }
+
+    m
+}
+
+fn dense_matvec(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
+    let n = a.len();
+    let mut y = vec![0.0; n];
+
+    for i in 0..n {
+        for j in 0..n {
+            y[i] += a[i][j] * x[j];
+        }
+    }
+
+    y
+}
+
+fn vec_linf_norm(x: &[f64]) -> f64 {
+    x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+}
+
+fn dense_relative_residual(a: &[Vec<f64>], x: &[f64], b: &[f64]) -> f64 {
+    let ax = dense_matvec(a, x);
+    let mut rmax: f64 = 0.0;
+    let mut bmax: f64 = 0.0;
+
+    for i in 0..b.len() {
+        rmax = rmax.max((ax[i] - b[i]).abs());
+        bmax = bmax.max(b[i].abs());
+    }
+
+    rmax / bmax.max(1.0)
+}
+
+//=======================================================================================================
+use faer::sparse::{SparseColMat, Triplet};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+pub fn generate_rhs_from_known_solution(a: &Banded<f64>, seed: u64) -> (Vec<f64>, Vec<f64>) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let x_true: Vec<f64> = (0..a.n()).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let b = banded_matvec(a, &x_true).unwrap();
+    (x_true, b)
+}
+pub fn relative_banded_residual(a: &Banded<f64>, x: &[f64], b: &[f64]) -> f64 {
+    let ax = banded_matvec(a, x).unwrap();
+    let mut rmax = 0.0_f64;
+    let mut bmax = 0.0_f64;
+
+    for i in 0..b.len() {
+        rmax = rmax.max((ax[i] - b[i]).abs());
+        bmax = bmax.max(b[i].abs());
+    }
+
+    rmax / bmax.max(1.0)
+}
+
+pub fn banded_to_triplets(a: &Banded<f64>) -> Vec<Triplet<usize, usize, f64>> {
+    let n = a.n();
+    let mut triplets = Vec::new();
+
+    for j in 0..n {
+        let i0 = j.saturating_sub(a.ku());
+        let i1 = (j + a.kl() + 1).min(n);
+
+        for i in i0..i1 {
+            let v = a[(i, j)];
+            if v != 0.0 {
+                triplets.push(Triplet::new(i, j, v));
+            }
+        }
+    }
+
+    triplets
+}
+pub fn rhs_vec_to_faer_col(rhs: &[f64]) -> faer::Col<f64> {
+    faer::Col::from_fn(rhs.len(), |i| rhs[i])
+}
+
+/// Dense block-tridiagonal benchmark matrix.
+/// Global scalar half-bandwidth = 2*block_size - 1.
+pub fn generate_block_tridiagonal_banded(
+    n_blocks: usize,
+    block_size: usize,
+    seed: u64,
+) -> Banded<f64> {
+    assert!(n_blocks > 0);
+    assert!(block_size > 0);
+
+    let n = n_blocks * block_size;
+    let kl = 2 * block_size - 1;
+    let ku = 2 * block_size - 1;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+    for blk in 0..n_blocks {
+        let row0 = blk * block_size;
+        let col0 = blk * block_size;
+
+        for local_j in 0..block_size {
+            let j = col0 + local_j;
+            let mut abs_sum = 0.0;
+
+            // diagonal block
+            for local_i in 0..block_size {
+                let i = row0 + local_i;
+                if i == j {
+                    continue;
+                }
+
+                let v = rng.random_range(-0.2..0.2);
+                a[(i, j)] = v;
+                abs_sum += v.abs();
+            }
+
+            // lower neighboring block
+            if blk > 0 {
+                let prev_row0 = (blk - 1) * block_size;
+                for local_i in 0..block_size {
+                    let i = prev_row0 + local_i;
+                    let v = rng.random_range(-0.05..0.05);
+                    a[(i, j)] = v;
+                    abs_sum += v.abs();
+                }
+            }
+
+            // upper neighboring block
+            if blk + 1 < n_blocks {
+                let next_row0 = (blk + 1) * block_size;
+                for local_i in 0..block_size {
+                    let i = next_row0 + local_i;
+                    let v = rng.random_range(-0.05..0.05);
+                    a[(i, j)] = v;
+                    abs_sum += v.abs();
+                }
+            }
+
+            a[(j, j)] = abs_sum + rng.random_range(1.0..2.0);
+        }
+    }
+
+    a
+}
+fn rhs_linf_norm(x: &[f64]) -> f64 {
+    x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+}
+
+//===========================================================================================================
+//diagnostics
+#[derive(Clone, Debug)]
+pub struct FactorStepDiagnostics {
+    pub step: usize,
+    pub pivot_row: usize,
+    pub ju: usize,
+    pub pivot_value: f64,
+    pub max_abs_multiplier: f64,
+    pub max_abs_active_entry: f64,
+    pub workspace_linf: f64,
+}
+fn slice_linf_norm(x: &[f64]) -> f64 {
+    x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+}
+
+pub fn extract_trailing_dense_block(a: &Banded<f64>, block_size: usize) -> Vec<Vec<f64>> {
+    let n = a.n();
+    assert!(block_size > 0);
+    assert!(block_size <= n);
+
+    let start = n - block_size;
+    let mut out = vec![vec![0.0; block_size]; block_size];
+
+    for local_j in 0..block_size {
+        let j = start + local_j;
+
+        let i0 = j.saturating_sub(a.ku()).max(start);
+        let i1 = (j + a.kl() + 1).min(n);
+
+        for i in i0..i1 {
+            let local_i = i - start;
+            out[local_i][local_j] = a[(i, j)];
+        }
+    }
+
+    out
+}
+
+pub fn dense_linf_norm(a: &[Vec<f64>]) -> f64 {
+    a.iter()
+        .flat_map(|row| row.iter())
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+pub fn dense_diag_abs_minmax(a: &[Vec<f64>]) -> (f64, f64) {
+    let n = a.len();
+    let mut mn: f64 = f64::INFINITY;
+    let mut mx: f64 = 0.0;
+
+    for i in 0..n {
+        let v = a[i][i].abs();
+        mn = mn.min(v);
+        mx = mx.max(v);
+    }
+
+    (mn, mx)
+}
+
+pub fn dense_print_small(a: &[Vec<f64>], max_rows: usize, max_cols: usize) {
+    let rows = a.len().min(max_rows);
+    let cols = if a.is_empty() {
+        0
+    } else {
+        a[0].len().min(max_cols)
+    };
+
+    for i in 0..rows {
+        for j in 0..cols {
+            eprint!("{:>12.4e} ", a[i][j]);
+        }
+        eprintln!();
+    }
+}
+
+pub fn row_scaled_banded_copy(a: &Banded<f64>) -> Banded<f64> {
+    let n = a.n();
+    let kl = a.kl();
+    let ku = a.ku();
+
+    let mut out = Banded::<f64>::zeros(n, kl, ku).unwrap();
+    let mut row_scales = vec![0.0_f64; n];
+
+    // compute row infinity norms
+    for i in 0..n {
+        let j0 = i.saturating_sub(kl);
+        let j1 = (i + ku + 1).min(n);
+
+        let mut s = 0.0_f64;
+        for j in j0..j1 {
+            s = s.max(a[(i, j)].abs());
+        }
+
+        row_scales[i] = if s > 0.0 { s } else { 1.0 };
+    }
+
+    // scale rows
+    for j in 0..n {
+        let i0 = j.saturating_sub(ku);
+        let i1 = (j + kl + 1).min(n);
+
+        for i in i0..i1 {
+            out[(i, j)] = a[(i, j)] / row_scales[i];
+        }
+    }
+
+    out
+}
+
+pub fn row_scaled_banded_copy_with_scales(a: &Banded<f64>) -> (Banded<f64>, Vec<f64>) {
+    let n = a.n();
+    let kl = a.kl();
+    let ku = a.ku();
+
+    let mut out = Banded::<f64>::zeros(n, kl, ku).unwrap();
+    let mut row_scales = vec![0.0_f64; n];
+
+    for i in 0..n {
+        let j0 = i.saturating_sub(kl);
+        let j1 = (i + ku + 1).min(n);
+
+        let mut s = 0.0_f64;
+        for j in j0..j1 {
+            s = s.max(a[(i, j)].abs());
+        }
+
+        row_scales[i] = if s > 0.0 { s } else { 1.0 };
+    }
+
+    for j in 0..n {
+        let i0 = j.saturating_sub(ku);
+        let i1 = (j + kl + 1).min(n);
+
+        for i in i0..i1 {
+            out[(i, j)] = a[(i, j)] / row_scales[i];
+        }
+    }
+
+    (out, row_scales)
+}
+pub fn apply_row_scales_to_rhs(rhs: &[f64], row_scales: &[f64]) -> Vec<f64> {
+    assert_eq!(rhs.len(), row_scales.len());
+
+    rhs.iter()
+        .zip(row_scales.iter())
+        .map(|(b, s)| b / s)
+        .collect()
+}
+pub fn print_factor_diag_summary(diag: &[FactorStepDiagnostics]) {
+    let min_pivot = diag
+        .iter()
+        .min_by(|a, b| {
+            a.pivot_value
+                .abs()
+                .partial_cmp(&b.pivot_value.abs())
+                .unwrap()
+        })
+        .unwrap();
+
+    let max_mult = diag
+        .iter()
+        .max_by(|a, b| {
+            a.max_abs_multiplier
+                .partial_cmp(&b.max_abs_multiplier)
+                .unwrap()
+        })
+        .unwrap();
+
+    let max_active = diag
+        .iter()
+        .max_by(|a, b| {
+            a.max_abs_active_entry
+                .partial_cmp(&b.max_abs_active_entry)
+                .unwrap()
+        })
+        .unwrap();
+
+    let max_workspace = diag
+        .iter()
+        .max_by(|a, b| a.workspace_linf.partial_cmp(&b.workspace_linf).unwrap())
+        .unwrap();
+
+    eprintln!(
+        "min pivot: step={}, piv_row={}, ju={}, pivot={:e}",
+        min_pivot.step, min_pivot.pivot_row, min_pivot.ju, min_pivot.pivot_value
+    );
+    eprintln!(
+        "max multiplier: step={}, piv_row={}, ju={}, max_mult={:e}",
+        max_mult.step, max_mult.pivot_row, max_mult.ju, max_mult.max_abs_multiplier
+    );
+    eprintln!(
+        "max active entry: step={}, piv_row={}, ju={}, max_active={:e}",
+        max_active.step, max_active.pivot_row, max_active.ju, max_active.max_abs_active_entry
+    );
+    eprintln!(
+        "max workspace inf: step={}, piv_row={}, ju={}, workspace_inf={:e}",
+        max_workspace.step, max_workspace.pivot_row, max_workspace.ju, max_workspace.workspace_linf
+    );
+}
+
+//=======================================================================================================
+#[cfg(test)]
+mod tests2 {
+    use super::LapackStyleBandedLu;
+    use super::*;
+    use crate::somelinalg::banded::storage::Banded;
+
+    fn dense_matmul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let n = a.len();
+        let mut c = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for k in 0..n {
+                let aik = a[i][k];
+                if aik == 0.0 {
+                    continue;
+                }
+                for j in 0..n {
+                    c[i][j] += aik * b[k][j];
+                }
+            }
+        }
+        c
+    }
+
+    fn linf_diff(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
+        let mut m: f64 = 0.0;
+        for i in 0..a.len() {
+            for j in 0..a.len() {
+                m = m.max((a[i][j] - b[i][j]).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn load_from_banded_reconstructs_original_band() {
+        let mut a = Banded::<f64>::zeros(4, 1, 1).unwrap();
+        a[(0, 0)] = 4.0;
+        a[(0, 1)] = 1.0;
+        a[(1, 0)] = 2.0;
+        a[(1, 1)] = 5.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 3.0;
+        a[(2, 2)] = 6.0;
+        a[(2, 3)] = 1.0;
+        a[(3, 2)] = 4.0;
+        a[(3, 3)] = 7.0;
+
+        let mut lu = LapackStyleBandedLu::new(4, 1, 1).unwrap();
+        lu.load_from_banded(&a).unwrap();
+
+        let d = lu.reconstruct_original_band_dense();
+
+        assert_eq!(d[0][0], 4.0);
+        assert_eq!(d[0][1], 1.0);
+        assert_eq!(d[1][0], 2.0);
+        assert_eq!(d[3][3], 7.0);
+    }
+
+    #[test]
+    fn factor_tridiagonal_runs() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        assert!(lu.is_factorized());
+    }
+
+    #[test]
+    fn factor_pivot_required_small_case_runs() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        assert!(lu.is_factorized());
+    }
+
+    #[test]
+    fn factor_residual_tridiagonal_is_small() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let abs_res = lu.factor_residual_inf(&a).unwrap();
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+
+        assert!(abs_res < 1e-10, "abs residual too large: {abs_res:e}");
+        assert!(rel_res < 1e-10, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn factor_residual_pivot_required_small_case_is_small() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let abs_res = lu.factor_residual_inf(&a).unwrap();
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+
+        assert!(abs_res < 1e-10, "abs residual too large: {abs_res:e}");
+        assert!(rel_res < 1e-10, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn factor_residual_random_diagonally_dominant_band_is_small() {
+        let n = 20;
+        let kl = 2;
+        let ku = 2;
+
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(ku);
+            let i1 = (j + kl + 1).min(n);
+
+            let mut col_sum = 0.0;
+            for i in i0..i1 {
+                if i == j {
+                    continue;
+                }
+                let v = 0.05 * ((i + 2 * j + 1) as f64).sin();
+                a[(i, j)] = v;
+                col_sum += v.abs();
+            }
+
+            a[(j, j)] = col_sum + 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+        assert!(rel_res < 1e-8, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn solve_tridiagonal_system_recovers_known_solution() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let x_true = vec![1.0, -1.0, 2.0, 0.5, -0.25];
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        for i in 0..x_true.len() {
+            assert!(
+                (rhs[i] - x_true[i]).abs() < 1e-10,
+                "i={i}, got={}, expected={}",
+                rhs[i],
+                x_true[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_pivot_required_small_case_recovers_known_solution() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let x_true = vec![1.0, 2.0, -1.0];
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        for i in 0..x_true.len() {
+            assert!(
+                (rhs[i] - x_true[i]).abs() < 1e-10,
+                "i={i}, got={}, expected={}",
+                rhs[i],
+                x_true[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_random_diagonally_dominant_band_has_small_residual() {
+        let n = 20;
+        let kl = 2;
+        let ku = 2;
+
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(ku);
+            let i1 = (j + kl + 1).min(n);
+
+            let mut col_sum = 0.0;
+            for i in i0..i1 {
+                if i == j {
+                    continue;
+                }
+                let v = 0.05 * ((i + 2 * j + 1) as f64).sin();
+                a[(i, j)] = v;
+                col_sum += v.abs();
+            }
+
+            a[(j, j)] = col_sum + 2.0;
+        }
+
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+
+        let x_true: Vec<f64> = (0..n).map(|i| 0.1 * (i as f64).cos()).collect();
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        let rel_res = dense_relative_residual(&dense, &rhs, &dense_matvec(&dense, &x_true));
+        assert!(rel_res < 1e-10, "relative residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn solve_multiple_tridiagonal_systems_recovers_known_solutions() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let x1 = vec![1.0, -1.0, 2.0, 0.5, -0.25];
+        let x2 = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+
+        let mut lu0 = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu0.load_from_banded(&a).unwrap();
+        let dense = lu0.reconstruct_original_band_dense();
+
+        let b1 = dense_matvec(&dense, &x1);
+        let b2 = dense_matvec(&dense, &x2);
+
+        let mut rhs = Vec::with_capacity(10);
+        rhs.extend_from_slice(&b1);
+        rhs.extend_from_slice(&b2);
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_multiple_in_place(&mut rhs, 2, 5).unwrap();
+
+        for i in 0..5 {
+            assert!((rhs[i] - x1[i]).abs() < 1e-10);
+            assert!((rhs[5 + i] - x2[i]).abs() < 1e-10);
+        }
+    }
+}
+
+#[cfg(test)]
+mod solver_comparison_tests {
+    use super::*;
+
+    use faer::linalg::solvers::Solve;
+
+    #[derive(Debug, Clone, Copy)]
+    struct CompareMetrics {
+        rr_band: f64,
+        rr_faer: f64,
+        x_diff_linf: f64,
+    }
+
+    fn compare_against_faer_once(a: &Banded<f64>, b: &[f64]) -> CompareMetrics {
+        let n = a.n();
+        let triplets = banded_to_triplets(a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(a).unwrap();
+
+        let mut x_band = b.to_vec();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        let x_faer = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(b));
+        let x_faer_vec: Vec<f64> = (0..n).map(|i| x_faer[i]).collect();
+
+        let rr_band = relative_banded_residual(a, &x_band, b);
+        let rr_faer = relative_banded_residual(a, &x_faer_vec, b);
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer_vec.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        CompareMetrics {
+            rr_band,
+            rr_faer,
+            x_diff_linf,
+        }
+    }
+
+    fn generate_bvp1d_banded(
+        n_nodes: usize,
+        vars_per_node: usize,
+        local_half_bw: usize,
+        coupling_half_bw: usize,
+        seed: u64,
+    ) -> Banded<f64> {
+        assert!(n_nodes > 0);
+        assert!(vars_per_node > 0);
+
+        let n = n_nodes * vars_per_node;
+        let kl = vars_per_node + coupling_half_bw;
+        let ku = vars_per_node + coupling_half_bw;
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for node in 0..n_nodes {
+            let row0 = node * vars_per_node;
+            let col0 = node * vars_per_node;
+
+            for local_j in 0..vars_per_node {
+                let j = col0 + local_j;
+                let mut abs_sum = 0.0;
+
+                // local/node block
+                let li0 = local_j.saturating_sub(local_half_bw);
+                let li1 = (local_j + local_half_bw + 1).min(vars_per_node);
+
+                for local_i in li0..li1 {
+                    let i = row0 + local_i;
+                    if i == j {
+                        continue;
+                    }
+                    let v = rng.random_range(-0.2..0.2);
+                    a[(i, j)] = v;
+                    abs_sum += v.abs();
+                }
+
+                // left neighbor node
+                if node > 0 {
+                    let prev_row0 = (node - 1) * vars_per_node;
+                    let li0 = local_j.saturating_sub(coupling_half_bw);
+                    let li1 = (local_j + coupling_half_bw + 1).min(vars_per_node);
+
+                    for local_i in li0..li1 {
+                        let i = prev_row0 + local_i;
+                        let v = rng.random_range(-0.05..0.05);
+                        a[(i, j)] = v;
+                        abs_sum += v.abs();
+                    }
+                }
+
+                // right neighbor node
+                if node + 1 < n_nodes {
+                    let next_row0 = (node + 1) * vars_per_node;
+                    let li0 = local_j.saturating_sub(coupling_half_bw);
+                    let li1 = (local_j + coupling_half_bw + 1).min(vars_per_node);
+
+                    for local_i in li0..li1 {
+                        let i = next_row0 + local_i;
+                        let v = rng.random_range(-0.05..0.05);
+                        a[(i, j)] = v;
+                        abs_sum += v.abs();
+                    }
+                }
+
+                a[(j, j)] = abs_sum + rng.random_range(1.0..2.0);
+            }
+        }
+
+        a
+    }
+    //-------------------------------------------------------------------------------
+    // DIAGNOSTIC INSTRUMENTS FOR DEBUGGING FACTORIZATION STEPS AND COMPARING AGAINST FAER
+    #[test]
+    fn debug_factorization_steps_on_small_pivoting_band_case() {
+        let mut a = Banded::<f64>::zeros(10, 2, 2).unwrap();
+
+        // Сконструируй маленький case с pivoting и умеренной жёсткостью
+        for i in 0..10 {
+            a[(i, i)] = 2.0;
+        }
+        for i in 0..9 {
+            a[(i + 1, i)] = 1.0;
+            a[(i, i + 1)] = 0.5;
+        }
+        for i in 0..8 {
+            a[(i + 2, i)] = -0.2;
+            a[(i, i + 2)] = 0.1;
+        }
+
+        // испортим первый pivot, чтобы точно была перестановка
+        a[(0, 0)] = 1e-8;
+        a[(1, 0)] = 1.0;
+
+        let mut lu = LapackStyleBandedLu::new(10, 2, 2).unwrap();
+        let steps = lu.factor_from_with_diagnostics(&a).unwrap();
+
+        for s in &steps {
+            eprintln!(
+                "step={} piv_row={} ju={} pivot={:e} max_mult={:e} max_active={:e} workspace_inf={:e}",
+                s.step,
+                s.pivot_row,
+                s.ju,
+                s.pivot_value,
+                s.max_abs_multiplier,
+                s.max_abs_active_entry,
+                s.workspace_linf,
+            );
+        }
+
+        let rel = lu.factor_residual_relative(&a).unwrap();
+        eprintln!("final factor residual rel = {rel:e}");
+    }
+
+    #[test]
+    fn debug_factorization_steps_on_small_bvp1d_case() {
+        let a = generate_bvp1d_banded(
+            20, // n_nodes
+            6,  // vars_per_node
+            2, 1, 12345,
+        );
+
+        let mut lu = LapackStyleBandedLu::new(a.n(), a.kl(), a.ku()).unwrap();
+        let steps = lu.factor_from_with_diagnostics(&a).unwrap();
+
+        for s in steps.iter().take(20) {
+            eprintln!(
+                "step={} piv_row={} ju={} pivot={:e} max_mult={:e} max_active={:e} workspace_inf={:e}",
+                s.step,
+                s.pivot_row,
+                s.ju,
+                s.pivot_value,
+                s.max_abs_multiplier,
+                s.max_abs_active_entry,
+                s.workspace_linf,
+            );
+        }
+
+        let rel = lu.factor_residual_relative(&a).unwrap();
+        eprintln!("small bvp factor residual rel = {rel:e}");
+    }
+
+    //-------------------------------------------------------------------------------
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_bvp1d_case() {
+        // Representative narrow-band BVP 1D-like case
+        let a = generate_bvp1d_banded(
+            200, // n_nodes
+            6,   // vars_per_node
+            2,   // local_half_bw
+            1,   // coupling_half_bw
+            12345,
+        );
+
+        let n = a.n();
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        // Solve with LapackStyleBandedLu
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let mut x_band = b.clone();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        // Solve with faer sparse LU
+        let triplets = banded_to_triplets(&a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let x_faer_col = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(&b));
+        let x_faer: Vec<f64> = (0..n).map(|i| x_faer_col[i]).collect();
+
+        // Compare residuals
+        let rr_band = relative_banded_residual(&a, &x_band, &b);
+        let rr_faer = relative_banded_residual(&a, &x_faer, &b);
+
+        // Compare solutions directly
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        eprintln!(
+            "compare_lapack_vs_faer: n={n}, kl={}, ku={}, rr_band={rr_band:e}, rr_faer={rr_faer:e}, x_diff_linf={x_diff_linf:e}",
+            a.kl(),
+            a.ku(),
+        );
+
+        assert!(
+            rr_band < 1e-10,
+            "LapackStyleBandedLu residual too large: {rr_band:e}"
+        );
+        assert!(rr_faer < 1e-10, "faer residual too large: {rr_faer:e}");
+        assert!(
+            x_diff_linf < 1e-8,
+            "solutions differ too much: {x_diff_linf:e}"
+        );
+    }
+
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_bvp1d_case1() {
+        let a = generate_bvp1d_banded(200, 6, 2, 1, 12345);
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        let m = compare_against_faer_once(&a, &b);
+
+        eprintln!("{m:?}");
+
+        assert!(m.rr_band < 1e-10);
+        assert!(m.rr_faer < 1e-10);
+        assert!(m.x_diff_linf < 1e-8);
+    }
+
+    #[test]
+    fn refinement_improves_bvp1d_solution() {
+        let a = generate_bvp1d_banded(1000, 6, 2, 1, 123);
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        let n = a.n();
+
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        // без refinement
+        let mut x0 = b.clone();
+        lu.solve_in_place(&mut x0).unwrap();
+        let rr0 = relative_banded_residual(&a, &x0, &b);
+
+        // с refinement
+        let mut x_ref = b.clone();
+        let accepted = lu
+            .solve_banded_in_place_with_refinement(&a, &mut x_ref, 3, 1e-12)
+            .unwrap();
+        let rr_ref = relative_banded_residual(&a, &x_ref, &b);
+
+        eprintln!("rr0 = {rr0:e}, rr_ref = {rr_ref:e}, accepted = {accepted}");
+
+        assert!(rr_ref <= rr0);
+    }
+}
+
+#[cfg(test)]
+mod solver_comparison_dense_block_tests {
+    use super::*;
+    use faer::linalg::solvers::Solve;
+    use faer::sparse::SparseColMat;
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_dense_block_tridiag_case() {
+        // Dense block-tridiagonal case:
+        // expected by benchmarks to favor faer in performance,
+        // but the numerical solutions should still agree closely.
+        let a = generate_block_tridiagonal_banded(
+            40, // n_blocks
+            20, // block_size
+            424242,
+        );
+
+        let n = a.n();
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        // Solve with LapackStyleBandedLu
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let mut x_band = b.clone();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        // Solve with faer sparse LU
+        let triplets = banded_to_triplets(&a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let x_faer_col = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(&b));
+        let x_faer: Vec<f64> = (0..n).map(|i| x_faer_col[i]).collect();
+
+        let rr_band = relative_banded_residual(&a, &x_band, &b);
+        let rr_faer = relative_banded_residual(&a, &x_faer, &b);
+
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        eprintln!(
+            "dense_block_tridiag compare: n={n}, kl={}, ku={}, rr_band={rr_band:e}, rr_faer={rr_faer:e}, x_diff_linf={x_diff_linf:e}",
+            a.kl(),
+            a.ku(),
+        );
+
+        assert!(
+            rr_band < 1e-10,
+            "LapackStyleBandedLu residual too large: {rr_band:e}"
+        );
+        assert!(rr_faer < 1e-10, "faer residual too large: {rr_faer:e}");
+        assert!(
+            x_diff_linf < 1e-8,
+            "solutions differ too much: {x_diff_linf:e}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LapackStyleBandedLu;
+    use super::*;
+    use crate::somelinalg::banded::storage::Banded;
+
+    fn dense_matmul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let n = a.len();
+        let mut c = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for k in 0..n {
+                let aik = a[i][k];
+                if aik == 0.0 {
+                    continue;
+                }
+                for j in 0..n {
+                    c[i][j] += aik * b[k][j];
+                }
+            }
+        }
+        c
+    }
+
+    fn linf_diff(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
+        let mut m: f64 = 0.0;
+        for i in 0..a.len() {
+            for j in 0..a.len() {
+                m = m.max((a[i][j] - b[i][j]).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn load_from_banded_reconstructs_original_band() {
+        let mut a = Banded::<f64>::zeros(4, 1, 1).unwrap();
+        a[(0, 0)] = 4.0;
+        a[(0, 1)] = 1.0;
+        a[(1, 0)] = 2.0;
+        a[(1, 1)] = 5.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 3.0;
+        a[(2, 2)] = 6.0;
+        a[(2, 3)] = 1.0;
+        a[(3, 2)] = 4.0;
+        a[(3, 3)] = 7.0;
+
+        let mut lu = LapackStyleBandedLu::new(4, 1, 1).unwrap();
+        lu.load_from_banded(&a).unwrap();
+
+        let d = lu.reconstruct_original_band_dense();
+
+        assert_eq!(d[0][0], 4.0);
+        assert_eq!(d[0][1], 1.0);
+        assert_eq!(d[1][0], 2.0);
+        assert_eq!(d[3][3], 7.0);
+    }
+
+    #[test]
+    fn factor_tridiagonal_runs() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        assert!(lu.is_factorized());
+    }
+
+    #[test]
+    fn factor_pivot_required_small_case_runs() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        assert!(lu.is_factorized());
+    }
+
+    #[test]
+    fn factor_residual_tridiagonal_is_small() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let abs_res = lu.factor_residual_inf(&a).unwrap();
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+
+        assert!(abs_res < 1e-10, "abs residual too large: {abs_res:e}");
+        assert!(rel_res < 1e-10, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn factor_residual_pivot_required_small_case_is_small() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let abs_res = lu.factor_residual_inf(&a).unwrap();
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+
+        assert!(abs_res < 1e-10, "abs residual too large: {abs_res:e}");
+        assert!(rel_res < 1e-10, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn factor_residual_random_diagonally_dominant_band_is_small() {
+        let n = 20;
+        let kl = 2;
+        let ku = 2;
+
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(ku);
+            let i1 = (j + kl + 1).min(n);
+
+            let mut col_sum = 0.0;
+            for i in i0..i1 {
+                if i == j {
+                    continue;
+                }
+                let v = 0.05 * ((i + 2 * j + 1) as f64).sin();
+                a[(i, j)] = v;
+                col_sum += v.abs();
+            }
+
+            a[(j, j)] = col_sum + 2.0;
+        }
+
+        let mut lu = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let rel_res = lu.factor_residual_relative(&a).unwrap();
+        assert!(rel_res < 1e-8, "rel residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn solve_tridiagonal_system_recovers_known_solution() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let x_true = vec![1.0, -1.0, 2.0, 0.5, -0.25];
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        for i in 0..x_true.len() {
+            assert!(
+                (rhs[i] - x_true[i]).abs() < 1e-10,
+                "i={i}, got={}, expected={}",
+                rhs[i],
+                x_true[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_pivot_required_small_case_recovers_known_solution() {
+        let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
+        a[(0, 0)] = 0.0;
+        a[(0, 1)] = 2.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 3.0;
+        a[(1, 2)] = 1.0;
+        a[(2, 1)] = 1.0;
+        a[(2, 2)] = 2.0;
+
+        let x_true = vec![1.0, 2.0, -1.0];
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(3, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        for i in 0..x_true.len() {
+            assert!(
+                (rhs[i] - x_true[i]).abs() < 1e-10,
+                "i={i}, got={}, expected={}",
+                rhs[i],
+                x_true[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_random_diagonally_dominant_band_has_small_residual() {
+        let n = 20;
+        let kl = 2;
+        let ku = 2;
+
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for j in 0..n {
+            let i0 = j.saturating_sub(ku);
+            let i1 = (j + kl + 1).min(n);
+
+            let mut col_sum = 0.0;
+            for i in i0..i1 {
+                if i == j {
+                    continue;
+                }
+                let v = 0.05 * ((i + 2 * j + 1) as f64).sin();
+                a[(i, j)] = v;
+                col_sum += v.abs();
+            }
+
+            a[(j, j)] = col_sum + 2.0;
+        }
+
+        let dense = {
+            let mut lu0 = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+            lu0.load_from_banded(&a).unwrap();
+            lu0.reconstruct_original_band_dense()
+        };
+
+        let x_true: Vec<f64> = (0..n).map(|i| 0.1 * (i as f64).cos()).collect();
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLu::new(n, kl, ku).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        let rel_res = dense_relative_residual(&dense, &rhs, &dense_matvec(&dense, &x_true));
+        assert!(rel_res < 1e-10, "relative residual too large: {rel_res:e}");
+    }
+
+    #[test]
+    fn solve_multiple_tridiagonal_systems_recovers_known_solutions() {
+        let mut a = Banded::<f64>::zeros(5, 1, 1).unwrap();
+        for i in 0..5 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..4 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+
+        let x1 = vec![1.0, -1.0, 2.0, 0.5, -0.25];
+        let x2 = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+
+        let mut lu0 = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu0.load_from_banded(&a).unwrap();
+        let dense = lu0.reconstruct_original_band_dense();
+
+        let b1 = dense_matvec(&dense, &x1);
+        let b2 = dense_matvec(&dense, &x2);
+
+        let mut rhs = Vec::with_capacity(10);
+        rhs.extend_from_slice(&b1);
+        rhs.extend_from_slice(&b2);
+
+        let mut lu = LapackStyleBandedLu::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_multiple_in_place(&mut rhs, 2, 5).unwrap();
+
+        for i in 0..5 {
+            assert!((rhs[i] - x1[i]).abs() < 1e-10);
+            assert!((rhs[5 + i] - x2[i]).abs() < 1e-10);
+        }
+    }
+}
+
+#[cfg(test)]
+mod solver_comparison_tests2 {
+    use super::*;
+
+    use faer::linalg::solvers::Solve;
+
+    #[derive(Debug, Clone, Copy)]
+    struct CompareMetrics {
+        rr_band: f64,
+        rr_faer: f64,
+        x_diff_linf: f64,
+    }
+
+    fn compare_against_faer_once(a: &Banded<f64>, b: &[f64]) -> CompareMetrics {
+        let n = a.n();
+        let triplets = banded_to_triplets(a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(a).unwrap();
+
+        let mut x_band = b.to_vec();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        let x_faer = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(b));
+        let x_faer_vec: Vec<f64> = (0..n).map(|i| x_faer[i]).collect();
+
+        let rr_band = relative_banded_residual(a, &x_band, b);
+        let rr_faer = relative_banded_residual(a, &x_faer_vec, b);
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer_vec.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        CompareMetrics {
+            rr_band,
+            rr_faer,
+            x_diff_linf,
+        }
+    }
+
+    fn generate_bvp1d_banded(
+        n_nodes: usize,
+        vars_per_node: usize,
+        local_half_bw: usize,
+        coupling_half_bw: usize,
+        seed: u64,
+    ) -> Banded<f64> {
+        assert!(n_nodes > 0);
+        assert!(vars_per_node > 0);
+
+        let n = n_nodes * vars_per_node;
+        let kl = vars_per_node + coupling_half_bw;
+        let ku = vars_per_node + coupling_half_bw;
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut a = Banded::<f64>::zeros(n, kl, ku).unwrap();
+
+        for node in 0..n_nodes {
+            let row0 = node * vars_per_node;
+            let col0 = node * vars_per_node;
+
+            for local_j in 0..vars_per_node {
+                let j = col0 + local_j;
+                let mut abs_sum = 0.0;
+
+                // local/node block
+                let li0 = local_j.saturating_sub(local_half_bw);
+                let li1 = (local_j + local_half_bw + 1).min(vars_per_node);
+
+                for local_i in li0..li1 {
+                    let i = row0 + local_i;
+                    if i == j {
+                        continue;
+                    }
+                    let v = rng.random_range(-0.2..0.2);
+                    a[(i, j)] = v;
+                    abs_sum += v.abs();
+                }
+
+                // left neighbor node
+                if node > 0 {
+                    let prev_row0 = (node - 1) * vars_per_node;
+                    let li0 = local_j.saturating_sub(coupling_half_bw);
+                    let li1 = (local_j + coupling_half_bw + 1).min(vars_per_node);
+
+                    for local_i in li0..li1 {
+                        let i = prev_row0 + local_i;
+                        let v = rng.random_range(-0.05..0.05);
+                        a[(i, j)] = v;
+                        abs_sum += v.abs();
+                    }
+                }
+
+                // right neighbor node
+                if node + 1 < n_nodes {
+                    let next_row0 = (node + 1) * vars_per_node;
+                    let li0 = local_j.saturating_sub(coupling_half_bw);
+                    let li1 = (local_j + coupling_half_bw + 1).min(vars_per_node);
+
+                    for local_i in li0..li1 {
+                        let i = next_row0 + local_i;
+                        let v = rng.random_range(-0.05..0.05);
+                        a[(i, j)] = v;
+                        abs_sum += v.abs();
+                    }
+                }
+
+                a[(j, j)] = abs_sum + rng.random_range(1.0..2.0);
+            }
+        }
+
+        a
+    }
+    //-------------------------------------------------------------------------------
+    // DIAGNOSTIC INSTRUMENTS FOR DEBUGGING FACTORIZATION STEPS AND COMPARING AGAINST FAER
+    #[test]
+    fn debug_factorization_steps_on_small_pivoting_band_case() {
+        let mut a = Banded::<f64>::zeros(10, 2, 2).unwrap();
+
+        // Сконструируй маленький case с pivoting и умеренной жёсткостью
+        for i in 0..10 {
+            a[(i, i)] = 2.0;
+        }
+        for i in 0..9 {
+            a[(i + 1, i)] = 1.0;
+            a[(i, i + 1)] = 0.5;
+        }
+        for i in 0..8 {
+            a[(i + 2, i)] = -0.2;
+            a[(i, i + 2)] = 0.1;
+        }
+
+        // испортим первый pivot, чтобы точно была перестановка
+        a[(0, 0)] = 1e-8;
+        a[(1, 0)] = 1.0;
+
+        let mut lu = LapackStyleBandedLu::new(10, 2, 2).unwrap();
+        let steps = lu.factor_from_with_diagnostics(&a).unwrap();
+
+        for s in &steps {
+            eprintln!(
+                "step={} piv_row={} ju={} pivot={:e} max_mult={:e} max_active={:e} workspace_inf={:e}",
+                s.step,
+                s.pivot_row,
+                s.ju,
+                s.pivot_value,
+                s.max_abs_multiplier,
+                s.max_abs_active_entry,
+                s.workspace_linf,
+            );
+        }
+
+        let rel = lu.factor_residual_relative(&a).unwrap();
+        eprintln!("final factor residual rel = {rel:e}");
+    }
+
+    #[test]
+    fn debug_factorization_steps_on_small_bvp1d_case() {
+        let a = generate_bvp1d_banded(
+            20, // n_nodes
+            6,  // vars_per_node
+            2, 1, 12345,
+        );
+
+        let mut lu = LapackStyleBandedLu::new(a.n(), a.kl(), a.ku()).unwrap();
+        let steps = lu.factor_from_with_diagnostics(&a).unwrap();
+
+        for s in steps.iter().take(20) {
+            eprintln!(
+                "step={} piv_row={} ju={} pivot={:e} max_mult={:e} max_active={:e} workspace_inf={:e}",
+                s.step,
+                s.pivot_row,
+                s.ju,
+                s.pivot_value,
+                s.max_abs_multiplier,
+                s.max_abs_active_entry,
+                s.workspace_linf,
+            );
+        }
+
+        let rel = lu.factor_residual_relative(&a).unwrap();
+        eprintln!("small bvp factor residual rel = {rel:e}");
+    }
+
+    //-------------------------------------------------------------------------------
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_bvp1d_case() {
+        // Representative narrow-band BVP 1D-like case
+        let a = generate_bvp1d_banded(
+            200, // n_nodes
+            6,   // vars_per_node
+            2,   // local_half_bw
+            1,   // coupling_half_bw
+            12345,
+        );
+
+        let n = a.n();
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        // Solve with LapackStyleBandedLu
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let mut x_band = b.clone();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        // Solve with faer sparse LU
+        let triplets = banded_to_triplets(&a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let x_faer_col = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(&b));
+        let x_faer: Vec<f64> = (0..n).map(|i| x_faer_col[i]).collect();
+
+        // Compare residuals
+        let rr_band = relative_banded_residual(&a, &x_band, &b);
+        let rr_faer = relative_banded_residual(&a, &x_faer, &b);
+
+        // Compare solutions directly
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        eprintln!(
+            "compare_lapack_vs_faer: n={n}, kl={}, ku={}, rr_band={rr_band:e}, rr_faer={rr_faer:e}, x_diff_linf={x_diff_linf:e}",
+            a.kl(),
+            a.ku(),
+        );
+
+        assert!(
+            rr_band < 1e-10,
+            "LapackStyleBandedLu residual too large: {rr_band:e}"
+        );
+        assert!(rr_faer < 1e-10, "faer residual too large: {rr_faer:e}");
+        assert!(
+            x_diff_linf < 1e-8,
+            "solutions differ too much: {x_diff_linf:e}"
+        );
+    }
+
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_bvp1d_case1() {
+        let a = generate_bvp1d_banded(200, 6, 2, 1, 12345);
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        let m = compare_against_faer_once(&a, &b);
+
+        eprintln!("{m:?}");
+
+        assert!(m.rr_band < 1e-10);
+        assert!(m.rr_faer < 1e-10);
+        assert!(m.x_diff_linf < 1e-8);
+    }
+
+    #[test]
+    fn refinement_improves_bvp1d_solution() {
+        let a = generate_bvp1d_banded(1000, 6, 2, 1, 123);
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        let n = a.n();
+
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        // без refinement
+        let mut x0 = b.clone();
+        lu.solve_in_place(&mut x0).unwrap();
+        let rr0 = relative_banded_residual(&a, &x0, &b);
+
+        // с refinement
+        let mut x_ref = b.clone();
+        let accepted = lu
+            .solve_banded_in_place_with_refinement(&a, &mut x_ref, 3, 1e-12)
+            .unwrap();
+        let rr_ref = relative_banded_residual(&a, &x_ref, &b);
+
+        eprintln!("rr0 = {rr0:e}, rr_ref = {rr_ref:e}, accepted = {accepted}");
+
+        assert!(rr_ref <= rr0);
+    }
+}
+
+#[cfg(test)]
+mod solver_comparison_dense_block_tests2 {
+    use super::*;
+    use faer::linalg::solvers::Solve;
+    use faer::sparse::SparseColMat;
+    #[test]
+    fn compare_lapack_style_banded_lu_against_faer_on_dense_block_tridiag_case() {
+        // Dense block-tridiagonal case:
+        // expected by benchmarks to favor faer in performance,
+        // but the numerical solutions should still agree closely.
+        let a = generate_block_tridiagonal_banded(
+            40, // n_blocks
+            20, // block_size
+            424242,
+        );
+
+        let n = a.n();
+        let (_x_true, b) = generate_rhs_from_known_solution(&a, 777);
+
+        // Solve with LapackStyleBandedLu
+        let mut lu = LapackStyleBandedLu::new(n, a.kl(), a.ku()).unwrap();
+        lu.factor_from(&a).unwrap();
+
+        let mut x_band = b.clone();
+        lu.solve_in_place(&mut x_band).unwrap();
+
+        // Solve with faer sparse LU
+        let triplets = banded_to_triplets(&a);
+        let sparse = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        let x_faer_col = sparse.sp_lu().unwrap().solve(&rhs_vec_to_faer_col(&b));
+        let x_faer: Vec<f64> = (0..n).map(|i| x_faer_col[i]).collect();
+
+        let rr_band = relative_banded_residual(&a, &x_band, &b);
+        let rr_faer = relative_banded_residual(&a, &x_faer, &b);
+
+        let x_diff_linf = x_band
+            .iter()
+            .zip(x_faer.iter())
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0_f64, f64::max);
+
+        eprintln!(
+            "dense_block_tridiag compare: n={n}, kl={}, ku={}, rr_band={rr_band:e}, rr_faer={rr_faer:e}, x_diff_linf={x_diff_linf:e}",
+            a.kl(),
+            a.ku(),
+        );
+
+        assert!(
+            rr_band < 1e-10,
+            "LapackStyleBandedLu residual too large: {rr_band:e}"
+        );
+        assert!(rr_faer < 1e-10, "faer residual too large: {rr_faer:e}");
+        assert!(
+            x_diff_linf < 1e-8,
+            "solutions differ too much: {x_diff_linf:e}"
+        );
+    }
+}

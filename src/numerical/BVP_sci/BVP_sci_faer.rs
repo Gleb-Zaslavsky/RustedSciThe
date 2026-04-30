@@ -1378,7 +1378,7 @@ pub fn solve_bvp(
     let mut iteration = 0;
 
     if verbose == 2 {
-        println!(
+        info!(
             "{:^15}{:^15}{:^15}{:^15}{:^15}",
             "Iteration", "Max residual", "Max BC residual", "Total nodes", "Nodes added"
         );
@@ -1463,7 +1463,7 @@ pub fn solve_bvp(
         if m + nodes_added > max_nodes {
             status = 1;
             if verbose == 2 {
-                println!(
+                info!(
                     "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
                     iteration,
                     max_rms_res,
@@ -1476,7 +1476,7 @@ pub fn solve_bvp(
         }
 
         if verbose == 2 {
-            println!(
+            info!(
                 "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
                 iteration, max_rms_res, max_bc_res, m, nodes_added
             );
@@ -1506,14 +1506,14 @@ pub fn solve_bvp(
 
     if verbose > 0 {
         match status {
-            0 => println!(
+            0 => info!(
                 "Solved in {} iterations, number of nodes {}.",
                 iteration,
                 x.nrows()
             ),
-            1 => println!("Number of nodes exceeded after iteration {}.", iteration),
-            2 => println!("Singular Jacobian encountered on iteration {}.", iteration),
-            3 => println!(
+            1 => log::warn!("Number of nodes exceeded after iteration {}.", iteration),
+            2 => log::warn!("Singular Jacobian encountered on iteration {}.", iteration),
+            3 => log::warn!(
                 "Unable to satisfy boundary conditions tolerance on iteration {}.",
                 iteration
             ),
@@ -1636,7 +1636,7 @@ pub fn solve_bvp_sparse(
     let mut iteration = 0;
 
     if verbose == 2 {
-        println!(
+        info!(
             "{:^15}{:^15}{:^15}{:^15}{:^15}",
             "Iteration", "Max residual", "Max BC residual", "Total nodes", "Nodes added"
         );
@@ -1723,7 +1723,7 @@ pub fn solve_bvp_sparse(
         if m + nodes_added > max_nodes {
             status = 1;
             if verbose == 2 {
-                println!(
+                info!(
                     "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
                     iteration,
                     max_rms_res,
@@ -1736,7 +1736,7 @@ pub fn solve_bvp_sparse(
         }
 
         if verbose == 2 {
-            println!(
+            info!(
                 "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
                 iteration, max_rms_res, max_bc_res, m, nodes_added
             );
@@ -1766,14 +1766,14 @@ pub fn solve_bvp_sparse(
 
     if verbose > 0 {
         match status {
-            0 => println!(
+            0 => info!(
                 "Solved in {} iterations, number of nodes {}.",
                 iteration,
                 x.nrows()
             ),
-            1 => println!("Number of nodes exceeded after iteration {}.", iteration),
-            2 => println!("Singular Jacobian encountered on iteration {}.", iteration),
-            3 => println!(
+            1 => log::warn!("Number of nodes exceeded after iteration {}.", iteration),
+            2 => log::warn!("Singular Jacobian encountered on iteration {}.", iteration),
+            3 => log::warn!(
                 "Unable to satisfy boundary conditions tolerance on iteration {}.",
                 iteration
             ),

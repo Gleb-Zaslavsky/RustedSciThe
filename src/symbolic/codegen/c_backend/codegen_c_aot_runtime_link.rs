@@ -1,0 +1,275 @@
+//! Runtime registry for dynamically loaded C AOT backends.
+//!
+//! This module mirrors codegen_aot_runtime_link.rs but for C compiled libraries.
+//! It loads .so/.dll/.dylib files and registers their FFI functions in the
+//! process-local registry so solvers can call them.
+
+use crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact;
+use crate::symbolic::codegen::codegen_aot_runtime_link::{
+    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
+    register_linked_dense_backend, register_linked_residual_backend,
+    register_linked_sparse_backend,
+};
+use libloading::Library;
+use log::info;
+use std::path::Path;
+use std::sync::Arc;
+
+type AbiWholeEval = unsafe extern "C" fn(*const f64, usize, *mut f64, usize) -> i32;
+
+#[derive(Debug)]
+struct LoadedCLibrary {
+    _library: Library,
+    residual_eval: AbiWholeEval,
+    jacobian_eval: AbiWholeEval,
+}
+
+#[derive(Debug)]
+struct LoadedCResidualLibrary {
+    _library: Library,
+    residual_eval: AbiWholeEval,
+}
+
+/// Loads a compiled C AOT shared library from disk.
+fn load_c_library(path: &Path) -> Result<Arc<LoadedCLibrary>, String> {
+    info!("Loading C AOT library from '{}'", path.display());
+    let library = unsafe { Library::new(path) }
+        .map_err(|err| format!("failed to load C library '{}': {err}", path.display()))?;
+
+    let residual_eval = unsafe {
+        *library
+            .get::<AbiWholeEval>(b"rustedscithe_aot_eval_residual")
+            .map_err(|err| {
+                format!(
+                    "failed to resolve symbol rustedscithe_aot_eval_residual from '{}': {err}",
+                    path.display()
+                )
+            })?
+    };
+
+    let jacobian_eval = unsafe {
+        *library
+            .get::<AbiWholeEval>(b"rustedscithe_aot_eval_jacobian_values")
+            .map_err(|err| {
+                format!(
+                    "failed to resolve symbol rustedscithe_aot_eval_jacobian_values from '{}': {err}",
+                    path.display()
+                )
+            })?
+    };
+
+    Ok(Arc::new(LoadedCLibrary {
+        _library: library,
+        residual_eval,
+        jacobian_eval,
+    }))
+}
+
+fn load_c_residual_library(path: &Path) -> Result<Arc<LoadedCResidualLibrary>, String> {
+    info!("Loading C residual AOT library from '{}'", path.display());
+    let library = unsafe { Library::new(path) }
+        .map_err(|err| format!("failed to load C library '{}': {err}", path.display()))?;
+
+    let residual_eval = unsafe {
+        *library
+            .get::<AbiWholeEval>(b"rustedscithe_aot_eval_residual")
+            .map_err(|err| {
+                format!(
+                    "failed to resolve symbol rustedscithe_aot_eval_residual from '{}': {err}",
+                    path.display()
+                )
+            })?
+    };
+
+    Ok(Arc::new(LoadedCResidualLibrary {
+        _library: library,
+        residual_eval,
+    }))
+}
+
+/// Registers a compiled C AOT residual-only backend from a registered artifact.
+pub fn register_generated_c_residual_backend(
+    artifact: &RegisteredAotArtifact,
+) -> Result<LinkedResidualAotBackend, String> {
+    let path = &artifact.expected_cdylib;
+    if !path.exists() {
+        return Err(format!(
+            "compiled C residual library does not exist at '{}'",
+            path.display()
+        ));
+    }
+
+    let loaded = load_c_residual_library(path)?;
+    let residual_len = artifact.manifest.io.residual_len;
+    let residual_loaded = Arc::clone(&loaded);
+    let residual_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
+        let ok = unsafe {
+            (residual_loaded.residual_eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len())
+        };
+        assert!(
+            ok != 0,
+            "generated C residual library callback returned false"
+        );
+    });
+
+    let backend =
+        LinkedResidualAotBackend::new(artifact.problem_key.clone(), residual_len, residual_eval);
+    register_linked_residual_backend(backend.clone());
+    info!(
+        "Registered C residual AOT backend with problem_key='{}'",
+        artifact.problem_key
+    );
+    Ok(backend)
+}
+
+/// Registers a compiled C AOT sparse backend from a registered artifact.
+///
+/// This function:
+/// 1. Loads the .so/.dll/.dylib file
+/// 2. Resolves the FFI symbols
+/// 3. Wraps them in safe Rust closures
+/// 4. Registers the backend in the global runtime registry
+pub fn register_generated_c_sparse_backend(
+    artifact: &RegisteredAotArtifact,
+) -> Result<LinkedSparseAotBackend, String> {
+    let path = &artifact.expected_cdylib;
+    if !path.exists() {
+        return Err(format!(
+            "compiled C sparse library does not exist at '{}'",
+            path.display()
+        ));
+    }
+
+    let loaded = load_c_library(path)?;
+    let residual_len = artifact.manifest.io.residual_len;
+    let shape = (
+        artifact.manifest.io.jacobian_rows,
+        artifact.manifest.io.jacobian_cols,
+    );
+    let nnz = artifact
+        .manifest
+        .io
+        .jacobian_nnz
+        .unwrap_or(shape.0 * shape.1);
+
+    let residual_loaded = Arc::clone(&loaded);
+    let residual_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
+        let ok = unsafe {
+            (residual_loaded.residual_eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len())
+        };
+        assert!(
+            ok != 0,
+            "generated C sparse library residual callback returned false"
+        );
+    });
+
+    let jacobian_loaded = Arc::clone(&loaded);
+    let jacobian_values_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
+        let ok = unsafe {
+            (jacobian_loaded.jacobian_eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len())
+        };
+        assert!(
+            ok != 0,
+            "generated C sparse library jacobian callback returned false"
+        );
+    });
+
+    let backend = LinkedSparseAotBackend::new(
+        artifact.problem_key.clone(),
+        residual_len,
+        shape,
+        nnz,
+        residual_eval,
+        jacobian_values_eval,
+    );
+    register_linked_sparse_backend(backend.clone());
+    info!(
+        "Registered C sparse AOT backend with problem_key='{}'",
+        artifact.problem_key
+    );
+    Ok(backend)
+}
+
+/// Registers a compiled C AOT banded backend.
+///
+/// Banded codegen currently shares the same flat Jacobian-values ABI as the
+/// sparse backend; the solver-facing layer reconstructs native banded storage.
+pub fn register_generated_c_banded_backend(
+    artifact: &RegisteredAotArtifact,
+) -> Result<LinkedSparseAotBackend, String> {
+    register_generated_c_sparse_backend(artifact)
+}
+
+/// Registers a compiled C AOT dense backend from a registered artifact.
+///
+/// This function:
+/// 1. Loads the .so/.dll/.dylib file
+/// 2. Resolves the FFI symbols
+/// 3. Wraps them in safe Rust closures
+/// 4. Registers the backend in the global runtime registry
+pub fn register_generated_c_dense_backend(
+    artifact: &RegisteredAotArtifact,
+) -> Result<LinkedDenseAotBackend, String> {
+    let path = &artifact.expected_cdylib;
+    if !path.exists() {
+        return Err(format!(
+            "compiled C dense library does not exist at '{}'",
+            path.display()
+        ));
+    }
+
+    let loaded = load_c_library(path)?;
+    let residual_len = artifact.manifest.io.residual_len;
+    let shape = (
+        artifact.manifest.io.jacobian_rows,
+        artifact.manifest.io.jacobian_cols,
+    );
+
+    let residual_loaded = Arc::clone(&loaded);
+    let residual_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
+        let ok = unsafe {
+            (residual_loaded.residual_eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len())
+        };
+        assert!(
+            ok != 0,
+            "generated C dense library residual callback returned false"
+        );
+    });
+
+    let jacobian_loaded = Arc::clone(&loaded);
+    let jacobian_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
+        let ok = unsafe {
+            (jacobian_loaded.jacobian_eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len())
+        };
+        assert!(
+            ok != 0,
+            "generated C dense library jacobian callback returned false"
+        );
+    });
+
+    let backend = LinkedDenseAotBackend::new(
+        artifact.problem_key.clone(),
+        residual_len,
+        shape,
+        residual_eval,
+        jacobian_eval,
+    );
+    register_linked_dense_backend(backend.clone());
+    info!(
+        "Registered C dense AOT backend with problem_key='{}'",
+        artifact.problem_key
+    );
+    Ok(backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_c_library_fails_gracefully_for_missing_file() {
+        let result = load_c_library(Path::new("/nonexistent/path/lib.so"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to load C library"));
+    }
+}
