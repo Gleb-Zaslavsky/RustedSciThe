@@ -25,6 +25,8 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 };
 use crate::symbolic::codegen::codegen_tasks::{IvpJacobianTask, IvpResidualTask};
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::View::conversions::atom_to_expr;
+use crate::symbolic::View::jacobian::PreparedSparseAtomSystem;
 use nalgebra::{DMatrix, DVector};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -92,6 +94,16 @@ pub enum IvpBackendSelectionPolicy {
     PreferAotThenLambdify,
 }
 
+/// Symbolic Jacobian assembly backend for IVP preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IvpSymbolicAssemblyBackend {
+    /// Legacy expression differentiation.
+    #[default]
+    ExprLegacy,
+    /// Packed AtomView differentiation path.
+    AtomView,
+}
+
 /// AOT preparation settings for dense IVP problems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SymbolicIvpAotOptions {
@@ -124,6 +136,8 @@ pub struct SymbolicIvpProblemOptions {
     pub backend_policy: IvpBackendSelectionPolicy,
     /// Dense AOT preparation settings.
     pub aot_options: SymbolicIvpAotOptions,
+    /// Symbolic Jacobian assembly backend.
+    pub symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
 }
 
 impl SymbolicIvpProblemOptions {
@@ -153,6 +167,15 @@ impl SymbolicIvpProblemOptions {
     /// Overrides dense AOT plan chunking.
     pub fn with_aot_options(mut self, options: SymbolicIvpAotOptions) -> Self {
         self.aot_options = options;
+        self
+    }
+
+    /// Selects the symbolic Jacobian assembly backend.
+    pub fn with_symbolic_assembly_backend(
+        mut self,
+        backend: IvpSymbolicAssemblyBackend,
+    ) -> Self {
+        self.symbolic_assembly_backend = backend;
         self
     }
 }
@@ -613,16 +636,40 @@ fn prepare_parameter_values_handle(
     }
 }
 
-fn build_symbolic_jacobian(equations: &[Expr], variables: &[String]) -> Vec<Vec<Expr>> {
-    equations
-        .iter()
-        .map(|expr| {
-            variables
-                .iter()
-                .map(|variable| expr.diff(variable).simplify())
-                .collect::<Vec<_>>()
-        })
-        .collect()
+fn build_symbolic_jacobian(
+    equations: &[Expr],
+    variables: &[String],
+    backend: IvpSymbolicAssemblyBackend,
+) -> Vec<Vec<Expr>> {
+    match backend {
+        IvpSymbolicAssemblyBackend::ExprLegacy => equations
+            .iter()
+            .map(|expr| {
+                variables
+                    .iter()
+                    .map(|variable| expr.diff(variable).simplify())
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        IvpSymbolicAssemblyBackend::AtomView => {
+            let rows = equations.len();
+            let cols = variables.len();
+            let variables_for_all_discrete = vec![variables.to_vec(); rows];
+            let sparse_entries = PreparedSparseAtomSystem::from_exprs(
+                equations,
+                variables,
+                &variables_for_all_discrete,
+            )
+            .calc_sparse_jacobian_with_bandwidth(None);
+
+            let zero = Expr::parse_expression("0");
+            let mut dense = vec![vec![zero.clone(); cols]; rows];
+            for entry in sparse_entries {
+                dense[entry.row][entry.col] = atom_to_expr(&entry.value).simplify();
+            }
+            dense
+        }
+    }
 }
 
 fn compile_ivp_residual(
@@ -726,7 +773,11 @@ pub fn prepare_symbolic_ivp_problem(
         options.equation_parameter_values,
     )?;
 
-    let symbolic_jacobian = build_symbolic_jacobian(&equations, &variables);
+    let symbolic_jacobian = build_symbolic_jacobian(
+        &equations,
+        &variables,
+        options.symbolic_assembly_backend,
+    );
     let residual = compile_ivp_residual(
         &equations,
         time_arg.as_str(),
@@ -841,6 +892,57 @@ mod tests {
             Err(other) => panic!("expected ParameterCountMismatch, got {other}"),
             Ok(_) => panic!("expected ParameterCountMismatch, got Ok(..)"),
         }
+    }
+
+    #[test]
+    fn symbolic_ivp_atom_view_and_expr_legacy_jacobians_match() {
+        let equations = vec![
+            Expr::parse_expression("a*t + y + b*z"),
+            Expr::parse_expression("c*y - z + b*t"),
+        ];
+        let variables = vec!["y".to_string(), "z".to_string()];
+        let params = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let pvals = DVector::from_vec(vec![2.0, -0.5, 3.0]);
+        let y = DVector::from_vec(vec![1.25, -0.75]);
+        let t = 0.6_f64;
+
+        let legacy = prepare_symbolic_ivp_problem(
+            equations.clone(),
+            variables.clone(),
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new()
+                .with_equation_parameters(params.clone())
+                .with_equation_parameter_values(pvals.clone())
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::ExprLegacy),
+        )
+        .expect("ExprLegacy IVP backend should prepare");
+        let atom = prepare_symbolic_ivp_problem(
+            equations,
+            variables,
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new()
+                .with_equation_parameters(params)
+                .with_equation_parameter_values(pvals)
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView),
+        )
+        .expect("AtomView IVP backend should prepare");
+
+        let j_legacy = (legacy.jacobian)(t, &y);
+        let j_atom = (atom.jacobian)(t, &y);
+        assert_eq!(
+            j_legacy.shape(),
+            j_atom.shape(),
+            "Jacobian shape should match across symbolic assembly backends"
+        );
+        let max_diff = j_legacy
+            .iter()
+            .zip(j_atom.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff <= 1.0e-12,
+            "AtomView and ExprLegacy Jacobians should match numerically; max_diff={max_diff:e}"
+        );
     }
 
     #[test]

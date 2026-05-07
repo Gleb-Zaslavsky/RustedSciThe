@@ -59,6 +59,14 @@ pub struct Lsode2SwitchTelemetry {
     pub adams_step_cost_estimate: Option<f64>,
     /// Optional ODEPACK-like per-step cost estimate for BDF path.
     pub bdf_step_cost_estimate: Option<f64>,
+    /// Number of Adams cost samples contributing to `adams_step_cost_estimate`.
+    pub adams_cost_samples: usize,
+    /// Number of BDF cost samples contributing to `bdf_step_cost_estimate`.
+    pub bdf_cost_samples: usize,
+    /// Optional DSTODA-style step-size capability proxy for Adams (`rh1`-like).
+    pub adams_step_size_cap_estimate: Option<f64>,
+    /// Optional DSTODA-style step-size capability proxy for BDF (`rh2`-like).
+    pub bdf_step_size_cap_estimate: Option<f64>,
 }
 
 impl Lsode2SwitchTelemetry {
@@ -70,6 +78,10 @@ impl Lsode2SwitchTelemetry {
             convergence_failures: 0,
             adams_step_cost_estimate: None,
             bdf_step_cost_estimate: None,
+            adams_cost_samples: 0,
+            bdf_cost_samples: 0,
+            adams_step_size_cap_estimate: None,
+            bdf_step_size_cap_estimate: None,
         }
     }
 
@@ -102,6 +114,26 @@ impl Lsode2SwitchTelemetry {
         self.bdf_step_cost_estimate = Some(cost);
         self
     }
+
+    pub fn with_adams_cost_samples(mut self, samples: usize) -> Self {
+        self.adams_cost_samples = samples;
+        self
+    }
+
+    pub fn with_bdf_cost_samples(mut self, samples: usize) -> Self {
+        self.bdf_cost_samples = samples;
+        self
+    }
+
+    pub fn with_adams_step_size_cap_estimate(mut self, rh1_like: f64) -> Self {
+        self.adams_step_size_cap_estimate = Some(rh1_like);
+        self
+    }
+
+    pub fn with_bdf_step_size_cap_estimate(mut self, rh2_like: f64) -> Self {
+        self.bdf_step_size_cap_estimate = Some(rh2_like);
+        self
+    }
 }
 
 impl Default for Lsode2SwitchTelemetry {
@@ -114,6 +146,8 @@ impl Default for Lsode2SwitchTelemetry {
 pub enum Lsode2SwitchReason {
     FixedController,
     SwitchProbeWarmup,
+    InsufficientCostEvidence,
+    SwitchAdvantageNotMet,
     NonstiffPreference,
     CostPreferenceAdams,
     CostPreferenceBdf,
@@ -127,6 +161,8 @@ impl Lsode2SwitchReason {
         match self {
             Self::FixedController => "fixed_controller",
             Self::SwitchProbeWarmup => "switch_probe_warmup",
+            Self::InsufficientCostEvidence => "insufficient_cost_evidence",
+            Self::SwitchAdvantageNotMet => "switch_advantage_not_met",
             Self::NonstiffPreference => "nonstiff_preference",
             Self::CostPreferenceAdams => "cost_preference_adams",
             Self::CostPreferenceBdf => "cost_preference_bdf",
@@ -242,7 +278,15 @@ impl Lsode2MethodSwitchState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lsode2MethodSwitchPolicy {
     pub stiffness_ratio_threshold: f64,
+    /// Optional override for forcing BDF on repeated convergence trouble.
+    ///
+    /// DSTODA method switching is primarily step-size/cost driven; this
+    /// threshold is therefore disabled by default and can be enabled
+    /// explicitly when such override is desired.
     pub convergence_failure_threshold: usize,
+    /// Optional override for forcing BDF on repeated rejected steps.
+    ///
+    /// Disabled by default for DSTODA-faithful automatic switching.
     pub rejection_threshold: usize,
     pub minimum_accepted_steps_for_nonstiff_probe: usize,
     /// Require Adams to be this much cheaper than BDF to trigger cost-based
@@ -251,17 +295,27 @@ pub struct Lsode2MethodSwitchPolicy {
     /// Require BDF to be this much cheaper than Adams to trigger cost-based
     /// BDF preference (`bdf_cost <= ratio * adams_cost`).
     pub bdf_cost_ratio_for_switch: f64,
+    /// Minimum number of cost samples for each family before allowing
+    /// cost-driven Adams/BDF switching.
+    pub min_cost_samples_for_switch: usize,
+    /// DSTODA ratio gate used in Adams<->BDF method-switch tests.
+    ///
+    /// In the original DSTODA choreography this is initialized to 5.0 and
+    /// participates in the `rh1/rh2` step-advantage tests.
+    pub switch_advantage_ratio: f64,
 }
 
 impl Default for Lsode2MethodSwitchPolicy {
     fn default() -> Self {
         Self {
             stiffness_ratio_threshold: LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD,
-            convergence_failure_threshold: 1,
-            rejection_threshold: 2,
+            convergence_failure_threshold: usize::MAX,
+            rejection_threshold: usize::MAX,
             minimum_accepted_steps_for_nonstiff_probe: LSODE2_DEFAULT_METHOD_SWITCH_PROBE_STEPS,
             adams_cost_ratio_for_switch: 0.85,
             bdf_cost_ratio_for_switch: 0.85,
+            min_cost_samples_for_switch: 3,
+            switch_advantage_ratio: 5.0,
         }
     }
 }
@@ -287,6 +341,16 @@ impl Lsode2MethodSwitchPolicy {
         self
     }
 
+    pub fn with_min_cost_samples_for_switch(mut self, samples: usize) -> Self {
+        self.min_cost_samples_for_switch = samples.max(1);
+        self
+    }
+
+    pub fn with_switch_advantage_ratio(mut self, ratio: f64) -> Self {
+        self.switch_advantage_ratio = ratio;
+        self
+    }
+
     fn should_probe_nonstiff_switch(self, accepted_steps: usize) -> bool {
         // Stateless approximation of DSTODA's ICOUNT gate:
         // with initial ICOUNT = 20 the first probe is on accepted step 21.
@@ -308,6 +372,18 @@ impl Lsode2MethodSwitchPolicy {
         telemetry: Lsode2SwitchTelemetry,
         probe_gate: Option<bool>,
     ) -> (Lsode2MethodFamily, Lsode2SwitchReason) {
+        self.preferred_family_and_reason_with_probe_gate_and_current(
+            mode, telemetry, probe_gate, None,
+        )
+    }
+
+    pub fn preferred_family_and_reason_with_probe_gate_and_current(
+        self,
+        mode: Lsode2ControllerMode,
+        telemetry: Lsode2SwitchTelemetry,
+        probe_gate: Option<bool>,
+        current_family: Option<Lsode2MethodFamily>,
+    ) -> (Lsode2MethodFamily, Lsode2SwitchReason) {
         match mode {
             Lsode2ControllerMode::AdamsOnly => (
                 Lsode2MethodFamily::Adams,
@@ -317,9 +393,13 @@ impl Lsode2MethodSwitchPolicy {
                 (Lsode2MethodFamily::Bdf, Lsode2SwitchReason::FixedController)
             }
             Lsode2ControllerMode::AutomaticAdamsBdf => {
-                if telemetry.convergence_failures >= self.convergence_failure_threshold
-                    || telemetry.rejected_steps >= self.rejection_threshold
-                {
+                let current = current_family.unwrap_or(Lsode2MethodFamily::Bdf);
+                let force_bdf_on_convergence_trouble = self.convergence_failure_threshold
+                    != usize::MAX
+                    && telemetry.convergence_failures >= self.convergence_failure_threshold;
+                let force_bdf_on_rejections = self.rejection_threshold != usize::MAX
+                    && telemetry.rejected_steps >= self.rejection_threshold;
+                if force_bdf_on_convergence_trouble || force_bdf_on_rejections {
                     return (
                         Lsode2MethodFamily::Bdf,
                         Lsode2SwitchReason::ConvergenceTrouble,
@@ -337,15 +417,56 @@ impl Lsode2MethodSwitchPolicy {
                 let probe_nonstiff = probe_gate
                     .unwrap_or_else(|| self.should_probe_nonstiff_switch(telemetry.accepted_steps));
                 if !probe_nonstiff {
-                    return (
-                        Lsode2MethodFamily::Bdf,
-                        Lsode2SwitchReason::SwitchProbeWarmup,
-                    );
+                    return (current, Lsode2SwitchReason::SwitchProbeWarmup);
+                }
+                // DSTODA-style method-switch gate via step-size advantage:
+                // - if currently BDF: switch to Adams only if `rh1 * ratio >= 5 * rh2`;
+                // - if currently Adams: switch to BDF only if `rh2 >= ratio * rh1`.
+                let has_any_step_advantage_telemetry =
+                    telemetry.adams_step_size_cap_estimate.is_some()
+                        || telemetry.bdf_step_size_cap_estimate.is_some();
+                if let (Some(rh1), Some(rh2)) = (
+                    telemetry.adams_step_size_cap_estimate,
+                    telemetry.bdf_step_size_cap_estimate,
+                ) {
+                    if rh1.is_finite()
+                        && rh2.is_finite()
+                        && rh1 > 0.0
+                        && rh2 > 0.0
+                        && self.switch_advantage_ratio.is_finite()
+                        && self.switch_advantage_ratio > 0.0
+                    {
+                        if current == Lsode2MethodFamily::Bdf {
+                            if rh1 * self.switch_advantage_ratio >= 5.0 * rh2 {
+                                return (
+                                    Lsode2MethodFamily::Adams,
+                                    Lsode2SwitchReason::NonstiffPreference,
+                                );
+                            }
+                        } else if rh2 >= self.switch_advantage_ratio * rh1 {
+                            return (
+                                Lsode2MethodFamily::Bdf,
+                                Lsode2SwitchReason::StiffnessSuspected,
+                            );
+                        }
+                        return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
+                    }
+                }
+                // If probe is open and DSTODA-style telemetry is present but
+                // not sufficient to justify a switch, report step-advantage
+                // hold reason instead of generic cost-evidence reason.
+                if has_any_step_advantage_telemetry {
+                    return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
                 }
                 if let (Some(adams_cost), Some(bdf_cost)) = (
                     telemetry.adams_step_cost_estimate,
                     telemetry.bdf_step_cost_estimate,
                 ) {
+                    if telemetry.adams_cost_samples < self.min_cost_samples_for_switch
+                        || telemetry.bdf_cost_samples < self.min_cost_samples_for_switch
+                    {
+                        return (current, Lsode2SwitchReason::InsufficientCostEvidence);
+                    }
                     if adams_cost.is_finite()
                         && bdf_cost.is_finite()
                         && adams_cost > 0.0
@@ -363,28 +484,10 @@ impl Lsode2MethodSwitchPolicy {
                                 Lsode2SwitchReason::CostPreferenceBdf,
                             );
                         }
+                        return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
                     }
                 }
-                if telemetry.bdf_step_cost_estimate.is_some()
-                    && telemetry.adams_step_cost_estimate.is_none()
-                {
-                    return (
-                        Lsode2MethodFamily::Bdf,
-                        Lsode2SwitchReason::CostPreferenceBdf,
-                    );
-                }
-                if telemetry.adams_step_cost_estimate.is_some()
-                    && telemetry.bdf_step_cost_estimate.is_none()
-                {
-                    return (
-                        Lsode2MethodFamily::Adams,
-                        Lsode2SwitchReason::CostPreferenceAdams,
-                    );
-                }
-                (
-                    Lsode2MethodFamily::Adams,
-                    Lsode2SwitchReason::NonstiffPreference,
-                )
+                (current, Lsode2SwitchReason::SwitchAdvantageNotMet)
             }
         }
     }
@@ -401,8 +504,8 @@ mod tests {
             Lsode2ControllerMode::AutomaticAdamsBdf,
             Lsode2SwitchTelemetry::quiet_nonstiff().with_accepted_steps(21),
         );
-        assert_eq!(family, Lsode2MethodFamily::Adams);
-        assert_eq!(reason, Lsode2SwitchReason::NonstiffPreference);
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
     }
 
     #[test]
@@ -430,13 +533,17 @@ mod tests {
             Lsode2ControllerMode::AutomaticAdamsBdf,
             Lsode2SwitchTelemetry::quiet_nonstiff().with_accepted_steps(21),
         );
-        assert_eq!(f21, Lsode2MethodFamily::Adams);
-        assert_eq!(r21, Lsode2SwitchReason::NonstiffPreference);
+        assert_eq!(f21, Lsode2MethodFamily::Bdf);
+        assert_eq!(r21, Lsode2SwitchReason::SwitchAdvantageNotMet);
     }
 
     #[test]
     fn policy_prefers_bdf_for_stiffness_or_convergence_signals() {
-        let policy = Lsode2MethodSwitchPolicy::default().with_stiffness_ratio_threshold(10.0);
+        let policy = Lsode2MethodSwitchPolicy {
+            convergence_failure_threshold: 1,
+            rejection_threshold: 2,
+            ..Lsode2MethodSwitchPolicy::default().with_stiffness_ratio_threshold(10.0)
+        };
         let (stiff_family, stiff_reason) = policy.preferred_family_and_reason(
             Lsode2ControllerMode::AutomaticAdamsBdf,
             Lsode2SwitchTelemetry::default().with_stiffness_ratio(12.0),
@@ -453,12 +560,28 @@ mod tests {
     }
 
     #[test]
+    fn policy_default_does_not_force_bdf_from_convergence_override() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let (family, reason) = policy.preferred_family_and_reason(
+            Lsode2ControllerMode::AutomaticAdamsBdf,
+            Lsode2SwitchTelemetry::default()
+                .with_accepted_steps(32)
+                .with_convergence_failures(999)
+                .with_rejected_steps(999),
+        );
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
+    }
+
+    #[test]
     fn policy_can_use_cost_based_preference_after_probe_gate() {
         let policy = Lsode2MethodSwitchPolicy::default();
         let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
             .with_accepted_steps(32)
             .with_adams_step_cost_estimate(0.5)
-            .with_bdf_step_cost_estimate(1.0);
+            .with_bdf_step_cost_estimate(1.0)
+            .with_adams_cost_samples(3)
+            .with_bdf_cost_samples(3);
         let (family_adams, reason_adams) =
             policy.preferred_family_and_reason(Lsode2ControllerMode::AutomaticAdamsBdf, telemetry);
         assert_eq!(family_adams, Lsode2MethodFamily::Adams);
@@ -467,11 +590,95 @@ mod tests {
         let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
             .with_accepted_steps(32)
             .with_adams_step_cost_estimate(1.0)
-            .with_bdf_step_cost_estimate(0.5);
+            .with_bdf_step_cost_estimate(0.5)
+            .with_adams_cost_samples(3)
+            .with_bdf_cost_samples(3);
         let (family_bdf, reason_bdf) =
             policy.preferred_family_and_reason(Lsode2ControllerMode::AutomaticAdamsBdf, telemetry);
         assert_eq!(family_bdf, Lsode2MethodFamily::Bdf);
         assert_eq!(reason_bdf, Lsode2SwitchReason::CostPreferenceBdf);
+    }
+
+    #[test]
+    fn policy_requires_minimum_cost_samples_for_cost_based_switch() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(32)
+            .with_adams_step_cost_estimate(0.5)
+            .with_bdf_step_cost_estimate(1.0)
+            .with_adams_cost_samples(1)
+            .with_bdf_cost_samples(3);
+        let (family, reason) =
+            policy.preferred_family_and_reason(Lsode2ControllerMode::AutomaticAdamsBdf, telemetry);
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::InsufficientCostEvidence);
+    }
+
+    #[test]
+    fn policy_dstoda_step_advantage_gate_can_switch_bdf_to_adams() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(32)
+            .with_adams_step_size_cap_estimate(2.0)
+            .with_bdf_step_size_cap_estimate(1.0);
+        let (family, reason) = policy.preferred_family_and_reason_with_probe_gate_and_current(
+            Lsode2ControllerMode::AutomaticAdamsBdf,
+            telemetry,
+            Some(true),
+            Some(Lsode2MethodFamily::Bdf),
+        );
+        assert_eq!(family, Lsode2MethodFamily::Adams);
+        assert_eq!(reason, Lsode2SwitchReason::NonstiffPreference);
+    }
+
+    #[test]
+    fn policy_dstoda_step_advantage_gate_can_switch_adams_to_bdf() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(32)
+            .with_adams_step_size_cap_estimate(1.0)
+            .with_bdf_step_size_cap_estimate(5.0);
+        let (family, reason) = policy.preferred_family_and_reason_with_probe_gate_and_current(
+            Lsode2ControllerMode::AutomaticAdamsBdf,
+            telemetry,
+            Some(true),
+            Some(Lsode2MethodFamily::Adams),
+        );
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::StiffnessSuspected);
+    }
+
+    #[test]
+    fn policy_dstoda_step_advantage_gate_reports_hold_when_advantage_not_met() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(32)
+            .with_adams_step_size_cap_estimate(0.9)
+            .with_bdf_step_size_cap_estimate(1.0);
+        let (family, reason) = policy.preferred_family_and_reason_with_probe_gate_and_current(
+            Lsode2ControllerMode::AutomaticAdamsBdf,
+            telemetry,
+            Some(true),
+            Some(Lsode2MethodFamily::Bdf),
+        );
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
+    }
+
+    #[test]
+    fn policy_prefers_step_advantage_hold_reason_when_dstoda_telemetry_is_partial() {
+        let policy = Lsode2MethodSwitchPolicy::default();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(32)
+            .with_adams_step_size_cap_estimate(1.2);
+        let (family, reason) = policy.preferred_family_and_reason_with_probe_gate_and_current(
+            Lsode2ControllerMode::AutomaticAdamsBdf,
+            telemetry,
+            Some(true),
+            Some(Lsode2MethodFamily::Bdf),
+        );
+        assert_eq!(family, Lsode2MethodFamily::Bdf);
+        assert_eq!(reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
     }
 
     #[test]

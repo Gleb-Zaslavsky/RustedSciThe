@@ -10,6 +10,7 @@
 use crate::Utils::plots::plots;
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::numerical::BE::{BE, BeSolverOptions};
+use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::NonStiff_api::nonstiffODE;
 use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions, RadauStatistics};
 use crate::symbolic::symbolic_engine::Expr;
@@ -27,6 +28,7 @@ pub enum SolverType {
     Radau(RadauOrder),
     BDF,
     BackwardEuler,
+    LSODE2,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +146,7 @@ impl UniversalIvpStatistics {
 #[derive(Debug)]
 pub enum UniversalOdeError {
     Backend(IvpBackendError),
+    Lsode2(Lsode2Error),
     UnsupportedGeneratedBackendForMethod { method: String },
 }
 
@@ -151,6 +154,7 @@ impl std::fmt::Display for UniversalOdeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(err) => write!(f, "{err}"),
+            Self::Lsode2(err) => write!(f, "{err}"),
             Self::UnsupportedGeneratedBackendForMethod { method } => {
                 write!(
                     f,
@@ -169,11 +173,18 @@ impl From<IvpBackendError> for UniversalOdeError {
     }
 }
 
+impl From<Lsode2Error> for UniversalOdeError {
+    fn from(value: Lsode2Error) -> Self {
+        Self::Lsode2(value)
+    }
+}
+
 pub enum SolverInstance {
     NonStiff(nonstiffODE),
     Radau(Radau),
     BDF(BdfOdeSolver),
     BE(BE),
+    LSODE2(Lsode2Solver),
 }
 
 pub struct UniversalODESolver {
@@ -200,6 +211,7 @@ pub struct UniversalODESolver {
     neighborhood_check: Option<f64>,
     parallel: bool,
     generated_backend_config: Option<SymbolicIvpGeneratedBackendConfig>,
+    lsode2_problem_config: Option<Lsode2ProblemConfig>,
     solver_params_legacy: HashMap<String, SolverParam>,
 }
 
@@ -238,6 +250,7 @@ impl UniversalODESolver {
             neighborhood_check: None,
             parallel: false,
             generated_backend_config: None,
+            lsode2_problem_config: None,
             solver_params_legacy: HashMap::new(),
         }
     }
@@ -248,6 +261,7 @@ impl UniversalODESolver {
             SolverType::Radau(order) => format!("Radau::{order:?}"),
             SolverType::BDF => "BDF".to_string(),
             SolverType::BackwardEuler => "BackwardEuler".to_string(),
+            SolverType::LSODE2 => "LSODE2".to_string(),
         }
     }
 
@@ -356,6 +370,10 @@ impl UniversalODESolver {
         self.generated_backend_config = Some(config);
     }
 
+    pub fn set_lsode2_problem_config(&mut self, config: Lsode2ProblemConfig) {
+        self.lsode2_problem_config = Some(config);
+    }
+
     pub fn set_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
         let config = self
             .generated_backend_config
@@ -411,6 +429,11 @@ impl UniversalODESolver {
         config: SymbolicIvpGeneratedBackendConfig,
     ) -> Self {
         self.set_generated_backend_config(config);
+        self
+    }
+
+    pub fn with_lsode2_problem_config(mut self, config: Lsode2ProblemConfig) -> Self {
+        self.set_lsode2_problem_config(config);
         self
     }
 
@@ -584,6 +607,33 @@ impl UniversalODESolver {
                 }
                 SolverInstance::BE(solver)
             }
+            SolverType::LSODE2 => {
+                let mut config = self.lsode2_problem_config.clone().unwrap_or_else(|| {
+                    Lsode2ProblemConfig::new(
+                        self.eq_system.clone(),
+                        self.values.clone(),
+                        self.arg.clone(),
+                        self.t0,
+                        self.y0.clone(),
+                        self.t_bound,
+                        self.max_step.unwrap_or(1e-3),
+                        self.rtol.unwrap_or(1e-5),
+                        self.atol.unwrap_or(1e-5),
+                    )
+                });
+
+                config = config
+                    .with_first_step(self.first_step)
+                    .with_jac_sparsity(self.jac_sparsity.clone())
+                    .with_vectorized(self.vectorized);
+
+                if let Some(generated) = self.generated_backend_config.clone() {
+                    let backend = config.backend.clone().with_generated_backend(generated);
+                    config = config.with_backend(backend);
+                }
+
+                SolverInstance::LSODE2(Lsode2Solver::new(config)?)
+            }
         });
         Ok(())
     }
@@ -622,6 +672,12 @@ impl UniversalODESolver {
                 self.t_result = t_result;
                 self.y_result = y_result;
             }
+            SolverInstance::LSODE2(solver) => {
+                solver.solve()?;
+                let (t_result, y_result) = solver.get_result();
+                self.t_result = Some(t_result);
+                self.y_result = Some(y_result);
+            }
         }
         Ok(())
     }
@@ -646,6 +702,7 @@ impl UniversalODESolver {
             SolverInstance::Radau(solver) => Some(solver.get_status().clone()),
             SolverInstance::BDF(solver) => Some(solver.get_status().clone()),
             SolverInstance::BE(solver) => Some(solver.get_status().clone()),
+            SolverInstance::LSODE2(solver) => Some(solver.status().to_string()),
         }
     }
 
@@ -669,6 +726,19 @@ impl UniversalODESolver {
                 backend,
                 &solver.get_statistics(),
             )),
+            SolverInstance::LSODE2(solver) => {
+                let summary = solver.summary();
+                Some(UniversalIvpStatistics::from_backend_stats(
+                    method,
+                    format!(
+                        "{}:{}:{}",
+                        summary.resolved_source,
+                        summary.resolved_structure,
+                        summary.linear_solver_backend
+                    ),
+                    &summary.statistics,
+                ))
+            }
         }
     }
 
@@ -691,6 +761,7 @@ impl UniversalODESolver {
         match self.solver_instance.as_ref() {
             Some(SolverInstance::NonStiff(solver)) => solver.save_result(),
             Some(SolverInstance::BDF(solver)) => solver.save_result(),
+            Some(SolverInstance::LSODE2(_)) => Ok(()),
             _ => Ok(()),
         }
     }
@@ -837,6 +908,24 @@ impl UniversalODESolver {
         }
         solver
     }
+
+    pub fn lsode2(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+    ) -> Self {
+        let mut solver = Self::new(eq_system, values, arg, SolverType::LSODE2, t0, y0, t_bound);
+        solver.set_max_step(max_step);
+        solver.set_rtol(rtol);
+        solver.set_atol(atol);
+        solver
+    }
 }
 
 #[cfg(test)]
@@ -891,6 +980,36 @@ mod tests {
             .get_statistics()
             .expect("BE should expose normalized statistics");
         assert_eq!(stats.method_label, "BackwardEuler");
+        assert!(stats.step_calls > 0);
+    }
+
+    #[test]
+    fn universal_ode_api_lsode2_exposes_statistics() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let config = crate::numerical::LSODE2::Lsode2ProblemConfig::new(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            0.0,
+            y0.clone(),
+            0.1,
+            1e-2,
+            1e-6,
+            1e-8,
+        )
+        .with_linear_system_structure(crate::numerical::LSODE2::Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(crate::numerical::LSODE2::Lsode2LinearSolverPolicy::Auto);
+
+        let mut solver =
+            UniversalODESolver::lsode2(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_lsode2_problem_config(config);
+        solver.solve();
+
+        let stats = solver
+            .get_statistics()
+            .expect("LSODE2 should expose normalized statistics");
+        assert_eq!(stats.method_label, "LSODE2");
+        assert!(stats.backend_label.contains("dense"));
         assert!(stats.step_calls > 0);
     }
 

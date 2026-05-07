@@ -17,6 +17,11 @@ pub struct Lsode2ControllerConfig {
     pub max_bdf_order: usize,
     pub stiffness_ratio_threshold: f64,
     pub method_switch_probe_steps: usize,
+    pub convergence_failure_threshold: usize,
+    pub rejection_threshold: usize,
+    pub adams_cost_ratio_for_switch: f64,
+    pub bdf_cost_ratio_for_switch: f64,
+    pub min_cost_samples_for_switch: usize,
 }
 
 /// Current executable status for one controller configuration.
@@ -52,32 +57,50 @@ impl Default for Lsode2ControllerConfig {
 
 impl Lsode2ControllerConfig {
     pub fn adams_only() -> Self {
+        let policy = Lsode2MethodSwitchPolicy::default();
         Self {
             mode: Lsode2ControllerMode::AdamsOnly,
             max_adams_order: LSODE2_MAX_ADAMS_ORDER,
             max_bdf_order: LSODE2_MAX_BDF_ORDER,
             stiffness_ratio_threshold: LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD,
             method_switch_probe_steps: LSODE2_DEFAULT_METHOD_SWITCH_PROBE_STEPS,
+            convergence_failure_threshold: policy.convergence_failure_threshold,
+            rejection_threshold: policy.rejection_threshold,
+            adams_cost_ratio_for_switch: policy.adams_cost_ratio_for_switch,
+            bdf_cost_ratio_for_switch: policy.bdf_cost_ratio_for_switch,
+            min_cost_samples_for_switch: policy.min_cost_samples_for_switch,
         }
     }
 
     pub fn bdf_only() -> Self {
+        let policy = Lsode2MethodSwitchPolicy::default();
         Self {
             mode: Lsode2ControllerMode::BdfOnly,
             max_adams_order: LSODE2_MAX_ADAMS_ORDER,
             max_bdf_order: LSODE2_MAX_BDF_ORDER,
             stiffness_ratio_threshold: LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD,
             method_switch_probe_steps: LSODE2_DEFAULT_METHOD_SWITCH_PROBE_STEPS,
+            convergence_failure_threshold: policy.convergence_failure_threshold,
+            rejection_threshold: policy.rejection_threshold,
+            adams_cost_ratio_for_switch: policy.adams_cost_ratio_for_switch,
+            bdf_cost_ratio_for_switch: policy.bdf_cost_ratio_for_switch,
+            min_cost_samples_for_switch: policy.min_cost_samples_for_switch,
         }
     }
 
     pub fn automatic_adams_bdf() -> Self {
+        let policy = Lsode2MethodSwitchPolicy::default();
         Self {
             mode: Lsode2ControllerMode::AutomaticAdamsBdf,
             max_adams_order: LSODE2_MAX_ADAMS_ORDER,
             max_bdf_order: LSODE2_MAX_BDF_ORDER,
             stiffness_ratio_threshold: LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD,
             method_switch_probe_steps: LSODE2_DEFAULT_METHOD_SWITCH_PROBE_STEPS,
+            convergence_failure_threshold: policy.convergence_failure_threshold,
+            rejection_threshold: policy.rejection_threshold,
+            adams_cost_ratio_for_switch: policy.adams_cost_ratio_for_switch,
+            bdf_cost_ratio_for_switch: policy.bdf_cost_ratio_for_switch,
+            min_cost_samples_for_switch: policy.min_cost_samples_for_switch,
         }
     }
 
@@ -98,6 +121,31 @@ impl Lsode2ControllerConfig {
 
     pub fn with_method_switch_probe_steps(mut self, steps: usize) -> Self {
         self.method_switch_probe_steps = steps;
+        self
+    }
+
+    pub fn with_convergence_failure_threshold(mut self, threshold: usize) -> Self {
+        self.convergence_failure_threshold = threshold;
+        self
+    }
+
+    pub fn with_rejection_threshold(mut self, threshold: usize) -> Self {
+        self.rejection_threshold = threshold;
+        self
+    }
+
+    pub fn with_adams_cost_ratio_for_switch(mut self, ratio: f64) -> Self {
+        self.adams_cost_ratio_for_switch = ratio;
+        self
+    }
+
+    pub fn with_bdf_cost_ratio_for_switch(mut self, ratio: f64) -> Self {
+        self.bdf_cost_ratio_for_switch = ratio;
+        self
+    }
+
+    pub fn with_min_cost_samples_for_switch(mut self, samples: usize) -> Self {
+        self.min_cost_samples_for_switch = samples;
         self
     }
 
@@ -125,6 +173,33 @@ impl Lsode2ControllerConfig {
                 "LSODE2 method-switch probe steps must be at least 1 (ODEPACK ICOUNT-style gate)"
                     .to_string(),
             );
+        }
+        if self.convergence_failure_threshold == 0 {
+            return Err(
+                "LSODE2 convergence-failure threshold must be at least 1 for automatic Adams/BDF switching".to_string(),
+            );
+        }
+        if self.rejection_threshold == 0 {
+            return Err(
+                "LSODE2 rejection threshold must be at least 1 for automatic Adams/BDF switching"
+                    .to_string(),
+            );
+        }
+        if !self.adams_cost_ratio_for_switch.is_finite() || self.adams_cost_ratio_for_switch <= 0.0
+        {
+            return Err(format!(
+                "LSODE2 Adams cost switch ratio must be finite and positive, got {}",
+                self.adams_cost_ratio_for_switch
+            ));
+        }
+        if !self.bdf_cost_ratio_for_switch.is_finite() || self.bdf_cost_ratio_for_switch <= 0.0 {
+            return Err(format!(
+                "LSODE2 BDF cost switch ratio must be finite and positive, got {}",
+                self.bdf_cost_ratio_for_switch
+            ));
+        }
+        if self.min_cost_samples_for_switch == 0 {
+            return Err("LSODE2 minimum cost samples for switch must be at least 1".to_string());
         }
         Ok(())
     }
@@ -164,10 +239,10 @@ impl Lsode2ControllerConfig {
             Lsode2ControllerMode::AutomaticAdamsBdf => {
                 if capabilities.adams_engine_available {
                     Lsode2ControllerExecutionPlan {
-                        executable_family: Some(Lsode2MethodFamily::Bdf),
+                        executable_family: Some(Lsode2MethodFamily::Adams),
                         uses_fallback: false,
                         requires_adams_engine: true,
-                        message: "automatic Adams/BDF controller is active",
+                        message: "automatic Adams/BDF controller is active (LSODA-style start on Adams family)",
                     }
                 } else {
                     Lsode2ControllerExecutionPlan {
@@ -207,12 +282,41 @@ impl Lsode2ControllerConfig {
         probe_gate: Option<bool>,
         capabilities: Lsode2ControllerExecutionCapabilities,
     ) -> Lsode2SwitchDecision {
+        self.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+            telemetry,
+            probe_gate,
+            capabilities,
+            None,
+        )
+    }
+
+    pub fn switch_decision_with_probe_gate_and_capabilities_and_current_family(
+        self,
+        telemetry: Lsode2SwitchTelemetry,
+        probe_gate: Option<bool>,
+        capabilities: Lsode2ControllerExecutionCapabilities,
+        current_family: Option<Lsode2MethodFamily>,
+    ) -> Lsode2SwitchDecision {
         let plan = self.execution_plan_with_capabilities(capabilities);
         let policy = Lsode2MethodSwitchPolicy::default()
             .with_stiffness_ratio_threshold(self.stiffness_ratio_threshold)
-            .with_minimum_accepted_steps_for_nonstiff_probe(self.method_switch_probe_steps);
-        let (preferred_family, base_reason) =
-            policy.preferred_family_and_reason_with_probe_gate(self.mode, telemetry, probe_gate);
+            .with_minimum_accepted_steps_for_nonstiff_probe(self.method_switch_probe_steps)
+            .with_adams_cost_ratio_for_switch(self.adams_cost_ratio_for_switch)
+            .with_bdf_cost_ratio_for_switch(self.bdf_cost_ratio_for_switch)
+            .with_min_cost_samples_for_switch(self.min_cost_samples_for_switch);
+        let policy = Lsode2MethodSwitchPolicy {
+            convergence_failure_threshold: self.convergence_failure_threshold,
+            rejection_threshold: self.rejection_threshold,
+            ..policy
+        };
+        let effective_current_family = current_family.or(plan.executable_family);
+        let (preferred_family, base_reason) = policy
+            .preferred_family_and_reason_with_probe_gate_and_current(
+                self.mode,
+                telemetry,
+                probe_gate,
+                effective_current_family,
+            );
 
         let (executable_family, reason, message) = match (self.mode, preferred_family) {
             (Lsode2ControllerMode::AdamsOnly, _) => {
@@ -236,6 +340,12 @@ impl Lsode2ControllerConfig {
                     }
                     Lsode2SwitchReason::CostPreferenceBdf => Lsode2SwitchReason::CostPreferenceBdf,
                     Lsode2SwitchReason::SwitchProbeWarmup => Lsode2SwitchReason::SwitchProbeWarmup,
+                    Lsode2SwitchReason::SwitchAdvantageNotMet => {
+                        Lsode2SwitchReason::SwitchAdvantageNotMet
+                    }
+                    Lsode2SwitchReason::InsufficientCostEvidence => {
+                        Lsode2SwitchReason::InsufficientCostEvidence
+                    }
                     _ => Lsode2SwitchReason::FixedController,
                 };
                 let message = match reason {
@@ -251,6 +361,12 @@ impl Lsode2ControllerConfig {
                     Lsode2SwitchReason::SwitchProbeWarmup => {
                         "automatic policy keeps BDF during warmup before non-stiff switch probing"
                     }
+                    Lsode2SwitchReason::SwitchAdvantageNotMet => {
+                        "automatic policy keeps BDF because DSTODA step-advantage test does not justify a switch to Adams"
+                    }
+                    Lsode2SwitchReason::InsufficientCostEvidence => {
+                        "automatic policy keeps BDF because non-stiff probe has insufficient cost evidence for a safe Adams switch"
+                    }
                     _ => plan.message,
                 };
                 (Some(Lsode2MethodFamily::Bdf), reason, message)
@@ -261,11 +377,29 @@ impl Lsode2ControllerConfig {
                         Lsode2SwitchReason::CostPreferenceAdams => {
                             Lsode2SwitchReason::CostPreferenceAdams
                         }
+                        Lsode2SwitchReason::SwitchProbeWarmup => {
+                            Lsode2SwitchReason::SwitchProbeWarmup
+                        }
+                        Lsode2SwitchReason::SwitchAdvantageNotMet => {
+                            Lsode2SwitchReason::SwitchAdvantageNotMet
+                        }
+                        Lsode2SwitchReason::InsufficientCostEvidence => {
+                            Lsode2SwitchReason::InsufficientCostEvidence
+                        }
                         _ => Lsode2SwitchReason::NonstiffPreference,
                     };
                     let message = match reason {
                         Lsode2SwitchReason::CostPreferenceAdams => {
                             "automatic policy prefers Adams because cost telemetry estimates Adams step cost lower than BDF"
+                        }
+                        Lsode2SwitchReason::SwitchProbeWarmup => {
+                            "automatic policy keeps current Adams family during post-switch warmup before the next non-stiff probe window"
+                        }
+                        Lsode2SwitchReason::SwitchAdvantageNotMet => {
+                            "automatic policy keeps Adams because DSTODA step-advantage test does not justify a switch to BDF"
+                        }
+                        Lsode2SwitchReason::InsufficientCostEvidence => {
+                            "automatic policy keeps current Adams family because non-stiff probe has insufficient cost evidence for a safe BDF switch"
                         }
                         _ => "automatic policy prefers Adams for non-stiff telemetry window",
                     };
@@ -392,10 +526,11 @@ impl Lsode2AlgorithmController {
             None
         };
         self.config
-            .switch_decision_with_probe_gate_and_capabilities(
+            .switch_decision_with_probe_gate_and_capabilities_and_current_family(
                 telemetry,
                 probe_gate,
                 self.execution_capabilities,
+                Some(self.active_family),
             )
     }
 
@@ -582,6 +717,36 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        assert!(
+            Lsode2ControllerConfig::automatic_adams_bdf()
+                .with_convergence_failure_threshold(0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Lsode2ControllerConfig::automatic_adams_bdf()
+                .with_rejection_threshold(0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Lsode2ControllerConfig::automatic_adams_bdf()
+                .with_adams_cost_ratio_for_switch(0.0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Lsode2ControllerConfig::automatic_adams_bdf()
+                .with_bdf_cost_ratio_for_switch(0.0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Lsode2ControllerConfig::automatic_adams_bdf()
+                .with_min_cost_samples_for_switch(0)
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -596,32 +761,49 @@ mod tests {
     }
 
     #[test]
-    fn automatic_switch_policy_prefers_adams_after_warmup_but_executes_bdf_fallback() {
-        let controller =
-            Lsode2AlgorithmController::new(Lsode2ControllerConfig::automatic_adams_bdf());
+    fn automatic_execution_plan_starts_on_adams_when_native_adams_is_available() {
+        let plan = Lsode2ControllerConfig::automatic_adams_bdf().execution_plan_with_capabilities(
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+        assert_eq!(plan.executable_family, Some(Lsode2MethodFamily::Adams));
+        assert!(!plan.uses_fallback);
+        assert!(plan.requires_adams_engine);
+        assert!(plan.message.contains("LSODA-style start on Adams"));
+    }
+
+    #[test]
+    fn automatic_switch_policy_requires_cost_evidence_after_warmup() {
+        let controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
         let decision = controller
             .switch_decision(Lsode2SwitchTelemetry::quiet_nonstiff().with_accepted_steps(21));
 
         assert_eq!(decision.preferred_family, Lsode2MethodFamily::Adams);
-        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Bdf));
-        assert!(decision.uses_fallback);
-        assert_eq!(decision.reason, Lsode2SwitchReason::AdamsEngineUnavailable);
-        assert!(
-            decision
-                .message
-                .contains("native Adams execution is unavailable")
-        );
+        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Adams));
+        assert!(!decision.uses_fallback);
+        assert_eq!(decision.reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
+        assert!(decision.message.contains("step-advantage test"));
     }
 
     #[test]
-    fn automatic_switch_policy_keeps_bdf_in_warmup_window() {
-        let controller =
-            Lsode2AlgorithmController::new(Lsode2ControllerConfig::automatic_adams_bdf());
+    fn automatic_switch_policy_keeps_current_family_in_warmup_window() {
+        let controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
         let decision = controller
             .switch_decision(Lsode2SwitchTelemetry::quiet_nonstiff().with_accepted_steps(2));
 
-        assert_eq!(decision.preferred_family, Lsode2MethodFamily::Bdf);
-        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Bdf));
+        assert_eq!(decision.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Adams));
         assert!(!decision.uses_fallback);
         assert_eq!(decision.reason, Lsode2SwitchReason::SwitchProbeWarmup);
         assert!(decision.message.contains("warmup"));
@@ -629,13 +811,16 @@ mod tests {
 
     #[test]
     fn automatic_switch_policy_respects_custom_probe_window() {
-        let controller = Lsode2AlgorithmController::new(
+        let controller = Lsode2AlgorithmController::new_with_capabilities(
             Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(5),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
         );
 
         let warmup = controller
             .switch_decision(Lsode2SwitchTelemetry::quiet_nonstiff().with_accepted_steps(5));
-        assert_eq!(warmup.preferred_family, Lsode2MethodFamily::Bdf);
+        assert_eq!(warmup.preferred_family, Lsode2MethodFamily::Adams);
         assert_eq!(warmup.reason, Lsode2SwitchReason::SwitchProbeWarmup);
 
         let after_warmup = controller
@@ -643,14 +828,16 @@ mod tests {
         assert_eq!(after_warmup.preferred_family, Lsode2MethodFamily::Adams);
         assert_eq!(
             after_warmup.reason,
-            Lsode2SwitchReason::AdamsEngineUnavailable
+            Lsode2SwitchReason::SwitchAdvantageNotMet
         );
     }
 
     #[test]
     fn automatic_switch_policy_prefers_bdf_for_stiffness_or_convergence_trouble() {
-        let config =
-            Lsode2ControllerConfig::automatic_adams_bdf().with_stiffness_ratio_threshold(10.0);
+        let config = Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_stiffness_ratio_threshold(10.0)
+            .with_convergence_failure_threshold(1)
+            .with_rejection_threshold(2);
 
         let stiff_decision =
             config.switch_decision(Lsode2SwitchTelemetry::default().with_stiffness_ratio(10.0));
@@ -678,6 +865,24 @@ mod tests {
     }
 
     #[test]
+    fn automatic_switch_policy_reports_switch_advantage_hold_when_rh_gate_is_available() {
+        let config = Lsode2ControllerConfig::automatic_adams_bdf();
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(64)
+            .with_adams_step_size_cap_estimate(0.9)
+            .with_bdf_step_size_cap_estimate(1.0);
+        let decision = config.switch_decision_with_probe_gate_and_capabilities(
+            telemetry,
+            Some(true),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+        assert_eq!(decision.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(decision.reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
+    }
+
+    #[test]
     fn fixed_controller_switch_policy_ignores_telemetry() {
         let decision = Lsode2ControllerConfig::bdf_only().switch_decision(
             Lsode2SwitchTelemetry::default()
@@ -692,6 +897,87 @@ mod tests {
     }
 
     #[test]
+    fn bdf_only_stateful_profile_ignores_probe_gate_and_switch_telemetry() {
+        let mut controller = Lsode2AlgorithmController::new(Lsode2ControllerConfig::bdf_only());
+        let before = controller.switch_state();
+        assert_eq!(before.switch_probe_countdown(), 20);
+        assert!(!before.switch_probe_ready());
+
+        // In fixed BDF mode, this call must be ignored entirely.
+        controller.record_accepted_steps_for_switch_probe(100);
+        let after_record = controller.switch_state();
+        assert_eq!(after_record.switch_probe_countdown(), 20);
+        assert!(!after_record.switch_probe_ready());
+
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(500)
+            .with_convergence_failures(500)
+            .with_rejected_steps(500)
+            .with_adams_step_cost_estimate(1.0e-4)
+            .with_bdf_step_cost_estimate(1.0e4)
+            .with_adams_cost_samples(100)
+            .with_bdf_cost_samples(100)
+            .with_adams_step_size_cap_estimate(10.0)
+            .with_bdf_step_size_cap_estimate(1.0e-3);
+        let decision = controller.switch_decision_stateful(telemetry);
+        assert_eq!(decision.preferred_family, Lsode2MethodFamily::Bdf);
+        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Bdf));
+        assert!(!decision.uses_fallback);
+        assert_eq!(decision.reason, Lsode2SwitchReason::FixedController);
+
+        controller.record_switch_decision(decision);
+        let after_decision = controller.switch_state();
+        assert_eq!(after_decision.mcur, Lsode2MethodFamily::Bdf);
+        assert_eq!(after_decision.mused, Lsode2MethodFamily::Bdf);
+        assert_eq!(after_decision.switch_count, 0);
+        assert_eq!(after_decision.switch_probe_countdown(), 20);
+        assert!(!after_decision.switch_probe_ready());
+    }
+
+    #[test]
+    fn adams_only_stateful_profile_stays_fixed_when_adams_engine_is_available() {
+        let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::adams_only(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+        let before = controller.switch_state();
+        assert_eq!(before.switch_probe_countdown(), 20);
+        assert!(!before.switch_probe_ready());
+
+        // In fixed Adams mode, this call must be ignored entirely.
+        controller.record_accepted_steps_for_switch_probe(100);
+        let after_record = controller.switch_state();
+        assert_eq!(after_record.switch_probe_countdown(), 20);
+        assert!(!after_record.switch_probe_ready());
+
+        let telemetry = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_accepted_steps(500)
+            .with_convergence_failures(500)
+            .with_rejected_steps(500)
+            .with_adams_step_cost_estimate(1.0e4)
+            .with_bdf_step_cost_estimate(1.0e-4)
+            .with_adams_cost_samples(100)
+            .with_bdf_cost_samples(100)
+            .with_adams_step_size_cap_estimate(1.0e-3)
+            .with_bdf_step_size_cap_estimate(10.0);
+        let decision = controller.switch_decision_stateful(telemetry);
+        assert_eq!(decision.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Adams));
+        assert!(!decision.uses_fallback);
+        assert_eq!(decision.reason, Lsode2SwitchReason::FixedController);
+
+        controller.record_switch_decision(decision);
+        let after_decision = controller.switch_state();
+        assert_eq!(after_decision.mcur, Lsode2MethodFamily::Adams);
+        assert_eq!(after_decision.mused, Lsode2MethodFamily::Adams);
+        assert_eq!(after_decision.switch_count, 0);
+        assert_eq!(after_decision.switch_probe_countdown(), 20);
+        assert!(!after_decision.switch_probe_ready());
+    }
+
+    #[test]
     fn controller_records_mused_mcur_like_state() {
         let mut controller =
             Lsode2AlgorithmController::new(Lsode2ControllerConfig::automatic_adams_bdf());
@@ -701,7 +987,7 @@ mod tests {
         let s0 = controller.switch_state();
         assert_eq!(s0.mcur, Lsode2MethodFamily::Bdf);
         assert_eq!(s0.mused, Lsode2MethodFamily::Bdf);
-        assert_eq!(s0.fallback_count, 1);
+        assert_eq!(s0.fallback_count, 0);
 
         let second = Lsode2SwitchDecision {
             preferred_family: Lsode2MethodFamily::Adams,
@@ -735,17 +1021,144 @@ mod tests {
         controller.record_accepted_steps_for_switch_probe(1);
         let probe_ready =
             controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
-        assert_eq!(probe_ready.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(probe_ready.preferred_family, Lsode2MethodFamily::Bdf);
         assert_eq!(
             probe_ready.reason,
-            Lsode2SwitchReason::AdamsEngineUnavailable
+            Lsode2SwitchReason::SwitchAdvantageNotMet
         );
-        assert!(probe_ready.uses_fallback);
+        assert!(!probe_ready.uses_fallback);
 
         let consumed_gate =
             controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
         assert_eq!(consumed_gate.preferred_family, Lsode2MethodFamily::Bdf);
         assert_eq!(consumed_gate.reason, Lsode2SwitchReason::SwitchProbeWarmup);
+    }
+
+    #[test]
+    fn controller_stateful_auto_switch_keeps_adams_during_post_switch_warmup() {
+        let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+
+        controller.record_switch_decision(Lsode2SwitchDecision {
+            preferred_family: Lsode2MethodFamily::Adams,
+            executable_family: Some(Lsode2MethodFamily::Adams),
+            uses_fallback: false,
+            reason: Lsode2SwitchReason::CostPreferenceAdams,
+            message: "test adams switch",
+        });
+
+        // Immediately after a method switch, ICOUNT-like gate is reset and
+        // must not force a thrash back to BDF without a real stiff/trouble signal.
+        let warmup = controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
+        assert_eq!(warmup.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(warmup.reason, Lsode2SwitchReason::SwitchProbeWarmup);
+    }
+
+    #[test]
+    fn controller_stateful_auto_switch_keeps_adams_when_probe_ready_but_cost_evidence_missing() {
+        let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+
+        controller.record_switch_decision(Lsode2SwitchDecision {
+            preferred_family: Lsode2MethodFamily::Adams,
+            executable_family: Some(Lsode2MethodFamily::Adams),
+            uses_fallback: false,
+            reason: Lsode2SwitchReason::CostPreferenceAdams,
+            message: "test adams switch",
+        });
+        controller.record_accepted_steps_for_switch_probe(21);
+
+        let no_cost = controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
+        assert_eq!(no_cost.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(no_cost.reason, Lsode2SwitchReason::SwitchAdvantageNotMet);
+    }
+
+    #[test]
+    fn controller_configurable_cost_sample_threshold_is_enforced_for_switch() {
+        let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf().with_min_cost_samples_for_switch(5),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+        controller.record_accepted_steps_for_switch_probe(21);
+
+        let telemetry_not_enough = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_adams_step_cost_estimate(0.5)
+            .with_bdf_step_cost_estimate(1.0)
+            .with_adams_cost_samples(4)
+            .with_bdf_cost_samples(5);
+        let hold = controller.switch_decision_stateful(telemetry_not_enough);
+        assert_eq!(hold.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(hold.reason, Lsode2SwitchReason::InsufficientCostEvidence);
+
+        controller.record_accepted_steps_for_switch_probe(1);
+        let telemetry_enough = Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_adams_step_cost_estimate(0.5)
+            .with_bdf_step_cost_estimate(1.0)
+            .with_adams_cost_samples(5)
+            .with_bdf_cost_samples(5);
+        let switch = controller.switch_decision_stateful(telemetry_enough);
+        assert_eq!(switch.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(switch.reason, Lsode2SwitchReason::CostPreferenceAdams);
+    }
+
+    #[test]
+    fn fortran_style_method_switch_replay_quality_gate_warmup_cost_stiffness() {
+        let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+            Lsode2ControllerConfig::automatic_adams_bdf(),
+            Lsode2ControllerExecutionCapabilities {
+                adams_engine_available: true,
+            },
+        );
+
+        // Phase 1 (ICOUNT warmup): keep current Adams (LSODA-style start).
+        let warmup_0 = controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
+        assert_eq!(warmup_0.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(warmup_0.reason, Lsode2SwitchReason::SwitchProbeWarmup);
+        controller.record_switch_decision(warmup_0);
+
+        controller.record_accepted_steps_for_switch_probe(21);
+
+        // Phase 2 (non-stiff probe with cost evidence): switch to Adams.
+        let cost_probe = controller.switch_decision_stateful(
+            Lsode2SwitchTelemetry::quiet_nonstiff()
+                .with_adams_step_cost_estimate(0.5)
+                .with_bdf_step_cost_estimate(1.0)
+                .with_adams_cost_samples(4)
+                .with_bdf_cost_samples(4),
+        );
+        assert_eq!(cost_probe.preferred_family, Lsode2MethodFamily::Adams);
+        assert_eq!(cost_probe.reason, Lsode2SwitchReason::CostPreferenceAdams);
+        controller.record_switch_decision(cost_probe);
+        assert_eq!(controller.active_family(), Lsode2MethodFamily::Adams);
+
+        // Phase 3 (stiffness signal): force BDF.
+        let stiff = controller.switch_decision_stateful(
+            Lsode2SwitchTelemetry::quiet_nonstiff()
+                .with_stiffness_ratio(LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD),
+        );
+        assert_eq!(stiff.preferred_family, Lsode2MethodFamily::Bdf);
+        assert_eq!(stiff.reason, Lsode2SwitchReason::StiffnessSuspected);
+        controller.record_switch_decision(stiff);
+        assert_eq!(controller.active_family(), Lsode2MethodFamily::Bdf);
+
+        // Phase 4 (after switch back, probe gate is reset): warmup must hold BDF.
+        let post_switch_warmup =
+            controller.switch_decision_stateful(Lsode2SwitchTelemetry::quiet_nonstiff());
+        assert_eq!(post_switch_warmup.preferred_family, Lsode2MethodFamily::Bdf);
+        assert_eq!(
+            post_switch_warmup.reason,
+            Lsode2SwitchReason::SwitchProbeWarmup
+        );
     }
 
     #[test]

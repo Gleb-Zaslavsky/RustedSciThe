@@ -427,6 +427,10 @@ impl Lsode2StepController {
             convergence_failures: self.convergence_failures,
             adams_step_cost_estimate: None,
             bdf_step_cost_estimate: None,
+            adams_cost_samples: 0,
+            bdf_cost_samples: 0,
+            adams_step_size_cap_estimate: None,
+            bdf_step_size_cap_estimate: None,
         }
     }
 
@@ -454,13 +458,14 @@ impl Lsode2StepController {
         let h_new = h_current * shrink_factor;
         // ODEPACK DSTODA parity:
         // - error-test failure path may retry with lowered order;
-        // - convergence-failure path primarily retracts and shrinks H, while
-        //   keeping order (NQ) unless later higher-level logic changes it.
+        // - convergence-failure retract path (label 450) forces NQ=1.
         let order_new = if failure == Lsode2StepFailure::ErrorTest
             && order_current > 1
             && self.consecutive_rejections >= self.config.lower_order_after_rejects
         {
             order_current - 1
+        } else if failure == Lsode2StepFailure::NonlinearConvergence && order_current > 1 {
+            1
         } else {
             order_current
         };
@@ -629,14 +634,14 @@ mod tests {
     }
 
     #[test]
-    fn nonlinear_reject_path_keeps_order_like_dstoda() {
+    fn nonlinear_reject_path_drops_to_first_order_like_dstoda_label_450() {
         let mut controller = Lsode2StepController::default();
 
         let first = controller.reject_after_nonlinear_failure(1.0, 3);
         let second = controller.reject_after_nonlinear_failure(first.h_new, first.order_new);
 
-        assert_eq!(first.order_new, 3);
-        assert_eq!(second.order_new, 3);
+        assert_eq!(first.order_new, 1);
+        assert_eq!(second.order_new, 1);
         assert_eq!(first.action, Lsode2RetryAction::RetryWithJacobianRefresh);
         assert_eq!(second.action, Lsode2RetryAction::RetryWithJacobianRefresh);
     }

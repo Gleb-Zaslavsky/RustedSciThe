@@ -139,6 +139,9 @@ pub struct Lsode2StepCycle {
     method: Lsode2StepMethod,
     adams_pdest: f64,
     adams_pdlast: f64,
+    last_stiffness_ratio_estimate: Option<f64>,
+    last_adams_step_size_cap_estimate: Option<f64>,
+    last_bdf_step_size_cap_estimate: Option<f64>,
 }
 
 impl Lsode2StepCycle {
@@ -159,6 +162,9 @@ impl Lsode2StepCycle {
             method,
             adams_pdest: 0.0,
             adams_pdlast: 0.0,
+            last_stiffness_ratio_estimate: None,
+            last_adams_step_size_cap_estimate: None,
+            last_bdf_step_size_cap_estimate: None,
         }
     }
 
@@ -387,7 +393,12 @@ impl Lsode2StepCycle {
     }
 
     pub fn switch_telemetry(&self, stiffness_ratio: Option<f64>) -> Lsode2SwitchTelemetry {
-        self.state.switch_telemetry(stiffness_ratio)
+        let mut telemetry = self
+            .state
+            .switch_telemetry(stiffness_ratio.or(self.last_stiffness_ratio_estimate));
+        telemetry.adams_step_size_cap_estimate = self.last_adams_step_size_cap_estimate;
+        telemetry.bdf_step_size_cap_estimate = self.last_bdf_step_size_cap_estimate;
+        telemetry
     }
 
     pub fn record_adams_lipschitz_estimate_from_assessment(
@@ -479,6 +490,13 @@ impl Lsode2StepCycle {
             }
             Lsode2CorrectorFailureDecision::RetractAndShrinkStep => {
                 let retry = self.state.reject_after_nonlinear_failure()?;
+                // DSTODA label-430 parity:
+                // `IPUP = MITER` is set only on the retry path (after passing
+                // HMIN/MXNCF terminal guards), not preemptively.
+                if retry.action == Lsode2RetryAction::RetryWithJacobianRefresh {
+                    self.dstoda
+                        .request_jacobian_update(Lsode2IpupTrigger::FailurePath);
+                }
                 retry
             }
         };
@@ -570,6 +588,11 @@ impl Lsode2StepCycle {
             false,
             true,
         );
+        self.update_switch_telemetry_hints_from_order_decision(
+            &decision,
+            order_current,
+            self.state.h(),
+        );
         self.reset_adams_pdest_after_rh_selection();
         Ok(decision)
     }
@@ -582,7 +605,6 @@ impl Lsode2StepCycle {
         let snapshot = self.state.step_control_snapshot();
         let failure_count = snapshot.consecutive_error_test_failures + 1;
         let next_kflag = -(failure_count as i32);
-        let max_failures = self.state.step_control_config().max_error_test_failures as i32;
 
         // DSTODA label 500:
         // IF (ABS(H) .LE. HMIN*1.00001D0) GO TO 660
@@ -595,19 +617,11 @@ impl Lsode2StepCycle {
                 .map_err(Into::into);
         }
 
-        // Terminal repeated-error guard (configurable analog of DSTODA's
-        // `KFLAG == -10` bailout): once the configured cap is reached, stop
-        // without further RH choreography.
-        if next_kflag <= -max_failures {
-            return self
-                .state
-                .reject_after_error_test_with_hint(self.state.h(), self.state.order())
-                .map_err(Into::into);
-        }
-
         // DSTODA label 640 trigger:
         // IF (KFLAG .LE. -3) GO TO 640
-        // Terminal "too many failures" (`KFLAG = -10`) is mapped via controller policy.
+        // We always pass through the label-640 reset choreography first.
+        // The terminal repeated-error exit (`KFLAG = -10`) is then emitted
+        // by the retry decision produced by that reset path.
         if next_kflag <= -3 {
             let retry = self
                 .state
@@ -641,6 +655,11 @@ impl Lsode2StepCycle {
             None,
             true,
             false,
+        );
+        self.update_switch_telemetry_hints_from_order_decision(
+            &decision,
+            order_current,
+            self.state.h(),
         );
         self.reset_adams_pdest_after_rh_selection();
         let order_new = decision.order_new;
@@ -683,6 +702,34 @@ impl Lsode2StepCycle {
             // the step-local PDEST accumulator is cleared for the next step.
             self.adams_pdest = 0.0;
         }
+    }
+
+    fn update_switch_telemetry_hints_from_order_decision(
+        &mut self,
+        decision: &Lsode2OrderSelectionDecision,
+        order_current: usize,
+        h_current: f64,
+    ) {
+        let cap = sanitize_positive_finite(decision.current_factor);
+        match self.method {
+            Lsode2StepMethod::BdfLike => {
+                self.last_bdf_step_size_cap_estimate = cap;
+            }
+            Lsode2StepMethod::AdamsLike => {
+                self.last_adams_step_size_cap_estimate = cap;
+                let pdh = dstoda_adams_pdh(h_current, self.adams_pdlast);
+                let sm1 = dstoda_adams_sm1(order_current).max(1.0e-12);
+                self.last_stiffness_ratio_estimate = sanitize_positive_finite(pdh / sm1);
+            }
+        }
+    }
+}
+
+fn sanitize_positive_finite(value: f64) -> Option<f64> {
+    if value.is_finite() && value > 0.0 {
+        Some(value)
+    } else {
+        None
     }
 }
 
@@ -1106,11 +1153,16 @@ mod tests {
                 assert!(cycle.jacobian_update_request().is_requested());
                 assert_eq!(cycle.iret(), Lsode2Iret::RestartWithDerivativeRefresh);
                 assert_eq!(cycle.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
+                // DSTODA label-640 reset path is an explicit redo-class branch.
                 assert_eq!(cycle.redo_stage(), Lsode2RedoStage::RepeatedErrorReset);
+                assert_eq!(cycle.iredo().code(), 3);
             }
             other => panic!("expected rejected step, got {other:?}"),
         }
-        assert_eq!(cycle.state().nordsieck().col(1).unwrap(), &[0.2]);
+        // With DSTODA-style reject rescaling enabled on each retry, YH(:,2)
+        // has already been scaled on the two preloaded reject steps (1.0 -> 0.5 -> 0.25).
+        // The label-640 reset applies one more RH=0.1 factor: 2.0 * 0.25 * 0.1 = 0.05.
+        assert_eq!(cycle.state().nordsieck().col(1).unwrap(), &[0.05]);
         assert_eq!(cycle.state().nordsieck().col(2).unwrap(), &[0.0]);
         assert_eq!(cycle.state().nordsieck().col(3).unwrap(), &[0.0]);
     }
@@ -1144,8 +1196,10 @@ mod tests {
                     retry.action,
                     Lsode2RetryAction::FailRepeatedErrorTestFailures
                 );
-                assert_eq!(retry.h_new, h_before);
-                assert_eq!(state.h, h_before);
+                let expected_h = h_before
+                    * (cycle.state().step_control_config().h_min / h_before.abs()).max(0.1);
+                assert_eq!(retry.h_new, expected_h);
+                assert_eq!(state.h, expected_h);
                 assert_eq!(state.consecutive_error_test_failures, 3);
                 assert_eq!(cycle.kflag(), Lsode2Kflag::RepeatedErrorTestFailure);
                 assert_eq!(cycle.redo_stage(), Lsode2RedoStage::None);
@@ -1247,6 +1301,40 @@ mod tests {
     }
 
     #[test]
+    fn step_cycle_bdf_updates_switch_cap_hint_from_dstoda_order_selection() {
+        let mut cycle = make_cycle();
+        let _ = cycle.select_post_accept_order(&[0.905], 1.0, None).unwrap();
+
+        let telemetry = cycle.switch_telemetry(None);
+        assert!(telemetry.bdf_step_size_cap_estimate.is_some());
+        assert!(
+            telemetry
+                .bdf_step_size_cap_estimate
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        );
+        assert!(telemetry.adams_step_size_cap_estimate.is_none());
+    }
+
+    #[test]
+    fn step_cycle_adams_updates_switch_hints_from_dstoda_order_selection() {
+        let mut cycle = make_adams_cycle_with_step_config(Lsode2StepControlConfig::default());
+        let _ = cycle.select_post_accept_order(&[0.905], 1.0, None).unwrap();
+
+        let telemetry = cycle.switch_telemetry(None);
+        assert!(telemetry.adams_step_size_cap_estimate.is_some());
+        assert!(
+            telemetry
+                .adams_step_size_cap_estimate
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        );
+        assert!(
+            telemetry
+                .stiffness_ratio
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        );
+    }
+
+    #[test]
     fn stale_jacobian_refresh_retry_is_one_shot_then_retracts_on_next_failure() {
         let mut cycle = make_cycle();
         cycle.state_mut().set_order(2).unwrap();
@@ -1339,6 +1427,14 @@ mod tests {
         assert_eq!(retry.action, Lsode2RetryAction::FailStepSizeUnderflow);
         assert_eq!(cycle.kflag(), Lsode2Kflag::RepeatedConvergenceFailure);
         assert_eq!(cycle.kflag_code(), -2);
+        // DSTODA label-430/670 parity:
+        // terminal HMIN branch exits before `IPUP = MITER`.
+        assert_eq!(cycle.ipup(), Lsode2Ipup::UpToDate);
+        assert_eq!(cycle.ipup_trigger(), Lsode2IpupTrigger::None);
+        assert_eq!(
+            cycle.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::None
+        );
         assert_eq!(cycle.icf(), Lsode2Icf::RefreshDidNotRecover);
         assert_eq!(cycle.iredo(), Lsode2Iredo::CorrectorFailureRetry);
         assert_eq!(cycle.iredo().code(), 1);
@@ -1366,6 +1462,12 @@ mod tests {
         assert_eq!(cycle_mxncf.kflag(), Lsode2Kflag::ConvergenceFailure);
         assert_eq!(cycle_mxncf.kflag_code(), -2);
         assert_eq!(cycle_mxncf.icf(), Lsode2Icf::RefreshRequested);
+        assert_eq!(cycle_mxncf.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
+        assert_eq!(cycle_mxncf.ipup_trigger(), Lsode2IpupTrigger::FailurePath);
+        assert_eq!(
+            cycle_mxncf.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::Requested
+        );
         assert_eq!(cycle_mxncf.iret(), Lsode2Iret::NormalFlow);
         assert_eq!(
             cycle_mxncf.redo_stage(),
@@ -1382,6 +1484,12 @@ mod tests {
         assert_eq!(cycle_mxncf.kflag(), Lsode2Kflag::ConvergenceFailure);
         assert_eq!(cycle_mxncf.kflag_code(), -2);
         assert_eq!(cycle_mxncf.icf(), Lsode2Icf::RefreshDidNotRecover);
+        assert_eq!(cycle_mxncf.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
+        assert_eq!(cycle_mxncf.ipup_trigger(), Lsode2IpupTrigger::FailurePath);
+        assert_eq!(
+            cycle_mxncf.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::Requested
+        );
         assert_eq!(cycle_mxncf.iret(), Lsode2Iret::NormalFlow);
         assert_eq!(
             cycle_mxncf.redo_stage(),
@@ -1398,6 +1506,14 @@ mod tests {
         );
         assert_eq!(cycle_mxncf.kflag(), Lsode2Kflag::RepeatedConvergenceFailure);
         assert_eq!(cycle_mxncf.kflag_code(), -2);
+        // DSTODA label-430 parity: terminal MXNCF branch exits before a new
+        // `IPUP = MITER` request is issued.
+        assert_eq!(cycle_mxncf.ipup(), Lsode2Ipup::UpToDate);
+        assert_eq!(cycle_mxncf.ipup_trigger(), Lsode2IpupTrigger::None);
+        assert_eq!(
+            cycle_mxncf.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::None
+        );
         assert_eq!(cycle_mxncf.icf(), Lsode2Icf::RefreshDidNotRecover);
         assert_eq!(cycle_mxncf.iret(), Lsode2Iret::NormalFlow);
         assert_eq!(
@@ -1444,7 +1560,7 @@ mod tests {
             .unwrap();
 
         assert!(retry.h_new < 0.1);
-        assert_eq!(retry.order_new, 2);
+        assert_eq!(retry.order_new, 1);
         assert_eq!(cycle.kflag(), Lsode2Kflag::ConvergenceFailure);
         assert_eq!(cycle.icf(), Lsode2Icf::RefreshDidNotRecover);
         assert_eq!(cycle.redo_stage(), Lsode2RedoStage::CorrectorFailureRetry);

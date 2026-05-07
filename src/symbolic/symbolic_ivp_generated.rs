@@ -28,24 +28,35 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_build::CAotCompileConfig;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
     register_generated_c_dense_backend, register_generated_c_residual_backend,
+    register_generated_c_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_aot_driver::{
-    generated_aot_build_request_from_artifact, AotBuildPreset, AotCodegenBackend,
-    ExecutedGeneratedAotBuild, GeneratedAotBuildRequest, GeneratedAotBuildResult,
+    generated_aot_artifact_from_prepared_problem, generated_aot_build_request_from_artifact,
+    AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildRequest,
+    GeneratedAotBuildResult,
 };
 use crate::symbolic::codegen::codegen_aot_resolution::{AotResolutionStatus, AotResolver};
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     register_generated_dense_cdylib_backend, register_generated_residual_cdylib_backend,
-    resolve_linked_dense_backend, resolve_linked_residual_backend,
+    register_generated_sparse_cdylib_backend, resolve_linked_dense_backend,
+    resolve_linked_residual_backend, resolve_linked_sparse_backend, LinkedSparseAotBackend,
+};
+use crate::symbolic::codegen::codegen_provider_api::{
+    BackendKind, MatrixBackend, PreparedProblem, PreparedSparseProblem,
+};
+use crate::symbolic::codegen::codegen_runtime_api::SparseJacobianStructure;
+use crate::symbolic::codegen::codegen_tasks::{
+    IvpResidualTask, SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_registry::register_zig_build_in_registry;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
     register_generated_zig_dense_backend, register_generated_zig_residual_backend,
+    register_generated_zig_sparse_backend,
 };
 use crate::symbolic::symbolic_ivp::{
     prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem, IvpBackendError,
-    IvpBackendKind, PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
+    PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
     SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_aot::{
@@ -379,6 +390,20 @@ impl PreparedGeneratedSymbolicIvpResidualProblem {
     }
 }
 
+/// Result of preparing one sparse-IVP generated backend (residual + sparse
+/// Jacobian values) through the high-level lifecycle.
+///
+/// This is the LSODE2-oriented AOT path where Jacobian values are produced by
+/// compiled callbacks instead of lambdified symbolic closures.
+pub struct PreparedGeneratedSymbolicIvpSparseBackend {
+    pub problem_key: String,
+    pub selected_backend: SelectedSymbolicIvpBackendKind,
+    pub linked_backend: Option<LinkedSparseAotBackend>,
+    pub jacobian_structure: SparseJacobianStructure,
+    pub updated_resolver: Option<AotResolver>,
+    pub build_result: Option<GeneratedAotBuildResult>,
+}
+
 fn generated_names(
     problem_key: &str,
     config: &SymbolicIvpGeneratedBackendConfig,
@@ -419,6 +444,26 @@ fn generated_residual_names(
     (crate_name, module_name)
 }
 
+fn generated_sparse_names(
+    problem_key: &str,
+    config: &SymbolicIvpGeneratedBackendConfig,
+) -> (String, String) {
+    let suffix = problem_key
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .replace('-', "_");
+    let crate_name = config
+        .crate_name_override
+        .clone()
+        .unwrap_or_else(|| format!("generated_ivp_sparse_{suffix}"));
+    let module_name = config
+        .module_name_override
+        .clone()
+        .unwrap_or_else(|| format!("generated_ivp_sparse_module_{suffix}"));
+    (crate_name, module_name)
+}
+
 fn select_backend(
     problem: &PreparedSymbolicIvpProblem,
     resolver: Option<&AotResolver>,
@@ -452,6 +497,32 @@ fn select_residual_backend(
     let prepared = problem.prepare_residual_aot_problem(options);
     let problem_key = prepared.problem_key();
     if let Some(linked) = resolve_linked_residual_backend(problem_key.as_str()) {
+        if linked.problem_key == problem_key {
+            return SelectedSymbolicIvpBackendKind::AotCompiled;
+        }
+    }
+
+    match resolver {
+        Some(resolver) => match resolver.resolve_by_problem_key(problem_key.as_str()).status {
+            AotResolutionStatus::Missing => SelectedSymbolicIvpBackendKind::AotMissing,
+            AotResolutionStatus::RegisteredButNotBuilt => {
+                SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt
+            }
+            AotResolutionStatus::Compiled => SelectedSymbolicIvpBackendKind::AotCompiled,
+        },
+        None => SelectedSymbolicIvpBackendKind::AotMissing,
+    }
+}
+
+fn select_sparse_backend(
+    problem: &PreparedSparseProblem<'_>,
+    resolver: Option<&AotResolver>,
+) -> SelectedSymbolicIvpBackendKind {
+    let problem_key = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
+        problem,
+    )
+    .problem_key();
+    if let Some(linked) = resolve_linked_sparse_backend(problem_key.as_str()) {
         if linked.problem_key == problem_key {
             return SelectedSymbolicIvpBackendKind::AotCompiled;
         }
@@ -560,6 +631,25 @@ fn register_ivp_residual_runtime_backend(
             .map(|_| ())
             .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
         AotCodegenBackend::Zig => register_generated_zig_residual_backend(&resolved.registered)
+            .map(|_| ())
+            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+    }
+}
+
+fn register_ivp_sparse_runtime_backend(
+    backend: AotCodegenBackend,
+    resolver: &AotResolver,
+    problem_key: &str,
+) -> Result<(), SymbolicIvpGeneratedError> {
+    let resolved = resolver.resolve_by_problem_key(problem_key);
+    match backend {
+        AotCodegenBackend::Rust => register_generated_sparse_cdylib_backend(&resolved.registered)
+            .map(|_| ())
+            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+        AotCodegenBackend::C => register_generated_c_sparse_backend(&resolved.registered)
+            .map(|_| ())
+            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+        AotCodegenBackend::Zig => register_generated_zig_sparse_backend(&resolved.registered)
             .map(|_| ())
             .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
     }
@@ -717,6 +807,226 @@ fn perform_requested_residual_build(
         prepared.problem_key().as_str(),
     )?;
     Ok((Some(build), Some(resolver)))
+}
+
+fn perform_requested_sparse_build(
+    problem: &PreparedSparseProblem<'_>,
+    config: &SymbolicIvpGeneratedBackendConfig,
+    resolver_snapshot: Option<AotResolver>,
+) -> Result<(Option<GeneratedAotBuildResult>, Option<AotResolver>), SymbolicIvpGeneratedError> {
+    let preset = match build_preset(config.build_policy) {
+        Some(preset) => preset,
+        None => return Ok((None, resolver_snapshot)),
+    };
+
+    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(problem);
+    let problem_key = manifest.problem_key();
+    let (crate_name, module_name) = generated_sparse_names(&problem_key, config);
+    info!(
+        "Materializing symbolic IVP sparse {:?} AOT build '{}' with preset {:?}",
+        config.aot_codegen_backend, crate_name, preset
+    );
+    let prepared_problem = PreparedProblem::sparse(problem.clone());
+    let artifact = generated_aot_artifact_from_prepared_problem(
+        &crate_name,
+        &module_name,
+        &prepared_problem,
+        config.aot_codegen_backend,
+    );
+    let mut request =
+        generated_aot_build_request_from_artifact(artifact, config.output_parent_dir()?, preset);
+    if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
+        (&mut request, config.aot_c_compiler.as_ref())
+    {
+        let compile_config = match preset {
+            AotBuildPreset::Production => CAotCompileConfig::production(),
+            AotBuildPreset::FastBuild => CAotCompileConfig::fast_build(),
+            AotBuildPreset::DevFastest => CAotCompileConfig::dev_fastest(),
+        }
+        .with_compiler(compiler.clone());
+        *c_request = c_request.clone().with_compile_config(compile_config);
+    }
+    let build = request
+        .materialize()
+        .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
+
+    let executed = build
+        .execute()
+        .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
+    if !executed.succeeded() {
+        let (status, stdout, stderr) = match &executed {
+            ExecutedGeneratedAotBuild::Rust(result) => (
+                result.status_code,
+                result.stdout.clone(),
+                result.stderr.clone(),
+            ),
+            ExecutedGeneratedAotBuild::C(result) => (
+                result.status_code,
+                result.stdout.clone(),
+                result.stderr.clone(),
+            ),
+            ExecutedGeneratedAotBuild::Zig(result) => (
+                result.status_code,
+                result.stdout.clone(),
+                result.stderr.clone(),
+            ),
+        };
+        return Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
+            "status={:?}\nstdout:\n{}\nstderr:\n{}",
+            status, stdout, stderr
+        )));
+    }
+
+    let resolver = register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)?;
+    register_ivp_sparse_runtime_backend(config.aot_codegen_backend, &resolver, problem_key.as_str())?;
+    Ok((Some(build), Some(resolver)))
+}
+
+/// Builds one sparse-IVP generated backend (residual + sparse Jacobian values)
+/// through the high-level lifecycle.
+///
+/// This path is intended for solvers like LSODE2 that want compiled Jacobian
+/// value callbacks for sparse/banded Newton systems.
+pub fn prepare_generated_symbolic_ivp_sparse_backend(
+    equations: Vec<crate::symbolic::symbolic_engine::Expr>,
+    variables: Vec<String>,
+    time_arg: String,
+    options: SymbolicIvpProblemOptions,
+    config: SymbolicIvpGeneratedBackendConfig,
+) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
+    let baseline_problem = prepare_symbolic_ivp_problem(equations, variables, time_arg, options)?;
+    let variable_refs = baseline_problem
+        .variables
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    let parameter_refs = baseline_problem.equation_parameters.as_ref().map(|parameters| {
+        parameters
+            .iter()
+            .map(|value| value.as_str())
+            .collect::<Vec<_>>()
+    });
+    let mut sparse_param_refs = Vec::with_capacity(1 + parameter_refs.as_ref().map_or(0, Vec::len));
+    sparse_param_refs.push(baseline_problem.time_arg.as_str());
+    if let Some(params) = parameter_refs.as_ref() {
+        sparse_param_refs.extend(params.iter().copied());
+    }
+
+    let sparse_entries = baseline_problem
+        .symbolic_jacobian
+        .iter()
+        .enumerate()
+        .flat_map(|(row, jac_row)| {
+            jac_row.iter().enumerate().filter_map(move |(col, expr)| {
+                if expr.is_zero() {
+                    None
+                } else {
+                    Some(SparseExprEntry { row, col, expr })
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let residual_plan = IvpResidualTask {
+        fn_name: "generated_ivp_residual_eval",
+        time_arg: baseline_problem.time_arg.as_str(),
+        residuals: &baseline_problem.equations,
+        variables: &variable_refs,
+        params: parameter_refs.as_deref(),
+    }
+    .runtime_plan(config.aot_options.residual_strategy);
+
+    let shape = (
+        baseline_problem.symbolic_jacobian.len(),
+        baseline_problem
+            .symbolic_jacobian
+            .first()
+            .map_or(0, |row| row.len()),
+    );
+
+    let sparse_plan = SparseJacobianTask {
+        fn_name: "generated_ivp_jacobian_values_eval",
+        shape,
+        entries: &sparse_entries,
+        variables: &variable_refs,
+        params: Some(sparse_param_refs.as_slice()),
+    }
+    .runtime_plan(SparseChunkingStrategy::Whole);
+    let jacobian_structure = sparse_plan.structure.clone();
+
+    let prepared_sparse = PreparedSparseProblem::new(
+        BackendKind::Aot,
+        MatrixBackend::SparseCol,
+        residual_plan,
+        sparse_plan,
+    );
+
+    let initial_selection = select_sparse_backend(&prepared_sparse, config.resolver.as_ref());
+    let (build_result, resolver_snapshot) =
+        if should_build_for_selection(&config, initial_selection) {
+            perform_requested_sparse_build(&prepared_sparse, &config, config.resolver.clone())?
+        } else {
+            (None, config.resolver.clone())
+        };
+
+    let final_selection = select_sparse_backend(&prepared_sparse, resolver_snapshot.as_ref());
+    let problem_key = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
+        &prepared_sparse,
+    )
+    .problem_key();
+
+    let mut linked_backend = resolve_linked_sparse_backend(problem_key.as_str());
+    if linked_backend.is_none() {
+        if let Some(resolver) = resolver_snapshot.as_ref() {
+            let _ = register_ivp_sparse_runtime_backend(
+                config.aot_codegen_backend,
+                resolver,
+                problem_key.as_str(),
+            );
+            linked_backend = resolve_linked_sparse_backend(problem_key.as_str());
+        }
+    }
+
+    match final_selection {
+        SelectedSymbolicIvpBackendKind::AotCompiled => {
+            if linked_backend.is_none() {
+                return Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+                    "symbolic IVP sparse compiled AOT artifact exists but no linked runtime is registered"
+                        .to_string(),
+                ));
+            }
+            Ok(PreparedGeneratedSymbolicIvpSparseBackend {
+                problem_key,
+                selected_backend: final_selection,
+                linked_backend,
+                jacobian_structure,
+                updated_resolver: resolver_snapshot,
+                build_result,
+            })
+        }
+        SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => Err(
+            SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
+                "symbolic IVP sparse AOT artifact is registered but not built".to_string(),
+            ),
+        ),
+        SelectedSymbolicIvpBackendKind::AotMissing | SelectedSymbolicIvpBackendKind::Lambdify => {
+            match config.build_policy {
+                SymbolicIvpAotBuildPolicy::RequirePrebuilt => Err(
+                    SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
+                        "symbolic IVP sparse AOT artifact is missing".to_string(),
+                    ),
+                ),
+                _ => Ok(PreparedGeneratedSymbolicIvpSparseBackend {
+                    problem_key,
+                    selected_backend: SelectedSymbolicIvpBackendKind::Lambdify,
+                    linked_backend: None,
+                    jacobian_structure,
+                    updated_resolver: resolver_snapshot,
+                    build_result,
+                }),
+            }
+        }
+    }
 }
 
 /// Builds one shared IVP symbolic problem through the high-level generated-backend layer.
@@ -896,6 +1206,7 @@ mod tests {
         register_linked_dense_backend, unregister_linked_dense_backend, LinkedDenseAotBackend,
     };
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_ivp::IvpBackendKind;
     use nalgebra::DVector;
     use std::sync::Arc;
     use tempfile::tempdir;

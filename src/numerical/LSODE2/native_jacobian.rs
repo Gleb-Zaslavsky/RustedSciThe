@@ -1,7 +1,14 @@
 use crate::numerical::BDF::BDF_solver::BdfJacobian;
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_ivp::SharedIvpParameterValues;
+use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
+    SymbolicIvpProblemOptions,
+};
+use crate::symbolic::symbolic_ivp_generated::{
+    SelectedSymbolicIvpBackendKind, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_sparse_backend,
+};
 use faer::sparse::Triplet;
 use nalgebra::DVector;
 use std::sync::{Arc, RwLock};
@@ -113,6 +120,115 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
     }
 }
 
+/// Builds a native Jacobian evaluator from compiled sparse AOT callbacks.
+///
+/// This path keeps LSODE2 sparse/banded Jacobian evaluation in the AOT branch
+/// instead of falling back to lambdified symbolic Jacobian entries.
+pub fn compile_native_sparse_aot_jacobian_with_parameter_handle(
+    equations: &[Expr],
+    variables: &[String],
+    time_arg: &str,
+    equation_parameters: Option<&[String]>,
+    equation_parameter_values: Option<DVector<f64>>,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    storage: NativeJacobianStorage,
+    generated_backend: SymbolicIvpGeneratedBackendConfig,
+    symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
+) -> Result<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>, IvpBackendError> {
+    let generated_backend = with_lsode2_sparse_jacobian_artifact_suffix(generated_backend);
+    let options = SymbolicIvpProblemOptions::new()
+        .with_equation_parameters(equation_parameters.unwrap_or(&[]).to_vec())
+        .with_equation_parameter_values(
+            equation_parameter_values.unwrap_or_else(|| DVector::zeros(0)),
+        )
+        .with_symbolic_assembly_backend(symbolic_assembly_backend);
+
+    let prepared = prepare_generated_symbolic_ivp_sparse_backend(
+        equations.to_vec(),
+        variables.to_vec(),
+        time_arg.to_string(),
+        options,
+        generated_backend,
+    )
+    .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+        message: err.to_string(),
+    })?;
+
+    if prepared.selected_backend != SelectedSymbolicIvpBackendKind::AotCompiled {
+        return Err(IvpBackendError::GeneratedBackendFailure {
+            message: "LSODE2 sparse/banded AOT Jacobian path expected a compiled sparse backend"
+                .to_string(),
+        });
+    }
+
+    let linked = prepared
+        .linked_backend
+        .ok_or_else(|| IvpBackendError::GeneratedBackendFailure {
+            message:
+                "LSODE2 sparse/banded AOT Jacobian path selected compiled backend but no runtime link is available"
+                    .to_string(),
+        })?;
+
+    validate_parameter_handle(equation_parameters, parameter_values_handle.as_ref());
+
+    let rows = prepared.jacobian_structure.rows;
+    let cols = prepared.jacobian_structure.cols;
+    let pattern = prepared
+        .jacobian_structure
+        .row_indices
+        .iter()
+        .copied()
+        .zip(prepared.jacobian_structure.col_indices.iter().copied())
+        .collect::<Vec<_>>();
+
+    match storage {
+        NativeJacobianStorage::SparseTriplets => {
+            Ok(Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+                let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
+                let args = build_args(t, parameter_values.as_ref(), y);
+                let mut values = vec![0.0_f64; pattern.len()];
+                (linked.jacobian_values_eval)(args.as_slice(), values.as_mut_slice());
+                let triplets = pattern
+                    .iter()
+                    .zip(values.iter().copied())
+                    .map(|((row, col), value)| Triplet::new(*row, *col, value))
+                    .collect::<Vec<_>>();
+                BdfJacobian::SparseTriplets { n: rows, triplets }
+            }))
+        }
+        NativeJacobianStorage::Banded => {
+            let (kl, ku) = infer_bandwidth_from_pattern(rows, cols, &pattern);
+            Ok(Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+                let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
+                let args = build_args(t, parameter_values.as_ref(), y);
+                let mut values = vec![0.0_f64; pattern.len()];
+                (linked.jacobian_values_eval)(args.as_slice(), values.as_mut_slice());
+                let mut banded = Banded::<f64>::zeros(rows, kl, ku)
+                    .expect("AOT sparse Jacobian pattern should define valid banded storage");
+                for ((row, col), value) in pattern.iter().zip(values.iter().copied()) {
+                    banded
+                        .set(*row, *col, value)
+                        .expect("AOT sparse Jacobian entry must fit inferred banded storage");
+                }
+                BdfJacobian::Banded(banded)
+            }))
+        }
+    }
+}
+
+fn with_lsode2_sparse_jacobian_artifact_suffix(
+    mut config: SymbolicIvpGeneratedBackendConfig,
+) -> SymbolicIvpGeneratedBackendConfig {
+    const SUFFIX: &str = "_sj";
+    if let Some(crate_name) = config.crate_name_override.clone() {
+        config.crate_name_override = Some(format!("{crate_name}{SUFFIX}"));
+    }
+    if let Some(module_name) = config.module_name_override.clone() {
+        config.module_name_override = Some(format!("{module_name}{SUFFIX}"));
+    }
+    config
+}
+
 fn validate_parameter_handle(
     equation_parameters: Option<&[String]>,
     parameter_values_handle: Option<&SharedIvpParameterValues>,
@@ -201,6 +317,24 @@ fn infer_bandwidth(rows: usize, cols: usize, entries: &[CompiledEntry]) -> (usiz
     }
 }
 
+fn infer_bandwidth_from_pattern(
+    rows: usize,
+    cols: usize,
+    pattern: &[(usize, usize)],
+) -> (usize, usize) {
+    let mut kl = 0usize;
+    let mut ku = 0usize;
+    for (row, col) in pattern {
+        kl = kl.max(row.saturating_sub(*col));
+        ku = ku.max(col.saturating_sub(*row));
+    }
+    if rows == cols && rows > 0 {
+        (kl, ku)
+    } else {
+        (rows.saturating_sub(1), cols.saturating_sub(1))
+    }
+}
+
 fn build_args(t: f64, parameter_values: Option<&DVector<f64>>, y: &DVector<f64>) -> Vec<f64> {
     let mut args =
         Vec::with_capacity(1 + y.len() + parameter_values.map_or(0, |values| values.len()));
@@ -215,6 +349,7 @@ fn build_args(t: f64, parameter_values: Option<&DVector<f64>>, y: &DVector<f64>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 
     #[test]
     fn sparse_native_jacobian_evaluates_only_symbolic_nonzeros() {
@@ -358,6 +493,24 @@ mod tests {
             triplets
                 .iter()
                 .any(|entry| entry.row == 0 && entry.col == 1 && entry.val == 7.0)
+        );
+    }
+
+    #[test]
+    fn sparse_aot_jacobian_artifact_suffix_avoids_residual_name_collision() {
+        let cfg =
+            SymbolicIvpGeneratedBackendConfig::build_if_missing_release("target/lsode2-tests")
+                .with_crate_name_override(Some("generated_lsode2_same_name".to_string()))
+                .with_module_name_override(Some("generated_lsode2_same_name".to_string()));
+        let patched = with_lsode2_sparse_jacobian_artifact_suffix(cfg);
+
+        assert_eq!(
+            patched.crate_name_override.as_deref(),
+            Some("generated_lsode2_same_name_sj")
+        );
+        assert_eq!(
+            patched.module_name_override.as_deref(),
+            Some("generated_lsode2_same_name_sj")
         );
     }
 }

@@ -128,7 +128,8 @@
 use crate::numerical::BDF::BDF_solver::{BDF, BdfJacobian, BdfLinearBackend};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    IvpBackendError, SharedIvpParameterValues, SymbolicIvpProblemOptions,
+    IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
+    SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
@@ -168,6 +169,7 @@ pub struct BdfSolverOptions {
     pub equation_parameters: Option<Vec<String>>,
     pub equation_parameter_values: Option<DVector<f64>>,
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    pub symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
 }
 
 impl BdfSolverOptions {
@@ -205,6 +207,7 @@ impl BdfSolverOptions {
             equation_parameters: None,
             equation_parameter_values: None,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            symbolic_assembly_backend: IvpSymbolicAssemblyBackend::ExprLegacy,
         }
     }
 
@@ -214,6 +217,12 @@ impl BdfSolverOptions {
         config: SymbolicIvpGeneratedBackendConfig,
     ) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Selects symbolic Jacobian assembly backend for generated IVP preparation.
+    pub fn with_symbolic_assembly_backend(mut self, backend: IvpSymbolicAssemblyBackend) -> Self {
+        self.symbolic_assembly_backend = backend;
         self
     }
 
@@ -370,6 +379,7 @@ pub struct ODEsolver {
     backend_prepared: bool,
     /// High-level generated-backend orchestration config reused across solves.
     generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
     statistics: Arc<Mutex<IvpBackendStatistics>>,
     /// Optional factory for replacing the default dense Newton linear backend
     /// after each generated BDF instance is initialized.
@@ -455,6 +465,7 @@ impl ODEsolver {
             parameter_values_handle: None,
             backend_prepared: false,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            symbolic_assembly_backend: IvpSymbolicAssemblyBackend::ExprLegacy,
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
@@ -482,6 +493,7 @@ impl ODEsolver {
         solver.max_bdf_order = options.max_bdf_order;
         solver.equation_parameters = options.equation_parameters;
         solver.equation_parameter_values = options.equation_parameter_values;
+        solver.symbolic_assembly_backend = options.symbolic_assembly_backend;
         solver
     }
 
@@ -494,6 +506,15 @@ impl ODEsolver {
     /// Returns the current generated-backend orchestration config.
     pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    pub fn symbolic_assembly_backend(&self) -> IvpSymbolicAssemblyBackend {
+        self.symbolic_assembly_backend
+    }
+
+    pub fn set_symbolic_assembly_backend(&mut self, backend: IvpSymbolicAssemblyBackend) {
+        self.symbolic_assembly_backend = backend;
+        self.backend_prepared = false;
     }
 
     pub fn get_statistics(&self) -> IvpBackendStatistics {
@@ -771,6 +792,7 @@ impl ODEsolver {
         if let Some(values) = self.equation_parameter_values.clone() {
             options = options.with_equation_parameter_values(values);
         }
+        options = options.with_symbolic_assembly_backend(self.symbolic_assembly_backend);
 
         if self.bdf_native_jacobian_factory.is_some() {
             return self.try_generate_with_native_jacobian(start, options);
@@ -1275,6 +1297,33 @@ mod tests {
         assert_eq!(
             solver.generated_backend_config().aot_c_compiler.as_deref(),
             Some("gcc")
+        );
+    }
+
+    #[test]
+    fn bdf_options_can_set_symbolic_assembly_backend() {
+        let solver = ODEsolver::new_with_options(
+            BdfSolverOptions::new(
+                vec![Expr::parse_expression("y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                "BDF".to_string(),
+                0.0,
+                DVector::from_vec(vec![1.0]),
+                1.0,
+                0.1,
+                1e-6,
+                1e-8,
+                None,
+                false,
+                None,
+            )
+            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView),
+        );
+
+        assert_eq!(
+            solver.symbolic_assembly_backend(),
+            IvpSymbolicAssemblyBackend::AtomView
         );
     }
 

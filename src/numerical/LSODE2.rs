@@ -44,6 +44,9 @@ mod tests;
 #[cfg(test)]
 mod story_tests;
 
+#[cfg(test)]
+mod story_tests2;
+
 pub use adams_engine::{
     Lsode2AdamsDcfodeError, Lsode2AdamsDcfodeTables, Lsode2AdamsOrderCoefficients,
 };
@@ -53,8 +56,12 @@ pub use algorithm::{
     Lsode2SwitchReason, Lsode2SwitchTelemetry,
 };
 pub use config::{
-    Lsode2BackendConfig, Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2Method,
-    Lsode2NativeExecutionConfig, Lsode2ProblemConfig,
+    Lsode2AnalyticalCallbacks, Lsode2AnalyticalJacobianCallback, Lsode2AnalyticalResidualCallback,
+    Lsode2AotProfile, Lsode2AotToolchain, Lsode2BackendConfig, Lsode2JacobianBackend,
+    Lsode2LinearSolverBackend, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
+    Lsode2LinearSystemStructure, Lsode2Method, Lsode2NativeExecutionConfig, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2ResolvedPlan, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
 };
 pub use correction::{
     Lsode2CorrectionAssessment, Lsode2CorrectionControlConfig, Lsode2CorrectionController,

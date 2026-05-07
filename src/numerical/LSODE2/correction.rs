@@ -22,7 +22,9 @@ impl Default for Lsode2CorrectionControlConfig {
             divergence_ratio: 2.0,
             rate_memory_weight: 0.2,
             initial_convergence_rate: 0.7,
-            max_iterations: 4,
+            // LSODE/DSTODA parity: Fortran initializes `MAXCOR = 3`.
+            // Keep the corrector-iteration cap aligned with that default.
+            max_iterations: 3,
         }
     }
 }
@@ -308,7 +310,7 @@ impl Lsode2CorrectionController {
             Lsode2CorrectionStatus::Converged
         } else if iteration >= 2
             && convergence_ratio
-                .map(|ratio| ratio.is_finite() && ratio > 2.0)
+                .map(|ratio| ratio.is_finite() && ratio > self.config.divergence_ratio)
                 .unwrap_or(false)
         {
             // DSTODA parity: once we have at least two correction passes
@@ -409,6 +411,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn correction_controller_default_max_iterations_matches_lsode_maxcor() {
+        let cfg = Lsode2CorrectionControlConfig::default();
+        assert_eq!(
+            cfg.max_iterations, 3,
+            "default corrector iteration cap should match LSODE MAXCOR=3"
+        );
+    }
+
+    #[test]
     fn correction_controller_marks_small_correction_as_converged() {
         let controller =
             Lsode2CorrectionController::scalar(1.0e-3, 1.0e-6, Default::default()).unwrap();
@@ -462,8 +473,13 @@ mod tests {
         assert_eq!(diverged.status, Lsode2CorrectionStatus::Diverged);
         assert!(diverged.needs_jacobian_refresh);
 
+        let prelimit = controller
+            .assess_iteration(2, &[1.0], &[1.0e-3], &[1.0e-3], Some(1.0), Some(0.5), 2)
+            .unwrap();
+        assert_eq!(prelimit.status, Lsode2CorrectionStatus::Continue);
+
         let limited = controller
-            .assess_iteration(2, &[1.0], &[1.0e-3], &[1.0e-3], Some(1.0), Some(0.5), 4)
+            .assess_iteration(2, &[1.0], &[1.0e-3], &[1.0e-3], Some(1.0), Some(0.5), 3)
             .unwrap();
         assert_eq!(
             limited.status,
@@ -500,10 +516,40 @@ mod tests {
         assert!(Lsode2CorrectionController::scalar(1.0e-3, 1.0e-6, bad).is_err());
 
         let bad = Lsode2CorrectionControlConfig {
+            divergence_ratio: 0.0,
+            ..Default::default()
+        };
+        assert!(Lsode2CorrectionController::scalar(1.0e-3, 1.0e-6, bad).is_err());
+
+        let bad = Lsode2CorrectionControlConfig {
             max_iterations: 0,
             ..Default::default()
         };
         assert!(Lsode2CorrectionController::scalar(1.0e-3, 1.0e-6, bad).is_err());
+    }
+
+    #[test]
+    fn correction_controller_divergence_ratio_controls_second_pass_divergence_gate() {
+        let strict = Lsode2CorrectionController::scalar(1.0, 1.0, Default::default()).unwrap();
+        let strict_assessment = strict
+            .assess_iteration(2, &[1.0], &[2.0], &[2.0], Some(0.4), Some(0.5), 2)
+            .unwrap();
+        assert_eq!(strict_assessment.status, Lsode2CorrectionStatus::Diverged);
+
+        let relaxed = Lsode2CorrectionController::scalar(
+            1.0,
+            1.0,
+            Lsode2CorrectionControlConfig {
+                divergence_ratio: 3.0,
+                max_iterations: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let relaxed_assessment = relaxed
+            .assess_iteration(2, &[1.0], &[2.0], &[2.0], Some(0.4), Some(0.5), 2)
+            .unwrap();
+        assert_eq!(relaxed_assessment.status, Lsode2CorrectionStatus::Continue);
     }
 
     #[test]

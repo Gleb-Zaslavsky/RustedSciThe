@@ -392,11 +392,14 @@ impl Lsode2RuntimeState {
         &mut self,
         error_norm: f64,
     ) -> Result<Lsode2RetryDecision, Lsode2RuntimeStateError> {
+        let h_old = self.h;
+        let order_old = self.order;
         let decision = self
             .step_controller
             .reject_after_error_test(self.h, self.order, error_norm);
         self.h = decision.h_new;
         self.order = decision.order_new;
+        self.rescale_nordsieck_after_accept_transition(h_old, self.h, order_old, self.order)?;
         self.staged_higher_order_correction = None;
         Ok(decision)
     }
@@ -406,11 +409,14 @@ impl Lsode2RuntimeState {
         h_new: f64,
         order_new: usize,
     ) -> Result<Lsode2RetryDecision, Lsode2RuntimeStateError> {
+        let h_old = self.h;
+        let order_old = self.order;
         let decision = self
             .step_controller
             .reject_after_error_test_with_hint(self.h, self.order, h_new, order_new);
         self.h = decision.h_new;
         self.order = decision.order_new;
+        self.rescale_nordsieck_after_accept_transition(h_old, self.h, order_old, self.order)?;
         self.staged_higher_order_correction = None;
         Ok(decision)
     }
@@ -446,11 +452,23 @@ impl Lsode2RuntimeState {
     pub fn reject_after_nonlinear_failure(
         &mut self,
     ) -> Result<Lsode2RetryDecision, Lsode2RuntimeStateError> {
+        let h_old = self.h;
+        let order_old = self.order;
         let decision = self
             .step_controller
             .reject_after_nonlinear_failure(self.h, self.order);
         self.h = decision.h_new;
         self.order = decision.order_new;
+        self.rescale_nordsieck_after_accept_transition(h_old, self.h, order_old, self.order)?;
+        // DSTODA label-450 parity:
+        // when convergence-failure retract path forces order down to 1, the
+        // next attempt should refresh first-derivative history (`YH(:,2)`).
+        if decision.action == Lsode2RetryAction::RetryWithJacobianRefresh
+            && order_old > 1
+            && decision.order_new == 1
+        {
+            self.first_derivative_refresh_requested = true;
+        }
         self.staged_higher_order_correction = None;
         Ok(decision)
     }
@@ -661,7 +679,7 @@ mod tests {
 
         assert_eq!(first.action, Lsode2RetryAction::Retry);
         assert_eq!(second.action, Lsode2RetryAction::RetryWithJacobianRefresh);
-        assert_eq!(state.order(), 3);
+        assert_eq!(state.order(), 1);
         assert_eq!(state.snapshot().rejected_steps, 2);
         assert_eq!(state.snapshot().error_test_failures, 1);
         assert_eq!(state.snapshot().consecutive_error_test_failures, 1);
@@ -744,6 +762,35 @@ mod tests {
         );
         assert_eq!(state.snapshot().convergence_failures, 2);
         assert_eq!(state.snapshot().consecutive_convergence_failures, 2);
+    }
+
+    #[test]
+    fn runtime_state_nonlinear_retract_to_first_order_requests_derivative_refresh() {
+        let mut state =
+            Lsode2RuntimeState::new(0.0, &[1.0], 0.2, 4, Lsode2StepControlConfig::default())
+                .unwrap();
+        state.set_order(3).unwrap();
+        state
+            .nordsieck_mut()
+            .set_col(1, &[0.5])
+            .expect("nordsieck col 1 should be writable");
+        state
+            .nordsieck_mut()
+            .set_col(2, &[0.25])
+            .expect("nordsieck col 2 should be writable");
+        state
+            .nordsieck_mut()
+            .set_col(3, &[0.125])
+            .expect("nordsieck col 3 should be writable");
+
+        let retry = state.reject_after_nonlinear_failure().unwrap();
+
+        assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
+        assert_eq!(retry.order_new, 1);
+        assert!(state.first_derivative_refresh_requested());
+        assert_eq!(state.order(), 1);
+        assert_eq!(state.nordsieck().col(2).unwrap(), &[0.0]);
+        assert_eq!(state.nordsieck().col(3).unwrap(), &[0.0]);
     }
 
     #[test]

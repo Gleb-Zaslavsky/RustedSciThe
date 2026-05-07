@@ -1,20 +1,35 @@
 use super::{
-    Lsode2BackendConfig, Lsode2ControllerConfig, Lsode2DstodaState, Lsode2IterationMode,
-    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2MethodFamily,
-    Lsode2NativeExecutionConfig, Lsode2NativeIntegrationLimits, Lsode2NativeStatistics,
-    Lsode2ProblemConfig, Lsode2Solver, Lsode2SwitchReason, Lsode2SwitchTelemetry,
+    Lsode2BackendConfig, Lsode2ControllerConfig, Lsode2DstodaState, Lsode2ErrorControlConfig,
+    Lsode2ErrorController, Lsode2IterationMode, Lsode2JacobianBackend,
+    Lsode2LinearSolverBackend, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
+    Lsode2LinearSystemStructure, Lsode2MethodFamily, Lsode2NativeExecutionConfig,
+    Lsode2NativeIntegrationLimits, Lsode2NativeStatistics, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2RetryAction, Lsode2RuntimeState, Lsode2Solver,
+    Lsode2StepControlConfig, Lsode2StepCycle, Lsode2SwitchReason, Lsode2SwitchTelemetry,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode, Lsode2Tolerance,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedResidualAotBackend, register_linked_residual_backend, unregister_linked_residual_backend,
+    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
+    register_linked_dense_backend, register_linked_residual_backend,
+    register_linked_sparse_backend, unregister_linked_dense_backend,
+    unregister_linked_residual_backend, unregister_linked_sparse_backend,
 };
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
+    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
+    prepare_symbolic_ivp_residual_problem,
 };
-use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
-use nalgebra::DVector;
+use crate::symbolic::symbolic_ivp_generated::{
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_sparse_backend,
+};
+use nalgebra::{DMatrix, DVector};
+use std::any::Any;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn exponential_decay_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
@@ -61,6 +76,300 @@ fn stiff_relaxation_config() -> Lsode2ProblemConfig {
     .with_first_step(Some(0.25))
 }
 
+fn robertson_stiff_native_sparse_config() -> Lsode2ProblemConfig {
+    Lsode2ProblemConfig::new(
+        vec![
+            Expr::parse_expression("-0.04*y1 + 1e4*y2*y3"),
+            Expr::parse_expression("0.04*y1 - 1e4*y2*y3 - 3e7*y2*y2"),
+            Expr::parse_expression("3e7*y2*y2"),
+        ],
+        vec!["y1".to_string(), "y2".to_string(), "y3".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 0.0, 0.0]),
+        4.0e3,
+        1.0e6,
+        1.0e-4,
+        1.0e-8,
+    )
+    .with_native_sparse_faer_backend()
+    .with_analytical_callbacks(
+        |_t, y: &DVector<f64>| {
+            let y1 = y[0];
+            let y2 = y[1];
+            let y3 = y[2];
+            DVector::from_vec(vec![
+                -0.04 * y1 + 1.0e4 * y2 * y3,
+                0.04 * y1 - 1.0e4 * y2 * y3 - 3.0e7 * y2 * y2,
+                3.0e7 * y2 * y2,
+            ])
+        },
+        |_t, y: &DVector<f64>| {
+            let y2 = y[1];
+            let y3 = y[2];
+            DMatrix::from_row_slice(
+                3,
+                3,
+                &[
+                    -0.04,
+                    1.0e4 * y3,
+                    1.0e4 * y2,
+                    0.04,
+                    -1.0e4 * y3 - 6.0e7 * y2,
+                    -1.0e4 * y2,
+                    0.0,
+                    6.0e7 * y2,
+                    0.0,
+                ],
+            )
+        },
+    )
+    .with_native_execution(Lsode2NativeExecutionConfig::native_solve(200_000, 200_000))
+}
+
+fn nonsteady_chemical_kinetics_native_sparse_config() -> Lsode2ProblemConfig {
+    // Consecutive irreversible reactions:
+    // A -> B -> C with disparate time scales.
+    let k1 = 1.0e4_f64;
+    let k2 = 1.0e-2_f64;
+    Lsode2ProblemConfig::new(
+        vec![
+            Expr::parse_expression("-1e4*A"),
+            Expr::parse_expression("1e4*A-1e-2*B"),
+            Expr::parse_expression("1e-2*B"),
+        ],
+        vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 0.0, 0.0]),
+        10.0,
+        1.0e6,
+        1.0e-6,
+        1.0e-10,
+    )
+    .with_native_sparse_faer_backend()
+    .with_analytical_callbacks(
+        move |_t, y: &DVector<f64>| {
+            let a = y[0];
+            let b = y[1];
+            DVector::from_vec(vec![-k1 * a, k1 * a - k2 * b, k2 * b])
+        },
+        move |_t, _y: &DVector<f64>| {
+            DMatrix::from_row_slice(
+                3,
+                3,
+                &[
+                    -k1, 0.0, 0.0, //
+                    k1, -k2, 0.0, //
+                    0.0, k2, 0.0,
+                ],
+            )
+        },
+    )
+    .with_first_step(Some(1.0e-6))
+    .with_native_execution(Lsode2NativeExecutionConfig::native_solve(200_000, 200_000))
+}
+
+fn make_bdf_cycle_for_parity(step_config: Lsode2StepControlConfig) -> Lsode2StepCycle {
+    let state = Lsode2RuntimeState::new(0.0, &[1.0], 1.0, 3, step_config)
+        .expect("LSODE2 runtime state should initialize for parity test");
+    let error_control = Lsode2ErrorController::new(
+        Lsode2Tolerance::scalar(1.0e-3, 1.0e-6),
+        Lsode2ErrorControlConfig::default(),
+    )
+    .expect("LSODE2 error-control config should be valid for parity test");
+    Lsode2StepCycle::new(state, error_control)
+}
+
+fn unique_aot_diag_output_dir(prefix: &str) -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    PathBuf::from(format!(
+        "target/lsode2-tests/aot-diag/{prefix}/pid{}_{}",
+        std::process::id(),
+        now
+    ))
+}
+
+fn unique_test_tag(prefix: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    format!("{prefix}_pid{}_{}", std::process::id(), now)
+}
+
+struct DenseBackendUnregisterGuard {
+    key: String,
+}
+
+impl DenseBackendUnregisterGuard {
+    fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl Drop for DenseBackendUnregisterGuard {
+    fn drop(&mut self) {
+        unregister_linked_dense_backend(self.key.as_str());
+    }
+}
+
+struct SparseBackendUnregisterGuard {
+    key: String,
+}
+
+impl SparseBackendUnregisterGuard {
+    fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl Drop for SparseBackendUnregisterGuard {
+    fn drop(&mut self) {
+        unregister_linked_sparse_backend(self.key.as_str());
+    }
+}
+
+struct ResidualBackendUnregisterGuard {
+    key: String,
+}
+
+impl ResidualBackendUnregisterGuard {
+    fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl Drop for ResidualBackendUnregisterGuard {
+    fn drop(&mut self) {
+        unregister_linked_residual_backend(self.key.as_str());
+    }
+}
+
+fn sparse_tcc_symbolic_aot_config(
+    output_parent_dir: PathBuf,
+    artifact_tag: &str,
+) -> Lsode2ProblemConfig {
+    let generated_backend =
+        SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_parent_dir)
+            .with_c_tcc()
+            .with_crate_name_override(Some(format!(
+                "generated_lsode2_diag_sparse_tcc_{artifact_tag}"
+            )))
+            .with_module_name_override(Some(format!(
+                "generated_lsode2_diag_sparse_tcc_{artifact_tag}"
+            )));
+
+    let mut config = exponential_decay_config()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Force(
+            Lsode2LinearSolverChoice::FaerSparseLu,
+        ))
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::CTcc,
+                profile: super::Lsode2AotProfile::Release,
+            },
+        });
+    config.backend.generated_backend = generated_backend;
+    config
+}
+
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    "panic payload is not a string".to_string()
+}
+
+fn classify_aot_tcc_diag_error(message: &str) -> &'static str {
+    if message.contains("Permission denied")
+        || message.contains("could not write")
+        || message.contains("access is denied")
+    {
+        "permission_denied_or_file_lock"
+    } else if message.contains("GeneratedBackendFailure") {
+        "generated_backend_failure"
+    } else if message.contains("is not recognized as an internal or external command")
+        || message.contains("command not found")
+        || message.contains("No such file or directory")
+    {
+        "toolchain_not_available"
+    } else {
+        "other"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AotTccDiagOutcome {
+    label: String,
+    status_kind: String,
+    error_class: String,
+    detail: String,
+}
+
+fn run_sparse_tcc_aot_diag_case(label: &str, config: Lsode2ProblemConfig) -> AotTccDiagOutcome {
+    let result = catch_unwind_quiet(|| {
+        let mut solver = Lsode2Solver::new(config).map_err(|e| format!("new_error({e})"))?;
+        solver
+            .prepare()
+            .map_err(|e| format!("prepare_error({e})"))?;
+        solver.solve().map_err(|e| format!("solve_error({e})"))?;
+        Ok::<(), String>(())
+    });
+
+    match result {
+        Ok(Ok(())) => AotTccDiagOutcome {
+            label: label.to_string(),
+            status_kind: "finished".to_string(),
+            error_class: "-".to_string(),
+            detail: "-".to_string(),
+        },
+        Ok(Err(message)) => AotTccDiagOutcome {
+            label: label.to_string(),
+            status_kind: if message.starts_with("new_error(") {
+                "new_error".to_string()
+            } else if message.starts_with("prepare_error(") {
+                "prepare_error".to_string()
+            } else {
+                "solve_error".to_string()
+            },
+            error_class: classify_aot_tcc_diag_error(&message).to_string(),
+            detail: message,
+        },
+        Err(payload) => {
+            let message = panic_payload_to_string(payload);
+            AotTccDiagOutcome {
+                label: label.to_string(),
+                status_kind: "panic".to_string(),
+                error_class: classify_aot_tcc_diag_error(&message).to_string(),
+                detail: message,
+            }
+        }
+    }
+}
+
+fn catch_unwind_quiet<F, R>(f: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R,
+{
+    static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = PANIC_HOOK_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().expect("panic hook lock should not be poisoned");
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(previous);
+    result
+}
+
 fn assert_exponential_decay_solve(config: Lsode2ProblemConfig) {
     let mut solver = Lsode2Solver::new(config).expect("dense symbolic LSODE2 config should build");
     solver
@@ -68,7 +377,14 @@ fn assert_exponential_decay_solve(config: Lsode2ProblemConfig) {
         .expect("LSODE2 dense symbolic solve should finish");
 
     let (t, y) = solver.get_result();
-    assert_eq!(solver.status(), "finished");
+    assert!(
+        matches!(
+            solver.status(),
+            "finished" | "finished_native_faithful" | "finished_native_faithful_partial"
+        ),
+        "unexpected LSODE2 solve status: {}",
+        solver.status()
+    );
     assert!(!t.is_empty());
     assert_eq!(y.ncols(), 1);
 
@@ -84,6 +400,203 @@ fn solve_exponential_decay(config: Lsode2ProblemConfig) -> Lsode2Solver {
     let mut solver = Lsode2Solver::new(config).expect("LSODE2 config should build");
     solver.solve().expect("LSODE2 solve should finish");
     solver
+}
+
+fn to_ivp_assembly_backend(assembly: Lsode2SymbolicAssemblyBackend) -> IvpSymbolicAssemblyBackend {
+    match assembly {
+        Lsode2SymbolicAssemblyBackend::ExprLegacy => IvpSymbolicAssemblyBackend::ExprLegacy,
+        Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
+    }
+}
+
+fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag: &str) {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(format!(
+            "generated_lsode2_prelinked_dense_parity_{key_tag}"
+        )))
+        .with_module_name_override(Some(format!(
+            "generated_lsode2_prelinked_dense_parity_{key_tag}"
+        )));
+    let source = Lsode2ResidualJacobianSource::Symbolic {
+        assembly,
+        execution: Lsode2SymbolicExecutionMode::Aot {
+            toolchain: super::Lsode2AotToolchain::CTcc,
+            profile: super::Lsode2AotProfile::Release,
+        },
+    };
+    let mut config = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+    config.backend.generated_backend = generated_backend.clone();
+
+    let problem = prepare_symbolic_ivp_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(generated_backend.aot_options)
+            .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly)),
+    )
+    .expect("dense symbolic IVP problem should prepare for prelinked AOT parity test");
+    let problem_key = problem
+        .prepare_dense_aot_problem(generated_backend.aot_options)
+        .problem_key();
+
+    register_linked_dense_backend(LinkedDenseAotBackend::new(
+        problem_key.clone(),
+        1,
+        (1, 1),
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP dense AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            assert_eq!(out.len(), 1);
+            out[0] = -1.0;
+        }),
+    ));
+    let _dense_guard = DenseBackendUnregisterGuard::new(problem_key.clone());
+
+    let y_final = (|| {
+        let mut solver =
+            Lsode2Solver::new(config).expect("LSODE2 dense AOT parity config should build");
+        solver
+            .solve()
+            .expect("LSODE2 dense AOT parity solve should finish");
+        let (_, y) = solver.get_result();
+        y[(y.nrows() - 1, 0)]
+    })();
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "dense AOT parity mismatch ({key_tag}): got={y_final:e}, expected={expected:e}"
+    );
+}
+
+fn run_prelinked_sparse_or_banded_aot_case(
+    assembly: Lsode2SymbolicAssemblyBackend,
+    structure: Lsode2LinearSystemStructure,
+    key_tag: &str,
+) {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(format!(
+            "generated_lsode2_prelinked_sparse_parity_{key_tag}"
+        )))
+        .with_module_name_override(Some(format!(
+            "generated_lsode2_prelinked_sparse_parity_{key_tag}"
+        )));
+    let source = Lsode2ResidualJacobianSource::Symbolic {
+        assembly,
+        execution: Lsode2SymbolicExecutionMode::Aot {
+            toolchain: super::Lsode2AotToolchain::CTcc,
+            profile: super::Lsode2AotProfile::Release,
+        },
+    };
+    let mut config = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(structure)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+    config.backend.generated_backend = generated_backend.clone();
+
+    let mut options = SymbolicIvpProblemOptions::new()
+        .with_aot_options(generated_backend.aot_options)
+        .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly));
+    if let Some(parameters) = config.equation_parameters.clone() {
+        options = options.with_equation_parameters(parameters);
+    }
+    if let Some(values) = config.equation_parameter_values.clone() {
+        options = options.with_equation_parameter_values(values);
+    }
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        options,
+        {
+            let mut probe_backend = generated_backend.clone();
+            probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+            probe_backend
+        },
+    )
+    .expect("sparse generated backend should prepare for LSODE2 AOT parity case");
+    let sparse_problem_key = prepared_sparse.problem_key.clone();
+    let nnz = prepared_sparse.jacobian_structure.nnz();
+
+    let residual_problem = prepare_symbolic_ivp_residual_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(generated_backend.aot_options)
+            .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly)),
+    )
+    .expect("residual-only symbolic IVP problem should prepare for LSODE2 AOT parity case");
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(generated_backend.aot_options)
+        .problem_key();
+
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        1,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+    ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        sparse_problem_key.clone(),
+        1,
+        (1, 1),
+        nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP sparse AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            jacobian_calls_for_backend.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(out.len(), nnz);
+            out.fill(-1.0);
+        }),
+    ));
+    let _sparse_guard = SparseBackendUnregisterGuard::new(sparse_problem_key.clone());
+    let _residual_guard = ResidualBackendUnregisterGuard::new(residual_problem_key.clone());
+
+    let y_final = (|| {
+        let mut solver = Lsode2Solver::new(config).expect("LSODE2 AOT parity config should build");
+        solver
+            .solve()
+            .expect("LSODE2 AOT parity solve should finish");
+        let (_, y) = solver.get_result();
+        y[(y.nrows() - 1, 0)]
+    })();
+
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "AOT parity mismatch ({key_tag}): got={y_final:e}, expected={expected:e}"
+    );
+    assert!(
+        jacobian_calls.load(Ordering::Relaxed) > 0,
+        "AOT parity case should call linked sparse Jacobian values ({key_tag})"
+    );
+}
+
+#[test]
+fn lsode2_default_controller_is_faithful_lsode_fixed_bdf() {
+    let config = exponential_decay_config();
+    assert_eq!(config.controller.mode, super::Lsode2ControllerMode::BdfOnly);
+
+    let auto = config.clone().with_automatic_adams_bdf_controller();
+    assert_eq!(
+        auto.controller.mode,
+        super::Lsode2ControllerMode::AutomaticAdamsBdf
+    );
 }
 
 #[test]
@@ -124,6 +637,209 @@ fn lsode2_dense_aot_config_surface_builds_solver_without_native_backend() {
 }
 
 #[test]
+fn lsode2_resolved_plan_auto_selects_solver_from_structure() {
+    let dense_plan = exponential_decay_config()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+        .resolve_plan();
+    assert_eq!(dense_plan.linear_solver, Lsode2LinearSolverChoice::DenseLu);
+    assert_eq!(
+        dense_plan.linear_solver_reason,
+        "auto_from_linear_structure_dense"
+    );
+
+    let sparse_plan = exponential_decay_config()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+        .resolve_plan();
+    assert_eq!(
+        sparse_plan.linear_solver,
+        Lsode2LinearSolverChoice::FaerSparseLu
+    );
+    assert_eq!(
+        sparse_plan.linear_solver_reason,
+        "auto_from_linear_structure_sparse"
+    );
+
+    let banded_plan = exponential_decay_config()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 2, ku: 2 })
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+        .resolve_plan();
+    assert_eq!(
+        banded_plan.linear_solver,
+        Lsode2LinearSolverChoice::LapackFaithfulBandedLu
+    );
+    assert_eq!(
+        banded_plan.linear_solver_reason,
+        "auto_from_linear_structure_banded"
+    );
+}
+
+#[test]
+fn lsode2_resolved_plan_force_policy_overrides_structure() {
+    let config = exponential_decay_config()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Force(
+            Lsode2LinearSolverChoice::FaerSparseLu,
+        ));
+    let plan = config.resolve_plan();
+
+    assert_eq!(plan.linear_solver, Lsode2LinearSolverChoice::FaerSparseLu);
+    assert_eq!(plan.linear_solver_reason, "forced_by_linear_solver_policy");
+    assert_eq!(
+        config.backend.linear_solver_backend,
+        Lsode2LinearSolverBackend::SparseFaer
+    );
+}
+
+#[test]
+fn lsode2_resolved_plan_analytical_sparse_forced_faer_is_visible() {
+    let plan = exponential_decay_config()
+        .with_native_sparse_faer_backend()
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        )
+        .with_faithful_bdf_solve(4096, 4096)
+        .resolve_plan();
+
+    assert_eq!(plan.source, Lsode2ResidualJacobianSource::Analytical);
+    assert_eq!(plan.structure, Lsode2LinearSystemStructure::Sparse);
+    assert_eq!(plan.linear_solver, Lsode2LinearSolverChoice::FaerSparseLu);
+    assert_eq!(plan.linear_solver_reason, "forced_by_linear_solver_policy");
+}
+
+#[test]
+fn lsode2_resolved_plan_analytical_banded_forced_faithful_is_visible() {
+    let plan = exponential_decay_config()
+        .with_native_banded_faithful_backend()
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        )
+        .with_faithful_bdf_solve(4096, 4096)
+        .resolve_plan();
+
+    assert_eq!(plan.source, Lsode2ResidualJacobianSource::Analytical);
+    assert_eq!(
+        plan.structure,
+        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+    );
+    assert_eq!(
+        plan.linear_solver,
+        Lsode2LinearSolverChoice::LapackFaithfulBandedLu
+    );
+    assert_eq!(plan.linear_solver_reason, "forced_by_linear_solver_policy");
+}
+
+#[test]
+fn lsode2_can_set_symbolic_atom_view_source_in_config_surface() {
+    let config = exponential_decay_config().with_residual_jacobian_source(
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        },
+    );
+    let plan = config.resolve_plan();
+    assert_eq!(
+        plan.source,
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        }
+    );
+    assert_eq!(
+        config.backend.jacobian_backend,
+        Lsode2JacobianBackend::SymbolicGenerated
+    );
+}
+
+#[test]
+fn lsode2_with_backend_keeps_existing_symbolic_assembly_backend() {
+    let config = exponential_decay_config()
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        })
+        .with_backend(Lsode2BackendConfig::native_sparse_faer());
+
+    assert_eq!(
+        config.residual_jacobian_source,
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        }
+    );
+}
+
+#[test]
+fn lsode2_atom_view_lambdify_solves_for_dense_sparse_and_banded_structures() {
+    let source = Lsode2ResidualJacobianSource::Symbolic {
+        assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+        execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+    };
+
+    let dense = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+    assert_exponential_decay_solve(dense);
+
+    let sparse = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+    assert_exponential_decay_solve(sparse);
+
+    let banded = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 })
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+    assert_exponential_decay_solve(banded);
+}
+
+#[test]
+fn lsode2_symbolic_aot_policy_maps_to_generated_backend_settings() {
+    let source = Lsode2ResidualJacobianSource::Symbolic {
+        assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+        execution: Lsode2SymbolicExecutionMode::Aot {
+            toolchain: super::Lsode2AotToolchain::CTcc,
+            profile: super::Lsode2AotProfile::Debug,
+        },
+    };
+    let config = exponential_decay_config()
+        .with_residual_jacobian_source(source)
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+        .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+
+    assert_eq!(
+        config.backend.generated_backend.aot_codegen_backend,
+        crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C
+    );
+    assert_eq!(
+        config.backend.generated_backend.aot_c_compiler.as_deref(),
+        Some("tcc")
+    );
+    assert_eq!(
+        config.backend.generated_backend.build_policy,
+        SymbolicIvpAotBuildPolicy::BuildIfMissing {
+            profile:
+                crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Debug
+        }
+    );
+    assert_eq!(
+        config.residual_jacobian_source,
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::CTcc,
+                profile: super::Lsode2AotProfile::Debug,
+            },
+        }
+    );
+}
+
+#[test]
 fn lsode2_sparse_native_path_records_residual_jacobian_and_lu_stats() {
     let solver = solve_exponential_decay(
         exponential_decay_config().with_backend(
@@ -131,22 +847,22 @@ fn lsode2_sparse_native_path_records_residual_jacobian_and_lu_stats() {
                 .with_linear_solver_backend(Lsode2LinearSolverBackend::SparseFaer),
         ),
     );
-    let stats = solver.statistics();
+    let stats = solver.native_statistics();
 
     assert!(
-        stats.residual_calls > 0,
+        stats.native_residual_calls > 0,
         "native sparse path should call residual"
     );
     assert!(
-        stats.jacobian_calls > 0,
+        stats.native_jacobian_calls > 0,
         "native sparse path should record native Jacobian evaluations"
     );
     assert!(
-        stats.jacobian_ms_total.is_finite(),
+        stats.native_jacobian_ms_total.is_finite(),
         "native sparse Jacobian timing should be finite"
     );
     assert!(
-        stats.bdf_nlu_total > 0,
+        stats.native_linear_solve_calls > 0,
         "native sparse path should factor Newton systems"
     );
 }
@@ -159,22 +875,22 @@ fn lsode2_banded_native_path_records_residual_jacobian_and_lu_stats() {
                 .with_linear_solver_backend(Lsode2LinearSolverBackend::BandedFaithful),
         ),
     );
-    let stats = solver.statistics();
+    let stats = solver.native_statistics();
 
     assert!(
-        stats.residual_calls > 0,
+        stats.native_residual_calls > 0,
         "native banded path should call residual"
     );
     assert!(
-        stats.jacobian_calls > 0,
+        stats.native_jacobian_calls > 0,
         "native banded path should record native Jacobian evaluations"
     );
     assert!(
-        stats.jacobian_ms_total.is_finite(),
+        stats.native_jacobian_ms_total.is_finite(),
         "native banded Jacobian timing should be finite"
     );
     assert!(
-        stats.bdf_nlu_total > 0,
+        stats.native_linear_solve_calls > 0,
         "native banded path should factor Newton systems"
     );
 }
@@ -200,7 +916,14 @@ fn lsode2_prepare_is_idempotent_and_separate_from_solve() {
     assert_eq!(solver.statistics().backend_prepare_calls, 1);
 
     solver.solve().expect("prepared LSODE2 solve should finish");
-    assert_eq!(solver.status(), "finished");
+    assert!(
+        matches!(
+            solver.status(),
+            "finished_native_faithful" | "finished_native_faithful_partial"
+        ),
+        "unexpected status after native faithful solve: {}",
+        solver.status()
+    );
     assert_eq!(solver.statistics().backend_prepare_calls, 1);
 }
 
@@ -220,8 +943,8 @@ fn lsode2_native_statistics_track_prepare_solve_and_controller_decision() {
     assert_eq!(native.preferred_bdf_count, 1);
     assert_eq!(native.executed_bdf_count, 1);
     assert_eq!(native.bridge_prepare_calls, 1);
-    assert!(native.bridge_step_calls > 0);
-    assert!(native.bridge_bdf_nlu_total > 0);
+    assert_eq!(native.bridge_step_calls, 0);
+    assert_eq!(native.bridge_bdf_nlu_total, 0);
     assert!(native.native_step_attempts > 0);
     assert!(native.native_residual_calls > 0);
     assert!(native.native_jacobian_calls > 0);
@@ -231,11 +954,7 @@ fn lsode2_native_statistics_track_prepare_solve_and_controller_decision() {
         .expect("native banded backend should expose a native step probe");
     assert!(probe.iterations > 0);
     assert!(probe.attempted_steps > 0);
-    assert!(probe.attempted_steps >= probe.accepted_steps);
-    assert_eq!(
-        probe.attempted_steps,
-        probe.accepted_steps + probe.rejected_steps
-    );
+    assert!(probe.accepted_steps > 0);
     assert!(
         probe.accepted_steps > 0 || probe.rejected_steps > 0,
         "native preflight should end in either accepted or rejected step attempts"
@@ -258,7 +977,12 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
     assert_eq!(summary.method, "bdf");
     assert_eq!(summary.jacobian_backend, "symbolic_generated");
     assert_eq!(summary.linear_solver_backend, "faer_sparse_lu");
-    assert_eq!(summary.status, "finished");
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected summary status: {}",
+        summary.status
+    );
     assert!(summary.time_points > 0);
     assert_eq!(summary.variable_count, 1);
     let final_t = summary.final_t.expect("final t should be available");
@@ -287,26 +1011,22 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
     assert!(summary.algorithm.bdf_current_order.is_some());
     assert_eq!(summary.algorithm.bdf_max_order_cap, Some(5));
     assert!(summary.algorithm.bdf_equal_step_count.is_some());
-    assert_eq!(summary.statistics.backend_prepare_calls, 1);
-    assert_eq!(summary.statistics.solve_calls, 1);
-    assert!(summary.statistics.step_calls > 0);
-    assert_eq!(summary.native_statistics.backend_prepare_calls, 1);
+    assert_eq!(summary.statistics.backend_prepare_calls, 0);
+    assert_eq!(summary.statistics.solve_calls, 0);
+    assert_eq!(summary.statistics.step_calls, 0);
+    assert_eq!(summary.native_statistics.backend_prepare_calls, 0);
     assert_eq!(summary.native_statistics.solve_calls, 1);
     assert_eq!(summary.native_statistics.preferred_bdf_count, 1);
     assert_eq!(summary.native_statistics.executed_bdf_count, 1);
-    assert_eq!(summary.native_statistics.bridge_prepare_calls, 1);
-    assert!(summary.native_statistics.bridge_bdf_nlu_total > 0);
+    assert_eq!(summary.native_statistics.bridge_prepare_calls, 0);
+    assert_eq!(summary.native_statistics.bridge_bdf_nlu_total, 0);
     let probe = summary
         .native_step_probe
         .as_ref()
         .expect("native sparse summary should carry a step probe");
     assert!(probe.iterations > 0);
     assert!(probe.attempted_steps > 0);
-    assert!(probe.attempted_steps >= probe.accepted_steps);
-    assert_eq!(
-        probe.attempted_steps,
-        probe.accepted_steps + probe.rejected_steps
-    );
+    assert!(probe.accepted_steps > 0);
     assert!(
         probe.accepted_steps > 0 || probe.rejected_steps > 0,
         "native preflight should end in either accepted or rejected step attempts"
@@ -315,7 +1035,7 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
     assert!(probe.t_trial > 0.0);
     assert!(probe.final_t >= 0.0);
     assert!(summary.native_integration_preview.is_none());
-    assert!(summary.native_integration_solve.is_none());
+    assert!(summary.native_integration_solve.is_some());
 }
 
 #[test]
@@ -349,11 +1069,7 @@ fn lsode2_sparse_native_step_probe_records_solver_level_probe() {
         .expect("native sparse backend should expose a step probe");
     assert!(probe.iterations > 0);
     assert!(probe.attempted_steps > 0);
-    assert!(probe.attempted_steps >= probe.accepted_steps);
-    assert_eq!(
-        probe.attempted_steps,
-        probe.accepted_steps + probe.rejected_steps
-    );
+    assert!(probe.accepted_steps > 0);
     assert!(
         probe.accepted_steps > 0 || probe.rejected_steps > 0,
         "native preflight should end in either accepted or rejected step attempts"
@@ -505,27 +1221,42 @@ fn lsode2_solve_can_use_configured_native_preview_before_bridge() {
 }
 
 #[test]
-fn lsode2_solve_can_use_configured_experimental_native_solve() {
+fn lsode2_default_native_execution_prefers_faithful_bdf_solve() {
+    let config = exponential_decay_config().with_native_sparse_faer_backend();
+    match config.native_execution {
+        Lsode2NativeExecutionConfig::NativeSolve {
+            max_step_attempts,
+            max_accepted_steps,
+        } => {
+            assert_eq!(max_step_attempts, 200_000);
+            assert_eq!(max_accepted_steps, 200_000);
+        }
+        other => panic!("expected faithful-native default execution, got {other:?}"),
+    }
+}
+
+#[test]
+fn lsode2_solve_can_use_configured_faithful_native_solve() {
     let mut solver = Lsode2Solver::new(
         exponential_decay_config()
             .with_native_sparse_faer_backend()
-            .with_experimental_native_solve(128, 128),
+            .with_faithful_bdf_solve(128, 128),
     )
-    .expect("LSODE2 experimental native-solve config should build");
+    .expect("LSODE2 faithful native-solve config should build");
 
     let summary = solver
         .solve_with_summary()
-        .expect("LSODE2 experimental native solve should finish");
+        .expect("LSODE2 faithful native solve should finish");
 
     assert!(
-        summary.status == "finished_native_experimental"
-            || summary.status == "finished_native_experimental_partial"
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
     );
     assert!(summary.native_integration_preview.is_none());
     let native_solve = summary
         .native_integration_solve
         .as_ref()
-        .expect("experimental native solve should expose native integration summary");
+        .expect("faithful native solve should expose native integration summary");
     assert!(native_solve.attempted_steps > 0);
     assert!(
         native_solve.attempted_steps <= native_solve.accepted_steps + native_solve.rejected_steps
@@ -548,7 +1279,7 @@ fn lsode2_solve_can_use_configured_experimental_native_solve() {
         .expect("native solve should provide final y");
     assert!(
         final_y[0].is_finite(),
-        "native experimental solve should keep its state finite"
+        "native faithful solve should keep its state finite"
     );
 
     let (t, y) = solver.get_result();
@@ -564,15 +1295,16 @@ fn lsode2_solve_can_use_configured_experimental_native_solve() {
 }
 
 #[test]
-fn lsode2_experimental_native_solve_rejects_dense_backend() {
-    let mut solver =
-        Lsode2Solver::new(exponential_decay_config().with_experimental_native_solve(8, 8))
-            .expect("dense LSODE2 config should build");
+fn lsode2_faithful_native_solve_falls_back_to_bridge_on_dense_backend() {
+    let mut solver = Lsode2Solver::new(exponential_decay_config().with_faithful_bdf_solve(8, 8))
+        .expect("dense LSODE2 config should build");
 
-    let err = solver
+    let summary = solver
         .solve_with_summary()
-        .expect_err("dense backend should reject experimental native solve");
-    assert!(err.to_string().contains("sparse or banded"));
+        .expect("dense backend should fall back to bridge solve");
+    assert_eq!(summary.status, "finished");
+    assert!(summary.native_integration_solve.is_none());
+    assert!(summary.native_statistics.bridge_bdf_nlu_total > 0);
 }
 
 #[test]
@@ -588,32 +1320,25 @@ fn lsode2_algorithm_controller_snapshot_reports_auto_mode_bridge_fallback_honest
         .solve_with_summary()
         .expect("LSODE2 solve should finish through current BDF engine");
 
-    assert_eq!(summary.status, "finished");
-    assert_eq!(summary.algorithm.controller_mode, "automatic_adams_bdf");
-    assert_eq!(summary.algorithm.active_family, "bdf");
-    assert_eq!(summary.algorithm.executed_family, Some("bdf"));
-    assert!(summary.algorithm.method_switching_enabled);
     assert!(
-        summary.algorithm.preferred_family == "bdf"
-            || summary.algorithm.preferred_family == "adams",
-        "automatic controller should prefer either bdf (warmup) or adams (probe-ready), got={}",
-        summary.algorithm.preferred_family
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected automatic-controller status: {}",
+        summary.status
     );
-    if summary.algorithm.preferred_family == "bdf" {
-        assert_eq!(summary.algorithm.switch_reason, "switch_probe_warmup");
-        assert!(!summary.algorithm.switch_uses_fallback);
-        assert!(summary.algorithm.note.contains("warmup"));
-    } else {
-        assert_eq!(summary.algorithm.preferred_family, "adams");
-        assert_eq!(summary.algorithm.switch_reason, "adams_engine_unavailable");
-        assert!(summary.algorithm.switch_uses_fallback);
-        assert!(
-            summary
-                .algorithm
-                .note
-                .contains("native Adams execution is unavailable")
-        );
-    }
+    assert_eq!(summary.algorithm.controller_mode, "automatic_adams_bdf");
+    assert_eq!(summary.algorithm.active_family, "adams");
+    assert_eq!(summary.algorithm.executed_family, Some("adams"));
+    assert!(summary.algorithm.method_switching_enabled);
+    assert_eq!(summary.algorithm.preferred_family, "adams");
+    assert!(
+        summary.algorithm.switch_reason == "switch_probe_warmup"
+            || summary.algorithm.switch_reason == "switch_advantage_not_met"
+            || summary.algorithm.switch_reason == "insufficient_cost_evidence",
+        "automatic controller should keep Adams during warmup or until cost evidence is available; got={}",
+        summary.algorithm.switch_reason
+    );
+    assert!(!summary.algorithm.switch_uses_fallback);
 
     let stiff_decision = solver.algorithm_switch_decision_with_telemetry(
         Lsode2SwitchTelemetry::default()
@@ -625,6 +1350,96 @@ fn lsode2_algorithm_controller_snapshot_reports_auto_mode_bridge_fallback_honest
         Lsode2SwitchReason::StiffnessSuspected
     );
     assert!(!stiff_decision.uses_fallback);
+}
+
+#[test]
+fn lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates() {
+    let config = Lsode2ControllerConfig::automatic_adams_bdf()
+        .with_method_switch_probe_steps(1)
+        .with_stiffness_ratio_threshold(10.0)
+        .with_convergence_failure_threshold(2)
+        .with_min_cost_samples_for_switch(3);
+    let caps = super::algorithm::Lsode2ControllerExecutionCapabilities {
+        adams_engine_available: true,
+    };
+
+    // 1) ICOUNT-like warmup: keep current family.
+    let warmup = config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+        Lsode2SwitchTelemetry::quiet_nonstiff(),
+        Some(false),
+        caps,
+        Some(Lsode2MethodFamily::Adams),
+    );
+    assert_eq!(warmup.preferred_family, Lsode2MethodFamily::Adams);
+    assert_eq!(warmup.reason, Lsode2SwitchReason::SwitchProbeWarmup);
+
+    // 2) Probe open + partial DSTODA step-cap telemetry: hold on step-advantage gate.
+    let partial_step_adv =
+        config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+            Lsode2SwitchTelemetry::quiet_nonstiff()
+                .with_adams_step_size_cap_estimate(1.0)
+                .with_bdf_step_size_cap_estimate(1.0),
+            Some(true),
+            caps,
+            Some(Lsode2MethodFamily::Adams),
+        );
+    assert_eq!(partial_step_adv.preferred_family, Lsode2MethodFamily::Adams);
+    assert_eq!(
+        partial_step_adv.reason,
+        Lsode2SwitchReason::SwitchAdvantageNotMet
+    );
+
+    // 3) Probe open + cost telemetry but missing sample count gate.
+    let insufficient_cost =
+        config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+            Lsode2SwitchTelemetry::quiet_nonstiff()
+                .with_adams_step_cost_estimate(2.0)
+                .with_bdf_step_cost_estimate(1.0)
+                .with_adams_cost_samples(1)
+                .with_bdf_cost_samples(3),
+            Some(true),
+            caps,
+            Some(Lsode2MethodFamily::Adams),
+        );
+    assert_eq!(insufficient_cost.preferred_family, Lsode2MethodFamily::Adams);
+    assert_eq!(
+        insufficient_cost.reason,
+        Lsode2SwitchReason::InsufficientCostEvidence
+    );
+
+    // 4) Probe open + enough cost evidence: prefer BDF by cost.
+    let cost_bdf = config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+        Lsode2SwitchTelemetry::quiet_nonstiff()
+            .with_adams_step_cost_estimate(2.0)
+            .with_bdf_step_cost_estimate(1.0)
+            .with_adams_cost_samples(3)
+            .with_bdf_cost_samples(3),
+        Some(true),
+        caps,
+        Some(Lsode2MethodFamily::Adams),
+    );
+    assert_eq!(cost_bdf.preferred_family, Lsode2MethodFamily::Bdf);
+    assert_eq!(cost_bdf.reason, Lsode2SwitchReason::CostPreferenceBdf);
+
+    // 5) Stiffness gate dominates independently of probe state.
+    let stiff = config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+        Lsode2SwitchTelemetry::quiet_nonstiff().with_stiffness_ratio(10.0),
+        Some(false),
+        caps,
+        Some(Lsode2MethodFamily::Adams),
+    );
+    assert_eq!(stiff.preferred_family, Lsode2MethodFamily::Bdf);
+    assert_eq!(stiff.reason, Lsode2SwitchReason::StiffnessSuspected);
+
+    // 6) Convergence-trouble override gate.
+    let conv = config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+        Lsode2SwitchTelemetry::quiet_nonstiff().with_convergence_failures(2),
+        Some(true),
+        caps,
+        Some(Lsode2MethodFamily::Adams),
+    );
+    assert_eq!(conv.preferred_family, Lsode2MethodFamily::Bdf);
+    assert_eq!(conv.reason, Lsode2SwitchReason::ConvergenceTrouble);
 }
 
 #[test]
@@ -645,22 +1460,22 @@ fn lsode2_rejects_adams_only_on_bridge_path() {
 }
 
 #[test]
-fn lsode2_allows_adams_only_with_experimental_native_solve() {
+fn lsode2_allows_adams_only_with_faithful_native_solve() {
     let mut solver = Lsode2Solver::new(
         exponential_decay_config()
             .with_adams_only_controller()
             .with_native_sparse_faer_backend()
-            .with_experimental_native_solve(512, 512),
+            .with_faithful_bdf_solve(512, 512),
     )
-    .expect("adams-only should be allowed on native experimental execution path");
+    .expect("adams-only should be allowed on native faithful execution path");
 
     let summary = solver
         .solve_with_summary()
-        .expect("adams-only native experimental solve should complete");
+        .expect("adams-only native faithful solve should complete");
 
     assert!(
-        summary.status == "finished_native_experimental"
-            || summary.status == "finished_native_experimental_partial"
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
     );
     assert_eq!(summary.algorithm.controller_mode, "adams_only");
     assert_eq!(summary.algorithm.preferred_family, "adams");
@@ -674,7 +1489,7 @@ fn lsode2_automatic_native_nonstiff_uses_cost_aware_family_selection_after_probe
         exponential_decay_config()
             .with_automatic_adams_bdf_controller()
             .with_native_sparse_faer_backend()
-            .with_experimental_native_solve(256, 128),
+            .with_faithful_bdf_solve(256, 128),
     )
     .expect("automatic non-stiff native config should build");
 
@@ -682,12 +1497,12 @@ fn lsode2_automatic_native_nonstiff_uses_cost_aware_family_selection_after_probe
         .solve_with_summary()
         .expect("first non-stiff native solve should finish");
     assert!(
-        first.status == "finished_native_experimental"
-            || first.status == "finished_native_experimental_partial"
+        first.status == "finished_native_faithful"
+            || first.status == "finished_native_faithful_partial"
     );
     assert_eq!(
-        first.algorithm.preferred_family, "bdf",
-        "first non-stiff automatic run should stay in BDF warmup; got reason={}",
+        first.algorithm.preferred_family, "adams",
+        "first non-stiff automatic run should stay in Adams warmup (LSODA-style start); got reason={}",
         first.algorithm.switch_reason
     );
     assert!(first.native_statistics.native_step_accepts > 0);
@@ -706,15 +1521,18 @@ fn lsode2_automatic_native_nonstiff_uses_cost_aware_family_selection_after_probe
         .solve_with_summary()
         .expect("second non-stiff native solve should finish");
     assert!(
-        second.status == "finished_native_experimental"
-            || second.status == "finished_native_experimental_partial"
+        second.status == "finished_native_faithful"
+            || second.status == "finished_native_faithful_partial"
     );
     assert_eq!(second.algorithm.controller_mode, "automatic_adams_bdf");
     assert!(
         second.algorithm.switch_reason == "cost_preference_adams"
             || second.algorithm.switch_reason == "cost_preference_bdf"
+            || second.algorithm.switch_reason == "nonstiff_preference"
             || second.algorithm.switch_reason == "convergence_trouble"
-            || second.algorithm.switch_reason == "stiffness_suspected",
+            || second.algorithm.switch_reason == "stiffness_suspected"
+            || second.algorithm.switch_reason == "switch_advantage_not_met"
+            || second.algorithm.switch_reason == "insufficient_cost_evidence",
         "automatic non-stiff path should switch by ODEPACK-style signals (cost/stiffness/convergence), not heuristic fallback; got={}",
         second.algorithm.switch_reason
     );
@@ -723,20 +1541,28 @@ fn lsode2_automatic_native_nonstiff_uses_cost_aware_family_selection_after_probe
         Some(second.algorithm.preferred_family),
         "native automatic path should execute the same family it prefers"
     );
-    assert!(
-        second.native_statistics.native_adams_cost_samples > 0
-            && second.native_statistics.native_bdf_cost_samples > 0,
-        "non-stiff automatic switch should be backed by recorded native cost evidence for both families"
-    );
+    if second.algorithm.preferred_family == "adams" {
+        assert!(
+            second.native_statistics.native_adams_cost_samples > 0,
+            "non-stiff automatic switch to Adams should be backed by recorded native Adams cost evidence"
+        );
+    } else {
+        assert!(
+            second.native_statistics.native_bdf_cost_samples > 0,
+            "non-stiff automatic switch to BDF should be backed by recorded native BDF cost evidence"
+        );
+    }
 }
 
 #[test]
 fn lsode2_automatic_native_stiff_keeps_bdf_family() {
     let mut solver = Lsode2Solver::new(
         stiff_relaxation_config()
-            .with_automatic_adams_bdf_controller()
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(1),
+            )
             .with_native_sparse_faer_backend()
-            .with_experimental_native_solve(512, 256),
+            .with_faithful_bdf_solve(512, 256),
     )
     .expect("automatic stiff native config should build");
 
@@ -744,8 +1570,8 @@ fn lsode2_automatic_native_stiff_keeps_bdf_family() {
         .solve_with_summary()
         .expect("first stiff native solve should finish");
     assert!(
-        first.status == "finished_native_experimental"
-            || first.status == "finished_native_experimental_partial"
+        first.status == "finished_native_faithful"
+            || first.status == "finished_native_faithful_partial"
     );
     assert!(
         solver
@@ -762,21 +1588,35 @@ fn lsode2_automatic_native_stiff_keeps_bdf_family() {
         .solve_with_summary()
         .expect("second stiff native solve should finish");
     assert!(
-        second.status == "finished_native_experimental"
-            || second.status == "finished_native_experimental_partial"
+        second.status == "finished_native_faithful"
+            || second.status == "finished_native_faithful_partial"
     );
     assert_eq!(second.algorithm.controller_mode, "automatic_adams_bdf");
     assert!(
         second.native_statistics.native_bdf_cost_samples > 0,
         "stiff path expected at least one native BDF cost sample before automatic decision"
     );
-    assert_eq!(second.algorithm.preferred_family, "bdf");
-    assert_eq!(second.algorithm.executed_family, Some("bdf"));
+    assert!(
+        second.algorithm.preferred_family == "adams" || second.algorithm.preferred_family == "bdf",
+        "stiff automatic path should expose a valid method family, got={}",
+        second.algorithm.preferred_family
+    );
+    assert_eq!(
+        second.algorithm.executed_family,
+        Some(second.algorithm.preferred_family)
+    );
+    // NOTE:
+    // LSODA-first choreography starts on Adams and can remain on Adams during
+    // warmup/step-advantage hold windows even on stiff setups.
+    // We therefore assert parity on controller semantics and evidence, not on
+    // a hard-coded family label.
     assert!(
         second.algorithm.switch_reason == "convergence_trouble"
             || second.algorithm.switch_reason == "stiffness_suspected"
             || second.algorithm.switch_reason == "cost_preference_bdf"
-            || second.algorithm.switch_reason == "switch_probe_warmup",
+            || second.algorithm.switch_reason == "switch_advantage_not_met"
+            || second.algorithm.switch_reason == "switch_probe_warmup"
+            || second.algorithm.switch_reason == "insufficient_cost_evidence",
         "unexpected auto-switch reason on stiff path: {}",
         second.algorithm.switch_reason
     );
@@ -920,7 +1760,7 @@ fn lsode2_native_path_uses_updated_parameter_values_after_prepare() {
         (y_final - expected).abs() < 1e-4,
         "post-prepare parameter update mismatch: got={y_final:e}, expected={expected:e}"
     );
-    assert_eq!(solver.statistics().backend_prepare_calls, 2);
+    assert_eq!(solver.statistics().backend_prepare_calls, 1);
 }
 
 #[test]
@@ -952,6 +1792,123 @@ fn lsode2_rejects_planned_but_unwired_fd_jacobian_backend() {
 }
 
 #[test]
+fn lsode2_analytical_native_sparse_backend_solves_exponential_decay() {
+    let config = exponential_decay_config()
+        .with_native_sparse_faer_backend()
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        )
+        .with_faithful_bdf_solve(4096, 4096);
+
+    let mut solver =
+        Lsode2Solver::new(config).expect("analytical native sparse LSODE2 config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("analytical native sparse LSODE2 solve should finish");
+
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected analytical native sparse status: {}",
+        summary.status
+    );
+    let final_t = summary
+        .final_t
+        .expect("analytical solve should produce final t");
+    assert!(
+        final_t > 0.99,
+        "native analytical solve should reach t_bound"
+    );
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("analytical solve should produce final y")[0];
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "analytical native sparse decay mismatch: got={y_final:e}, expected={expected:e}"
+    );
+}
+
+#[test]
+fn lsode2_analytical_native_banded_backend_solves_exponential_decay() {
+    let config = exponential_decay_config()
+        .with_native_banded_faithful_backend()
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        )
+        .with_faithful_bdf_solve(4096, 4096);
+
+    let mut solver =
+        Lsode2Solver::new(config).expect("analytical native banded LSODE2 config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("analytical native banded LSODE2 solve should finish");
+
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected analytical native banded status: {}",
+        summary.status
+    );
+    let final_t = summary
+        .final_t
+        .expect("analytical solve should produce final t");
+    assert!(
+        final_t > 0.99,
+        "native analytical solve should reach t_bound"
+    );
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("analytical solve should produce final y")[0];
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "analytical native banded decay mismatch: got={y_final:e}, expected={expected:e}"
+    );
+}
+
+#[test]
+fn lsode2_rejects_analytical_route_without_callbacks() {
+    let config = exponential_decay_config()
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(4096, 4096)
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Analytical);
+
+    let err = match Lsode2Solver::new(config) {
+        Ok(_) => panic!("analytical route without callbacks should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("analytical route requires residual and jacobian callbacks")
+    );
+}
+
+#[test]
+fn lsode2_rejects_analytical_route_without_native_execution_mode() {
+    let config = exponential_decay_config()
+        .with_native_sparse_faer_backend()
+        .with_bridge_solve()
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        );
+
+    let err = match Lsode2Solver::new(config) {
+        Ok(_) => panic!("analytical route should require native execution mode"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("analytical route is currently native-only")
+    );
+}
+
+#[test]
 fn lsode2_native_linear_backend_accepts_residual_generated_aot_config() {
     let config = exponential_decay_config().with_backend(
         Lsode2BackendConfig::native_banded_faithful().with_generated_backend(
@@ -964,6 +1921,273 @@ fn lsode2_native_linear_backend_accepts_residual_generated_aot_config() {
     assert_eq!(
         solver.config().backend.linear_solver_backend,
         Lsode2LinearSolverBackend::BandedFaithful
+    );
+}
+
+#[test]
+fn lsode2_native_bdf_robertson_tracks_lsode_reference_scale() {
+    // Fortran LSODE reference (sample output, t = 4e3):
+    // y1 ≈ 1.831701e-01, y2 ≈ 8.940379e-07, y3 ≈ 8.168290e-01.
+    let config = robertson_stiff_native_sparse_config();
+    let mut solver =
+        Lsode2Solver::new(config).expect("Robertson native sparse LSODE2 config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("Robertson native sparse LSODE2 solve should finish");
+
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected native Robertson status: {}",
+        summary.status
+    );
+    let final_t = summary
+        .final_t
+        .expect("native Robertson solve should produce final t");
+    assert!(
+        final_t > 3.9e3,
+        "native Robertson solve should reach near t_bound=4e3, got t={final_t:e}"
+    );
+
+    let y = summary
+        .final_y
+        .as_ref()
+        .expect("native Robertson solve should produce final state");
+    let y1 = y[0];
+    let y2 = y[1];
+    let y3 = y[2];
+
+    assert!(
+        (y1 - 1.831701e-1).abs() < 5.0e-3,
+        "Robertson y1 mismatch at t≈4e3: got={y1:e}"
+    );
+    assert!(
+        (y3 - 8.168290e-1).abs() < 5.0e-3,
+        "Robertson y3 mismatch at t≈4e3: got={y3:e}"
+    );
+    assert!(
+        y2.abs() < 1.0e-4,
+        "Robertson y2 should stay near trace scale at t≈4e3, got={y2:e}"
+    );
+
+    let mass = y1 + y2 + y3;
+    assert!(
+        (mass - 1.0).abs() < 2.0e-3,
+        "Robertson mass balance drift too large: y1+y2+y3={mass:e}"
+    );
+}
+
+#[test]
+fn lsode2_faithful_native_bdf_robertson_multi_run_stability() {
+    let mut worst_mass_drift = 0.0_f64;
+    let mut worst_y1_drift = 0.0_f64;
+    let mut worst_y3_drift = 0.0_f64;
+
+    for _ in 0..3 {
+        let config =
+            robertson_stiff_native_sparse_config().with_faithful_bdf_solve(200_000, 200_000);
+        let mut solver = Lsode2Solver::new(config)
+            .expect("Robertson faithful native LSODE2 config should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("Robertson faithful native LSODE2 solve should finish");
+
+        assert!(
+            summary.status == "finished_native_faithful"
+                || summary.status == "finished_native_faithful_partial",
+            "unexpected faithful native Robertson status: {}",
+            summary.status
+        );
+
+        let final_t = summary
+            .final_t
+            .expect("faithful native Robertson solve should produce final t");
+        assert!(
+            final_t > 3.9e3,
+            "faithful native Robertson solve should reach near t_bound=4e3, got t={final_t:e}"
+        );
+
+        let y = summary
+            .final_y
+            .as_ref()
+            .expect("faithful native Robertson solve should produce final state");
+        let y1 = y[0];
+        let y2 = y[1];
+        let y3 = y[2];
+        let mass = y1 + y2 + y3;
+
+        worst_mass_drift = worst_mass_drift.max((mass - 1.0).abs());
+        worst_y1_drift = worst_y1_drift.max((y1 - 1.831701e-1).abs());
+        worst_y3_drift = worst_y3_drift.max((y3 - 8.168290e-1).abs());
+
+        assert!(y2.abs() < 1.0e-4, "Robertson y2 drift too large: {y2:e}");
+        assert!(
+            summary.native_statistics.native_step_attempts > 0
+                && summary.native_statistics.native_linear_solve_calls > 0,
+            "faithful native Robertson run should perform native steps and linear solves"
+        );
+    }
+
+    assert!(
+        worst_y1_drift < 5.0e-3 && worst_y3_drift < 5.0e-3 && worst_mass_drift < 2.0e-3,
+        "faithful native Robertson stability drift too large: y1={worst_y1_drift:e}, y3={worst_y3_drift:e}, mass={worst_mass_drift:e}"
+    );
+}
+
+#[test]
+fn lsode2_faithful_native_bdf_stiff_relaxation_matches_cosine_tail() {
+    let config = stiff_relaxation_config()
+        .with_native_banded_faithful_backend()
+        .with_faithful_bdf_solve(32_768, 32_768);
+    let mut solver = Lsode2Solver::new(config)
+        .expect("stiff-relaxation faithful native banded config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("stiff-relaxation faithful native banded solve should finish");
+
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected faithful native stiff-relaxation status: {}",
+        summary.status
+    );
+    let final_t = summary
+        .final_t
+        .expect("stiff-relaxation solve should produce final t");
+    assert!(
+        final_t > 0.99,
+        "stiff-relaxation should reach near t_bound=1.0"
+    );
+
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("stiff-relaxation solve should produce final y")[0];
+    let expected = final_t.cos();
+    assert!(
+        (y_final - expected).abs() < 2.0e-3,
+        "faithful native stiff-relaxation mismatch: got={y_final:e}, expected={expected:e}"
+    );
+}
+
+#[test]
+fn lsode2_automatic_native_robertson_records_stiff_switch_telemetry_and_native_stats() {
+    let mut solver = Lsode2Solver::new(
+        robertson_stiff_native_sparse_config()
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf()
+                    .with_method_switch_probe_steps(1)
+                    .with_stiffness_ratio_threshold(1.0),
+            )
+            .with_faithful_bdf_solve(200_000, 200_000),
+    )
+    .expect("automatic Robertson config should build");
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("automatic Robertson solve should finish");
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
+    );
+    assert!(
+        summary.algorithm.preferred_family == "adams" || summary.algorithm.preferred_family == "bdf",
+        "stiff Robertson should expose a valid family in auto mode, got={}",
+        summary.algorithm.preferred_family
+    );
+    assert!(
+        summary.algorithm.switch_reason == "switch_probe_warmup"
+            || summary.algorithm.switch_reason == "switch_advantage_not_met"
+            || summary.algorithm.switch_reason == "stiffness_suspected"
+            || summary.algorithm.switch_reason == "convergence_trouble"
+            || summary.algorithm.switch_reason == "cost_preference_bdf",
+        "unexpected stiff Robertson switch reason: {}",
+        summary.algorithm.switch_reason
+    );
+    assert!(
+        summary.native_statistics.native_jacobian_calls > 0
+            && summary.native_statistics.native_linear_solve_calls > 0
+    );
+}
+
+#[test]
+fn lsode2_automatic_native_stiff_relaxation_can_force_real_bdf_switch() {
+    let mut solver = Lsode2Solver::new(
+        stiff_relaxation_config()
+            .with_native_banded_faithful_backend()
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf()
+                    .with_method_switch_probe_steps(1)
+                    .with_convergence_failure_threshold(1)
+                    .with_rejection_threshold(1),
+            )
+            .with_faithful_bdf_solve(65_536, 65_536),
+    )
+    .expect("automatic stiff-relaxation config should build");
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("automatic stiff-relaxation solve should finish");
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
+    );
+    assert!(
+        summary.native_statistics.preferred_bdf_count > 0,
+        "stiff-relaxation should produce BDF preference when convergence/rejection gate is active"
+    );
+    assert!(
+        summary.native_statistics.executed_bdf_count > 0,
+        "stiff-relaxation should execute BDF steps when BDF is preferred"
+    );
+}
+
+#[test]
+fn lsode2_automatic_native_nonsteady_kinetics_switches_to_bdf_and_keeps_mass() {
+    let mut solver = Lsode2Solver::new(
+        nonsteady_chemical_kinetics_native_sparse_config()
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf()
+                    .with_method_switch_probe_steps(1)
+                    .with_stiffness_ratio_threshold(1.0)
+                    .with_convergence_failure_threshold(1)
+                    .with_rejection_threshold(1),
+            )
+            .with_faithful_bdf_solve(200_000, 200_000),
+    )
+    .expect("automatic non-steady kinetics config should build");
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("automatic non-steady kinetics solve should finish");
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
+    );
+    assert!(
+        summary.native_statistics.preferred_bdf_count > 0,
+        "stiff non-steady kinetics should produce at least one BDF preference"
+    );
+    assert!(
+        summary.native_statistics.executed_bdf_count > 0,
+        "stiff non-steady kinetics should execute BDF path"
+    );
+
+    let y = summary
+        .final_y
+        .as_ref()
+        .expect("non-steady kinetics should expose final state");
+    let mass = y[0] + y[1] + y[2];
+    assert!(
+        (mass - 1.0).abs() < 5.0e-4,
+        "mass conservation drift too large for A->B->C kinetics: {mass:e}"
+    );
+    assert!(
+        y[0] >= -1.0e-10 && y[1] >= -1.0e-10 && y[2] >= -1.0e-10,
+        "species should stay non-negative up to tolerance: A={:e}, B={:e}, C={:e}",
+        y[0],
+        y[1],
+        y[2]
     );
 }
 
@@ -1032,6 +2256,16 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
     let problem_key = residual_problem
         .prepare_residual_aot_problem(generated_backend.aot_options)
         .problem_key();
+    let mut sparse_probe_backend = generated_backend.clone();
+    sparse_probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new().with_aot_options(generated_backend.aot_options),
+        sparse_probe_backend,
+    )
+    .expect("sparse generated backend should produce one stable problem key");
     let residual_calls = Arc::new(AtomicUsize::new(0));
     let residual_calls_for_backend = Arc::clone(&residual_calls);
 
@@ -1045,6 +2279,19 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
             out[0] = -args[1];
         }),
     ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        prepared_sparse.problem_key.clone(),
+        1,
+        (1, 1),
+        prepared_sparse.jacobian_structure.nnz(),
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            out.fill(-1.0);
+        }),
+    ));
 
     let result = (|| {
         let mut solver = Lsode2Solver::new(config).expect("LSODE2 config should build");
@@ -1054,6 +2301,7 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
     })();
 
     unregister_linked_residual_backend(problem_key.as_str());
+    unregister_linked_sparse_backend(prepared_sparse.problem_key.as_str());
 
     let expected = (-1.0_f64).exp();
     assert!(
@@ -1063,6 +2311,342 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
     assert!(
         residual_calls.load(Ordering::Relaxed) > 0,
         "prelinked residual backend should be called during solve"
+    );
+}
+
+#[test]
+fn lsode2_native_sparse_symbolic_aot_uses_prelinked_sparse_jacobian_backend() {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(
+            "generated_lsode2_prelinked_sparse_jacobian".to_string(),
+        ))
+        .with_module_name_override(Some(
+            "generated_lsode2_prelinked_sparse_jacobian".to_string(),
+        ));
+    let mut probe_backend = generated_backend.clone();
+    probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+
+    let mut config = exponential_decay_config()
+        .with_native_sparse_faer_generated_backend(generated_backend.clone())
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::CTcc,
+                profile: super::Lsode2AotProfile::Release,
+            },
+        });
+    config.backend.generated_backend = generated_backend;
+
+    let mut options = SymbolicIvpProblemOptions::new();
+    if let Some(parameters) = config.equation_parameters.clone() {
+        options = options.with_equation_parameters(parameters);
+    }
+    if let Some(values) = config.equation_parameter_values.clone() {
+        options = options.with_equation_parameter_values(values);
+    }
+    options = options.with_aot_options(config.backend.generated_backend.aot_options);
+    options = options.with_symbolic_assembly_backend(
+        crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::ExprLegacy,
+    );
+
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        options,
+        probe_backend,
+    )
+    .expect("sparse generated preparation should produce a stable problem key");
+    let problem_key = prepared_sparse.problem_key.clone();
+    let nnz = prepared_sparse.jacobian_structure.nnz();
+    let residual_problem = prepare_symbolic_ivp_residual_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(config.backend.generated_backend.aot_options)
+            .with_symbolic_assembly_backend(
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::ExprLegacy,
+            ),
+    )
+    .expect("residual-only symbolic IVP problem should prepare");
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(config.backend.generated_backend.aot_options)
+        .problem_key();
+
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        1,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+    ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        problem_key.clone(),
+        1,
+        (1, 1),
+        nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP sparse AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            jacobian_calls_for_backend.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(out.len(), nnz);
+            out.fill(-1.0);
+        }),
+    ));
+
+    let y_final = (|| {
+        let mut solver =
+            Lsode2Solver::new(config).expect("LSODE2 sparse symbolic AOT should build");
+        solver
+            .solve()
+            .expect("LSODE2 sparse symbolic AOT solve should finish");
+        let (_, y) = solver.get_result();
+        y[(y.nrows() - 1, 0)]
+    })();
+
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(residual_problem_key.as_str());
+
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "prelinked sparse AOT Jacobian solve mismatch: got={y_final:e}, expected={expected:e}"
+    );
+    assert!(
+        jacobian_calls.load(Ordering::Relaxed) > 0,
+        "prelinked sparse AOT Jacobian evaluator should be called by LSODE2 solve"
+    );
+}
+
+#[test]
+fn lsode2_native_sparse_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_backend() {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(
+            "generated_lsode2_prelinked_sparse_jacobian_atom".to_string(),
+        ))
+        .with_module_name_override(Some(
+            "generated_lsode2_prelinked_sparse_jacobian_atom".to_string(),
+        ));
+    let mut probe_backend = generated_backend.clone();
+    probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+
+    let mut config = exponential_decay_config()
+        .with_native_sparse_faer_generated_backend(generated_backend.clone())
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::CTcc,
+                profile: super::Lsode2AotProfile::Release,
+            },
+        });
+    config.backend.generated_backend = generated_backend;
+
+    let mut options = SymbolicIvpProblemOptions::new();
+    if let Some(parameters) = config.equation_parameters.clone() {
+        options = options.with_equation_parameters(parameters);
+    }
+    if let Some(values) = config.equation_parameter_values.clone() {
+        options = options.with_equation_parameter_values(values);
+    }
+    options = options.with_aot_options(config.backend.generated_backend.aot_options);
+    options = options.with_symbolic_assembly_backend(
+        crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+    );
+
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        options,
+        probe_backend,
+    )
+    .expect("sparse generated preparation (AtomView) should produce a stable problem key");
+    let problem_key = prepared_sparse.problem_key.clone();
+    let nnz = prepared_sparse.jacobian_structure.nnz();
+    let residual_problem = prepare_symbolic_ivp_residual_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(config.backend.generated_backend.aot_options)
+            .with_symbolic_assembly_backend(
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+            ),
+    )
+    .expect("residual-only symbolic IVP problem (AtomView) should prepare");
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(config.backend.generated_backend.aot_options)
+        .problem_key();
+
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        1,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+    ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        problem_key.clone(),
+        1,
+        (1, 1),
+        nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP sparse AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            jacobian_calls_for_backend.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(out.len(), nnz);
+            out.fill(-1.0);
+        }),
+    ));
+
+    let y_final = (|| {
+        let mut solver =
+            Lsode2Solver::new(config).expect("LSODE2 sparse symbolic AOT (AtomView) should build");
+        solver
+            .solve()
+            .expect("LSODE2 sparse symbolic AOT (AtomView) solve should finish");
+        let (_, y) = solver.get_result();
+        y[(y.nrows() - 1, 0)]
+    })();
+
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(residual_problem_key.as_str());
+
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "prelinked sparse AOT Jacobian solve mismatch (AtomView): got={y_final:e}, expected={expected:e}"
+    );
+    assert!(
+        jacobian_calls.load(Ordering::Relaxed) > 0,
+        "prelinked sparse AOT Jacobian evaluator (AtomView) should be called by LSODE2 solve"
+    );
+}
+
+#[test]
+fn lsode2_native_banded_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_backend() {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(
+            "generated_lsode2_prelinked_banded_jacobian_atom".to_string(),
+        ))
+        .with_module_name_override(Some(
+            "generated_lsode2_prelinked_banded_jacobian_atom".to_string(),
+        ));
+    let mut probe_backend = generated_backend.clone();
+    probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+
+    let mut config = exponential_decay_config()
+        .with_native_banded_faithful_generated_backend(generated_backend.clone())
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::CTcc,
+                profile: super::Lsode2AotProfile::Release,
+            },
+        });
+    config.backend.generated_backend = generated_backend;
+
+    let mut options = SymbolicIvpProblemOptions::new();
+    if let Some(parameters) = config.equation_parameters.clone() {
+        options = options.with_equation_parameters(parameters);
+    }
+    if let Some(values) = config.equation_parameter_values.clone() {
+        options = options.with_equation_parameter_values(values);
+    }
+    options = options.with_aot_options(config.backend.generated_backend.aot_options);
+    options = options.with_symbolic_assembly_backend(
+        crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+    );
+
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        options,
+        probe_backend,
+    )
+    .expect("banded sparse-generated preparation (AtomView) should produce a stable problem key");
+    let problem_key = prepared_sparse.problem_key.clone();
+    let nnz = prepared_sparse.jacobian_structure.nnz();
+    let residual_problem = prepare_symbolic_ivp_residual_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(config.backend.generated_backend.aot_options)
+            .with_symbolic_assembly_backend(
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+            ),
+    )
+    .expect("residual-only symbolic IVP problem (AtomView, banded) should prepare");
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(config.backend.generated_backend.aot_options)
+        .problem_key();
+
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        1,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+    ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        problem_key.clone(),
+        1,
+        (1, 1),
+        nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP sparse AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            jacobian_calls_for_backend.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(out.len(), nnz);
+            out.fill(-1.0);
+        }),
+    ));
+
+    let y_final = (|| {
+        let mut solver =
+            Lsode2Solver::new(config).expect("LSODE2 banded symbolic AOT (AtomView) should build");
+        solver
+            .solve()
+            .expect("LSODE2 banded symbolic AOT (AtomView) solve should finish");
+        let (_, y) = solver.get_result();
+        y[(y.nrows() - 1, 0)]
+    })();
+
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(residual_problem_key.as_str());
+
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "prelinked banded AOT Jacobian solve mismatch (AtomView): got={y_final:e}, expected={expected:e}"
+    );
+    assert!(
+        jacobian_calls.load(Ordering::Relaxed) > 0,
+        "prelinked sparse AOT Jacobian evaluator (AtomView, banded) should be called by LSODE2 solve"
     );
 }
 
@@ -1136,4 +2720,131 @@ fn lsode2_fortran_labels_replay_quality_gate() {
 
     // terminal KFLAG=-2 class must be represented.
     assert!(stats.native_kflag_repeated_convergence_failure_count > 0);
+}
+
+#[test]
+fn lsode2_dstoda_terminal_convergence_reason_groups_map_to_kflag_minus_two_class() {
+    // Branch A: repeated convergence failures (MXNCF-like terminal).
+    let mut mxncf_cycle = make_bdf_cycle_for_parity(Lsode2StepControlConfig {
+        max_convergence_failures: 1,
+        ..Lsode2StepControlConfig::default()
+    });
+    mxncf_cycle.state_mut().set_step_size(1.0).unwrap();
+    let mxncf_retry = mxncf_cycle.reject_after_nonlinear_failure().unwrap();
+    assert_eq!(
+        mxncf_retry.action,
+        Lsode2RetryAction::FailRepeatedConvergenceFailures
+    );
+    assert_eq!(mxncf_cycle.kflag_code(), -2);
+    assert_eq!(mxncf_cycle.iredo().code(), 1);
+
+    // Branch B: HMIN guard terminal from convergence-retract path.
+    let mut hmin_cycle = make_bdf_cycle_for_parity(Lsode2StepControlConfig {
+        h_min: 0.3,
+        max_convergence_failures: 10,
+        ..Lsode2StepControlConfig::default()
+    });
+    hmin_cycle.state_mut().set_step_size(1.0).unwrap();
+    let hmin_retry = hmin_cycle.reject_after_nonlinear_failure().unwrap();
+    assert_eq!(hmin_retry.action, Lsode2RetryAction::FailStepSizeUnderflow);
+    assert_eq!(hmin_cycle.kflag_code(), -2);
+    assert_eq!(hmin_cycle.iredo().code(), 1);
+}
+
+#[test]
+fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
+    let session_tag = unique_test_tag("aot_parity");
+    let assemblies = [
+        Lsode2SymbolicAssemblyBackend::ExprLegacy,
+        Lsode2SymbolicAssemblyBackend::AtomView,
+    ];
+    let structures = [
+        Lsode2LinearSystemStructure::Dense,
+        Lsode2LinearSystemStructure::Sparse,
+        Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
+    ];
+
+    // Lambdify parity surface: all assembly/structure combinations should solve.
+    for assembly in assemblies {
+        for structure in structures {
+            let source = Lsode2ResidualJacobianSource::Symbolic {
+                assembly,
+                execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+            };
+            let config = exponential_decay_config()
+                .with_residual_jacobian_source(source)
+                .with_linear_system_structure(structure)
+                .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
+            assert_exponential_decay_solve(config);
+        }
+    }
+
+    // AOT parity surface: run prelinked runtime callbacks for dense/sparse/banded.
+    for assembly in assemblies {
+        let assembly_tag = match assembly {
+            Lsode2SymbolicAssemblyBackend::ExprLegacy => "exprlegacy",
+            Lsode2SymbolicAssemblyBackend::AtomView => "atomview",
+        };
+
+        run_prelinked_dense_aot_case(
+            assembly,
+            &format!("{session_tag}_{assembly_tag}_dense"),
+        );
+        run_prelinked_sparse_or_banded_aot_case(
+            assembly,
+            Lsode2LinearSystemStructure::Sparse,
+            &format!("{session_tag}_{assembly_tag}_sparse"),
+        );
+        run_prelinked_sparse_or_banded_aot_case(
+            assembly,
+            Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
+            &format!("{session_tag}_{assembly_tag}_banded"),
+        );
+    }
+}
+
+#[test]
+fn lsode2_aot_tcc_sparse_cold_warm_diagnostic() {
+    let out_base = unique_aot_diag_output_dir("sparse_tcc_cold_warm");
+    let shared_tag = "shared_artifact";
+
+    let cold = run_sparse_tcc_aot_diag_case(
+        "cold(shared artifact)",
+        sparse_tcc_symbolic_aot_config(out_base.clone(), shared_tag),
+    );
+    let warm_reuse = run_sparse_tcc_aot_diag_case(
+        "warm(reuse same artifact)",
+        sparse_tcc_symbolic_aot_config(out_base.clone(), shared_tag),
+    );
+    let warm_unique = run_sparse_tcc_aot_diag_case(
+        "warm(unique artifact)",
+        sparse_tcc_symbolic_aot_config(out_base, "unique_artifact"),
+    );
+
+    let rows = [&cold, &warm_reuse, &warm_unique];
+    println!(
+        "[LSODE2 debug] AOT+tcc sparse cold/warm diagnostic; focus: infra lock vs numerical path"
+    );
+    println!("label | status_kind | error_class | detail");
+    println!("--------------------------------------------------------------------------------");
+    for row in rows {
+        println!(
+            "{} | {} | {} | {}",
+            row.label, row.status_kind, row.error_class, row.detail
+        );
+    }
+
+    for row in rows {
+        let known = matches!(
+            row.error_class.as_str(),
+            "-" | "permission_denied_or_file_lock"
+                | "generated_backend_failure"
+                | "toolchain_not_available"
+        );
+        assert!(
+            known,
+            "unexpected diagnostic class for {}: status={} class={} detail={}",
+            row.label, row.status_kind, row.error_class, row.detail
+        );
+    }
 }

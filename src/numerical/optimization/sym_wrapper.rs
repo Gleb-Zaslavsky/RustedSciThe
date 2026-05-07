@@ -63,6 +63,122 @@ impl LM {
             loglevel: Some("info".to_string()),
         }
     }
+
+    /// Builder pattern: Set equations from Expr vector
+    pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
+        self.eq_system = eq_system;
+        self
+    }
+
+    /// Builder pattern: Set equations from string vector
+    pub fn with_equations_str(mut self, eq_system_string: Vec<String>) -> Self {
+        self.eq_system = eq_system_string
+            .iter()
+            .map(|x| Expr::parse_expression(x))
+            .collect();
+        self
+    }
+
+    /// Builder pattern: Set unknowns
+    pub fn with_unknowns(mut self, unknowns: Vec<String>) -> Self {
+        self.values = unknowns;
+        self
+    }
+
+    /// Builder pattern: Set parameters
+    pub fn with_parameters(mut self, parameters: Vec<String>) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
+    /// Builder pattern: Set initial guess
+    pub fn with_initial_guess(mut self, initial_guess: Vec<f64>) -> Self {
+        self.initial_guess = initial_guess;
+        self
+    }
+
+    /// Builder pattern: Set tolerance
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = Some(tolerance);
+        self
+    }
+
+    /// Builder pattern: Set function tolerance
+    pub fn with_f_tolerance(mut self, f_tolerance: f64) -> Self {
+        self.f_tolerance = Some(f_tolerance);
+        self
+    }
+
+    /// Builder pattern: Set gradient tolerance
+    pub fn with_g_tolerance(mut self, g_tolerance: f64) -> Self {
+        self.g_tolerance = Some(g_tolerance);
+        self
+    }
+
+    /// Builder pattern: Set scale diagonal
+    pub fn with_scale_diag(mut self, scale_diag: bool) -> Self {
+        self.scale_diag = Some(scale_diag);
+        self
+    }
+
+    /// Builder pattern: Set max iterations
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Builder pattern: Set log level
+    pub fn with_loglevel(mut self, loglevel: String) -> Self {
+        self.loglevel = Some(loglevel);
+        self
+    }
+
+    /// Builder pattern: Build and prepare solver (generates Jacobian)
+    pub fn build(mut self) -> Self {
+        self.validate_and_infer();
+        if self.parameters.is_some() {
+            self.eq_generate_with_params();
+        } else {
+            self.eq_generate();
+        }
+        self
+    }
+
+    /// Validate inputs and infer unknowns if not provided
+    fn validate_and_infer(&mut self) {
+        assert!(
+            !self.eq_system.is_empty(),
+            "Equation system cannot be empty."
+        );
+        assert!(
+            !self.initial_guess.is_empty(),
+            "Initial guess cannot be empty."
+        );
+
+        if self.values.is_empty() {
+            let mut args: Vec<String> = self
+                .eq_system
+                .iter()
+                .flat_map(|x| x.all_arguments_are_variables())
+                .collect();
+            args.sort();
+            args.dedup();
+            assert!(!args.is_empty(), "No variables found in equations.");
+            self.values = args;
+        }
+
+        assert_eq!(
+            self.values.len(),
+            self.eq_system.len(),
+            "Number of unknowns must equal number of equations."
+        );
+        assert_eq!(
+            self.values.len(),
+            self.initial_guess.len(),
+            "Initial guess length must match number of unknowns."
+        );
+    }
+
     pub fn set_loglevel(&mut self, loglevel: String) {
         self.loglevel = Some(loglevel);
     }
@@ -637,6 +753,123 @@ mod tests2 {
     use super::*;
     use crate::symbolic::symbolic_engine::Expr;
     use std::vec;
+
+    #[test]
+    fn test_builder_pattern_basic() {
+        let solver = LM::new()
+            .with_equations_str(vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()])
+            .with_unknowns(vec!["x".to_string(), "y".to_string()])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!((map["x"].abs() - expected).abs() < 1e-6);
+        assert!((map["y"].abs() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_builder_pattern_with_expr() {
+        let eq1 = Expr::parse_expression("x^2 + y^2 - 1");
+        let eq2 = Expr::parse_expression("x - y");
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_unknowns(vec!["x".to_string(), "y".to_string()])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        assert!(solver.map_of_solutions.is_some());
+    }
+
+    #[test]
+    fn test_builder_rosenbrock() {
+        // Rosenbrock function: f1 = 10*(y - x^2), f2 = 1 - x
+        let solver = LM::new()
+            .with_equations_str(vec!["10*(y - x^2)".to_string(), "1 - x".to_string()])
+            .with_initial_guess(vec![-1.2, 1.0])
+            .with_tolerance(1e-8)
+            .with_max_iterations(200)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        assert!((map["x"] - 1.0).abs() < 1e-5);
+        assert!((map["y"] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_builder_exponential_system() {
+        // exp(x) + y - 3 = 0, x + exp(y) - 3 = 0
+        let solver = LM::new()
+            .with_equations_str(vec![
+                "exp(x) + y - 3".to_string(),
+                "x + exp(y) - 3".to_string(),
+            ])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_f_tolerance(1e-8)
+            .with_g_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        // Solution should be symmetric: x ≈ y
+        assert!((map["x"] - map["y"]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_builder_trigonometric_system() {
+        // sin(x) + cos(y) - 1 = 0, cos(x) - sin(y) = 0
+        let solver = LM::new()
+            .with_equations_str(vec![
+                "sin(x) + cos(y) - 1".to_string(),
+                "cos(x) - sin(y)".to_string(),
+            ])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_tolerance(1e-7)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        assert!(solver.map_of_solutions.is_some());
+    }
+
+    #[test]
+    fn test_builder_3d_system() {
+        // x^2 + y^2 + z^2 - 1 = 0, x + y + z - 1 = 0, x - y = 0
+        let solver = LM::new()
+            .with_equations_str(vec![
+                "x^2 + y^2 + z^2 - 1".to_string(),
+                "x + y + z - 1".to_string(),
+                "x - y".to_string(),
+            ])
+            .with_initial_guess(vec![0.3, 0.3, 0.3])
+            .with_tolerance(1e-7)
+            .with_max_iterations(150)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        // Check x = y
+        assert!((map["x"] - map["y"]).abs() < 1e-5);
+        // Check x + y + z = 1
+        assert!((map["x"] + map["y"] + map["z"] - 1.0).abs() < 1e-5);
+    }
+
     #[test]
     fn test_nonlinear_system_example() {
         let vec_of_str = vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()];
@@ -657,6 +890,7 @@ mod tests2 {
         LM.eq_generate();
         LM.solve();
     }
+
     #[test]
     fn test_with_params() {
         // Solve: a*x^2 + b*y^2 - 1 = 0, x - y = 0 with params a=1, b=1
@@ -686,10 +920,205 @@ mod tests2 {
     }
 
     #[test]
+    fn test_builder_with_params() {
+        // Builder pattern with parameters
+        let solver = LM::new()
+            .with_equations_str(vec!["a*x^2 + b*y^2 - 1".to_string(), "x - y".to_string()])
+            .with_unknowns(vec!["x".to_string(), "y".to_string()])
+            .with_parameters(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve_with_params(vec![1.0, 1.0]);
+        let map = solver.map_of_solutions.unwrap();
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!((map["x"].abs() - expected).abs() < 1e-6);
+        assert!((map["y"].abs() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_native_symbolic_construction() {
+        // Using native Expr construction without string parsing
+        let vars = Expr::Symbols("x, y");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+
+        // Build equations: x^2 + y^2 - 1 = 0, x - y = 0
+        let eq1 =
+            x.clone().pow(Expr::Const(2.0)) + y.clone().pow(Expr::Const(2.0)) - Expr::Const(1.0);
+        let eq2 = x.clone() - y.clone();
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_unknowns(vec!["x".to_string(), "y".to_string()])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!((map["x"].abs() - expected).abs() < 1e-6);
+        assert!((map["y"].abs() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_native_symbolic_exponential() {
+        // Native symbolic construction with exponentials
+        let vars = Expr::Symbols("x, y");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+
+        // exp(x) + y - 3 = 0, x + exp(y) - 3 = 0
+        let eq1 = Expr::exp(x.clone()) + y.clone() - Expr::Const(3.0);
+        let eq2 = x.clone() + Expr::exp(y.clone()) - Expr::Const(3.0);
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        // Solution should be symmetric
+        assert!((map["x"] - map["y"]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_native_symbolic_trigonometric() {
+        // Native symbolic construction with trig functions
+        let vars = Expr::Symbols("x, y");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+
+        // sin(x) + cos(y) - 1 = 0, cos(x) - sin(y) = 0
+        let eq1 =
+            Expr::sin(Box::new(x.clone())) + Expr::cos(Box::new(y.clone())) - Expr::Const(1.0);
+        let eq2 = Expr::cos(Box::new(x.clone())) - Expr::sin(Box::new(y.clone()));
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_tolerance(1e-7)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        assert!(solver.map_of_solutions.is_some());
+    }
+
+    #[test]
+    fn test_native_symbolic_logarithmic() {
+        // Native symbolic construction with logarithms
+        let vars = Expr::Symbols("x, y");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+
+        // ln(x) + y - 2 = 0, x + ln(y) - 2 = 0
+        let eq1 = Expr::ln(x.clone()) + y.clone() - Expr::Const(2.0);
+        let eq2 = x.clone() + Expr::ln(y.clone()) - Expr::Const(2.0);
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_initial_guess(vec![1.0, 1.0])
+            .with_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+        // Solution should be symmetric
+        assert!((map["x"] - map["y"]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_native_symbolic_complex_expression() {
+        // Complex expression with multiple operations
+        let vars = Expr::Symbols("x, y, z");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+        let z = vars[2].clone();
+
+        // x^2 + y^2 + z^2 - 1 = 0
+        let eq1 = x.clone().pow(Expr::Const(2.0))
+            + y.clone().pow(Expr::Const(2.0))
+            + z.clone().pow(Expr::Const(2.0))
+            - Expr::Const(1.0);
+
+        // x*y + z - 0.5 = 0
+        let eq2 = x.clone() * y.clone() + z.clone() - Expr::Const(0.5);
+
+        // x + y + z - 1 = 0
+        let eq3 = x.clone() + y.clone() + z.clone() - Expr::Const(1.0);
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2, eq3])
+            .with_unknowns(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+            .with_initial_guess(vec![0.3, 0.3, 0.4])
+            .with_tolerance(1e-7)
+            .with_max_iterations(200)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+
+        // Verify constraints
+        let sphere = map["x"].powi(2) + map["y"].powi(2) + map["z"].powi(2);
+        let product = map["x"] * map["y"] + map["z"];
+        let sum = map["x"] + map["y"] + map["z"];
+
+        assert!((sphere - 1.0).abs() < 1e-5);
+        assert!((product - 0.5).abs() < 1e-5);
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_native_symbolic_with_parameters() {
+        // Native symbolic construction with parameters
+        let vars = Expr::Symbols("x, y");
+        let params = Expr::Symbols("a, b");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+        let a = params[0].clone();
+        let b = params[1].clone();
+
+        // a*x^2 + b*y^2 - 1 = 0, x - y = 0
+        let eq1 = a * x.clone().pow(Expr::Const(2.0)) + b * y.clone().pow(Expr::Const(2.0))
+            - Expr::Const(1.0);
+        let eq2 = x.clone() - y.clone();
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_unknowns(vec!["x".to_string(), "y".to_string()])
+            .with_parameters(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![0.5, 0.5])
+            .with_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve_with_params(vec![1.0, 1.0]);
+        let map = solver.map_of_solutions.unwrap();
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!((map["x"].abs() - expected).abs() < 1e-6);
+        assert!((map["y"].abs() - expected).abs() < 1e-6);
+    }
+
+    #[test]
     fn chemical_equations() {
         let symbolic = Expr::Symbols("N0, N1, N2, Np, Lambda0, Lambda1");
 
-        let dGm0 = Expr::Const(8.314 * 8.0e4); //8.314 * 8.0e3   
+        let dGm0 = Expr::Const(8.314 * 8.0e4); //8.314 * 8.0e3
         let dG0 = Expr::Const(-450.0e3);
         let dG1 = Expr::Const(-150.0e3);
         let dG2 = Expr::Const(-50e3);
@@ -766,5 +1195,32 @@ mod tests2 {
         assert!(d1.abs() < 1e-3);
         assert!(d2.abs() < 1e-2);
         assert!(d3.abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_native_symbolic_division_operations() {
+        // Test with division and complex operations
+        let vars = Expr::Symbols("x, y");
+        let x = vars[0].clone();
+        let y = vars[1].clone();
+
+        // x/y - 2 = 0, x + y - 3 = 0
+        let eq1 = x.clone() / y.clone() - Expr::Const(2.0);
+        let eq2 = x.clone() + y.clone() - Expr::Const(3.0);
+
+        let solver = LM::new()
+            .with_equations(vec![eq1, eq2])
+            .with_initial_guess(vec![1.5, 1.0])
+            .with_tolerance(1e-8)
+            .with_loglevel("none".to_string())
+            .build();
+
+        let mut solver = solver;
+        solver.solve();
+        let map = solver.map_of_solutions.unwrap();
+
+        // x = 2, y = 1
+        assert!((map["x"] - 2.0).abs() < 1e-5);
+        assert!((map["y"] - 1.0).abs() < 1e-5);
     }
 }

@@ -14,7 +14,10 @@
 
 use super::adams_engine::Lsode2AdamsDcfodeTables;
 use super::algorithm::Lsode2SwitchTelemetry;
-use super::config::{Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2ProblemConfig};
+use super::config::{
+    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+};
 use super::correction::{Lsode2CorrectionControlConfig, Lsode2CorrectionController};
 use super::dcfode::Lsode2BdfDcfodeTables;
 use super::dstoda_state::{
@@ -26,7 +29,8 @@ use super::history::Lsode2Tolerance;
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_executor::Lsode2NativeCallbackExecutor;
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_symbolic_jacobian_with_parameter_handle,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -38,13 +42,15 @@ use super::step_cycle::{
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
 use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
 use crate::symbolic::symbolic_ivp::{
-    IvpBackendError, PreparedSymbolicIvpResidualProblem, SymbolicIvpProblemOptions,
+    IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::prepare_generated_symbolic_ivp_residual_problem;
 use nalgebra::DVector;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
+
+type NativeResidualFn = dyn Fn(f64, &DVector<f64>) -> DVector<f64>;
 
 #[derive(Debug, Clone)]
 struct NativeStepResidualContext {
@@ -130,10 +136,13 @@ impl Lsode2NativeStepEngine {
         config: &Lsode2ProblemConfig,
         method: Lsode2NativeStepMethod,
     ) -> Result<Option<Self>, IvpBackendError> {
-        if config.backend.jacobian_backend != Lsode2JacobianBackend::SymbolicGenerated {
+        if !matches!(
+            config.backend.jacobian_backend,
+            Lsode2JacobianBackend::SymbolicGenerated | Lsode2JacobianBackend::AnalyticClosure
+        ) {
             return Err(IvpBackendError::GeneratedBackendFailure {
                 message:
-                    "LSODE2 native step engine currently supports symbolic-generated Jacobians only"
+                    "LSODE2 native step engine currently supports symbolic-generated and analytical Jacobians only"
                         .to_string(),
             });
         }
@@ -196,7 +205,7 @@ impl Lsode2NativeStepEngine {
 }
 
 struct Lsode2NativeStepEngineImpl<L> {
-    residual_problem: Rc<PreparedSymbolicIvpResidualProblem>,
+    residual: Rc<NativeResidualFn>,
     jacobian: Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
     linear_backend: L,
     driver: Lsode2NonlinearStepDriver,
@@ -212,35 +221,118 @@ where
         linear_backend: L,
         jacobian_storage: NativeJacobianStorage,
     ) -> Result<Self, IvpBackendError> {
-        let mut options = SymbolicIvpProblemOptions::new();
-        if let Some(parameters) = config.equation_parameters.clone() {
-            options = options.with_equation_parameters(parameters);
-        }
-        if let Some(values) = config.equation_parameter_values.clone() {
-            options = options.with_equation_parameter_values(values);
-        }
+        let (residual, jacobian): (
+            Rc<NativeResidualFn>,
+            Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
+        ) = match config.backend.jacobian_backend {
+            Lsode2JacobianBackend::SymbolicGenerated => {
+                let mut options = SymbolicIvpProblemOptions::new();
+                if let Some(parameters) = config.equation_parameters.clone() {
+                    options = options.with_equation_parameters(parameters);
+                }
+                if let Some(values) = config.equation_parameter_values.clone() {
+                    options = options.with_equation_parameter_values(values);
+                }
+                let symbolic_assembly_backend = match config.residual_jacobian_source {
+                    Lsode2ResidualJacobianSource::Symbolic { assembly, .. } => assembly,
+                    Lsode2ResidualJacobianSource::Analytical => {
+                        Lsode2SymbolicAssemblyBackend::ExprLegacy
+                    }
+                };
+                options = options.with_symbolic_assembly_backend(match symbolic_assembly_backend {
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                        IvpSymbolicAssemblyBackend::ExprLegacy
+                    }
+                    Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
+                });
 
-        let prepared = prepare_generated_symbolic_ivp_residual_problem(
-            config.eq_system.clone(),
-            config.values.clone(),
-            config.arg.clone(),
-            options,
-            config.backend.generated_backend.clone(),
-        )
-        .map_err(map_generated_backend_error)?;
-        let residual_problem = Rc::new(prepared.into_problem());
-        let jacobian = Rc::new(RefCell::new(
-            compile_native_symbolic_jacobian_with_parameter_handle(
-                &config.eq_system,
-                &config.values,
-                config.arg.as_str(),
-                config.equation_parameters.as_deref(),
-                residual_problem.parameter_values_handle(),
-                jacobian_storage,
-            ),
-        ));
+                let prepared = prepare_generated_symbolic_ivp_residual_problem(
+                    config.eq_system.clone(),
+                    config.values.clone(),
+                    config.arg.clone(),
+                    options,
+                    config.backend.generated_backend.clone(),
+                )
+                .map_err(map_generated_backend_error)?;
+                let residual_problem = Rc::new(prepared.into_problem());
+                let residual = {
+                    let residual_problem = Rc::clone(&residual_problem);
+                    Rc::new(move |t: f64, y: &DVector<f64>| (residual_problem.residual)(t, y))
+                        as Rc<NativeResidualFn>
+                };
+                let use_sparse_aot_jacobian = matches!(
+                    config.residual_jacobian_source,
+                    Lsode2ResidualJacobianSource::Symbolic {
+                        execution: Lsode2SymbolicExecutionMode::Aot { .. },
+                        ..
+                    }
+                );
+                let jacobian = if use_sparse_aot_jacobian {
+                    Rc::new(RefCell::new(
+                        compile_native_sparse_aot_jacobian_with_parameter_handle(
+                            &config.eq_system,
+                            &config.values,
+                            config.arg.as_str(),
+                            config.equation_parameters.as_deref(),
+                            config.equation_parameter_values.clone(),
+                            residual_problem.parameter_values_handle(),
+                            jacobian_storage,
+                            config.backend.generated_backend.clone(),
+                            match symbolic_assembly_backend {
+                                Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                                    IvpSymbolicAssemblyBackend::ExprLegacy
+                                }
+                                Lsode2SymbolicAssemblyBackend::AtomView => {
+                                    IvpSymbolicAssemblyBackend::AtomView
+                                }
+                            },
+                        )?,
+                    ))
+                } else {
+                    Rc::new(RefCell::new(
+                        compile_native_symbolic_jacobian_with_parameter_handle(
+                            &config.eq_system,
+                            &config.values,
+                            config.arg.as_str(),
+                            config.equation_parameters.as_deref(),
+                            residual_problem.parameter_values_handle(),
+                            jacobian_storage,
+                        ),
+                    ))
+                };
+                (residual, jacobian)
+            }
+            Lsode2JacobianBackend::AnalyticClosure => {
+                let callbacks = config
+                    .analytical_callbacks
+                    .as_ref()
+                    .ok_or_else(|| IvpBackendError::GeneratedBackendFailure {
+                        message:
+                            "LSODE2 analytical native step engine requires residual/jacobian callbacks"
+                                .to_string(),
+                    })?
+                    .clone();
+                let residual_callbacks = callbacks.clone();
+                let residual =
+                    Rc::new(move |t: f64, y: &DVector<f64>| (residual_callbacks.residual)(t, y))
+                        as Rc<NativeResidualFn>;
+                let jacobian_callbacks = callbacks;
+                let jacobian = Rc::new(RefCell::new(Box::new(move |t: f64, y: &DVector<f64>| {
+                    BdfJacobian::from_dense((jacobian_callbacks.jacobian)(t, y))
+                })
+                    as Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>));
+                (residual, jacobian)
+            }
+            Lsode2JacobianBackend::FiniteDifference => {
+                return Err(IvpBackendError::GeneratedBackendFailure {
+                    message:
+                        "LSODE2 native step engine finite-difference Jacobian backend is not wired yet"
+                            .to_string(),
+                });
+            }
+        };
 
-        let h0 = initial_native_step_size(config, &residual_problem);
+        let h0 = initial_native_step_size(config, residual.as_ref());
         let max_order = method.max_order(config);
         let step_method = match method {
             Lsode2NativeStepMethod::BdfLike => Lsode2StepMethod::BdfLike,
@@ -269,7 +361,7 @@ where
         .map_err(map_correction_error)?;
 
         Ok(Self {
-            residual_problem,
+            residual,
             jacobian,
             linear_backend,
             driver: Lsode2NonlinearStepDriver::new(cycle, correction),
@@ -289,12 +381,12 @@ where
         let mut refresh_requested = false;
         let residual_ctx: Rc<RefCell<Option<NativeStepResidualContext>>> =
             Rc::new(RefCell::new(None));
-        let residual_problem = Rc::clone(&self.residual_problem);
+        let residual = Rc::clone(&self.residual);
         let residual_ctx_for_cb = Rc::clone(&residual_ctx);
         let jacobian = Rc::clone(&self.jacobian);
         let mut executor = Lsode2NativeCallbackExecutor::new(
             move |t: f64, y: &DVector<f64>| {
-                let fy = (residual_problem.residual)(t, y);
+                let fy = (residual)(t, y);
                 let ctx_guard = residual_ctx_for_cb.borrow();
                 let ctx = ctx_guard
                     .as_ref()
@@ -482,7 +574,7 @@ where
         let snapshot = self.state_snapshot();
         let y = DVector::from_vec(self.driver.cycle().state().y().to_vec());
         let started = Instant::now();
-        let rhs = (self.residual_problem.residual)(snapshot.t, &y);
+        let rhs = (self.residual)(snapshot.t, &y);
         self.driver
             .statistics_mut()
             .record_native_residual_duration(started.elapsed());
@@ -506,7 +598,7 @@ where
     ) -> Result<(), IvpBackendError> {
         let y_new_vec = DVector::from_vec(y_new.to_vec());
         let started = Instant::now();
-        let accepted_rhs = (self.residual_problem.residual)(t_new, &y_new_vec);
+        let accepted_rhs = (self.residual)(t_new, &y_new_vec);
         self.driver
             .statistics_mut()
             .record_native_residual_duration(started.elapsed());
@@ -577,10 +669,7 @@ fn el1_for_step_method(method: Lsode2StepMethod, order: usize) -> Result<f64, Iv
     Ok(el1)
 }
 
-fn initial_native_step_size(
-    config: &Lsode2ProblemConfig,
-    residual_problem: &PreparedSymbolicIvpResidualProblem,
-) -> f64 {
+fn initial_native_step_size(config: &Lsode2ProblemConfig, residual: &NativeResidualFn) -> f64 {
     let direction = if config.t_bound >= config.t0 {
         1.0
     } else {
@@ -589,7 +678,7 @@ fn initial_native_step_size(
     let span = (config.t_bound - config.t0).abs();
 
     let h0_mag = {
-        let f0 = (residual_problem.residual)(config.t0, &config.y0);
+        let f0 = residual(config.t0, &config.y0);
         let scale = DVector::from_vec(scale_func(
             NumberOrVec::Number(config.rtol),
             NumberOrVec::Number(config.atol),
@@ -606,7 +695,7 @@ fn initial_native_step_size(
 
         if h0 > 0.0 {
             let y1 = &config.y0 + h0 * direction * &f0;
-            let f1 = (residual_problem.residual)(config.t0 + h0 * direction, &y1);
+            let f1 = residual(config.t0 + h0 * direction, &y1);
             let d2 = norm(&((f1 - f0).component_div(&scale))) / h0;
             let h1 = if d1 <= 1.0e-15 && d2 <= 1.0e-15 {
                 1.0e-6_f64.max(h0 * 1.0e-3)
@@ -789,6 +878,44 @@ mod tests {
             .state_mut()
             .reset_after_repeated_error_failures()
             .unwrap();
+        assert!(
+            inner
+                .driver
+                .cycle()
+                .state()
+                .first_derivative_refresh_requested()
+        );
+
+        inner.refresh_first_derivative_if_requested().unwrap();
+
+        let state = inner.driver.cycle().state();
+        let expected = -state.h() * state.y()[0];
+        assert!((state.nordsieck().col(1).unwrap()[0] - expected).abs() < 1.0e-12);
+        assert!(!state.first_derivative_refresh_requested());
+        assert!(inner.driver.statistics().native_residual_calls > 0);
+    }
+
+    #[test]
+    fn native_step_engine_refreshes_first_derivative_after_nonlinear_retract_to_order_one() {
+        let mut engine = Lsode2NativeStepEngine::from_problem_config(
+            &exponential_decay_config().with_native_sparse_faer_backend(),
+        )
+        .expect("sparse config should build a native step engine")
+        .expect("sparse config should enable native step engine");
+
+        let inner = match &mut engine {
+            Lsode2NativeStepEngine::Sparse(inner) => inner,
+            Lsode2NativeStepEngine::Banded(_) => unreachable!("test requested sparse backend"),
+        };
+        inner.driver.cycle_mut().state_mut().set_order(3).unwrap();
+        let retry = inner
+            .driver
+            .cycle_mut()
+            .state_mut()
+            .reject_after_nonlinear_failure()
+            .unwrap();
+        assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
+        assert_eq!(retry.order_new, 1);
         assert!(
             inner
                 .driver

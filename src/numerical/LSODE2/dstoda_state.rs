@@ -342,7 +342,6 @@ impl Lsode2DstodaState {
         self.icf = Lsode2Icf::RefreshDidNotRecover;
         self.iret = Lsode2Iret::NormalFlow;
         self.redo_stage = Lsode2RedoStage::CorrectorFailureRetry;
-        self.request_jacobian_update(Lsode2IpupTrigger::FailurePath);
     }
 
     pub fn record_history_or_step_size_change(&mut self) {
@@ -373,7 +372,6 @@ impl Lsode2DstodaState {
             self.corrector_failure_mode = Lsode2CorrectorFailureMode::StepRetraction;
             self.icf = Lsode2Icf::RefreshDidNotRecover;
             self.redo_stage = Lsode2RedoStage::CorrectorFailureRetry;
-            self.request_jacobian_update(Lsode2IpupTrigger::FailurePath);
             Lsode2CorrectorFailureDecision::RetractAndShrinkStep
         }
     }
@@ -452,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn current_jacobian_corrector_failure_retracts_and_requests_update() {
+    fn current_jacobian_corrector_failure_retracts_without_preemptive_ipup_request() {
         let mut state = Lsode2DstodaState::default();
 
         let decision = state.decide_after_corrector_failure(Lsode2IterationMode::JacobianBased);
@@ -465,10 +463,14 @@ mod tests {
             state.corrector_failure_mode(),
             Lsode2CorrectorFailureMode::StepRetraction
         );
-        assert_eq!(state.jacobian_currency(), Lsode2JacobianCurrency::Stale);
-        assert!(state.jacobian_update_request().is_requested());
-        assert_eq!(state.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
-        assert_eq!(state.ipup_trigger(), Lsode2IpupTrigger::FailurePath);
+        // DSTODA parity: label-430 sets IPUP only on the nonterminal retry branch.
+        assert_eq!(state.jacobian_currency(), Lsode2JacobianCurrency::Current);
+        assert_eq!(
+            state.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::None
+        );
+        assert_eq!(state.ipup(), Lsode2Ipup::UpToDate);
+        assert_eq!(state.ipup_trigger(), Lsode2IpupTrigger::None);
         assert_eq!(state.icf(), Lsode2Icf::RefreshDidNotRecover);
         assert_eq!(state.redo_stage(), Lsode2RedoStage::CorrectorFailureRetry);
     }
@@ -612,12 +614,13 @@ mod tests {
         let mut state = Lsode2DstodaState::default();
         state.record_history_or_step_size_change();
         assert_eq!(state.iret(), Lsode2Iret::RescaleHistory);
+        assert_eq!(state.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
 
         state.record_repeated_convergence_failure();
 
         assert_eq!(state.kflag(), Lsode2Kflag::RepeatedConvergenceFailure);
-        assert_eq!(state.jacobian_currency(), Lsode2JacobianCurrency::Stale);
-        assert!(state.jacobian_update_request().is_requested());
+        // DSTODA parity: terminal convergence exit itself does not set IPUP;
+        // the request belongs to the nonterminal retry branch only.
         assert_eq!(state.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
         assert_eq!(state.ipup_trigger(), Lsode2IpupTrigger::FailurePath);
         assert_eq!(state.icf(), Lsode2Icf::RefreshDidNotRecover);
