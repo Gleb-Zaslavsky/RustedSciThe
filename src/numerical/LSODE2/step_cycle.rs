@@ -527,7 +527,7 @@ impl Lsode2StepCycle {
         }
     }
 
-    fn select_post_accept_order(
+pub    fn select_post_accept_order(
         &mut self,
         y_candidate: &[f64],
         current_error_norm: f64,

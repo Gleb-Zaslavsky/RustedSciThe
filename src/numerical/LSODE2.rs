@@ -48,6 +48,8 @@ mod story_tests;
 
 #[cfg(test)]
 mod story_tests2;
+#[cfg(test)]
+mod parity_micro;
 
 pub use adams_engine::{
     Lsode2AdamsDcfodeError, Lsode2AdamsDcfodeTables, Lsode2AdamsOrderCoefficients,

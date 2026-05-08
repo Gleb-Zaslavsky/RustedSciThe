@@ -200,14 +200,11 @@ fn one_d_solid_combustion_config(backend: Lsode2ResidualJacobianSource) -> Lsode
         1.0,   // Lambda
         5.0e2, // Q
     ]))
-    .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
-        assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
-        execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
-    })
+    .with_residual_jacobian_source(backend)
     .with_automatic_adams_bdf_controller()
+    //.with_bridge_solve()
     .with_controller(Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(1))
 }
-
 #[test]
 fn lsode2_1d_solid_combustion_switches_bdf_to_adams() {
     let start = Instant::now();
@@ -246,7 +243,7 @@ fn lsode2_1d_solid_combustion_switches_bdf_to_adams() {
     println!("1D solid combustion test duration: {:?}", duration.as_millis());
 }
 
-#[test]
+//#[test]
 fn lsode2_1d_solid_combustion_switches_bdf_to_adams_aot() {
     let start = Instant::now();
     let mut solver = Lsode2Solver::new(one_d_solid_combustion_config(

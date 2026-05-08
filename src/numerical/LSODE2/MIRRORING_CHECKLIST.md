@@ -7,12 +7,30 @@ Rule: a block is marked complete only when behavior is verified against `lsode.f
 - [x] Predictor/corrector loop skeleton with accept/reject branches.
 - [x] Error-test failure branches with `KFLAG` classes and `HMIN*1.00001` guard.
 - [x] Corrector-failure branches with refresh/retry and repeated-convergence terminal classes.
-- [x] Control-plane flags tracked (`KFLAG`, `ICF`, `IPUP`, `JCUR`, `IRET`, `IREDO`, `IALTH`) and exported to statistics.
+-[x] Control-plane flags tracked (`KFLAG`, `ICF`, `IPUP`, `JCUR`, `IRET`, `IREDO`, `IALTH`) and exported to statistics.
 - [ ] One-to-one label-by-label replay matrix vs Fortran for all terminal/near-terminal branches (final audit pass).
-new
-  - [ ] Verify HMIN guard terminal (label 670) matches Fortran's `HMIN*1.00001` logic and exit before IPUP request.
-  - [ ] Verify MXNCF terminal (label 430) matches Fortran's `MXNCF` limit and exit before IPUP request.
-  - [ ] Verify repeated error-test failure reset choreography (label 520) matches Fortran's `NHNIL` and `MXHNIL` handling.
+
+ **Math-parity status and gaps (DSTODA control state):**
+  - [x] `ICF`/`IPUP` stale-Jacobian choreography is mirrored in Rust:
+        - `Lsode2DstodaState::decide_after_corrector_failure` implements:
+          - One-shot same-step refresh when Jacobian is stale and Jacobian-based iteration is active (`ICF` transitions from `None` to `RefreshRequested`, `IPUP=FailurePath`).
+          - Subsequent convergence failure transitions to step retraction (`RefreshDidNotRecover`) with no repeated same-step refresh.
+        - Locally verified by:
+          - `dstoda_state::tests::stale_jacobian_corrector_failure_requests_same_step_refresh`
+          - `dstoda_state::tests::second_convergence_failure_after_refresh_request_retracts_step`
+          - `nonlinear_driver::tests::nonlinear_driver_submit_path_transitions_from_icf1_refresh_to_icf2_retract`
+  - [ ] Step-level parity vs Fortran for `ICF`/`IPUP` branches:
+        - Add a **full-step parity test** that drives a stiff IVP through the 410 → 430 progression in Fortran and compare Rust’s `(ICF, IPUP, KFLAG, H)` history to Fortran’s DSTODA.
+
+  - [ ] HMIN guard terminal (Fortran label 670):
+        - Verify the Rust HMIN terminal uses the same `HMIN*1.00001` comparison (no extra epsilons, same inequality direction).
+        - Ensure that terminal exit happens before any new Jacobian update request (`IPUP` remains unchanged), and that final `(T, H, KFLAG)` match Fortran for crafted boundary cases.
+  - [ ] MXNCF terminal (Fortran label 430 terminal path):
+        - Confirm that when the maximum number of corrector failures (`MXNCF`) is reached, Rust terminates at the same step index as Fortran, with the same `KFLAG` and no extra Jacobian refresh requests on the terminal step.
+  - [ ] Repeated error-test reset choreography (Fortran label 520):
+        - `record_error_test_failure`, `record_repeated_error_test_reset`, and `record_repeated_error_test_failure` must:
+          - Reproduce `NHNIL`/`MXHNIL` semantics (number of null steps and associated `H` reductions).
+          - Match Fortran’s `KFLAG = -1` vs `KFLAG = -4` classification and the point of terminal exit for a dedicated repeated error-test IVP.
 
 ## B. BDF numeric path (faithful default)
 - [x] Native BDF path is default in solver/config.
@@ -28,11 +46,33 @@ new
 - [x] Adams-specific RH selection constraints (`SM1`/`PDLAST`) are present.
 - [ ] Accuracy/performance parity vs expected Adams behavior on non-stiff corpus is not yet closed.
 new
-  - [ ] Establish benchmark suite comparing Rust Adams vs Fortran Adams on classic non-stiff problems (e.g., DETEST).
-  - [ ] Verify step-size selection (`RH`), order selection, and stability limit (`PDLAST`) produce identical sequences.
-- [ ] Final one-to-one audit of Adams correction/retry edge branches.
-  - [ ] Verify Adams correction divergence detection (`DEL > 2*DELP`) matches Fortran's `METH=1` branch.
-  - [ ] Verify `SM1` constraint application when `PDEST` < `SM1` matches Fortran's `RH = MIN(RH, SM1/PDEST)`.
+
+  **Math-parity gaps to close (Adams):**
+  - [ ] Step-size (`RH`) and order selection:
+        - For a non-stiff corpus with fixed tolerances, ensure the sequence of `RH` and `NQ` in Rust matches Fortran’s Adams solver:
+          - Same first-step size.
+          - Same subsequent growth/shrink decisions when the local error test is borderline.
+  - [ ] Stability limit / `PDLAST`:
+        - Verify that `PDLAST` and `SM1` are used exactly as in Fortran:
+          - When `PDEST` exceeds the stability limit, Rust’s `RH` must follow `RH = MIN(RH, SM1/PDEST)` without extra safety factors or reordered conditionals.
+  - [x] Adams correction divergence detection (`DEL > 2*DELP`, `METH=1` branch) mirrored:
+        - `Lsode2CorrectionController` uses `convergence_ratio = DEL / DELP` and a configurable `divergence_ratio` (default `2.0`), and for iteration `>= 2` marks `Diverged` when `DEL > 2*DELP`.
+        - Locally verified by:
+          - `correction::tests::correction_controller_detects_divergence_and_iteration_limit`
+          - `correction::tests::correction_controller_divergence_ratio_controls_second_pass_divergence_gate`
+        - Adams-specific Lipschitz behavior mirrored and tested:
+          - First pass is forced to `Continue` unless the correction is at roundoff level, via `Lsode2DstodaCorrectorContext::method_is_adams` and `roundoff_tolerance`.
+          - Verified by:
+            - `correction::tests::correction_controller_adams_forces_second_pass_except_roundoff`
+            - `nonlinear_driver::tests::nonlinear_driver_adams_forces_second_iteration_when_not_roundoff`
+  - [x] Adams-specific `TESCO(2,q)` constants:
+        - For Adams, `TESCO(2,q)` values are taken from `Lsode2AdamsDcfodeTables` and passed as `tesco2_override` into `Lsode2CorrectionController`, avoiding BDF `tesco2` lookup for high Adams orders.
+        - Locally verified by:
+          - `correction::tests::correction_controller_adams_high_order_requires_method_specific_tesco2_override`
+          - `nonlinear_driver::tests::nonlinear_driver_adams_high_order_submit_uses_adams_tesco2_without_bdf_overflow`
+  - [ ] Cross-checked parity vs Fortran for Adams DEL/DELP divergence and local-error scaling:
+        - Still required: a Fortran vs Rust step trace where Adams corrector diverges (`DEL > 2*DELP`) and the same iteration triggers divergence in both.
+        - Verify that `ACOR / TESCO(2,q)` in Rust matches Fortran’s DSTODA for Adams steps, for multiple orders (`q`).
 
 ## D. Method switching (LSODA-style extension)
 - [x] Automatic controller mode exists (`automatic_adams_bdf`) with probe gate (`ICOUNT`-like).
@@ -52,6 +92,7 @@ new
 - [x] Symbolic Lambdify and AOT routes are integrated for Dense/Sparse/Banded.
 - [x] Analytical residual/jacobian route is integrated.
 - [ ] Intermittent infra issues (toolchain/file-lock/spawn failures) still require hardening and retry/diagnostic policy.
+  - [ ] Add retry logic for external toolchain invocations (C compiler, Zig compiler).
 new
   - [ ] Add retry logic for external toolchain invocations (C compiler, Zig compiler).
   - [ ] Implement file-lock detection and cleanup for AOT build artifacts.
@@ -131,7 +172,7 @@ A systematic audit of deviations between Fortran (`lsoda.f`, `lsode.f`, `opkdmai
 ### Key Gaps Identified
 1. **Terminal branch parity** (A.11): Need final audit of HMIN guard and MXNCF terminal exit sequences.
 2. **BDF edge-case coverage** (B.3): Missing systematic verification of order-change and retry logic under stiff stress.
-3. **Adams performance parity** (C.2): No quantitative comparison against Fortran Adams on non-stiff benchmark corpus.
+
 4. **Adams correction audit** (C.3): Missing verification of Adams-specific divergence detection and `SM1` constraint.
 5. **Infrastructure robustness** (F.2): Intermittent toolchain failures need retry policies and better diagnostics.
 6. **Test separation** (G.2): Parity gates should be separated from quality/debug tables to clarify CI requirements.
@@ -152,6 +193,50 @@ A systematic audit of deviations between Fortran (`lsoda.f`, `lsode.f`, `opkdmai
 ---
 
 *Last updated: May 2026 (audit)*
+
+## H. Action Plan and Todos
+
+This chapter gathers all concrete todos, short-term plan items, and CI actions
+that follow from the audit above. Each item should be tracked as a small,
+testable change and verified against Fortran references where parity is claimed.
+
+
+- [ ] Implement the math-parity micro-tests in `numerical::LSODE2::tests::parity_micro`:
+  - [ ] `HMIN` terminal parity test (DSTODA label 670 equivalence).
+  - [ ] `MXNCF` terminal parity test (DSTODA label 430 equivalence, terminal case).
+  - [ ] `NHNIL/MXHNIL` repeated error-test failure behavior (DSTODA label 520) — compare null-step count and `H` sequence to Fortran.
+  - [ ] `ICF=1` / `ICF=2` stale-Jacobian retry semantics test:
+        - Use `Lsode2DstodaState` inside a full stepper to hit the Fortran 410 → 430 progression and assert identical `ICF`, `IPUP`, `KFLAG`, and `H` history.
+  - [ ] `LMAX` / BDF order-reduction parity test (`NQ` history vs Fortran).
+  - [ ] `DEL/DELP` divergence detection micro-test (Adams, `METH=1` branch) using `Lsode2CorrectionController`.
+  - [ ] `TESCO(2,q)` local-error scaling micro-test:
+        - Verify BDF `TESCO(2,q)` constants for `q ≤ 5` and Adams `TESCO(2,q)` (via override) match Fortran’s values and `ACOR/TESCO(2,q)` local error.
+  - [ ] `SM1/PDLAST` stability/limit behavior micro-test (Adams).
+- [ ] Create `label-mapping.md` and a small harness to replay Fortran label
+  traces and compare them to Rust runs (one-to-one label mapping required for DSTODA and switch branches).
+
+
+- [ ] Add AOT reproducibility CI checks:
+  - [ ] Deterministic artifact naming and hash comparison
+  - [ ] Spawn and file-lock retry logic for external toolchain invocations
+- [ ] Add Lambdify vs AOT numeric equivalence tests (elementwise compare
+  residuals and Jacobians within tight tolerance across sample IVP grid).
+- [ ] Refactor tests to separate `parity` (must-pass) and `quality` (warn-only)
+  categories; update CI to run `parity` group as mandatory gates.
+- [ ] Harden sparse/dense linear-solver parity tests (pivot/scale-sensitive
+  cases) to catch backend-induced acceptance differences.
+
+
+Short-term implementation timeline (recommended):
+- Sprint 1 (this week): implement micro-tests in `parity_micro`, add
+  `label-mapping.md` scaffold, and wire one DETEST-style Adams benchmark.
+- Sprint 2 (next week): add AOT reproducibility checks, Lambdify vs AOT
+  numeric tests, and CI classification for parity vs quality jobs.
+- Sprint 3: harden linear-solver parity tests,
+  and finalize label-by-label replay harness.
+
+Owner: whoever is assigned should update this chapter as items complete.
+
 
 ## Detailed Deviations Audit (part-by-part)
 

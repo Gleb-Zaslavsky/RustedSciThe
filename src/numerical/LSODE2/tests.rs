@@ -45,6 +45,77 @@ fn exponential_decay_config() -> Lsode2ProblemConfig {
     )
 }
 
+// --- Adams parity micro-tests (C. Adams numeric path) ---
+
+#[test]
+fn parity_adams_correction_divergence_detection_micro() {
+    // Use the correction controller directly to assert DSTODA-style divergence
+    let controller = crate::numerical::LSODE2::Lsode2CorrectionController::scalar(
+        1.0e-3,
+        1.0e-6,
+        crate::numerical::LSODE2::Lsode2CorrectionControlConfig::default(),
+    )
+    .expect("build correction controller");
+
+    let diverged = controller
+        .assess_iteration(2, &[1.0], &[1.0e-2], &[1.0e-2], Some(1.0e-4), Some(0.5), 2)
+        .expect("assessment should run");
+
+    assert_eq!(
+        diverged.status,
+        crate::numerical::LSODE2::Lsode2CorrectionStatus::Diverged,
+        "expected DSTODA-style divergence (DEL > 2*DELP) to be detected"
+    );
+}
+
+#[test]
+fn parity_adams_pdlast_and_sm1_limits_rh() {
+    use crate::numerical::LSODE2::{
+        Lsode2ErrorControlConfig, Lsode2ErrorController, Lsode2RuntimeState,
+        Lsode2StepControlConfig, Lsode2StepCycle,  Lsode2Tolerance,
+        Lsode2CorrectionAssessment, Lsode2CorrectionStatus,
+    };
+    use super::step_cycle::{
+    Lsode2StepMethod,
+};
+    // Build an Adams-like step cycle and exercise PDEST/PDLAST behaviour
+    let state = Lsode2RuntimeState::new(0.0, &[1.0], 0.1, 3, Lsode2StepControlConfig::default())
+        .expect("runtime state");
+    let error_control = Lsode2ErrorController::new(
+        Lsode2Tolerance::scalar(1.0e-3, 1.0e-6),
+        Lsode2ErrorControlConfig::default(),
+    )
+    .expect("error controller");
+
+    let mut cycle = Lsode2StepCycle::new_with_method(state, error_control, Lsode2StepMethod::AdamsLike);
+
+    cycle.record_adams_lipschitz_estimate_from_assessment(&Lsode2CorrectionAssessment {
+        order: 1,
+        iteration: 2,
+        weighted_norm: 0.0,
+        accumulated_weighted_norm: 0.0,
+        previous_weighted_norm: None,
+        previous_rate_max: None,
+        convergence_ratio: None,
+        convergence_rate_estimate: None,
+        rate_max_estimate: None,
+        pdest_candidate: Some(5.0),
+        convergence_measure: 0.0,
+        status: Lsode2CorrectionStatus::Converged,
+        local_error: vec![0.0],
+        needs_jacobian_refresh: false,
+    });
+
+    // After recording, PDEST and PDLAST should reflect the estimate
+    assert_eq!(cycle.adams_pdest(), 5.0);
+    assert_eq!(cycle.adams_pdlast(), 5.0);
+
+    // Now run a post-accept order selection which should clear PDEST but keep PDLAST
+    let _ = cycle.select_post_accept_order(&[0.905], 1.0, None).expect("select order");
+    assert_eq!(cycle.adams_pdest(), 0.0, "PDEST should be cleared after RH selection");
+    assert_eq!(cycle.adams_pdlast(), 5.0, "PDLAST should retain last nonzero estimate");
+}
+
 fn parameterized_decay_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
         vec![Expr::parse_expression("a*y")],
@@ -2847,4 +2918,108 @@ fn lsode2_aot_tcc_sparse_cold_warm_diagnostic() {
             row.label, row.status_kind, row.error_class, row.detail
         );
     }
+}
+
+// --- Additional parity micro-tests ---
+
+#[test]
+fn parity_hmin_guard_terminal() {
+    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+
+    // Create a cycle with h_min set to 1.0 and initial h just slightly above
+    // the HMIN*1.00001 guard to trigger the guard path on reject.
+    let mut cycle = {
+        let state = crate::numerical::LSODE2::Lsode2RuntimeState::new(
+            0.0,
+            &[1.0],
+            1.000009,
+            3,
+            Lsode2StepControlConfig { h_min: 1.0, ..Default::default() },
+        )
+        .expect("runtime state");
+        let ec = crate::numerical::LSODE2::Lsode2ErrorController::new(
+            crate::numerical::LSODE2::Lsode2Tolerance::scalar(1.0e-3, 1.0e-6),
+            crate::numerical::LSODE2::Lsode2ErrorControlConfig::default(),
+        )
+        .expect("error controller");
+        crate::numerical::LSODE2::Lsode2StepCycle::new(state, ec)
+    };
+
+    let outcome = cycle
+        .finish_with_local_error(1.0, &[0.9], &[1.0e-1])
+        .expect("finish should return outcome");
+
+    match outcome {
+        crate::numerical::LSODE2::Lsode2StepCycleOutcome::Rejected { retry, .. } => {
+            assert_eq!(retry.action, crate::numerical::LSODE2::Lsode2RetryAction::FailStepSizeUnderflow);
+            assert_eq!(cycle.kflag(), crate::numerical::LSODE2::Lsode2Kflag::ErrorTestFailure);
+        }
+        other => panic!("expected HMIN-guard rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn parity_mxncg_terminal_reached() {
+    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+
+    // Configure cycle with max_error_test_failures small so repeated rejects hit terminal
+    let mut cycle = {
+        let state = crate::numerical::LSODE2::Lsode2RuntimeState::new(
+            0.0,
+            &[1.0],
+            0.5,
+            3,
+            Lsode2StepControlConfig { max_error_test_failures: 2, ..Default::default() },
+        )
+        .expect("runtime state");
+        let ec = crate::numerical::LSODE2::Lsode2ErrorController::new(
+            crate::numerical::LSODE2::Lsode2Tolerance::scalar(1.0e-3, 1.0e-6),
+            crate::numerical::LSODE2::Lsode2ErrorControlConfig::default(),
+        )
+        .expect("error controller");
+        crate::numerical::LSODE2::Lsode2StepCycle::new(state, ec)
+    };
+
+    // Cause repeated error-test failures
+    cycle.state_mut().reject_after_error_test_with_hint(0.5, 3).unwrap();
+    cycle.state_mut().reject_after_error_test_with_hint(0.25, 3).unwrap();
+
+    let outcome = cycle
+        .finish_with_local_error(0.1, &[0.9], &[1.0e-1])
+        .expect("finish outcome");
+
+    match outcome {
+        crate::numerical::LSODE2::Lsode2StepCycleOutcome::Rejected { retry, .. } => {
+            assert_eq!(retry.action, crate::numerical::LSODE2::Lsode2RetryAction::FailRepeatedErrorTestFailures);
+            assert_eq!(cycle.kflag(), crate::numerical::LSODE2::Lsode2Kflag::RepeatedErrorTestFailure);
+        }
+        other => panic!("expected repeated error-test terminal, got {other:?}"),
+    }
+}
+
+#[test]
+fn parity_lmax_order_reduction() {
+    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+
+    // Create a state with max_order=3 and ensure order selection never exceeds it
+    let mut cycle = {
+        let state = crate::numerical::LSODE2::Lsode2RuntimeState::new(
+            0.0,
+            &[1.0],
+            0.1,
+            3, // max_order (LMAX equivalent)
+            Lsode2StepControlConfig::default(),
+        )
+        .expect("runtime state");
+        let ec = crate::numerical::LSODE2::Lsode2ErrorController::new(
+            crate::numerical::LSODE2::Lsode2Tolerance::scalar(1.0e-3, 1.0e-6),
+            crate::numerical::LSODE2::Lsode2ErrorControlConfig::default(),
+        )
+        .expect("error controller");
+        crate::numerical::LSODE2::Lsode2StepCycle::new(state, ec)
+    };
+
+    // Call select_post_accept_order and assert the returned order respects the runtime max_order
+    let decision = cycle.select_post_accept_order(&[0.9], 1.0, None).expect("select order");
+    assert!(decision.order_new <= cycle.state().max_order(), "new order must not exceed configured max_order");
 }
