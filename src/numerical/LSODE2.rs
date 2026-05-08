@@ -42,6 +42,8 @@ pub mod step_cycle;
 mod tests;
 
 #[cfg(test)]
+mod tests2;
+#[cfg(test)]
 mod story_tests;
 
 #[cfg(test)]
