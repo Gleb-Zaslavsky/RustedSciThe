@@ -7,6 +7,15 @@
 //! explicit follow-up steps.
 
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use crate::command_interpreter::task_parser_common::{
+    apply_symbolic_substitutions_to_vec, parse_symbolic_substitutions, validate_symbol_names,
+};
+use crate::numerical::LSODE2::{
+    Lsode2AotProfile, Lsode2AotToolchain, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
+    Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2NativeExecutionConfig,
+    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
+};
 use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
 use crate::numerical::Radau::Radau_main::RadauOrder;
 use crate::symbolic::symbolic_engine::Expr;
@@ -37,6 +46,7 @@ pub enum IvpMethodSpec {
     Radau5,
     Bdf,
     BackwardEuler,
+    Lsode2,
 }
 
 impl IvpMethodSpec {
@@ -47,6 +57,7 @@ impl IvpMethodSpec {
             Self::Radau5 => SolverType::Radau(RadauOrder::Order5),
             Self::Bdf => SolverType::BDF,
             Self::BackwardEuler => SolverType::BackwardEuler,
+            Self::Lsode2 => SolverType::LSODE2,
         }
     }
 
@@ -60,6 +71,7 @@ impl IvpMethodSpec {
             "radau5" | "radau-5" | "radau_iia_5" => Ok(Self::Radau5),
             "bdf" => Ok(Self::Bdf),
             "backwardeuler" | "backward_euler" | "implicit_euler" => Ok(Self::BackwardEuler),
+            "lsode2" | "lsode" | "lsoda" => Ok(Self::Lsode2),
             other => Err(IvpTaskError::UnknownMethod(other.to_string())),
         }
     }
@@ -104,6 +116,27 @@ pub struct IvpSolverOptionsSpec {
     pub vectorized: Option<bool>,
     pub parallel: Option<bool>,
     pub neighborhood_check: Option<f64>,
+    pub lsode2: Option<Lsode2TaskOptionsSpec>,
+}
+
+/// LSODE2-specific options parsed from `solver_options`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Lsode2TaskOptionsSpec {
+    pub symbolic_assembly: Option<Lsode2SymbolicAssemblyBackend>,
+    pub symbolic_execution: Option<Lsode2TaskExecutionSpec>,
+    pub linear_system_structure: Option<Lsode2LinearSystemStructure>,
+    pub linear_solver_policy: Option<Lsode2LinearSolverPolicy>,
+    pub native_execution: Option<Lsode2NativeExecutionConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lsode2TaskExecutionSpec {
+    LambdifyExpr,
+    Aot {
+        toolchain: Lsode2AotToolchain,
+        profile: Lsode2AotProfile,
+        output_parent_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -197,7 +230,11 @@ pub fn parse_ivp_task_from_str(input: &str) -> Result<IvpTaskSpec, IvpTaskError>
     let pseudonyms = default_ivp_pseudonyms();
     parser.with_pseudonims(Some(pseudonyms.0), Some(pseudonyms.1));
     parser.parse_document().map_err(IvpTaskError::Parser)?;
-    parser.keys_to_lower_case(Some(vec!["equations".to_string()]));
+    parser.keys_to_lower_case(Some(vec![
+        "equations".to_string(),
+        "where".to_string(),
+        "substitute".to_string(),
+    ]));
     let document = parser
         .get_result()
         .ok_or_else(|| IvpTaskError::Parser("document parser returned no result".to_string()))?;
@@ -234,15 +271,20 @@ pub fn build_ivp_solver_from_spec(spec: &IvpTaskSpec) -> Result<UniversalODESolv
         )));
     }
 
-    let mut solver = UniversalODESolver::new(
-        spec.equations.rhs.clone(),
-        spec.equations.unknowns.clone(),
-        spec.equations.arg.clone(),
-        spec.solver.method.to_solver_type(),
-        spec.initial_conditions.t0,
-        DVector::from_vec(spec.initial_conditions.y0.clone()),
-        spec.initial_conditions.t_end,
-    );
+    let mut solver = if matches!(spec.solver.method, IvpMethodSpec::Lsode2) {
+        let config = build_lsode2_problem_config_from_spec(spec)?;
+        UniversalODESolver::lsode2_with_problem_config(config)
+    } else {
+        UniversalODESolver::new(
+            spec.equations.rhs.clone(),
+            spec.equations.unknowns.clone(),
+            spec.equations.arg.clone(),
+            spec.solver.method.to_solver_type(),
+            spec.initial_conditions.t0,
+            DVector::from_vec(spec.initial_conditions.y0.clone()),
+            spec.initial_conditions.t_end,
+        )
+    };
 
     if let Some(value) = spec.solver_options.step_size {
         solver.set_step_size(value);
@@ -274,6 +316,116 @@ pub fn build_ivp_solver_from_spec(spec: &IvpTaskSpec) -> Result<UniversalODESolv
     }
 
     Ok(solver)
+}
+
+fn build_lsode2_problem_config_from_spec(
+    spec: &IvpTaskSpec,
+) -> Result<Lsode2ProblemConfig, IvpTaskError> {
+    let max_step = spec.solver_options.max_step.unwrap_or(1e-3);
+    let rtol = spec.solver_options.rtol.unwrap_or(1e-5);
+    let atol = spec.solver_options.atol.unwrap_or(1e-8);
+
+    let mut config = Lsode2ProblemConfig::new(
+        spec.equations.rhs.clone(),
+        spec.equations.unknowns.clone(),
+        spec.equations.arg.clone(),
+        spec.initial_conditions.t0,
+        DVector::from_vec(spec.initial_conditions.y0.clone()),
+        spec.initial_conditions.t_end,
+        max_step,
+        rtol,
+        atol,
+    )
+    .with_first_step(spec.solver_options.first_step)
+    .with_vectorized(spec.solver_options.vectorized.unwrap_or(false))
+    .with_faithful_bdf_solve(200_000, 200_000);
+
+    if !spec.equations.parameter_names.is_empty() {
+        config = config
+            .with_equation_parameters(spec.equations.parameter_names.clone())
+            .with_equation_parameter_values(DVector::from_vec(
+                spec.equations
+                    .parameter_names
+                    .iter()
+                    .map(|name| {
+                        *spec
+                            .equations
+                            .parameter_values
+                            .get(name)
+                            .expect("parameter map should include declared key")
+                    })
+                    .collect(),
+            ));
+    }
+
+    if let Some(options) = spec.solver_options.lsode2.as_ref() {
+        let symbolic_assembly = options
+            .symbolic_assembly
+            .unwrap_or(Lsode2SymbolicAssemblyBackend::ExprLegacy);
+        let symbolic_execution = options
+            .symbolic_execution
+            .clone()
+            .unwrap_or(Lsode2TaskExecutionSpec::LambdifyExpr);
+
+        match symbolic_execution {
+            Lsode2TaskExecutionSpec::LambdifyExpr => {
+                config =
+                    config.with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+                        assembly: symbolic_assembly,
+                        execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+                    });
+            }
+            Lsode2TaskExecutionSpec::Aot {
+                toolchain,
+                profile,
+                output_parent_dir,
+            } => {
+                config =
+                    config.with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+                        assembly: symbolic_assembly,
+                        execution: Lsode2SymbolicExecutionMode::Aot { toolchain, profile },
+                    });
+                if let Some(output_dir) = output_parent_dir {
+                    let mut backend = config.backend.clone();
+                    backend.generated_backend.output_parent_dir = Some(output_dir);
+                    config = config.with_backend(backend);
+                }
+            }
+        }
+
+        if let Some(structure) = options.linear_system_structure {
+            config = config.with_linear_system_structure(structure);
+        }
+        if let Some(policy) = options.linear_solver_policy {
+            config = config.with_linear_solver_policy(policy);
+        }
+        if let Some(native_execution) = options.native_execution {
+            config = config.with_native_execution(native_execution);
+        }
+    }
+
+    // Keep parser route symbolic-only to avoid hybrid "document + closures" mode.
+    let source = config.residual_jacobian_source;
+    config = config.with_residual_jacobian_source(match source {
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly,
+            execution,
+        } => Lsode2ResidualJacobianSource::Symbolic {
+            assembly,
+            execution,
+        },
+        Lsode2ResidualJacobianSource::Analytical => Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        },
+    });
+    let backend = config
+        .backend
+        .clone()
+        .with_jacobian_backend(Lsode2JacobianBackend::SymbolicGenerated);
+    config = config.with_backend(backend);
+
+    Ok(config)
 }
 
 pub fn run_ivp_task_from_str(input: &str) -> Result<IvpTaskRunResult, IvpTaskError> {
@@ -417,7 +569,7 @@ fn parse_equations(document: &DocumentMap) -> Result<EquationSpec, IvpTaskError>
         .zip(parameter_values_vec)
         .collect();
 
-    validate_symbol_names(&arg, &parameter_names)?;
+    validate_symbol_names(&arg, &parameter_names).map_err(IvpTaskError::Semantic)?;
 
     let (unknowns, rhs_raw) = if section.contains_key("unknowns") || section.contains_key("rhs") {
         let unknowns = get_required_string_list(section, "equations", "unknowns")?;
@@ -453,9 +605,20 @@ fn parse_equations(document: &DocumentMap) -> Result<EquationSpec, IvpTaskError>
         }
     }
 
+    let substitutions = parse_symbolic_substitutions(document).map_err(|message| {
+        IvpTaskError::InvalidField {
+            section: "where/substitute".to_string(),
+            field: "*".to_string(),
+            message,
+        }
+    })?;
     let rhs = rhs_raw
         .iter()
-        .map(|expr| Expr::parse_expression(expr).set_variable_from_map(&parameter_values))
+        .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
+        .into_iter()
+        .map(|expr| expr.set_variable_from_map(&parameter_values))
         .collect();
 
     Ok(EquationSpec {
@@ -464,6 +627,16 @@ fn parse_equations(document: &DocumentMap) -> Result<EquationSpec, IvpTaskError>
         rhs,
         parameter_names,
         parameter_values,
+    })
+}
+
+fn parse_expr_safe(expr_text: &str, section: &str, field: &str) -> Result<Expr, IvpTaskError> {
+    std::panic::catch_unwind(|| Expr::parse_expression(expr_text)).map_err(|_| {
+        IvpTaskError::InvalidField {
+            section: section.to_string(),
+            field: field.to_string(),
+            message: format!("failed to parse symbolic expression `{expr_text}`"),
+        }
     })
 }
 
@@ -479,7 +652,7 @@ fn parse_pair_style_equations(
         if reserved.contains(&key.as_str()) {
             continue;
         }
-        let expr = get_required_string(section, "equations", key)?;
+        let expr = get_required_symbolic_expr(section, "equations", key)?;
         unknowns.push(key.clone());
         rhs.push(expr);
     }
@@ -492,6 +665,25 @@ fn parse_pair_style_equations(
     }
 
     Ok((unknowns, rhs))
+}
+
+fn get_required_symbolic_expr(
+    section: &GenericSectionMap,
+    section_name: &str,
+    field: &str,
+) -> Result<String, IvpTaskError> {
+    let values = get_required_values(section, section_name, field)?;
+    if values.is_empty() {
+        return Err(IvpTaskError::MissingField {
+            section: section_name.to_string(),
+            field: field.to_string(),
+        });
+    }
+    Ok(values
+        .iter()
+        .map(Value::to_string_value)
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// Parse `t0`, `t_end`, and the initial state vector.
@@ -522,6 +714,7 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         Some(section) => section,
         None => return Ok(IvpSolverOptionsSpec::default()),
     };
+    let lsode2 = parse_lsode2_options(section)?;
     Ok(IvpSolverOptionsSpec {
         step_size: get_optional_float(section, "step_size")?,
         tolerance: get_optional_float(section, "tolerance")?,
@@ -533,7 +726,39 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         vectorized: get_optional_bool(section, "vectorized")?,
         parallel: get_optional_bool(section, "parallel")?,
         neighborhood_check: get_optional_float(section, "neighborhood_check")?,
+        lsode2,
     })
+}
+
+fn parse_lsode2_options(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2TaskOptionsSpec>, IvpTaskError> {
+    let assembly = match get_optional_string(section, "lsode2_symbolic_assembly", "solver_options")?
+    {
+        Some(raw) => Some(parse_lsode2_symbolic_assembly(&raw)?),
+        None => None,
+    };
+    let execution = parse_lsode2_execution(section)?;
+    let linear_structure = parse_lsode2_linear_structure(section)?;
+    let linear_policy = parse_lsode2_linear_solver_policy(section)?;
+    let native_execution = parse_lsode2_native_execution(section)?;
+
+    let has_any = assembly.is_some()
+        || execution.is_some()
+        || linear_structure.is_some()
+        || linear_policy.is_some()
+        || native_execution.is_some();
+    if !has_any {
+        return Ok(None);
+    }
+
+    Ok(Some(Lsode2TaskOptionsSpec {
+        symbolic_assembly: assembly,
+        symbolic_execution: execution,
+        linear_system_structure: linear_structure,
+        linear_solver_policy: linear_policy,
+        native_execution,
+    }))
 }
 
 /// Parse lightweight output controls.
@@ -559,6 +784,10 @@ fn default_ivp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Ve
         (
             "equations".to_string(),
             vec!["system".to_string(), "ode_system".to_string()],
+        ),
+        (
+            "where".to_string(),
+            vec!["substitute".to_string(), "aliases".to_string()],
         ),
         (
             "initial_conditions".to_string(),
@@ -588,6 +817,167 @@ fn default_ivp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Ve
         ),
     ]);
     (headers, fields)
+}
+
+fn parse_lsode2_symbolic_assembly(
+    raw: &str,
+) -> Result<Lsode2SymbolicAssemblyBackend, IvpTaskError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "exprlegacy" | "expr_legacy" => Ok(Lsode2SymbolicAssemblyBackend::ExprLegacy),
+        "atomview" | "atom_view" => Ok(Lsode2SymbolicAssemblyBackend::AtomView),
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "lsode2_symbolic_assembly".to_string(),
+            message: format!(
+                "unknown LSODE2 symbolic assembly `{other}` (use ExprLegacy or AtomView)"
+            ),
+        }),
+    }
+}
+
+fn parse_lsode2_execution(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2TaskExecutionSpec>, IvpTaskError> {
+    let raw = match get_optional_string(section, "lsode2_symbolic_execution", "solver_options")? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let key = raw.trim().to_ascii_lowercase();
+    if matches!(key.as_str(), "lambdify" | "lambdifyexpr" | "lambdify_expr") {
+        return Ok(Some(Lsode2TaskExecutionSpec::LambdifyExpr));
+    }
+    if !matches!(key.as_str(), "aot") {
+        return Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "lsode2_symbolic_execution".to_string(),
+            message: format!("unknown LSODE2 symbolic execution `{raw}` (use LambdifyExpr or AOT)"),
+        });
+    }
+
+    let toolchain_raw = get_optional_string(section, "lsode2_aot_toolchain", "solver_options")?
+        .unwrap_or_else(|| "c_gcc".to_string());
+    let profile_raw = get_optional_string(section, "lsode2_aot_profile", "solver_options")?
+        .unwrap_or_else(|| "release".to_string());
+    let output_parent_dir =
+        get_optional_string(section, "lsode2_aot_output_dir", "solver_options")?.map(PathBuf::from);
+
+    let toolchain = match toolchain_raw.trim().to_ascii_lowercase().as_str() {
+        "c_tcc" | "ctcc" => Lsode2AotToolchain::CTcc,
+        "c_gcc" | "cgcc" | "gcc" => Lsode2AotToolchain::CGcc,
+        "zig" => Lsode2AotToolchain::Zig,
+        "rust" => Lsode2AotToolchain::Rust,
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_aot_toolchain".to_string(),
+                message: format!("unknown LSODE2 AOT toolchain `{other}`"),
+            });
+        }
+    };
+    let profile = match profile_raw.trim().to_ascii_lowercase().as_str() {
+        "debug" => Lsode2AotProfile::Debug,
+        "release" => Lsode2AotProfile::Release,
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_aot_profile".to_string(),
+                message: format!("unknown LSODE2 AOT profile `{other}`"),
+            });
+        }
+    };
+
+    Ok(Some(Lsode2TaskExecutionSpec::Aot {
+        toolchain,
+        profile,
+        output_parent_dir,
+    }))
+}
+
+fn parse_lsode2_linear_structure(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2LinearSystemStructure>, IvpTaskError> {
+    let raw = match get_optional_string(section, "lsode2_linear_structure", "solver_options")? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "dense" => Ok(Some(Lsode2LinearSystemStructure::Dense)),
+        "sparse" => Ok(Some(Lsode2LinearSystemStructure::Sparse)),
+        "banded" => {
+            let kl = get_optional_usize(section, "lsode2_banded_kl")?.unwrap_or(0);
+            let ku = get_optional_usize(section, "lsode2_banded_ku")?.unwrap_or(0);
+            Ok(Some(Lsode2LinearSystemStructure::Banded { kl, ku }))
+        }
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "lsode2_linear_structure".to_string(),
+            message: format!(
+                "unknown LSODE2 linear structure `{other}` (use dense, sparse or banded)"
+            ),
+        }),
+    }
+}
+
+fn parse_lsode2_linear_solver_policy(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2LinearSolverPolicy>, IvpTaskError> {
+    let raw = match get_optional_string(section, "lsode2_linear_solver_policy", "solver_options")? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    let policy = match value.as_str() {
+        "auto" => Lsode2LinearSolverPolicy::Auto,
+        "dense_lu" | "denselu" => {
+            Lsode2LinearSolverPolicy::Force(Lsode2LinearSolverChoice::DenseLu)
+        }
+        "faer_sparse_lu" | "faersparselu" => {
+            Lsode2LinearSolverPolicy::Force(Lsode2LinearSolverChoice::FaerSparseLu)
+        }
+        "lapack_faithful_banded_lu" | "lapackfaithfulbandedlu" => {
+            Lsode2LinearSolverPolicy::Force(Lsode2LinearSolverChoice::LapackFaithfulBandedLu)
+        }
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_linear_solver_policy".to_string(),
+                message: format!("unknown LSODE2 linear solver policy `{other}`"),
+            });
+        }
+    };
+    Ok(Some(policy))
+}
+
+fn parse_lsode2_native_execution(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2NativeExecutionConfig>, IvpTaskError> {
+    let raw = match get_optional_string(section, "lsode2_native_execution", "solver_options")? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let max_step_attempts =
+        get_optional_usize(section, "lsode2_native_max_step_attempts")?.unwrap_or(200_000);
+    let max_accepted_steps =
+        get_optional_usize(section, "lsode2_native_max_accepted_steps")?.unwrap_or(200_000);
+    let value = raw.trim().to_ascii_lowercase();
+    let mode = match value.as_str() {
+        "faithful_bdf_solve" | "native_solve" => {
+            Lsode2NativeExecutionConfig::faithful_bdf_solve(max_step_attempts, max_accepted_steps)
+        }
+        "probe_before_bridge" | "native_probe_before_bridge" => {
+            Lsode2NativeExecutionConfig::probe_before_bridge(max_step_attempts, max_accepted_steps)
+        }
+        "bridge_solve" => Lsode2NativeExecutionConfig::bridge_solve(),
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_native_execution".to_string(),
+                message: format!("unknown LSODE2 native execution mode `{other}`"),
+            });
+        }
+    };
+    Ok(Some(mode))
 }
 
 /// Save a solved IVP trajectory as a simple CSV table.
@@ -912,23 +1302,6 @@ fn value_to_float(value: &Value, section_name: &str, field: &str) -> Result<f64,
     }
 }
 
-fn validate_symbol_names(arg: &str, parameter_names: &[String]) -> Result<(), IvpTaskError> {
-    if arg.trim().is_empty() {
-        return Err(IvpTaskError::Semantic(
-            "independent argument name cannot be empty".to_string(),
-        ));
-    }
-    let mut seen = HashSet::new();
-    for name in parameter_names {
-        if !seen.insert(name) {
-            return Err(IvpTaskError::Semantic(format!(
-                "duplicate parameter name `{name}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,6 +1337,37 @@ step_size: 1e-3
             spec.solver.method,
             IvpMethodSpec::NonStiff("RK45".to_string())
         );
+    }
+
+    #[test]
+    fn ivp_task_parser_supports_where_symbolic_substitutions() {
+        let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+y: heat - y
+
+where
+arr: 2.0*t
+heat: arr + 1.0
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+"#;
+
+        let spec = parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
+        let expr = spec.equations.rhs[0].clone();
+        let f = expr.lambdify_borrowed_thread_safe(&["t", "y"]);
+        let value = f(&[0.5, 1.0]);
+        assert!((value - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1111,6 +1515,80 @@ max_step: 0.05
 
         let result = run_ivp_task_from_str(input).expect("Radau5 IVP task should solve");
         assert_eq!(result.status.as_deref(), Some("finished"));
+        assert!(result.y_result.is_some());
+    }
+
+    #[test]
+    fn ivp_task_parser_supports_lsode2_method_and_options() {
+        let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -2.0*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: faer_sparse_lu
+lsode2_native_execution: faithful_bdf_solve
+"#;
+
+        let spec = parse_ivp_task_from_str(input).expect("LSODE2 document should parse");
+        assert_eq!(spec.solver.method, IvpMethodSpec::Lsode2);
+        let lsode2 = spec
+            .solver_options
+            .lsode2
+            .as_ref()
+            .expect("LSODE2 options should be present");
+        assert_eq!(
+            lsode2.symbolic_assembly,
+            Some(Lsode2SymbolicAssemblyBackend::AtomView)
+        );
+        assert_eq!(
+            lsode2.linear_system_structure,
+            Some(Lsode2LinearSystemStructure::Sparse)
+        );
+    }
+
+    #[test]
+    fn ivp_task_runner_supports_lsode2_lambdify_path() {
+        let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: dense
+lsode2_linear_solver_policy: auto
+"#;
+
+        let result = run_ivp_task_from_str(input).expect("LSODE2 task should solve");
+        assert!(result.status.is_some());
         assert!(result.y_result.is_some());
     }
 }

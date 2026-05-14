@@ -1599,6 +1599,7 @@ fn lsode2_native_attempt_timeline_story_replay() {
 }
 
 #[test]
+#[ignore = "parity replay gate; covered by parity_micro/tests in default CI"]
 fn lsode2_ipup_reason_control_plane_story_replay() {
     let mut dstoda = Lsode2DstodaState::default();
     let mut stats = Lsode2NativeStatistics::default();
@@ -1659,6 +1660,7 @@ fn lsode2_ipup_reason_control_plane_story_replay() {
 }
 
 #[test]
+#[ignore = "parity replay gate; covered by parity_micro/tests in default CI"]
 fn lsode2_dstoda_flag_control_plane_story_replay() {
     let mut dstoda = Lsode2DstodaState::default();
     let mut stats = Lsode2NativeStatistics::default();
@@ -1744,17 +1746,17 @@ fn lsode2_dstoda_flag_control_plane_story_replay() {
     assert_eq!(stats.native_iret_retry_after_error_test_failure_count, 1);
     assert_eq!(stats.native_iret_restart_with_derivative_refresh_count, 1);
 
-    assert_eq!(stats.native_redo_none_count, 2);
+    assert_eq!(stats.native_redo_none_count, 3);
     assert_eq!(stats.native_redo_corrector_refresh_same_step_count, 1);
-    // `record_repeated_error_test_failure()` does not overwrite REDO stage,
-    // so after a repeated convergence path we still see `corr_retry`.
-    assert_eq!(stats.native_redo_corrector_failure_retry_count, 3);
+    // Terminal repeated error-test failure now clears sticky REDO marker.
+    assert_eq!(stats.native_redo_corrector_failure_retry_count, 2);
     assert_eq!(stats.native_redo_error_test_retry_count, 1);
     assert_eq!(stats.native_redo_repeated_error_reset_count, 1);
     assert_eq!(stats.native_redo_history_or_step_size_changed_count, 0);
 }
 
 #[test]
+#[ignore = "parity replay gate; covered by parity_micro/tests in default CI"]
 fn lsode2_dstoda_terminal_convergence_reason_story_replay() {
     fn make_cycle(config: super::Lsode2StepControlConfig) -> super::Lsode2StepCycle {
         let state = super::Lsode2RuntimeState::new(0.0, &[1.0], 0.1, 2, config)

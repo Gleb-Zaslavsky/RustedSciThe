@@ -90,10 +90,21 @@ mod tests {
     }
 
     #[test]
-    fn native_preflight_skips_dense_backend() {
+    fn native_preflight_runs_dense_backend() {
         let outcome = run_native_step_preflight(&exponential_decay_config()).unwrap();
-        assert!(outcome.summary.is_none());
-        assert_eq!(outcome.statistics.native_step_attempts, 0);
+        let summary = outcome
+            .summary
+            .as_ref()
+            .expect("dense native preflight should produce a summary");
+        assert!(summary.iterations > 0);
+        assert!(summary.attempted_steps > 0);
+        assert_eq!(
+            summary.attempted_steps,
+            summary.accepted_steps + summary.rejected_steps
+        );
+        assert!(outcome.statistics.native_residual_calls > 0);
+        assert!(outcome.statistics.native_jacobian_calls > 0);
+        assert!(outcome.statistics.native_linear_solve_calls > 0);
     }
 
     #[test]

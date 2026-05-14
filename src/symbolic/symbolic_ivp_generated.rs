@@ -66,6 +66,7 @@ use crate::symbolic::symbolic_ivp_aot::{
 use log::{info, warn};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
 use std::time::Duration;
 
 /// Aggregated runtime/setup statistics for one symbolic IVP solver instance.
@@ -185,12 +186,14 @@ pub enum SelectedSymbolicIvpBackendKind {
 }
 
 /// User-facing configuration for symbolic IVP generated backend orchestration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SymbolicIvpGeneratedBackendConfig {
     /// Optional resolver snapshot reused across calls.
     pub resolver: Option<AotResolver>,
     /// Dense IVP AOT runtime-plan chunking options.
     pub aot_options: SymbolicIvpAotOptions,
+    /// Sparse Jacobian chunking used by sparse/banded native-AOT Jacobian paths.
+    pub sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
     /// Lifecycle build policy.
     pub build_policy: SymbolicIvpAotBuildPolicy,
     /// Backend used to emit generated dense IVP artifacts.
@@ -203,6 +206,22 @@ pub struct SymbolicIvpGeneratedBackendConfig {
     pub crate_name_override: Option<String>,
     /// Optional explicit generated module name.
     pub module_name_override: Option<String>,
+}
+
+impl Default for SymbolicIvpGeneratedBackendConfig {
+    fn default() -> Self {
+        Self {
+            resolver: None,
+            aot_options: SymbolicIvpAotOptions::default(),
+            sparse_jacobian_chunking_strategy: SparseChunkingStrategy::Whole,
+            build_policy: SymbolicIvpAotBuildPolicy::default(),
+            aot_codegen_backend: AotCodegenBackend::default(),
+            aot_c_compiler: None,
+            output_parent_dir: None,
+            crate_name_override: None,
+            module_name_override: None,
+        }
+    }
 }
 
 impl SymbolicIvpGeneratedBackendConfig {
@@ -248,6 +267,14 @@ impl SymbolicIvpGeneratedBackendConfig {
 
     pub fn with_aot_options(mut self, aot_options: SymbolicIvpAotOptions) -> Self {
         self.aot_options = aot_options;
+        self
+    }
+
+    pub fn with_sparse_jacobian_chunking_strategy(
+        mut self,
+        sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
+    ) -> Self {
+        self.sparse_jacobian_chunking_strategy = sparse_jacobian_chunking_strategy;
         self
     }
 
@@ -358,6 +385,80 @@ impl From<IvpBackendError> for SymbolicIvpGeneratedError {
     fn from(value: IvpBackendError) -> Self {
         Self::IvpBackend(value)
     }
+}
+
+fn executed_process_output(executed: &ExecutedGeneratedAotBuild) -> (Option<i32>, String, String) {
+    match executed {
+        ExecutedGeneratedAotBuild::Rust(result) => (
+            result.status_code,
+            result.stdout.clone(),
+            result.stderr.clone(),
+        ),
+        ExecutedGeneratedAotBuild::C(result) => (
+            result.status_code,
+            result.stdout.clone(),
+            result.stderr.clone(),
+        ),
+        ExecutedGeneratedAotBuild::Zig(result) => (
+            result.status_code,
+            result.stdout.clone(),
+            result.stderr.clone(),
+        ),
+    }
+}
+
+fn is_transient_aot_infra_failure(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("permission denied")
+        || low.contains("access is denied")
+        || low.contains("being used by another process")
+        || low.contains("resource busy")
+        || low.contains("temporarily unavailable")
+        || low.contains("failed to spawn build runner")
+        || low.contains("could not write")
+        || low.contains("file is locked")
+        || low.contains("sharing violation")
+}
+
+fn execute_generated_build_with_retry(
+    build: &GeneratedAotBuildResult,
+    build_context: &str,
+) -> Result<ExecutedGeneratedAotBuild, SymbolicIvpGeneratedError> {
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_failure: Option<String> = None;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match build.execute() {
+            Ok(executed) => {
+                if executed.succeeded() {
+                    return Ok(executed);
+                }
+                let (status, stdout, stderr) = executed_process_output(&executed);
+                let detail = format!("status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+                let transient = is_transient_aot_infra_failure(&detail);
+                last_failure = Some(detail);
+                if transient && attempt < MAX_ATTEMPTS {
+                    sleep(Duration::from_millis((attempt as u64) * 120));
+                    continue;
+                }
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                let transient = is_transient_aot_infra_failure(&detail);
+                last_failure = Some(detail);
+                if transient && attempt < MAX_ATTEMPTS {
+                    sleep(Duration::from_millis((attempt as u64) * 120));
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    let detail = last_failure.unwrap_or_else(|| "unknown build failure".to_string());
+    Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
+        "AOT build execution failed ({build_context}) after retry policy; detail:\n{detail}"
+    )))
 }
 
 /// Result of preparing one IVP symbolic problem through the high-level
@@ -695,32 +796,14 @@ fn perform_requested_build(
         .materialize()
         .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
 
-    let executed = build
-        .execute()
-        .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
-    if !executed.succeeded() {
-        let (status, stdout, stderr) = match &executed {
-            ExecutedGeneratedAotBuild::Rust(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::C(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::Zig(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-        };
-        return Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
-            "status={:?}\nstdout:\n{}\nstderr:\n{}",
-            status, stdout, stderr
-        )));
-    }
+    execute_generated_build_with_retry(
+        &build,
+        &format!(
+            "ivp-dense backend={:?} key={}",
+            config.aot_codegen_backend,
+            prepared.problem_key()
+        ),
+    )?;
 
     let resolver =
         register_ivp_build_result_in_registry(resolver_snapshot, prepared.manifest(), &build)?;
@@ -772,32 +855,14 @@ fn perform_requested_residual_build(
         .materialize()
         .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
 
-    let executed = build
-        .execute()
-        .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
-    if !executed.succeeded() {
-        let (status, stdout, stderr) = match &executed {
-            ExecutedGeneratedAotBuild::Rust(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::C(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::Zig(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-        };
-        return Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
-            "status={:?}\nstdout:\n{}\nstderr:\n{}",
-            status, stdout, stderr
-        )));
-    }
+    execute_generated_build_with_retry(
+        &build,
+        &format!(
+            "ivp-residual backend={:?} key={}",
+            config.aot_codegen_backend,
+            prepared.problem_key()
+        ),
+    )?;
 
     let resolver =
         register_ivp_build_result_in_registry(resolver_snapshot, prepared.manifest(), &build)?;
@@ -850,32 +915,13 @@ fn perform_requested_sparse_build(
         .materialize()
         .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
 
-    let executed = build
-        .execute()
-        .map_err(|err| SymbolicIvpGeneratedError::AotBuildFailed(err.to_string()))?;
-    if !executed.succeeded() {
-        let (status, stdout, stderr) = match &executed {
-            ExecutedGeneratedAotBuild::Rust(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::C(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-            ExecutedGeneratedAotBuild::Zig(result) => (
-                result.status_code,
-                result.stdout.clone(),
-                result.stderr.clone(),
-            ),
-        };
-        return Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
-            "status={:?}\nstdout:\n{}\nstderr:\n{}",
-            status, stdout, stderr
-        )));
-    }
+    execute_generated_build_with_retry(
+        &build,
+        &format!(
+            "ivp-sparse backend={:?} key={}",
+            config.aot_codegen_backend, problem_key
+        ),
+    )?;
 
     let resolver = register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)?;
     register_ivp_sparse_runtime_backend(config.aot_codegen_backend, &resolver, problem_key.as_str())?;
@@ -951,7 +997,7 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         variables: &variable_refs,
         params: Some(sparse_param_refs.as_slice()),
     }
-    .runtime_plan(SparseChunkingStrategy::Whole);
+    .runtime_plan(config.sparse_jacobian_chunking_strategy);
     let jacobian_structure = sparse_plan.structure.clone();
 
     let prepared_sparse = PreparedSparseProblem::new(
@@ -1397,5 +1443,21 @@ mod tests {
         );
         assert_eq!(second.problem.backend_kind, IvpBackendKind::Aot);
         unregister_linked_dense_backend(problem_key.as_str());
+    }
+
+    #[test]
+    fn generated_ivp_transient_infra_failure_detector_matches_known_lock_and_spawn_signatures() {
+        assert!(is_transient_aot_infra_failure(
+            "tcc: error: could not write 'x.dll': Permission denied"
+        ));
+        assert!(is_transient_aot_infra_failure(
+            "error: failed to spawn build runner target\\...\\build.zig"
+        ));
+        assert!(is_transient_aot_infra_failure(
+            "The process cannot access the file because it is being used by another process"
+        ));
+        assert!(!is_transient_aot_infra_failure(
+            "symbolic parse error: unknown variable q"
+        ));
     }
 }

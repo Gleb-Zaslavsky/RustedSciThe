@@ -12,8 +12,9 @@ use super::history::{
     reconcile_first_nordsieck_derivative,
 };
 use super::step_control::{
-    Lsode2AcceptDecision, Lsode2RetryAction, Lsode2RetryDecision, Lsode2StepControlConfig,
-    Lsode2StepControlError, Lsode2StepControlSnapshot, Lsode2StepController,
+    Lsode2AcceptDecision, Lsode2NullStepWarningLevel, Lsode2RetryAction, Lsode2RetryDecision,
+    Lsode2StepControlConfig, Lsode2StepControlError, Lsode2StepControlSnapshot,
+    Lsode2StepController,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +96,10 @@ pub struct Lsode2RuntimeStateSnapshot {
     pub consecutive_rejections: usize,
     pub consecutive_accepts: usize,
     pub jacobian_refresh_requests: usize,
+    pub null_step_count: usize,
+    pub null_step_warning_count: usize,
+    pub null_step_warning_cap: usize,
+    pub null_step_warning_cap_reached: bool,
     pub first_derivative_refresh_requested: bool,
     pub last_failure: Option<&'static str>,
 }
@@ -494,6 +499,10 @@ impl Lsode2RuntimeState {
         self.step_controller.switch_telemetry(stiffness_ratio)
     }
 
+    pub fn record_null_step_event(&mut self) -> Lsode2NullStepWarningLevel {
+        self.step_controller.record_null_step_event()
+    }
+
     pub fn snapshot(&self) -> Lsode2RuntimeStateSnapshot {
         let step = self.step_controller.snapshot();
         Lsode2RuntimeStateSnapshot {
@@ -512,6 +521,10 @@ impl Lsode2RuntimeState {
             consecutive_rejections: step.consecutive_rejections,
             consecutive_accepts: step.consecutive_accepts,
             jacobian_refresh_requests: step.jacobian_refresh_requests,
+            null_step_count: step.null_step_count,
+            null_step_warning_count: step.null_step_warning_count,
+            null_step_warning_cap: step.null_step_warning_cap,
+            null_step_warning_cap_reached: step.null_step_warning_cap_reached,
             first_derivative_refresh_requested: self.first_derivative_refresh_requested,
             last_failure: step.last_failure,
         }

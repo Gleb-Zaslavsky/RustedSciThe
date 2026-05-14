@@ -26,7 +26,9 @@ use super::dstoda_state::{
 };
 use super::error_control::{Lsode2ErrorControlConfig, Lsode2ErrorController};
 use super::history::Lsode2Tolerance;
-use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
+use super::linear_backends::{
+    DenseLuBdfLinearBackend, FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend,
+};
 use super::native_executor::Lsode2NativeCallbackExecutor;
 use super::native_jacobian::{
     NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
@@ -41,11 +43,12 @@ use super::step_cycle::{
 };
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
 use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
+use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::prepare_generated_symbolic_ivp_residual_problem;
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
@@ -121,6 +124,7 @@ fn should_force_refresh_on_first_correction(
 }
 
 pub enum Lsode2NativeStepEngine {
+    Dense(Box<Lsode2NativeStepEngineImpl<DenseLuBdfLinearBackend>>),
     Sparse(Box<Lsode2NativeStepEngineImpl<FaerSparseBdfLinearBackend>>),
     Banded(Box<Lsode2NativeStepEngineImpl<FaithfulBandedBdfLinearBackend>>),
 }
@@ -138,7 +142,9 @@ impl Lsode2NativeStepEngine {
     ) -> Result<Option<Self>, IvpBackendError> {
         if !matches!(
             config.backend.jacobian_backend,
-            Lsode2JacobianBackend::SymbolicGenerated | Lsode2JacobianBackend::AnalyticClosure
+            Lsode2JacobianBackend::SymbolicGenerated
+                | Lsode2JacobianBackend::AnalyticClosure
+                | Lsode2JacobianBackend::FiniteDifference
         ) {
             return Err(IvpBackendError::GeneratedBackendFailure {
                 message:
@@ -148,7 +154,14 @@ impl Lsode2NativeStepEngine {
         }
 
         match config.backend.linear_solver_backend {
-            Lsode2LinearSolverBackend::Dense => Ok(None),
+            Lsode2LinearSolverBackend::Dense => Ok(Some(Self::Dense(Box::new(
+                Lsode2NativeStepEngineImpl::from_problem_config(
+                    config,
+                    method,
+                    DenseLuBdfLinearBackend,
+                    NativeJacobianStorage::Dense,
+                )?,
+            )))),
             Lsode2LinearSolverBackend::SparseFaer => Ok(Some(Self::Sparse(Box::new(
                 Lsode2NativeStepEngineImpl::from_problem_config(
                     config,
@@ -170,6 +183,7 @@ impl Lsode2NativeStepEngine {
 
     pub fn step_once(&mut self) -> Result<Lsode2NativeStepAttemptReport, IvpBackendError> {
         match self {
+            Self::Dense(engine) => engine.step_once(),
             Self::Sparse(engine) => engine.step_once(),
             Self::Banded(engine) => engine.step_once(),
         }
@@ -177,6 +191,7 @@ impl Lsode2NativeStepEngine {
 
     pub fn statistics(&self) -> &Lsode2NativeStatistics {
         match self {
+            Self::Dense(engine) => engine.statistics(),
             Self::Sparse(engine) => engine.statistics(),
             Self::Banded(engine) => engine.statistics(),
         }
@@ -184,6 +199,7 @@ impl Lsode2NativeStepEngine {
 
     pub fn state_snapshot(&self) -> Lsode2RuntimeStateSnapshot {
         match self {
+            Self::Dense(engine) => engine.state_snapshot(),
             Self::Sparse(engine) => engine.state_snapshot(),
             Self::Banded(engine) => engine.state_snapshot(),
         }
@@ -191,6 +207,7 @@ impl Lsode2NativeStepEngine {
 
     pub fn current_solution(&self) -> Vec<f64> {
         match self {
+            Self::Dense(engine) => engine.current_solution(),
             Self::Sparse(engine) => engine.current_solution(),
             Self::Banded(engine) => engine.current_solution(),
         }
@@ -198,6 +215,7 @@ impl Lsode2NativeStepEngine {
 
     pub fn clamp_step_to_t_bound(&mut self, t_bound: f64) -> Result<(), IvpBackendError> {
         match self {
+            Self::Dense(engine) => engine.clamp_step_to_t_bound(t_bound),
             Self::Sparse(engine) => engine.clamp_step_to_t_bound(t_bound),
             Self::Banded(engine) => engine.clamp_step_to_t_bound(t_bound),
         }
@@ -324,11 +342,32 @@ where
                 (residual, jacobian)
             }
             Lsode2JacobianBackend::FiniteDifference => {
-                return Err(IvpBackendError::GeneratedBackendFailure {
-                    message:
-                        "LSODE2 native step engine finite-difference Jacobian backend is not wired yet"
-                            .to_string(),
-                });
+                let callbacks = config
+                    .analytical_callbacks
+                    .as_ref()
+                    .ok_or_else(|| IvpBackendError::GeneratedBackendFailure {
+                        message:
+                            "LSODE2 finite-difference Jacobian backend requires analytical residual callback"
+                                .to_string(),
+                    })?
+                    .clone();
+                let residual_callbacks = callbacks.clone();
+                let residual =
+                    Rc::new(move |t: f64, y: &DVector<f64>| (residual_callbacks.residual)(t, y))
+                        as Rc<NativeResidualFn>;
+                let residual_for_jac = Rc::clone(&residual);
+                let atol = config.atol.abs().max(1.0e-14);
+                let jacobian = Rc::new(RefCell::new(Box::new(move |t: f64, y: &DVector<f64>| {
+                    finite_difference_jacobian_from_residual(
+                        residual_for_jac.as_ref(),
+                        t,
+                        y,
+                        atol,
+                        jacobian_storage,
+                    )
+                })
+                    as Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>));
+                (residual, jacobian)
             }
         };
 
@@ -637,6 +676,63 @@ where
     }
 }
 
+fn finite_difference_jacobian_from_residual(
+    residual: &NativeResidualFn,
+    t: f64,
+    y: &DVector<f64>,
+    atol: f64,
+    storage: NativeJacobianStorage,
+) -> BdfJacobian {
+    let n = y.len();
+    let f0 = residual(t, y);
+    let mut dense = DMatrix::<f64>::zeros(n, n);
+    let eps = f64::EPSILON.sqrt();
+
+    for col in 0..n {
+        let yj = y[col];
+        let h = eps * yj.abs().max(atol).max(1.0);
+        let mut y_pert = y.clone_owned();
+        y_pert[col] += h;
+        let f_pert = residual(t, &y_pert);
+        for row in 0..n {
+            dense[(row, col)] = (f_pert[row] - f0[row]) / h;
+        }
+    }
+
+    match storage {
+        NativeJacobianStorage::Dense => BdfJacobian::from_dense(dense),
+        NativeJacobianStorage::SparseTriplets => {
+            let mut triplets = Vec::new();
+            for col in 0..n {
+                for row in 0..n {
+                    let value = dense[(row, col)];
+                    if value != 0.0 {
+                        triplets.push(faer::sparse::Triplet::new(row, col, value));
+                    }
+                }
+            }
+            BdfJacobian::SparseTriplets { n, triplets }
+        }
+        NativeJacobianStorage::Banded => {
+            let mut kl = 0usize;
+            let mut ku = 0usize;
+            for col in 0..n {
+                for row in 0..n {
+                    let value = dense[(row, col)];
+                    if value != 0.0 {
+                        kl = kl.max(row.saturating_sub(col));
+                        ku = ku.max(col.saturating_sub(row));
+                    }
+                }
+            }
+            let mut banded = Banded::<f64>::zeros(n, kl, ku)
+                .expect("finite-difference Jacobian bandwidth should define valid banded storage");
+            banded.fill_from_dense(|i, j| dense[(i, j)]);
+            BdfJacobian::Banded(banded)
+        }
+    }
+}
+
 fn retry_refresh_requested(action: Lsode2RetryAction) -> Option<bool> {
     match action {
         Lsode2RetryAction::Retry => Some(false),
@@ -788,10 +884,33 @@ mod tests {
     }
 
     #[test]
-    fn native_step_engine_skips_dense_backend() {
+    fn native_step_engine_builds_dense_backend() {
         let engine = Lsode2NativeStepEngine::from_problem_config(&exponential_decay_config())
-            .expect("dense config should not error");
-        assert!(engine.is_none());
+            .expect("dense config should not error")
+            .expect("dense config should enable native step engine");
+        match engine {
+            Lsode2NativeStepEngine::Dense(_) => {}
+            _ => panic!("expected dense native step engine"),
+        }
+    }
+
+    #[test]
+    fn native_step_engine_dense_attempt_records_native_statistics() {
+        let mut engine = Lsode2NativeStepEngine::from_problem_config(&exponential_decay_config())
+            .expect("dense config should build a native step engine")
+            .expect("dense config should enable native step engine");
+
+        let report = engine
+            .step_once()
+            .expect("native dense step attempt should succeed");
+
+        assert!(report.iterations > 0);
+        assert!(report.predicted.t_trial > 0.0);
+        assert!(!report.outcome_label().is_empty());
+        assert!(engine.statistics().native_step_attempts > 0);
+        assert!(engine.statistics().native_residual_calls > 0);
+        assert!(engine.statistics().native_jacobian_calls > 0);
+        assert!(engine.statistics().native_linear_solve_calls > 0);
     }
 
     #[test]
@@ -869,6 +988,7 @@ mod tests {
 
         let inner = match &mut engine {
             Lsode2NativeStepEngine::Sparse(inner) => inner,
+            Lsode2NativeStepEngine::Dense(_) => unreachable!("test requested sparse backend"),
             Lsode2NativeStepEngine::Banded(_) => unreachable!("test requested sparse backend"),
         };
         inner.driver.cycle_mut().state_mut().set_order(3).unwrap();
@@ -905,6 +1025,7 @@ mod tests {
 
         let inner = match &mut engine {
             Lsode2NativeStepEngine::Sparse(inner) => inner,
+            Lsode2NativeStepEngine::Dense(_) => unreachable!("test requested sparse backend"),
             Lsode2NativeStepEngine::Banded(_) => unreachable!("test requested sparse backend"),
         };
         inner.driver.cycle_mut().state_mut().set_order(3).unwrap();

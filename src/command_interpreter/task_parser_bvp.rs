@@ -17,6 +17,9 @@
 //! - postprocessing currently supports CSV saving and optional plot flag parsing
 
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use crate::command_interpreter::task_parser_common::{
+    apply_symbolic_substitutions_to_vec, parse_symbolic_substitutions, validate_symbol_names,
+};
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
@@ -237,6 +240,8 @@ pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError>
         "equations".to_string(),
         "boundary_conditions".to_string(),
         "initial_guess".to_string(),
+        "where".to_string(),
+        "substitute".to_string(),
     ]));
     let document = parser
         .get_result()
@@ -478,7 +483,7 @@ fn parse_bvp_equations(document: &DocumentMap) -> Result<BvpEquationSpec, BvpTas
         .zip(parameter_values_vec)
         .collect();
 
-    validate_symbol_names(&arg, &parameter_names)?;
+    validate_symbol_names(&arg, &parameter_names).map_err(BvpTaskError::Semantic)?;
 
     let (unknowns, rhs_raw) = if section.contains_key("unknowns") || section.contains_key("rhs") {
         let unknowns = get_required_string_list(section, "equations", "unknowns")?;
@@ -514,9 +519,20 @@ fn parse_bvp_equations(document: &DocumentMap) -> Result<BvpEquationSpec, BvpTas
         }
     }
 
+    let substitutions = parse_symbolic_substitutions(document).map_err(|message| {
+        BvpTaskError::InvalidField {
+            section: "where/substitute".to_string(),
+            field: "*".to_string(),
+            message,
+        }
+    })?;
     let rhs = rhs_raw
         .iter()
-        .map(|expr| Expr::parse_expression(expr).set_variable_from_map(&parameter_values))
+        .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
+        .into_iter()
+        .map(|expr| expr.set_variable_from_map(&parameter_values))
         .collect();
 
     Ok(BvpEquationSpec {
@@ -525,6 +541,16 @@ fn parse_bvp_equations(document: &DocumentMap) -> Result<BvpEquationSpec, BvpTas
         rhs,
         parameter_names,
         parameter_values,
+    })
+}
+
+fn parse_expr_safe(expr_text: &str, section: &str, field: &str) -> Result<Expr, BvpTaskError> {
+    std::panic::catch_unwind(|| Expr::parse_expression(expr_text)).map_err(|_| {
+        BvpTaskError::InvalidField {
+            section: section.to_string(),
+            field: field.to_string(),
+            message: format!("failed to parse symbolic expression `{expr_text}`"),
+        }
     })
 }
 
@@ -950,7 +976,7 @@ fn parse_pair_style_equations(
         if reserved.contains(&key.as_str()) {
             continue;
         }
-        let expr = get_required_string(section, "equations", key)?;
+        let expr = get_required_symbolic_expr(section, "equations", key)?;
         unknowns.push(key.clone());
         rhs.push(expr);
     }
@@ -965,6 +991,25 @@ fn parse_pair_style_equations(
     Ok((unknowns, rhs))
 }
 
+fn get_required_symbolic_expr(
+    section: &GenericSectionMap,
+    section_name: &str,
+    field: &str,
+) -> Result<String, BvpTaskError> {
+    let values = get_required_values(section, section_name, field)?;
+    if values.is_empty() {
+        return Err(BvpTaskError::MissingField {
+            section: section_name.to_string(),
+            field: field.to_string(),
+        });
+    }
+    Ok(values
+        .iter()
+        .map(Value::to_string_value)
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
 fn default_bvp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let headers = HashMap::from([
         (
@@ -974,6 +1019,10 @@ fn default_bvp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Ve
         (
             "equations".to_string(),
             vec!["system".to_string(), "bvp_system".to_string()],
+        ),
+        (
+            "where".to_string(),
+            vec!["substitute".to_string(), "aliases".to_string()],
         ),
         (
             "boundary_conditions".to_string(),
@@ -1273,23 +1322,6 @@ fn value_to_float(value: &Value, section_name: &str, field: &str) -> Result<f64,
     }
 }
 
-fn validate_symbol_names(arg: &str, parameter_names: &[String]) -> Result<(), BvpTaskError> {
-    if arg.trim().is_empty() {
-        return Err(BvpTaskError::Semantic(
-            "independent argument name cannot be empty".to_string(),
-        ));
-    }
-    let mut seen = HashSet::new();
-    for name in parameter_names {
-        if !seen.insert(name) {
-            return Err(BvpTaskError::Semantic(format!(
-                "duplicate parameter name `{name}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1327,6 +1359,41 @@ y: 0.0
             spec.boundary_conditions.conditions["y"],
             vec![(0usize, 1.0f64)]
         );
+    }
+
+    #[test]
+    fn bvp_task_parser_supports_where_symbolic_substitutions() {
+        let input = r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+y: flux - y
+
+where
+flux: 3.0*x
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+"#;
+
+        let spec = parse_bvp_task_from_str(input).expect("BVP with where substitutions should parse");
+        let expr = spec.equations.rhs[0].clone();
+        let f = expr.lambdify_borrowed_thread_safe(&["x", "y"]);
+        let value = f(&[2.0, 1.0]);
+        assert!((value - 5.0).abs() < 1e-12);
     }
 
     #[test]

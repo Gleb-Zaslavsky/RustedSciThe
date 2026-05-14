@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn exponential_decay_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
@@ -337,26 +338,14 @@ fn lsode2_exponential_decay_backend_story_table() {
         });
 
     let rows = vec![
-        StoryRow {
-            route: "Lambdify",
-            matrix: "Dense",
-            mode: "symbolic/lambdify",
-            total_ms: reference.statistics.solve_ms_total,
-            prepare_ms: Some(reference.statistics.backend_prepare_ms_total),
-            solve_ms: Some(reference.statistics.solve_ms_total),
-            final_diff: Some(0.0),
-            resolved_source: Some(reference.resolved_source.to_string()),
-            resolved_structure: Some(reference.resolved_structure.to_string()),
-            linear_solver: Some(reference.linear_solver_backend.to_string()),
-            linear_reason: Some(reference.linear_solver_reason.to_string()),
-            residual_calls: Some(reference.statistics.residual_calls),
-            jacobian_calls: Some(reference.statistics.jacobian_calls),
-            nlu_or_native_linsolve: Some(reference.statistics.bdf_nlu_total),
-            residual_ms_total: Some(reference.statistics.residual_ms_total),
-            jacobian_ms_total: Some(reference.statistics.jacobian_ms_total),
-            linked_residual_calls: Some(0),
-            status: reference.status.clone(),
-        },
+        solve_story_row_fallible(
+            "Lambdify",
+            "Dense",
+            "symbolic/lambdify",
+            exponential_decay_config(),
+            reference_final_y,
+            Some(0),
+        ),
         solve_story_row_fallible(
             "Lambdify",
             "Sparse",
@@ -1285,66 +1274,35 @@ fn lsode2_aot_toolchain_stage_story_table() {
         }
     }
 
-    println!(
-        "[LSODE2 story] AOT toolchain stage table (Dense/Sparse/Banded); all time columns are milliseconds"
-    );
-    println!(
-        "matrix | toolchain | run  | rep | total_ms | prepare_ms | solve_ms | final_diff_vs_lambdify | status"
-    );
-    println!(
-        "------------------------------------------------------------------------------------------------------------"
-    );
-    for row in &rows {
+    let verbose_rows = std::env::var_os("LSODE2_STORY_VERBOSE").is_some();
+    if verbose_rows {
+        println!("[LSODE2 story] AOT per-run table (verbose); all time columns are milliseconds");
         println!(
-            "{:<6} | {:<9} | {:<4} | {:>3} | {:>8.3} | {:>10} | {:>8} | {:>22} | {}",
-            row.matrix,
-            row.toolchain,
-            row.run_kind,
-            row.repeat_idx,
-            row.total_ms,
-            row.prepare_ms
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "-".to_string()),
-            row.solve_ms
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "-".to_string()),
-            row.final_diff_vs_lambdify
-                .map(|v| format!("{v:.3e}"))
-                .unwrap_or_else(|| "-".to_string()),
-            row.status
+            "matrix | toolchain | run  | rep | total_ms | prepare_ms | solve_ms | final_diff_vs_lambdify | status"
         );
-    }
-
-    println!("[LSODE2 story] AOT toolchain diagnostics; all time columns are milliseconds");
-    println!(
-        "matrix | toolchain | run  | rep | residual_calls | jacobian_calls | nlu | residual_ms | jacobian_ms"
-    );
-    println!(
-        "-----------------------------------------------------------------------------------------------------"
-    );
-    for row in &rows {
         println!(
-            "{:<6} | {:<9} | {:<4} | {:>3} | {:>14} | {:>13} | {:>3} | {:>11} | {:>11}",
-            row.matrix,
-            row.toolchain,
-            row.run_kind,
-            row.repeat_idx,
-            row.residual_calls
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            row.jacobian_calls
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            row.nlu
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            row.residual_ms_total
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "-".to_string()),
-            row.jacobian_ms_total
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "-".to_string()),
+            "------------------------------------------------------------------------------------------------------------"
         );
+        for row in &rows {
+            println!(
+                "{:<6} | {:<9} | {:<4} | {:>3} | {:>8.3} | {:>10} | {:>8} | {:>22} | {}",
+                row.matrix,
+                row.toolchain,
+                row.run_kind,
+                row.repeat_idx,
+                row.total_ms,
+                row.prepare_ms
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                row.solve_ms
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                row.final_diff_vs_lambdify
+                    .map(|v| format!("{v:.3e}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                row.status
+            );
+        }
     }
 
     #[derive(Default)]
@@ -1388,6 +1346,12 @@ fn lsode2_aot_toolchain_stage_story_table() {
         total_ms: RunStats,
         prepare_ms: RunStats,
         solve_ms: RunStats,
+        final_diff_vs_lambdify: RunStats,
+        residual_calls: RunStats,
+        jacobian_calls: RunStats,
+        nlu: RunStats,
+        residual_ms: RunStats,
+        jacobian_ms: RunStats,
     }
     let mut aggregates = std::collections::BTreeMap::<String, AggregateBucket>::new();
     for row in &rows {
@@ -1403,14 +1367,32 @@ fn lsode2_aot_toolchain_stage_story_table() {
             if let Some(v) = row.solve_ms {
                 bucket.solve_ms.push(v);
             }
+            if let Some(v) = row.final_diff_vs_lambdify {
+                bucket.final_diff_vs_lambdify.push(v);
+            }
+            if let Some(v) = row.residual_calls {
+                bucket.residual_calls.push(v as f64);
+            }
+            if let Some(v) = row.jacobian_calls {
+                bucket.jacobian_calls.push(v as f64);
+            }
+            if let Some(v) = row.nlu {
+                bucket.nlu.push(v as f64);
+            }
+            if let Some(v) = row.residual_ms_total {
+                bucket.residual_ms.push(v);
+            }
+            if let Some(v) = row.jacobian_ms_total {
+                bucket.jacobian_ms.push(v);
+            }
         }
     }
     println!("[LSODE2 story] AOT multi-run aggregate table; all time columns are milliseconds");
     println!(
-        "matrix | toolchain | run  | ok/runs | total_ms mean±std [min,max] | prepare_ms mean±std [min,max] | solve_ms mean±std [min,max]"
+        "matrix | toolchain | run  | ok/runs | total_ms mean+/-std [min,max] | prepare_ms mean+/-std [min,max] | solve_ms mean+/-std [min,max] | final_diff_vs_lambdify mean+/-std [min,max]"
     );
     println!(
-        "-----------------------------------------------------------------------------------------------------------------------------------"
+        "---------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
     );
     for (key, bucket) in &aggregates {
         let parts = key.split('|').collect::<Vec<_>>();
@@ -1418,32 +1400,88 @@ fn lsode2_aot_toolchain_stage_story_table() {
         let total = bucket
             .total_ms
             .summary()
-            .map(|(m, s, n, x)| format!("{m:.3}±{s:.3} [{n:.3},{x:.3}]"))
+            .map(|(m, s, n, x)| format!("{m:.3}+/-{s:.3} [{n:.3},{x:.3}]"))
             .unwrap_or_else(|| "-".to_string());
         let prepare = bucket
             .prepare_ms
             .summary()
-            .map(|(m, s, n, x)| format!("{m:.3}±{s:.3} [{n:.3},{x:.3}]"))
+            .map(|(m, s, n, x)| format!("{m:.3}+/-{s:.3} [{n:.3},{x:.3}]"))
             .unwrap_or_else(|| "-".to_string());
         let solve = bucket
             .solve_ms
             .summary()
-            .map(|(m, s, n, x)| format!("{m:.3}±{s:.3} [{n:.3},{x:.3}]"))
+            .map(|(m, s, n, x)| format!("{m:.3}+/-{s:.3} [{n:.3},{x:.3}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = bucket
+            .final_diff_vs_lambdify
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.3e}+/-{s:.1e} [{n:.3e},{x:.3e}]"))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<6} | {:<9} | {:<4} | {:>7} | {:<30} | {:<32} | {}",
+            "{:<6} | {:<9} | {:<4} | {:>7} | {:<30} | {:<32} | {:<28} | {}",
             matrix,
             toolchain,
             run_kind,
             format!("{}/{}", bucket.ok_runs, bucket.total_runs),
             total,
             prepare,
-            solve
+            solve,
+            diff
         );
     }
 
     println!(
-        "note: anomaly-localization output is intentionally kept in debug diagnostics (`LSODE2/tests.rs`), not in story tables."
+        "[LSODE2 story] AOT aggregate diagnostics; counters are counts, times are milliseconds"
+    );
+    println!(
+        "matrix | toolchain | run  | residual_calls mean+/-std | jacobian_calls mean+/-std | nlu mean+/-std | residual_ms mean+/-std | jacobian_ms mean+/-std"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (key, bucket) in &aggregates {
+        let parts = key.split('|').collect::<Vec<_>>();
+        let (matrix, toolchain, run_kind) = (parts[0], parts[1], parts[2]);
+        let residual_calls = bucket
+            .residual_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_calls = bucket
+            .jacobian_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let nlu = bucket
+            .nlu
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let residual_ms = bucket
+            .residual_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_ms = bucket
+            .jacobian_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<9} | {:<4} | {:<24} | {:<24} | {:<15} | {:<21} | {}",
+            matrix,
+            toolchain,
+            run_kind,
+            residual_calls,
+            jacobian_calls,
+            nlu,
+            residual_ms,
+            jacobian_ms
+        );
+    }
+
+    println!(
+        "note: set LSODE2_STORY_VERBOSE=1 to print per-run rows; default output is aggregated for stable CI readability."
     );
 
     let successful = rows
@@ -1531,6 +1569,9 @@ struct BackendRaceRow {
     residual_calls: RaceStats,
     jacobian_calls: RaceStats,
     nlu_or_native_linear: RaceStats,
+    residual_ms: RaceStats,
+    jacobian_ms: RaceStats,
+    linear_ms: RaceStats,
     accepted_steps: RaceStats,
     rejected_steps: RaceStats,
 }
@@ -1549,6 +1590,9 @@ impl BackendRaceRow {
             residual_calls: RaceStats::default(),
             jacobian_calls: RaceStats::default(),
             nlu_or_native_linear: RaceStats::default(),
+            residual_ms: RaceStats::default(),
+            jacobian_ms: RaceStats::default(),
+            linear_ms: RaceStats::default(),
             accepted_steps: RaceStats::default(),
             rejected_steps: RaceStats::default(),
         }
@@ -1567,12 +1611,28 @@ fn race_lambdify_config(matrix: BackendRaceMatrix) -> Lsode2ProblemConfig {
     }
 }
 
-fn race_aot_config(matrix: BackendRaceMatrix) -> Lsode2ProblemConfig {
-    let out = PathBuf::from(format!(
-        "target/lsode2-story-race/{}/aot_c_tcc",
-        matrix.label().to_lowercase()
-    ));
-    let generated = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(out).with_c_tcc();
+fn unique_story_run_tag(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}_pid{}_{}", std::process::id(), nanos)
+}
+
+fn unique_story_short_tag() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), (nanos & 0xFFFFF))
+}
+
+fn race_aot_config_with_output(
+    matrix: BackendRaceMatrix,
+    output_dir: impl Into<PathBuf>,
+) -> Lsode2ProblemConfig {
+    let generated =
+        SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_dir).with_c_tcc();
     let source = Lsode2ResidualJacobianSource::Symbolic {
         assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
         execution: Lsode2SymbolicExecutionMode::Aot {
@@ -1596,6 +1656,29 @@ fn race_aot_config(matrix: BackendRaceMatrix) -> Lsode2ProblemConfig {
             .with_native_banded_faithful_generated_backend(generated)
             .with_residual_jacobian_source(source),
     }
+}
+
+fn race_aot_config(matrix: BackendRaceMatrix) -> Lsode2ProblemConfig {
+    let out = PathBuf::from(format!(
+        "target/lsode2-story-race/{}/aot_c_tcc",
+        matrix.label().to_lowercase()
+    ));
+    race_aot_config_with_output(matrix, out)
+}
+
+fn race_aot_parallel_config(
+    matrix: BackendRaceMatrix,
+    chunks_per_worker: usize,
+) -> Lsode2ProblemConfig {
+    race_aot_config(matrix).with_aot_parallel_chunking(chunks_per_worker)
+}
+
+fn race_aot_parallel_config_with_output(
+    matrix: BackendRaceMatrix,
+    output_dir: impl Into<PathBuf>,
+    chunks_per_worker: usize,
+) -> Lsode2ProblemConfig {
+    race_aot_config_with_output(matrix, output_dir).with_aot_parallel_chunking(chunks_per_worker)
 }
 
 fn race_analytical_config(matrix: BackendRaceMatrix) -> Option<Lsode2ProblemConfig> {
@@ -1624,7 +1707,7 @@ fn run_backend_race_sample(
     route: &'static str,
     config: Lsode2ProblemConfig,
     baseline_final_y: f64,
-) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
+) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
     let started_total = Instant::now();
     let mut solver = Lsode2Solver::new(config).ok()?;
     let mut prepare_ms = 0.0;
@@ -1655,6 +1738,21 @@ fn run_backend_race_sample(
     } else {
         summary.statistics.bdf_nlu_total as f64
     };
+    let residual_ms = if route == "Analytical-Native" || is_native_faithful {
+        summary.native_statistics.native_residual_ms_total
+    } else {
+        summary.statistics.residual_ms_total
+    };
+    let jacobian_ms = if route == "Analytical-Native" || is_native_faithful {
+        summary.native_statistics.native_jacobian_ms_total
+    } else {
+        summary.statistics.jacobian_ms_total
+    };
+    let linear_ms = if route == "Analytical-Native" || is_native_faithful {
+        summary.native_statistics.native_linear_solve_ms_total
+    } else {
+        0.0
+    };
     let accepted_steps = summary
         .native_statistics
         .native_step_accepts
@@ -1669,6 +1767,9 @@ fn run_backend_race_sample(
         residual_calls,
         jacobian_calls,
         nlu_or_native_linear,
+        residual_ms,
+        jacobian_ms,
+        linear_ms,
         accepted_steps,
         rejected_steps,
     ))
@@ -1725,8 +1826,11 @@ fn lsode2_multi_run_backend_race_by_weight_class() {
                     row.residual_calls.push(sample.4);
                     row.jacobian_calls.push(sample.5);
                     row.nlu_or_native_linear.push(sample.6);
-                    row.accepted_steps.push(sample.7);
-                    row.rejected_steps.push(sample.8);
+                    row.residual_ms.push(sample.7);
+                    row.jacobian_ms.push(sample.8);
+                    row.linear_ms.push(sample.9);
+                    row.accepted_steps.push(sample.10);
+                    row.rejected_steps.push(sample.11);
                 }
             }
             rows.push(row);
@@ -1822,6 +1926,33 @@ fn lsode2_multi_run_backend_race_by_weight_class() {
         );
     }
 
+    println!(
+        "[LSODE2 story] backend race stage timers; all time columns are milliseconds (mean+/-std)"
+    );
+    println!("matrix | route             | residual_ms | jacobian_ms | linear_ms");
+    println!("--------------------------------------------------------------------------");
+    for row in &rows {
+        let residual_ms = row
+            .residual_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_ms = row
+            .jacobian_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear_ms = row
+            .linear_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<17} | {:<11} | {:<11} | {}",
+            row.matrix, row.route, residual_ms, jacobian_ms, linear_ms
+        );
+    }
+
     assert!(
         rows.iter().any(|r| r.runs_ok > 0),
         "at least one backend race route should complete successfully"
@@ -1844,6 +1975,224 @@ fn lsode2_multi_run_backend_race_by_weight_class() {
                 row.route,
                 mean_diff,
                 tol
+            );
+        }
+    }
+}
+
+#[test]
+fn lsode2_parallel_chunking_story_by_weight_class() {
+    const REPEATS: usize = 5;
+    const CHUNKS_PER_WORKER: usize = 2;
+    let matrices = [
+        BackendRaceMatrix::Dense,
+        BackendRaceMatrix::Sparse,
+        BackendRaceMatrix::Banded,
+    ];
+    let routes = [
+        ("Lambdify", "baseline(no_chunk_knobs)"),
+        ("AOT-Ctcc-Whole", "whole"),
+        ("AOT-Ctcc-Parallel", "parallel(auto,x2)"),
+    ];
+
+    let mut baselines = std::collections::BTreeMap::new();
+    for matrix in matrices {
+        let mut solver = Lsode2Solver::new(race_lambdify_config(matrix))
+            .expect("parallel story baseline config should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("parallel story baseline solve should finish");
+        let final_y = summary
+            .final_y
+            .as_ref()
+            .expect("parallel story baseline should expose final_y")[0];
+        baselines.insert(matrix.label(), final_y);
+    }
+
+    let mut rows = Vec::new();
+    for matrix in matrices {
+        for (route, chunking) in routes {
+            let mut row = BackendRaceRow::new(matrix.label(), route);
+            let baseline = *baselines
+                .get(matrix.label())
+                .expect("parallel story baseline final_y should exist");
+
+            // Prewarm AOT routes once so multi-run aggregates reflect warm runtime
+            // behavior instead of mixing in cold codegen/build noise.
+            if route.starts_with("AOT-") {
+                let warmup_cfg = match route {
+                    "AOT-Ctcc-Whole" => Some(race_aot_config(matrix)),
+                    "AOT-Ctcc-Parallel" => {
+                        Some(race_aot_parallel_config(matrix, CHUNKS_PER_WORKER))
+                    }
+                    _ => None,
+                };
+                if let Some(cfg) = warmup_cfg {
+                    let _ = run_backend_race_sample(route, cfg, baseline);
+                }
+            }
+
+            for _ in 0..REPEATS {
+                row.runs_total += 1;
+                let config = match route {
+                    "Lambdify" => Some(race_lambdify_config(matrix)),
+                    "AOT-Ctcc-Whole" => Some(race_aot_config(matrix)),
+                    "AOT-Ctcc-Parallel" => {
+                        Some(race_aot_parallel_config(matrix, CHUNKS_PER_WORKER))
+                    }
+                    _ => None,
+                };
+                let Some(config) = config else {
+                    continue;
+                };
+                if let Some(sample) = run_backend_race_sample(route, config, baseline) {
+                    row.runs_ok += 1;
+                    row.total_ms.push(sample.0);
+                    row.prepare_ms.push(sample.1);
+                    row.solve_ms.push(sample.2);
+                    row.final_diff.push(sample.3);
+                    row.residual_calls.push(sample.4);
+                    row.jacobian_calls.push(sample.5);
+                    row.nlu_or_native_linear.push(sample.6);
+                    row.residual_ms.push(sample.7);
+                    row.jacobian_ms.push(sample.8);
+                    row.linear_ms.push(sample.9);
+                    row.accepted_steps.push(sample.10);
+                    row.rejected_steps.push(sample.11);
+                }
+            }
+            rows.push((row, chunking));
+        }
+    }
+
+    println!(
+        "[LSODE2 story] parallel chunking race by weight class; all time columns are milliseconds"
+    );
+    println!(
+        "note: `Lambdify` is a baseline route and currently does not use generated-backend chunking knobs."
+    );
+    println!(
+        "matrix | route             | chunking              | ok/runs | total_ms mean+/-std [min,max] | solve_ms mean+/-std | final_diff mean+/-std | status"
+    );
+    println!(
+        "---------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, chunking) in &rows {
+        let total = row
+            .total_ms
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2}+/-{s:.2} [{n:.2},{x:.2}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let solve = row
+            .solve_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = row
+            .final_diff
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2e}+/-{s:.1e}"))
+            .unwrap_or_else(|| "-".to_string());
+        let status = if row.runs_ok == row.runs_total {
+            format!("ok {}/{}", row.runs_ok, row.runs_total)
+        } else if row.runs_ok == 0 {
+            "failed".to_string()
+        } else {
+            format!("partial {}/{}", row.runs_ok, row.runs_total)
+        };
+        println!(
+            "{:<6} | {:<17} | {:<21} | {:>7} | {:<31} | {:<18} | {:<20} | {}",
+            row.matrix,
+            row.route,
+            chunking,
+            format!("{}/{}", row.runs_ok, row.runs_total),
+            total,
+            solve,
+            diff,
+            status
+        );
+    }
+
+    println!("[LSODE2 story] parallel chunking diagnostics; counters are counts (mean+/-std)");
+    println!(
+        "matrix | route             | chunking              | residual_calls | jacobian_calls | linear_calls | residual_ms | jacobian_ms | linear_ms | accepted | rejected"
+    );
+    println!(
+        "---------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, chunking) in &rows {
+        let residual_calls = row
+            .residual_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_calls = row
+            .jacobian_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear_calls = row
+            .nlu_or_native_linear
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let residual_ms = row
+            .residual_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_ms = row
+            .jacobian_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear_ms = row
+            .linear_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let accepted = row
+            .accepted_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let rejected = row
+            .rejected_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<17} | {:<21} | {:<14} | {:<14} | {:<12} | {:<11} | {:<11} | {:<9} | {:<8} | {}",
+            row.matrix,
+            row.route,
+            chunking,
+            residual_calls,
+            jacobian_calls,
+            linear_calls,
+            residual_ms,
+            jacobian_ms,
+            linear_ms,
+            accepted,
+            rejected
+        );
+    }
+
+    assert!(
+        rows.iter().any(|(r, _)| r.runs_ok > 0),
+        "at least one parallel chunking race route should complete successfully"
+    );
+    for (row, _) in rows {
+        if row.runs_ok > 0 {
+            let (mean_diff, _, _, _) = row
+                .final_diff
+                .summary()
+                .expect("successful parallel chunking route should have diff samples");
+            assert!(
+                mean_diff <= 1.0e-5,
+                "{} {} final_diff too large in parallel chunking race: {:e}",
+                row.matrix,
+                row.route,
+                mean_diff
             );
         }
     }
@@ -2021,4 +2370,887 @@ fn lsode2_quality_dashboard_stiff_vs_nonstiff_auto_switch() {
             }
         }
     }
+}
+
+fn combustion_like_story_base_config() -> Lsode2ProblemConfig {
+    // Simplified stiff combustion-like IVP:
+    // A -> B with Arrhenius-driven heat release + linear cooling.
+    let eqs = vec![
+        Expr::parse_expression("-k*exp(-E/(R*T))*A*A"),
+        Expr::parse_expression("0.5*k*exp(-E/(R*T))*A*A - kloss*B"),
+        Expr::parse_expression("Qcrho*k*exp(-E/(R*T))*A*A - cooling*(T - T0)"),
+    ];
+    Lsode2ProblemConfig::new(
+        eqs,
+        vec!["A".to_string(), "B".to_string(), "T".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 0.0, 300.0]),
+        120.0,
+        0.5,
+        1e-8,
+        1e-8,
+    )
+    .with_equation_parameters(vec![
+        "k".to_string(),
+        "E".to_string(),
+        "R".to_string(),
+        "T0".to_string(),
+        "Qcrho".to_string(),
+        "kloss".to_string(),
+        "cooling".to_string(),
+    ])
+    .with_equation_parameter_values(DVector::from_vec(vec![
+        1.0e7, // k
+        5.0e4, // E
+        8.314, // R
+        300.0, // T0
+        5.0e2, // Qcrho
+        0.0,   // kloss
+        0.5,   // cooling
+    ]))
+    .with_controller(
+        super::algorithm::Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_method_switch_probe_steps(1),
+    )
+    .with_faithful_bdf_solve(20_000, 20_000)
+}
+
+fn combustion_story_route_config_with_base_dir(
+    matrix: BackendRaceMatrix,
+    route: &'static str,
+    base_dir: &str,
+) -> Option<Lsode2ProblemConfig> {
+    let source = match route {
+        "Lambdify" => Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        },
+        "AOT-Ctcc" | "AOT-Ctcc-Whole" | "AOT-Ctcc-Parallel" => {
+            Lsode2ResidualJacobianSource::Symbolic {
+                assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+                execution: Lsode2SymbolicExecutionMode::Aot {
+                    toolchain: Lsode2AotToolchain::CTcc,
+                    profile: Lsode2AotProfile::Release,
+                },
+            }
+        }
+        _ => return None,
+    };
+
+    let base = combustion_like_story_base_config().with_residual_jacobian_source(source);
+    let cfg = match (matrix, route) {
+        (BackendRaceMatrix::Sparse, "Lambdify") => base.with_native_sparse_faer_backend(),
+        (BackendRaceMatrix::Banded, "Lambdify") => base.with_native_banded_faithful_backend(),
+        (BackendRaceMatrix::Sparse, "AOT-Ctcc") | (BackendRaceMatrix::Sparse, "AOT-Ctcc-Whole") => {
+            let out = PathBuf::from(format!("{base_dir}/sparse/aot_c_tcc"));
+            let backend =
+                SymbolicIvpGeneratedBackendConfig::build_if_missing_release(out).with_c_tcc();
+            base.with_native_sparse_faer_generated_backend(backend)
+        }
+        (BackendRaceMatrix::Banded, "AOT-Ctcc") | (BackendRaceMatrix::Banded, "AOT-Ctcc-Whole") => {
+            let out = PathBuf::from(format!("{base_dir}/banded/aot_c_tcc"));
+            let backend =
+                SymbolicIvpGeneratedBackendConfig::build_if_missing_release(out).with_c_tcc();
+            base.with_native_banded_faithful_generated_backend(backend)
+        }
+        (BackendRaceMatrix::Sparse, "AOT-Ctcc-Parallel") => {
+            let out = PathBuf::from(format!("{base_dir}/sparse/aot_c_tcc_parallel"));
+            let backend =
+                SymbolicIvpGeneratedBackendConfig::build_if_missing_release(out).with_c_tcc();
+            base.with_native_sparse_faer_generated_backend(backend)
+                .with_aot_parallel_chunking(2)
+        }
+        (BackendRaceMatrix::Banded, "AOT-Ctcc-Parallel") => {
+            let out = PathBuf::from(format!("{base_dir}/banded/aot_c_tcc_parallel"));
+            let backend =
+                SymbolicIvpGeneratedBackendConfig::build_if_missing_release(out).with_c_tcc();
+            base.with_native_banded_faithful_generated_backend(backend)
+                .with_aot_parallel_chunking(2)
+        }
+        _ => return None,
+    };
+    Some(cfg)
+}
+
+fn combustion_story_route_config(
+    matrix: BackendRaceMatrix,
+    route: &'static str,
+) -> Option<Lsode2ProblemConfig> {
+    combustion_story_route_config_with_base_dir(matrix, route, "target/lsode2-story-combustion")
+}
+
+fn run_combustion_story_sample(
+    route: &'static str,
+    config: Lsode2ProblemConfig,
+    baseline_final_a: f64,
+) -> Option<(
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+)> {
+    let started_total = Instant::now();
+    let mut solver = Lsode2Solver::new(config).ok()?;
+    let prep_started = Instant::now();
+    solver.prepare().ok()?;
+    let prepare_ms_wall = prep_started.elapsed().as_secs_f64() * 1_000.0;
+    let solve_started = Instant::now();
+    let summary = solver.solve_with_summary().ok()?;
+    let solve_ms_wall = solve_started.elapsed().as_secs_f64() * 1_000.0;
+    let total_ms_wall = started_total.elapsed().as_secs_f64() * 1_000.0;
+
+    let final_a = summary.final_y.as_ref()?.get(0).copied()?;
+    let final_diff = (final_a - baseline_final_a).abs();
+    let is_native_faithful = is_native_faithful_status(&summary.status);
+
+    let (
+        stage_prepare_ms,
+        stage_solve_ms,
+        residual_calls,
+        jacobian_calls,
+        linear_calls,
+        residual_ms,
+        jacobian_ms,
+        linear_ms,
+    ) = if is_native_faithful {
+        (
+            summary.native_statistics.backend_prepare_ms_total,
+            summary.native_statistics.solve_ms_total,
+            summary.native_statistics.native_residual_calls as f64,
+            summary.native_statistics.native_jacobian_calls as f64,
+            summary.native_statistics.native_linear_solve_calls as f64,
+            summary.native_statistics.native_residual_ms_total,
+            summary.native_statistics.native_jacobian_ms_total,
+            summary.native_statistics.native_linear_solve_ms_total,
+        )
+    } else {
+        (
+            summary.statistics.backend_prepare_ms_total,
+            summary.statistics.solve_ms_total,
+            summary.statistics.residual_calls as f64,
+            summary.statistics.jacobian_calls as f64,
+            summary.statistics.bdf_nlu_total as f64,
+            summary.statistics.residual_ms_total,
+            summary.statistics.jacobian_ms_total,
+            0.0,
+        )
+    };
+
+    let accepted_steps = summary
+        .native_statistics
+        .native_step_accepts
+        .max(summary.native_statistics.bridge_accepted_steps) as f64;
+    let rejected_steps = (summary.native_statistics.native_step_rejects_error_test
+        + summary.native_statistics.native_step_rejects_nonlinear) as f64;
+    let preferred_bdf = summary.native_statistics.preferred_bdf_count as f64;
+    let executed_bdf = summary.native_statistics.executed_bdf_count as f64;
+
+    let _ = route;
+    Some((
+        total_ms_wall,
+        prepare_ms_wall,
+        solve_ms_wall,
+        final_diff,
+        residual_calls,
+        jacobian_calls,
+        linear_calls,
+        accepted_steps,
+        rejected_steps,
+        preferred_bdf,
+        executed_bdf,
+        stage_prepare_ms,
+        stage_solve_ms,
+        residual_ms,
+        jacobian_ms,
+        linear_ms,
+    ))
+}
+
+#[test]
+fn lsode2_combustion_like_multi_run_story_dashboard() {
+    const REPEATS: usize = 5;
+    let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
+    let routes = ["Lambdify", "AOT-Ctcc"];
+
+    let mut baselines = std::collections::BTreeMap::new();
+    for matrix in matrices {
+        let baseline_cfg =
+            combustion_story_route_config(matrix, "Lambdify").expect("lambdify baseline config");
+        let mut solver = Lsode2Solver::new(baseline_cfg).expect("baseline solver should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("baseline combustion solve should finish");
+        let final_a = summary
+            .final_y
+            .as_ref()
+            .expect("baseline should provide final_y")[0];
+        baselines.insert(matrix.label(), final_a);
+    }
+
+    let mut rows = Vec::new();
+    for matrix in matrices {
+        for route in routes {
+            let mut row = BackendRaceRow::new(matrix.label(), route);
+            let mut preferred_bdf = RaceStats::default();
+            let mut executed_bdf = RaceStats::default();
+            for _ in 0..REPEATS {
+                row.runs_total += 1;
+                let Some(cfg) = combustion_story_route_config(matrix, route) else {
+                    continue;
+                };
+                let baseline = *baselines
+                    .get(matrix.label())
+                    .expect("combustion baseline should exist");
+                if let Some(sample) = run_combustion_story_sample(route, cfg, baseline) {
+                    row.runs_ok += 1;
+                    row.total_ms.push(sample.0);
+                    row.prepare_ms.push(sample.1);
+                    row.solve_ms.push(sample.2);
+                    row.final_diff.push(sample.3);
+                    row.residual_calls.push(sample.4);
+                    row.jacobian_calls.push(sample.5);
+                    row.nlu_or_native_linear.push(sample.6);
+                    row.accepted_steps.push(sample.7);
+                    row.rejected_steps.push(sample.8);
+                    preferred_bdf.push(sample.9);
+                    executed_bdf.push(sample.10);
+                    row.residual_ms.push(sample.13);
+                    row.jacobian_ms.push(sample.14);
+                    row.linear_ms.push(sample.15);
+                }
+            }
+            rows.push((row, preferred_bdf, executed_bdf));
+        }
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like backend summary (multi-run); all time columns are milliseconds"
+    );
+    println!(
+        "matrix | route     | ok/runs | total_ms mean+/-std [min,max] | final_diff(A) mean+/-std [min,max] | status"
+    );
+    println!(
+        "-----------------------------------------------------------------------------------------------------------"
+    );
+    for (row, _, _) in &rows {
+        let total = row
+            .total_ms
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2}+/-{s:.2} [{n:.2},{x:.2}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = row
+            .final_diff
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2e}+/-{s:.1e} [{n:.2e},{x:.2e}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let status = if row.runs_ok == row.runs_total {
+            format!("ok {}/{}", row.runs_ok, row.runs_total)
+        } else if row.runs_ok == 0 {
+            "failed".to_string()
+        } else {
+            format!("partial {}/{}", row.runs_ok, row.runs_total)
+        };
+        println!(
+            "{:<6} | {:<9} | {:>7} | {:<31} | {:<36} | {}",
+            row.matrix,
+            row.route,
+            format!("{}/{}", row.runs_ok, row.runs_total),
+            total,
+            diff,
+            status
+        );
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like diagnostics (multi-run); prepare/solve are stage times, counters are counts"
+    );
+    println!(
+        "matrix | route     | prepare_ms mean+/-std | solve_ms mean+/-std | residual_calls mean+/-std | jacobian_calls mean+/-std | linear_calls mean+/-std | accepted mean+/-std | rejected mean+/-std | preferred_bdf mean+/-std | executed_bdf mean+/-std"
+    );
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, preferred_bdf, executed_bdf) in &rows {
+        let prep = row
+            .prepare_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let solve = row
+            .solve_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let residual = row
+            .residual_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian = row
+            .jacobian_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear = row
+            .nlu_or_native_linear
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let accepted = row
+            .accepted_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let rejected = row
+            .rejected_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let pref_bdf = preferred_bdf
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let exec_bdf = executed_bdf
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<9} | {:<21} | {:<19} | {:<24} | {:<24} | {:<21} | {:<18} | {:<18} | {:<24} | {}",
+            row.matrix,
+            row.route,
+            prep,
+            solve,
+            residual,
+            jacobian,
+            linear,
+            accepted,
+            rejected,
+            pref_bdf,
+            exec_bdf
+        );
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like stage timers (multi-run); all time columns are milliseconds"
+    );
+    println!(
+        "matrix | route     | residual_ms mean+/-std | jacobian_ms mean+/-std | linear_ms mean+/-std"
+    );
+    println!(
+        "-----------------------------------------------------------------------------------------------"
+    );
+    for (row, _, _) in &rows {
+        let residual_ms = row
+            .residual_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian_ms = row
+            .jacobian_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear_ms = row
+            .linear_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.3}+/-{s:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<9} | {:<21} | {:<21} | {}",
+            row.matrix, row.route, residual_ms, jacobian_ms, linear_ms
+        );
+    }
+
+    assert!(
+        rows.iter().any(|(row, _, _)| row.runs_ok > 0),
+        "at least one combustion story route should complete successfully"
+    );
+    for (row, _, _) in rows {
+        if row.runs_ok > 0 {
+            let (mean_diff, _, _, _) = row
+                .final_diff
+                .summary()
+                .expect("successful combustion route should have diff samples");
+            assert!(
+                mean_diff <= 2.0e-4,
+                "{} {} combustion final_diff too large: {:e}",
+                row.matrix,
+                row.route,
+                mean_diff
+            );
+        }
+    }
+}
+
+#[test]
+fn lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard() {
+    const REPEATS: usize = 5;
+    let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
+    let routes = [
+        ("Lambdify", "baseline(no_chunk_knobs)"),
+        ("AOT-Ctcc-Whole", "whole"),
+        ("AOT-Ctcc-Parallel", "parallel(auto,x2)"),
+    ];
+
+    let mut baselines = std::collections::BTreeMap::new();
+    for matrix in matrices {
+        let baseline_cfg =
+            combustion_story_route_config(matrix, "Lambdify").expect("lambdify baseline config");
+        let mut solver = Lsode2Solver::new(baseline_cfg).expect("baseline solver should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("baseline combustion solve should finish");
+        let final_a = summary
+            .final_y
+            .as_ref()
+            .expect("baseline should provide final_y")[0];
+        baselines.insert(matrix.label(), final_a);
+    }
+
+    let mut rows = Vec::new();
+    for matrix in matrices {
+        for (route, chunking) in routes {
+            let mut row = BackendRaceRow::new(matrix.label(), route);
+            let mut preferred_bdf = RaceStats::default();
+            let mut executed_bdf = RaceStats::default();
+
+            let baseline = *baselines
+                .get(matrix.label())
+                .expect("combustion baseline should exist");
+
+            // Prewarm AOT routes once so statistics focus on warm runtime and
+            // chunking effects, while cold build cost is covered by dedicated
+            // AOT stage/cold-warm stories.
+            if route.starts_with("AOT-") {
+                if let Some(cfg) = combustion_story_route_config(matrix, route) {
+                    let _ = run_combustion_story_sample(route, cfg, baseline);
+                }
+            }
+
+            for _ in 0..REPEATS {
+                row.runs_total += 1;
+                let Some(cfg) = combustion_story_route_config(matrix, route) else {
+                    continue;
+                };
+                if let Some(sample) = run_combustion_story_sample(route, cfg, baseline) {
+                    row.runs_ok += 1;
+                    row.total_ms.push(sample.0);
+                    row.prepare_ms.push(sample.1);
+                    row.solve_ms.push(sample.2);
+                    row.final_diff.push(sample.3);
+                    row.residual_calls.push(sample.4);
+                    row.jacobian_calls.push(sample.5);
+                    row.nlu_or_native_linear.push(sample.6);
+                    row.accepted_steps.push(sample.7);
+                    row.rejected_steps.push(sample.8);
+                    preferred_bdf.push(sample.9);
+                    executed_bdf.push(sample.10);
+                    row.residual_ms.push(sample.13);
+                    row.jacobian_ms.push(sample.14);
+                    row.linear_ms.push(sample.15);
+                }
+            }
+            rows.push((row, preferred_bdf, executed_bdf, chunking));
+        }
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like parallel chunking summary (multi-run); all time columns are milliseconds"
+    );
+    println!(
+        "matrix | route              | chunking              | ok/runs | total_ms mean+/-std [min,max] | solve_ms mean+/-std | final_diff(A) mean+/-std | status"
+    );
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, _, _, chunking) in &rows {
+        let total = row
+            .total_ms
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2}+/-{s:.2} [{n:.2},{x:.2}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let solve = row
+            .solve_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = row
+            .final_diff
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2e}+/-{s:.1e}"))
+            .unwrap_or_else(|| "-".to_string());
+        let status = if row.runs_ok == row.runs_total {
+            format!("ok {}/{}", row.runs_ok, row.runs_total)
+        } else if row.runs_ok == 0 {
+            "failed".to_string()
+        } else {
+            format!("partial {}/{}", row.runs_ok, row.runs_total)
+        };
+        println!(
+            "{:<6} | {:<18} | {:<21} | {:>7} | {:<31} | {:<18} | {:<24} | {}",
+            row.matrix,
+            row.route,
+            chunking,
+            format!("{}/{}", row.runs_ok, row.runs_total),
+            total,
+            solve,
+            diff,
+            status
+        );
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like parallel chunking diagnostics (multi-run); counters are counts"
+    );
+    println!(
+        "matrix | route              | chunking              | residual_calls | jacobian_calls | linear_calls | accepted | rejected | preferred_bdf | executed_bdf"
+    );
+    println!(
+        "-------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, preferred_bdf, executed_bdf, chunking) in &rows {
+        let residual = row
+            .residual_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let jacobian = row
+            .jacobian_calls
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let linear = row
+            .nlu_or_native_linear
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let accepted = row
+            .accepted_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let rejected = row
+            .rejected_steps
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let pref_bdf = preferred_bdf
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        let exec_bdf = executed_bdf
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.1}+/-{s:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<6} | {:<18} | {:<21} | {:<14} | {:<14} | {:<12} | {:<8} | {:<8} | {:<13} | {}",
+            row.matrix,
+            row.route,
+            chunking,
+            residual,
+            jacobian,
+            linear,
+            accepted,
+            rejected,
+            pref_bdf,
+            exec_bdf
+        );
+    }
+
+    assert!(
+        rows.iter().any(|(row, _, _, _)| row.runs_ok > 0),
+        "at least one combustion parallel chunking route should complete successfully"
+    );
+    for (row, _, _, _) in rows {
+        if row.runs_ok > 0 {
+            let (mean_diff, _, _, _) = row
+                .final_diff
+                .summary()
+                .expect("successful combustion parallel route should have diff samples");
+            assert!(
+                mean_diff <= 2.0e-4,
+                "{} {} combustion parallel final_diff too large: {:e}",
+                row.matrix,
+                row.route,
+                mean_diff
+            );
+        }
+    }
+}
+
+#[test]
+fn lsode2_parallel_chunking_cold_stage_story_by_weight_class() {
+    const REPEATS: usize = 3;
+    const CHUNKS_PER_WORKER: usize = 2;
+    let matrices = [
+        BackendRaceMatrix::Dense,
+        BackendRaceMatrix::Sparse,
+        BackendRaceMatrix::Banded,
+    ];
+    let routes = [
+        ("Lambdify", "baseline(no_build_stage)"),
+        ("AOT-Ctcc-Whole", "cold_build(whole)"),
+        ("AOT-Ctcc-Parallel", "cold_build(parallel)"),
+    ];
+
+    let mut baselines = std::collections::BTreeMap::new();
+    for matrix in matrices {
+        let mut solver = Lsode2Solver::new(race_lambdify_config(matrix))
+            .expect("cold-stage baseline config should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("cold-stage baseline solve should finish");
+        let final_y = summary
+            .final_y
+            .as_ref()
+            .expect("cold-stage baseline should expose final_y")[0];
+        baselines.insert(matrix.label(), final_y);
+    }
+
+    let mut rows = Vec::new();
+    for matrix in matrices {
+        for (route, scenario) in routes {
+            let mut row = BackendRaceRow::new(matrix.label(), route);
+            let baseline = *baselines
+                .get(matrix.label())
+                .expect("cold-stage baseline final_y should exist");
+            for _ in 0..REPEATS {
+                row.runs_total += 1;
+                let config = match route {
+                    "Lambdify" => Some(race_lambdify_config(matrix)),
+                    "AOT-Ctcc-Whole" => {
+                        let tag = unique_story_run_tag("lsode2_story_race_cold_whole");
+                        let out = PathBuf::from(format!(
+                            "target/lsode2-story-race-cold/{}/{}/whole",
+                            matrix.label().to_lowercase(),
+                            tag
+                        ));
+                        Some(race_aot_config_with_output(matrix, out))
+                    }
+                    "AOT-Ctcc-Parallel" => {
+                        let tag = unique_story_run_tag("lsode2_story_race_cold_parallel");
+                        let out = PathBuf::from(format!(
+                            "target/lsode2-story-race-cold/{}/{}/parallel",
+                            matrix.label().to_lowercase(),
+                            tag
+                        ));
+                        Some(race_aot_parallel_config_with_output(
+                            matrix,
+                            out,
+                            CHUNKS_PER_WORKER,
+                        ))
+                    }
+                    _ => None,
+                };
+                let Some(config) = config else {
+                    continue;
+                };
+                if let Some(sample) = run_backend_race_sample(route, config, baseline) {
+                    row.runs_ok += 1;
+                    row.total_ms.push(sample.0);
+                    row.prepare_ms.push(sample.1);
+                    row.solve_ms.push(sample.2);
+                    row.final_diff.push(sample.3);
+                }
+            }
+            rows.push((row, scenario));
+        }
+    }
+
+    println!(
+        "[LSODE2 story] parallel chunking cold-stage story by weight class; all time columns are milliseconds"
+    );
+    println!(
+        "note: this table intentionally measures cold build+prepare cost for AOT (unique artifact dir per run)."
+    );
+    println!(
+        "matrix | route             | scenario              | ok/runs | total_ms mean+/-std [min,max] | prepare_ms mean+/-std | solve_ms mean+/-std | final_diff mean+/-std | status"
+    );
+    println!(
+        "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, scenario) in &rows {
+        let total = row
+            .total_ms
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2}+/-{s:.2} [{n:.2},{x:.2}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let prep = row
+            .prepare_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let solve = row
+            .solve_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = row
+            .final_diff
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2e}+/-{s:.1e}"))
+            .unwrap_or_else(|| "-".to_string());
+        let status = if row.runs_ok == row.runs_total {
+            format!("ok {}/{}", row.runs_ok, row.runs_total)
+        } else if row.runs_ok == 0 {
+            "failed".to_string()
+        } else {
+            format!("partial {}/{}", row.runs_ok, row.runs_total)
+        };
+        println!(
+            "{:<6} | {:<17} | {:<21} | {:>7} | {:<31} | {:<21} | {:<18} | {:<20} | {}",
+            row.matrix,
+            row.route,
+            scenario,
+            format!("{}/{}", row.runs_ok, row.runs_total),
+            total,
+            prep,
+            solve,
+            diff,
+            status
+        );
+    }
+
+    assert!(
+        rows.iter().any(|(row, _)| row.runs_ok > 0),
+        "at least one cold-stage route should complete successfully"
+    );
+}
+
+#[test]
+fn lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard() {
+    const REPEATS: usize = 3;
+    let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
+    let routes = [
+        ("Lambdify", "baseline(no_build_stage)"),
+        ("AOT-Ctcc-Whole", "cold_build(whole)"),
+        ("AOT-Ctcc-Parallel", "cold_build(parallel)"),
+    ];
+
+    let mut baselines = std::collections::BTreeMap::new();
+    for matrix in matrices {
+        let baseline_cfg =
+            combustion_story_route_config(matrix, "Lambdify").expect("lambdify baseline config");
+        let mut solver = Lsode2Solver::new(baseline_cfg).expect("baseline solver should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("baseline combustion solve should finish");
+        let final_a = summary
+            .final_y
+            .as_ref()
+            .expect("baseline should provide final_y")[0];
+        baselines.insert(matrix.label(), final_a);
+    }
+
+    let mut rows = Vec::new();
+    for matrix in matrices {
+        for (route, scenario) in routes {
+            let mut row = BackendRaceRow::new(matrix.label(), route);
+            let baseline = *baselines
+                .get(matrix.label())
+                .expect("combustion baseline should exist");
+            for _ in 0..REPEATS {
+                row.runs_total += 1;
+                let config = match route {
+                    "Lambdify" => combustion_story_route_config(matrix, route),
+                    "AOT-Ctcc-Whole" | "AOT-Ctcc-Parallel" => {
+                        let tag = unique_story_short_tag();
+                        let route_short = if route == "AOT-Ctcc-Whole" { "w" } else { "p" };
+                        let matrix_short = if matrix.label() == "Sparse" { "s" } else { "b" };
+                        let base_dir =
+                            format!("target/l2cold/{}/{}/{}", matrix_short, route_short, tag);
+                        combustion_story_route_config_with_base_dir(
+                            matrix,
+                            route,
+                            base_dir.as_str(),
+                        )
+                    }
+                    _ => None,
+                };
+                let Some(config) = config else {
+                    continue;
+                };
+                if let Some(sample) = run_combustion_story_sample(route, config, baseline) {
+                    row.runs_ok += 1;
+                    row.total_ms.push(sample.0);
+                    row.prepare_ms.push(sample.1);
+                    row.solve_ms.push(sample.2);
+                    row.final_diff.push(sample.3);
+                }
+            }
+            rows.push((row, scenario));
+        }
+    }
+
+    println!(
+        "[LSODE2 story] combustion-like parallel chunking cold-stage summary; all time columns are milliseconds"
+    );
+    println!(
+        "note: this table intentionally includes cold AOT build/prepare by forcing unique artifact dirs."
+    );
+    println!(
+        "matrix | route              | scenario              | ok/runs | total_ms mean+/-std [min,max] | prepare_ms mean+/-std | solve_ms mean+/-std | final_diff(A) mean+/-std | status"
+    );
+    println!(
+        "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for (row, scenario) in &rows {
+        let total = row
+            .total_ms
+            .summary()
+            .map(|(m, s, n, x)| format!("{m:.2}+/-{s:.2} [{n:.2},{x:.2}]"))
+            .unwrap_or_else(|| "-".to_string());
+        let prep = row
+            .prepare_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let solve = row
+            .solve_ms
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2}+/-{s:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        let diff = row
+            .final_diff
+            .summary()
+            .map(|(m, s, _, _)| format!("{m:.2e}+/-{s:.1e}"))
+            .unwrap_or_else(|| "-".to_string());
+        let status = if row.runs_ok == row.runs_total {
+            format!("ok {}/{}", row.runs_ok, row.runs_total)
+        } else if row.runs_ok == 0 {
+            "failed".to_string()
+        } else {
+            format!("partial {}/{}", row.runs_ok, row.runs_total)
+        };
+        println!(
+            "{:<6} | {:<18} | {:<21} | {:>7} | {:<31} | {:<21} | {:<18} | {:<24} | {}",
+            row.matrix,
+            row.route,
+            scenario,
+            format!("{}/{}", row.runs_ok, row.runs_total),
+            total,
+            prep,
+            solve,
+            diff,
+            status
+        );
+    }
+
+    assert!(
+        rows.iter().any(|(row, _)| row.runs_ok > 0),
+        "at least one combustion cold-stage route should complete successfully"
+    );
 }

@@ -1276,6 +1276,7 @@ fn parse_single_value(input: &str) -> IResult<&str, &str> {
     let mut bracket_depth = 0;
     let mut paren_depth = 0;
     let mut end_pos = 0;
+    let mut saw_top_level_whitespace = false;
 
     for (pos, ch) in chars {
         match ch {
@@ -1283,8 +1284,25 @@ fn parse_single_value(input: &str) -> IResult<&str, &str> {
             ']' => bracket_depth -= 1,
             '(' => paren_depth += 1,
             ')' => paren_depth -= 1,
-            ',' | ' ' | '\t' | '\n' | ';' if bracket_depth == 0 && paren_depth == 0 => {
+            ',' | '\n' | ';' if bracket_depth == 0 && paren_depth == 0 => {
                 break;
+            }
+            // Preserve spaces inside symbolic expressions, but stop before the
+            // next inline key-value pair (`... value key2: ...`).
+            ' ' | '\t' if bracket_depth == 0 && paren_depth == 0 => {
+                let tail = trim_inline_start(&input[pos..]);
+                if looks_like_inline_key_value_start(tail) {
+                    break;
+                }
+                // Legacy inline format support:
+                // `section1 key1: v1, v2 key2: v3, v4 section2`
+                // We only treat this as a boundary on the first top-level
+                // whitespace so normal phrases like `value with spaces` keep
+                // parsing as one value.
+                if !saw_top_level_whitespace && looks_like_standalone_section_title(tail) {
+                    break;
+                }
+                saw_top_level_whitespace = true;
             }
             _ => {}
         }
@@ -1299,6 +1317,74 @@ fn parse_single_value(input: &str) -> IResult<&str, &str> {
     }
 
     Ok((&input[end_pos..], &input[..end_pos]))
+}
+
+fn trim_inline_start(input: &str) -> &str {
+    input.trim_start_matches([' ', '\t'])
+}
+
+fn looks_like_inline_key_value_start(input: &str) -> bool {
+    let s = trim_inline_start(input);
+    if s.is_empty() {
+        return false;
+    }
+
+    let mut chars = s.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || ch == '-'
+            || ch == '+'
+            || ch == '='
+            || ch == '>'
+        {
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+
+    let rest = trim_inline_start(&s[end..]);
+    rest.starts_with(':')
+}
+
+fn looks_like_standalone_section_title(input: &str) -> bool {
+    let s = trim_inline_start(input);
+    if s.is_empty() {
+        return false;
+    }
+
+    // This branch is only for inline trailing tokens; real multiline section
+    // boundaries are handled earlier in the parsing flow.
+    if s.contains(':') || s.contains(',') || s.contains(';') || s.contains('\n') || s.contains('\r') {
+        return false;
+    }
+
+    let mut parts = s.split_whitespace();
+    let Some(token) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '>' || c == '=' || c == '<')
 }
 
 pub fn parse_value<'a>(
@@ -1437,11 +1523,11 @@ fn parse_value_list_with_lookahead<'a>(
         // Parse a value
         let (value, new_remaining) = parse_value(remaining, original_input)?;
         values.push(value);
-        remaining = new_remaining.trim_start();
+        remaining = trim_inline_start(new_remaining);
 
         // Check if we should continue parsing values
         if remaining.starts_with(',') {
-            remaining = &remaining[1..].trim_start(); // Skip comma
+            remaining = trim_inline_start(&remaining[1..]); // Skip comma
 
             if remaining.is_empty() {
                 return Err(create_positioned_error(
@@ -1454,10 +1540,21 @@ fn parse_value_list_with_lookahead<'a>(
             continue;
         }
 
+        // Reaching a new line terminates this key-value pair.
+        if remaining.starts_with('\n') || remaining.starts_with('\r') || remaining.starts_with(';')
+        {
+            break;
+        }
+
         // Check if the next content looks like a new key-value pair
         if !remaining.is_empty() {
-            // Look for a pattern like "key:" in the remaining text
-            if let Some(colon_pos) = remaining.find(':') {
+            if looks_like_standalone_section_title(remaining) {
+                break;
+            }
+
+            // Look for a pattern like "key:" on the same line.
+            let current_line = remaining.lines().next().unwrap_or("");
+            if let Some(colon_pos) = current_line.find(':') {
                 let potential_key = remaining[..colon_pos].trim();
                 // If it looks like a valid key, stop parsing values
                 if !potential_key.is_empty()
@@ -1471,8 +1568,11 @@ fn parse_value_list_with_lookahead<'a>(
             }
         }
 
-        // If we can't parse another value and it doesn't look like a key, we're done
-        break;
+        // Otherwise continue parsing space-separated tokens on the same line.
+        // This keeps symbolic expressions like `heat - y` intact at parser-adapter level.
+        if remaining.is_empty() {
+            break;
+        }
     }
 
     Ok((values, remaining))

@@ -217,10 +217,19 @@ impl Lsode2StepCycle {
         let nst = self.state.step_control_snapshot().accepted_steps;
         self.dstoda
             .maybe_request_jacobian_update_before_predict(nst, self.iteration_mode);
+        let t_current = self.state.t();
+        let h_current = self.state.h();
+        if t_current + h_current == t_current {
+            // LSODE/LSODA NHNIL branch parity:
+            // when machine precision makes TN + H == TN, Fortran increments NHNIL
+            // and only warns up to MXHNIL times. This is controller-plane telemetry;
+            // it must not alter step math directly here.
+            self.state.record_null_step_event();
+        }
         let y_pred = self.state.predict_from_nordsieck()?.to_vec();
         Ok(Lsode2PredictedStep {
-            t_trial: self.state.t() + self.state.h(),
-            h_trial: self.state.h(),
+            t_trial: t_current + h_current,
+            h_trial: h_current,
             order: self.state.order(),
             y_pred,
         })
@@ -392,6 +401,11 @@ impl Lsode2StepCycle {
         self.dstoda.iredo()
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_dstoda_coefficient_ratio_for_test(&mut self, rc: f64) {
+        self.dstoda.set_coefficient_ratio(rc);
+    }
+
     pub fn switch_telemetry(&self, stiffness_ratio: Option<f64>) -> Lsode2SwitchTelemetry {
         let mut telemetry = self
             .state
@@ -527,7 +541,7 @@ impl Lsode2StepCycle {
         }
     }
 
-pub    fn select_post_accept_order(
+    pub fn select_post_accept_order(
         &mut self,
         y_candidate: &[f64],
         current_error_norm: f64,

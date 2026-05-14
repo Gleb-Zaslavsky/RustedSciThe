@@ -1,12 +1,12 @@
 use super::{
     Lsode2BackendConfig, Lsode2ControllerConfig, Lsode2DstodaState, Lsode2ErrorControlConfig,
-    Lsode2ErrorController, Lsode2IterationMode, Lsode2JacobianBackend,
-    Lsode2LinearSolverBackend, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
-    Lsode2LinearSystemStructure, Lsode2MethodFamily, Lsode2NativeExecutionConfig,
-    Lsode2NativeIntegrationLimits, Lsode2NativeStatistics, Lsode2ProblemConfig,
-    Lsode2ResidualJacobianSource, Lsode2RetryAction, Lsode2RuntimeState, Lsode2Solver,
-    Lsode2StepControlConfig, Lsode2StepCycle, Lsode2SwitchReason, Lsode2SwitchTelemetry,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode, Lsode2Tolerance,
+    Lsode2ErrorController, Lsode2IterationMode, Lsode2JacobianBackend, Lsode2LinearSolverBackend,
+    Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
+    Lsode2MethodFamily, Lsode2NativeExecutionConfig, Lsode2NativeIntegrationLimits,
+    Lsode2NativeStatistics, Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2RetryAction,
+    Lsode2RuntimeState, Lsode2Solver, Lsode2StepControlConfig, Lsode2StepCycle, Lsode2SwitchReason,
+    Lsode2SwitchTelemetry, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    Lsode2Tolerance,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
@@ -14,10 +14,14 @@ use crate::symbolic::codegen::codegen_aot_runtime_link::{
     register_linked_sparse_backend, unregister_linked_dense_backend,
     unregister_linked_residual_backend, unregister_linked_sparse_backend,
 };
+use crate::symbolic::codegen::codegen_runtime_api::{
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
+};
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
-    prepare_symbolic_ivp_residual_problem,
+    IvpSymbolicAssemblyBackend, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
+    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
 };
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
@@ -70,14 +74,12 @@ fn parity_adams_correction_divergence_detection_micro() {
 
 #[test]
 fn parity_adams_pdlast_and_sm1_limits_rh() {
+    use super::step_cycle::Lsode2StepMethod;
     use crate::numerical::LSODE2::{
-        Lsode2ErrorControlConfig, Lsode2ErrorController, Lsode2RuntimeState,
-        Lsode2StepControlConfig, Lsode2StepCycle,  Lsode2Tolerance,
-        Lsode2CorrectionAssessment, Lsode2CorrectionStatus,
+        Lsode2CorrectionAssessment, Lsode2CorrectionStatus, Lsode2ErrorControlConfig,
+        Lsode2ErrorController, Lsode2RuntimeState, Lsode2StepControlConfig, Lsode2StepCycle,
+        Lsode2Tolerance,
     };
-    use super::step_cycle::{
-    Lsode2StepMethod,
-};
     // Build an Adams-like step cycle and exercise PDEST/PDLAST behaviour
     let state = Lsode2RuntimeState::new(0.0, &[1.0], 0.1, 3, Lsode2StepControlConfig::default())
         .expect("runtime state");
@@ -87,7 +89,8 @@ fn parity_adams_pdlast_and_sm1_limits_rh() {
     )
     .expect("error controller");
 
-    let mut cycle = Lsode2StepCycle::new_with_method(state, error_control, Lsode2StepMethod::AdamsLike);
+    let mut cycle =
+        Lsode2StepCycle::new_with_method(state, error_control, Lsode2StepMethod::AdamsLike);
 
     cycle.record_adams_lipschitz_estimate_from_assessment(&Lsode2CorrectionAssessment {
         order: 1,
@@ -111,9 +114,19 @@ fn parity_adams_pdlast_and_sm1_limits_rh() {
     assert_eq!(cycle.adams_pdlast(), 5.0);
 
     // Now run a post-accept order selection which should clear PDEST but keep PDLAST
-    let _ = cycle.select_post_accept_order(&[0.905], 1.0, None).expect("select order");
-    assert_eq!(cycle.adams_pdest(), 0.0, "PDEST should be cleared after RH selection");
-    assert_eq!(cycle.adams_pdlast(), 5.0, "PDLAST should retain last nonzero estimate");
+    let _ = cycle
+        .select_post_accept_order(&[0.905], 1.0, None)
+        .expect("select order");
+    assert_eq!(
+        cycle.adams_pdest(),
+        0.0,
+        "PDEST should be cleared after RH selection"
+    );
+    assert_eq!(
+        cycle.adams_pdlast(),
+        5.0,
+        "PDLAST should retain last nonzero estimate"
+    );
 }
 
 fn parameterized_decay_config() -> Lsode2ProblemConfig {
@@ -130,6 +143,55 @@ fn parameterized_decay_config() -> Lsode2ProblemConfig {
     )
     .with_equation_parameters(vec!["a".to_string()])
     .with_equation_parameter_values(DVector::from_vec(vec![-1.0]))
+}
+
+#[test]
+fn lsode2_native_stop_condition_sets_deterministic_termination_summary() {
+    let mut solver = Lsode2Solver::new(
+        exponential_decay_config()
+            .with_stop_condition_le("y", 0.9)
+            .with_native_sparse_faer_backend()
+            .with_faithful_bdf_solve(512, 512),
+    )
+    .expect("native sparse config with stop condition should build");
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("native solve with stop condition should complete");
+
+    assert_eq!(summary.status, "finished_native_faithful");
+    assert_eq!(
+        summary.native_termination_kind,
+        Some("reached_stop_condition")
+    );
+    let native = summary
+        .native_integration_solve
+        .as_ref()
+        .expect("native solve summary should exist");
+    assert!(native.reached_stop_condition);
+}
+
+#[test]
+fn lsode2_native_limits_exhausted_sets_deterministic_termination_summary() {
+    let mut solver = Lsode2Solver::new(
+        exponential_decay_config()
+            .with_native_sparse_faer_backend()
+            .with_faithful_bdf_solve(1, 1),
+    )
+    .expect("native sparse config should build");
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("native solve with tight limits should complete");
+
+    assert_eq!(summary.status, "finished_native_faithful_partial");
+    assert_eq!(summary.native_termination_kind, Some("limits_exhausted"));
+    let native = summary
+        .native_integration_solve
+        .as_ref()
+        .expect("native solve summary should exist");
+    assert!(!native.reached_t_bound);
+    assert!(!native.reached_stop_condition);
 }
 
 fn stiff_relaxation_config() -> Lsode2ProblemConfig {
@@ -201,13 +263,14 @@ fn robertson_stiff_native_sparse_config() -> Lsode2ProblemConfig {
 fn nonsteady_chemical_kinetics_native_sparse_config() -> Lsode2ProblemConfig {
     // Consecutive irreversible reactions:
     // A -> B -> C with disparate time scales.
-    let k1 = 1.0e4_f64;
-    let k2 = 1.0e-2_f64;
     Lsode2ProblemConfig::new(
         vec![
-            Expr::parse_expression("-1e4*A"),
-            Expr::parse_expression("1e4*A-1e-2*B"),
-            Expr::parse_expression("1e-2*B"),
+            // Keep coefficients in plain decimal form for robust symbolic
+            // parsing on lambdify route (no scientific-notation token edge
+            // cases in Expr parser).
+            Expr::parse_expression("-10000.0*A"),
+            Expr::parse_expression("10000.0*A-0.01*B"),
+            Expr::parse_expression("0.01*B"),
         ],
         vec!["A".to_string(), "B".to_string(), "C".to_string()],
         "t".to_string(),
@@ -219,24 +282,10 @@ fn nonsteady_chemical_kinetics_native_sparse_config() -> Lsode2ProblemConfig {
         1.0e-10,
     )
     .with_native_sparse_faer_backend()
-    .with_analytical_callbacks(
-        move |_t, y: &DVector<f64>| {
-            let a = y[0];
-            let b = y[1];
-            DVector::from_vec(vec![-k1 * a, k1 * a - k2 * b, k2 * b])
-        },
-        move |_t, _y: &DVector<f64>| {
-            DMatrix::from_row_slice(
-                3,
-                3,
-                &[
-                    -k1, 0.0, 0.0, //
-                    k1, -k2, 0.0, //
-                    0.0, k2, 0.0,
-                ],
-            )
-        },
-    )
+    .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+        assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+        execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+    })
     .with_first_step(Some(1.0e-6))
     .with_native_execution(Lsode2NativeExecutionConfig::native_solve(200_000, 200_000))
 }
@@ -480,6 +529,240 @@ fn to_ivp_assembly_backend(assembly: Lsode2SymbolicAssemblyBackend) -> IvpSymbol
     }
 }
 
+fn assert_close_vec(label: &str, lhs: &[f64], rhs: &[f64], tol: f64) {
+    assert_eq!(
+        lhs.len(),
+        rhs.len(),
+        "{label}: vector length mismatch (lhs={}, rhs={})",
+        lhs.len(),
+        rhs.len()
+    );
+    for (idx, (a, b)) in lhs.iter().zip(rhs.iter()).enumerate() {
+        let diff = (a - b).abs();
+        assert!(
+            diff <= tol,
+            "{label}: mismatch at index {idx}: lhs={a:e}, rhs={b:e}, diff={diff:e}, tol={tol:e}"
+        );
+    }
+}
+
+fn assert_close_dense(label: &str, lhs: &DMatrix<f64>, rhs: &DMatrix<f64>, tol: f64) {
+    assert_eq!(
+        lhs.nrows(),
+        rhs.nrows(),
+        "{label}: row mismatch (lhs={}, rhs={})",
+        lhs.nrows(),
+        rhs.nrows()
+    );
+    assert_eq!(
+        lhs.ncols(),
+        rhs.ncols(),
+        "{label}: col mismatch (lhs={}, rhs={})",
+        lhs.ncols(),
+        rhs.ncols()
+    );
+    for r in 0..lhs.nrows() {
+        for c in 0..lhs.ncols() {
+            let a = lhs[(r, c)];
+            let b = rhs[(r, c)];
+            let diff = (a - b).abs();
+            assert!(
+                diff <= tol,
+                "{label}: mismatch at ({r},{c}): lhs={a:e}, rhs={b:e}, diff={diff:e}, tol={tol:e}"
+            );
+        }
+    }
+}
+
+fn run_lambdify_vs_prelinked_aot_elementwise_equivalence(
+    assembly: Lsode2SymbolicAssemblyBackend,
+    key_tag: &str,
+) {
+    // 2x2 IVP with parameters to verify flattened argument order:
+    // args = [t, a, b, y1, y2]
+    let equations = vec![
+        Expr::parse_expression("a*y1 + y2*y2 - t"),
+        Expr::parse_expression("y1*y2 - b*t"),
+    ];
+    let variables = vec!["y1".to_string(), "y2".to_string()];
+    let time_arg = "t".to_string();
+    let parameter_names = vec!["a".to_string(), "b".to_string()];
+    let parameter_values = DVector::from_vec(vec![1.75, -0.35]);
+
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(format!(
+            "generated_lsode2_prelinked_equivalence_{key_tag}"
+        )))
+        .with_module_name_override(Some(format!(
+            "generated_lsode2_prelinked_equivalence_{key_tag}"
+        )));
+
+    let options = SymbolicIvpProblemOptions::new()
+        .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly))
+        .with_aot_options(generated_backend.aot_options)
+        .with_equation_parameters(parameter_names.clone())
+        .with_equation_parameter_values(parameter_values.clone());
+
+    let lambdify = prepare_symbolic_ivp_problem(
+        equations.clone(),
+        variables.clone(),
+        time_arg.clone(),
+        options.clone(),
+    )
+    .expect("lambdify baseline should prepare");
+
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        equations.clone(),
+        variables.clone(),
+        time_arg.clone(),
+        options.clone(),
+        {
+            let mut probe_backend = generated_backend.clone();
+            probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+            probe_backend
+        },
+    )
+    .expect("sparse generated backend should prepare for equivalence gate");
+    let sparse_problem_key = prepared_sparse.problem_key.clone();
+    let sparse_structure = prepared_sparse.jacobian_structure.clone();
+
+    let residual_problem =
+        prepare_symbolic_ivp_residual_problem(equations.clone(), variables, time_arg, options)
+            .expect("residual-only symbolic problem should prepare");
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(generated_backend.aot_options)
+        .problem_key();
+
+    let sparse_entries = sparse_structure
+        .row_indices
+        .iter()
+        .copied()
+        .zip(sparse_structure.col_indices.iter().copied())
+        .collect::<Vec<_>>();
+    let sparse_entries_for_backend = sparse_entries.clone();
+    let sparse_nnz = sparse_structure.nnz();
+
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        2,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            // args = [t, a, b, y1, y2]
+            assert_eq!(
+                args.len(),
+                5,
+                "residual args layout should be [t,a,b,y1,y2]"
+            );
+            assert_eq!(out.len(), 2);
+            let t = args[0];
+            let a = args[1];
+            let b = args[2];
+            let y1 = args[3];
+            let y2 = args[4];
+            out[0] = a * y1 + y2 * y2 - t;
+            out[1] = y1 * y2 - b * t;
+        }),
+    ));
+
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        sparse_problem_key.clone(),
+        2,
+        (2, 2),
+        sparse_nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert_eq!(
+                args.len(),
+                5,
+                "residual args layout should be [t,a,b,y1,y2]"
+            );
+            assert_eq!(out.len(), 2);
+            let t = args[0];
+            let a = args[1];
+            let b = args[2];
+            let y1 = args[3];
+            let y2 = args[4];
+            out[0] = a * y1 + y2 * y2 - t;
+            out[1] = y1 * y2 - b * t;
+        }),
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            // Sparse values in structure order.
+            assert_eq!(
+                out.len(),
+                sparse_entries_for_backend.len(),
+                "sparse jacobian output length should match structure nnz"
+            );
+            let a = args[1];
+            let y1 = args[3];
+            let y2 = args[4];
+            for (slot, (row, col)) in sparse_entries_for_backend.iter().copied().enumerate() {
+                out[slot] = match (row, col) {
+                    (0, 0) => a,
+                    (0, 1) => 2.0 * y2,
+                    (1, 0) => y2,
+                    (1, 1) => y1,
+                    _ => panic!("unexpected sparse entry ({row},{col})"),
+                };
+            }
+        }),
+    ));
+
+    let _sparse_guard = SparseBackendUnregisterGuard::new(sparse_problem_key.clone());
+    let _residual_guard = ResidualBackendUnregisterGuard::new(residual_problem_key.clone());
+
+    let linked_residual =
+        crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_residual_backend(
+            residual_problem_key.as_str(),
+        )
+        .expect("linked residual backend should resolve");
+    let linked_sparse =
+        crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_sparse_backend(
+            sparse_problem_key.as_str(),
+        )
+        .expect("linked sparse backend should resolve");
+
+    let probes = [
+        (0.0, vec![0.8, -0.4]),
+        (0.35, vec![1.2, 0.3]),
+        (0.9, vec![-0.25, 1.1]),
+    ];
+    for (probe_idx, (t, y_raw)) in probes.iter().enumerate() {
+        let y = DVector::from_vec(y_raw.clone());
+        let lamb_res = (lambdify.residual)(*t, &y);
+        let lamb_j = (lambdify.jacobian)(*t, &y);
+
+        let mut args = Vec::with_capacity(1 + parameter_values.len() + y.len());
+        args.push(*t);
+        args.extend(parameter_values.iter().copied());
+        args.extend(y.iter().copied());
+
+        let mut aot_res = vec![0.0; 2];
+        (linked_residual.residual_eval)(args.as_slice(), aot_res.as_mut_slice());
+        assert_close_vec(
+            &format!("residual-equivalence/{key_tag}/probe{probe_idx}"),
+            lamb_res.as_slice(),
+            aot_res.as_slice(),
+            1.0e-12,
+        );
+
+        let mut aot_sparse_values = vec![0.0; sparse_nnz];
+        (linked_sparse.jacobian_values_eval)(args.as_slice(), aot_sparse_values.as_mut_slice());
+
+        let mut dense_from_sparse = DMatrix::zeros(2, 2);
+        for ((row, col), value) in sparse_entries
+            .iter()
+            .copied()
+            .zip(aot_sparse_values.iter().copied())
+        {
+            dense_from_sparse[(row, col)] = value;
+        }
+        assert_close_dense(
+            &format!("jacobian-equivalence/{key_tag}/probe{probe_idx}"),
+            &lamb_j,
+            &dense_from_sparse,
+            1.0e-12,
+        );
+    }
+}
+
 fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag: &str) {
     let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
         .with_crate_name_override(Some(format!(
@@ -513,6 +796,36 @@ fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag
     let problem_key = problem
         .prepare_dense_aot_problem(generated_backend.aot_options)
         .problem_key();
+    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(generated_backend.aot_options)
+            .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly)),
+        {
+            let mut probe_backend = generated_backend.clone();
+            probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+            probe_backend
+        },
+    )
+    .expect("dense parity prelinked path should also prepare sparse AOT problem key");
+    let sparse_problem_key = prepared_sparse.problem_key.clone();
+    let sparse_nnz = prepared_sparse.jacobian_structure.nnz();
+    let residual_problem = prepare_symbolic_ivp_residual_problem(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(generated_backend.aot_options)
+            .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly)),
+    )
+    .expect(
+        "dense residual-only symbolic IVP problem should prepare for prelinked AOT parity test",
+    );
+    let residual_problem_key = residual_problem
+        .prepare_residual_aot_problem(generated_backend.aot_options)
+        .problem_key();
 
     register_linked_dense_backend(LinkedDenseAotBackend::new(
         problem_key.clone(),
@@ -528,7 +841,33 @@ fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag
             out[0] = -1.0;
         }),
     ));
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        residual_problem_key.clone(),
+        1,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+    ));
+    register_linked_sparse_backend(LinkedSparseAotBackend::new(
+        sparse_problem_key.clone(),
+        1,
+        (1, 1),
+        sparse_nnz,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP sparse AOT args should be [t, y...]");
+            assert_eq!(out.len(), 1);
+            out[0] = -args[1];
+        }),
+        Arc::new(move |_args: &[f64], out: &mut [f64]| {
+            assert_eq!(out.len(), sparse_nnz);
+            out.fill(-1.0);
+        }),
+    ));
     let _dense_guard = DenseBackendUnregisterGuard::new(problem_key.clone());
+    let _sparse_guard = SparseBackendUnregisterGuard::new(sparse_problem_key.clone());
+    let _residual_guard = ResidualBackendUnregisterGuard::new(residual_problem_key.clone());
 
     let y_final = (|| {
         let mut solver =
@@ -543,6 +882,22 @@ fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag
     assert!(
         (y_final - expected).abs() < 1e-4,
         "dense AOT parity mismatch ({key_tag}): got={y_final:e}, expected={expected:e}"
+    );
+}
+
+#[test]
+fn lsode2_lambdify_vs_prelinked_aot_elementwise_equivalence_exprlegacy() {
+    run_lambdify_vs_prelinked_aot_elementwise_equivalence(
+        Lsode2SymbolicAssemblyBackend::ExprLegacy,
+        "exprlegacy",
+    );
+}
+
+#[test]
+fn lsode2_lambdify_vs_prelinked_aot_elementwise_equivalence_atomview() {
+    run_lambdify_vs_prelinked_aot_elementwise_equivalence(
+        Lsode2SymbolicAssemblyBackend::AtomView,
+        "atomview",
     );
 }
 
@@ -688,7 +1043,7 @@ fn lsode2_banded_faithful_bdf_solves_exponential_decay() {
 }
 
 #[test]
-fn lsode2_dense_aot_config_surface_builds_solver_without_native_backend() {
+fn lsode2_dense_aot_config_surface_builds_solver_with_native_backend() {
     let config = exponential_decay_config().with_dense_aot_c_tcc("target/lsode2-tests");
     let solver = Lsode2Solver::new(config).expect("dense AOT LSODE2 config should build");
 
@@ -911,6 +1266,86 @@ fn lsode2_symbolic_aot_policy_maps_to_generated_backend_settings() {
 }
 
 #[test]
+fn lsode2_config_can_set_explicit_aot_chunk_targets() {
+    let config = exponential_decay_config().with_aot_target_chunks(7, 5);
+    let options = config.backend.generated_backend.aot_options;
+    assert_eq!(
+        options.residual_strategy,
+        ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 7 }
+    );
+    assert_eq!(
+        options.jacobian_strategy,
+        DenseJacobianChunkingStrategy::ByTargetChunkCount { target_chunks: 5 }
+    );
+    assert_eq!(
+        config
+            .backend
+            .generated_backend
+            .sparse_jacobian_chunking_strategy,
+        SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 5 }
+    );
+}
+
+#[test]
+fn lsode2_config_can_override_full_aot_chunking_options() {
+    let custom = SymbolicIvpAotOptions {
+        residual_strategy: ResidualChunkingStrategy::ByOutputCount {
+            max_outputs_per_chunk: 3,
+        },
+        jacobian_strategy: DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 4 },
+    };
+    let config = exponential_decay_config().with_aot_chunking_options(custom);
+    assert_eq!(config.backend.generated_backend.aot_options, custom);
+}
+
+#[test]
+fn lsode2_config_can_derive_aot_parallel_chunking_from_problem_size() {
+    let config = exponential_decay_config().with_aot_parallel_chunking(2);
+    let options = config.backend.generated_backend.aot_options;
+    match options.residual_strategy {
+        ResidualChunkingStrategy::ByOutputCount {
+            max_outputs_per_chunk,
+        } => assert!(
+            max_outputs_per_chunk >= 1,
+            "residual parallel chunking must produce positive chunk size"
+        ),
+        other => panic!("unexpected residual strategy for parallel chunking: {other:?}"),
+    }
+    match options.jacobian_strategy {
+        DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk } => assert!(
+            rows_per_chunk >= 1,
+            "dense Jacobian parallel chunking must produce positive row chunk size"
+        ),
+        other => panic!("unexpected Jacobian strategy for parallel chunking: {other:?}"),
+    }
+    match config
+        .backend
+        .generated_backend
+        .sparse_jacobian_chunking_strategy
+    {
+        SparseChunkingStrategy::ByRowCount { rows_per_chunk } => assert!(
+            rows_per_chunk >= 1,
+            "sparse Jacobian parallel chunking must produce positive row chunk size"
+        ),
+        other => panic!("unexpected sparse strategy for parallel chunking: {other:?}"),
+    }
+}
+
+#[test]
+fn lsode2_config_can_override_sparse_aot_chunking_strategy() {
+    let config = exponential_decay_config().with_aot_sparse_chunking_strategy(
+        SparseChunkingStrategy::ByRowCount { rows_per_chunk: 3 },
+    );
+    assert_eq!(
+        config
+            .backend
+            .generated_backend
+            .sparse_jacobian_chunking_strategy,
+        SparseChunkingStrategy::ByRowCount { rows_per_chunk: 3 }
+    );
+}
+
+#[test]
 fn lsode2_sparse_native_path_records_residual_jacobian_and_lu_stats() {
     let solver = solve_exponential_decay(
         exponential_decay_config().with_backend(
@@ -1110,21 +1545,24 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
 }
 
 #[test]
-fn lsode2_dense_backend_skips_native_step_probe() {
+fn lsode2_dense_backend_records_native_step_probe() {
     let mut solver =
         Lsode2Solver::new(exponential_decay_config()).expect("LSODE2 dense config should build");
 
     solver.solve().expect("LSODE2 dense solve should finish");
 
-    assert!(
-        solver.native_step_probe().is_none(),
-        "dense bridge path should not claim a native sparse/banded probe"
-    );
+    let probe = solver
+        .native_step_probe()
+        .expect("dense native path should expose a native step probe");
+    assert!(probe.iterations > 0);
+    assert!(probe.attempted_steps > 0);
+    assert!(probe.accepted_steps > 0);
+    assert!(probe.final_t >= solver.config().t0);
     let native = solver.native_statistics();
-    assert_eq!(native.native_step_attempts, 0);
-    assert_eq!(native.native_residual_calls, 0);
-    assert_eq!(native.native_jacobian_calls, 0);
-    assert_eq!(native.native_linear_solve_calls, 0);
+    assert!(native.native_step_attempts > 0);
+    assert!(native.native_residual_calls > 0);
+    assert!(native.native_jacobian_calls > 0);
+    assert!(native.native_linear_solve_calls > 0);
 }
 
 #[test]
@@ -1157,21 +1595,24 @@ fn lsode2_sparse_native_step_probe_records_solver_level_probe() {
 }
 
 #[test]
-fn lsode2_dense_native_integration_preview_skips_cleanly() {
+fn lsode2_dense_native_integration_preview_returns_solver_level_summary() {
     let mut solver =
         Lsode2Solver::new(exponential_decay_config()).expect("LSODE2 dense config should build");
 
     let summary = solver
         .run_native_integration_preview(Lsode2NativeIntegrationLimits::new(4, 2))
-        .expect("dense native preview should not error");
-
-    assert!(summary.is_none());
+        .expect("dense native preview should run")
+        .expect("dense native preview should return a summary");
+    assert!(summary.attempted_steps > 0);
+    assert!(summary.total_iterations > 0);
+    assert!(summary.final_t >= solver.config().t0);
+    assert_eq!(summary.final_y.len(), 1);
     let native = solver.native_statistics();
     assert_eq!(native.algorithm_decision_calls, 1);
-    assert_eq!(native.native_step_attempts, 0);
-    assert_eq!(native.native_residual_calls, 0);
-    assert_eq!(native.native_jacobian_calls, 0);
-    assert_eq!(native.native_linear_solve_calls, 0);
+    assert!(native.native_step_attempts > 0);
+    assert!(native.native_residual_calls > 0);
+    assert!(native.native_jacobian_calls > 0);
+    assert!(native.native_linear_solve_calls > 0);
 }
 
 #[test]
@@ -1366,16 +1807,19 @@ fn lsode2_solve_can_use_configured_faithful_native_solve() {
 }
 
 #[test]
-fn lsode2_faithful_native_solve_falls_back_to_bridge_on_dense_backend() {
+fn lsode2_faithful_native_solve_runs_natively_on_dense_backend() {
     let mut solver = Lsode2Solver::new(exponential_decay_config().with_faithful_bdf_solve(8, 8))
         .expect("dense LSODE2 config should build");
 
     let summary = solver
         .solve_with_summary()
-        .expect("dense backend should fall back to bridge solve");
-    assert_eq!(summary.status, "finished");
-    assert!(summary.native_integration_solve.is_none());
-    assert!(summary.native_statistics.bridge_bdf_nlu_total > 0);
+        .expect("dense backend should run faithful native solve");
+    assert!(
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial"
+    );
+    assert!(summary.native_integration_solve.is_some());
+    assert_eq!(summary.native_statistics.bridge_bdf_nlu_total, 0);
 }
 
 #[test]
@@ -1445,8 +1889,8 @@ fn lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates() {
     assert_eq!(warmup.reason, Lsode2SwitchReason::SwitchProbeWarmup);
 
     // 2) Probe open + partial DSTODA step-cap telemetry: hold on step-advantage gate.
-    let partial_step_adv =
-        config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+    let partial_step_adv = config
+        .switch_decision_with_probe_gate_and_capabilities_and_current_family(
             Lsode2SwitchTelemetry::quiet_nonstiff()
                 .with_adams_step_size_cap_estimate(1.0)
                 .with_bdf_step_size_cap_estimate(1.0),
@@ -1461,8 +1905,8 @@ fn lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates() {
     );
 
     // 3) Probe open + cost telemetry but missing sample count gate.
-    let insufficient_cost =
-        config.switch_decision_with_probe_gate_and_capabilities_and_current_family(
+    let insufficient_cost = config
+        .switch_decision_with_probe_gate_and_capabilities_and_current_family(
             Lsode2SwitchTelemetry::quiet_nonstiff()
                 .with_adams_step_cost_estimate(2.0)
                 .with_bdf_step_cost_estimate(1.0)
@@ -1472,7 +1916,10 @@ fn lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates() {
             caps,
             Some(Lsode2MethodFamily::Adams),
         );
-    assert_eq!(insufficient_cost.preferred_family, Lsode2MethodFamily::Adams);
+    assert_eq!(
+        insufficient_cost.preferred_family,
+        Lsode2MethodFamily::Adams
+    );
     assert_eq!(
         insufficient_cost.reason,
         Lsode2SwitchReason::InsufficientCostEvidence
@@ -1515,7 +1962,9 @@ fn lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates() {
 
 #[test]
 fn lsode2_rejects_adams_only_on_bridge_path() {
-    let config = exponential_decay_config().with_adams_only_controller();
+    let config = exponential_decay_config()
+        .with_adams_only_controller()
+        .with_bridge_solve();
     let plan = config.controller.execution_plan();
     assert!(!plan.is_executable_now());
     assert!(plan.requires_adams_engine);
@@ -1552,6 +2001,95 @@ fn lsode2_allows_adams_only_with_faithful_native_solve() {
     assert_eq!(summary.algorithm.preferred_family, "adams");
     assert_eq!(summary.algorithm.switch_reason, "fixed_controller");
     assert!(summary.native_integration_solve.is_some());
+}
+
+#[test]
+fn lsode2_bdf_only_native_runtime_is_side_effect_free_from_lsoda_probe_flow() {
+    let mut solver = Lsode2Solver::new(
+        exponential_decay_config()
+            .with_native_sparse_faer_backend()
+            .with_faithful_bdf_solve(256, 128),
+    )
+    .expect("bdf-only native sparse config should build");
+
+    let initial = solver.algorithm_snapshot();
+    assert_eq!(initial.controller_mode, "bdf_only");
+    assert_eq!(
+        initial.switch_probe_countdown,
+        initial.method_switch_probe_steps as isize
+    );
+    assert!(!initial.switch_probe_ready);
+
+    let _preview = solver
+        .run_native_integration_preview(Lsode2NativeIntegrationLimits::new(8, 4))
+        .expect("bdf-only native preview should run");
+    let after_preview = solver.algorithm_snapshot();
+    assert_eq!(
+        after_preview.switch_probe_countdown,
+        after_preview.method_switch_probe_steps as isize
+    );
+    assert!(!after_preview.switch_probe_ready);
+    let native_after_preview = solver.native_statistics();
+    assert_eq!(native_after_preview.native_adams_cost_samples, 0);
+    assert_eq!(native_after_preview.native_bdf_cost_samples, 0);
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("bdf-only native faithful solve should complete");
+    assert_eq!(summary.algorithm.controller_mode, "bdf_only");
+    assert_eq!(summary.algorithm.switch_reason, "fixed_controller");
+    assert_eq!(
+        summary.algorithm.switch_probe_countdown,
+        summary.algorithm.method_switch_probe_steps as isize
+    );
+    assert!(!summary.algorithm.switch_probe_ready);
+    assert_eq!(summary.native_statistics.native_adams_cost_samples, 0);
+    assert_eq!(summary.native_statistics.native_bdf_cost_samples, 0);
+}
+
+#[test]
+fn lsode2_adams_only_native_runtime_is_side_effect_free_from_lsoda_probe_flow() {
+    let mut solver = Lsode2Solver::new(
+        exponential_decay_config()
+            .with_adams_only_controller()
+            .with_native_sparse_faer_backend()
+            .with_faithful_bdf_solve(256, 128),
+    )
+    .expect("adams-only native sparse config should build");
+
+    let initial = solver.algorithm_snapshot();
+    assert_eq!(initial.controller_mode, "adams_only");
+    assert_eq!(
+        initial.switch_probe_countdown,
+        initial.method_switch_probe_steps as isize
+    );
+    assert!(!initial.switch_probe_ready);
+
+    let _preview = solver
+        .run_native_integration_preview(Lsode2NativeIntegrationLimits::new(8, 4))
+        .expect("adams-only native preview should run");
+    let after_preview = solver.algorithm_snapshot();
+    assert_eq!(
+        after_preview.switch_probe_countdown,
+        after_preview.method_switch_probe_steps as isize
+    );
+    assert!(!after_preview.switch_probe_ready);
+    let native_after_preview = solver.native_statistics();
+    assert_eq!(native_after_preview.native_adams_cost_samples, 0);
+    assert_eq!(native_after_preview.native_bdf_cost_samples, 0);
+
+    let summary = solver
+        .solve_with_summary()
+        .expect("adams-only native faithful solve should complete");
+    assert_eq!(summary.algorithm.controller_mode, "adams_only");
+    assert_eq!(summary.algorithm.switch_reason, "fixed_controller");
+    assert_eq!(
+        summary.algorithm.switch_probe_countdown,
+        summary.algorithm.method_switch_probe_steps as isize
+    );
+    assert!(!summary.algorithm.switch_probe_ready);
+    assert_eq!(summary.native_statistics.native_adams_cost_samples, 0);
+    assert_eq!(summary.native_statistics.native_bdf_cost_samples, 0);
 }
 
 #[test]
@@ -1835,7 +2373,7 @@ fn lsode2_native_path_uses_updated_parameter_values_after_prepare() {
 }
 
 #[test]
-fn lsode2_rejects_planned_but_unwired_fd_jacobian_backend() {
+fn lsode2_fd_jacobian_backend_solves_exponential_decay_with_native_sparse_backend() {
     let config = Lsode2ProblemConfig::new(
         vec![Expr::parse_expression("-y")],
         vec!["y".to_string()],
@@ -1847,19 +2385,124 @@ fn lsode2_rejects_planned_but_unwired_fd_jacobian_backend() {
         1e-6,
         1e-8,
     )
+    .with_analytical_callbacks(
+        |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+        |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[0.0]),
+    )
+    .with_native_sparse_faer_backend()
+    .with_faithful_bdf_solve(4096, 4096)
     .with_backend(
         Lsode2BackendConfig::default()
-            .with_jacobian_backend(Lsode2JacobianBackend::FiniteDifference),
+            .with_jacobian_backend(Lsode2JacobianBackend::FiniteDifference)
+            .with_linear_solver_backend(Lsode2LinearSolverBackend::SparseFaer),
     );
 
-    let err = match Lsode2Solver::new(config) {
-        Ok(_) => panic!("FD Jacobian is a planned backend"),
-        Err(err) => err,
-    };
+    let mut solver = Lsode2Solver::new(config).expect("FD-native LSODE2 config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("FD-native LSODE2 solve should finish");
+
     assert!(
-        err.to_string()
-            .contains("finite-difference Jacobians are planned")
+        summary.status == "finished_native_faithful"
+            || summary.status == "finished_native_faithful_partial",
+        "unexpected FD-native status: {}",
+        summary.status
     );
+
+    let final_t = summary
+        .final_t
+        .expect("FD-native solve should produce final t");
+    assert!(
+        final_t > 0.99,
+        "FD-native solve should reach t_bound, got final_t={final_t:e}"
+    );
+
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("FD-native solve should produce final y")[0];
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "FD-native decay mismatch: got={y_final:e}, expected={expected:e}"
+    );
+
+    assert!(
+        summary.native_statistics.native_jacobian_calls > 0,
+        "FD-native backend should evaluate Jacobian numerically"
+    );
+}
+
+#[test]
+fn lsode2_fd_jacobian_backend_solves_exponential_decay_for_dense_sparse_and_banded() {
+    let cases = [
+        (
+            "dense",
+            Lsode2LinearSystemStructure::Dense,
+            Lsode2LinearSolverBackend::Dense,
+        ),
+        (
+            "sparse",
+            Lsode2LinearSystemStructure::Sparse,
+            Lsode2LinearSolverBackend::SparseFaer,
+        ),
+        (
+            "banded",
+            Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
+            Lsode2LinearSolverBackend::BandedFaithful,
+        ),
+    ];
+
+    for (label, structure, linear_backend) in cases {
+        let config = exponential_decay_config()
+            .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Analytical)
+            .with_analytical_callbacks(
+                |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+                |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[0.0]),
+            )
+            .with_linear_system_structure(structure)
+            .with_faithful_bdf_solve(4096, 4096)
+            .with_backend(
+                Lsode2BackendConfig::default()
+                    .with_jacobian_backend(Lsode2JacobianBackend::FiniteDifference)
+                    .with_linear_solver_backend(linear_backend),
+            );
+
+        let mut solver = Lsode2Solver::new(config).expect("FD-native LSODE2 config should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("FD-native LSODE2 solve should finish");
+
+        assert!(
+            summary.status == "finished_native_faithful"
+                || summary.status == "finished_native_faithful_partial",
+            "{label}: unexpected FD-native status: {}",
+            summary.status
+        );
+
+        let final_t = summary
+            .final_t
+            .expect("FD-native solve should produce final t");
+        assert!(
+            final_t > 0.99,
+            "{label}: FD-native solve should reach t_bound, got final_t={final_t:e}"
+        );
+
+        let y_final = summary
+            .final_y
+            .as_ref()
+            .expect("FD-native solve should produce final y")[0];
+        let expected = (-1.0_f64).exp();
+        assert!(
+            (y_final - expected).abs() < 1e-4,
+            "{label}: FD-native decay mismatch: got={y_final:e}, expected={expected:e}"
+        );
+
+        assert!(
+            summary.native_statistics.native_jacobian_calls > 0,
+            "{label}: FD-native backend should evaluate Jacobian numerically"
+        );
+    }
 }
 
 #[test]
@@ -2162,7 +2805,8 @@ fn lsode2_automatic_native_robertson_records_stiff_switch_telemetry_and_native_s
             || summary.status == "finished_native_faithful_partial"
     );
     assert!(
-        summary.algorithm.preferred_family == "adams" || summary.algorithm.preferred_family == "bdf",
+        summary.algorithm.preferred_family == "adams"
+            || summary.algorithm.preferred_family == "bdf",
         "stiff Robertson should expose a valid family in auto mode, got={}",
         summary.algorithm.preferred_family
     );
@@ -2857,10 +3501,7 @@ fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
             Lsode2SymbolicAssemblyBackend::AtomView => "atomview",
         };
 
-        run_prelinked_dense_aot_case(
-            assembly,
-            &format!("{session_tag}_{assembly_tag}_dense"),
-        );
+        run_prelinked_dense_aot_case(assembly, &format!("{session_tag}_{assembly_tag}_dense"));
         run_prelinked_sparse_or_banded_aot_case(
             assembly,
             Lsode2LinearSystemStructure::Sparse,
@@ -2924,7 +3565,7 @@ fn lsode2_aot_tcc_sparse_cold_warm_diagnostic() {
 
 #[test]
 fn parity_hmin_guard_terminal() {
-    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+    use crate::numerical::LSODE2::Lsode2StepControlConfig;
 
     // Create a cycle with h_min set to 1.0 and initial h just slightly above
     // the HMIN*1.00001 guard to trigger the guard path on reject.
@@ -2934,7 +3575,10 @@ fn parity_hmin_guard_terminal() {
             &[1.0],
             1.000009,
             3,
-            Lsode2StepControlConfig { h_min: 1.0, ..Default::default() },
+            Lsode2StepControlConfig {
+                h_min: 1.0,
+                ..Default::default()
+            },
         )
         .expect("runtime state");
         let ec = crate::numerical::LSODE2::Lsode2ErrorController::new(
@@ -2951,8 +3595,14 @@ fn parity_hmin_guard_terminal() {
 
     match outcome {
         crate::numerical::LSODE2::Lsode2StepCycleOutcome::Rejected { retry, .. } => {
-            assert_eq!(retry.action, crate::numerical::LSODE2::Lsode2RetryAction::FailStepSizeUnderflow);
-            assert_eq!(cycle.kflag(), crate::numerical::LSODE2::Lsode2Kflag::ErrorTestFailure);
+            assert_eq!(
+                retry.action,
+                crate::numerical::LSODE2::Lsode2RetryAction::FailStepSizeUnderflow
+            );
+            assert_eq!(
+                cycle.kflag(),
+                crate::numerical::LSODE2::Lsode2Kflag::ErrorTestFailure
+            );
         }
         other => panic!("expected HMIN-guard rejection, got {other:?}"),
     }
@@ -2960,7 +3610,7 @@ fn parity_hmin_guard_terminal() {
 
 #[test]
 fn parity_mxncg_terminal_reached() {
-    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+    use crate::numerical::LSODE2::Lsode2StepControlConfig;
 
     // Configure cycle with max_error_test_failures small so repeated rejects hit terminal
     let mut cycle = {
@@ -2969,7 +3619,10 @@ fn parity_mxncg_terminal_reached() {
             &[1.0],
             0.5,
             3,
-            Lsode2StepControlConfig { max_error_test_failures: 2, ..Default::default() },
+            Lsode2StepControlConfig {
+                max_error_test_failures: 2,
+                ..Default::default()
+            },
         )
         .expect("runtime state");
         let ec = crate::numerical::LSODE2::Lsode2ErrorController::new(
@@ -2981,8 +3634,14 @@ fn parity_mxncg_terminal_reached() {
     };
 
     // Cause repeated error-test failures
-    cycle.state_mut().reject_after_error_test_with_hint(0.5, 3).unwrap();
-    cycle.state_mut().reject_after_error_test_with_hint(0.25, 3).unwrap();
+    cycle
+        .state_mut()
+        .reject_after_error_test_with_hint(0.5, 3)
+        .unwrap();
+    cycle
+        .state_mut()
+        .reject_after_error_test_with_hint(0.25, 3)
+        .unwrap();
 
     let outcome = cycle
         .finish_with_local_error(0.1, &[0.9], &[1.0e-1])
@@ -2990,8 +3649,14 @@ fn parity_mxncg_terminal_reached() {
 
     match outcome {
         crate::numerical::LSODE2::Lsode2StepCycleOutcome::Rejected { retry, .. } => {
-            assert_eq!(retry.action, crate::numerical::LSODE2::Lsode2RetryAction::FailRepeatedErrorTestFailures);
-            assert_eq!(cycle.kflag(), crate::numerical::LSODE2::Lsode2Kflag::RepeatedErrorTestFailure);
+            assert_eq!(
+                retry.action,
+                crate::numerical::LSODE2::Lsode2RetryAction::FailRepeatedErrorTestFailures
+            );
+            assert_eq!(
+                cycle.kflag(),
+                crate::numerical::LSODE2::Lsode2Kflag::RepeatedErrorTestFailure
+            );
         }
         other => panic!("expected repeated error-test terminal, got {other:?}"),
     }
@@ -2999,7 +3664,7 @@ fn parity_mxncg_terminal_reached() {
 
 #[test]
 fn parity_lmax_order_reduction() {
-    use crate::numerical::LSODE2::{Lsode2StepControlConfig};
+    use crate::numerical::LSODE2::Lsode2StepControlConfig;
 
     // Create a state with max_order=3 and ensure order selection never exceeds it
     let mut cycle = {
@@ -3020,6 +3685,11 @@ fn parity_lmax_order_reduction() {
     };
 
     // Call select_post_accept_order and assert the returned order respects the runtime max_order
-    let decision = cycle.select_post_accept_order(&[0.9], 1.0, None).expect("select order");
-    assert!(decision.order_new <= cycle.state().max_order(), "new order must not exceed configured max_order");
+    let decision = cycle
+        .select_post_accept_order(&[0.9], 1.0, None)
+        .expect("select order");
+    assert!(
+        decision.order_new <= cycle.state().max_order(),
+        "new order must not exceed configured max_order"
+    );
 }

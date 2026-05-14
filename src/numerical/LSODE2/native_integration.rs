@@ -7,6 +7,7 @@
 //! - and eventually a solver-owned native path inside `solve()`.
 
 use super::config::Lsode2ProblemConfig;
+use super::config::{Lsode2StopComparator, Lsode2StopCondition};
 use super::native_step_engine::{
     Lsode2NativeStepAttemptReport, Lsode2NativeStepEngine, Lsode2NativeStepMethod,
 };
@@ -38,11 +39,32 @@ pub struct Lsode2NativeIntegrationSummary {
     pub rejected_steps: usize,
     pub total_iterations: usize,
     pub reached_t_bound: bool,
+    pub reached_stop_condition: bool,
+    pub termination_kind: Lsode2NativeTerminationKind,
     pub final_t: f64,
     pub final_h: f64,
     pub final_y: Vec<f64>,
     pub accepted_t_history: Vec<f64>,
     pub accepted_y_history: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lsode2NativeTerminationKind {
+    ReachedTBound,
+    ReachedStopCondition,
+    ReachedTBoundAndStopCondition,
+    LimitsExhausted,
+}
+
+impl Lsode2NativeTerminationKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReachedTBound => "reached_t_bound",
+            Self::ReachedStopCondition => "reached_stop_condition",
+            Self::ReachedTBoundAndStopCondition => "reached_t_bound_and_stop_condition",
+            Self::LimitsExhausted => "limits_exhausted",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,12 +103,15 @@ pub fn run_native_integration_for_method(
     let mut accepted_steps = 0usize;
     let mut rejected_steps = 0usize;
     let mut total_iterations = 0usize;
+    let mut reached_stop_condition = false;
     let initial_state = engine.state_snapshot();
     let mut accepted_t_history = vec![initial_state.t];
     let mut accepted_y_history = vec![engine.current_solution()];
+    let stop_conditions = resolve_stop_conditions(config);
 
     while attempted_steps < limits.max_step_attempts
         && accepted_steps < limits.max_accepted_steps
+        && !reached_stop_condition
         && !reached_t_bound(
             engine.state_snapshot().t,
             config.t_bound,
@@ -105,8 +130,10 @@ pub fn run_native_integration_for_method(
         if report.accepted() {
             accepted_steps += 1;
             let state = engine.state_snapshot();
+            let accepted_y = engine.current_solution();
             accepted_t_history.push(state.t);
-            accepted_y_history.push(engine.current_solution());
+            accepted_y_history.push(accepted_y.clone());
+            reached_stop_condition = stop_condition_reached(&stop_conditions, &accepted_y);
         } else {
             rejected_steps += 1;
         }
@@ -116,6 +143,13 @@ pub fn run_native_integration_for_method(
     let summary = match (first_report, last_report) {
         (Some(first_report), Some(last_report)) => {
             let final_state = engine.state_snapshot();
+            let reached_t_bound_now = reached_t_bound(final_state.t, config.t_bound, final_state.h);
+            let termination_kind = match (reached_t_bound_now, reached_stop_condition) {
+                (true, true) => Lsode2NativeTerminationKind::ReachedTBoundAndStopCondition,
+                (true, false) => Lsode2NativeTerminationKind::ReachedTBound,
+                (false, true) => Lsode2NativeTerminationKind::ReachedStopCondition,
+                (false, false) => Lsode2NativeTerminationKind::LimitsExhausted,
+            };
             Some(Lsode2NativeIntegrationSummary {
                 first_report,
                 last_report,
@@ -124,7 +158,9 @@ pub fn run_native_integration_for_method(
                 accepted_steps,
                 rejected_steps,
                 total_iterations,
-                reached_t_bound: reached_t_bound(final_state.t, config.t_bound, final_state.h),
+                reached_t_bound: reached_t_bound_now,
+                reached_stop_condition,
+                termination_kind,
                 final_t: final_state.t,
                 final_h: final_state.h,
                 final_y: engine.current_solution(),
@@ -151,6 +187,54 @@ fn reached_t_bound(t: f64, t_bound: f64, h: f64) -> bool {
     if h >= 0.0 { t >= t_bound } else { t <= t_bound }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedStopCondition {
+    index: usize,
+    target: f64,
+    comparator: Lsode2StopComparator,
+    tolerance: f64,
+}
+
+fn resolve_stop_conditions(config: &Lsode2ProblemConfig) -> Vec<ResolvedStopCondition> {
+    config
+        .stop_conditions
+        .iter()
+        .filter_map(|condition| resolve_stop_condition(config, condition))
+        .collect()
+}
+
+fn resolve_stop_condition(
+    config: &Lsode2ProblemConfig,
+    condition: &Lsode2StopCondition,
+) -> Option<ResolvedStopCondition> {
+    config
+        .values
+        .iter()
+        .position(|name| name == &condition.variable)
+        .map(|index| ResolvedStopCondition {
+            index,
+            target: condition.target,
+            comparator: condition.comparator,
+            tolerance: condition.tolerance.max(0.0),
+        })
+}
+
+fn stop_condition_reached(conditions: &[ResolvedStopCondition], y: &[f64]) -> bool {
+    conditions.iter().any(|condition| {
+        let value = y.get(condition.index).copied().unwrap_or(f64::NAN);
+        if !value.is_finite() {
+            return false;
+        }
+        match condition.comparator {
+            Lsode2StopComparator::GreaterEqual => value >= condition.target,
+            Lsode2StopComparator::LessEqual => value <= condition.target,
+            Lsode2StopComparator::AbsDistance => {
+                (value - condition.target).abs() <= condition.tolerance
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,14 +257,25 @@ mod tests {
     }
 
     #[test]
-    fn native_integration_skips_dense_backend() {
+    fn native_integration_dense_runner_collects_multi_step_summary() {
         let outcome = run_native_integration(
             &exponential_decay_config(),
             Lsode2NativeIntegrationLimits::new(4, 2),
         )
-        .expect("dense path should not error");
-        assert!(outcome.summary.is_none());
-        assert_eq!(outcome.statistics.native_step_attempts, 0);
+        .expect("dense path should run native integration");
+        let summary = outcome
+            .summary
+            .expect("native dense path should produce integration summary");
+        assert!(summary.attempted_steps > 0);
+        assert_eq!(summary.attempt_reports.len(), summary.attempted_steps);
+        assert!(summary.accepted_steps > 0);
+        assert!(summary.total_iterations > 0);
+        assert!(summary.final_t >= 0.0);
+        assert_eq!(summary.final_y.len(), 1);
+        assert!(outcome.statistics.native_step_attempts > 0);
+        assert!(outcome.statistics.native_residual_calls > 0);
+        assert!(outcome.statistics.native_jacobian_calls > 0);
+        assert!(outcome.statistics.native_linear_solve_calls > 0);
     }
 
     #[test]

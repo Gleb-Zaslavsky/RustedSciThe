@@ -5,13 +5,13 @@ use super::algorithm::{
 };
 use super::config::{
     Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2NativeExecutionConfig,
-    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2ResolvedPlan,
+    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2ResolvedPlan, Lsode2StopComparator,
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, run_native_integration,
-    run_native_integration_for_method,
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
+    run_native_integration, run_native_integration_for_method,
 };
 use super::native_jacobian::{
     NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
@@ -24,6 +24,7 @@ use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use nalgebra::{DMatrix, DVector};
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
@@ -36,7 +37,9 @@ struct Lsode2SwitchTelemetryHints {
 
 impl Lsode2SwitchTelemetryHints {
     fn absorb(&mut self, telemetry: Lsode2SwitchTelemetry) {
-        if let Some(value) = telemetry.stiffness_ratio.filter(|value| value.is_finite() && *value > 0.0)
+        if let Some(value) = telemetry
+            .stiffness_ratio
+            .filter(|value| value.is_finite() && *value > 0.0)
         {
             self.stiffness_ratio = Some(
                 self.stiffness_ratio
@@ -130,6 +133,7 @@ pub struct Lsode2SolveSummary {
     pub native_step_probe: Option<Lsode2NativeStepProbeSummary>,
     pub native_integration_preview: Option<Lsode2NativeIntegrationSummary>,
     pub native_integration_solve: Option<Lsode2NativeIntegrationSummary>,
+    pub native_termination_kind: Option<&'static str>,
 }
 
 /// First LSODE2 solver facade.
@@ -160,6 +164,7 @@ impl Lsode2Solver {
         validate_supported_backend_routes(&config)?;
         validate_parameter_config(&config)?;
         validate_controller_config(&config)?;
+        validate_stop_condition_config(&config)?;
         let resolved_plan = config.resolve_plan();
 
         let mut options = BdfSolverOptions::new(
@@ -194,6 +199,9 @@ impl Lsode2Solver {
         }
 
         let mut inner = BdfOdeSolver::new_with_options(options);
+        if let Some(legacy_stop_conditions) = bridge_compatible_stop_conditions(&config) {
+            inner.set_stop_condition(legacy_stop_conditions);
+        }
         install_native_jacobian_factory(&mut inner, &config);
         install_linear_backend_factory(&mut inner, resolved_plan.linear_solver.to_backend());
 
@@ -278,20 +286,16 @@ impl Lsode2Solver {
                     self.native_override_result =
                         Some(native_result_from_integration_summary(&solve_summary));
                     self.native_override_status = Some(
-                        if solve_summary.reached_t_bound {
-                            "finished_native_faithful"
-                        } else {
-                            "finished_native_faithful_partial"
-                        }
-                        .to_string(),
+                        status_for_native_termination_kind(solve_summary.termination_kind)
+                            .to_string(),
                     );
                     self.native_integration_solve = Some(solve_summary);
                     self.native_statistics
                         .record_solve_duration(started.elapsed());
                     return Ok(());
                 }
-                // Native faithful path is unavailable for dense backends.
-                // Keep bridge path reachable as an explicit fallback.
+                // Keep bridge path reachable as an explicit fallback when
+                // native faithful integration is unavailable for a given route.
                 run_bridge = true;
                 self.prepare()?;
                 self.native_step_probe = self.run_native_step_probe()?;
@@ -443,6 +447,7 @@ impl Lsode2Solver {
         record_decision: bool,
         method_override: Option<Lsode2NativeStepMethod>,
     ) -> Result<Option<Lsode2NativeIntegrationSummary>, Lsode2Error> {
+        let lsoda_probe_flow_enabled = self.lsoda_probe_flow_enabled();
         let decision = if record_decision {
             self.algorithm_switch_decision_stateful()
         } else {
@@ -466,18 +471,26 @@ impl Lsode2Solver {
             let family = method_family_from_native_step_method(method);
             let cost =
                 integration_method_cost_estimate(&outcome.statistics, summary.accepted_steps);
-            self.native_statistics
-                .record_native_method_cost_sample(family, cost);
-            for report in &summary.attempt_reports {
-                self.absorb_native_switch_telemetry(report.telemetry);
+            if lsoda_probe_flow_enabled {
+                self.native_statistics
+                    .record_native_method_cost_sample(family, cost);
+                for report in &summary.attempt_reports {
+                    self.absorb_native_switch_telemetry(report.telemetry);
+                }
             }
         }
         merge_native_statistics(&mut self.native_statistics, &outcome.statistics);
-        if let Some(summary) = &outcome.summary {
-            self.algorithm
-                .record_accepted_steps_for_switch_probe(summary.accepted_steps);
+        if lsoda_probe_flow_enabled {
+            if let Some(summary) = &outcome.summary {
+                self.algorithm
+                    .record_accepted_steps_for_switch_probe(summary.accepted_steps);
+            }
         }
         Ok(outcome.summary)
+    }
+
+    fn lsoda_probe_flow_enabled(&self) -> bool {
+        self.config.controller.mode == Lsode2ControllerMode::AutomaticAdamsBdf
     }
 
     pub fn statistics_report(&self) -> String {
@@ -576,9 +589,58 @@ impl Lsode2Solver {
         decision: Lsode2SwitchDecision,
     ) -> bool {
         self.config.controller.mode == Lsode2ControllerMode::AutomaticAdamsBdf
-            && decision.reason == Lsode2SwitchReason::SwitchProbeWarmup
+            && (decision.reason == Lsode2SwitchReason::SwitchProbeWarmup
+                || decision.reason == Lsode2SwitchReason::InsufficientCostEvidence)
             && !decision.uses_fallback
             && decision.executed_family().is_some()
+    }
+
+    fn probe_method_for_switch_choreography(
+        &self,
+        decision: &Lsode2SwitchDecision,
+    ) -> Lsode2NativeStepMethod {
+        if decision.reason != Lsode2SwitchReason::InsufficientCostEvidence {
+            return native_method_for_decision(decision);
+        }
+
+        let min_samples = self.config.controller.min_cost_samples_for_switch.max(1);
+        let adams_samples = self.native_statistics.native_adams_cost_samples;
+        let bdf_samples = self.native_statistics.native_bdf_cost_samples;
+
+        // Strictly targeted evidence collection:
+        // when cost-evidence gate is the only blocker, probe the family that
+        // is currently missing samples, instead of always running symmetric
+        // cross-family probes.
+        if adams_samples < min_samples && bdf_samples >= min_samples {
+            return Lsode2NativeStepMethod::AdamsLike;
+        }
+        if bdf_samples < min_samples && adams_samples >= min_samples {
+            return Lsode2NativeStepMethod::BdfLike;
+        }
+
+        native_method_for_decision(decision)
+    }
+
+    fn probe_limits_for_switch_choreography(
+        &self,
+        decision: &Lsode2SwitchDecision,
+    ) -> Lsode2NativeIntegrationLimits {
+        if decision.reason == Lsode2SwitchReason::SwitchProbeWarmup {
+            // ICOUNT-like warmup gate: consume enough accepted steps to open
+            // probe window deterministically in one bounded integration pass.
+            let probe_accepted_steps = self
+                .config
+                .controller
+                .method_switch_probe_steps
+                .saturating_add(1)
+                .max(1);
+            let probe_attempt_steps = probe_accepted_steps.saturating_mul(4).max(1);
+            return Lsode2NativeIntegrationLimits::new(probe_attempt_steps, probe_accepted_steps);
+        }
+
+        // Cost-evidence gate: collect one additional accepted sample from the
+        // targeted family.
+        Lsode2NativeIntegrationLimits::new(8, 1)
     }
 
     fn run_switch_probe_before_full_native_solve(
@@ -586,32 +648,12 @@ impl Lsode2Solver {
         decision: Lsode2SwitchDecision,
     ) -> Result<(), Lsode2Error> {
         // LSODA-first choreography:
-        // when ICOUNT-like gate is still warming up, run a short native
-        // integration probe to collect DSTODA telemetry and cost samples, then
-        // re-evaluate the automatic Adams/BDF decision for the full solve.
-        let probe_accepted_steps = self
-            .config
-            .controller
-            .method_switch_probe_steps
-            .saturating_add(1)
-            .max(1);
-        let probe_attempt_steps = probe_accepted_steps.saturating_mul(4).max(1);
-        let probe_method = native_method_for_decision(&decision);
-        let _probe_summary = self.run_native_integration_internal_with_method(
-            Lsode2NativeIntegrationLimits::new(probe_attempt_steps, probe_accepted_steps),
-            false,
-            Some(probe_method),
-        )?;
-        // Collect cross-family cost/telemetry evidence for the switch decision.
-        // This keeps the automatic decision less sensitive to one-family-only
-        // warmup data when LSODA-style probe gate opens.
-        if probe_method == Lsode2NativeStepMethod::AdamsLike {
-            let _bdf_probe_summary = self.run_native_integration_internal_with_method(
-                Lsode2NativeIntegrationLimits::new(probe_attempt_steps, probe_accepted_steps),
-                false,
-                Some(Lsode2NativeStepMethod::BdfLike),
-            )?;
-        }
+        // - warmup gate: run one bounded probe to open the ICOUNT-like window;
+        // - cost-evidence gate: run one targeted probe for the missing family.
+        let limits = self.probe_limits_for_switch_choreography(&decision);
+        let probe_method = self.probe_method_for_switch_choreography(&decision);
+        let _probe_summary =
+            self.run_native_integration_internal_with_method(limits, false, Some(probe_method))?;
         Ok(())
     }
 
@@ -647,6 +689,10 @@ impl Lsode2Solver {
             native_step_probe: self.native_step_probe.clone(),
             native_integration_preview: self.native_integration_preview.clone(),
             native_integration_solve: self.native_integration_solve.clone(),
+            native_termination_kind: self
+                .native_integration_solve
+                .as_ref()
+                .map(|summary| summary.termination_kind.label()),
         }
     }
 
@@ -682,7 +728,9 @@ impl Lsode2Solver {
         let outcome = run_native_step_preflight(&self.config).map_err(Lsode2Error::from)?;
         merge_native_statistics(&mut self.native_statistics, &outcome.statistics);
         if let Some(summary) = outcome.summary.as_ref() {
-            self.absorb_native_switch_telemetry(summary.telemetry);
+            if self.lsoda_probe_flow_enabled() {
+                self.absorb_native_switch_telemetry(summary.telemetry);
+            }
         }
         Ok(outcome.summary)
     }
@@ -829,6 +877,15 @@ fn native_result_from_integration_summary(
     (t_result, y_result)
 }
 
+fn status_for_native_termination_kind(kind: Lsode2NativeTerminationKind) -> &'static str {
+    match kind {
+        Lsode2NativeTerminationKind::ReachedTBound
+        | Lsode2NativeTerminationKind::ReachedStopCondition
+        | Lsode2NativeTerminationKind::ReachedTBoundAndStopCondition => "finished_native_faithful",
+        Lsode2NativeTerminationKind::LimitsExhausted => "finished_native_faithful_partial",
+    }
+}
+
 fn validate_supported_backend_routes(config: &Lsode2ProblemConfig) -> Result<(), Lsode2Error> {
     match config.backend.jacobian_backend {
         Lsode2JacobianBackend::SymbolicGenerated => {}
@@ -848,9 +905,19 @@ fn validate_supported_backend_routes(config: &Lsode2ProblemConfig) -> Result<(),
             }
         }
         Lsode2JacobianBackend::FiniteDifference => {
-            return Err(Lsode2Error::UnsupportedBackend(
-                "LSODE2 currently supports symbolic-generated and analytical Jacobians; finite-difference Jacobians are planned for the next backend layer",
-            ));
+            if config.analytical_callbacks.is_none() {
+                return Err(Lsode2Error::InvalidConfig(
+                    "LSODE2 finite-difference Jacobian backend requires analytical residual callback route".to_string(),
+                ));
+            }
+            if !matches!(
+                config.native_execution,
+                Lsode2NativeExecutionConfig::NativeSolve { .. }
+            ) {
+                return Err(Lsode2Error::UnsupportedBackend(
+                    "LSODE2 finite-difference Jacobian backend is currently native-only; set native_solve execution mode",
+                ));
+            }
         }
     }
 
@@ -897,6 +964,47 @@ fn validate_controller_config(config: &Lsode2ProblemConfig) -> Result<(), Lsode2
     Ok(())
 }
 
+fn validate_stop_condition_config(config: &Lsode2ProblemConfig) -> Result<(), Lsode2Error> {
+    for condition in &config.stop_conditions {
+        if !condition.target.is_finite() {
+            return Err(Lsode2Error::InvalidConfig(format!(
+                "LSODE2 stop condition target for `{}` must be finite",
+                condition.variable
+            )));
+        }
+        if matches!(condition.comparator, Lsode2StopComparator::AbsDistance)
+            && !condition.tolerance.is_finite()
+        {
+            return Err(Lsode2Error::InvalidConfig(format!(
+                "LSODE2 stop condition tolerance for `{}` must be finite",
+                condition.variable
+            )));
+        }
+        if !config.values.iter().any(|name| name == &condition.variable) {
+            return Err(Lsode2Error::InvalidConfig(format!(
+                "LSODE2 stop condition references unknown variable `{}`",
+                condition.variable
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn bridge_compatible_stop_conditions(config: &Lsode2ProblemConfig) -> Option<HashMap<String, f64>> {
+    if config.stop_conditions.is_empty() {
+        return None;
+    }
+
+    // Bridge BDF path supports scalar stop map semantics only.
+    // We forward all configured conditions as target values so bridge mode can
+    // still stop early when thresholds are approached.
+    let mut conditions = HashMap::with_capacity(config.stop_conditions.len());
+    for stop in &config.stop_conditions {
+        conditions.insert(stop.variable.clone(), stop.target);
+    }
+    Some(conditions)
+}
+
 fn controller_execution_capabilities(
     config: &Lsode2ProblemConfig,
 ) -> Lsode2ControllerExecutionCapabilities {
@@ -906,7 +1014,9 @@ fn controller_execution_capabilities(
             | Lsode2NativeExecutionConfig::NativeSolve { .. }
     ) && matches!(
         config.backend.linear_solver_backend,
-        Lsode2LinearSolverBackend::SparseFaer | Lsode2LinearSolverBackend::BandedFaithful
+        Lsode2LinearSolverBackend::Dense
+            | Lsode2LinearSolverBackend::SparseFaer
+            | Lsode2LinearSolverBackend::BandedFaithful
     );
     Lsode2ControllerExecutionCapabilities {
         adams_engine_available,
@@ -991,7 +1101,10 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::LSODE2::{Lsode2ControllerConfig, Lsode2MethodFamily, Lsode2SwitchReason};
+    use crate::numerical::LSODE2::{
+        Lsode2ControllerConfig, Lsode2MethodFamily, Lsode2SwitchReason,
+    };
+    use crate::symbolic::symbolic_engine::Expr;
 
     #[test]
     fn native_method_selector_uses_executable_family_when_fallback_is_active() {
@@ -1091,5 +1204,111 @@ mod tests {
         assert_eq!(merged.stiffness_ratio, Some(0.25));
         assert_eq!(merged.adams_step_size_cap_estimate, Some(2.0));
         assert_eq!(merged.bdf_step_size_cap_estimate, Some(0.6));
+    }
+
+    #[test]
+    fn warmup_preprobe_collects_targeted_probe_evidence_without_forced_cross_family_sampling() {
+        let mut solver = Lsode2Solver::new(
+            Lsode2ProblemConfig::new(
+                vec![Expr::parse_expression("-y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                0.0,
+                DVector::from_vec(vec![1.0]),
+                1.0,
+                0.02,
+                1.0e-6,
+                1.0e-8,
+            )
+            .with_native_sparse_faer_backend()
+            .with_controller(Lsode2ControllerConfig::automatic_adams_bdf())
+            .with_faithful_bdf_solve(512, 256),
+        )
+        .expect("automatic native config should build");
+
+        // Force current-family context to BDF to exercise the BDF->Adams
+        // probe direction in warmup choreography.
+        solver
+            .algorithm
+            .record_switch_decision(Lsode2SwitchDecision {
+                preferred_family: Lsode2MethodFamily::Bdf,
+                executable_family: Some(Lsode2MethodFamily::Bdf),
+                uses_fallback: false,
+                reason: Lsode2SwitchReason::StiffnessSuspected,
+                message: "test setup",
+            });
+
+        assert_eq!(solver.native_statistics.native_adams_cost_samples, 0);
+        assert_eq!(solver.native_statistics.native_bdf_cost_samples, 0);
+
+        solver
+            .run_switch_probe_before_full_native_solve(Lsode2SwitchDecision {
+                preferred_family: Lsode2MethodFamily::Bdf,
+                executable_family: Some(Lsode2MethodFamily::Bdf),
+                uses_fallback: false,
+                reason: Lsode2SwitchReason::SwitchProbeWarmup,
+                message: "test warmup",
+            })
+            .expect("warmup probe should run for the active family");
+
+        assert!(
+            solver.native_statistics.native_bdf_cost_samples > 0,
+            "warmup pre-probe should record BDF cost evidence"
+        );
+        assert_eq!(
+            solver.native_statistics.native_adams_cost_samples, 0,
+            "warmup pre-probe should not force cross-family Adams sampling"
+        );
+        assert!(
+            solver.algorithm.switch_state().switch_probe_ready(),
+            "warmup pre-probe should open ICOUNT-like switch gate"
+        );
+    }
+
+    #[test]
+    fn insufficient_cost_preprobe_targets_missing_family_without_forced_symmetric_probe() {
+        let mut solver = Lsode2Solver::new(
+            Lsode2ProblemConfig::new(
+                vec![Expr::parse_expression("-y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                0.0,
+                DVector::from_vec(vec![1.0]),
+                1.0,
+                0.02,
+                1.0e-6,
+                1.0e-8,
+            )
+            .with_native_sparse_faer_backend()
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf().with_min_cost_samples_for_switch(3),
+            )
+            .with_faithful_bdf_solve(512, 256),
+        )
+        .expect("automatic native config should build");
+
+        solver.native_statistics.native_bdf_cost_samples = 3;
+        solver.native_statistics.native_bdf_step_cost_accum = 3.0;
+        solver.native_statistics.native_adams_cost_samples = 0;
+        solver.native_statistics.native_adams_step_cost_accum = 0.0;
+
+        solver
+            .run_switch_probe_before_full_native_solve(Lsode2SwitchDecision {
+                preferred_family: Lsode2MethodFamily::Bdf,
+                executable_family: Some(Lsode2MethodFamily::Bdf),
+                uses_fallback: false,
+                reason: Lsode2SwitchReason::InsufficientCostEvidence,
+                message: "test insufficient cost",
+            })
+            .expect("insufficient-cost probe should run on missing family");
+
+        assert!(
+            solver.native_statistics.native_adams_cost_samples > 0,
+            "insufficient-cost probe should collect missing Adams evidence"
+        );
+        assert!(
+            solver.native_statistics.native_bdf_cost_samples >= 3,
+            "insufficient-cost probe should not drop existing BDF evidence"
+        );
     }
 }

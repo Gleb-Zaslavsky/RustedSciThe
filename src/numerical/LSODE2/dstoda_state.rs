@@ -251,6 +251,10 @@ impl Lsode2DstodaState {
         self.redo_stage.into()
     }
 
+    pub fn coefficient_ratio(&self) -> f64 {
+        self.rc
+    }
+
     pub fn mark_jacobian_current(&mut self, nst: usize) {
         self.jacobian_currency = Lsode2JacobianCurrency::Current;
         self.jacobian_update_request = Lsode2JacobianUpdateRequest::None;
@@ -334,6 +338,11 @@ impl Lsode2DstodaState {
         self.corrector_failure_mode = Lsode2CorrectorFailureMode::None;
         self.kflag = Lsode2Kflag::RepeatedErrorTestFailure;
         self.icf = Lsode2Icf::None;
+        self.iret = Lsode2Iret::NormalFlow;
+        self.redo_stage = Lsode2RedoStage::None;
+        self.jacobian_update_request = Lsode2JacobianUpdateRequest::None;
+        self.ipup = Lsode2Ipup::UpToDate;
+        self.ipup_trigger = Lsode2IpupTrigger::None;
     }
 
     pub fn record_repeated_convergence_failure(&mut self) {
@@ -690,6 +699,28 @@ mod tests {
         assert_eq!(
             state.corrector_failure_mode(),
             Lsode2CorrectorFailureMode::None
+        );
+    }
+
+    #[test]
+    fn repeated_error_test_failure_clears_sticky_reset_markers() {
+        let mut state = Lsode2DstodaState::default();
+        state.record_repeated_error_test_reset();
+        assert_eq!(state.iret(), Lsode2Iret::RestartWithDerivativeRefresh);
+        assert_eq!(state.redo_stage(), Lsode2RedoStage::RepeatedErrorReset);
+        assert_eq!(state.ipup(), Lsode2Ipup::NeedsJacobianUpdate);
+
+        state.record_repeated_error_test_failure();
+
+        assert_eq!(state.kflag(), Lsode2Kflag::RepeatedErrorTestFailure);
+        assert_eq!(state.iret(), Lsode2Iret::NormalFlow);
+        assert_eq!(state.redo_stage(), Lsode2RedoStage::None);
+        assert_eq!(state.iredo(), Lsode2Iredo::None);
+        assert_eq!(state.ipup(), Lsode2Ipup::UpToDate);
+        assert_eq!(state.ipup_trigger(), Lsode2IpupTrigger::None);
+        assert_eq!(
+            state.jacobian_update_request(),
+            Lsode2JacobianUpdateRequest::None
         );
     }
 

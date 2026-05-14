@@ -18,6 +18,7 @@ type CompiledEntry = (usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>);
 /// Native symbolic Jacobian storage requested by the LSODE2 linear backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJacobianStorage {
+    Dense,
     SparseTriplets,
     Banded,
 }
@@ -91,6 +92,15 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
     let entries = compile_nonzero_entries(&symbolic_jacobian, &name_refs);
 
     match storage {
+        NativeJacobianStorage::Dense => Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+            let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
+            let args = build_args(t, parameter_values.as_ref(), y);
+            let mut matrix = nalgebra::DMatrix::<f64>::zeros(rows, cols);
+            for (row, col, eval) in &entries {
+                matrix[(*row, *col)] = eval(&args);
+            }
+            BdfJacobian::Dense(matrix)
+        }),
         NativeJacobianStorage::SparseTriplets => {
             Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
@@ -182,6 +192,19 @@ pub fn compile_native_sparse_aot_jacobian_with_parameter_handle(
         .collect::<Vec<_>>();
 
     match storage {
+        NativeJacobianStorage::Dense => {
+            Ok(Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+                let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
+                let args = build_args(t, parameter_values.as_ref(), y);
+                let mut values = vec![0.0_f64; pattern.len()];
+                (linked.jacobian_values_eval)(args.as_slice(), values.as_mut_slice());
+                let mut matrix = nalgebra::DMatrix::<f64>::zeros(rows, cols);
+                for ((row, col), value) in pattern.iter().zip(values.iter().copied()) {
+                    matrix[(*row, *col)] = value;
+                }
+                BdfJacobian::Dense(matrix)
+            }))
+        }
         NativeJacobianStorage::SparseTriplets => {
             Ok(Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
@@ -386,6 +409,32 @@ mod tests {
                 .iter()
                 .any(|entry| entry.row == 1 && entry.col == 0 && entry.val == 3.0)
         );
+    }
+
+    #[test]
+    fn dense_native_jacobian_evaluates_symbolic_entries_into_dense_matrix() {
+        let equations = vec![
+            Expr::parse_expression("-2*y1 + y2"),
+            Expr::parse_expression("3*y1 - 4*y2"),
+        ];
+        let variables = vec!["y1".to_string(), "y2".to_string()];
+        let mut jacobian = compile_native_symbolic_jacobian(
+            &equations,
+            &variables,
+            "t",
+            NativeJacobianStorage::Dense,
+        );
+
+        let out = jacobian(0.0, &DVector::from_vec(vec![1.0, 2.0]));
+        let BdfJacobian::Dense(matrix) = out else {
+            panic!("expected dense Jacobian");
+        };
+        assert_eq!(matrix.nrows(), 2);
+        assert_eq!(matrix.ncols(), 2);
+        assert_eq!(matrix[(0, 0)], -2.0);
+        assert_eq!(matrix[(0, 1)], 1.0);
+        assert_eq!(matrix[(1, 0)], 3.0);
+        assert_eq!(matrix[(1, 1)], -4.0);
     }
 
     #[test]

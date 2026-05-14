@@ -44,15 +44,19 @@ fn find_rightmost_operator_outside_brackets(
     input: &str,
     operators: &[char],
 ) -> Option<(usize, char)> {
+    let chars: Vec<char> = input.chars().collect();
     let mut bracket_depth = 0;
     let mut last_op_pos = None;
     let mut last_op_char = ' ';
 
-    for (i, c) in input.chars().enumerate() {
+    for (i, c) in chars.iter().copied().enumerate() {
         match c {
             '(' => bracket_depth += 1,
             ')' => bracket_depth -= 1,
-            _ if bracket_depth == 0 && operators.contains(&c) => {
+            _ if bracket_depth == 0
+                && operators.contains(&c)
+                && !is_scientific_exponent_sign(&chars, i, c) =>
+            {
                 last_op_pos = Some(i); // Updates to LAST match
                 last_op_char = c; // Remembers which operator
             }
@@ -61,6 +65,66 @@ fn find_rightmost_operator_outside_brackets(
     }
 
     last_op_pos.map(|pos| (pos, last_op_char))
+}
+
+fn is_valid_variable_name(input: &str) -> bool {
+    if input.is_empty() {
+        return false;
+    }
+    let mut chars = input.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_scientific_exponent_sign(chars: &[char], index: usize, op: char) -> bool {
+    if op != '+' && op != '-' {
+        return false;
+    }
+    if index == 0 || index + 1 >= chars.len() {
+        return false;
+    }
+
+    let mut prev = index;
+    while prev > 0 && chars[prev - 1].is_whitespace() {
+        prev -= 1;
+    }
+    if prev == 0 {
+        return false;
+    }
+    let e_pos = prev - 1;
+    if chars[e_pos] != 'e' && chars[e_pos] != 'E' {
+        return false;
+    }
+
+    let mut next = index + 1;
+    while next < chars.len() && chars[next].is_whitespace() {
+        next += 1;
+    }
+    if next >= chars.len() || !chars[next].is_ascii_digit() {
+        return false;
+    }
+
+    let mut has_mantissa_digit = false;
+    let mut j = e_pos;
+    while j > 0 {
+        let c = chars[j - 1];
+        if c.is_ascii_digit() {
+            has_mantissa_digit = true;
+            j -= 1;
+            continue;
+        }
+        if c == '.' || c == '_' {
+            j -= 1;
+            continue;
+        }
+        break;
+    }
+    has_mantissa_digit
 }
 
 /// Parse a string expression into a symbolic tree.
@@ -249,7 +313,7 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
         if let Some(pos) = find_char_positions_outside_brackets(input, '^') {
             let base = &input[..pos].trim();
             let exponent = &input[pos + 1..].trim();
-            let base_expr = if base.chars().all(char::is_alphanumeric) {
+            let base_expr = if is_valid_variable_name(base) {
                 Expr::Var(base.to_string())
             } else {
                 parse_expression_func(0, base)?
@@ -355,7 +419,7 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             } else {
                 Ok(Expr::Const(-value))
             };
-        } else if input.chars().all(char::is_alphanumeric) {
+        } else if is_valid_variable_name(input) {
             return if flg != 2 {
                 Ok(Expr::Var(input.to_string()))
             } else {
@@ -632,6 +696,54 @@ mod tests {
         assert_eq!(
             expr,
             Expr::sin(Box::new(Expr::cos(Box::new(Expr::Var("x".to_string())))))
+        );
+    }
+
+    #[test]
+    fn test_parse_scientific_constant_with_negative_exponent() {
+        let expr = parse_expression_func(0, "2.88e-4").unwrap();
+        assert_eq!(expr, Expr::Const(2.88e-4));
+    }
+
+    #[test]
+    fn test_parse_scientific_constant_with_positive_exponent_sign() {
+        let expr = parse_expression_func(0, "1.0e+3").unwrap();
+        assert_eq!(expr, Expr::Const(1.0e3));
+    }
+
+    #[test]
+    fn test_parse_scientific_constant_in_composite_expression() {
+        let expr = parse_expression_func(0, "J0/2.88e-4").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Div(
+                Box::new(Expr::Var("J0".to_string())),
+                Box::new(Expr::Const(2.88e-4))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_variable_with_underscore_indexing() {
+        let expr = parse_expression_func(0, "x_0").unwrap();
+        assert_eq!(expr, Expr::Var("x_0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_variable_with_mixed_digits_and_underscore_indexing() {
+        let expr = parse_expression_func(0, "z0_1").unwrap();
+        assert_eq!(expr, Expr::Var("z0_1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_expression_with_indexed_variables() {
+        let expr = parse_expression_func(0, "x_0 + z0_1").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Add(
+                Box::new(Expr::Var("x_0".to_string())),
+                Box::new(Expr::Var("z0_1".to_string()))
+            )
         );
     }
     const S: &'static str = "((1000 * (((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))) / 0.028)) * ((((2.5 * (1 - ((0.6366197723675814 * (8.314 / (1.5 * 8.314))) * ((2.5 - (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))) / (((1.8 * (((1 + (2.784163998415854 * ((98.1 / T) ^ 0.5))) + (4.4674011002723395 * (98.1 / T))) + (5.568327996831708 * ((98.1 / T) ^ 3.2)))) / (1 + 3.2271366789503664)) + (0.6366197723675814 * ((0.20046507898324112 * 8.314) + (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))))))))) * (1.5 * 8.314)) + (((((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) * (1 + (0.6366197723675814 * ((2.5 - (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))) / (((1.8 * (((1 + (2.784163998415854 * ((98.1 / T) ^ 0.5))) + (4.4674011002723395 * (98.1 / T))) + (5.568327996831708 * ((98.1 / T) ^ 3.2)))) / (1 + 3.2271366789503664)) + (0.6366197723675814 * ((0.20046507898324112 * 8.314) + (((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1))))))))))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1)))))) * 8.314)) + ((((ro * 1) * (((18750000000000000000 * (T ^ 1.5)) * 0.00000000000000000000018973399110000764) / (1349902.3125 * (((((1.06036 / ((T / 98.1) ^ 0.1561)) + (0.193 / exp((0.47635 * (T / 98.1))))) + (1.03587 / exp((1.52996 * (T / 98.1))))) + (1.76474 / exp((3.89411 * (T / 98.1))))) + ((0.19 * (0 ^ 2)) / (T / 98.1)))))) / ((0.000002669 * ((28 * T) ^ 0.5)) / (13.3225 * ((((1.16145 / ((T / 98.1) ^ 0.14874)) + (0.52487 / exp((0.7732 * (T / 98.1))))) + (2.16178 / exp((2.43787 * (T / 98.1))))) + ((0.2 * (0 ^ 2)) / (T / 98.1)))))) * ((Cp - 8.314) - (2.5 * 8.314)))))";

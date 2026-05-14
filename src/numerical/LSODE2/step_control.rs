@@ -23,6 +23,7 @@ pub struct Lsode2StepControlConfig {
     pub raise_order_error_threshold: f64,
     pub max_error_test_failures: usize,
     pub max_convergence_failures: usize,
+    pub max_hnil_warnings: usize,
 }
 
 impl Default for Lsode2StepControlConfig {
@@ -41,6 +42,7 @@ impl Default for Lsode2StepControlConfig {
             raise_order_error_threshold: 0.5,
             max_error_test_failures: 10,
             max_convergence_failures: 10,
+            max_hnil_warnings: 10,
         }
     }
 }
@@ -109,6 +111,11 @@ impl Lsode2StepControlConfig {
         if self.max_error_test_failures == 0 {
             return Err(Lsode2StepControlError::InvalidConfig(
                 "max_error_test_failures must be at least 1",
+            ));
+        }
+        if self.max_hnil_warnings == 0 {
+            return Err(Lsode2StepControlError::InvalidConfig(
+                "max_hnil_warnings must be at least 1",
             ));
         }
         Ok(())
@@ -188,7 +195,18 @@ pub struct Lsode2StepControlSnapshot {
     pub adjustment_wait: usize,
     pub active_growth_cap: f64,
     pub jacobian_refresh_requests: usize,
+    pub null_step_count: usize,
+    pub null_step_warning_count: usize,
+    pub null_step_warning_cap: usize,
+    pub null_step_warning_cap_reached: bool,
     pub last_failure: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lsode2NullStepWarningLevel {
+    Warning,
+    WarningCapReached,
+    SuppressedAfterCap,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +223,8 @@ pub struct Lsode2StepController {
     adjustment_wait: usize,
     active_growth_cap: f64,
     jacobian_refresh_requests: usize,
+    null_step_count: usize,
+    null_step_warning_count: usize,
     last_failure: Option<Lsode2StepFailure>,
 }
 
@@ -224,6 +244,8 @@ impl Lsode2StepController {
             adjustment_wait: 2,
             active_growth_cap: config.max_growth,
             jacobian_refresh_requests: 0,
+            null_step_count: 0,
+            null_step_warning_count: 0,
             last_failure: None,
         })
     }
@@ -252,7 +274,7 @@ impl Lsode2StepController {
         }
 
         let requested_growth = if suggested_growth.is_finite() {
-            suggested_growth.clamp(1.0, self.active_growth_cap)
+            suggested_growth.clamp(self.config.min_shrink, self.active_growth_cap)
         } else {
             1.0
         };
@@ -277,7 +299,13 @@ impl Lsode2StepController {
             };
         }
 
-        let should_change_h_or_order = requested_order != order_current || requested_growth >= 1.1;
+        // DSTODA parity:
+        // Order/growth choreography (including the 1.1 gate and Adams
+        // stability-limited bypass) is already resolved upstream by step-cycle
+        // RH selection. Here we should apply any non-unity RH that reaches
+        // accept(), rather than re-imposing a second 1.1 threshold.
+        let should_change_h_or_order =
+            requested_order != order_current || (requested_growth - 1.0).abs() > f64::EPSILON;
         let (h_next, order_new) = if should_change_h_or_order {
             self.adjustment_wait = requested_order + 1;
             (h_current * requested_growth, requested_order)
@@ -410,7 +438,24 @@ impl Lsode2StepController {
             adjustment_wait: self.adjustment_wait,
             active_growth_cap: self.active_growth_cap,
             jacobian_refresh_requests: self.jacobian_refresh_requests,
+            null_step_count: self.null_step_count,
+            null_step_warning_count: self.null_step_warning_count,
+            null_step_warning_cap: self.config.max_hnil_warnings,
+            null_step_warning_cap_reached: self.null_step_count >= self.config.max_hnil_warnings,
             last_failure: self.last_failure.map(Lsode2StepFailure::label),
+        }
+    }
+
+    pub fn record_null_step_event(&mut self) -> Lsode2NullStepWarningLevel {
+        self.null_step_count += 1;
+        if self.null_step_count > self.config.max_hnil_warnings {
+            return Lsode2NullStepWarningLevel::SuppressedAfterCap;
+        }
+        self.null_step_warning_count += 1;
+        if self.null_step_count == self.config.max_hnil_warnings {
+            Lsode2NullStepWarningLevel::WarningCapReached
+        } else {
+            Lsode2NullStepWarningLevel::Warning
         }
     }
 
@@ -847,6 +892,13 @@ mod tests {
         };
 
         assert!(Lsode2StepController::new(config).is_err());
+
+        let config = Lsode2StepControlConfig {
+            max_hnil_warnings: 0,
+            ..Lsode2StepControlConfig::default()
+        };
+
+        assert!(Lsode2StepController::new(config).is_err());
     }
 
     #[test]
@@ -883,5 +935,47 @@ mod tests {
         assert_eq!(first.order_new, 3);
         assert_eq!(second.order_new, 2);
         assert_eq!(third.order_new, 2);
+    }
+
+    #[test]
+    fn null_step_warning_counter_respects_mxhnil_cap() {
+        let mut controller = Lsode2StepController::new(Lsode2StepControlConfig {
+            max_hnil_warnings: 2,
+            ..Lsode2StepControlConfig::default()
+        })
+        .expect("valid step controller");
+
+        let first = controller.record_null_step_event();
+        let second = controller.record_null_step_event();
+        let third = controller.record_null_step_event();
+
+        assert_eq!(first, Lsode2NullStepWarningLevel::Warning);
+        assert_eq!(second, Lsode2NullStepWarningLevel::WarningCapReached);
+        assert_eq!(third, Lsode2NullStepWarningLevel::SuppressedAfterCap);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.null_step_count, 3);
+        assert_eq!(snapshot.null_step_warning_count, 2);
+        assert_eq!(snapshot.null_step_warning_cap, 2);
+        assert!(snapshot.null_step_warning_cap_reached);
+    }
+
+    #[test]
+    fn accept_applies_nonunity_growth_without_secondary_ten_percent_gate() {
+        let mut controller = Lsode2StepController::default();
+
+        // Warmup call consumes initial IALTH-like wait (2 -> 1), no immediate change.
+        let warmup = controller.accept(0.2, 1, 3, 1.0, 0.1, 1);
+        assert!((warmup.h_next - 0.2).abs() < 1.0e-14);
+        assert_eq!(warmup.order_new, 1);
+
+        // With wait now at 1, second call drops it to 0 and applies RH directly.
+        // RH < 1.1 must still be applied when upstream DSTODA selection left RH != 1.
+        let applied = controller.accept(0.2, 1, 3, 0.93, 0.1, 1);
+        assert!(
+            (applied.h_next - 0.186).abs() < 1.0e-14,
+            "non-unity RH from DSTODA choreography should be applied directly"
+        );
+        assert_eq!(applied.order_new, 1);
     }
 }

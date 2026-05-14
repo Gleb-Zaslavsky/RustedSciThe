@@ -12,9 +12,43 @@ use crate::somelinalg::banded::lapack_style_banded::LapackStyleBandedLuFaithful;
 use crate::somelinalg::banded::solver_traits::{DirectLinearSolver, FaerSparseLuSolver};
 use crate::somelinalg::banded::storage::Banded;
 use faer::sparse::Triplet;
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Dyn, LU};
 
 const DEFAULT_DROP_TOL: f64 = 0.0;
+
+/// Dense LU backend based on `nalgebra` LU factorization.
+#[derive(Debug, Clone, Default)]
+pub struct DenseLuBdfLinearBackend;
+
+impl BdfLinearBackend for DenseLuBdfLinearBackend {
+    fn factor(&mut self, matrix: &DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>> {
+        if matrix.nrows() != matrix.ncols() {
+            return None;
+        }
+        Some(Box::new(DenseLuFactorization {
+            lu: LU::new(matrix.clone()),
+        }))
+    }
+
+    fn factor_shifted_jacobian(
+        &mut self,
+        c: f64,
+        jacobian: &BdfJacobian,
+    ) -> Option<Box<dyn BdfLinearFactorization>> {
+        let shifted = jacobian.to_shifted_dense(c)?;
+        self.factor(&shifted)
+    }
+}
+
+struct DenseLuFactorization {
+    lu: LU<f64, Dyn, Dyn>,
+}
+
+impl BdfLinearFactorization for DenseLuFactorization {
+    fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>> {
+        self.lu.solve(rhs)
+    }
+}
 
 /// Sparse LU backend based on `faer` sparse factorization.
 #[derive(Debug, Clone)]
@@ -182,6 +216,106 @@ mod tests {
             .expect("solve should succeed")
     }
 
+    fn max_abs_diff(a: &DVector<f64>, b: &DVector<f64>) -> f64 {
+        assert_eq!(a.len(), b.len(), "vectors must have equal lengths");
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn relative_l2_error(actual: &DVector<f64>, reference: &DVector<f64>) -> f64 {
+        assert_eq!(
+            actual.len(),
+            reference.len(),
+            "vectors must have equal lengths"
+        );
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for (a, r) in actual.iter().zip(reference.iter()) {
+            let d = a - r;
+            num += d * d;
+            den += r * r;
+        }
+        num.sqrt() / den.sqrt().max(1.0e-30)
+    }
+
+    fn make_pivot_scaling_stress_banded_matrix(n: usize) -> DMatrix<f64> {
+        assert!(n >= 6, "stress matrix requires n >= 6");
+        let mut a = DMatrix::<f64>::zeros(n, n);
+
+        for i in 0..n {
+            let d = match i % 4 {
+                0 => 1.0e-10,
+                1 => 1.0e-7,
+                2 => 1.0e-4,
+                _ => 1.0,
+            };
+            a[(i, i)] = d;
+
+            if i + 1 < n {
+                // upper bandwidth ku=1
+                a[(i, i + 1)] = -0.75 - 0.01 * i as f64;
+            }
+            if i >= 1 {
+                // lower bandwidth kl>=1; values dominate tiny pivots
+                a[(i, i - 1)] = 1.25 + 0.02 * i as f64;
+            }
+            if i >= 2 {
+                // second lower diagonal to exercise kl=2 path
+                a[(i, i - 2)] = -0.5;
+            }
+        }
+
+        // Keep invertibility robust while preserving pivot pressure.
+        for i in 0..n {
+            a[(i, i)] += 0.2;
+        }
+        a
+    }
+
+    fn make_row_scales(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| match i % 7 {
+                0 => 1.0e-6,
+                1 => 1.0e-4,
+                2 => 1.0e-2,
+                3 => 1.0,
+                4 => 1.0e2,
+                5 => 1.0e4,
+                _ => 1.0e6,
+            })
+            .collect()
+    }
+
+    fn left_row_scale(matrix: &DMatrix<f64>, scales: &[f64]) -> DMatrix<f64> {
+        assert_eq!(
+            matrix.nrows(),
+            scales.len(),
+            "row scales length must match matrix rows"
+        );
+        let mut out = matrix.clone();
+        for i in 0..matrix.nrows() {
+            for j in 0..matrix.ncols() {
+                out[(i, j)] = scales[i] * matrix[(i, j)];
+            }
+        }
+        out
+    }
+
+    fn left_row_scale_vec(rhs: &DVector<f64>, scales: &[f64]) -> DVector<f64> {
+        assert_eq!(
+            rhs.len(),
+            scales.len(),
+            "row scales length must match rhs length"
+        );
+        let mut out = rhs.clone();
+        for i in 0..rhs.len() {
+            out[i] = scales[i] * rhs[i];
+        }
+        out
+    }
+
     #[test]
     fn faer_sparse_backend_solves_small_newton_matrix() {
         let matrix = DMatrix::from_row_slice(3, 3, &[4.0, 1.0, 0.0, 1.0, 5.0, 1.0, 0.0, 1.0, 6.0]);
@@ -256,5 +390,162 @@ mod tests {
 
         let residual = jacobian.to_shifted_dense(c).unwrap() * &x - rhs;
         assert!(residual.amax() < 1e-12);
+    }
+
+    #[test]
+    fn dense_lu_backend_factors_shifted_dense_jacobian_natively() {
+        let c = 0.3;
+        let jacobian = BdfJacobian::from_dense(DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                -2.0, 1.0, 0.0, //
+                3.0, -4.0, 2.0, //
+                0.0, 1.5, -5.0,
+            ],
+        ));
+        let rhs = DVector::from_vec(vec![1.0, -2.0, 0.5]);
+        let x =
+            solve_shifted_with_backend(DenseLuBdfLinearBackend, c, jacobian.clone(), rhs.clone());
+
+        let residual = jacobian.to_shifted_dense(c).unwrap() * &x - rhs;
+        assert!(residual.amax() < 1e-12);
+    }
+
+    #[test]
+    fn faithful_banded_backend_pivot_scaling_stress_matches_dense_reference() {
+        let n = 20;
+        let a = make_pivot_scaling_stress_banded_matrix(n);
+        let x_true = DVector::from_iterator(
+            n,
+            (0..n).map(|i| {
+                if i % 2 == 0 {
+                    5.0e2 / (i + 1) as f64
+                } else {
+                    -3.0e-6 * (i + 1) as f64
+                }
+            }),
+        );
+        let b = &a * &x_true;
+
+        let x_dense = solve_with_backend(DenseLuBdfLinearBackend, a.clone(), b.clone());
+        let x_banded = solve_with_backend(
+            FaithfulBandedBdfLinearBackend::default(),
+            a.clone(),
+            b.clone(),
+        );
+
+        let rel_dense = relative_l2_error(&x_dense, &x_true);
+        let rel_banded = relative_l2_error(&x_banded, &x_true);
+        let rel_vs_dense = relative_l2_error(&x_banded, &x_dense);
+        assert!(
+            rel_dense < 1.0e-9,
+            "dense reference should recover stress system accurately, got rel_l2={rel_dense:e}"
+        );
+        assert!(
+            rel_banded < 1.0e-7,
+            "faithful banded should remain accurate on pivot/scaling stress, got rel_l2={rel_banded:e}"
+        );
+        assert!(
+            rel_vs_dense < 1.0e-7,
+            "faithful banded should stay close to dense reference on stress matrix, got rel_l2={rel_vs_dense:e}"
+        );
+
+        let scales = make_row_scales(n);
+        let a_scaled = left_row_scale(&a, &scales);
+        let b_scaled = left_row_scale_vec(&b, &scales);
+
+        let x_banded_scaled = solve_with_backend(
+            FaithfulBandedBdfLinearBackend::default(),
+            a_scaled.clone(),
+            b_scaled.clone(),
+        );
+        let x_dense_scaled = solve_with_backend(DenseLuBdfLinearBackend, a_scaled, b_scaled);
+
+        let rel_banded_scaled = relative_l2_error(&x_banded_scaled, &x_true);
+        let rel_dense_scaled = relative_l2_error(&x_dense_scaled, &x_true);
+        let rel_scaled_vs_unscaled = relative_l2_error(&x_banded_scaled, &x_banded);
+        assert!(
+            rel_dense_scaled < 1.0e-8,
+            "dense reference on row-scaled stress system should remain accurate, got rel_l2={rel_dense_scaled:e}"
+        );
+        assert!(
+            rel_banded_scaled < 1.0e-6,
+            "faithful banded should remain stable under row scaling, got rel_l2={rel_banded_scaled:e}"
+        );
+        assert!(
+            rel_scaled_vs_unscaled < 1.0e-6,
+            "faithful banded row-scaled solve should match unscaled solve, got rel_l2={rel_scaled_vs_unscaled:e}"
+        );
+        assert!(
+            max_abs_diff(&x_banded_scaled, &x_banded) < 1.0e-3,
+            "max_abs diff between scaled and unscaled faithful solutions is unexpectedly large"
+        );
+    }
+
+    #[test]
+    fn sparse_faer_backend_pivot_scaling_stress_matches_dense_reference() {
+        let n = 20;
+        let a = make_pivot_scaling_stress_banded_matrix(n);
+        let x_true = DVector::from_iterator(
+            n,
+            (0..n).map(|i| {
+                if i % 3 == 0 {
+                    2.0e3 / (i + 1) as f64
+                } else if i % 3 == 1 {
+                    -1.0e-4 * (i + 1) as f64
+                } else {
+                    1.0e-8 * (i + 1) as f64
+                }
+            }),
+        );
+        let b = &a * &x_true;
+
+        let x_dense = solve_with_backend(DenseLuBdfLinearBackend, a.clone(), b.clone());
+        let x_sparse =
+            solve_with_backend(FaerSparseBdfLinearBackend::default(), a.clone(), b.clone());
+
+        let rel_dense = relative_l2_error(&x_dense, &x_true);
+        let rel_sparse = relative_l2_error(&x_sparse, &x_true);
+        let rel_vs_dense = relative_l2_error(&x_sparse, &x_dense);
+        assert!(
+            rel_dense < 1.0e-9,
+            "dense reference should recover sparse stress system accurately, got rel_l2={rel_dense:e}"
+        );
+        assert!(
+            rel_sparse < 1.0e-7,
+            "faer sparse backend should remain accurate on pivot/scaling stress, got rel_l2={rel_sparse:e}"
+        );
+        assert!(
+            rel_vs_dense < 1.0e-7,
+            "faer sparse backend should stay close to dense reference on stress matrix, got rel_l2={rel_vs_dense:e}"
+        );
+
+        let scales = make_row_scales(n);
+        let a_scaled = left_row_scale(&a, &scales);
+        let b_scaled = left_row_scale_vec(&b, &scales);
+
+        let x_sparse_scaled = solve_with_backend(
+            FaerSparseBdfLinearBackend::default(),
+            a_scaled.clone(),
+            b_scaled.clone(),
+        );
+        let x_dense_scaled = solve_with_backend(DenseLuBdfLinearBackend, a_scaled, b_scaled);
+
+        let rel_sparse_scaled = relative_l2_error(&x_sparse_scaled, &x_true);
+        let rel_dense_scaled = relative_l2_error(&x_dense_scaled, &x_true);
+        let rel_scaled_vs_unscaled = relative_l2_error(&x_sparse_scaled, &x_sparse);
+        assert!(
+            rel_dense_scaled < 1.0e-8,
+            "dense reference on row-scaled sparse stress system should remain accurate, got rel_l2={rel_dense_scaled:e}"
+        );
+        assert!(
+            rel_sparse_scaled < 1.0e-6,
+            "faer sparse backend should remain stable under row scaling, got rel_l2={rel_sparse_scaled:e}"
+        );
+        assert!(
+            rel_scaled_vs_unscaled < 1.0e-6,
+            "faer sparse row-scaled solve should match unscaled solve, got rel_l2={rel_scaled_vs_unscaled:e}"
+        );
     }
 }

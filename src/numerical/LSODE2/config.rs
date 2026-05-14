@@ -1,7 +1,14 @@
 use super::algorithm::Lsode2ControllerConfig;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+use crate::symbolic::codegen::codegen_runtime_api::{
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
+    recommended_dense_jacobian_chunking_for_parallelism,
+    recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
+};
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::SymbolicIvpAotOptions;
 use crate::symbolic::symbolic_ivp_generated::{
     DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
@@ -276,6 +283,60 @@ pub enum Lsode2LinearSolverPolicy {
     Force(Lsode2LinearSolverChoice),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lsode2StopComparator {
+    GreaterEqual,
+    LessEqual,
+    AbsDistance,
+}
+
+impl Lsode2StopComparator {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GreaterEqual => "ge",
+            Self::LessEqual => "le",
+            Self::AbsDistance => "abs_distance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lsode2StopCondition {
+    pub variable: String,
+    pub target: f64,
+    pub comparator: Lsode2StopComparator,
+    pub tolerance: f64,
+}
+
+impl Lsode2StopCondition {
+    pub fn greater_equal(variable: impl Into<String>, target: f64) -> Self {
+        Self {
+            variable: variable.into(),
+            target,
+            comparator: Lsode2StopComparator::GreaterEqual,
+            tolerance: 0.0,
+        }
+    }
+
+    pub fn less_equal(variable: impl Into<String>, target: f64) -> Self {
+        Self {
+            variable: variable.into(),
+            target,
+            comparator: Lsode2StopComparator::LessEqual,
+            tolerance: 0.0,
+        }
+    }
+
+    pub fn abs_distance(variable: impl Into<String>, target: f64, tolerance: f64) -> Self {
+        Self {
+            variable: variable.into(),
+            target,
+            comparator: Lsode2StopComparator::AbsDistance,
+            tolerance: tolerance.abs(),
+        }
+    }
+}
+
 /// Resolved backend plan after policy/validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lsode2ResolvedPlan {
@@ -517,11 +578,69 @@ impl Lsode2BackendConfig {
         self
     }
 
+    /// Overrides generated-backend AOT chunking options.
+    ///
+    /// This controls how generated residual/Jacobian kernels are split into
+    /// runtime chunks. It is useful when tuning backend-level parallel work
+    /// granularity.
+    pub fn with_generated_backend_aot_options(mut self, options: SymbolicIvpAotOptions) -> Self {
+        self.generated_backend = self.generated_backend.clone().with_aot_options(options);
+        self
+    }
+
+    /// Overrides sparse-Jacobian chunking for native sparse/banded generated
+    /// Jacobian callbacks.
+    pub fn with_generated_backend_sparse_chunking_strategy(
+        mut self,
+        strategy: SparseChunkingStrategy,
+    ) -> Self {
+        self.generated_backend = self
+            .generated_backend
+            .clone()
+            .with_sparse_jacobian_chunking_strategy(strategy);
+        self
+    }
+
+    /// Sets explicit target chunk counts for generated residual and dense
+    /// Jacobian runtime plans.
+    ///
+    /// This is a direct, deterministic way to control generated backend
+    /// parallel granularity without relying on machine-dependent auto sizing.
+    pub fn with_generated_backend_target_chunks(
+        self,
+        residual_target_chunks: usize,
+        jacobian_target_chunks: usize,
+    ) -> Self {
+        assert!(
+            residual_target_chunks > 0,
+            "residual_target_chunks must be positive"
+        );
+        assert!(
+            jacobian_target_chunks > 0,
+            "jacobian_target_chunks must be positive"
+        );
+        self.with_generated_backend_aot_options(SymbolicIvpAotOptions {
+            residual_strategy: ResidualChunkingStrategy::ByTargetChunkCount {
+                target_chunks: residual_target_chunks,
+            },
+            jacobian_strategy: DenseJacobianChunkingStrategy::ByTargetChunkCount {
+                target_chunks: jacobian_target_chunks,
+            },
+        })
+        .with_generated_backend_sparse_chunking_strategy(
+            SparseChunkingStrategy::ByTargetChunkCount {
+                target_chunks: jacobian_target_chunks,
+            },
+        )
+    }
+
     /// Applies one high-level dense generated-backend lifecycle mode.
     pub fn with_dense_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
         let mut config = SymbolicIvpGeneratedBackendConfig::from_mode(mode);
         config.resolver = self.generated_backend.resolver.clone();
         config.aot_options = self.generated_backend.aot_options;
+        config.sparse_jacobian_chunking_strategy =
+            self.generated_backend.sparse_jacobian_chunking_strategy;
         config.aot_codegen_backend = self.generated_backend.aot_codegen_backend;
         config.aot_c_compiler = self.generated_backend.aot_c_compiler.clone();
         config.output_parent_dir = self.generated_backend.output_parent_dir.clone();
@@ -596,6 +715,7 @@ pub struct Lsode2ProblemConfig {
     pub jac_sparsity: Option<DMatrix<f64>>,
     pub vectorized: bool,
     pub first_step: Option<f64>,
+    pub stop_conditions: Vec<Lsode2StopCondition>,
     pub residual_jacobian_source: Lsode2ResidualJacobianSource,
     pub linear_system_structure: Lsode2LinearSystemStructure,
     pub linear_solver_policy: Lsode2LinearSolverPolicy,
@@ -634,6 +754,7 @@ impl Lsode2ProblemConfig {
             jac_sparsity: None,
             vectorized: false,
             first_step: None,
+            stop_conditions: Vec::new(),
             residual_jacobian_source: Lsode2ResidualJacobianSource::default(),
             linear_system_structure: Lsode2LinearSystemStructure::default(),
             linear_solver_policy: Lsode2LinearSolverPolicy::default(),
@@ -1017,6 +1138,38 @@ impl Lsode2ProblemConfig {
         self
     }
 
+    /// Adds a stop condition with `current(variable) >= target`.
+    ///
+    /// Typical combustion-style usage:
+    /// `with_stop_condition("eta", 0.999)`.
+    pub fn with_stop_condition(self, variable: impl Into<String>, target: f64) -> Self {
+        self.with_stop_condition_ge(variable, target)
+    }
+
+    pub fn with_stop_condition_ge(mut self, variable: impl Into<String>, target: f64) -> Self {
+        self.stop_conditions
+            .push(Lsode2StopCondition::greater_equal(variable, target));
+        self
+    }
+
+    pub fn with_stop_condition_le(mut self, variable: impl Into<String>, target: f64) -> Self {
+        self.stop_conditions
+            .push(Lsode2StopCondition::less_equal(variable, target));
+        self
+    }
+
+    pub fn with_stop_condition_abs(
+        mut self,
+        variable: impl Into<String>,
+        target: f64,
+        tolerance: f64,
+    ) -> Self {
+        self.stop_conditions.push(Lsode2StopCondition::abs_distance(
+            variable, target, tolerance,
+        ));
+        self
+    }
+
     pub fn with_jac_sparsity(mut self, jac_sparsity: Option<DMatrix<f64>>) -> Self {
         self.jac_sparsity = jac_sparsity;
         self
@@ -1059,6 +1212,67 @@ impl Lsode2ProblemConfig {
         self.residual_jacobian_source = Lsode2ResidualJacobianSource::Analytical;
         self.sync_legacy_backend_from_policy();
         self
+    }
+
+    /// Overrides generated-backend AOT chunking options.
+    ///
+    /// This keeps chunking control at the LSODE2 config surface so callers do
+    /// not need to build `SymbolicIvpGeneratedBackendConfig` manually.
+    pub fn with_aot_chunking_options(mut self, options: SymbolicIvpAotOptions) -> Self {
+        self.backend = self
+            .backend
+            .clone()
+            .with_generated_backend_aot_options(options);
+        self
+    }
+
+    /// Overrides sparse-Jacobian chunking for native sparse/banded generated
+    /// Jacobian callbacks.
+    pub fn with_aot_sparse_chunking_strategy(mut self, strategy: SparseChunkingStrategy) -> Self {
+        self.backend = self
+            .backend
+            .clone()
+            .with_generated_backend_sparse_chunking_strategy(strategy);
+        self
+    }
+
+    /// Sets explicit target chunk counts for generated residual and dense
+    /// Jacobian runtime plans.
+    pub fn with_aot_target_chunks(
+        mut self,
+        residual_target_chunks: usize,
+        jacobian_target_chunks: usize,
+    ) -> Self {
+        self.backend = self
+            .backend
+            .clone()
+            .with_generated_backend_target_chunks(residual_target_chunks, jacobian_target_chunks);
+        self
+    }
+
+    /// Chooses backend chunking from available parallelism and requested
+    /// chunk-overprovisioning.
+    ///
+    /// `chunks_per_worker > 1` typically improves load balancing for uneven
+    /// symbolic workloads by exposing more independent runtime chunks.
+    pub fn with_aot_parallel_chunking(self, chunks_per_worker: usize) -> Self {
+        assert!(chunks_per_worker > 0, "chunks_per_worker must be positive");
+        let total_rows = self.eq_system.len().max(1);
+        let options = SymbolicIvpAotOptions {
+            residual_strategy: recommended_residual_chunking_for_parallelism(
+                total_rows,
+                chunks_per_worker,
+            ),
+            jacobian_strategy: recommended_dense_jacobian_chunking_for_parallelism(
+                total_rows,
+                chunks_per_worker,
+            ),
+        };
+        self.with_aot_chunking_options(options)
+            .with_aot_sparse_chunking_strategy(recommended_row_chunking_for_parallelism(
+                total_rows,
+                chunks_per_worker,
+            ))
     }
 }
 

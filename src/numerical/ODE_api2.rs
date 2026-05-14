@@ -926,6 +926,30 @@ impl UniversalODESolver {
         solver.set_atol(atol);
         solver
     }
+
+    /// Build the universal facade directly from a prepared LSODE2 problem config.
+    ///
+    /// This is the most ergonomic entrypoint when the caller already assembled
+    /// LSODE2 backend/controller/native options and still wants to execute
+    /// through the shared `UniversalODESolver` API surface.
+    pub fn lsode2_with_problem_config(config: Lsode2ProblemConfig) -> Self {
+        let mut solver = Self::lsode2(
+            config.eq_system.clone(),
+            config.values.clone(),
+            config.arg.clone(),
+            config.t0,
+            config.y0.clone(),
+            config.t_bound,
+            config.max_step,
+            config.rtol,
+            config.atol,
+        );
+        solver.set_first_step(config.first_step);
+        solver.set_vectorized(config.vectorized);
+        solver.set_jac_sparsity(config.jac_sparsity.clone());
+        solver.set_lsode2_problem_config(config);
+        solver
+    }
 }
 
 #[cfg(test)]
@@ -958,7 +982,11 @@ mod tests {
         let (t, y) = solver.get_result();
         assert!(t.is_some());
         assert!(y.is_some());
-        assert_eq!(solver.get_status().as_deref(), Some("finished"));
+        let status = solver.get_status().unwrap_or_default();
+        assert!(
+            status == "finished" || status == "finished_native_faithful",
+            "unexpected LSODE2 status: {status}"
+        );
     }
 
     #[test]
@@ -1011,6 +1039,24 @@ mod tests {
         assert_eq!(stats.method_label, "LSODE2");
         assert!(stats.backend_label.contains("dense"));
         assert!(stats.step_calls > 0);
+    }
+
+    #[test]
+    fn universal_ode_api_lsode2_with_problem_config_solves() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let config = crate::numerical::LSODE2::Lsode2ProblemConfig::new(
+            eq_system, values, arg, 0.0, y0, 0.1, 0.05, 1e-6, 1e-8,
+        )
+        .with_linear_system_structure(crate::numerical::LSODE2::Lsode2LinearSystemStructure::Dense)
+        .with_linear_solver_policy(crate::numerical::LSODE2::Lsode2LinearSolverPolicy::Auto);
+
+        let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+        solver.solve();
+        let status = solver.get_status().unwrap_or_default();
+        assert!(
+            status == "finished" || status == "finished_native_faithful",
+            "unexpected LSODE2 status: {status}"
+        );
     }
 
     #[test]
