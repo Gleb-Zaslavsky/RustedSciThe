@@ -551,5 +551,6 @@ pub mod Radau;
 pub mod Rosenbrock;
 /// shooting method for solving BVP
 pub mod ShootingBVP;
+pub mod data_processing;
 /// collection of optimization algorithms
 pub mod optimization;

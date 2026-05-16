@@ -1364,7 +1364,8 @@ fn looks_like_standalone_section_title(input: &str) -> bool {
 
     // This branch is only for inline trailing tokens; real multiline section
     // boundaries are handled earlier in the parsing flow.
-    if s.contains(':') || s.contains(',') || s.contains(';') || s.contains('\n') || s.contains('\r') {
+    if s.contains(':') || s.contains(',') || s.contains(';') || s.contains('\n') || s.contains('\r')
+    {
         return false;
     }
 
@@ -1384,7 +1385,9 @@ fn looks_like_standalone_section_title(input: &str) -> bool {
         return false;
     }
 
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '>' || c == '=' || c == '<')
+    chars.all(|c| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '>' || c == '=' || c == '<'
+    })
 }
 
 pub fn parse_value<'a>(

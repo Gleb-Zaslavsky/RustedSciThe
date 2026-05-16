@@ -519,13 +519,12 @@ fn parse_bvp_equations(document: &DocumentMap) -> Result<BvpEquationSpec, BvpTas
         }
     }
 
-    let substitutions = parse_symbolic_substitutions(document).map_err(|message| {
-        BvpTaskError::InvalidField {
+    let substitutions =
+        parse_symbolic_substitutions(document).map_err(|message| BvpTaskError::InvalidField {
             section: "where/substitute".to_string(),
             field: "*".to_string(),
             message,
-        }
-    })?;
+        })?;
     let rhs = rhs_raw
         .iter()
         .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
@@ -1389,7 +1388,8 @@ initial_guess
 y: 0.0
 "#;
 
-        let spec = parse_bvp_task_from_str(input).expect("BVP with where substitutions should parse");
+        let spec =
+            parse_bvp_task_from_str(input).expect("BVP with where substitutions should parse");
         let expr = spec.equations.rhs[0].clone();
         let f = expr.lambdify_borrowed_thread_safe(&["x", "y"]);
         let value = f(&[2.0, 1.0]);

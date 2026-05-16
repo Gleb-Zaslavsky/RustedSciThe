@@ -1,15 +1,93 @@
-[TOC]
+
 
 # RustedSciThe
 RustedSciThe is a Rust framework for symbolic and numerical computing.
 
-PROJECT NEWS:
+PROJECT NEWS: HUGE UPGRADE LSODE / LSODA family solvers 
 
+##  The RustedSciThe Zen
+"
+1. Symbolic expressions are documentation that compiles.
+
+2. If users write equations as strings,
+they will eventually write a language.
+
+3. DSLs and symbolic algebra belong together.
+
+4. Lambdify early, optimize later.
+
+5. Differentiate analytically.
+Finite differences are for debugging and despair.
+
+6. A symbolic Jacobian today saves ten Newton failures tomorrow.
+
+7. The Jacobian decides
+whether your method is mathematics
+or optimism.
+
+8. Stiff systems forgive nothing.
+Analytical Jacobians forgive more.
+
+9. Exact derivatives beat approximate confidence.
+
+10. If an expression can be compiled ahead-of-time,
+it probably should be.
+
+11. A solver without statistics is a black box.
+Black boxes breed superstition.
+
+12. Measure iterations.
+Measure allocations.
+Measure regret.
+
+13. Logs are cheaper than debugging.
+
+14. Every numerical method deserves a postprocessor.
+
+15. Plots reveal bugs.
+Tables confirm them.
+
+16. The eleventh solver should reuse the first ten.
+
+17. Infrastructure is an algorithm.
+
+18. FFI is a sin.
+Try to keep it Rusty. 
+
+19. Borrow from Fortran.
+Return with Jacobians and AOT.
+
+20. Ancient libraries deserve reincarnation.
+A good numerical method outlives its language.
+
+21. Dense, sparse, and banded:
+serious problems need all three.
+
+22. Bandwidth ignored becomes memory wasted.
+
+23. Most nonlinear solvers
+are secretly linear solvers.
+
+24. Benchmark before rewriting.
+Profile before parallelizing.
+Think before GPU-izing.
+
+25. Numerical stability is a feature.
+
+26. Trust convergence criteria.
+Distrust convergence.
+
+27. Warnings ignored become papers retracted.
+
+" 
+
+[TOC]
 ## Content
 - [Motivation](#motivation)
 - [Features](#features)
 - [Project Documentation and Navigation](#project-documentation-and-navigation)
 - [Examples](#examples)
+- [Task Documents and Executable Mode](#task-documents-and-executable-mode)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [To do](#to-do)
@@ -146,6 +224,7 @@ cargo build --features cuda
 | Core symbolic engine | `src/symbolic/symbolic_engine.rs` |
 | Symbolic vectors and matrices | `src/symbolic/` |
 | Task parsers and command interpreter | `src/command_interpreter/` |
+| Task-document guide (EN) | `src/command_interpreter/TASK_DOCS_GUIDE_EN.md` |
 | Linear algebra collection | `src/somelinalg/` |
 | Faithful banded LU backend | `src/somelinalg/banded/lapack_style_banded.rs` |
 | GPU iterative solvers | `src/somelinalg/iterative_solvers_gpu/` |
@@ -157,6 +236,47 @@ In the `Book` folder of the project (on GitHub), there is an in-depth scientific
 
 ## Examples
 Practical usage scenarios are kept in the `examples` folder and in `examples/task_docs`. This includes complete workflows for IVP/BVP solvers, LSODE2 numerical/lambdify/AOT routes, backend comparison stories, and task-document driven execution.
+
+## Task Documents and Executable Mode
+RustedSciThe includes a task-document interpreter for both IVP and BVP workflows (`src/command_interpreter/`). A task file is a human-readable text document split into sections such as `task`, `equations`, `initial_conditions` (for IVP) or `boundary_conditions`/`mesh` (for BVP), plus optional `solver_options` and `postprocessing`. In other words, you can describe equations, conditions, backend choices, and output behavior in one place and run it without writing a custom Rust harness every time. Real examples are available in `examples/task_docs/`, and template generators are available from CLI (`--template ivp`, `--template bvp`).
+
+Minimal IVP task-document example:
+
+```text
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+parameters: a
+parameter_values: 1.0
+y: -a*y
+
+initial_conditions
+t0: 0.0
+t_end: 2.0
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: faer_sparse_lu
+lsode2_native_execution: faithful_bdf_solve
+```
+
+If you compile RustedSciThe as an executable (instead of embedding it as a library), the resulting binary accepts task docs directly and routes them to IVP/BVP parsers automatically through the unified task runner:
+
+```bash
+cargo build --release
+./target/release/RustedSciThe.exe examples/task_docs/ivp_decay_task.txt
+./target/release/RustedSciThe.exe examples/task_docs/bvp_reference_task.txt
+```
+
+This executable mode is intentionally a thin wrapper around the same parser and solver APIs used in library mode, so behavior stays consistent between automation scripts, interactive CLI usage, and Rust integration.
 
 ## Testing
 Our project is covered by tests and you can run them by standard command:

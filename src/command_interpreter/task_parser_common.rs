@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 
-pub fn parse_symbolic_substitutions(document: &DocumentMap) -> Result<HashMap<String, Expr>, String> {
+pub fn parse_symbolic_substitutions(
+    document: &DocumentMap,
+) -> Result<HashMap<String, Expr>, String> {
     let mut raw: HashMap<String, Expr> = HashMap::new();
     for section_name in ["where", "substitute"] {
         if let Some(section) = document.get(section_name) {
@@ -80,7 +82,9 @@ fn parse_substitution_section(
     Ok(())
 }
 
-fn resolve_substitution_aliases(raw: &HashMap<String, Expr>) -> Result<HashMap<String, Expr>, String> {
+fn resolve_substitution_aliases(
+    raw: &HashMap<String, Expr>,
+) -> Result<HashMap<String, Expr>, String> {
     fn resolve_one(
         name: &str,
         raw: &HashMap<String, Expr>,

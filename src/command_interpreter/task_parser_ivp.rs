@@ -605,13 +605,12 @@ fn parse_equations(document: &DocumentMap) -> Result<EquationSpec, IvpTaskError>
         }
     }
 
-    let substitutions = parse_symbolic_substitutions(document).map_err(|message| {
-        IvpTaskError::InvalidField {
+    let substitutions =
+        parse_symbolic_substitutions(document).map_err(|message| IvpTaskError::InvalidField {
             section: "where/substitute".to_string(),
             field: "*".to_string(),
             message,
-        }
-    })?;
+        })?;
     let rhs = rhs_raw
         .iter()
         .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
@@ -1363,7 +1362,8 @@ solver_options
 step_size: 1e-3
 "#;
 
-        let spec = parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
+        let spec =
+            parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
         let expr = spec.equations.rhs[0].clone();
         let f = expr.lambdify_borrowed_thread_safe(&["t", "y"]);
         let value = f(&[0.5, 1.0]);
