@@ -144,20 +144,40 @@ pub(crate) fn build_real_bvp_damp1_case_with_backend(
 
     let mut jac = Jacobian::new();
     jac.set_symbolic_assembly_backend(symbolic_backend);
-    jac.discretization_system_BVP_par(
-        eq_system,
-        values,
-        "x".to_string(),
-        0.0,
-        Some(n_steps),
-        None,
-        None,
-        border_conditions,
-        None,
-        None,
-        "forward".to_string(),
-    );
-    jac.calc_jacobian_parallel_smart_optimized();
+    if symbolic_backend == BvpSymbolicAssemblyBackend::AtomView {
+        jac.generate_BVP_with_params(
+            eq_system,
+            values,
+            "x".to_string(),
+            None,
+            0.0,
+            None,
+            Some(n_steps),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+            "Sparse".to_string(),
+            None,
+        );
+    } else {
+        jac.discretization_system_BVP_par(
+            eq_system,
+            values,
+            "x".to_string(),
+            0.0,
+            Some(n_steps),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+        jac.calc_jacobian_parallel_smart_optimized();
+    }
     jac
 }
 
@@ -249,20 +269,40 @@ pub(crate) fn build_combustion_bvp_case_with_backend(
     let (eqs, values, boundary_conditions) = combustion_bvp_fixture(n_steps);
     let mut jac = Jacobian::new();
     jac.set_symbolic_assembly_backend(symbolic_backend);
-    jac.discretization_system_BVP_par(
-        eqs,
-        values,
-        "x".to_string(),
-        0.0,
-        Some(n_steps),
-        None,
-        None,
-        boundary_conditions,
-        None,
-        None,
-        "trapezoid".to_string(),
-    );
-    jac.calc_jacobian_parallel_smart_optimized();
+    if symbolic_backend == BvpSymbolicAssemblyBackend::AtomView {
+        jac.generate_BVP_with_params(
+            eqs,
+            values,
+            "x".to_string(),
+            None,
+            0.0,
+            None,
+            Some(n_steps),
+            None,
+            None,
+            boundary_conditions,
+            None,
+            None,
+            "trapezoid".to_string(),
+            "Sparse".to_string(),
+            None,
+        );
+    } else {
+        jac.discretization_system_BVP_par(
+            eqs,
+            values,
+            "x".to_string(),
+            0.0,
+            Some(n_steps),
+            None,
+            None,
+            boundary_conditions,
+            None,
+            None,
+            "trapezoid".to_string(),
+        );
+        jac.calc_jacobian_parallel_smart_optimized();
+    }
     jac
 }
 

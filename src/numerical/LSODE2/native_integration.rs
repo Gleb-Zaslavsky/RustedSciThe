@@ -85,6 +85,21 @@ pub fn run_native_integration_for_method(
     limits: Lsode2NativeIntegrationLimits,
     method: Lsode2NativeStepMethod,
 ) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError> {
+    run_native_integration_for_method_with_policy(config, limits, method, |_, _| None)
+}
+
+pub fn run_native_integration_for_method_with_policy<F>(
+    config: &Lsode2ProblemConfig,
+    limits: Lsode2NativeIntegrationLimits,
+    method: Lsode2NativeStepMethod,
+    mut next_method_policy: F,
+) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
+where
+    F: FnMut(
+        &Lsode2NativeStepAttemptReport,
+        Lsode2NativeStepMethod,
+    ) -> Option<Lsode2NativeStepMethod>,
+{
     let mut engine = match Lsode2NativeStepEngine::from_problem_config_with_method(config, method)?
     {
         Some(engine) => engine,
@@ -108,6 +123,7 @@ pub fn run_native_integration_for_method(
     let mut accepted_t_history = vec![initial_state.t];
     let mut accepted_y_history = vec![engine.current_solution()];
     let stop_conditions = resolve_stop_conditions(config);
+    let mut current_method = method;
 
     while attempted_steps < limits.max_step_attempts
         && accepted_steps < limits.max_accepted_steps
@@ -134,6 +150,14 @@ pub fn run_native_integration_for_method(
             accepted_t_history.push(state.t);
             accepted_y_history.push(accepted_y.clone());
             reached_stop_condition = stop_condition_reached(&stop_conditions, &accepted_y);
+            if !reached_stop_condition {
+                if let Some(next_method) = next_method_policy(&report, current_method) {
+                    if next_method != current_method {
+                        engine.switch_method(config, next_method)?;
+                        current_method = next_method;
+                    }
+                }
+            }
         } else {
             rejected_steps += 1;
         }
@@ -184,7 +208,11 @@ pub fn run_native_integration_for_method(
 }
 
 fn reached_t_bound(t: f64, t_bound: f64, h: f64) -> bool {
-    if h >= 0.0 { t >= t_bound } else { t <= t_bound }
+    if h >= 0.0 {
+        t >= t_bound
+    } else {
+        t <= t_bound
+    }
 }
 
 #[derive(Debug, Clone)]

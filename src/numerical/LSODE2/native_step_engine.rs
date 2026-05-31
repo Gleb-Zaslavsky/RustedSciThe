@@ -13,7 +13,7 @@
 //! This module focuses on one-step DSTODA choreography and callback execution.
 
 use super::adams_engine::Lsode2AdamsDcfodeTables;
-use super::algorithm::Lsode2SwitchTelemetry;
+use super::algorithm::{Lsode2ControllerMode, Lsode2SwitchTelemetry};
 use super::config::{
     Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2ProblemConfig,
     Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
@@ -29,10 +29,10 @@ use super::history::Lsode2Tolerance;
 use super::linear_backends::{
     DenseLuBdfLinearBackend, FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend,
 };
-use super::native_executor::Lsode2NativeCallbackExecutor;
+use super::native_executor::{jacobian_abs_max, Lsode2NativeCallbackExecutor};
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle,
+    compile_native_sparse_aot_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle, NativeJacobianStorage,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -41,8 +41,8 @@ use super::step_control::{Lsode2RetryAction, Lsode2StepControlConfig};
 use super::step_cycle::{
     Lsode2PredictedStep, Lsode2StepCycle, Lsode2StepCycleOutcome, Lsode2StepMethod,
 };
+use crate::numerical::BDF::common::{norm, scale_func, NumberOrVec};
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
-use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
@@ -104,6 +104,13 @@ pub struct Lsode2NativeStepAttemptReport {
 impl Lsode2NativeStepAttemptReport {
     pub fn accepted(&self) -> bool {
         matches!(self.outcome, Lsode2StepCycleOutcome::Accepted { .. })
+    }
+
+    pub fn accepted_t(&self) -> Option<f64> {
+        match self.outcome {
+            Lsode2StepCycleOutcome::Accepted { t_new, .. } => Some(t_new),
+            _ => None,
+        }
     }
 
     pub fn outcome_label(&self) -> &'static str {
@@ -220,6 +227,18 @@ impl Lsode2NativeStepEngine {
             Self::Banded(engine) => engine.clamp_step_to_t_bound(t_bound),
         }
     }
+
+    pub fn switch_method(
+        &mut self,
+        config: &Lsode2ProblemConfig,
+        method: Lsode2NativeStepMethod,
+    ) -> Result<(), IvpBackendError> {
+        match self {
+            Self::Dense(engine) => engine.switch_method(config, method),
+            Self::Sparse(engine) => engine.switch_method(config, method),
+            Self::Banded(engine) => engine.switch_method(config, method),
+        }
+    }
 }
 
 struct Lsode2NativeStepEngineImpl<L> {
@@ -227,6 +246,7 @@ struct Lsode2NativeStepEngineImpl<L> {
     jacobian: Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
     linear_backend: L,
     driver: Lsode2NonlinearStepDriver,
+    fallback_stiffness_probe_interval: Option<usize>,
 }
 
 impl<L> Lsode2NativeStepEngineImpl<L>
@@ -404,6 +424,9 @@ where
             jacobian,
             linear_backend,
             driver: Lsode2NonlinearStepDriver::new(cycle, correction),
+            fallback_stiffness_probe_interval: (config.controller.mode
+                == Lsode2ControllerMode::AutomaticAdamsBdf)
+                .then_some(config.controller.method_switch_probe_steps.max(1)),
         })
     }
 
@@ -517,7 +540,13 @@ where
                     Lsode2StepCycleOutcome::Accepted { .. } => {}
                 }
 
-                let telemetry = self.driver.switch_telemetry(None);
+                let stiffness_ratio = executor
+                    .last_jacobian_abs_max()
+                    .map(|jac_max| jac_max * h_trial.abs())
+                    .or_else(|| {
+                        self.fallback_adams_stiffness_probe(&outcome, &y_candidate, h_trial)
+                    });
+                let telemetry = self.driver.switch_telemetry(stiffness_ratio);
                 let jcur = self.driver.cycle().jacobian_currency();
                 let ipup = self.driver.cycle().ipup();
                 let ipup_trigger = self.driver.cycle().ipup_trigger();
@@ -598,6 +627,51 @@ where
                 .map_err(map_runtime_state_error)?;
         }
         Ok(())
+    }
+
+    fn switch_method(
+        &mut self,
+        config: &Lsode2ProblemConfig,
+        method: Lsode2NativeStepMethod,
+    ) -> Result<(), IvpBackendError> {
+        let max_order = method.max_order(config);
+        let step_method = match method {
+            Lsode2NativeStepMethod::BdfLike => Lsode2StepMethod::BdfLike,
+            Lsode2NativeStepMethod::AdamsLike => Lsode2StepMethod::AdamsLike,
+        };
+        self.driver
+            .cycle_mut()
+            .prepare_for_method_switch_handoff(step_method, max_order)
+            .map_err(map_step_cycle_error)?;
+        self.driver.reset_iteration_memory_after_method_switch();
+        Ok(())
+    }
+
+    fn fallback_adams_stiffness_probe(
+        &mut self,
+        outcome: &Lsode2StepCycleOutcome,
+        y_candidate: &DVector<f64>,
+        h_trial: f64,
+    ) -> Option<f64> {
+        let interval = self.fallback_stiffness_probe_interval?;
+        if self.driver.cycle().method() != Lsode2StepMethod::AdamsLike {
+            return None;
+        }
+        let accepted_steps = self.driver.cycle().state().snapshot().accepted_steps;
+        if accepted_steps == 0 || accepted_steps % interval != 0 {
+            return None;
+        }
+        let t_new = match outcome {
+            Lsode2StepCycleOutcome::Accepted { t_new, .. } => *t_new,
+            _ => return None,
+        };
+
+        // Adams functional iteration can accept a step without touching the
+        // Newton/Jacobian executor. LSODA still needs a stiffness signal for
+        // method switching, so in automatic mode we probe the already available
+        // Jacobian callback at the configured switch cadence.
+        let jacobian = (self.jacobian.borrow_mut())(t_new, y_candidate);
+        jacobian_abs_max(&jacobian).map(|jac_max| jac_max * h_trial.abs())
     }
 
     fn refresh_first_derivative_if_requested(&mut self) -> Result<(), IvpBackendError> {
@@ -817,7 +891,11 @@ fn initial_native_step_size(config: &Lsode2ProblemConfig, residual: &NativeResid
         })
         .abs()
         .max(f64::EPSILON);
-    if direction > 0.0 { mag } else { -mag }
+    if direction > 0.0 {
+        mag
+    } else {
+        -mag
+    }
 }
 
 fn map_generated_backend_error(
@@ -850,6 +928,12 @@ fn map_correction_error(err: super::correction::Lsode2CorrectionError) -> IvpBac
 }
 
 fn map_history_error(err: super::history::Lsode2HistoryError) -> IvpBackendError {
+    IvpBackendError::GeneratedBackendFailure {
+        message: err.to_string(),
+    }
+}
+
+fn map_step_cycle_error(err: super::step_cycle::Lsode2StepCycleError) -> IvpBackendError {
     IvpBackendError::GeneratedBackendFailure {
         message: err.to_string(),
     }
@@ -998,13 +1082,11 @@ mod tests {
             .state_mut()
             .reset_after_repeated_error_failures()
             .unwrap();
-        assert!(
-            inner
-                .driver
-                .cycle()
-                .state()
-                .first_derivative_refresh_requested()
-        );
+        assert!(inner
+            .driver
+            .cycle()
+            .state()
+            .first_derivative_refresh_requested());
 
         inner.refresh_first_derivative_if_requested().unwrap();
 
@@ -1037,13 +1119,11 @@ mod tests {
             .unwrap();
         assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
         assert_eq!(retry.order_new, 1);
-        assert!(
-            inner
-                .driver
-                .cycle()
-                .state()
-                .first_derivative_refresh_requested()
-        );
+        assert!(inner
+            .driver
+            .cycle()
+            .state()
+            .first_derivative_refresh_requested());
 
         inner.refresh_first_derivative_if_requested().unwrap();
 

@@ -28,6 +28,8 @@ pub mod generated_solver_handoff;
 pub mod grid_api;
 /// module for linear system solvers
 pub mod linear_sys_solvers_depot;
+/// pure numeric BVP discretization helpers used by NumericOnly runtime path
+pub mod numeric_discretization;
 
 pub mod BVP_traits2;
 

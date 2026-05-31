@@ -117,6 +117,30 @@ impl Lsode2NonlinearStepDriver {
         &mut self.statistics
     }
 
+    pub fn reset_cycle_after_method_switch(
+        &mut self,
+        cycle: Lsode2StepCycle,
+        correction: Lsode2CorrectionController,
+    ) {
+        self.cycle = cycle;
+        self.correction = correction;
+        self.active_prediction = None;
+        self.active_accumulated_correction = None;
+        self.current_iteration = 0;
+        self.previous_weighted_norm = None;
+        self.previous_rate_estimate = None;
+        self.previous_rate_max_estimate = None;
+    }
+
+    pub fn reset_iteration_memory_after_method_switch(&mut self) {
+        self.active_prediction = None;
+        self.active_accumulated_correction = None;
+        self.current_iteration = 0;
+        self.previous_weighted_norm = None;
+        self.previous_rate_estimate = None;
+        self.previous_rate_max_estimate = None;
+    }
+
     pub fn current_iteration(&self) -> usize {
         self.current_iteration
     }

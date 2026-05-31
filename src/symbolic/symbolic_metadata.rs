@@ -30,6 +30,62 @@ pub(crate) struct TraversalCache {
     metadata_by_ptr: HashMap<usize, ExprMetadata>,
 }
 
+/// Cached structural signatures for consumers that do not need variable sets.
+///
+/// Code generation CSE is one such consumer: constructing and merging
+/// `Vec<String>` metadata for every node makes large residual lowering pay for
+/// information it never reads.
+#[derive(Default)]
+pub(crate) struct SignatureCache {
+    signature_by_ptr: HashMap<usize, u64>,
+}
+
+impl SignatureCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn signature(&mut self, expr: &Expr) -> u64 {
+        let key = expr as *const Expr as usize;
+        if let Some(existing) = self.signature_by_ptr.get(&key) {
+            return *existing;
+        }
+
+        let signature = match expr {
+            Expr::Var(name) => combine_signature(1, &[hash_string(name)]),
+            Expr::Const(value) => combine_signature(2, &[value.to_bits()]),
+            Expr::Add(lhs, rhs) => self.binary_signature(3, lhs, rhs),
+            Expr::Sub(lhs, rhs) => self.binary_signature(4, lhs, rhs),
+            Expr::Mul(lhs, rhs) => self.binary_signature(5, lhs, rhs),
+            Expr::Div(lhs, rhs) => self.binary_signature(6, lhs, rhs),
+            Expr::Pow(base, exp) => self.binary_signature(7, base, exp),
+            Expr::Exp(inner) => self.unary_signature(8, inner),
+            Expr::Ln(inner) => self.unary_signature(9, inner),
+            Expr::sin(inner) => self.unary_signature(10, inner),
+            Expr::cos(inner) => self.unary_signature(11, inner),
+            Expr::tg(inner) => self.unary_signature(12, inner),
+            Expr::ctg(inner) => self.unary_signature(13, inner),
+            Expr::arcsin(inner) => self.unary_signature(14, inner),
+            Expr::arccos(inner) => self.unary_signature(15, inner),
+            Expr::arctg(inner) => self.unary_signature(16, inner),
+            Expr::arcctg(inner) => self.unary_signature(17, inner),
+        };
+        self.signature_by_ptr.insert(key, signature);
+        signature
+    }
+
+    fn unary_signature(&mut self, tag: u64, inner: &Expr) -> u64 {
+        let inner_signature = self.signature(inner);
+        combine_signature(tag, &[inner_signature])
+    }
+
+    fn binary_signature(&mut self, tag: u64, lhs: &Expr, rhs: &Expr) -> u64 {
+        let lhs_signature = self.signature(lhs);
+        let rhs_signature = self.signature(rhs);
+        combine_signature(tag, &[lhs_signature, rhs_signature])
+    }
+}
+
 impl TraversalCache {
     /// Create a new empty traversal cache.
     pub(crate) fn new() -> Self {
@@ -120,8 +176,32 @@ impl TraversalCache {
 
 /// Compute a structural signature with a fresh traversal cache.
 pub(crate) fn structural_signature(expr: &Expr) -> u64 {
-    let mut cache = TraversalCache::new();
+    let mut cache = SignatureCache::new();
     cache.signature(expr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SignatureCache, TraversalCache};
+    use crate::symbolic::symbolic_engine::Expr;
+
+    #[test]
+    fn signature_only_cache_matches_full_traversal_signature() {
+        let expr = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("x_0".to_string())),
+                Box::new(Expr::Const(3.5)),
+            )),
+            Box::new(Expr::Exp(Box::new(Expr::Sub(
+                Box::new(Expr::Var("temperature".to_string())),
+                Box::new(Expr::Const(298.15)),
+            )))),
+        );
+
+        let mut full = TraversalCache::new();
+        let mut signatures = SignatureCache::new();
+        assert_eq!(signatures.signature(&expr), full.signature(&expr));
+    }
 }
 
 fn merge_sorted_unique(lhs: &[String], rhs: &[String]) -> Vec<String> {

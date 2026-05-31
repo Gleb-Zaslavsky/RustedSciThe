@@ -1,9 +1,9 @@
 use super::algorithm::Lsode2ControllerConfig;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_runtime_api::{
-    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
     recommended_dense_jacobian_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
@@ -780,6 +780,10 @@ impl Lsode2ProblemConfig {
         self.with_controller(Lsode2ControllerConfig::adams_only())
     }
 
+    pub fn with_bdf_only_controller(self) -> Self {
+        self.with_controller(Lsode2ControllerConfig::bdf_only())
+    }
+
     /// Declares intent to use automatic Adams/BDF switching.
     ///
     /// Note on parity: classic `LSODE` uses a fixed method selected by `MF`
@@ -920,6 +924,8 @@ impl Lsode2ProblemConfig {
     }
 
     fn sync_policy_fields_from_legacy_backend(&mut self) {
+        let preserve_analytical_source = self.analytical_callbacks.is_some()
+            && self.residual_jacobian_source == Lsode2ResidualJacobianSource::Analytical;
         let (preserved_assembly, preserved_execution) = match self.residual_jacobian_source {
             Lsode2ResidualJacobianSource::Symbolic {
                 assembly,
@@ -929,15 +935,24 @@ impl Lsode2ProblemConfig {
                 (Lsode2SymbolicAssemblyBackend::ExprLegacy, None)
             }
         };
-        self.residual_jacobian_source = match self.backend.jacobian_backend {
-            Lsode2JacobianBackend::SymbolicGenerated => Lsode2ResidualJacobianSource::Symbolic {
-                assembly: preserved_assembly,
-                execution: preserved_execution.unwrap_or_else(|| {
-                    execution_mode_from_generated_backend(&self.backend.generated_backend)
-                }),
-            },
-            Lsode2JacobianBackend::AnalyticClosure => Lsode2ResidualJacobianSource::Analytical,
-            Lsode2JacobianBackend::FiniteDifference => Lsode2ResidualJacobianSource::Analytical,
+        if preserve_analytical_source {
+            self.residual_jacobian_source = Lsode2ResidualJacobianSource::Analytical;
+            if self.backend.jacobian_backend != Lsode2JacobianBackend::FiniteDifference {
+                self.backend.jacobian_backend = Lsode2JacobianBackend::AnalyticClosure;
+            }
+        } else {
+            self.residual_jacobian_source = match self.backend.jacobian_backend {
+                Lsode2JacobianBackend::SymbolicGenerated => {
+                    Lsode2ResidualJacobianSource::Symbolic {
+                        assembly: preserved_assembly,
+                        execution: preserved_execution.unwrap_or_else(|| {
+                            execution_mode_from_generated_backend(&self.backend.generated_backend)
+                        }),
+                    }
+                }
+                Lsode2JacobianBackend::AnalyticClosure => Lsode2ResidualJacobianSource::Analytical,
+                Lsode2JacobianBackend::FiniteDifference => Lsode2ResidualJacobianSource::Analytical,
+            };
         };
 
         let (structure, choice) = match self.backend.linear_solver_backend {
@@ -1310,5 +1325,51 @@ fn execution_mode_from_generated_backend(
                 | SymbolicIvpAotBuildPolicy::UseIfAvailable => Lsode2AotProfile::Release,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar_analytical_config() -> Lsode2ProblemConfig {
+        Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("0")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1.0e-6,
+            1.0e-8,
+        )
+        .with_analytical_callbacks(
+            |_t, y: &DVector<f64>| DVector::from_vec(vec![-y[0]]),
+            |_t, _y: &DVector<f64>| DMatrix::from_row_slice(1, 1, &[-1.0]),
+        )
+    }
+
+    #[test]
+    fn native_linear_backend_preserves_analytical_callbacks_source() {
+        let sparse = scalar_analytical_config().with_native_sparse_faer_backend();
+        assert_eq!(
+            sparse.residual_jacobian_source,
+            Lsode2ResidualJacobianSource::Analytical
+        );
+        assert_eq!(
+            sparse.backend.jacobian_backend,
+            Lsode2JacobianBackend::AnalyticClosure
+        );
+
+        let banded = scalar_analytical_config().with_native_banded_faithful_backend();
+        assert_eq!(
+            banded.residual_jacobian_source,
+            Lsode2ResidualJacobianSource::Analytical
+        );
+        assert_eq!(
+            banded.backend.jacobian_backend,
+            Lsode2JacobianBackend::AnalyticClosure
+        );
     }
 }

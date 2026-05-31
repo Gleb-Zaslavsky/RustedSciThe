@@ -1,33 +1,36 @@
 #![cfg(test)]
 
 use crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting;
-use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
+use crate::numerical::Examples_and_utils::NonlinEquation;
 use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedSparseAotBackend, register_linked_sparse_backend, unregister_linked_sparse_backend,
+    register_linked_sparse_backend, unregister_linked_sparse_backend, LinkedSparseAotBackend,
 };
-use crate::symbolic::codegen::codegen_backend_selection::{BackendSelectionPolicy, SelectedBackendKind};
+use crate::symbolic::codegen::codegen_backend_selection::{
+    BackendSelectionPolicy, SelectedBackendKind,
+};
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_orchestrator::AutoExecutionMode;
 use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend, PreparedProblem};
 use crate::symbolic::codegen::codegen_runtime_api::{
-    ResidualChunkingStrategy, recommended_residual_chunking_for_parallelism,
-    recommended_row_chunking_for_parallelism,
+    recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
+    ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
     BvpBackendConfig, BvpBackendKind, BvpMatrixBackend, BvpSparseExecutionPlan,
     BvpSymbolicAssemblyBackend, Jacobian,
 };
+use crate::symbolic::symbolic_functions_BVP2::{BandedJacobianChunking, BandedLambdifyConfig};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
-use crate::numerical::Examples_and_utils::NonlinEquation;
 
 fn build_small_symbolic_case() -> Jacobian {
     let mut jacobian = Jacobian::new();
@@ -258,9 +261,107 @@ fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
     let jac = jacobian.jac_function.as_mut().unwrap();
     let jacobian_value = jac.call(1.0, &variables);
 
-    assert_eq!(jacobian.backend_config().matrix_backend, BvpMatrixBackend::Banded);
+    assert_eq!(
+        jacobian.backend_config().matrix_backend,
+        BvpMatrixBackend::Banded
+    );
     assert_eq!(residual.to_DVectorType(), expected_residual);
     assert_eq!(jacobian_value.to_DMatrixType(), expected_jacobian);
+    let binding = jacobian
+        .last_lambdify_binding_timer_snapshot
+        .as_ref()
+        .expect("lambdify callback compilation should expose binding-stage timings");
+    for stage in [
+        "lambdify jacobian callback compile time",
+        "lambdify residual callback compile time",
+    ] {
+        assert!(
+            binding.get(stage).is_some_and(|value| *value >= 0.0),
+            "missing non-negative callback compilation stage {stage}"
+        );
+    }
+}
+
+#[test]
+fn compile_lambdified_problem_with_banded_backend_entry_chunking_matches_diagonal() {
+    let expected_residual = DVector::from_vec(vec![5.0, 4.0, 19.0, 16.0]);
+    let expected_jacobian = DMatrix::from_row_slice(
+        4,
+        4,
+        &[
+            1.0, 1.0, 0.0, 0.0, //
+            -1.0, 2.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 3.0, //
+            0.0, 0.0, -1.0, 4.0,
+        ],
+    );
+    let variables = DVector::from_vec(vec![2.0, 3.0, 4.0, 5.0]);
+
+    let mut diagonal = build_node_major_banded_symbolic_case();
+    diagonal.set_banded_lambdify_config(BandedLambdifyConfig {
+        jacobian_chunking: BandedJacobianChunking::Diagonal,
+        ..BandedLambdifyConfig::default()
+    });
+    diagonal.compile_lambdified_problem_with_config(
+        "x",
+        vec!["y_0", "z_0", "y_1", "z_1"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::Banded),
+    );
+    let diag_residual = diagonal.residiual_function.call(1.0, &variables);
+    let diag_jac = diagonal
+        .jac_function
+        .as_mut()
+        .expect("diagonal banded jacobian callback should exist")
+        .call(1.0, &variables);
+
+    let mut entry = build_node_major_banded_symbolic_case();
+    entry.set_banded_lambdify_config(BandedLambdifyConfig {
+        jacobian_chunking: BandedJacobianChunking::EntryChunks,
+        ..BandedLambdifyConfig::default()
+    });
+    entry.compile_lambdified_problem_with_config(
+        "x",
+        vec!["y_0", "z_0", "y_1", "z_1"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::Banded),
+    );
+    let entry_residual = entry.residiual_function.call(1.0, &variables);
+    let entry_jac = entry
+        .jac_function
+        .as_mut()
+        .expect("entry-chunk banded jacobian callback should exist")
+        .call(1.0, &variables);
+
+    assert_eq!(diag_residual.to_DVectorType(), expected_residual);
+    assert_eq!(entry_residual.to_DVectorType(), expected_residual);
+    assert_eq!(diag_jac.to_DMatrixType(), expected_jacobian);
+    assert_eq!(entry_jac.to_DMatrixType(), expected_jacobian);
+}
+
+#[test]
+fn compile_lambdified_banded_backend_respects_structural_threshold() {
+    let mut jacobian = build_node_major_banded_symbolic_case();
+    jacobian
+        .symbolic_jacobian_sparse
+        .push((0, 2, Expr::Const(1.0e-14)));
+    jacobian.set_banded_lambdify_config(BandedLambdifyConfig {
+        jacobian_chunking: BandedJacobianChunking::EntryChunks,
+        structural_threshold: 1.0e-12,
+        ..BandedLambdifyConfig::default()
+    });
+
+    let variables = DVector::from_vec(vec![2.0, 3.0, 4.0, 5.0]);
+    jacobian.compile_lambdified_problem_with_config(
+        "x",
+        vec!["y_0", "z_0", "y_1", "z_1"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::Banded),
+    );
+
+    let jac = jacobian
+        .jac_function
+        .as_mut()
+        .expect("banded jacobian callback should exist");
+    let matrix = jac.call(1.0, &variables).to_DMatrixType();
+    assert_eq!(matrix[(0, 2)], 0.0);
 }
 
 #[test]
@@ -303,7 +404,10 @@ fn smart_parallel_jacobian_populates_sparse_symbolic_cache() {
         .map(|entry| (entry.row, entry.col))
         .collect();
 
-    assert_eq!(jacobian.symbolic_jacobian.len(), 2);
+    assert!(
+        jacobian.symbolic_jacobian.is_empty(),
+        "the default faer sparse backend must not retain a dense zero-filled Jacobian cache"
+    );
     assert_eq!(jacobian.symbolic_jacobian_sparse.len(), 4);
     assert_eq!(coords, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
 }
@@ -325,6 +429,83 @@ fn bandwidth_optimized_parallel_jacobian_keeps_sparse_entries_within_band() {
         vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
     );
     assert!(coords.iter().all(|(row, col)| row.abs_diff(*col) <= 1));
+}
+
+#[test]
+fn bandwidth_optimized_banded_jacobian_uses_sparse_first_storage() {
+    let mut jacobian = build_bandwidth_symbolic_case();
+    jacobian.set_backend_config(BvpBackendConfig::lambdify(BvpMatrixBackend::Banded));
+
+    jacobian.calc_jacobian_parallel_smart_optimized_with_given_bandwidth();
+
+    let coords = jacobian
+        .symbolic_jacobian_sparse_entries()
+        .iter()
+        .map(|entry| (entry.row, entry.col))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coords,
+        vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
+    );
+    assert!(
+        jacobian.symbolic_jacobian.is_empty(),
+        "banded callbacks consume sparse entries and must not retain a dense zero-filled cache"
+    );
+    let timings = jacobian
+        .last_symbolic_jacobian_timer_snapshot
+        .as_ref()
+        .expect("symbolic Jacobian construction should expose internal stage timings");
+    for key in [
+        "symbolic jacobian variable sets time",
+        "symbolic jacobian row differentiation time",
+        "symbolic jacobian dense cache materialize time",
+        "symbolic jacobian sparse cache flatten time",
+    ] {
+        assert!(
+            timings.get(key).is_some_and(|value| *value >= 0.0),
+            "missing non-negative stage timing {key}"
+        );
+    }
+}
+
+#[test]
+fn bandwidth_optimized_faer_sparse_jacobian_uses_sparse_first_storage_and_lambdifies() {
+    let mut jacobian = build_bandwidth_symbolic_case();
+    jacobian.set_backend_config(BvpBackendConfig::lambdify(BvpMatrixBackend::FaerSparseCol));
+
+    jacobian.calc_jacobian_parallel_smart_optimized_with_given_bandwidth();
+
+    let coords = jacobian
+        .symbolic_jacobian_sparse_entries()
+        .iter()
+        .map(|entry| (entry.row, entry.col))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coords,
+        vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
+    );
+    assert!(
+        jacobian.symbolic_jacobian.is_empty(),
+        "faer sparse callbacks consume sparse entries and must not retain a dense zero-filled cache"
+    );
+
+    jacobian.compile_lambdified_problem_with_config(
+        "x",
+        vec!["a", "b", "c"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::FaerSparseCol),
+    );
+    let dense_variables = DVector::from_vec(vec![2.0, 3.0, 4.0]);
+    let variables = &*Vectors_type_casting(&dense_variables, "Sparse".to_string());
+    let matrix = jacobian
+        .jac_function
+        .as_mut()
+        .expect("faer sparse Jacobian function must exist")
+        .call(1.0, variables)
+        .to_DMatrixType();
+    assert_eq!(
+        matrix,
+        DMatrix::from_row_slice(3, 3, &[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+    );
 }
 
 #[test]
@@ -375,7 +556,7 @@ fn prepare_sparse_aot_problem_can_export_banded_prepared_problem() {
     assert_eq!(prepared.jacobian_plan.structure.ku, 3);
     assert_eq!(
         prepared.jacobian_plan.structure.diagonal_offsets,
-        vec![-1, -1, 0, 0, 0, 0, 1, 1]
+        vec![0, 1, -1, 0, 0, 1, -1, 0]
     );
 }
 
@@ -411,7 +592,10 @@ fn prepared_sparse_aot_problem_exposes_machine_aware_auto_parallel_plan() {
 
     assert!(auto_plan.workers >= 1);
     assert!(auto_plan.min_work_per_job >= 1);
-    assert_eq!(auto_plan.executor_config, prepared_bridge.auto_parallel_executor_config());
+    assert_eq!(
+        auto_plan.executor_config,
+        prepared_bridge.auto_parallel_executor_config()
+    );
     match auto_plan.execution_mode {
         AutoExecutionMode::Sequential => {
             assert!(auto_plan.executor_config.is_none());
@@ -503,12 +687,10 @@ fn select_sparse_backend_prefers_compiled_aot_when_registered_artifact_exists() 
     );
     assert_eq!(selection.matrix_backend, MatrixBackend::SparseCol);
     assert!(selection.is_compiled_aot());
-    assert!(
-        selection
-            .aot_resolution
-            .as_ref()
-            .is_some_and(|resolved| resolved.is_compiled())
-    );
+    assert!(selection
+        .aot_resolution
+        .as_ref()
+        .is_some_and(|resolved| resolved.is_compiled()));
 }
 
 #[test]
@@ -609,12 +791,10 @@ fn prepare_sparse_backend_execution_preserves_compiled_aot_selection_metadata() 
     match execution {
         BvpSparseExecutionPlan::AotCompiled(selected) => {
             assert_eq!(selected.effective_backend, SelectedBackendKind::AotCompiled);
-            assert!(
-                selected
-                    .aot_resolution
-                    .as_ref()
-                    .is_some_and(|resolved| resolved.is_compiled())
-            );
+            assert!(selected
+                .aot_resolution
+                .as_ref()
+                .is_some_and(|resolved| resolved.is_compiled()));
         }
         other => panic!("expected AotCompiled plan, got {other:?}"),
     }
@@ -787,7 +967,10 @@ fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
     atom_bc.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     legacy_bc.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(atom_bc, legacy_bc);
-    assert_eq!(atom.variables_for_all_disrete, legacy.variables_for_all_disrete);
+    assert_eq!(
+        atom.variables_for_all_disrete,
+        legacy.variables_for_all_disrete
+    );
     assert_eq!(atom_residual.nrows(), legacy_residual.nrows());
     for index in 0..atom_residual.len() {
         assert!(
@@ -806,6 +989,99 @@ fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
             assert!(
                 (atom_value - legacy_value).abs() < 1e-10,
                 "jacobian mismatch at ({row}, {col}): atom={atom_value}, legacy={legacy_value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn generate_bvp_with_atom_discretization_matches_legacy_banded_path() {
+    let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
+    let bandwidth = Some((2, 2));
+    let mut legacy = Jacobian::new();
+    legacy.generate_BVP_with_params(
+        eq_system.clone(),
+        values.clone(),
+        arg.clone(),
+        None,
+        0.0,
+        None,
+        Some(6),
+        None,
+        None,
+        border_conditions.clone(),
+        None,
+        None,
+        "forward".to_string(),
+        "Banded".to_string(),
+        bandwidth,
+    );
+
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    atom.generate_BVP_with_params(
+        eq_system,
+        values,
+        arg,
+        None,
+        0.0,
+        None,
+        Some(6),
+        None,
+        None,
+        border_conditions,
+        None,
+        None,
+        "forward".to_string(),
+        "Banded".to_string(),
+        bandwidth,
+    );
+
+    let args = DVector::from_vec(
+        (0..atom.variable_string.len())
+            .map(|index| 0.2 + index as f64 * 0.01)
+            .collect(),
+    );
+    let typed = &*Vectors_type_casting(&args, "Banded".to_string());
+
+    let legacy_residual = legacy.residiual_function.call(1.0, typed).to_DVectorType();
+    let atom_residual = atom.residiual_function.call(1.0, typed).to_DVectorType();
+    let legacy_jacobian = legacy
+        .jac_function
+        .as_mut()
+        .expect("legacy banded jacobian should exist")
+        .call(1.0, typed)
+        .to_DMatrixType();
+    let atom_jacobian = atom
+        .jac_function
+        .as_mut()
+        .expect("atom-native banded jacobian should exist")
+        .call(1.0, typed)
+        .to_DMatrixType();
+
+    assert_eq!(atom.variable_string, legacy.variable_string);
+    assert!(
+        atom.symbolic_jacobian.is_empty(),
+        "AtomView Banded preparation must remain sparse-first"
+    );
+    assert_eq!(atom_residual.nrows(), legacy_residual.nrows());
+    for index in 0..atom_residual.len() {
+        assert!(
+            (atom_residual[index] - legacy_residual[index]).abs() < 1e-10,
+            "banded residual mismatch at index {index}: atom={}, legacy={}",
+            atom_residual[index],
+            legacy_residual[index]
+        );
+    }
+    assert_eq!(atom_jacobian.nrows(), legacy_jacobian.nrows());
+    assert_eq!(atom_jacobian.ncols(), legacy_jacobian.ncols());
+    for row in 0..atom_jacobian.nrows() {
+        for col in 0..atom_jacobian.ncols() {
+            assert!(
+                (atom_jacobian[(row, col)] - legacy_jacobian[(row, col)]).abs() < 1e-10,
+                "banded Jacobian mismatch at ({row}, {col}): atom={}, legacy={}",
+                atom_jacobian[(row, col)],
+                legacy_jacobian[(row, col)]
             );
         }
     }
@@ -875,10 +1151,7 @@ fn atom_two_point_residual_row_diagnostics() {
 
     println!(
         "[two-point residual row diagnostics] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
-        max_index,
-        max_diff,
-        legacy_residual[max_index],
-        atom_residual[max_index]
+        max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
 
     for index in 0..legacy_residual.len().min(8) {
@@ -899,7 +1172,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics() {
     let arg = "x".to_string();
     let border_conditions = ne.boundary_conditions();
 
-    let  legacy = Jacobian::new();
+    let legacy = Jacobian::new();
     let legacy_bundle = legacy
         .try_generate_sparse_solver_bundle_with_backend_selection(
             eq_system.clone(),
@@ -973,10 +1246,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics() {
 
     println!(
         "[two-point sparse bundle diagnostics] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
-        max_index,
-        max_diff,
-        legacy_residual[max_index],
-        atom_residual[max_index]
+        max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
 }
 
@@ -988,7 +1258,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics_large_grid() {
     let arg = "x".to_string();
     let border_conditions = ne.boundary_conditions();
 
-    let  legacy = Jacobian::new();
+    let legacy = Jacobian::new();
     let mut atom = Jacobian::new();
     atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
 
@@ -1086,7 +1356,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics_with_explicit_h() {
     let n_steps = 72usize;
     let h = (t_end - t0) / n_steps as f64;
 
-    let  legacy = Jacobian::new();
+    let legacy = Jacobian::new();
     let mut atom = Jacobian::new();
     atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
 
@@ -1244,10 +1514,7 @@ fn atom_two_point_direct_generate_residual_diagnostics_with_explicit_h() {
 
     println!(
         "[two-point direct generate explicit-h] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
-        max_index,
-        max_diff,
-        legacy_residual[max_index],
-        atom_residual[max_index]
+        max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
     println!(
         "[two-point direct generate explicit-h] legacy_row_expr={}",
@@ -1491,11 +1758,9 @@ fn sparse_solver_provider_exposes_compiled_aot_metadata_for_real_bvp() {
         provider.effective_backend(),
         SelectedBackendKind::AotCompiled
     );
-    assert!(
-        provider
-            .resolved_aot_artifact()
-            .is_some_and(|resolved| resolved.is_compiled())
-    );
+    assert!(provider
+        .resolved_aot_artifact()
+        .is_some_and(|resolved| resolved.is_compiled()));
     assert_eq!(provider.jacobian_shape(), (12, 12));
     assert_eq!(provider.jacobian_structure().nnz(), 28);
 }
@@ -1807,11 +2072,9 @@ fn sparse_solver_bundle_collects_real_bvp_compiled_aot_metadata() {
 
     assert!(!bundle.is_runtime_callable());
     assert_eq!(bundle.effective_backend(), SelectedBackendKind::AotCompiled);
-    assert!(
-        bundle
-            .resolved_aot_artifact()
-            .is_some_and(|resolved| resolved.is_compiled())
-    );
+    assert!(bundle
+        .resolved_aot_artifact()
+        .is_some_and(|resolved| resolved.is_compiled()));
     assert_eq!(bundle.jacobian_shape(), (12, 12));
     assert_eq!(bundle.sparse_structure.nnz(), 28);
     assert_eq!(bundle.variable_string.len(), 12);

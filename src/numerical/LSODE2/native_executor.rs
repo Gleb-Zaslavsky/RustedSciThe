@@ -17,6 +17,29 @@ use std::time::Instant;
 type ResidualCallback = dyn FnMut(f64, &DVector<f64>) -> DVector<f64>;
 type JacobianCallback = dyn FnMut(f64, &DVector<f64>) -> BdfJacobian;
 
+pub(crate) fn jacobian_abs_max(jacobian: &BdfJacobian) -> Option<f64> {
+    let max_abs = match jacobian {
+        BdfJacobian::Dense(matrix) => matrix.iter().map(|value| value.abs()).fold(0.0, f64::max),
+        BdfJacobian::SparseTriplets { triplets, .. } => triplets
+            .iter()
+            .map(|triplet| triplet.val.abs())
+            .fold(0.0, f64::max),
+        BdfJacobian::Banded(matrix) => {
+            let n = matrix.n();
+            let mut max_abs = 0.0_f64;
+            for j in 0..n {
+                let i0 = j.saturating_sub(matrix.ku());
+                let i1 = (j + matrix.kl() + 1).min(n);
+                for i in i0..i1 {
+                    max_abs = max_abs.max(matrix[(i, j)].abs());
+                }
+            }
+            max_abs
+        }
+    };
+    (max_abs.is_finite() && max_abs > 0.0).then_some(max_abs)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lsode2NativeExecutorError {
     ResidualDimensionMismatch { expected: usize, actual: usize },
@@ -48,6 +71,7 @@ pub struct Lsode2NativeCallbackExecutor<L> {
     cached_t: Option<f64>,
     cached_c: Option<f64>,
     cached_factorization: Option<Box<dyn BdfLinearFactorization>>,
+    last_jacobian_abs_max: Option<f64>,
 }
 
 impl<L> std::fmt::Debug for Lsode2NativeCallbackExecutor<L>
@@ -74,6 +98,7 @@ impl<L> Lsode2NativeCallbackExecutor<L> {
             cached_t: None,
             cached_c: None,
             cached_factorization: None,
+            last_jacobian_abs_max: None,
         }
     }
 }
@@ -109,7 +134,12 @@ where
         let started = Instant::now();
         let jacobian = (self.jacobian)(t, y);
         statistics.record_native_jacobian_duration(started.elapsed());
+        self.last_jacobian_abs_max = jacobian_abs_max(&jacobian);
         jacobian
+    }
+
+    pub fn last_jacobian_abs_max(&self) -> Option<f64> {
+        self.last_jacobian_abs_max
     }
 
     pub fn invalidate_linearization(&mut self) {

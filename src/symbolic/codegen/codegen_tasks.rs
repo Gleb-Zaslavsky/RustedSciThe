@@ -590,8 +590,11 @@ impl<'a> SparseJacobianTask<'a> {
             }],
             SparseChunkingStrategy::ByTargetChunkCount { target_chunks } => {
                 assert!(target_chunks > 0, "target_chunks must be positive");
-                let rows_per_chunk = self.shape.0.max(1).div_ceil(target_chunks).max(1);
-                self.chunk_with_strategy(SparseChunkingStrategy::ByRowCount { rows_per_chunk })
+                let max_entries_per_chunk =
+                    self.entries.len().max(1).div_ceil(target_chunks).max(1);
+                self.chunk_with_strategy(SparseChunkingStrategy::ByNonZeroCount {
+                    max_entries_per_chunk,
+                })
             }
             SparseChunkingStrategy::ByNonZeroCount {
                 max_entries_per_chunk,
@@ -599,7 +602,7 @@ impl<'a> SparseJacobianTask<'a> {
             SparseChunkingStrategy::ByRowCount { rows_per_chunk } => {
                 assert!(rows_per_chunk > 0, "rows_per_chunk must be positive");
 
-                let mut chunk_entries: Vec<Vec<SparseExprEntry<'a>>> = Vec::new();
+                let mut chunk_entries: Vec<Vec<(usize, SparseExprEntry<'a>)>> = Vec::new();
                 let mut chunk_offsets: Vec<usize> = Vec::new();
 
                 for (entry_index, entry) in self.entries.iter().copied().enumerate() {
@@ -611,7 +614,28 @@ impl<'a> SparseJacobianTask<'a> {
                     if chunk_entries[bucket].is_empty() {
                         chunk_offsets[bucket] = entry_index;
                     }
-                    chunk_entries[bucket].push(entry);
+                    chunk_entries[bucket].push((entry_index, entry));
+                }
+
+                let non_empty_chunks = chunk_entries
+                    .iter()
+                    .filter(|entries| !entries.is_empty())
+                    .collect::<Vec<_>>();
+                let all_chunks_are_contiguous = non_empty_chunks.iter().all(|entries| {
+                    let start = entries.first().map(|(index, _)| *index).unwrap_or(0);
+                    entries
+                        .iter()
+                        .enumerate()
+                        .all(|(local_index, (entry_index, _))| *entry_index == start + local_index)
+                });
+
+                if !all_chunks_are_contiguous {
+                    let target_chunks = self.shape.0.max(1).div_ceil(rows_per_chunk).max(1);
+                    let max_entries_per_chunk =
+                        self.entries.len().max(1).div_ceil(target_chunks).max(1);
+                    return self.chunk_with_strategy(SparseChunkingStrategy::ByNonZeroCount {
+                        max_entries_per_chunk,
+                    });
                 }
 
                 chunk_entries
@@ -623,7 +647,7 @@ impl<'a> SparseJacobianTask<'a> {
                         chunk_index,
                         entry_offset: chunk_offsets[chunk_index],
                         shape: self.shape,
-                        entries,
+                        entries: entries.into_iter().map(|(_, entry)| entry).collect(),
                         variables: self.variables,
                         params: self.params,
                     })
@@ -1115,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_chunking_strategy_by_target_chunk_count_creates_coarse_row_groups() {
+    fn sparse_chunking_strategy_by_target_chunk_count_creates_contiguous_value_groups() {
         let e0 = Expr::Var("y0".to_string());
         let e1 = Expr::Var("y1".to_string());
         let e2 = Expr::Var("y2".to_string());
@@ -1154,10 +1178,108 @@ mod tests {
             .chunk_with_strategy(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 2 });
 
         assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].entry_offset, 0);
         assert_eq!(chunks[0].entries.len(), 2);
+        assert_eq!(chunks[1].entry_offset, 2);
         assert_eq!(chunks[1].entries.len(), 2);
         assert_eq!(chunks[0].entries[0].row, 0);
         assert_eq!(chunks[1].entries[0].row, 2);
+    }
+
+    #[test]
+    fn sparse_target_chunking_keeps_value_offsets_contiguous_for_column_major_entries() {
+        let e0 = Expr::Var("y0".to_string());
+        let e1 = Expr::Var("y1".to_string());
+        let e2 = Expr::Var("y2".to_string());
+        let e3 = Expr::Var("y3".to_string());
+        let entries = vec![
+            SparseExprEntry {
+                row: 0,
+                col: 0,
+                expr: &e0,
+            },
+            SparseExprEntry {
+                row: 2,
+                col: 0,
+                expr: &e1,
+            },
+            SparseExprEntry {
+                row: 1,
+                col: 1,
+                expr: &e2,
+            },
+            SparseExprEntry {
+                row: 3,
+                col: 1,
+                expr: &e3,
+            },
+        ];
+        let task = SparseJacobianTask {
+            fn_name: "eval_sparse_values",
+            shape: (4, 4),
+            entries: &entries,
+            variables: &["y0", "y1", "y2", "y3"],
+            params: None,
+        };
+
+        let chunks = task
+            .chunk_with_strategy(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 2 });
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].entry_offset, 0);
+        assert_eq!(chunks[0].entries[0].row, 0);
+        assert_eq!(chunks[0].entries[1].row, 2);
+        assert_eq!(chunks[1].entry_offset, 2);
+        assert_eq!(chunks[1].entries[0].row, 1);
+        assert_eq!(chunks[1].entries[1].row, 3);
+    }
+
+    #[test]
+    fn sparse_row_chunking_falls_back_to_contiguous_values_for_column_major_entries() {
+        let e0 = Expr::Var("y0".to_string());
+        let e1 = Expr::Var("y1".to_string());
+        let e2 = Expr::Var("y2".to_string());
+        let e3 = Expr::Var("y3".to_string());
+        let entries = vec![
+            SparseExprEntry {
+                row: 0,
+                col: 0,
+                expr: &e0,
+            },
+            SparseExprEntry {
+                row: 2,
+                col: 0,
+                expr: &e1,
+            },
+            SparseExprEntry {
+                row: 1,
+                col: 1,
+                expr: &e2,
+            },
+            SparseExprEntry {
+                row: 3,
+                col: 1,
+                expr: &e3,
+            },
+        ];
+        let task = SparseJacobianTask {
+            fn_name: "eval_sparse_values",
+            shape: (4, 4),
+            entries: &entries,
+            variables: &["y0", "y1", "y2", "y3"],
+            params: None,
+        };
+
+        let chunks =
+            task.chunk_with_strategy(SparseChunkingStrategy::ByRowCount { rows_per_chunk: 2 });
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].entry_offset, 0);
+        assert_eq!(chunks[0].entries[0].row, 0);
+        assert_eq!(chunks[0].entries[1].row, 2);
+        assert_eq!(chunks[1].entry_offset, 2);
+        assert_eq!(chunks[1].entries[0].row, 1);
+        assert_eq!(chunks[1].entries[1].row, 3);
     }
 
     #[test]

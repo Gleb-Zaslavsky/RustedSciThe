@@ -6,19 +6,13 @@
 //! file does not become even heavier.
 //!
 //! Current scope of this module:
-//! - declare the architectural contract for the future banded lambdify path,
-//! - infer a node-major block layout from the already discretized BVP system,
-//! - provide storage/layout allocation helpers that later generators can reuse.
-//!
-//! Deliberately not implemented yet:
-//! - symbolic lambdify generators returning `BandedAssembly`,
-//! - `JacEnum::Banded` runtime hookup,
-//! - direct solver integration inside `BVP_traits`.
-//!
-//! Those next steps will build on the typed helpers introduced here.
+//! - infer node-major block layout from the discretized BVP system,
+//! - compile residual/Jacobian evaluators for the banded lambdify path,
+//! - evaluate Jacobians directly into native `BandedAssembly`,
+//! - expose chunking/threshold controls used by the runtime callbacks.
 
 use crate::somelinalg::banded::{
-    BandedError, LinearSolverConfig, NodeMajorLayout, banded_assembly::BandedAssembly,
+    banded_assembly::BandedAssembly, BandedError, LinearSolverConfig, NodeMajorLayout,
 };
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::Jacobian;
@@ -117,8 +111,17 @@ type BandedScalarEvaluator = Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
 /// - runtime evaluation becomes a straight linear pass without lookups,
 ///   hashing, or sparse triplet assembly.
 struct CompiledBandedDiagonal {
-    offset: isize,
     evaluators: Vec<Option<BandedScalarEvaluator>>,
+}
+
+/// One compiled scalar symbolic entry of the Jacobian.
+///
+/// This representation is used by the `EntryChunks` runtime mode where we
+/// evaluate entries independently and scatter them into `BandedAssembly`.
+struct CompiledBandedEntry {
+    row: usize,
+    col: usize,
+    evaluator: BandedScalarEvaluator,
 }
 
 impl BandedStructurePlan {
@@ -151,18 +154,8 @@ fn base_variable_name(name: &str) -> &str {
     name.rsplit_once('_').map_or(name, |(base, _)| base)
 }
 
-fn compile_banded_scalar_evaluator(
-    expr: &Expr,
-    argument_names: &[String],
-) -> BandedScalarEvaluator {
-    Expr::lambdify_borrowed_thread_safe(
-        expr,
-        argument_names
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>()
-            .as_slice(),
-    )
+fn compile_banded_scalar_evaluator(expr: &Expr, argument_names: &[&str]) -> BandedScalarEvaluator {
+    Expr::lambdify_borrowed_thread_safe(expr, argument_names)
 }
 
 impl Jacobian {
@@ -196,10 +189,10 @@ impl Jacobian {
         // Variable names in the discretized BVP follow a node-major pattern such as:
         // y_0, z_0, y_1, z_1, ...
         // Counting unique base names in that flattened list gives us the block size.
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut vars_per_node = 0usize;
         for name in &self.variable_string {
-            let inserted = seen.insert(base_variable_name(name).to_string());
+            let inserted = seen.insert(base_variable_name(name));
             if inserted {
                 vars_per_node += 1;
             }
@@ -285,46 +278,86 @@ impl Jacobian {
     ) -> Result<Vec<CompiledBandedDiagonal>, BandedError> {
         let parameter_map = self.parameter_substitution_map();
         let argument_names = self.runtime_argument_names(&parameter_map)?;
-        let asm_template = BandedAssembly::zeros(
-            plan.n_unknowns,
-            plan.scalar_bandwidth.0,
-            plan.scalar_bandwidth.1,
-        )?;
+        let argument_name_refs: Vec<&str> =
+            argument_names.iter().map(|name| name.as_str()).collect();
 
         let mut diagonals: Vec<CompiledBandedDiagonal> =
-            Vec::with_capacity(asm_template.num_diagonals());
-        for offset in asm_template.offsets() {
-            let len = asm_template
-                .diag_len(offset)
-                .ok_or(BandedError::DimensionMismatch)?;
+            Vec::with_capacity(plan.scalar_bandwidth.0 + plan.scalar_bandwidth.1 + 1);
+        for offset in -(plan.scalar_bandwidth.0 as isize)..=(plan.scalar_bandwidth.1 as isize) {
+            let len = plan.n_unknowns.saturating_sub(offset.unsigned_abs());
             diagonals.push(CompiledBandedDiagonal {
-                offset,
                 evaluators: std::iter::repeat_with(|| None).take(len).collect(),
             });
         }
 
-        for (row, col, expr) in &self.symbolic_jacobian_sparse {
-            let offset = *col as isize - *row as isize;
-            if offset < -(plan.scalar_bandwidth.0 as isize)
-                || offset > plan.scalar_bandwidth.1 as isize
-            {
-                continue;
-            }
+        // Lambdification dominates setup for large meshes. Compile independent
+        // nonzeros in parallel, then scatter closures into diagonal storage in
+        // source order so runtime layout remains deterministic.
+        let compiled_entries: Vec<(usize, usize, BandedScalarEvaluator)> = self
+            .symbolic_jacobian_sparse
+            .par_iter()
+            .filter_map(|(row, col, expr)| {
+                let offset = *col as isize - *row as isize;
+                if offset < -(plan.scalar_bandwidth.0 as isize)
+                    || offset > plan.scalar_bandwidth.1 as isize
+                {
+                    return None;
+                }
 
-            let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
-            let pos = if offset >= 0 { *row } else { *col };
+                let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
+                let pos = if offset >= 0 { *row } else { *col };
+                let evaluator = if let Some(ref map) = parameter_map {
+                    let prepared_expr = expr.set_variable_from_map(map);
+                    compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
+                } else {
+                    compile_banded_scalar_evaluator(expr, &argument_name_refs)
+                };
 
-            let prepared_expr = if let Some(ref map) = parameter_map {
-                expr.set_variable_from_map(map)
-            } else {
-                expr.clone()
-            };
+                Some((diag_index, pos, evaluator))
+            })
+            .collect();
 
-            diagonals[diag_index].evaluators[pos] =
-                Some(compile_banded_scalar_evaluator(&prepared_expr, &argument_names));
+        for (diag_index, pos, evaluator) in compiled_entries {
+            diagonals[diag_index].evaluators[pos] = Some(evaluator);
         }
 
         Ok(diagonals)
+    }
+
+    /// Builds an entry-wise compile plan used by `EntryChunks` runtime mode.
+    fn compile_banded_entry_plan(
+        &self,
+        plan: &BandedStructurePlan,
+    ) -> Result<Vec<CompiledBandedEntry>, BandedError> {
+        let parameter_map = self.parameter_substitution_map();
+        let argument_names = self.runtime_argument_names(&parameter_map)?;
+        let argument_name_refs: Vec<&str> =
+            argument_names.iter().map(|name| name.as_str()).collect();
+        Ok(self
+            .symbolic_jacobian_sparse
+            .par_iter()
+            .filter_map(|(row, col, expr)| {
+                let offset = *col as isize - *row as isize;
+                if offset < -(plan.scalar_bandwidth.0 as isize)
+                    || offset > plan.scalar_bandwidth.1 as isize
+                {
+                    return None;
+                }
+
+                let evaluator = if let Some(ref map) = parameter_map {
+                    let prepared_expr = expr.set_variable_from_map(map);
+                    compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
+                } else {
+                    compile_banded_scalar_evaluator(expr, &argument_name_refs)
+                };
+
+                Some(CompiledBandedEntry {
+                    row: *row,
+                    col: *col,
+                    evaluator,
+                })
+            })
+            .collect())
     }
 
     /// Returns a high-performance banded Jacobian evaluator producing
@@ -339,39 +372,81 @@ impl Jacobian {
     ///
     /// The returned closure is thread-safe and intentionally immutable. That
     /// makes it easier to reuse in future frozen-Jacobian branches.
-    pub fn generate_banded_jacobian_assembly_parallel(
+    pub(crate) fn generate_banded_jacobian_assembly_from_plan_parallel(
         &self,
-        _config: &BandedLambdifyConfig,
+        plan: &BandedStructurePlan,
+        config: &BandedLambdifyConfig,
     ) -> Result<Box<dyn Fn(&[f64]) -> Result<BandedAssembly, BandedError> + Send + Sync>, BandedError>
     {
-        let plan = self.infer_banded_structure_plan()?;
-        let compiled_diagonals = self.compile_banded_diagonal_plan(&plan)?;
         let n = plan.n_unknowns;
         let kl = plan.scalar_bandwidth.0;
         let ku = plan.scalar_bandwidth.1;
+        let threshold = config.structural_threshold.abs();
 
-        Ok(Box::new(move |unknowns: &[f64]| -> Result<BandedAssembly, BandedError> {
-            if unknowns.len() != n {
-                return Err(BandedError::DimensionMismatch);
+        enum CompiledPlan {
+            Diagonal(Vec<CompiledBandedDiagonal>),
+            Entry(Vec<CompiledBandedEntry>),
+        }
+
+        let compiled = match config.jacobian_chunking {
+            BandedJacobianChunking::Diagonal => {
+                CompiledPlan::Diagonal(self.compile_banded_diagonal_plan(&plan)?)
             }
+            BandedJacobianChunking::EntryChunks => {
+                CompiledPlan::Entry(self.compile_banded_entry_plan(&plan)?)
+            }
+        };
 
-            let mut asm = BandedAssembly::zeros(n, kl, ku)?;
+        Ok(Box::new(
+            move |unknowns: &[f64]| -> Result<BandedAssembly, BandedError> {
+                if unknowns.len() != n {
+                    return Err(BandedError::DimensionMismatch);
+                }
 
-            asm.diagonals_mut()
-                .par_iter_mut()
-                .zip(compiled_diagonals.par_iter())
-                .for_each(|(diag_values, compiled_diag)| {
-                    let _offset = compiled_diag.offset;
-                    for (slot, maybe_eval) in diag_values.iter_mut().zip(compiled_diag.evaluators.iter()) {
-                        *slot = maybe_eval
-                            .as_ref()
-                            .map(|eval| eval(unknowns))
-                            .unwrap_or(0.0);
+                let mut asm = BandedAssembly::zeros(n, kl, ku)?;
+                match &compiled {
+                    CompiledPlan::Diagonal(compiled_diagonals) => {
+                        asm.diagonals_mut()
+                            .par_iter_mut()
+                            .zip(compiled_diagonals.par_iter())
+                            .for_each(|(diag_values, compiled_diag)| {
+                                for (slot, maybe_eval) in
+                                    diag_values.iter_mut().zip(compiled_diag.evaluators.iter())
+                                {
+                                    let value = maybe_eval
+                                        .as_ref()
+                                        .map(|eval| eval(unknowns))
+                                        .unwrap_or(0.0);
+                                    *slot = if value.abs() < threshold { 0.0 } else { value };
+                                }
+                            });
                     }
-                });
+                    CompiledPlan::Entry(compiled_entries) => {
+                        let values: Vec<(usize, usize, f64)> = compiled_entries
+                            .par_iter()
+                            .map(|entry| (entry.row, entry.col, (entry.evaluator)(unknowns)))
+                            .collect();
+                        for (row, col, mut value) in values {
+                            if value.abs() < threshold {
+                                value = 0.0;
+                            }
+                            asm.set(row, col, value)?;
+                        }
+                    }
+                }
 
-            Ok(asm)
-        }))
+                Ok(asm)
+            },
+        ))
+    }
+
+    pub fn generate_banded_jacobian_assembly_parallel(
+        &self,
+        config: &BandedLambdifyConfig,
+    ) -> Result<Box<dyn Fn(&[f64]) -> Result<BandedAssembly, BandedError> + Send + Sync>, BandedError>
+    {
+        let plan = self.infer_banded_structure_plan()?;
+        self.generate_banded_jacobian_assembly_from_plan_parallel(&plan, config)
     }
 
     /// Returns a parallel residual evaluator for the banded lambdify branch.
@@ -381,34 +456,39 @@ impl Jacobian {
     /// - runtime just evaluates them in parallel into a plain `Vec<f64>`.
     pub fn generate_banded_residual_parallel(
         &self,
-    ) -> Result<Box<dyn Fn(&[f64]) -> Result<Vec<f64>, BandedError> + Send + Sync>, BandedError> {
+    ) -> Result<Box<dyn Fn(&[f64]) -> Result<Vec<f64>, BandedError> + Send + Sync>, BandedError>
+    {
         let n_unknowns = self.vector_of_variables.len();
         let parameter_map = self.parameter_substitution_map();
         let argument_names = self.runtime_argument_names(&parameter_map)?;
+        let argument_name_refs: Vec<&str> =
+            argument_names.iter().map(|name| name.as_str()).collect();
 
         let compiled_residuals: Vec<BandedScalarEvaluator> = self
             .vector_of_functions
-            .iter()
+            .par_iter()
             .map(|expr| {
-                let prepared_expr = if let Some(ref map) = parameter_map {
-                    expr.set_variable_from_map(map)
+                if let Some(ref map) = parameter_map {
+                    let prepared_expr = expr.set_variable_from_map(map);
+                    compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
                 } else {
-                    expr.clone()
-                };
-                compile_banded_scalar_evaluator(&prepared_expr, &argument_names)
+                    compile_banded_scalar_evaluator(expr, &argument_name_refs)
+                }
             })
             .collect();
 
-        Ok(Box::new(move |unknowns: &[f64]| -> Result<Vec<f64>, BandedError> {
-            if unknowns.len() != n_unknowns {
-                return Err(BandedError::DimensionMismatch);
-            }
+        Ok(Box::new(
+            move |unknowns: &[f64]| -> Result<Vec<f64>, BandedError> {
+                if unknowns.len() != n_unknowns {
+                    return Err(BandedError::DimensionMismatch);
+                }
 
-            Ok(compiled_residuals
-                .par_iter()
-                .map(|eval| eval(unknowns))
-                .collect())
-        }))
+                Ok(compiled_residuals
+                    .par_iter()
+                    .map(|eval| eval(unknowns))
+                    .collect())
+            },
+        ))
     }
 
     /// Builds a parameter substitution map when the current symbolic problem
@@ -418,7 +498,10 @@ impl Jacobian {
     /// if parameters are fixed for the whole Newton solve, we substitute them
     /// once in symbolic form and keep the runtime closures purely state-based.
     fn parameter_substitution_map(&self) -> Option<HashMap<String, f64>> {
-        match (self.parameters_string.is_empty(), self.parameter_values.as_ref()) {
+        match (
+            self.parameters_string.is_empty(),
+            self.parameter_values.as_ref(),
+        ) {
             (true, _) => None,
             (false, Some(values)) if values.len() == self.parameters_string.len() => Some(
                 self.parameters_string
@@ -499,30 +582,14 @@ mod tests {
         ];
         jac.bandwidth = Some((3, 3));
         jac.symbolic_jacobian_sparse = vec![
-            (
-                0,
-                0,
-                Expr::Const(2.0) * Expr::Var("y_0".to_string()),
-            ),
+            (0, 0, Expr::Const(2.0) * Expr::Var("y_0".to_string())),
             (0, 1, Expr::Const(1.0)),
             (1, 0, Expr::Const(-1.0)),
-            (
-                1,
-                1,
-                Expr::Const(3.0) * Expr::Var("z_0".to_string()),
-            ),
-            (
-                2,
-                2,
-                Expr::Const(4.0) * Expr::Var("y_1".to_string()),
-            ),
+            (1, 1, Expr::Const(3.0) * Expr::Var("z_0".to_string())),
+            (2, 2, Expr::Const(4.0) * Expr::Var("y_1".to_string())),
             (2, 3, Expr::Const(2.0)),
             (3, 2, Expr::Const(-2.0)),
-            (
-                3,
-                3,
-                Expr::Const(5.0) * Expr::Var("z_1".to_string()),
-            ),
+            (3, 3, Expr::Const(5.0) * Expr::Var("z_1".to_string())),
         ];
 
         let generator = jac
@@ -545,9 +612,8 @@ mod tests {
     #[test]
     fn substitutes_fixed_parameters_before_compilation() {
         let mut jac = Jacobian::new();
-        jac.vector_of_functions = vec![
-            Expr::Var("a".to_string()) * Expr::Var("y_0".to_string()) + Expr::Const(1.0),
-        ];
+        jac.vector_of_functions =
+            vec![Expr::Var("a".to_string()) * Expr::Var("y_0".to_string()) + Expr::Const(1.0)];
         jac.vector_of_variables = vec![Expr::Var("y_0".to_string())];
         jac.variable_string = vec!["y_0".to_string()];
         jac.bandwidth = Some((0, 0));
@@ -565,5 +631,84 @@ mod tests {
 
         assert_eq!(r[0], 22.0);
         assert_eq!(j.get(0, 0).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn banded_chunking_modes_produce_identical_assembly_values() {
+        let mut jac = Jacobian::new();
+        jac.vector_of_functions = vec![Expr::Const(0.0); 4];
+        jac.vector_of_variables = vec![
+            Expr::Var("y_0".to_string()),
+            Expr::Var("z_0".to_string()),
+            Expr::Var("y_1".to_string()),
+            Expr::Var("z_1".to_string()),
+        ];
+        jac.variable_string = vec![
+            "y_0".to_string(),
+            "z_0".to_string(),
+            "y_1".to_string(),
+            "z_1".to_string(),
+        ];
+        jac.bandwidth = Some((3, 3));
+        jac.symbolic_jacobian_sparse = vec![
+            (0, 0, Expr::Const(2.0) * Expr::Var("y_0".to_string())),
+            (0, 1, Expr::Const(1.0)),
+            (1, 0, Expr::Const(-1.0)),
+            (1, 1, Expr::Const(3.0) * Expr::Var("z_0".to_string())),
+            (2, 2, Expr::Const(4.0) * Expr::Var("y_1".to_string())),
+            (2, 3, Expr::Const(2.0)),
+            (3, 2, Expr::Const(-2.0)),
+            (3, 3, Expr::Const(5.0) * Expr::Var("z_1".to_string())),
+        ];
+
+        let diagonal = jac
+            .generate_banded_jacobian_assembly_parallel(&BandedLambdifyConfig {
+                jacobian_chunking: BandedJacobianChunking::Diagonal,
+                ..BandedLambdifyConfig::default()
+            })
+            .unwrap();
+        let entry_chunks = jac
+            .generate_banded_jacobian_assembly_parallel(&BandedLambdifyConfig {
+                jacobian_chunking: BandedJacobianChunking::EntryChunks,
+                ..BandedLambdifyConfig::default()
+            })
+            .unwrap();
+
+        let x = [2.0, 3.0, 4.0, 5.0];
+        let d = diagonal(&x).unwrap();
+        let e = entry_chunks(&x).unwrap();
+
+        for row in 0..4 {
+            for col in 0..4 {
+                let dv = d.get(row, col).unwrap();
+                let ev = e.get(row, col).unwrap();
+                assert!(
+                    (dv - ev).abs() <= 1e-12,
+                    "chunking mismatch at ({row},{col}): diagonal={dv}, entry={ev}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn banded_structural_threshold_zeros_tiny_entries() {
+        let mut jac = Jacobian::new();
+        jac.vector_of_functions = vec![Expr::Const(0.0); 2];
+        jac.vector_of_variables = vec![Expr::Var("y_0".to_string()), Expr::Var("z_0".to_string())];
+        jac.variable_string = vec!["y_0".to_string(), "z_0".to_string()];
+        jac.bandwidth = Some((1, 1));
+        jac.symbolic_jacobian_sparse = vec![(0, 0, Expr::Const(1e-14)), (1, 1, Expr::Const(2.0))];
+
+        let generator = jac
+            .generate_banded_jacobian_assembly_parallel(&BandedLambdifyConfig {
+                jacobian_chunking: BandedJacobianChunking::EntryChunks,
+                structural_threshold: 1e-12,
+                ..BandedLambdifyConfig::default()
+            })
+            .unwrap();
+
+        let asm = generator(&[1.0, 1.0]).unwrap();
+        assert_eq!(asm.get(0, 0).unwrap(), 0.0);
+        assert_eq!(asm.get(1, 1).unwrap(), 2.0);
     }
 }

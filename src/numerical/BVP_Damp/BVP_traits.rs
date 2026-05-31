@@ -1,13 +1,13 @@
 #![allow(non_camel_case_types)] //
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
 use crate::somelinalg::banded::{
-    LinearSystemRef, NodeMajorLayout, banded_assembly::BandedAssembly,
-    linear_solver::build_solver_for_system, solver_policy::LinearSolverConfig,
-    solver_traits::DirectLinearSolver,
+    banded_assembly::BandedAssembly, linear_solver::build_solver_for_system,
+    solver_policy::LinearSolverConfig, solver_traits::DirectLinearSolver, LinearSystemRef,
+    NodeMajorLayout,
 };
+use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
 use crate::somelinalg::iterative_solvers_cpu::LUsolver::invers_Mat_LU;
 use crate::somelinalg::iterative_solvers_cpu::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
-use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
 
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
@@ -1198,14 +1198,64 @@ pub fn convert_to_jac(f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>
     Box::new(JacWrapper(f))
 }
 
+/// Builds a finite-difference Jacobian matrix for the provided residual callback.
+///
+/// The routine preserves the currently selected vector/matrix backend by
+/// constructing the result through [`VectorType::from_vector`].
+pub fn finite_difference_jacobian(
+    fun: &dyn Fun,
+    x: f64,
+    vec: &dyn VectorType,
+    step_scale: f64,
+) -> Box<dyn MatrixType> {
+    let n = vec.len();
+    let f0 = fun.call(x, vec).to_DVectorType();
+    assert_eq!(
+        f0.len(),
+        n,
+        "finite-difference Jacobian expects residual length to match unknown count"
+    );
+
+    let mut dense = vec![0.0_f64; n * n];
+    let mut triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(n * n);
+    let min_step = f64::EPSILON.sqrt();
+
+    for col in 0..n {
+        let y_col = vec.get_val(col);
+        let h = (step_scale * y_col.abs()).max(min_step);
+        let perturbed = vec.assign_value(col, y_col + h);
+        let f1 = fun.call(x, &*perturbed).to_DVectorType();
+        assert_eq!(
+            f1.len(),
+            n,
+            "finite-difference Jacobian perturbed residual length mismatch"
+        );
+
+        for row in 0..n {
+            let value = (f1[row] - f0[row]) / h;
+            dense[row * n + col] = value;
+            if value != 0.0 {
+                triplets.push((row, col, value));
+            }
+        }
+    }
+
+    vec.from_vector(n, n, &dense, triplets)
+}
+
 //_________________________________________________Y___________________________________________________________
 pub trait Y: Any {
     fn as_any(&self) -> Box<&dyn Any>;
+    fn clone_box(&self) -> Box<dyn Y>;
 }
 
 impl Y for DVector<f64> {
     fn as_any(&self) -> Box<&dyn Any> {
         Box::new(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn Y> {
+        Box::new(self.clone())
     }
 }
 
@@ -1213,11 +1263,15 @@ impl Y for CsVec<f64> {
     fn as_any(&self) -> Box<&dyn Any> {
         Box::new(self)
     }
+
+    fn clone_box(&self) -> Box<dyn Y> {
+        Box::new(self.clone())
+    }
 }
 
 impl Clone for Box<dyn Y> {
     fn clone(&self) -> Self {
-        self.clone()
+        self.clone_box()
     }
 }
 ///////////////////////////////
@@ -1255,6 +1309,38 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         panic!("Unsupported vector type: {}", desired_type);
     };
     res
+}
+
+#[cfg(test)]
+mod y_trait_object_clone_tests {
+    use super::*;
+
+    #[test]
+    fn boxed_y_clone_preserves_dense_payload_without_recursion() {
+        let original: Box<dyn Y> = Box::new(DVector::from_vec(vec![1.0, -2.0, 3.5]));
+        let cloned = original.clone();
+        let any = cloned.as_any();
+        let dense = (*any)
+            .downcast_ref::<DVector<f64>>()
+            .expect("cloned Box<dyn Y> should keep dense payload type");
+
+        assert_eq!(dense.as_slice(), &[1.0, -2.0, 3.5]);
+    }
+
+    #[test]
+    fn boxed_y_clone_preserves_sparse_payload_without_recursion() {
+        let sparse = CsVec::new(5, vec![0, 3], vec![2.0, -4.0]);
+        let original: Box<dyn Y> = Box::new(sparse);
+        let cloned = original.clone();
+        let any = cloned.as_any();
+        let sparse = (*any)
+            .downcast_ref::<CsVec<f64>>()
+            .expect("cloned Box<dyn Y> should keep sparse payload type");
+
+        assert_eq!(sparse.dim(), 5);
+        assert_eq!(sparse.indices(), &[0, 3]);
+        assert_eq!(sparse.data(), &[2.0, -4.0]);
+    }
 }
 //________________________________________
 #[allow(dead_code)]

@@ -15,6 +15,30 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+fn finite_difference_jacobian(
+    fun: &dyn Fn(f64, &DVector<f64>) -> DVector<f64>,
+    t: f64,
+    y: &DVector<f64>,
+) -> DMatrix<f64> {
+    let n = y.len();
+    if n == 0 {
+        return DMatrix::zeros(0, 0);
+    }
+    let f0 = fun(t, y);
+    let mut jac = DMatrix::zeros(n, n);
+    let eps_base = f64::EPSILON.sqrt();
+    for col in 0..n {
+        let mut y_pert = y.clone();
+        let h = eps_base * (1.0 + y[col].abs());
+        y_pert[col] += h;
+        let f1 = fun(t, &y_pert);
+        for row in 0..n {
+            jac[(row, col)] = (f1[row] - f0[row]) / h;
+        }
+    }
+    jac
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 impl Jacobian {
     pub fn jacobian_generate_IVP_Radau_mode(
@@ -511,6 +535,56 @@ impl RadauNewton {
     /// Set initial guess for K variables
     pub fn set_initial_guess(&mut self, guess: DVector<f64>) {
         self.k_values = guess;
+    }
+
+    /// Installs pure numerical callbacks for Radau Newton stage solves.
+    ///
+    /// The installed `fun` must return the stage-system residual vector
+    /// `G(K)`. If `jac` is `None`, a finite-difference Jacobian of `G` is used.
+    pub fn set_native_callbacks(
+        &mut self,
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
+    ) {
+        use std::sync::Arc;
+        let fun = Arc::new(fun);
+        let stats_for_fun = Arc::clone(&self.statistics);
+        let fun_for_eval = Arc::clone(&fun);
+        self.fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let out = fun_for_eval(t, y);
+            stats_for_fun
+                .lock()
+                .expect("Radau statistics lock poisoned")
+                .record_residual_ms(start.elapsed().as_secs_f64() * 1_000.0);
+            out
+        });
+
+        let stats_for_jac = Arc::clone(&self.statistics);
+        self.jac = Some(match jac {
+            Some(jac_fun) => Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                let start = Instant::now();
+                let out = jac_fun(t, y);
+                stats_for_jac
+                    .lock()
+                    .expect("Radau statistics lock poisoned")
+                    .record_jacobian_ms(start.elapsed().as_secs_f64() * 1_000.0);
+                out
+            }),
+            None => {
+                let fd_fun = Arc::clone(&fun);
+                Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                    let start = Instant::now();
+                    let out = finite_difference_jacobian(fd_fun.as_ref().as_ref(), t, y);
+                    stats_for_jac
+                        .lock()
+                        .expect("Radau statistics lock poisoned")
+                        .record_jacobian_ms(start.elapsed().as_secs_f64() * 1_000.0);
+                    out
+                })
+            }
+        });
+        self.n = self.eq_system.len();
     }
 
     /// Perform one Newton-Raphson iteration

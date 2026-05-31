@@ -230,12 +230,14 @@ cargo build --features cuda
 | GPU iterative solvers | `src/somelinalg/iterative_solvers_gpu/` |
 | LSODE2 user guide (EN) | `src/numerical/LSODE2/LSODE2_USER_GUIDE_EN.md` |
 | LSODE2 user guide (RU) | `src/numerical/LSODE2/LSODE2_USER_GUIDE_RU.md` |
+| IVP user guide (EN, BDF/Radau/BE + Universal API) | `src/numerical/IVP_USER_GUIDE_EN.md` |
+| IVP user guide (RU, BDF/Radau/BE + Universal API) | `src/numerical/IVP_USER_GUIDE_RU.md` |
 
 ## Project Documentation
 In the `Book` folder of the project (on GitHub), there is an in-depth scientific manual as well as developer and user manuals in English and Russian. The documentation is actively evolving.
 
 ## Examples
-Practical usage scenarios are kept in the `examples` folder and in `examples/task_docs`. This includes complete workflows for IVP/BVP solvers, LSODE2 numerical/lambdify/AOT routes, backend comparison stories, and task-document driven execution.
+Practical usage scenarios are kept in the `examples` folder and in `examples/task_docs`. This includes complete workflows for IVP/BVP solvers, LSODE2 numerical/lambdify/AOT routes, backend comparison stories, and task-document driven execution. For method-focused reading, see `src/numerical/IVP_USER_GUIDE_EN.md` and `src/numerical/IVP_USER_GUIDE_RU.md` (BDF, Radau, Backward Euler, explicit non-stiff family, and Universal IVP API).
 
 ## Task Documents and Executable Mode
 RustedSciThe includes a task-document interpreter for both IVP and BVP workflows (`src/command_interpreter/`). A task file is a human-readable text document split into sections such as `task`, `equations`, `initial_conditions` (for IVP) or `boundary_conditions`/`mesh` (for BVP), plus optional `solver_options` and `postprocessing`. In other words, you can describe equations, conditions, backend choices, and output behavior in one place and run it without writing a custom Rust harness every time. Real examples are available in `examples/task_docs/`, and template generators are available from CLI (`--template ivp`, `--template bvp`).

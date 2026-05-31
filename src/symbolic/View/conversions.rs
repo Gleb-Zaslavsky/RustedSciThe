@@ -14,6 +14,18 @@ pub(crate) fn approximate_f64_atom(value: f64) -> Atom {
         return Atom::new_num(n);
     }
 
+    const MAX_COMPACT_DENOMINATOR: i64 = 1_000_000;
+    const MAX_COMPACT_ERROR: f64 = 1.0e-12;
+    if let Some((num, den)) = bounded_f64_to_ratio(value, MAX_COMPACT_DENOMINATOR) {
+        let error = (num as f64 / den as f64 - value).abs();
+        if num != 0 && error <= MAX_COMPACT_ERROR * value.abs().max(1.0) {
+            return Atom::new_num(Coefficient::reduce(num, den));
+        }
+    }
+
+    // Very small physical constants cannot be represented accurately under
+    // the compact-denominator cap. Preserve their decimal magnitude rather
+    // than allowing a compact approximation to collapse them to zero.
     if let Some((num, den)) = decimal_f64_to_ratio(value) {
         return Atom::new_num(Coefficient::reduce(num, den));
     }
@@ -23,80 +35,113 @@ pub(crate) fn approximate_f64_atom(value: f64) -> Atom {
     Atom::new_num(Coefficient::reduce(num, scale))
 }
 
+/// Recovers a compact rational close to `value` without encoding the full
+/// binary-float expansion into symbolic arithmetic.
+///
+/// Small recurring coefficients occur naturally after BVP discretization
+/// (`0.01 / 0.000288 = 625 / 18`). Continued fractions preserve those
+/// coefficients exactly while the denominator cap prevents nonlinear
+/// products from acquiring impractically large rational storage.
+fn bounded_f64_to_ratio(value: f64, max_denominator: i64) -> Option<(i64, i64)> {
+    if !value.is_finite() {
+        return None;
+    }
+    if max_denominator < 1 {
+        return None;
+    }
+
+    let sign = if value < 0.0 { -1i128 } else { 1i128 };
+    let target = value.abs();
+    if target > i64::MAX as f64 {
+        return None;
+    }
+
+    let max_denominator = max_denominator as i128;
+    let mut x = target;
+    let mut prev_num = 0i128;
+    let mut prev_den = 1i128;
+    let mut num = 1i128;
+    let mut den = 0i128;
+
+    loop {
+        let whole = x.floor() as i128;
+        let next_num = whole.checked_mul(num)?.checked_add(prev_num)?;
+        let next_den = whole.checked_mul(den)?.checked_add(prev_den)?;
+
+        if next_den > max_denominator {
+            if den == 0 {
+                return None;
+            }
+            let scale = (max_denominator - prev_den) / den;
+            let bound_num = scale.checked_mul(num)?.checked_add(prev_num)?;
+            let bound_den = scale.checked_mul(den)?.checked_add(prev_den)?;
+            let current_error = (target - num as f64 / den as f64).abs();
+            let bound_error = (target - bound_num as f64 / bound_den as f64).abs();
+            if bound_error < current_error {
+                num = bound_num;
+                den = bound_den;
+            }
+            break;
+        }
+
+        prev_num = num;
+        prev_den = den;
+        num = next_num;
+        den = next_den;
+
+        let fractional = x - whole as f64;
+        if fractional.abs() <= f64::EPSILON {
+            break;
+        }
+        x = fractional.recip();
+    }
+
+    let num = i64::try_from(sign.checked_mul(num)?).ok()?;
+    let den = i64::try_from(den).ok()?;
+    Some((num, den))
+}
+
 fn decimal_f64_to_ratio(value: f64) -> Option<(i64, i64)> {
     if !value.is_finite() {
         return None;
     }
 
-    let s = format!("{value:.6e}");
-    let (negative, unsigned) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else if let Some(rest) = s.strip_prefix('+') {
-        (false, rest)
-    } else {
-        (false, s.as_str())
-    };
+    let formatted = format!("{value:.6e}");
+    let (mantissa, exponent) = formatted.split_once('e')?;
+    let exponent = exponent.parse::<i32>().ok()?;
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.trim_start_matches('-');
+    let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fractional}").parse::<i128>().ok()?;
+    let mut numerator = if negative { -digits } else { digits };
+    let mut denominator = pow10_i128(fractional.len() as u32)?;
 
-    let (mantissa, exp10) = if let Some((m, e)) = unsigned.split_once(['e', 'E']) {
-        (m, e.parse::<i32>().ok()?)
+    if exponent >= 0 {
+        numerator = numerator.checked_mul(pow10_i128(exponent as u32)?)?;
     } else {
-        (unsigned, 0)
-    };
-
-    let (int_part, frac_part) = if let Some((i, f)) = mantissa.split_once('.') {
-        (i, f)
-    } else {
-        (mantissa, "")
-    };
-
-    let mut digits = format!("{int_part}{frac_part}");
-    while digits.ends_with('0') && digits.len() > 1 {
-        digits.pop();
-    }
-    if digits.is_empty() {
-        return None;
+        denominator = denominator.checked_mul(pow10_i128((-exponent) as u32)?)?;
     }
 
-    let frac_len =
-        frac_part.len() as i32 - mantissa.chars().rev().take_while(|ch| *ch == '0').count() as i32;
-    let scale_exp = frac_len - exp10;
-    let mut numerator = digits.parse::<i128>().ok()?;
-    let mut denominator = 1i128;
-
-    if scale_exp >= 0 {
-        denominator = pow10_i128(scale_exp as u32)?;
-    } else {
-        numerator = numerator.checked_mul(pow10_i128((-scale_exp) as u32)?)?;
-    }
-
-    if negative {
-        numerator = -numerator;
-    }
-
-    let gcd = gcd_i128(numerator.unsigned_abs() as i128, denominator);
-    numerator /= gcd;
-    denominator /= gcd;
-
-    let num = i64::try_from(numerator).ok()?;
-    let den = i64::try_from(denominator).ok()?;
-    Some((num, den))
+    let divisor = gcd_i128(numerator.abs(), denominator);
+    numerator /= divisor;
+    denominator /= divisor;
+    Some((
+        i64::try_from(numerator).ok()?,
+        i64::try_from(denominator).ok()?,
+    ))
 }
 
-fn pow10_i128(exp: u32) -> Option<i128> {
-    let mut acc = 1i128;
-    for _ in 0..exp {
-        acc = acc.checked_mul(10)?;
-    }
-    Some(acc)
+fn pow10_i128(power: u32) -> Option<i128> {
+    10i128.checked_pow(power)
 }
 
-fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
+fn gcd_i128(mut lhs: i128, mut rhs: i128) -> i128 {
+    while rhs != 0 {
+        let remainder = lhs % rhs;
+        lhs = rhs;
+        rhs = remainder;
     }
-    a.abs()
+    lhs.max(1)
 }
 // ── Atom → Expr ───────────────────────────────────────────────────────────────
 
@@ -387,6 +432,26 @@ mod tests {
     fn expr_const_integer_to_atom() {
         let expr = Expr::Const(7.0);
         assert_eq!(expr_to_atom(&expr), Atom::new_num(7i64));
+    }
+
+    #[test]
+    fn expr_const_roundtrip_preserves_bvp_diffusion_coefficient_precision() {
+        let value = 34.72222222222222;
+        let back = atom_to_expr(&expr_to_atom(&Expr::Const(value))).eval_expression(&[], &[]);
+        assert!(
+            (back - value).abs() < 1.0e-13,
+            "atom conversion changed a solver coefficient: input={value}, output={back}"
+        );
+    }
+
+    #[test]
+    fn expr_const_roundtrip_does_not_erase_small_combustion_scale() {
+        let value = 9.0e-8;
+        let back = atom_to_expr(&expr_to_atom(&Expr::Const(value))).eval_expression(&[], &[]);
+        assert!(
+            (back - value).abs() < 1.0e-15,
+            "atom conversion erased or distorted a small physical constant: input={value}, output={back}"
+        );
     }
 
     #[test]

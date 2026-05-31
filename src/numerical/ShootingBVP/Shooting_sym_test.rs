@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_solve_with_bdf_modern_universal_facade() {
+    fn test_solve_with_bdf_generic_universal_facade() {
         use crate::numerical::ODE_api2::SolverType;
         init_logger();
 
@@ -468,7 +468,7 @@ mod tests {
 
         let mut bvp = BVPShooting::new(eq_vec, values, arg, boundary_conditions, (0.0, 1.0));
 
-        bvp.solve_with_certain_ivp_modern(0.5, 1e-8, 100, 0.001, SolverType::BDF, |mut solver| {
+        bvp.solve_with_certain_ivp_generic(0.5, 1e-8, 100, 0.001, SolverType::BDF, |mut solver| {
             solver.set_rtol(1e-6);
             solver.set_atol(1e-8);
             solver.set_max_step(1e-3);

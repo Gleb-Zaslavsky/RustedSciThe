@@ -148,6 +148,8 @@ use std::time::Instant;
 
 type BdfNativeJacobianFactory =
     dyn Fn(Option<SharedIvpParameterValues>) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>;
+type BdfNativeRhs = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
+type BdfNativeDenseJac = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
 
 /// Grouped setup for one symbolic BDF solve.
 #[derive(Clone)]
@@ -387,6 +389,10 @@ pub struct ODEsolver {
     /// Optional factory for replacing the dense generated Jacobian callback
     /// with a native sparse/banded Jacobian callback.
     bdf_native_jacobian_factory: Option<Box<BdfNativeJacobianFactory>>,
+    /// Optional pure numerical RHS callback `f(t, y)`.
+    native_rhs: Option<BdfNativeRhs>,
+    /// Optional pure numerical dense Jacobian callback `df/dy`.
+    native_jacobian: Option<BdfNativeDenseJac>,
 }
 impl ODEsolver {
     /// Creates a new ODE solver with the specified parameters.
@@ -469,6 +475,8 @@ impl ODEsolver {
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
+            native_rhs: None,
+            native_jacobian: None,
         }
     }
 
@@ -589,6 +597,19 @@ impl ODEsolver {
     {
         self.set_bdf_native_jacobian_factory(factory);
         self
+    }
+
+    /// Installs pure numerical ODE callbacks for BDF.
+    ///
+    /// If `jac` is `None`, BDF falls back to finite-difference Jacobians.
+    pub fn set_native_ode_callbacks<F, J>(&mut self, rhs: F, jac: Option<J>)
+    where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        self.native_rhs = Some(Arc::new(rhs));
+        self.native_jacobian = jac.map(|j| Arc::new(j) as BdfNativeDenseJac);
+        self.backend_prepared = false;
     }
 
     /// Builder-style generated backend setup.
@@ -784,6 +805,9 @@ impl ODEsolver {
     /// Uses the symbolic engine to automatically compute ∂f/∂y analytically,
     /// which is crucial for stiff problem performance.
     pub fn try_generate(&mut self) -> Result<(), IvpBackendError> {
+        if self.native_rhs.is_some() {
+            return self.try_generate_native_numeric();
+        }
         let start = Instant::now();
         let mut options = SymbolicIvpProblemOptions::new();
         if let Some(parameters) = self.equation_parameters.clone() {
@@ -860,6 +884,65 @@ impl ODEsolver {
                 Solver_instance.set_linear_backend(factory());
             }
             self.Solver_instance = Solver_instance;
+        }
+        self.backend_prepared = true;
+        self.statistics
+            .lock()
+            .expect("IVP statistics lock poisoned")
+            .record_backend_prepare_duration(start.elapsed());
+        Ok(())
+    }
+
+    fn try_generate_native_numeric(&mut self) -> Result<(), IvpBackendError> {
+        let start = Instant::now();
+        if self.method == "BDF" {
+            let rhs = self
+                .native_rhs
+                .clone()
+                .expect("native_rhs must exist in native numeric generation path");
+            let stats_for_fun = Arc::clone(&self.statistics);
+            let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+                let start = Instant::now();
+                let out = rhs(t, y);
+                stats_for_fun
+                    .lock()
+                    .expect("IVP statistics lock poisoned")
+                    .record_residual_duration(start.elapsed());
+                out
+            });
+
+            let wrapped_jac = self.native_jacobian.clone().map(|jac| {
+                let stats_for_jac = Arc::clone(&self.statistics);
+                Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                    let start = Instant::now();
+                    let out = jac(t, y);
+                    stats_for_jac
+                        .lock()
+                        .expect("IVP statistics lock poisoned")
+                        .record_jacobian_duration(start.elapsed());
+                    out
+                }) as Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>
+            });
+
+            let mut solver_instance = BDF::new();
+            solver_instance.set_max_order_cap(self.max_bdf_order);
+            solver_instance.set_initial(
+                wrapped_fun,
+                self.t0,
+                self.y0.clone(),
+                self.t_bound,
+                self.max_step,
+                NumberOrVec::Number(self.rtol),
+                NumberOrVec::Number(self.atol),
+                wrapped_jac,
+                self.jac_sparsity.clone(),
+                self.vectorized,
+                self.first_step,
+            );
+            if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
+                solver_instance.set_linear_backend(factory());
+            }
+            self.Solver_instance = solver_instance;
         }
         self.backend_prepared = true;
         self.statistics
@@ -1729,5 +1812,415 @@ mod tests {
         let (_, y_result) = solver.get_result();
         let final_y = y_result[(y_result.nrows() - 1, 0)];
         assert!((final_y - 1.5).abs() <= atol);
+    }
+}
+
+#[cfg(test)]
+mod tests_generated_backend_heavy_dense_aot {
+    use super::*;
+    use crate::symbolic::codegen::codegen_runtime_api::{
+        recommended_dense_jacobian_chunking_for_parallelism,
+        recommended_residual_chunking_for_parallelism,
+    };
+    use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
+    use crate::symbolic::symbolic_ivp::SymbolicIvpAotOptions;
+    use crate::symbolic::symbolic_ivp_generated::{
+        DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    };
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone)]
+    struct BdfScenario {
+        label: &'static str,
+        equations: Vec<Expr>,
+        values: Vec<String>,
+        y0: DVector<f64>,
+        t0: f64,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Toolchain {
+        Ctcc,
+        Cgcc,
+        Zig,
+        Rust,
+    }
+
+    impl Toolchain {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Ctcc => "AOT-C-tcc",
+                Self::Cgcc => "AOT-C-gcc",
+                Self::Zig => "AOT-Zig",
+                Self::Rust => "AOT-Rust",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ChunkingMode {
+        Whole,
+        Parallel2,
+    }
+
+    impl ChunkingMode {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Whole => "whole",
+                Self::Parallel2 => "parallel(auto,x2)",
+            }
+        }
+    }
+
+    struct CompareRow {
+        scenario: &'static str,
+        route: String,
+        chunking: &'static str,
+        total: Duration,
+        prepare_ms: f64,
+        solve_ms: f64,
+        residual_calls: usize,
+        jacobian_calls: usize,
+        nlu: usize,
+        final_diff: f64,
+        status: String,
+    }
+
+    fn command_exists(cmd: &str, probe_arg: &str) -> bool {
+        Command::new(cmd).arg(probe_arg).output().is_ok()
+    }
+
+    fn tcc_available() -> bool {
+        if let Ok(explicit) = std::env::var("RUSTEDSCITHE_TCC") {
+            return std::path::Path::new(&explicit).is_file();
+        }
+        command_exists("tcc", "-v")
+    }
+
+    fn gcc_available() -> bool {
+        if let Ok(explicit) = std::env::var("RUSTEDSCITHE_GCC") {
+            return std::path::Path::new(&explicit).is_file();
+        }
+        command_exists("gcc", "--version")
+    }
+
+    fn zig_available() -> bool {
+        command_exists("zig", "version")
+    }
+
+    fn toolchain_available(toolchain: Toolchain) -> bool {
+        match toolchain {
+            Toolchain::Ctcc => tcc_available(),
+            Toolchain::Cgcc => gcc_available(),
+            Toolchain::Zig => zig_available(),
+            Toolchain::Rust => true,
+        }
+    }
+
+    fn robertson_3_scenario() -> BdfScenario {
+        BdfScenario {
+            label: "robertson-3",
+            equations: vec![
+                Expr::parse_expression("-0.04*y1 + 1.0e4*y2*y3"),
+                Expr::parse_expression("0.04*y1 - 1.0e4*y2*y3 - 3.0e7*y2^2"),
+                Expr::parse_expression("3.0e7*y2^2"),
+            ],
+            values: vec!["y1".to_string(), "y2".to_string(), "y3".to_string()],
+            y0: DVector::from_vec(vec![1.0, 0.0, 0.0]),
+            t0: 0.0,
+            t_bound: 20.0,
+            max_step: 0.001,
+            rtol: 1e-9,
+            atol: 1e-12,
+        }
+    }
+
+    fn hires_8_scenario() -> BdfScenario {
+        BdfScenario {
+            label: "hires-8",
+            equations: vec![
+                Expr::parse_expression("-1.71*y1 + 0.43*y2 + 8.32*y3 + 0.0007"),
+                Expr::parse_expression("1.71*y1 - 8.75*y2"),
+                Expr::parse_expression("-10.03*y3 + 0.43*y4 + 0.035*y5"),
+                Expr::parse_expression("8.32*y2 + 1.71*y3 - 1.12*y4"),
+                Expr::parse_expression("-1.745*y5 + 0.43*y6 + 0.43*y7"),
+                Expr::parse_expression("-280.0*y6*y8 + 0.69*y4 + 1.71*y5 - 0.43*y6 + 0.69*y7"),
+                Expr::parse_expression("280.0*y6*y8 - 1.81*y7"),
+                Expr::parse_expression("-280.0*y6*y8 + 1.81*y7"),
+            ],
+            values: vec![
+                "y1".to_string(),
+                "y2".to_string(),
+                "y3".to_string(),
+                "y4".to_string(),
+                "y5".to_string(),
+                "y6".to_string(),
+                "y7".to_string(),
+                "y8".to_string(),
+            ],
+            y0: DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0057]),
+            t0: 0.0,
+            t_bound: 20.0,
+            max_step: 0.002,
+            rtol: 1e-8,
+            atol: 1e-11,
+        }
+    }
+
+    fn max_abs_diff(a: &DVector<f64>, b: &DVector<f64>) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .fold(0.0_f64, |acc, (lhs, rhs)| acc.max((lhs - rhs).abs()))
+    }
+
+    fn unique_output_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        PathBuf::from(format!(
+            "target/generated-bdf-aot-story/{prefix}/pid{}_{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn chunking_options(var_count: usize, mode: ChunkingMode) -> SymbolicIvpAotOptions {
+        match mode {
+            ChunkingMode::Whole => SymbolicIvpAotOptions::default(),
+            ChunkingMode::Parallel2 => SymbolicIvpAotOptions {
+                residual_strategy: recommended_residual_chunking_for_parallelism(var_count, 2),
+                jacobian_strategy: recommended_dense_jacobian_chunking_for_parallelism(
+                    var_count, 2,
+                ),
+            },
+        }
+    }
+
+    fn make_backend_config(
+        out_dir: PathBuf,
+        toolchain: Toolchain,
+        chunking: ChunkingMode,
+        var_count: usize,
+    ) -> SymbolicIvpGeneratedBackendConfig {
+        let base = SymbolicIvpGeneratedBackendConfig::from_mode(
+            DenseIvpGeneratedBackendMode::BuildIfMissingRelease,
+        )
+        .with_output_parent_dir(Some(out_dir))
+        .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+            profile: AotBuildProfile::Release,
+        })
+        .with_aot_options(chunking_options(var_count, chunking));
+
+        match toolchain {
+            Toolchain::Ctcc => base.with_c_tcc(),
+            Toolchain::Cgcc => base.with_c_gcc(),
+            Toolchain::Zig => base.with_zig(),
+            Toolchain::Rust => base.with_rust(),
+        }
+    }
+
+    fn scenario_options(s: &BdfScenario) -> BdfSolverOptions {
+        BdfSolverOptions::new(
+            s.equations.clone(),
+            s.values.clone(),
+            "t".to_string(),
+            "BDF".to_string(),
+            s.t0,
+            s.y0.clone(),
+            s.t_bound,
+            s.max_step,
+            s.rtol,
+            s.atol,
+            None,
+            false,
+            None,
+        )
+        .with_max_bdf_order(5)
+    }
+
+    fn run_case(
+        scenario: &BdfScenario,
+        route_label: &str,
+        chunking: ChunkingMode,
+        options: BdfSolverOptions,
+        baseline_solution: Option<&DVector<f64>>,
+    ) -> (CompareRow, DVector<f64>) {
+        let mut solver = ODEsolver::new_with_options(options);
+        let start = Instant::now();
+        let solve_result = catch_unwind(AssertUnwindSafe(|| {
+            solver.solve();
+            let stats = solver.get_statistics();
+            let (_, y) = solver.get_result();
+            let final_solution = if y.nrows() == 0 {
+                DVector::from_element(scenario.values.len(), f64::NAN)
+            } else {
+                y.row(y.nrows() - 1).transpose().into_owned()
+            };
+            (
+                solver.get_status().clone(),
+                stats.backend_prepare_ms_total,
+                stats.solve_ms_total,
+                stats.bdf_nfev_total,
+                stats.bdf_njev_total,
+                stats.bdf_nlu_total,
+                final_solution,
+            )
+        }));
+        let total = start.elapsed();
+
+        match solve_result {
+            Ok((status, prepare_ms, solve_ms, residual_calls, jacobian_calls, nlu, solution)) => {
+                let final_diff = baseline_solution
+                    .map(|baseline| max_abs_diff(&solution, baseline))
+                    .unwrap_or(0.0);
+                (
+                    CompareRow {
+                        scenario: scenario.label,
+                        route: route_label.to_string(),
+                        chunking: chunking.label(),
+                        total,
+                        prepare_ms,
+                        solve_ms,
+                        residual_calls,
+                        jacobian_calls,
+                        nlu,
+                        final_diff,
+                        status,
+                    },
+                    solution,
+                )
+            }
+            Err(_) => (
+                CompareRow {
+                    scenario: scenario.label,
+                    route: route_label.to_string(),
+                    chunking: chunking.label(),
+                    total,
+                    prepare_ms: f64::NAN,
+                    solve_ms: f64::NAN,
+                    residual_calls: 0,
+                    jacobian_calls: 0,
+                    nlu: 0,
+                    final_diff: f64::NAN,
+                    status: "panic".to_string(),
+                },
+                DVector::from_element(scenario.values.len(), f64::NAN),
+            ),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bdf_dense_aot_heavy_toolchain_chunking_matrix_story() {
+        let scenarios = vec![robertson_3_scenario(), hires_8_scenario()];
+        let mut rows = Vec::<CompareRow>::new();
+
+        for scenario in &scenarios {
+            let (baseline_row, baseline_solution) = run_case(
+                scenario,
+                "Lambdify",
+                ChunkingMode::Whole,
+                scenario_options(scenario),
+                None,
+            );
+            rows.push(baseline_row);
+
+            for toolchain in [
+                Toolchain::Ctcc,
+                Toolchain::Cgcc,
+                Toolchain::Zig,
+                Toolchain::Rust,
+            ] {
+                if !toolchain_available(toolchain) {
+                    println!(
+                        "[BDF AOT heavy] skipping {} on scenario {}: compiler/runtime unavailable",
+                        toolchain.label(),
+                        scenario.label
+                    );
+                    continue;
+                }
+
+                for chunking in [ChunkingMode::Whole, ChunkingMode::Parallel2] {
+                    let out_dir = unique_output_root(&format!(
+                        "{}_{}_{}",
+                        scenario.label,
+                        toolchain.label(),
+                        chunking.label()
+                    ));
+                    let config = make_backend_config(
+                        out_dir,
+                        toolchain,
+                        chunking,
+                        scenario.values.len().max(1),
+                    );
+                    let options = scenario_options(scenario).with_generated_backend_config(config);
+                    let (row, _) = run_case(
+                        scenario,
+                        toolchain.label(),
+                        chunking,
+                        options,
+                        Some(&baseline_solution),
+                    );
+                    rows.push(row);
+                }
+            }
+        }
+
+        println!(
+            "[BDF AOT heavy] dense toolchain+chunking matrix; all time columns are milliseconds"
+        );
+        println!(
+            "scenario    | route        | chunking         | total_ms | prepare_ms | solve_ms | final_diff_vs_lambdify | residual_calls | jacobian_calls | nlu | status"
+        );
+        println!(
+            "---------------------------------------------------------------------------------------------------------------------------------------------------------------"
+        );
+        for row in &rows {
+            println!(
+                "{:<11} | {:<12} | {:<16} | {:>8.3} | {:>10.3} | {:>8.3} | {:>22.3e} | {:>14} | {:>14} | {:>3} | {}",
+                row.scenario,
+                row.route,
+                row.chunking,
+                row.total.as_secs_f64() * 1_000.0,
+                row.prepare_ms,
+                row.solve_ms,
+                row.final_diff,
+                row.residual_calls,
+                row.jacobian_calls,
+                row.nlu,
+                row.status
+            );
+        }
+
+        let finished: Vec<&CompareRow> =
+            rows.iter().filter(|row| row.status == "finished").collect();
+        assert!(
+            !finished.is_empty(),
+            "at least one dense BDF heavy AOT route should finish"
+        );
+
+        for row in rows.iter().filter(|row| row.route != "Lambdify") {
+            assert_eq!(
+                row.status, "finished",
+                "dense BDF AOT route failed: scenario={} route={} chunking={}",
+                row.scenario, row.route, row.chunking
+            );
+            assert!(
+                row.final_diff <= 1e-6,
+                "dense BDF AOT parity drift is too large: scenario={} route={} chunking={} diff={:e}",
+                row.scenario,
+                row.route,
+                row.chunking,
+                row.final_diff
+            );
+        }
     }
 }

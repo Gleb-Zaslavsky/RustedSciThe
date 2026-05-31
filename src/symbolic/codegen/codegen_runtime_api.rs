@@ -406,9 +406,10 @@ pub struct SparseJacobianStructure {
 
 /// Solver-facing banded Jacobian structure metadata independent of values.
 ///
-/// Generated chunks write one flat values slice in diagonal-major order, while
-/// the runtime plan owns the exact native-band coordinates needed to assemble
-/// `BandedAssembly` directly.
+/// Generated chunks write one flat values slice in the same explicit order as
+/// the metadata vectors below.  The order is intentionally not required to be
+/// diagonal-major: native assembly uses `(diagonal_offset, diagonal_position)`
+/// for each value, so codegen may choose an order with better locality.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BandedJacobianStructure {
     pub rows: usize,
@@ -457,7 +458,7 @@ impl BandedJacobianStructure {
     }
 
     /// Builds a native `BandedAssembly` from values written in the same
-    /// diagonal-major order as this structure.
+    /// explicit order as this structure.
     pub fn assemble_banded_assembly(&self, values: &[f64]) -> BandedAssembly {
         assert_eq!(
             values.len(),
@@ -532,7 +533,7 @@ impl<'a> BandedJacobianRuntimePlan<'a> {
     }
 
     /// Assembles a native banded matrix from values written in the global
-    /// diagonal-major order expected by the chunk plans.
+    /// explicit order expected by the chunk plans.
     pub fn assemble_banded_assembly(&self, values: &[f64]) -> BandedAssembly {
         self.structure.assemble_banded_assembly(values)
     }
@@ -1115,6 +1116,25 @@ mod tests {
         assert_eq!(asm.get(1, 0).unwrap(), 10.0);
         assert_eq!(asm.get(0, 0).unwrap(), 20.0);
         assert_eq!(asm.get(0, 1).unwrap(), 30.0);
+    }
+
+    #[test]
+    fn banded_structure_assembles_values_in_metadata_order_not_diagonal_major_order() {
+        let structure = BandedJacobianStructure {
+            rows: 2,
+            cols: 2,
+            kl: 1,
+            ku: 1,
+            // Deliberately row/column locality order: (0, 0), (0, 1), (1, 0).
+            diagonal_offsets: vec![0, 1, -1],
+            diagonal_positions: vec![0, 0, 0],
+        };
+
+        let asm = structure.assemble_banded_assembly(&[20.0, 30.0, 10.0]);
+
+        assert_eq!(asm.get(0, 0).unwrap(), 20.0);
+        assert_eq!(asm.get(0, 1).unwrap(), 30.0);
+        assert_eq!(asm.get(1, 0).unwrap(), 10.0);
     }
 
     #[test]

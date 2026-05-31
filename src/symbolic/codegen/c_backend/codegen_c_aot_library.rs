@@ -20,42 +20,10 @@ use crate::symbolic::codegen::codegen_provider_api::{
     PreparedBandedProblem, PreparedDenseProblem, PreparedProblem, PreparedSparseProblem,
 };
 use log::info;
-use std::env;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn compiler_override_env_var(program: &str) -> Option<&'static str> {
-    match program.to_ascii_lowercase().as_str() {
-        "tcc" => Some("RUSTEDSCITHE_TCC"),
-        "gcc" => Some("RUSTEDSCITHE_GCC"),
-        "clang" => Some("RUSTEDSCITHE_CLANG"),
-        "cl" => Some("RUSTEDSCITHE_CL"),
-        "cc" => Some("RUSTEDSCITHE_CC"),
-        _ => None,
-    }
-}
-
-fn compiler_override(program: &str) -> Option<String> {
-    compiler_override_env_var(program)
-        .and_then(|key| env::var(key).ok())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("RUSTEDSCITHE_C_COMPILER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-}
-
-fn compiler_command_succeeds(program: &str, probe_arg: &str) -> bool {
-    let requested = compiler_override(program).unwrap_or_else(|| program.to_string());
-    Command::new(requested)
-        .arg(probe_arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Description of one generated C AOT library ready to be written to disk.
 #[derive(Debug, Clone)]
@@ -68,7 +36,10 @@ pub struct GeneratedCAotLibrary {
     pub c_header: String,
     /// Owned solver/codegen metadata exported alongside the source.
     pub manifest: PreparedProblemManifest,
-    /// C compiler to use (gcc, clang, etc.)
+    /// Compiler name written to optional Makefile scaffolding.
+    ///
+    /// `CAotBuildRequest` owns the actual compiler-selection policy used by
+    /// normal AOT execution.
     pub compiler: String,
     /// Optimization level (-O0, -O1, -O2, -O3, -Os)
     pub optimization: String,
@@ -109,7 +80,9 @@ impl GeneratedCAotLibrary {
             c_source: c_source.into(),
             c_header: c_header.into(),
             manifest,
-            compiler: select_default_c_compiler(),
+            // Keep artifact packaging independent from the local toolchain.
+            // The actual build request resolves user-selected compilers later.
+            compiler: "gcc".to_string(),
             optimization: "-O3".to_string(),
         }
     }
@@ -197,8 +170,8 @@ impl GeneratedCAotLibrary {
         let aot_interface_h = library_dir.join("aot_interface.h");
 
         fs::write(&makefile, self.emit_makefile())?;
-        fs::write(&generated_c, self.emit_generated_c())?;
-        fs::write(&generated_h, self.emit_generated_h())?;
+        self.write_generated_c(&generated_c)?;
+        self.write_generated_h(&generated_h)?;
         fs::write(&manifest_h, self.emit_manifest_h())?;
         fs::write(&aot_interface_c, self.emit_aot_interface_c())?;
         fs::write(&aot_interface_h, self.emit_aot_interface_h())?;
@@ -255,23 +228,23 @@ clean:\n\
         )
     }
 
-    fn emit_generated_c(&self) -> String {
-        let mut source = String::new();
-        source.push_str("/* AUTO-GENERATED C AOT SOURCE */\n\n");
-        source.push_str("#include \"generated.h\"\n");
-        source.push_str("#include \"manifest.h\"\n\n");
-        source.push_str(&self.c_source);
-        source
+    fn write_generated_c(&self, path: &Path) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(b"/* AUTO-GENERATED C AOT SOURCE */\n\n")?;
+        file.write_all(b"#include \"generated.h\"\n")?;
+        file.write_all(b"#include \"manifest.h\"\n\n")?;
+        file.write_all(self.c_source.as_bytes())?;
+        Ok(())
     }
 
-    fn emit_generated_h(&self) -> String {
-        let mut header = String::new();
-        header.push_str("/* AUTO-GENERATED C AOT HEADER */\n\n");
-        header.push_str("#ifndef GENERATED_H\n");
-        header.push_str("#define GENERATED_H\n\n");
-        header.push_str(&self.c_header);
-        header.push_str("\n#endif /* GENERATED_H */\n");
-        header
+    fn write_generated_h(&self, path: &Path) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(b"/* AUTO-GENERATED C AOT HEADER */\n\n")?;
+        file.write_all(b"#ifndef GENERATED_H\n")?;
+        file.write_all(b"#define GENERATED_H\n\n")?;
+        file.write_all(self.c_header.as_bytes())?;
+        file.write_all(b"\n#endif /* GENERATED_H */\n")?;
+        Ok(())
     }
 
     fn emit_manifest_h(&self) -> String {
@@ -305,6 +278,62 @@ clean:\n\
     }
 
     fn emit_aot_interface_c(&self) -> String {
+        let residual_chunk_exports = self
+            .manifest
+            .functions
+            .residual_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\nRUSTEDSCITHE_AOT_EXPORT int rustedscithe_aot_chunk_{fn_name}(\n\
+    const double* args_ptr,\n\
+    size_t args_len,\n\
+    double* out_ptr,\n\
+    size_t out_len\n\
+) {{\n\
+    if (args_ptr == NULL || out_ptr == NULL || out_len != {out_len}) {{\n\
+        return 0;\n\
+    }}\n\
+    const double* args = args_ptr;\n\
+    double* out = out_ptr;\n\
+    (void)args_len;\n\
+    {fn_name}(args, out);\n\
+    return 1;\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let jacobian_chunk_exports = self
+            .manifest
+            .functions
+            .jacobian_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\nRUSTEDSCITHE_AOT_EXPORT int rustedscithe_aot_chunk_{fn_name}(\n\
+    const double* args_ptr,\n\
+    size_t args_len,\n\
+    double* out_ptr,\n\
+    size_t out_len\n\
+) {{\n\
+    if (args_ptr == NULL || out_ptr == NULL || out_len != {out_len}) {{\n\
+        return 0;\n\
+    }}\n\
+    const double* args = args_ptr;\n\
+    double* out = out_ptr;\n\
+    (void)args_len;\n\
+    {fn_name}(args, out);\n\
+    return 1;\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
         let residual_dispatch = if self.manifest.functions.residual_chunks.is_empty() {
             format!(
                 "    {}(args, out);",
@@ -379,7 +408,8 @@ RUSTEDSCITHE_AOT_EXPORT int rustedscithe_aot_eval_jacobian_values(\n\
     return 1;\n\
 }}\n",
             residual_dispatch, jacobian_dispatch
-        )
+        ) + residual_chunk_exports.as_str()
+            + jacobian_chunk_exports.as_str()
     }
 
     fn emit_aot_interface_h(&self) -> String {
@@ -442,39 +472,6 @@ fn escape_c_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\"', "\\\"")
 }
 
-fn select_default_c_compiler() -> String {
-    if compiler_command_succeeds("tcc", "-v") {
-        return "tcc".to_string();
-    }
-
-    if cfg!(target_os = "macos") {
-        if compiler_command_succeeds("clang", "-v") {
-            return "clang".to_string();
-        }
-    }
-
-    if cfg!(target_os = "windows") {
-        if compiler_command_succeeds("gcc", "-v") {
-            return "gcc".to_string();
-        }
-        if compiler_command_succeeds("cl", "?") {
-            return "cl".to_string();
-        }
-    }
-
-    if cfg!(target_os = "linux") {
-        if compiler_command_succeeds("gcc", "-v") {
-            return "gcc".to_string();
-        }
-    }
-
-    if compiler_command_succeeds("cc", "-v") {
-        return "cc".to_string();
-    }
-
-    "gcc".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +510,39 @@ mod tests {
                 params: None,
             }
             .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        ))
+    }
+
+    fn sample_chunked_prepared_problem() -> PreparedProblem<'static> {
+        let residuals = Box::leak(Box::new(vec![
+            Expr::parse_expression("x + 1"),
+            Expr::parse_expression("y + 2"),
+        ]));
+        let jacobian = Box::leak(Box::new(vec![
+            vec![Expr::parse_expression("1"), Expr::parse_expression("0")],
+            vec![Expr::parse_expression("0"), Expr::parse_expression("1")],
+        ]));
+        let vars = Box::leak(Box::new(vec!["x", "y"]));
+
+        PreparedProblem::dense(PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals,
+                variables: vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::ByOutputCount {
+                max_outputs_per_chunk: 1,
+            }),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian,
+                variables: vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 1 }),
         ))
     }
 
@@ -561,6 +591,32 @@ mod tests {
         assert!(aot_interface_c.contains("rustedscithe_aot_eval_jacobian_values"));
         assert!(aot_interface_c.contains("const double* args = args_ptr;"));
         assert!(aot_interface_c.contains("double* out = out_ptr;"));
+    }
+
+    #[test]
+    fn generated_c_library_defers_compiler_choice_to_build_configuration() {
+        let prepared = sample_prepared_problem();
+        let module = CodegenModule::new("generated_fixture").with_language(CodegenLanguage::C);
+        let library_spec =
+            GeneratedCAotLibrary::from_prepared_problem("generated_c_fixture", &prepared, &module);
+
+        assert_eq!(library_spec.compiler, "gcc");
+        assert_eq!(library_spec.with_compiler("tcc").compiler, "tcc");
+    }
+
+    #[test]
+    fn generated_c_library_exports_chunk_ffi_symbols() {
+        let prepared = sample_chunked_prepared_problem();
+        let module = CodegenModule::new("generated_fixture").with_language(CodegenLanguage::C);
+        let library_spec =
+            GeneratedCAotLibrary::from_prepared_problem("generated_c_fixture", &prepared, &module);
+
+        let aot_interface_c = library_spec.emit_aot_interface_c();
+
+        assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_residual_chunk_0"));
+        assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
+        assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
+        assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
     }
 
     #[test]

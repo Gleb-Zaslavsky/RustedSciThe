@@ -117,7 +117,8 @@
 use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
 use crate::symbolic::codegen::CodegenIR::{CodegenModule, LinearBlock};
 use crate::symbolic::codegen::codegen_adapters::{
-    banded_ir_blocks, residual_and_sparse_module, residual_ir_blocks, sparse_ir_blocks,
+    banded_ir_blocks, banded_module, residual_and_sparse_module, residual_ir_blocks,
+    residual_module, sparse_ir_blocks, sparse_module,
 };
 use crate::symbolic::codegen::codegen_orchestrator::{
     GeneratedChunkFn, ParallelExecutorConfig, ParallelFallbackPolicy, ParallelResidualExecutor,
@@ -133,9 +134,9 @@ use crate::symbolic::codegen::codegen_tasks::{
 };
 use crate::symbolic::codegen::tests::codegen_test_support::{
     benchmark_parallel_config, benchmark_sparse_parallel_config_with_jobs,
-    build_combustion_bvp_case, build_multifield_stress_bvp_case, env_usize, median_duration,
-    per_iter_ns, stress_env_list_usize, stress_jacobian_iters, stress_residual_iters,
-    stress_samples,
+    build_combustion_bvp_case, build_combustion_bvp_case_with_backend,
+    build_multifield_stress_bvp_case, env_usize, median_duration, per_iter_ns,
+    stress_env_list_usize, stress_jacobian_iters, stress_residual_iters, stress_samples,
 };
 use crate::somelinalg::banded::banded_assembly::BandedAssembly;
 use crate::somelinalg::banded::block_tridiagonal_lu::BlockTridiagonalLu;
@@ -156,7 +157,7 @@ use crate::symbolic::codegen::testing_fixtures::test_codegen_generated_stress_ab
 use crate::symbolic::codegen::testing_fixtures::test_codegen_generated_stress_bvp_fixtures::generated_stress_bvp_fixture_bindings;
 use crate::symbolic::codegen::testing_fixtures::test_codegen_generated_stress_large_bvp_fixtures::generated_stress_large_bvp_fixture_bindings;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions_BVP::Jacobian;
+use crate::symbolic::symbolic_functions_BVP::{BvpSymbolicAssemblyBackend, Jacobian};
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use nalgebra::DMatrix;
@@ -244,7 +245,9 @@ fn compile_banded_lambdify<'a>(
         .iter()
         .flat_map(|chunk| chunk.entries.iter())
         .map(|entry| {
-            let fun = entry.expr.lambdify_borrowed_thread_safe(input_names.as_slice());
+            let fun = entry
+                .expr
+                .lambdify_borrowed_thread_safe(input_names.as_slice());
             Box::new(move |args: &[f64]| fun(args)) as EvalFn<'a>
         })
         .collect()
@@ -318,11 +321,10 @@ fn preferred_superblock_group(jac: &Jacobian, n_total: usize) -> usize {
     }
 }
 
-fn solve_sparse_lu(
-    matrix: &faer::sparse::SparseColMat<usize, f64>,
-    rhs: &[f64],
-) -> Vec<f64> {
-    let lu = matrix.sp_lu().expect("sparse LU factorization should succeed");
+fn solve_sparse_lu(matrix: &faer::sparse::SparseColMat<usize, f64>, rhs: &[f64]) -> Vec<f64> {
+    let lu = matrix
+        .sp_lu()
+        .expect("sparse LU factorization should succeed");
     let rhs_col = faer::Col::from_fn(rhs.len(), |index| rhs[index]);
     let solution = lu.solve(&rhs_col);
     solution.iter().copied().collect()
@@ -357,7 +359,7 @@ fn solve_banded_block_tridiagonal(
             iterative_refinement_steps: 0,
         },
     )
-        .expect("banded linear solver factorization should succeed");
+    .expect("banded linear solver factorization should succeed");
     let solver_backend = solver.backend_name().to_string();
     let mut rhs_owned = rhs.to_vec();
     solver
@@ -997,28 +999,23 @@ fn benchmark_bvp_sparse_vs_banded_lambdify_and_ir_table() {
                 sparse_prepared.jacobian_plan.nnz(),
             ))
             .to_DMatrixType();
-        let banded_ir_dense = banded_assembly_to_dense(
-            &banded_prepared
-                .jacobian_plan
-                .assemble_banded_assembly(&eval_ir_blocks_sequential(
+        let banded_ir_dense =
+            banded_assembly_to_dense(&banded_prepared.jacobian_plan.assemble_banded_assembly(
+                &eval_ir_blocks_sequential(
                     args.as_slice(),
                     &banded_blocks,
                     banded_prepared.jacobian_plan.nnz(),
-                )),
-        );
+                ),
+            ));
 
         let banded_lambdify_diff = max_abs_diff(
             sparse_lambdify_dense.as_slice(),
             banded_lambdify_dense.as_slice(),
         );
-        let sparse_ir_diff = max_abs_diff(
-            sparse_lambdify_dense.as_slice(),
-            sparse_ir_dense.as_slice(),
-        );
-        let banded_ir_diff = max_abs_diff(
-            sparse_lambdify_dense.as_slice(),
-            banded_ir_dense.as_slice(),
-        );
+        let sparse_ir_diff =
+            max_abs_diff(sparse_lambdify_dense.as_slice(), sparse_ir_dense.as_slice());
+        let banded_ir_diff =
+            max_abs_diff(sparse_lambdify_dense.as_slice(), banded_ir_dense.as_slice());
 
         let sparse_lambdify_ns = per_iter_ns(
             median_duration(
@@ -1134,7 +1131,11 @@ fn benchmark_bvp_sparse_vs_banded_lambdify_and_ir_table() {
             jacobian_diff: format!("{:.3e}", banded_ir_diff),
         });
 
-        let tol = if label == "combustion-1000" { 1.0e-9 } else { 1.0e-11 };
+        let tol = if label == "combustion-1000" {
+            1.0e-9
+        } else {
+            1.0e-11
+        };
         assert!(banded_lambdify_diff <= tol);
         assert!(sparse_ir_diff <= tol);
         assert!(banded_ir_diff <= tol);
@@ -1213,16 +1214,16 @@ fn benchmark_bvp_sparse_vs_banded_linear_solve_table() {
 
         let banded_lambdify_diagnostics = solve_banded_block_tridiagonal(
             &jac,
-            &banded_prepared.jacobian_plan.assemble_banded_assembly(
-                eval_functions(&banded_fns, &args).as_slice(),
-            ),
+            &banded_prepared
+                .jacobian_plan
+                .assemble_banded_assembly(eval_functions(&banded_fns, &args).as_slice()),
             rhs.as_slice(),
         );
         let banded_lambdify_consistent_diagnostics = solve_banded_block_tridiagonal_consistent(
             &jac,
-            &banded_prepared.jacobian_plan.assemble_banded_assembly(
-                eval_functions(&banded_fns, &args).as_slice(),
-            ),
+            &banded_prepared
+                .jacobian_plan
+                .assemble_banded_assembly(eval_functions(&banded_fns, &args).as_slice()),
             rhs.as_slice(),
             1,
         );
@@ -1265,12 +1266,16 @@ fn benchmark_bvp_sparse_vs_banded_linear_solve_table() {
 
         let banded_lambdify_diff =
             max_abs_diff(&baseline_solution, &banded_lambdify_diagnostics.solution);
-        let banded_lambdify_consistent_diff =
-            max_abs_diff(&baseline_solution, &banded_lambdify_consistent_diagnostics.solution);
+        let banded_lambdify_consistent_diff = max_abs_diff(
+            &baseline_solution,
+            &banded_lambdify_consistent_diagnostics.solution,
+        );
         let sparse_ir_diff = max_abs_diff(&baseline_solution, &sparse_ir_solution);
         let banded_ir_diff = max_abs_diff(&baseline_solution, &banded_ir_diagnostics.solution);
-        let banded_ir_consistent_diff =
-            max_abs_diff(&baseline_solution, &banded_ir_consistent_diagnostics.solution);
+        let banded_ir_consistent_diff = max_abs_diff(
+            &baseline_solution,
+            &banded_ir_consistent_diagnostics.solution,
+        );
 
         let sparse_lambdify_ns = per_iter_ns(
             median_duration(
@@ -1494,7 +1499,11 @@ fn benchmark_bvp_sparse_vs_banded_linear_solve_table() {
             solve_diff: format!("{:.3e}", banded_ir_consistent_diff),
         });
 
-        let tol = if label == "combustion-1000" { 1.0e-8 } else { 1.0e-10 };
+        let tol = if label == "combustion-1000" {
+            1.0e-8
+        } else {
+            1.0e-10
+        };
         checks.push(LinearSolveCorrectnessCheck {
             scenario: label.to_string(),
             path: "Lambdify-Banded".to_string(),
@@ -1816,7 +1825,8 @@ pub(crate) fn run_diagnose_combustion_superblock_groupings() {
             .collect();
 
         let sparse_entries_owned = jac.symbolic_jacobian_sparse_entries_owned();
-        let sparse_fns = compile_sparse_lambdify(input_names.as_slice(), sparse_entries_owned.as_slice());
+        let sparse_fns =
+            compile_sparse_lambdify(input_names.as_slice(), sparse_entries_owned.as_slice());
         let sparse_values = eval_functions(&sparse_fns, &args);
         let sparse_prepared = prepared.as_prepared_problem();
         let sparse_matrix = sparse_prepared
@@ -1853,9 +1863,8 @@ pub(crate) fn run_diagnose_combustion_superblock_groupings() {
                 continue;
             }
 
-            let layout =
-                SuperBlockLayout::new(n_nodes, vars_per_node, nodes_per_superblock)
-                    .expect("superblock layout should be valid");
+            let layout = SuperBlockLayout::new(n_nodes, vars_per_node, nodes_per_superblock)
+                .expect("superblock layout should be valid");
             let block = assembly
                 .finalize_superblock_tridiagonal(&layout)
                 .expect("superblock layout should convert to uniform block-tridiagonal storage");
@@ -1897,15 +1906,17 @@ pub(crate) fn run_diagnose_combustion_superblock_groupings() {
                 let (dense_l, dense_u) = reconstruct_block_lu_factors(&legacy_lu);
                 let dense_lu = dense_matmul_square(dense_l.as_slice(), dense_u.as_slice());
                 let mut rhs_native = rhs.clone();
-                legacy_lu
-                    .solve_in_place(rhs_native.as_mut_slice())
-                    .expect("legacy superblock solve should succeed after successful factorization");
+                legacy_lu.solve_in_place(rhs_native.as_mut_slice()).expect(
+                    "legacy superblock solve should succeed after successful factorization",
+                );
                 let block_ax = crate::somelinalg::banded::ops::dense_matvec(
                     dense_a.as_slice(),
                     rhs_native.as_slice(),
                 );
-                last.factor_residual =
-                    format!("{:.3e}", dense_linf_diff(dense_pa.as_slice(), dense_lu.as_slice()));
+                last.factor_residual = format!(
+                    "{:.3e}",
+                    dense_linf_diff(dense_pa.as_slice(), dense_lu.as_slice())
+                );
                 last.solve_diff = format!("{:.3e}", max_abs_diff(&rhs_native, &sparse_solution));
                 last.block_residual = format!(
                     "{:.3e}",
@@ -5037,8 +5048,8 @@ pub(crate) fn run_diagnose_rayon_overhead_baseline() {
     );
 }
 
-/// Sweeps requested_jobs on the compiled stress fixture and prints actual_jobs,
-/// uses_sequential_fallback(), nnz/job, and ns/call for each configuration.
+/// Sweeps requested_jobs on the compiled stress fixture and prints Auto-policy
+/// diagnostics plus forced-parallel timings for comparison.
 /// Run with: cargo test diagnose_chunk_granularity -- --nocapture --ignored
 /// diagnose_chunk_granularity_and_fallback
 ///Uses the compiled stress fixture (8 fields × 96 steps) and sweeps requested_jobs from 1 to 2 × thread_count.
@@ -5081,16 +5092,20 @@ pub(crate) fn run_diagnose_chunk_granularity_and_fallback() {
     let nnz = sparse_plan.nnz();
     let chunk_count = sparse_plan.chunks.len();
     let sparse_bindings = bind_sparse_fixture_chunks(&sparse_plan, stress_sparse_chunk_fns());
+    let auto_probe = ParallelSparseJacobianExecutor::new(&sparse_plan, sparse_bindings.clone());
+    let min_work = auto_probe.min_work_per_parallel_job();
+    let nnz_per_chunk = auto_probe.work_per_chunk();
 
     println!(
         "\n=== Chunk granularity / fallback diagnostic ===\
          \nfields={field_count}, steps={n_steps}, nnz={nnz}, chunks={chunk_count}\
          \nrayon_threads={max_threads}, samples={samples}, jacobian_iters={jacobian_iters}\
-         \nAuto fallback threshold: nnz < 256 triggers sequential fallback\n"
+         \nAuto policy derives min_work/job from measured rayon overhead.\
+         \nmin_work/job={min_work}, nnz/chunk={nnz_per_chunk}\n"
     );
     println!(
-        "{:<16} {:<12} {:<10} {:<10} {:<12}",
-        "requested_jobs", "actual_jobs", "fallback", "nnz/job", "ns/call"
+        "{:<16} {:<12} {:<10} {:<10} {:<10} {:<12}",
+        "mode", "jobs", "fallback", "nnz/job", "nnz/chunk", "ns/call"
     );
 
     // Sequential baseline.
@@ -5110,8 +5125,39 @@ pub(crate) fn run_diagnose_chunk_granularity_and_fallback() {
         jacobian_iters,
     );
     println!(
-        "{:<16} {:<12} {:<10} {:<10} {:.2}",
-        "sequential", "-", "-", nnz, seq_ns
+        "{:<16} {:<12} {:<10} {:<10} {:<10} {:.2}",
+        "sequential", "-", "-", nnz, "-", seq_ns
+    );
+
+    let auto_ns = per_iter_ns(
+        median_duration(
+            (0..samples)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..jacobian_iters {
+                        black_box(auto_probe.eval_values(&flat_args)[0]);
+                    }
+                    t.elapsed()
+                })
+                .collect(),
+        ),
+        jacobian_iters,
+    );
+    println!(
+        "{:<16} {:<12} {:<10} {:<10} {:<10} {:.2}  {}",
+        "auto",
+        auto_probe.job_count(),
+        auto_probe.uses_sequential_fallback(),
+        auto_probe.work_per_job(),
+        auto_probe.work_per_chunk(),
+        auto_ns,
+        if auto_ns < seq_ns { "<-- faster" } else { "" }
+    );
+
+    println!("\nForced sweep (`ParallelFallbackPolicy::Never`) for diagnostics:");
+    println!(
+        "{:<16} {:<12} {:<10} {:<10} {:<10} {:<12}",
+        "requested", "actual", "fallback", "nnz/job", "nnz/chunk", "ns/call"
     );
 
     // Parallel sweep with Never fallback so we always exercise the parallel path.
@@ -5127,8 +5173,6 @@ pub(crate) fn run_diagnose_chunk_granularity_and_fallback() {
             sparse_bindings.clone(),
             config,
         );
-        let actual_jobs = par.job_count();
-        let nnz_per_job = nnz / actual_jobs.max(1);
         let ns = per_iter_ns(
             median_duration(
                 (0..samples)
@@ -5144,15 +5188,191 @@ pub(crate) fn run_diagnose_chunk_granularity_and_fallback() {
             jacobian_iters,
         );
         println!(
-            "{:<16} {:<12} {:<10} {:<10} {:.2}  {}",
+            "{:<16} {:<12} {:<10} {:<10} {:<10} {:.2}  {}",
             requested_jobs,
-            actual_jobs,
+            par.job_count(),
             par.uses_sequential_fallback(),
-            nnz_per_job,
+            par.work_per_job(),
+            par.work_per_chunk(),
             ns,
             if ns < seq_ns { "<-- faster" } else { "" }
         );
     }
+}
+
+#[derive(Clone, Debug)]
+struct IrAmplificationRow {
+    matrix: &'static str,
+    stage: &'static str,
+    strategy: String,
+    chunks: usize,
+    outputs: usize,
+    instructions: usize,
+    max_block_instructions: usize,
+    temps: usize,
+    source_kb: f64,
+}
+
+fn ir_amplification_row(
+    matrix: &'static str,
+    stage: &'static str,
+    strategy: impl Into<String>,
+    chunks: usize,
+    blocks: Vec<(usize, LinearBlock)>,
+    source_len: usize,
+) -> IrAmplificationRow {
+    let mut outputs = 0usize;
+    let mut instructions = 0usize;
+    let mut max_block_instructions = 0usize;
+    let mut temps = 0usize;
+    for (_, block) in blocks {
+        outputs += block.outputs.len();
+        instructions += block.instructions.len();
+        max_block_instructions = max_block_instructions.max(block.instructions.len());
+        temps += block.num_temps;
+    }
+
+    IrAmplificationRow {
+        matrix,
+        stage,
+        strategy: strategy.into(),
+        chunks,
+        outputs,
+        instructions,
+        max_block_instructions,
+        temps,
+        source_kb: source_len as f64 / 1024.0,
+    }
+}
+
+fn ir_amplification_baselines(
+    rows: &[IrAmplificationRow],
+) -> HashMap<(&'static str, &'static str), usize> {
+    rows.iter()
+        .filter(|row| row.strategy == "whole")
+        .map(|row| ((row.matrix, row.stage), row.instructions.max(1)))
+        .collect()
+}
+
+/// Prints whether generated chunking inflates IR/source work before runtime
+/// scheduling and FFI even start.
+pub(crate) fn run_diagnose_combustion_chunk_ir_amplification() {
+    let n_steps = env_usize("BVP_CHUNK_IR_STEPS", 1000);
+    let target_chunks = [
+        ("whole", 1usize),
+        ("chunk4", 4usize),
+        ("chunk8", 8usize),
+        ("chunk16", 16usize),
+    ];
+
+    let jac =
+        build_combustion_bvp_case_with_backend(n_steps, BvpSymbolicAssemblyBackend::AtomView);
+    let mut rows = Vec::new();
+
+    for (label, chunks) in target_chunks {
+        let residual_strategy = if chunks == 1 {
+            ResidualChunkingStrategy::Whole
+        } else {
+            ResidualChunkingStrategy::ByTargetChunkCount {
+                target_chunks: chunks,
+            }
+        };
+        let sparse_strategy = if chunks == 1 {
+            SparseChunkingStrategy::Whole
+        } else {
+            SparseChunkingStrategy::ByTargetChunkCount {
+                target_chunks: chunks,
+            }
+        };
+
+        let prepared = jac.prepare_sparse_aot_problem(
+            "diagnose_combustion_residual",
+            "diagnose_combustion_jacobian_values",
+            residual_strategy,
+            sparse_strategy,
+        );
+        let sparse_prepared = prepared.as_prepared_problem();
+        let banded_prepared = prepared.as_prepared_banded_problem();
+
+        rows.push(ir_amplification_row(
+            "Shared",
+            "Residual",
+            label,
+            sparse_prepared.residual_plan.chunks.len(),
+            residual_ir_blocks(&sparse_prepared.residual_plan),
+            residual_module("diag_residual", &sparse_prepared.residual_plan)
+                .emit_source()
+                .len(),
+        ));
+        rows.push(ir_amplification_row(
+            "Sparse",
+            "Jacobian",
+            label,
+            sparse_prepared.jacobian_plan.chunks.len(),
+            sparse_ir_blocks(&sparse_prepared.jacobian_plan),
+            sparse_module("diag_sparse", &sparse_prepared.jacobian_plan)
+                .emit_source()
+                .len(),
+        ));
+        rows.push(ir_amplification_row(
+            "Banded",
+            "Jacobian",
+            label,
+            banded_prepared.jacobian_plan.chunks.len(),
+            banded_ir_blocks(&banded_prepared.jacobian_plan),
+            banded_module("diag_banded", &banded_prepared.jacobian_plan)
+                .emit_source()
+                .len(),
+        ));
+    }
+
+    let baselines = ir_amplification_baselines(&rows);
+    println!(
+        "\n=== Combustion BVP chunk IR/source amplification ===\
+         \nn_steps={n_steps}, unknowns={}, residuals={}, sparse_nnz={}\
+         \nThis does not execute callbacks. It measures generated IR/source size before scheduling/FFI.",
+        jac.vector_of_variables.len(),
+        jac.vector_of_functions.len(),
+        jac.symbolic_jacobian_sparse_entries_owned().len(),
+    );
+    println!(
+        "{:<8} | {:<8} | {:<7} | {:>6} | {:>8} | {:>10} | {:>8} | {:>8} | {:>9} | {:>8}",
+        "matrix",
+        "stage",
+        "strategy",
+        "chunks",
+        "outputs",
+        "instr",
+        "amp",
+        "max_blk",
+        "temps",
+        "src_kb",
+    );
+    println!("{}", "-".repeat(106));
+    for row in &rows {
+        let baseline = *baselines
+            .get(&(row.matrix, row.stage))
+            .expect("whole baseline must exist for every matrix/stage");
+        let amp = row.instructions as f64 / baseline as f64;
+        println!(
+            "{:<8} | {:<8} | {:<7} | {:>6} | {:>8} | {:>10} | {:>8.3} | {:>8} | {:>9} | {:>8.1}",
+            row.matrix,
+            row.stage,
+            row.strategy,
+            row.chunks,
+            row.outputs,
+            row.instructions,
+            amp,
+            row.max_block_instructions,
+            row.temps,
+            row.source_kb,
+        );
+    }
+
+    println!(
+        "\nInterpretation: amp > 1 means chunking generated more total straight-line IR than the whole callback. \
+         If that happens, runtime parallelism must first pay back duplicated arithmetic/source work plus FFI/scheduler overhead."
+    );
 }
 /*
 rayon::join costs ~2000 ns per call

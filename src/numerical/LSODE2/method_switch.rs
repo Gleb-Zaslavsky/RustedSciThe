@@ -190,10 +190,12 @@ impl Lsode2SwitchDecision {
 }
 
 /// ODEPACK-like method-switch state (`MUSED`/`MCUR`) for observability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lsode2MethodSwitchState {
     pub mused: Lsode2MethodFamily,
     pub mcur: Lsode2MethodFamily,
+    pub tsw: Option<f64>,
+    pub last_handoff_jstart: Option<i32>,
     pub switch_count: usize,
     pub decision_count: usize,
     pub fallback_count: usize,
@@ -207,6 +209,8 @@ impl Default for Lsode2MethodSwitchState {
         Self {
             mused: Lsode2MethodFamily::Bdf,
             mcur: Lsode2MethodFamily::Bdf,
+            tsw: None,
+            last_handoff_jstart: None,
             switch_count: 0,
             decision_count: 0,
             fallback_count: 0,
@@ -219,6 +223,10 @@ impl Default for Lsode2MethodSwitchState {
 
 impl Lsode2MethodSwitchState {
     pub fn record_decision(&mut self, decision: Lsode2SwitchDecision) {
+        self.record_decision_at(decision, None);
+    }
+
+    pub fn record_decision_at(&mut self, decision: Lsode2SwitchDecision, switch_time: Option<f64>) {
         self.decision_count += 1;
         if decision.uses_fallback {
             self.fallback_count += 1;
@@ -230,6 +238,8 @@ impl Lsode2MethodSwitchState {
             self.switch_count += 1;
             self.mused = self.mcur;
             self.mcur = next;
+            self.tsw = switch_time.filter(|value| value.is_finite());
+            self.last_handoff_jstart = Some(-1);
             // ODEPACK DSTODA parity:
             // after a successful method switch, `ICOUNT` is reset to its
             // initial value (20 by default) before the next probe window.
@@ -237,6 +247,7 @@ impl Lsode2MethodSwitchState {
             self.switch_probe_ready = false;
         } else {
             self.mused = self.mcur;
+            self.last_handoff_jstart = None;
         }
     }
 
@@ -451,10 +462,12 @@ impl Lsode2MethodSwitchPolicy {
                         }
                         return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
                     }
+                    return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
                 }
-                // If probe is open and DSTODA-style telemetry is present but
-                // not sufficient to justify a switch, report step-advantage
-                // hold reason instead of generic cost-evidence reason.
+                // Fortran-style branch precedence: once DSTODA-style RH
+                // telemetry participates in the switch branch, incomplete
+                // telemetry is still a step-advantage hold, not permission to
+                // fall through to the cost branch.
                 if has_any_step_advantage_telemetry {
                     return (current, Lsode2SwitchReason::SwitchAdvantageNotMet);
                 }

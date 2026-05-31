@@ -8,8 +8,8 @@ use super::adams_engine::{Lsode2AdamsDcfodeError, Lsode2AdamsDcfodeTables};
 use super::algorithm::Lsode2SwitchTelemetry;
 use super::dcfode::{Lsode2BdfDcfodeTables, Lsode2DcfodeError};
 use super::history::{
-    Lsode2HistoryError, Lsode2NordsieckHistory, Lsode2YHistory, backward_differences_to_nordsieck,
-    reconcile_first_nordsieck_derivative,
+    backward_differences_to_nordsieck, reconcile_first_nordsieck_derivative, Lsode2HistoryError,
+    Lsode2NordsieckHistory, Lsode2YHistory,
 };
 use super::step_control::{
     Lsode2AcceptDecision, Lsode2NullStepWarningLevel, Lsode2RetryAction, Lsode2RetryDecision,
@@ -492,6 +492,56 @@ impl Lsode2RuntimeState {
     ) -> Result<(), Lsode2RuntimeStateError> {
         reconcile_first_nordsieck_derivative(scaled_derivative, &mut self.nordsieck)?;
         self.first_derivative_refresh_requested = false;
+        Ok(())
+    }
+
+    pub fn prepare_for_method_switch_handoff(
+        &mut self,
+        new_max_order: usize,
+    ) -> Result<(), Lsode2RuntimeStateError> {
+        if new_max_order == 0 {
+            return Err(Lsode2HistoryError::InvalidOrder {
+                order: 0,
+                max_order: 0,
+            }
+            .into());
+        }
+
+        if new_max_order != self.max_order {
+            let old_nordsieck = self.nordsieck.clone();
+            let old_y_history = self.y_history.clone();
+            let copy_order = old_nordsieck.max_order().min(new_max_order);
+            let copy_age = old_y_history.max_order().min(new_max_order);
+
+            let mut nordsieck = Lsode2NordsieckHistory::new(self.y.len(), new_max_order)?;
+            for order in 0..=copy_order {
+                nordsieck.set_col(order, old_nordsieck.col(order)?)?;
+            }
+
+            let mut y_history = Lsode2YHistory::new(&self.y, new_max_order)?;
+            for age in 0..=copy_age {
+                y_history
+                    .block_mut(age)?
+                    .copy_from_slice(old_y_history.block(age)?);
+            }
+
+            self.max_order = new_max_order;
+            self.order = self.order.min(new_max_order).max(1);
+            self.nordsieck = nordsieck;
+            self.predicted_nordsieck = Lsode2NordsieckHistory::new(self.y.len(), new_max_order)?;
+            self.y_history = y_history;
+        } else {
+            self.order = self.order.min(new_max_order).max(1);
+            self.predicted_nordsieck = Lsode2NordsieckHistory::new(self.y.len(), new_max_order)?;
+        }
+
+        // LSODA driver sets JSTART=-1 after a method switch.  The next DSTODA
+        // entry completes the new-method setup without treating the problem as
+        // a fresh initial call.  In this native state model that means keeping
+        // counters/history, clearing one-step scratch state, and refreshing
+        // YH(:,2) from f(t,y) before the next predictor.
+        self.staged_higher_order_correction = None;
+        self.first_derivative_refresh_requested = true;
         Ok(())
     }
 

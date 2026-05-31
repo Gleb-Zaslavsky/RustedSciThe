@@ -42,7 +42,7 @@ use crate::symbolic::View::atom::AtomView;
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, CodegenTaskPlan};
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_metadata::TraversalCache;
+use crate::symbolic::symbolic_metadata::SignatureCache;
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -972,18 +972,18 @@ fn optimize_unary_instr<F, G>(
 }
 
 /// Lowers symbolic expressions into linear IR.
-pub struct Lowerer<'a> {
+pub struct Lowerer<'vars, 'expr> {
     instructions: Vec<Instr>,
     next_temp: usize,
-    var_index_map: HashMap<&'a str, usize>,
+    var_index_map: HashMap<&'vars str, usize>,
     input_cache: HashMap<usize, Temp>,
     const_cache: HashMap<u64, Temp>,
-    expr_cache: HashMap<u64, Vec<(Expr, Temp)>>,
-    traversal_cache: TraversalCache,
+    expr_cache: HashMap<u64, Vec<(&'expr Expr, Temp)>>,
+    signature_cache: SignatureCache,
 }
 
-impl<'a> Lowerer<'a> {
-    pub fn new(vars: &'a [&'a str]) -> Self {
+impl<'vars, 'expr> Lowerer<'vars, 'expr> {
+    pub fn new(vars: &'vars [&'vars str]) -> Self {
         let var_index_map = vars
             .iter()
             .enumerate()
@@ -997,7 +997,7 @@ impl<'a> Lowerer<'a> {
             input_cache: HashMap::new(),
             const_cache: HashMap::new(),
             expr_cache: HashMap::new(),
-            traversal_cache: TraversalCache::new(),
+            signature_cache: SignatureCache::new(),
         }
     }
 
@@ -1041,24 +1041,24 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lookup_expr_cache(&mut self, expr: &Expr) -> Option<Temp> {
-        let signature = self.traversal_cache.signature(expr);
+        let signature = self.signature_cache.signature(expr);
         self.expr_cache.get(&signature).and_then(|bucket| {
             bucket
                 .iter()
-                .find(|(candidate, _)| candidate == expr)
+                .find(|(candidate, _)| *candidate == expr)
                 .map(|(_, temp)| *temp)
         })
     }
 
-    fn cache_expr(&mut self, expr: &Expr, temp: Temp) {
-        let signature = self.traversal_cache.signature(expr);
+    fn cache_expr(&mut self, expr: &'expr Expr, temp: Temp) {
+        let signature = self.signature_cache.signature(expr);
         self.expr_cache
             .entry(signature)
             .or_default()
-            .push((expr.clone(), temp));
+            .push((expr, temp));
     }
 
-    fn lower_expr(&mut self, expr: &Expr) -> Temp {
+    fn lower_expr(&mut self, expr: &'expr Expr) -> Temp {
         if !matches!(expr, Expr::Var(_) | Expr::Const(_)) {
             if let Some(existing) = self.lookup_expr_cache(expr) {
                 return existing;
@@ -1178,7 +1178,7 @@ impl<'a> Lowerer<'a> {
         lowered
     }
 
-    pub fn lower(mut self, expr: &Expr) -> LinearExpr {
+    pub fn lower(mut self, expr: &'expr Expr) -> LinearExpr {
         let output = self.lower_expr(expr);
 
         LinearExpr {
@@ -1188,14 +1188,28 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub fn lower_many(mut self, exprs: &[Expr]) -> LinearBlock {
-        let outputs = exprs.iter().map(|expr| self.lower_expr(expr)).collect();
+    fn lower_many_iter<I>(mut self, exprs: I) -> LinearBlock
+    where
+        I: IntoIterator<Item = &'expr Expr>,
+    {
+        let outputs = exprs
+            .into_iter()
+            .map(|expr| self.lower_expr(expr))
+            .collect();
 
         LinearBlock {
             instructions: self.instructions,
             outputs,
             num_temps: self.next_temp,
         }
+    }
+
+    pub fn lower_many(self, exprs: &'expr [Expr]) -> LinearBlock {
+        self.lower_many_iter(exprs.iter())
+    }
+
+    pub fn lower_many_refs(self, exprs: &[&'expr Expr]) -> LinearBlock {
+        self.lower_many_iter(exprs.iter().copied())
     }
 }
 
@@ -1209,6 +1223,13 @@ impl Expr {
     /// constant temporaries before heavier IR passes are introduced.
     pub fn lower_many_to_linear(exprs: &[Expr], vars: &[&str]) -> LinearBlock {
         Lowerer::new(vars).lower_many(exprs)
+    }
+
+    /// Lower borrowed symbolic expressions together without cloning the output
+    /// expression list first. This is important for generated BVP systems where
+    /// residual/Jacobian task plans already own the flattened expression order.
+    pub fn lower_many_refs_to_linear(exprs: &[&Expr], vars: &[&str]) -> LinearBlock {
+        Lowerer::new(vars).lower_many_refs(exprs)
     }
 }
 
@@ -1543,6 +1564,50 @@ impl Default for AtomTempReusePolicy {
     }
 }
 
+/// Optimization profile used while lowering packed AtomView expressions into
+/// the linear codegen IR.
+///
+/// `Full` preserves the historical behavior. `FastBootstrap` deliberately
+/// skips IR-level cleanup passes that can cost noticeable cold-start time on
+/// large generated BVP systems; it is intended for diagnostics and for
+/// one-shot solves where compile/bootstrap latency matters more than repeated
+/// callback throughput.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomOptimizationProfile {
+    Full,
+    FastBootstrap,
+    NoPeephole,
+    NoTempReuse,
+}
+
+impl Default for AtomOptimizationProfile {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+impl AtomOptimizationProfile {
+    fn use_peephole(self) -> bool {
+        !matches!(self, Self::FastBootstrap | Self::NoPeephole)
+    }
+
+    fn effective_reuse_policy(self, requested: AtomTempReusePolicy) -> AtomTempReusePolicy {
+        match self {
+            Self::FastBootstrap | Self::NoTempReuse => AtomTempReusePolicy::Never,
+            Self::Full | Self::NoPeephole => requested,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::FastBootstrap => "fast_bootstrap",
+            Self::NoPeephole => "no_peephole",
+            Self::NoTempReuse => "no_temp_reuse",
+        }
+    }
+}
+
 impl GeneratedBlock {
     pub fn new(fn_name: impl Into<String>, exprs: &[Expr], vars: &[&str]) -> Self {
         Self {
@@ -1556,11 +1621,11 @@ impl GeneratedBlock {
     /// Builds a named multi-output code generation unit from a flattened task
     /// plan produced by `codegen_tasks`.
     pub fn from_task_plan(plan: &CodegenTaskPlan<'_>) -> Self {
-        let exprs: Vec<Expr> = plan.output_exprs().into_iter().cloned().collect();
         Self {
             fn_name: plan.fn_name.to_string(),
             vars: plan.input_names.iter().map(|s| s.to_string()).collect(),
-            ir: Expr::lower_many_to_linear(&exprs, &plan.input_names),
+            ir: Lowerer::new(&plan.input_names)
+                .lower_many_iter(plan.outputs.iter().map(|output| output.expr)),
             layout: Some(plan.layout),
         }
     }
@@ -1644,15 +1709,59 @@ impl GeneratedBlock {
         layout: Option<CodegenOutputLayout>,
         reuse_policy: AtomTempReusePolicy,
     ) -> (Self, AtomGeneratedBlockBreakdown) {
+        Self::from_atom_views_with_symbols_with_breakdown_and_profile(
+            fn_name,
+            views,
+            vars,
+            symbols,
+            layout,
+            AtomOptimizationProfile::Full,
+            reuse_policy,
+        )
+    }
+
+    pub fn from_atom_views_with_symbols_with_breakdown_and_optimization_profile(
+        fn_name: impl Into<String>,
+        views: &[AtomView<'_>],
+        vars: &[String],
+        symbols: &[Symbol],
+        layout: Option<CodegenOutputLayout>,
+        optimization_profile: AtomOptimizationProfile,
+    ) -> (Self, AtomGeneratedBlockBreakdown) {
+        Self::from_atom_views_with_symbols_with_breakdown_and_profile(
+            fn_name,
+            views,
+            vars,
+            symbols,
+            layout,
+            optimization_profile,
+            AtomTempReusePolicy::Auto,
+        )
+    }
+
+    pub(crate) fn from_atom_views_with_symbols_with_breakdown_and_profile(
+        fn_name: impl Into<String>,
+        views: &[AtomView<'_>],
+        vars: &[String],
+        symbols: &[Symbol],
+        layout: Option<CodegenOutputLayout>,
+        optimization_profile: AtomOptimizationProfile,
+        reuse_policy: AtomTempReusePolicy,
+    ) -> (Self, AtomGeneratedBlockBreakdown) {
         let lower_begin = std::time::Instant::now();
         let lowered = AtomLowerer::new(symbols).lower_many(views);
         let lower_many_ms = lower_begin.elapsed().as_secs_f64() * 1_000.0;
 
-        let peephole_begin = std::time::Instant::now();
-        let optimized = lowered.peephole_optimize();
-        let peephole_ms = peephole_begin.elapsed().as_secs_f64() * 1_000.0;
+        let (optimized, peephole_ms) = if optimization_profile.use_peephole() {
+            let peephole_begin = std::time::Instant::now();
+            let optimized = lowered.peephole_optimize();
+            (optimized, peephole_begin.elapsed().as_secs_f64() * 1_000.0)
+        } else {
+            (lowered, 0.0)
+        };
 
-        let should_reuse = match reuse_policy {
+        let effective_reuse_policy = optimization_profile.effective_reuse_policy(reuse_policy);
+        let should_reuse = match effective_reuse_policy {
             AtomTempReusePolicy::Always => true,
             AtomTempReusePolicy::Never => false,
             AtomTempReusePolicy::Auto => should_apply_atom_temp_reuse(&optimized, layout),
@@ -1888,8 +1997,28 @@ impl CodegenModule {
         }
     }
 
+    fn source_capacity_hint(&self) -> usize {
+        let function_instrs: usize = self
+            .functions
+            .iter()
+            .map(|function| function.ir.instructions.len())
+            .sum();
+        let block_instrs = self.total_block_instruction_count();
+        let block_outputs = self.total_block_output_count();
+        let unit_count = self.functions.len() + self.blocks.len();
+
+        // Keep this deliberately conservative: generated expressions are
+        // text-heavy, and under-reserving hurts the large BVP AOT path more
+        // than a few spare KB of capacity.
+        4_096
+            + self.module_name.len()
+            + unit_count * 384
+            + (function_instrs + block_instrs) * 112
+            + block_outputs * 40
+    }
+
     fn emit_rust_source(&self) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.source_capacity_hint());
 
         out.push_str("// =========================================\n");
         out.push_str("// AUTO-GENERATED FILE. DO NOT EDIT MANUALLY.\n");
@@ -1926,7 +2055,7 @@ impl CodegenModule {
     fn emit_c_source(&self) -> String {
         use crate::symbolic::codegen::c_backend::c_emitter::CEmitter;
 
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.source_capacity_hint());
 
         out.push_str("/* ========================================= */\n");
         out.push_str("/* AUTO-GENERATED FILE. DO NOT EDIT MANUALLY. */\n");
@@ -1934,46 +2063,49 @@ impl CodegenModule {
         out.push_str("#include <math.h>\n\n");
 
         for func in &self.functions {
-            out.push_str(&CEmitter::emit_function(
-                &func.ir,
-                &func.fn_name,
-                func.vars.len(),
-            ));
+            CEmitter::emit_function_into(&func.ir, &func.fn_name, func.vars.len(), &mut out);
             out.push('\n');
         }
 
         for block in &self.blocks {
-            let emitted = match block.layout {
+            match block.layout {
                 Some(CodegenOutputLayout::Vector { len }) => {
-                    CEmitter::emit_residual_block_function(
+                    CEmitter::emit_residual_block_function_into(
                         &block.ir,
                         &block.fn_name,
                         block.vars.len(),
                         len,
+                        &mut out,
                     )
                 }
                 Some(CodegenOutputLayout::Matrix { rows, cols }) => {
-                    CEmitter::emit_dense_jacobian_block_function(
+                    CEmitter::emit_dense_jacobian_block_function_into(
                         &block.ir,
                         &block.fn_name,
                         block.vars.len(),
                         rows,
                         cols,
+                        &mut out,
                     )
                 }
                 Some(CodegenOutputLayout::SparseValues { rows, cols, nnz }) => {
-                    CEmitter::emit_sparse_values_block_function(
+                    CEmitter::emit_sparse_values_block_function_into(
                         &block.ir,
                         &block.fn_name,
                         block.vars.len(),
                         rows,
                         cols,
                         nnz,
+                        &mut out,
                     )
                 }
-                None => CEmitter::emit_block_function(&block.ir, &block.fn_name, block.vars.len()),
+                None => CEmitter::emit_block_function_into(
+                    &block.ir,
+                    &block.fn_name,
+                    block.vars.len(),
+                    &mut out,
+                ),
             };
-            out.push_str(&emitted);
             out.push('\n');
         }
 
@@ -1983,7 +2115,7 @@ impl CodegenModule {
     fn emit_zig_source(&self) -> String {
         use crate::symbolic::codegen::zig_backend::zig_emitter::ZigEmitter;
 
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.source_capacity_hint());
         out.push_str("// =========================================\n");
         out.push_str("// AUTO-GENERATED FILE. DO NOT EDIT MANUALLY.\n");
         out.push_str("// =========================================\n\n");

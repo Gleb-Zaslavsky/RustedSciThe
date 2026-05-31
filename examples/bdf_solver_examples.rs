@@ -58,7 +58,11 @@ fn riccati_equation() {
 
     let (t_result, y_result) = solver.get_result();
     println!("Initial value: y(0) = {}", y_result[(0, 0)]);
-    println!("Final value: y({}) = {}", t_bound, y_result[(y_result.nrows() - 1, 0)]);
+    println!(
+        "Final value: y({}) = {}",
+        t_bound,
+        y_result[(y_result.nrows() - 1, 0)]
+    );
     println!("Solution points: {}", t_result.len());
 }
 
@@ -85,10 +89,18 @@ fn van_der_pol_oscillator() {
     println!("Status: {}", solver.get_status());
 
     let (_, y_result) = solver.get_result();
-    println!("Initial: y1(0) = {}, y2(0) = {}", y_result[(0, 0)], y_result[(0, 1)]);
-    println!("Final: y1({}) = {}, y2({}) = {}", 
-             t_bound, y_result[(y_result.nrows() - 1, 0)], 
-             t_bound, y_result[(y_result.nrows() - 1, 1)]);
+    println!(
+        "Initial: y1(0) = {}, y2(0) = {}",
+        y_result[(0, 0)],
+        y_result[(0, 1)]
+    );
+    println!(
+        "Final: y1({}) = {}, y2({}) = {}",
+        t_bound,
+        y_result[(y_result.nrows() - 1, 0)],
+        t_bound,
+        y_result[(y_result.nrows() - 1, 1)]
+    );
     println!("Van der Pol exhibits limit cycle behavior (bounded oscillation)");
 }
 
@@ -121,7 +133,8 @@ fn logistic_equation() {
     let k = 10.0;
     let y0_val = 1.0;
     let t_final = t_result[t_result.len() - 1];
-    let y_analytical = k * y0_val * (r * t_final).exp() / (k + y0_val * ((r * t_final).exp() - 1.0));
+    let y_analytical =
+        k * y0_val * (r * t_final).exp() / (k + y0_val * ((r * t_final).exp() - 1.0));
     let y_numerical = y_result[(y_result.nrows() - 1, 0)];
 
     println!("Final time: {}", t_final);
@@ -165,11 +178,17 @@ fn nonlinear_pendulum() {
     let initial_energy = 0.5 * initial_omega.powi(2) - initial_theta.cos();
     let final_energy = 0.5 * final_omega.powi(2) - final_theta.cos();
 
-    println!("Initial: θ = {:.4}, ω = {:.4}", initial_theta, initial_omega);
+    println!(
+        "Initial: θ = {:.4}, ω = {:.4}",
+        initial_theta, initial_omega
+    );
     println!("Final: θ = {:.4}, ω = {:.4}", final_theta, final_omega);
     println!("Initial energy: {:.6}", initial_energy);
     println!("Final energy: {:.6}", final_energy);
-    println!("Energy conservation error: {:.2e}", (final_energy - initial_energy).abs());
+    println!(
+        "Energy conservation error: {:.2e}",
+        (final_energy - initial_energy).abs()
+    );
 }
 
 fn lorenz_system() {
@@ -198,12 +217,18 @@ fn lorenz_system() {
 
     let (_, y_result) = solver.get_result();
 
-    println!("Initial: x={:.2}, y={:.2}, z={:.2}", 
-             y_result[(0, 0)], y_result[(0, 1)], y_result[(0, 2)]);
-    println!("Final: x={:.2}, y={:.2}, z={:.2}", 
-             y_result[(y_result.nrows() - 1, 0)], 
-             y_result[(y_result.nrows() - 1, 1)], 
-             y_result[(y_result.nrows() - 1, 2)]);
+    println!(
+        "Initial: x={:.2}, y={:.2}, z={:.2}",
+        y_result[(0, 0)],
+        y_result[(0, 1)],
+        y_result[(0, 2)]
+    );
+    println!(
+        "Final: x={:.2}, y={:.2}, z={:.2}",
+        y_result[(y_result.nrows() - 1, 0)],
+        y_result[(y_result.nrows() - 1, 1)],
+        y_result[(y_result.nrows() - 1, 2)]
+    );
 
     // Check bounds for chaotic attractor
     let mut x_min = f64::INFINITY;
@@ -256,12 +281,18 @@ fn stiff_chemical_reaction() {
         + y_result[(y_result.nrows() - 1, 1)]
         + y_result[(y_result.nrows() - 1, 2)];
 
-    println!("Initial concentrations: A={:.3}, B={:.3}, C={:.3}", 
-             y_result[(0, 0)], y_result[(0, 1)], y_result[(0, 2)]);
-    println!("Final concentrations: A={:.3}, B={:.3}, C={:.3}", 
-             y_result[(y_result.nrows() - 1, 0)], 
-             y_result[(y_result.nrows() - 1, 1)], 
-             y_result[(y_result.nrows() - 1, 2)]);
+    println!(
+        "Initial concentrations: A={:.3}, B={:.3}, C={:.3}",
+        y_result[(0, 0)],
+        y_result[(0, 1)],
+        y_result[(0, 2)]
+    );
+    println!(
+        "Final concentrations: A={:.3}, B={:.3}, C={:.3}",
+        y_result[(y_result.nrows() - 1, 0)],
+        y_result[(y_result.nrows() - 1, 1)],
+        y_result[(y_result.nrows() - 1, 2)]
+    );
     println!("Mass conservation: {:.6} (should be 1.0)", final_sum);
     println!("Conservation error: {:.2e}", (final_sum - 1.0).abs());
 
@@ -269,8 +300,12 @@ fn stiff_chemical_reaction() {
     let t_final = t_result[t_result.len() - 1];
     let y1_analytical = (-t_final).exp();
     let y1_numerical = y_result[(y_result.nrows() - 1, 0)];
-    println!("A analytical: {:.6}, numerical: {:.6}, error: {:.2e}", 
-             y1_analytical, y1_numerical, (y1_numerical - y1_analytical).abs());
+    println!(
+        "A analytical: {:.6}, numerical: {:.6}, error: {:.2e}",
+        y1_analytical,
+        y1_numerical,
+        (y1_numerical - y1_analytical).abs()
+    );
 }
 
 fn stop_condition_example() {
@@ -304,24 +339,37 @@ fn stop_condition_example() {
     let final_t = t_result[t_result.len() - 1];
     let final_y = y_result[(y_result.nrows() - 1, 0)];
 
-    println!("Integration stopped at t = {:.4} (instead of t = {})", final_t, t_bound);
+    println!(
+        "Integration stopped at t = {:.4} (instead of t = {})",
+        final_t, t_bound
+    );
     println!("Final value: y = {:.4} (target was 2.0)", final_y);
     println!("Analytical stop time: t = ln(2) = {:.4}", 2.0_f64.ln());
     println!("Error in stop time: {:.2e}", (final_t - 2.0_f64.ln()).abs());
 
     // Demonstrate multiple variable stop condition
     println!("\nMultiple variable stop condition example:");
-    
+
     // Harmonic oscillator: y1' = y2, y2' = -y1
     let eq1 = Expr::parse_expression("y2");
     let eq2 = Expr::parse_expression("-y1");
     let eq_system = vec![eq1, eq2];
     let values = vec!["y1".to_string(), "y2".to_string()];
-    
+
     let mut solver = ODEsolver::new(
-        eq_system, values, "t".to_string(), "BDF".to_string(),
-        0.0, DVector::from_vec(vec![1.0, 0.0]), 10.0,
-        0.01, 1e-6, 1e-3, None, false, None,
+        eq_system,
+        values,
+        "t".to_string(),
+        "BDF".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 0.0]),
+        10.0,
+        0.01,
+        1e-6,
+        1e-3,
+        None,
+        false,
+        None,
     );
 
     // Stop when y1 crosses zero (first time)
@@ -336,5 +384,8 @@ fn stop_condition_example() {
 
     println!("Harmonic oscillator stopped at t = {:.4}", final_t);
     println!("y1 = {:.6} (target was 0.0)", final_y1);
-    println!("Analytical crossing time: t = π/2 = {:.4}", std::f64::consts::PI / 2.0);
+    println!(
+        "Analytical crossing time: t = π/2 = {:.4}",
+        std::f64::consts::PI / 2.0
+    );
 }

@@ -17,6 +17,7 @@ use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
 use log::info;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Description of one generated Zig AOT library ready to be written to disk.
@@ -108,7 +109,7 @@ impl GeneratedZigAotLibrary {
         let aot_interface_zig = library_dir.join("aot_interface.zig");
 
         fs::write(&build_zig, self.emit_build_zig())?;
-        fs::write(&generated_zig, self.emit_generated_zig())?;
+        self.write_generated_zig(&generated_zig)?;
         fs::write(&aot_interface_zig, self.emit_aot_interface_zig())?;
 
         info!(
@@ -148,11 +149,11 @@ pub fn build(b: *std.Build) void {{\n\
         )
     }
 
-    fn emit_generated_zig(&self) -> String {
-        let mut out = String::new();
-        out.push_str("// AUTO-GENERATED ZIG AOT SOURCE\n\n");
-        out.push_str(&self.zig_source);
-        out
+    fn write_generated_zig(&self, path: &Path) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(b"// AUTO-GENERATED ZIG AOT SOURCE\n\n")?;
+        file.write_all(self.zig_source.as_bytes())?;
+        Ok(())
     }
 
     fn emit_aot_interface_zig(&self) -> String {
@@ -162,6 +163,54 @@ pub fn build(b: *std.Build) void {{\n\
             .io
             .jacobian_nnz
             .unwrap_or(self.manifest.io.jacobian_rows * self.manifest.io.jacobian_cols);
+        let residual_chunk_exports = self
+            .manifest
+            .functions
+            .residual_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\nexport fn rustedscithe_aot_chunk_{fn_name}(\n\
+    args_ptr: [*]const f64,\n\
+    args_len: usize,\n\
+    out_ptr: [*]f64,\n\
+    out_len: usize,\n\
+) bool {{\n\
+    _ = args_len;\n\
+    if (out_len != {out_len}) return false;\n\
+    generated.{fn_name}(args_ptr, out_ptr);\n\
+    return true;\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let jacobian_chunk_exports = self
+            .manifest
+            .functions
+            .jacobian_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\nexport fn rustedscithe_aot_chunk_{fn_name}(\n\
+    args_ptr: [*]const f64,\n\
+    args_len: usize,\n\
+    out_ptr: [*]f64,\n\
+    out_len: usize,\n\
+) bool {{\n\
+    _ = args_len;\n\
+    if (out_len != {out_len}) return false;\n\
+    generated.{fn_name}(args_ptr, out_ptr);\n\
+    return true;\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
 
         let residual_dispatch = if self.manifest.functions.residual_chunks.is_empty() {
             format!(
@@ -234,7 +283,8 @@ export fn rustedscithe_aot_eval_jacobian_values(\n\
             jacobian_nnz = jacobian_nnz,
             residual_dispatch = residual_dispatch,
             jacobian_dispatch = jacobian_dispatch,
-        )
+        ) + residual_chunk_exports.as_str()
+            + jacobian_chunk_exports.as_str()
     }
 }
 
@@ -273,6 +323,39 @@ mod tests {
     use crate::symbolic::codegen::CodegenIR::CodegenModule;
     use crate::symbolic::symbolic_engine::Expr;
     use tempfile::tempdir;
+
+    fn chunked_dense_problem() -> PreparedDenseProblem<'static> {
+        let residuals = Box::leak(Box::new(vec![
+            Expr::parse_expression("x + 1"),
+            Expr::parse_expression("y + 2"),
+        ]));
+        let jacobian = Box::leak(Box::new(vec![
+            vec![Expr::parse_expression("1"), Expr::parse_expression("0")],
+            vec![Expr::parse_expression("0"), Expr::parse_expression("1")],
+        ]));
+        let vars = Box::leak(Box::new(vec!["x", "y"]));
+
+        PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals,
+                variables: vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::ByOutputCount {
+                max_outputs_per_chunk: 1,
+            }),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian,
+                variables: vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 1 }),
+        )
+    }
 
     #[test]
     fn generated_zig_library_writes_expected_file_layout() {
@@ -320,6 +403,21 @@ mod tests {
         assert!(build_zig.contains("test_zig_lib"));
         assert!(aot_interface.contains("rustedscithe_aot_eval_residual"));
         assert!(aot_interface.contains("rustedscithe_aot_eval_jacobian_values"));
+    }
+
+    #[test]
+    fn generated_zig_library_exports_chunk_ffi_symbols() {
+        let prepared = chunked_dense_problem();
+        let module = CodegenModule::new("test_module").with_language(CodegenLanguage::Zig);
+        let library_spec =
+            GeneratedZigAotLibrary::from_prepared_dense_problem("test_zig_lib", &prepared, &module);
+
+        let aot_interface = library_spec.emit_aot_interface_zig();
+
+        assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_residual_chunk_0"));
+        assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
+        assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
+        assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
     }
 
     #[test]

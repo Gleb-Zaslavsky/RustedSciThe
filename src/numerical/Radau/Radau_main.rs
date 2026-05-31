@@ -21,6 +21,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+type RadauNativeRhs = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
+type RadauNativeJac = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
+
+#[derive(Clone, Debug)]
+struct RadauNativeStepContext {
+    y_n: DVector<f64>,
+    h: f64,
+    t_n: f64,
+}
+
 /// Radau IIA method orders and corresponding coefficients
 #[derive(Debug, Clone)]
 pub enum RadauOrder {
@@ -332,6 +342,9 @@ pub struct Radau {
     pub tolerance: f64,
     generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     statistics: Arc<Mutex<RadauStatistics>>,
+    native_rhs: Option<RadauNativeRhs>,
+    native_jac: Option<RadauNativeJac>,
+    native_step_context: Option<Arc<Mutex<RadauNativeStepContext>>>,
 }
 
 impl Display for Radau {
@@ -393,6 +406,9 @@ impl Radau {
             tolerance: 1e-6,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             statistics,
+            native_rhs: None,
+            native_jac: None,
+            native_step_context: None,
         }
     }
 
@@ -538,6 +554,144 @@ impl Radau {
     pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
         self.generated_backend_config = config.clone();
         self.newton.set_generated_backend_config(config);
+    }
+
+    /// Installs pure numerical ODE callbacks for Radau.
+    ///
+    /// If `jac` is `None`, stage Jacobians are computed by finite differences
+    /// on the stage residual system.
+    pub fn set_native_ode_callbacks<F, J>(&mut self, rhs: F, jac: Option<J>)
+    where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        let rhs: RadauNativeRhs = Arc::new(rhs);
+        let jac: Option<RadauNativeJac> = jac.map(|j| Arc::new(j) as RadauNativeJac);
+        self.native_rhs = Some(Arc::clone(&rhs));
+        self.native_jac = jac.clone();
+
+        let n_vars = self.y.len();
+        let n_stages = self.coefficients.stages;
+        let coeff_a = self.coefficients.a.clone();
+        let coeff_c = self.coefficients.c.clone();
+        let context = Arc::new(Mutex::new(RadauNativeStepContext {
+            y_n: self.y.clone(),
+            h: self.h.unwrap_or(1e-4),
+            t_n: self.t,
+        }));
+        self.native_step_context = Some(Arc::clone(&context));
+
+        let residual_builder: Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync> =
+            Arc::new({
+                let rhs = Arc::clone(&rhs);
+                let coeff_a = coeff_a.clone();
+                let coeff_c = coeff_c.clone();
+                let context = Arc::clone(&context);
+                move |t_unused: f64, packed: &DVector<f64>| -> DVector<f64> {
+                    let _ = t_unused;
+                    let n_k = n_vars * n_stages;
+                    let k = DVector::from_iterator(n_k, packed.iter().take(n_k).copied());
+                    let ctx = context.lock().expect("Radau native context lock poisoned");
+                    let mut residual = DVector::zeros(n_k);
+
+                    for stage_i in 0..n_stages {
+                        let mut y_stage = DVector::zeros(n_vars);
+                        for var_j in 0..n_vars {
+                            let mut value = ctx.y_n[var_j];
+                            for stage_k in 0..n_stages {
+                                let idx = var_j * n_stages + stage_k;
+                                value += ctx.h * coeff_a[(stage_i, stage_k)] * k[idx];
+                            }
+                            y_stage[var_j] = value;
+                        }
+                        let t_stage = ctx.t_n + coeff_c[stage_i] * ctx.h;
+                        let f_stage = rhs(t_stage, &y_stage);
+                        for var_j in 0..n_vars {
+                            let idx = var_j * n_stages + stage_i;
+                            residual[idx] = k[idx] - f_stage[var_j];
+                        }
+                    }
+                    residual
+                }
+            });
+
+        let jac_builder: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = match jac {
+            Some(jac_fun) => {
+                let coeff_a = coeff_a.clone();
+                let coeff_c = coeff_c.clone();
+                let context = Arc::clone(&context);
+                Box::new(
+                    move |t_unused: f64, packed: &DVector<f64>| -> DMatrix<f64> {
+                        let _ = t_unused;
+                        let n_k = n_vars * n_stages;
+                        let k = DVector::from_iterator(n_k, packed.iter().take(n_k).copied());
+                        let ctx = context.lock().expect("Radau native context lock poisoned");
+                        let mut jac_k = DMatrix::zeros(n_k, n_k);
+
+                        for stage_i in 0..n_stages {
+                            let mut y_stage = DVector::zeros(n_vars);
+                            for var_j in 0..n_vars {
+                                let mut value = ctx.y_n[var_j];
+                                for stage_k in 0..n_stages {
+                                    let idx = var_j * n_stages + stage_k;
+                                    value += ctx.h * coeff_a[(stage_i, stage_k)] * k[idx];
+                                }
+                                y_stage[var_j] = value;
+                            }
+                            let t_stage = ctx.t_n + coeff_c[stage_i] * ctx.h;
+                            let jf = jac_fun(t_stage, &y_stage);
+                            for var_row in 0..n_vars {
+                                for stage_col in 0..n_stages {
+                                    for var_col in 0..n_vars {
+                                        let row = var_row * n_stages + stage_i;
+                                        let col = var_col * n_stages + stage_col;
+                                        let mut value = -ctx.h
+                                            * coeff_a[(stage_i, stage_col)]
+                                            * jf[(var_row, var_col)];
+                                        if var_row == var_col && stage_i == stage_col {
+                                            value += 1.0;
+                                        }
+                                        jac_k[(row, col)] = value;
+                                    }
+                                }
+                            }
+                        }
+                        jac_k
+                    },
+                )
+            }
+            None => {
+                let residual_for_fd = Arc::clone(&residual_builder);
+                Box::new(
+                    move |t_unused: f64, packed: &DVector<f64>| -> DMatrix<f64> {
+                        let _ = t_unused;
+                        let n = packed.len().min(n_vars * n_stages);
+                        if n == 0 {
+                            return DMatrix::zeros(0, 0);
+                        }
+                        let k = DVector::from_iterator(n, packed.iter().take(n).copied());
+                        let r0 = residual_for_fd(0.0, &k);
+                        let mut jac_k = DMatrix::zeros(n, n);
+                        let eps_base = f64::EPSILON.sqrt();
+                        for col in 0..n {
+                            let mut k_pert = k.clone();
+                            let h = eps_base * (1.0 + k[col].abs());
+                            k_pert[col] += h;
+                            let r1 = residual_for_fd(0.0, &k_pert);
+                            for row in 0..n {
+                                jac_k[(row, col)] = (r1[row] - r0[row]) / h;
+                            }
+                        }
+                        jac_k
+                    },
+                )
+            }
+        };
+
+        self.newton.set_native_callbacks(
+            Box::new(move |t, y| residual_builder(t, y)),
+            Some(jac_builder),
+        );
     }
 
     pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
@@ -752,7 +906,7 @@ impl Radau {
 
         // Calculate step size
         let dt = if self.global_timestepping {
-            self.h.unwrap()
+            self.h.unwrap().min((self.t_bound - self.t).max(0.0))
         } else {
             // Adaptive step size logic could go here
             (self.t_bound - self.t).min(self.h.unwrap())
@@ -760,6 +914,12 @@ impl Radau {
 
         // Set up Newton solver for this step
         let t_new = self.t + dt;
+        if let Some(context) = self.native_step_context.as_ref() {
+            let mut ctx = context.lock().expect("Radau native context lock poisoned");
+            ctx.y_n = self.y.clone();
+            ctx.h = dt;
+            ctx.t_n = self.t;
+        }
         self.newton.set_parameters(self.y.clone(), dt, t_new);
 
         // Set initial guess for stage derivatives
@@ -768,7 +928,7 @@ impl Radau {
 
         for stage_i in 0..n_stages {
             for var_j in 0..n_vars {
-                let idx = stage_i * n_vars + var_j;
+                let idx = var_j * n_stages + stage_i;
                 // Simple initial guess - could be improved
                 initial_guess[idx] = self.k_stages[(var_j, stage_i)];
             }
@@ -922,7 +1082,7 @@ impl Radau {
     pub fn step(&mut self) {
         // Similar to BE::step but for Radau
         let t = self.t;
-        if t == self.t_bound {
+        if t >= self.t_bound {
             self.t_old = Some(t);
             self.status = "finished".to_string();
         } else {
@@ -1105,8 +1265,9 @@ impl Radau {
 
     pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
         info!("Initializing Radau solver with {:?} order", self.order);
-
-        self.newton.try_eq_generate()?;
+        if self.native_rhs.is_none() {
+            self.newton.try_eq_generate()?;
+        }
 
         // Run the main integration loop
         self.main_loop();

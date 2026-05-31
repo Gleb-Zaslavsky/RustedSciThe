@@ -10,14 +10,15 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
+    run_native_integration_for_method_with_policy, Lsode2NativeIntegrationLimits,
+    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
 };
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle,
+    compile_native_sparse_aot_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle, NativeJacobianStorage,
 };
-use super::native_preflight::{Lsode2NativeStepProbeSummary, run_native_step_preflight};
+use super::native_preflight::{run_native_step_preflight, Lsode2NativeStepProbeSummary};
 use super::native_step_engine::Lsode2NativeStepMethod;
 use super::statistics::Lsode2NativeStatistics;
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
@@ -274,12 +275,19 @@ impl Lsode2Solver {
                     self.native_statistics.record_algorithm_decision(&decision);
                 }
                 let started = Instant::now();
-                let native_method = native_method_for_decision(&decision);
-                let maybe_solve_summary = self.run_native_integration_internal_with_method(
-                    Lsode2NativeIntegrationLimits::new(max_step_attempts, max_accepted_steps),
-                    false,
-                    Some(native_method),
-                )?;
+                let limits =
+                    Lsode2NativeIntegrationLimits::new(max_step_attempts, max_accepted_steps);
+                let maybe_solve_summary =
+                    if self.config.controller.mode == Lsode2ControllerMode::AutomaticAdamsBdf {
+                        self.run_native_integration_internal_with_method(limits, true, None)?
+                    } else {
+                        let native_method = native_method_for_decision(&decision);
+                        self.run_native_integration_internal_with_method(
+                            limits,
+                            false,
+                            Some(native_method),
+                        )?
+                    };
                 if let Some(solve_summary) = maybe_solve_summary {
                     self.native_step_probe =
                         Some(native_step_probe_from_integration_summary(&solve_summary));
@@ -366,7 +374,70 @@ impl Lsode2Solver {
     }
 
     pub fn statistics(&self) -> IvpBackendStatistics {
-        self.inner.get_statistics()
+        let bridge = self.inner.get_statistics();
+        let bridge_has_activity = bridge.solve_calls > 0
+            || bridge.step_calls > 0
+            || bridge.residual_calls > 0
+            || bridge.jacobian_calls > 0;
+        if bridge_has_activity {
+            return bridge;
+        }
+
+        let native = &self.native_statistics;
+        let native_has_activity = native.solve_calls > 0
+            || native.backend_prepare_calls > 0
+            || native.native_step_attempts > 0
+            || native.native_residual_calls > 0
+            || native.native_jacobian_calls > 0
+            || native.native_linear_solve_calls > 0;
+        if !native_has_activity {
+            return bridge;
+        }
+
+        IvpBackendStatistics {
+            backend_prepare_calls: native
+                .backend_prepare_calls
+                .max(native.bridge_prepare_calls),
+            backend_prepare_ms_total: if native.backend_prepare_ms_total > 0.0 {
+                native.backend_prepare_ms_total
+            } else {
+                native.bridge_prepare_ms_total
+            },
+            solve_calls: native.solve_calls.max(native.bridge_solve_calls),
+            solve_ms_total: if native.solve_ms_total > 0.0 {
+                native.solve_ms_total
+            } else {
+                native.bridge_solve_ms_total
+            },
+            step_calls: native.bridge_step_calls.max(native.native_step_attempts),
+            nonlinear_solve_calls: native.bridge_nonlinear_solve_calls.max(
+                native.native_nonlinear_converged_count + native.native_nonlinear_continue_count,
+            ),
+            nonlinear_iterations_total: native.bridge_nonlinear_iterations_total,
+            residual_calls: native
+                .bridge_residual_calls
+                .max(native.native_residual_calls),
+            residual_ms_total: if native.native_residual_ms_total > 0.0 {
+                native.native_residual_ms_total
+            } else {
+                native.bridge_residual_ms_total
+            },
+            jacobian_calls: native
+                .bridge_jacobian_calls
+                .max(native.native_jacobian_calls),
+            jacobian_ms_total: if native.native_jacobian_ms_total > 0.0 {
+                native.native_jacobian_ms_total
+            } else {
+                native.bridge_jacobian_ms_total
+            },
+            bdf_nfev_total: native.bridge_bdf_nfev_total,
+            bdf_njev_total: native
+                .bridge_bdf_njev_total
+                .max(native.native_jacobian_calls),
+            bdf_nlu_total: native
+                .bridge_bdf_nlu_total
+                .max(native.native_linear_solve_calls),
+        }
     }
 
     /// Returns LSODE2-native statistics collected at the facade level.
@@ -458,13 +529,74 @@ impl Lsode2Solver {
             self.native_statistics.record_algorithm_decision(&decision);
         }
         let method = method_override.unwrap_or_else(|| native_method_for_decision(&decision));
-        let outcome = match method {
-            Lsode2NativeStepMethod::BdfLike => {
-                run_native_integration(&self.config, limits).map_err(Lsode2Error::from)?
-            }
-            Lsode2NativeStepMethod::AdamsLike => {
-                run_native_integration_for_method(&self.config, limits, method)
-                    .map_err(Lsode2Error::from)?
+        let outcome = if lsoda_probe_flow_enabled
+            && record_decision
+            && method_override.is_none()
+            && self.config.controller.mode == Lsode2ControllerMode::AutomaticAdamsBdf
+        {
+            let config = &self.config;
+            let algorithm = &mut self.algorithm;
+            let native_statistics = &mut self.native_statistics;
+            let last_native_switch_telemetry = &mut self.last_native_switch_telemetry;
+            let switch_telemetry_hints = self.switch_telemetry_hints;
+            run_native_integration_for_method_with_policy(
+                config,
+                limits,
+                method,
+                |report, current| {
+                    let family = method_family_from_native_step_method(current);
+                    native_statistics
+                        .record_native_method_cost_sample(family, report.iterations.max(1) as f64);
+                    *last_native_switch_telemetry = Some(report.telemetry);
+                    if report.accepted() {
+                        algorithm.record_accepted_steps_for_switch_probe(1);
+                    }
+                    let mut telemetry = Lsode2SwitchTelemetry::default()
+                        .with_accepted_steps(native_statistics.native_step_accepts + 1)
+                        .with_rejected_steps(
+                            native_statistics.native_step_rejects_error_test
+                                + native_statistics.native_step_rejects_nonlinear,
+                        )
+                        .with_convergence_failures(native_statistics.native_step_rejects_nonlinear)
+                        .with_adams_cost_samples(native_statistics.native_adams_cost_samples)
+                        .with_bdf_cost_samples(native_statistics.native_bdf_cost_samples);
+                    if let Some(cost) = native_statistics.adams_step_cost_estimate() {
+                        telemetry = telemetry.with_adams_step_cost_estimate(cost);
+                    }
+                    if let Some(cost) = native_statistics.bdf_step_cost_estimate() {
+                        telemetry = telemetry.with_bdf_step_cost_estimate(cost);
+                    }
+                    if telemetry
+                        .stiffness_ratio
+                        .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
+                    {
+                        telemetry.stiffness_ratio = report.telemetry.stiffness_ratio;
+                    }
+                    if telemetry.adams_step_size_cap_estimate.is_none() {
+                        telemetry.adams_step_size_cap_estimate =
+                            report.telemetry.adams_step_size_cap_estimate;
+                    }
+                    if telemetry.bdf_step_size_cap_estimate.is_none() {
+                        telemetry.bdf_step_size_cap_estimate =
+                            report.telemetry.bdf_step_size_cap_estimate;
+                    }
+                    telemetry = switch_telemetry_hints.apply_to(telemetry);
+                    let decision = algorithm.switch_decision_stateful(telemetry);
+                    algorithm.record_switch_decision_at(decision, report.accepted_t());
+                    native_statistics.record_algorithm_decision(&decision);
+                    decision.executed_family().map(native_method_for_family)
+                },
+            )
+            .map_err(Lsode2Error::from)?
+        } else {
+            match method {
+                Lsode2NativeStepMethod::BdfLike => {
+                    run_native_integration(&self.config, limits).map_err(Lsode2Error::from)?
+                }
+                Lsode2NativeStepMethod::AdamsLike => {
+                    run_native_integration_for_method(&self.config, limits, method)
+                        .map_err(Lsode2Error::from)?
+                }
             }
         };
         if let Some(summary) = &outcome.summary {
@@ -748,6 +880,10 @@ fn native_method_for_decision(decision: &Lsode2SwitchDecision) -> Lsode2NativeSt
     let family = decision
         .executed_family()
         .unwrap_or(decision.preferred_family);
+    native_method_for_family(family)
+}
+
+fn native_method_for_family(family: Lsode2MethodFamily) -> Lsode2NativeStepMethod {
     match family {
         Lsode2MethodFamily::Adams => Lsode2NativeStepMethod::AdamsLike,
         Lsode2MethodFamily::Bdf => Lsode2NativeStepMethod::BdfLike,

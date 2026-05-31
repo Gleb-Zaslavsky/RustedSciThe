@@ -340,6 +340,21 @@ pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskErro
         &spec.solver_options.generated_backend,
         &spec.solver.backend,
     )?;
+    if matches!(
+        generated_config.backend_policy_override,
+        Some(
+            BackendSelectionPolicy::NumericOnly
+                | BackendSelectionPolicy::PreferAotThenNumeric
+                | BackendSelectionPolicy::PreferLambdifyThenNumeric
+        )
+    ) {
+        return Err(BvpTaskError::Semantic(
+            "BVP task documents are symbolic inputs and cannot provide Rust numeric_rhs closures; \
+             use lambdify/AOT backend policies in task docs, or the damped NRBVP Rust API with \
+             set_numeric_rhs/with_numeric_rhs for pure numeric BVP solving"
+                .to_string(),
+        ));
+    }
     if let Some(structure_damp) = &mut solver.structure_damp {
         structure_damp.set_generated_backend_config(generated_config.clone());
     }
@@ -1535,6 +1550,97 @@ refinement_steps: 1
                 .iterative_refinement_steps,
             1
         );
+    }
+
+    #[test]
+    fn bvp_task_docs_reject_numeric_backend_policies_because_they_cannot_carry_closures() {
+        for policy in [
+            "numeric_only",
+            "prefer_aot_then_numeric",
+            "prefer_lambdify_then_numeric",
+        ] {
+            let input = format!(
+                r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.5
+
+solver_options
+backend_policy: {policy}
+"#
+            );
+
+            let spec = parse_bvp_task_from_str(&input).expect("syntax is valid");
+            let err = match build_bvp_solver_from_spec(&spec) {
+                Ok(_) => panic!("task docs cannot request pure numeric closure route: {policy}"),
+                Err(err) => err,
+            };
+            match err {
+                BvpTaskError::Semantic(message) => {
+                    assert!(
+                        message.contains("cannot provide Rust numeric_rhs closures"),
+                        "unexpected semantic error for {policy}: {message}"
+                    );
+                }
+                other => panic!("expected semantic error for {policy}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bvp_task_docs_accept_symbolic_backend_policies_after_numeric_guard() {
+        for policy in ["lambdify_only", "prefer_aot_then_lambdify", "aot_only"] {
+            let input = format!(
+                r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.5
+
+solver_options
+backend_policy: {policy}
+"#
+            );
+
+            let spec = parse_bvp_task_from_str(&input).expect("syntax is valid");
+            build_bvp_solver_from_spec(&spec)
+                .unwrap_or_else(|err| panic!("symbolic policy {policy} should be accepted: {err}"));
+        }
     }
 
     #[test]

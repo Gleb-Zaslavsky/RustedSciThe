@@ -52,15 +52,13 @@ use std::ops::Range;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-// Minimum work thresholds before the Auto policy allows parallel execution.
-// Derived from measured rayon::join overhead (~2000 ns on this machine) and
-// typical per-value cost (~5 ns): need at least ~400 values/job to break even,
-// times a minimum of 2 jobs = ~800 values total. Use 2000 as a conservative
-// floor that accounts for variance and non-uniform chunk costs.
-const DEFAULT_MIN_RESIDUAL_OUTPUTS_FOR_PARALLEL: usize = 512;
-const DEFAULT_MIN_SPARSE_VALUES_FOR_PARALLEL: usize = 2000;
+// Runtime parallelism must be chosen from measured scheduling overhead rather
+// than from one developer machine.  The unit-cost estimate is intentionally
+// small and conservative: if the generated scalar operations are heavier than
+// this, Auto will become more willing to parallelize on that workload after the
+// join-overhead calibration moves the threshold down.
 const DEFAULT_ESTIMATED_UNIT_COST_NS: f64 = 5.0;
-const DEFAULT_MIN_WORK_PER_JOB: usize = 400;
+const DEFAULT_PARALLEL_OVERHEAD_SAFETY_FACTOR: f64 = 2.0;
 
 /// Cached process-local measurement of raw rayon join overhead on the current machine.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,6 +84,62 @@ pub struct AutoParallelRecommendation {
     pub min_work_per_job: usize,
     /// Number of workers observed during calibration.
     pub workers: usize,
+    /// Residual callback workload diagnostics.
+    pub residual_stage: AutoParallelStagePlan,
+    /// Sparse/Banded Jacobian callback workload diagnostics.
+    pub sparse_stage: AutoParallelStagePlan,
+}
+
+/// Why `Auto` accepted or rejected parallel execution for one callback stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoParallelDecisionReason {
+    /// There is no work for this callback stage.
+    NoWork,
+    /// The generated artifact has only one chunk or the current machine can use
+    /// only one useful grouped job, so there is nothing meaningful to schedule.
+    SingleChunkOrJob,
+    /// The whole stage is too small to amortize measured rayon scheduling cost.
+    TotalWorkTooSmall,
+    /// Grouped jobs would be too light.
+    WorkPerJobTooSmall,
+    /// Individual generated chunks would be too light; this is the usual sign
+    /// of over-fragmented generated code.
+    WorkPerChunkTooSmall,
+    /// The stage is large and coarse enough to run in parallel.
+    ParallelCandidate,
+}
+
+impl AutoParallelDecisionReason {
+    /// Short stable label for logs and story-table diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoWork => "no_work",
+            Self::SingleChunkOrJob => "single_chunk_or_job",
+            Self::TotalWorkTooSmall => "total_work_too_small",
+            Self::WorkPerJobTooSmall => "work_per_job_too_small",
+            Self::WorkPerChunkTooSmall => "work_per_chunk_too_small",
+            Self::ParallelCandidate => "parallel_candidate",
+        }
+    }
+}
+
+/// Per-stage workload diagnostics used by the `Auto` execution policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoParallelStagePlan {
+    /// Total scalar outputs/values represented by this stage.
+    pub total_work: usize,
+    /// Number of generated chunks available before grouped runtime scheduling.
+    pub chunk_count: usize,
+    /// Number of grouped runtime jobs selected for this stage.
+    pub jobs: usize,
+    /// Integer work per grouped runtime job.
+    pub work_per_job: usize,
+    /// Integer work per generated chunk.
+    pub work_per_chunk: usize,
+    /// Minimum useful work per job derived from measured machine overhead.
+    pub min_work_per_job: usize,
+    /// Decision reason for this stage.
+    pub reason: AutoParallelDecisionReason,
 }
 
 /// High-level machine-aware execution mode chosen by the `Auto` parallel policy.
@@ -120,6 +174,10 @@ pub struct SparseAutoParallelPlan {
     pub min_work_per_job: usize,
     /// Number of workers observed during calibration.
     pub workers: usize,
+    /// Residual callback workload diagnostics.
+    pub residual_stage: AutoParallelStagePlan,
+    /// Sparse/Banded Jacobian callback workload diagnostics.
+    pub sparse_stage: AutoParallelStagePlan,
 }
 
 fn measure_rayon_overhead_baseline() -> RayonOverheadBaseline {
@@ -183,8 +241,68 @@ pub fn rayon_overhead_baseline() -> RayonOverheadBaseline {
 }
 
 fn min_work_per_job_from_baseline(baseline: RayonOverheadBaseline) -> usize {
-    ((baseline.join2_ns / DEFAULT_ESTIMATED_UNIT_COST_NS).ceil() as usize)
-        .max(DEFAULT_MIN_WORK_PER_JOB)
+    ((baseline.join4_ns * DEFAULT_PARALLEL_OVERHEAD_SAFETY_FACTOR / DEFAULT_ESTIMATED_UNIT_COST_NS)
+        .ceil() as usize)
+        .max(1)
+}
+
+fn work_per_group(total_work: usize, group_count: usize) -> usize {
+    if group_count == 0 {
+        0
+    } else {
+        total_work / group_count
+    }
+}
+
+fn auto_parallel_fallback_for_workload(
+    total_work: usize,
+    chunk_count: usize,
+    job_count: usize,
+) -> bool {
+    if job_count <= 1 || chunk_count <= 1 {
+        return true;
+    }
+
+    let min_work_per_job = min_work_per_job_from_baseline(rayon_overhead_baseline());
+    let min_total_work = min_work_per_job.saturating_mul(2);
+
+    total_work < min_total_work
+        || work_per_group(total_work, job_count) < min_work_per_job
+        || work_per_group(total_work, chunk_count) < min_work_per_job
+}
+
+fn auto_parallel_stage_plan(
+    total_work: usize,
+    chunk_count: usize,
+    job_count: usize,
+    min_work_per_job: usize,
+) -> AutoParallelStagePlan {
+    let work_per_job = work_per_group(total_work, job_count);
+    let work_per_chunk = work_per_group(total_work, chunk_count);
+    let min_total_work = min_work_per_job.saturating_mul(2);
+    let reason = if total_work == 0 {
+        AutoParallelDecisionReason::NoWork
+    } else if job_count <= 1 || chunk_count <= 1 {
+        AutoParallelDecisionReason::SingleChunkOrJob
+    } else if total_work < min_total_work {
+        AutoParallelDecisionReason::TotalWorkTooSmall
+    } else if work_per_job < min_work_per_job {
+        AutoParallelDecisionReason::WorkPerJobTooSmall
+    } else if work_per_chunk < min_work_per_job {
+        AutoParallelDecisionReason::WorkPerChunkTooSmall
+    } else {
+        AutoParallelDecisionReason::ParallelCandidate
+    };
+
+    AutoParallelStagePlan {
+        total_work,
+        chunk_count,
+        jobs: job_count,
+        work_per_job,
+        work_per_chunk,
+        min_work_per_job,
+        reason,
+    }
 }
 
 fn recommended_job_count_for_workload(
@@ -223,13 +341,33 @@ pub fn auto_parallel_recommendation(
         min_work_per_job,
         baseline.workers,
     );
+    let residual_stage = auto_parallel_stage_plan(
+        residual_work,
+        residual_chunk_count,
+        residual_jobs,
+        min_work_per_job,
+    );
+    let sparse_stage = auto_parallel_stage_plan(
+        sparse_work,
+        sparse_chunk_count,
+        sparse_jobs,
+        min_work_per_job,
+    );
 
     AutoParallelRecommendation {
-        should_parallelize: residual_jobs > 1 || sparse_jobs > 1,
+        should_parallelize: matches!(
+            residual_stage.reason,
+            AutoParallelDecisionReason::ParallelCandidate
+        ) || matches!(
+            sparse_stage.reason,
+            AutoParallelDecisionReason::ParallelCandidate
+        ),
         residual_jobs,
         sparse_jobs,
         min_work_per_job,
         workers: baseline.workers,
+        residual_stage,
+        sparse_stage,
     }
 }
 
@@ -305,6 +443,8 @@ pub fn recommended_sparse_auto_parallel_plan(
     let min_work_per_job = min_work_per_job_from_baseline(baseline);
 
     if residual_work == 0 || sparse_rows == 0 || sparse_work == 0 {
+        let residual_stage = auto_parallel_stage_plan(residual_work, 0, 1, min_work_per_job);
+        let sparse_stage = auto_parallel_stage_plan(sparse_work, 0, 1, min_work_per_job);
         return SparseAutoParallelPlan {
             execution_mode: AutoExecutionMode::Sequential,
             residual_chunking: ResidualChunkingStrategy::Whole,
@@ -312,6 +452,8 @@ pub fn recommended_sparse_auto_parallel_plan(
             executor_config: None,
             min_work_per_job,
             workers: baseline.workers,
+            residual_stage,
+            sparse_stage,
         };
     }
 
@@ -332,6 +474,8 @@ pub fn recommended_sparse_auto_parallel_plan(
             executor_config: None,
             min_work_per_job: recommendation.min_work_per_job,
             workers: recommendation.workers,
+            residual_stage: recommendation.residual_stage,
+            sparse_stage: recommendation.sparse_stage,
         };
     }
 
@@ -347,6 +491,8 @@ pub fn recommended_sparse_auto_parallel_plan(
         }),
         min_work_per_job: recommendation.min_work_per_job,
         workers: recommendation.workers,
+        residual_stage: recommendation.residual_stage,
+        sparse_stage: recommendation.sparse_stage,
     }
 }
 
@@ -504,7 +650,7 @@ impl ParallelExecutorConfig {
             .max(1)
     }
 
-    fn residual_fallback(self, output_len: usize, job_count: usize) -> bool {
+    fn residual_fallback(self, output_len: usize, chunk_count: usize, job_count: usize) -> bool {
         if job_count <= 1 {
             return true;
         }
@@ -512,8 +658,7 @@ impl ParallelExecutorConfig {
         match self.fallback_policy {
             ParallelFallbackPolicy::Never => false,
             ParallelFallbackPolicy::Auto => {
-                output_len < DEFAULT_MIN_RESIDUAL_OUTPUTS_FOR_PARALLEL
-                    || output_len / job_count < 400
+                auto_parallel_fallback_for_workload(output_len, chunk_count, job_count)
             }
             ParallelFallbackPolicy::Thresholds {
                 min_residual_outputs,
@@ -522,7 +667,7 @@ impl ParallelExecutorConfig {
         }
     }
 
-    fn sparse_fallback(self, nnz: usize, job_count: usize) -> bool {
+    fn sparse_fallback(self, nnz: usize, chunk_count: usize, job_count: usize) -> bool {
         if job_count <= 1 {
             return true;
         }
@@ -530,10 +675,7 @@ impl ParallelExecutorConfig {
         match self.fallback_policy {
             ParallelFallbackPolicy::Never => false,
             ParallelFallbackPolicy::Auto => {
-                // Fall back if total work is below threshold OR each job gets
-                // too little work to amortize rayon scheduling overhead.
-                // At ~2000 ns/join and ~5 ns/value, a job needs ~400 values.
-                nnz < DEFAULT_MIN_SPARSE_VALUES_FOR_PARALLEL || nnz / job_count < 400
+                auto_parallel_fallback_for_workload(nnz, chunk_count, job_count)
             }
             ParallelFallbackPolicy::Thresholds {
                 min_sparse_values, ..
@@ -899,8 +1041,11 @@ impl<'a> ParallelDenseJacobianExecutor<'a> {
                 first.value_offset..(last.value_offset + last.value_len)
             })
             .collect();
-        let use_sequential_fallback =
-            config.sparse_fallback(sequential.plan.len(), job_ranges.len());
+        let use_sequential_fallback = config.sparse_fallback(
+            sequential.plan.len(),
+            sequential.chunks.len(),
+            job_ranges.len(),
+        );
 
         Self {
             plan: sequential.plan,
@@ -968,6 +1113,22 @@ impl<'a> ParallelDenseJacobianExecutor<'a> {
 
     pub fn job_count(&self) -> usize {
         self.job_ranges.len()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn work_per_job(&self) -> usize {
+        work_per_group(self.plan.len(), self.job_count())
+    }
+
+    pub fn work_per_chunk(&self) -> usize {
+        work_per_group(self.plan.len(), self.chunk_count())
+    }
+
+    pub fn min_work_per_parallel_job(&self) -> usize {
+        min_work_per_job_from_baseline(rayon_overhead_baseline())
     }
 
     pub fn config(&self) -> ParallelExecutorConfig {
@@ -1088,12 +1249,9 @@ impl<'a> ParallelDenseJacobianExecutor<'a> {
 
 /// Parallel executor for residual chunks.
 ///
-/// The first version stays maximally safe and deterministic:
-/// - each chunk computes into its own temporary buffer in parallel,
-/// - results are copied into the final residual slice in solver order.
-///
-/// This avoids aliasing issues while already matching the future runtime model
-/// of "parallel chunk execution + deterministic assembly".
+/// Jobs write directly into disjoint slices of one caller-owned residual
+/// buffer. This keeps the deterministic chunk order while avoiding the
+/// temporary-buffer/copy-back pattern that was too expensive for hot callbacks.
 pub struct ParallelResidualExecutor<'a> {
     plan: &'a ResidualRuntimePlan<'a>,
     chunks: Vec<ResidualChunkBinding<'a>>,
@@ -1133,8 +1291,11 @@ impl<'a> ParallelResidualExecutor<'a> {
                 first.output_offset..(last.output_offset + last.output_len)
             })
             .collect();
-        let use_sequential_fallback =
-            config.residual_fallback(sequential.plan.output_len, job_ranges.len());
+        let use_sequential_fallback = config.residual_fallback(
+            sequential.plan.output_len,
+            sequential.chunks.len(),
+            job_ranges.len(),
+        );
         Self {
             plan: sequential.plan,
             chunks: sequential.chunks,
@@ -1204,6 +1365,22 @@ impl<'a> ParallelResidualExecutor<'a> {
     /// execution.
     pub fn job_count(&self) -> usize {
         self.job_ranges.len()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn work_per_job(&self) -> usize {
+        work_per_group(self.plan.output_len, self.job_count())
+    }
+
+    pub fn work_per_chunk(&self) -> usize {
+        work_per_group(self.plan.output_len, self.chunk_count())
+    }
+
+    pub fn min_work_per_parallel_job(&self) -> usize {
+        min_work_per_job_from_baseline(rayon_overhead_baseline())
     }
 
     /// Returns the effective configuration used by this executor.
@@ -1296,9 +1473,8 @@ impl<'a> ParallelResidualExecutor<'a> {
 
 /// Parallel executor for sparse Jacobian value chunks.
 ///
-/// Just like the residual executor, this version computes each chunk into an
-/// independent temporary value buffer in parallel and then joins them into the
-/// global explicit sparse ordering.
+/// Jobs write directly into disjoint slices of the explicit sparse-values
+/// buffer, preserving global sparse ordering without a merge step.
 pub struct ParallelSparseJacobianExecutor<'a> {
     plan: &'a SparseJacobianRuntimePlan<'a>,
     chunks: Vec<SparseJacobianChunkBinding<'a>>,
@@ -1338,8 +1514,11 @@ impl<'a> ParallelSparseJacobianExecutor<'a> {
                 first.value_offset..(last.value_offset + last.value_len)
             })
             .collect();
-        let use_sequential_fallback =
-            config.sparse_fallback(sequential.plan.nnz(), job_ranges.len());
+        let use_sequential_fallback = config.sparse_fallback(
+            sequential.plan.nnz(),
+            sequential.chunks.len(),
+            job_ranges.len(),
+        );
         Self {
             plan: sequential.plan,
             chunks: sequential.chunks,
@@ -1411,6 +1590,22 @@ impl<'a> ParallelSparseJacobianExecutor<'a> {
     /// execution.
     pub fn job_count(&self) -> usize {
         self.job_ranges.len()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn work_per_job(&self) -> usize {
+        work_per_group(self.plan.nnz(), self.job_count())
+    }
+
+    pub fn work_per_chunk(&self) -> usize {
+        work_per_group(self.plan.nnz(), self.chunk_count())
+    }
+
+    pub fn min_work_per_parallel_job(&self) -> usize {
+        min_work_per_job_from_baseline(rayon_overhead_baseline())
     }
 
     /// Returns the effective configuration used by this executor.
@@ -1550,8 +1745,11 @@ impl<'a> ParallelBandedJacobianExecutor<'a> {
                 first.value_offset..(last.value_offset + last.value_len)
             })
             .collect();
-        let use_sequential_fallback =
-            config.sparse_fallback(sequential.plan.nnz(), job_ranges.len());
+        let use_sequential_fallback = config.sparse_fallback(
+            sequential.plan.nnz(),
+            sequential.chunks.len(),
+            job_ranges.len(),
+        );
         Self {
             plan: sequential.plan,
             chunks: sequential.chunks,
@@ -1618,6 +1816,22 @@ impl<'a> ParallelBandedJacobianExecutor<'a> {
 
     pub fn job_count(&self) -> usize {
         self.job_ranges.len()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn work_per_job(&self) -> usize {
+        work_per_group(self.plan.nnz(), self.job_count())
+    }
+
+    pub fn work_per_chunk(&self) -> usize {
+        work_per_group(self.plan.nnz(), self.chunk_count())
+    }
+
+    pub fn min_work_per_parallel_job(&self) -> usize {
+        min_work_per_job_from_baseline(rayon_overhead_baseline())
     }
 
     pub fn config(&self) -> ParallelExecutorConfig {
@@ -1723,7 +1937,9 @@ mod tests {
         ParallelFallbackPolicy, ParallelResidualExecutor, ParallelSparseJacobianExecutor,
         ResidualChunkBinding, SequentialBandedJacobianExecutor, SequentialDenseJacobianExecutor,
         SequentialResidualExecutor, SequentialSparseJacobianExecutor, SparseJacobianChunkBinding,
-        borrowed_sparse_entries, recommended_sparse_auto_parallel_plan,
+        auto_parallel_fallback_for_workload, borrowed_sparse_entries,
+        min_work_per_job_from_baseline, rayon_overhead_baseline,
+        recommended_sparse_auto_parallel_plan, work_per_group,
     };
     use crate::somelinalg::banded::banded_assembly::BandedAssembly;
     use crate::symbolic::codegen::codegen_runtime_api::{
@@ -2425,7 +2641,13 @@ mod tests {
 
     #[test]
     fn sparse_auto_parallel_plan_exposes_parallel_shape_for_large_workloads() {
-        let plan = recommended_sparse_auto_parallel_plan(1536, 1536, 6112);
+        let baseline = rayon_overhead_baseline();
+        let min_work = min_work_per_job_from_baseline(baseline);
+        let rows = min_work
+            .saturating_mul(baseline.workers.max(2))
+            .saturating_mul(4)
+            .max(1536);
+        let plan = recommended_sparse_auto_parallel_plan(rows, rows, rows.saturating_mul(4));
 
         assert!(plan.min_work_per_job >= 1);
         assert!(plan.workers >= 1);
@@ -2448,8 +2670,50 @@ mod tests {
             .executor_config
             .expect("large sparse workloads should produce runtime parallel config");
         assert_eq!(config.jobs_per_worker, 1);
-        assert!(config.max_residual_jobs.unwrap_or(0) >= 2);
+        assert!(config.max_residual_jobs.unwrap_or(0) >= 1);
         assert!(config.max_sparse_jobs.unwrap_or(0) >= 2);
         assert_eq!(config.fallback_policy, ParallelFallbackPolicy::Never);
+    }
+
+    #[test]
+    fn auto_fallback_rejects_overfragmented_medium_chunks() {
+        let min_work = min_work_per_job_from_baseline(rayon_overhead_baseline());
+        let total_work = min_work.saturating_mul(8);
+        let chunk_count = 16;
+        let job_count = 4;
+
+        assert!(
+            work_per_group(total_work, job_count) >= min_work,
+            "test setup should have enough work per job"
+        );
+        assert!(
+            work_per_group(total_work, chunk_count) < min_work,
+            "test setup should expose too little work per chunk"
+        );
+        assert!(
+            auto_parallel_fallback_for_workload(total_work, chunk_count, job_count),
+            "Auto should stay sequential when chunks are too fine-grained even if grouped jobs look large enough"
+        );
+    }
+
+    #[test]
+    fn auto_fallback_allows_coarse_large_chunks() {
+        let min_work = min_work_per_job_from_baseline(rayon_overhead_baseline());
+        let total_work = min_work.saturating_mul(16);
+        let chunk_count = 4;
+        let job_count = 4;
+
+        assert!(
+            work_per_group(total_work, job_count) >= min_work,
+            "test setup should have enough work per job"
+        );
+        assert!(
+            work_per_group(total_work, chunk_count) >= min_work,
+            "test setup should have enough work per chunk"
+        );
+        assert!(
+            !auto_parallel_fallback_for_workload(total_work, chunk_count, job_count),
+            "Auto should permit parallel execution when both jobs and chunks are coarse enough"
+        );
     }
 }

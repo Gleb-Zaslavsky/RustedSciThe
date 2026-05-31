@@ -47,7 +47,7 @@ use chrono::Local;
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use crate::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
+    Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting, finite_difference_jacobian,
 };
 use crate::numerical::BVP_Damp::BVP_utils::{
     CustomTimer, construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
@@ -61,9 +61,14 @@ use crate::numerical::BVP_Damp::generated_solver_handoff::{
     DampedSolverBuildRequest, GeneratedBackendConfig, SparseGeneratedBackendMode,
     try_generate_and_apply_damped_solver_state,
 };
+use crate::numerical::BVP_Damp::numeric_discretization::{
+    NumericBvpJacobian, NumericBvpRhs, build_numeric_generated_solver_state,
+};
 use crate::somelinalg::banded::LinearSolverConfig;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
-use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::codegen::codegen_backend_selection::{
+    BackendSelectionPolicy, SelectedBackendKind,
+};
 use crate::symbolic::symbolic_functions_BVP::{
     BvpBackendIntegrationError, BvpSymbolicAssemblyBackend,
 };
@@ -73,6 +78,7 @@ use simplelog::LevelFilter;
 use simplelog::*;
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
 
@@ -148,6 +154,7 @@ pub struct DampedSolverOptions {
 pub struct DampedBvpStatistics {
     pub counters: HashMap<String, usize>,
     pub timers: HashMap<String, String>,
+    pub diagnostics: HashMap<String, String>,
 }
 
 impl DampedSolverOptions {
@@ -443,6 +450,10 @@ pub struct NRBVP {
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),   //bandwidth
     generated_backend_config: GeneratedBackendConfig, // generated backend selection config
+    numeric_rhs: Option<NumericBvpRhs>, // pure numeric RHS source for NumericOnly route
+    numeric_jacobian: Option<NumericBvpJacobian>, // optional continuous RHS Jacobian
+    generated_backend_selected_backend: Option<SelectedBackendKind>,
+    generated_backend_runtime_diagnostics: HashMap<String, String>,
     calc_statistics: HashMap<String, usize>,
     nodes_added: Vec<usize>,
     custom_timer: CustomTimer,
@@ -460,6 +471,8 @@ impl ApplyDampedGeneratedSolverState for NRBVP {
         self.variable_string = state.variable_string;
         self.bandwidth = state.bandwidth;
         self.BC_position_and_value = state.bc_position_and_value;
+        self.generated_backend_selected_backend = Some(state.selected_backend);
+        self.generated_backend_runtime_diagnostics = state.runtime_diagnostics;
     }
 }
 
@@ -513,6 +526,11 @@ impl BuildDampedSolverRequest for NRBVP {
 }
 
 impl NRBVP {
+    #[inline]
+    fn effective_runtime_method(&self) -> String {
+        self.generated_backend_config.effective_method(&self.method)
+    }
+
     fn parse_log_level(&self) -> Result<LevelFilter, BvpBackendIntegrationError> {
         match self.loglevel.as_deref() {
             Some("debug") | Some("info") => Ok(LevelFilter::Info),
@@ -635,6 +653,10 @@ impl NRBVP {
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             generated_backend_config: GeneratedBackendConfig::default(),
+            numeric_rhs: None,
+            numeric_jacobian: None,
+            generated_backend_selected_backend: None,
+            generated_backend_runtime_diagnostics: HashMap::new(),
             calc_statistics: Hashmap_statistics,
             nodes_added: Vec::new(),
             custom_timer: CustomTimer::new(),
@@ -793,6 +815,186 @@ impl NRBVP {
         )
     }
 
+    /// Creates a pure-numeric Damped solver that uses the RHS closure as the
+    /// source of truth and an explicit finite-difference Newton Jacobian.
+    ///
+    /// Uses [`DampedSolverOptions::sparse_damped`] plus the provided bounds and
+    /// per-variable tolerances. Use [`NRBVP::new_numeric_fd_with_options`] when
+    /// you need Banded, custom nonlinear parameters, or logging settings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_fd<
+        F: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DVector<f64> + Send + Sync + 'static,
+    >(
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        bounds: HashMap<String, (f64, f64)>,
+        rel_tolerance: HashMap<String, f64>,
+        rhs: F,
+    ) -> NRBVP {
+        Self::new_numeric_fd_with_options(
+            initial_guess,
+            values,
+            arg,
+            border_conditions,
+            t0,
+            t_end,
+            n_steps,
+            DampedSolverOptions::sparse_damped()
+                .with_bounds(bounds)
+                .with_rel_tolerance(rel_tolerance),
+            rhs,
+        )
+    }
+
+    /// Creates a pure-numeric Damped solver that uses the RHS closure as the
+    /// source of truth and an explicit finite-difference Newton Jacobian.
+    ///
+    /// This wrapper exists so users do not have to pass `Vec::new()` as a
+    /// symbolic equation placeholder when they intentionally choose the numeric
+    /// route.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_fd_with_options<
+        F: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DVector<f64> + Send + Sync + 'static,
+    >(
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        options: DampedSolverOptions,
+        rhs: F,
+    ) -> NRBVP {
+        Self::new_numeric_with_optional_jacobian(
+            initial_guess,
+            values,
+            arg,
+            border_conditions,
+            t0,
+            t_end,
+            n_steps,
+            options,
+            Arc::new(rhs),
+            None,
+        )
+    }
+
+    /// Creates a pure-numeric Damped solver with a user-provided continuous
+    /// RHS Jacobian `df/dy`.
+    ///
+    /// The closure returns the small per-node Jacobian of the continuous RHS.
+    /// The large discretized Newton Jacobian is assembled by
+    /// `numeric_discretization`, preserving the selected matrix backend.
+    ///
+    /// Uses [`DampedSolverOptions::sparse_damped`] plus the provided bounds and
+    /// per-variable tolerances. Use [`NRBVP::new_numeric_with_jacobian_options`]
+    /// when you need Banded, custom nonlinear parameters, or logging settings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_with_jacobian<
+        F: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DMatrix<f64> + Send + Sync + 'static,
+    >(
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        bounds: HashMap<String, (f64, f64)>,
+        rel_tolerance: HashMap<String, f64>,
+        rhs: F,
+        jacobian: J,
+    ) -> NRBVP {
+        Self::new_numeric_with_jacobian_options(
+            initial_guess,
+            values,
+            arg,
+            border_conditions,
+            t0,
+            t_end,
+            n_steps,
+            DampedSolverOptions::sparse_damped()
+                .with_bounds(bounds)
+                .with_rel_tolerance(rel_tolerance),
+            rhs,
+            jacobian,
+        )
+    }
+
+    /// Creates a pure-numeric Damped solver with a user-provided continuous
+    /// RHS Jacobian `df/dy`.
+    ///
+    /// The closure returns the small per-node Jacobian of the continuous RHS.
+    /// The large discretized Newton Jacobian is assembled by
+    /// `numeric_discretization`, preserving the selected matrix backend.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_with_jacobian_options<
+        F: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DMatrix<f64> + Send + Sync + 'static,
+    >(
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        options: DampedSolverOptions,
+        rhs: F,
+        jacobian: J,
+    ) -> NRBVP {
+        Self::new_numeric_with_optional_jacobian(
+            initial_guess,
+            values,
+            arg,
+            border_conditions,
+            t0,
+            t_end,
+            n_steps,
+            options,
+            Arc::new(rhs),
+            Some(Arc::new(jacobian)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_numeric_with_optional_jacobian(
+        initial_guess: DMatrix<f64>,
+        values: Vec<String>,
+        arg: String,
+        border_conditions: HashMap<String, Vec<(usize, f64)>>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        mut options: DampedSolverOptions,
+        rhs: NumericBvpRhs,
+        jacobian: Option<NumericBvpJacobian>,
+    ) -> NRBVP {
+        options.generated_backend_config = options
+            .generated_backend_config
+            .with_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+        Self::new_with_options(
+            Vec::new(),
+            initial_guess,
+            values,
+            arg,
+            border_conditions,
+            t0,
+            t_end,
+            n_steps,
+            options,
+        )
+        .with_numeric_rhs_arc(rhs)
+        .with_numeric_jacobian_arc(jacobian)
+    }
+
     /// Returns a solver configured with the provided generated-backend settings.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
@@ -916,6 +1118,76 @@ impl NRBVP {
 
         self.x_mesh = DVector::from_vec(T_list);
     }
+
+    /// Installs a pure numeric RHS callback used by the `NumericOnly` backend route.
+    ///
+    /// This route is available for the damped Newton BVP solver only. It bypasses
+    /// symbolic BVP assembly: the continuous RHS closure is discretized by
+    /// `numeric_discretization`. If no numeric Jacobian closure is installed,
+    /// the Newton Jacobian is approximated by finite differences. Use
+    /// [`NRBVP::set_numeric_jacobian`] or
+    /// [`NRBVP::new_numeric_with_jacobian_options`] for an explicit analytical
+    /// continuous RHS Jacobian.
+    ///
+    /// The callback must return a derivative vector with length `values.len()`.
+    pub fn set_numeric_rhs(&mut self, rhs: Option<NumericBvpRhs>) {
+        self.numeric_rhs = rhs;
+    }
+
+    /// Installs a continuous RHS Jacobian callback for the `NumericOnly` route.
+    ///
+    /// The callback returns `df/dy` at one mesh node. The solver assembles the
+    /// global discretized Newton Jacobian from this local Jacobian, boundary
+    /// conditions, and the selected finite-difference scheme.
+    pub fn set_numeric_jacobian(&mut self, jacobian: Option<NumericBvpJacobian>) {
+        self.numeric_jacobian = jacobian;
+    }
+
+    /// Builder-style helper to install an already boxed/arc-ed numeric RHS.
+    pub fn with_numeric_rhs_arc(mut self, rhs: NumericBvpRhs) -> Self {
+        self.numeric_rhs = Some(rhs);
+        self
+    }
+
+    /// Builder-style helper to install an already boxed/arc-ed numeric Jacobian.
+    pub fn with_numeric_jacobian_arc(mut self, jacobian: Option<NumericBvpJacobian>) -> Self {
+        self.numeric_jacobian = jacobian;
+        self
+    }
+
+    /// Builder-style helper to install a pure numeric RHS callback.
+    ///
+    /// See [`NRBVP::set_numeric_rhs`] for the route contract.
+    pub fn with_numeric_rhs<
+        F: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DVector<f64> + Send + Sync + 'static,
+    >(
+        mut self,
+        rhs: F,
+    ) -> Self {
+        self.numeric_rhs = Some(Arc::new(rhs));
+        self
+    }
+
+    /// Builder-style helper to install a continuous RHS Jacobian callback.
+    pub fn with_numeric_jacobian<
+        J: Fn(f64, &DVector<f64>, Option<&[f64]>) -> DMatrix<f64> + Send + Sync + 'static,
+    >(
+        mut self,
+        jacobian: J,
+    ) -> Self {
+        self.numeric_jacobian = Some(Arc::new(jacobian));
+        self
+    }
+
+    /// Returns true when a pure numeric RHS callback is installed.
+    pub fn has_numeric_rhs(&self) -> bool {
+        self.numeric_rhs.is_some()
+    }
+
+    /// Returns true when a pure numeric continuous RHS Jacobian callback is installed.
+    pub fn has_numeric_jacobian(&self) -> bool {
+        self.numeric_jacobian.is_some()
+    }
     /// Basic methods to set the equation system
 
     /// Validates solver configuration and input parameters
@@ -1014,6 +1286,57 @@ impl NRBVP {
     ) -> Result<(), BvpBackendIntegrationError> {
         task_check_mem(self.n_steps, self.values.len(), &self.method);
         self.task_check();
+
+        let effective_method = self.generated_backend_config.effective_method(&self.method);
+        let effective_policy = self
+            .generated_backend_config
+            .effective_backend_policy(&effective_method);
+        if effective_policy == BackendSelectionPolicy::NumericOnly {
+            if let Some(rhs) = self.numeric_rhs.clone() {
+                if let Some(mesh) = mesh_.clone() {
+                    self.x_mesh = DVector::from_vec(mesh);
+                }
+                let mesh_vec: Vec<f64> = self.x_mesh.iter().copied().collect();
+                let bounds = self.Bounds.as_ref().ok_or_else(|| {
+                    BvpBackendIntegrationError::PipelinePanicked(
+                        "pure numeric BVP route requires Bounds".to_string(),
+                    )
+                })?;
+                let rel_tolerance = self.rel_tolerance.as_ref().ok_or_else(|| {
+                    BvpBackendIntegrationError::PipelinePanicked(
+                        "pure numeric BVP route requires rel_tolerance".to_string(),
+                    )
+                })?;
+                let state = build_numeric_generated_solver_state(
+                    rhs,
+                    self.numeric_jacobian.clone(),
+                    &effective_method,
+                    self.scheme.as_str(),
+                    &self.values,
+                    &self.BorderConditions,
+                    bounds,
+                    rel_tolerance,
+                    self.n_steps,
+                    &mesh_vec,
+                    bandwidth.or_else(|| {
+                        if self.bandwidth == (0, 0) {
+                            None
+                        } else {
+                            Some(self.bandwidth)
+                        }
+                    }),
+                    self.param_values.clone(),
+                )
+                .map_err(BvpBackendIntegrationError::PipelinePanicked)?;
+                self.apply_generated_solver_state(state);
+                return Ok(());
+            }
+            return Err(BvpBackendIntegrationError::PipelinePanicked(
+                "NumericOnly BVP route requires a numeric_rhs closure; symbolic lambdify/AOT routes must use LambdifyOnly, AotOnly, or PreferAotThenLambdify"
+                    .to_string(),
+            ));
+        }
+
         try_generate_and_apply_damped_solver_state(
             self,
             mesh_,
@@ -1161,7 +1484,100 @@ impl NRBVP {
             self.x_mesh.len() as usize,
         );
         let timers = self.custom_timer.get_all();
-        DampedBvpStatistics { counters, timers }
+        let mut diagnostics = self.generated_backend_runtime_diagnostics.clone();
+        self.append_generated_backend_diagnostics(&mut diagnostics);
+        DampedBvpStatistics {
+            counters,
+            timers,
+            diagnostics,
+        }
+    }
+
+    fn append_generated_backend_diagnostics(&self, diagnostics: &mut HashMap<String, String>) {
+        let config = &self.generated_backend_config;
+        let effective_method = self.effective_runtime_method();
+        let backend_policy = config.effective_backend_policy(&effective_method);
+        diagnostics.insert("generated.effective_method".to_string(), effective_method);
+        diagnostics.insert(
+            "generated.backend_policy".to_string(),
+            format!("{backend_policy:?}"),
+        );
+        diagnostics.insert(
+            "generated.selected_backend".to_string(),
+            self.generated_backend_selected_backend
+                .map(|backend| format!("{backend:?}"))
+                .unwrap_or_else(|| "not_generated".to_string()),
+        );
+        diagnostics.insert(
+            "generated.symbolic_assembly_backend".to_string(),
+            format!("{:?}", config.symbolic_assembly_backend),
+        );
+        diagnostics.insert(
+            "generated.matrix_backend_override".to_string(),
+            config
+                .matrix_backend_override
+                .map(|backend| format!("{backend:?}"))
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        diagnostics.insert(
+            "aot.build_policy".to_string(),
+            config.aot_build_policy.as_str().to_string(),
+        );
+        diagnostics.insert(
+            "aot.execution_policy".to_string(),
+            config.aot_execution_policy.as_str().to_string(),
+        );
+        diagnostics.insert(
+            "aot.codegen_backend".to_string(),
+            format!("{:?}", config.aot_codegen_backend),
+        );
+        diagnostics.insert(
+            "aot.c_compiler".to_string(),
+            config
+                .aot_c_compiler
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        diagnostics.insert(
+            "aot.chunking.residual".to_string(),
+            config
+                .aot_chunking_policy
+                .residual
+                .map(|strategy| format!("{strategy:?}"))
+                .unwrap_or_else(|| "default".to_string()),
+        );
+        diagnostics.insert(
+            "aot.chunking.sparse_jacobian".to_string(),
+            config
+                .aot_chunking_policy
+                .sparse_jacobian
+                .map(|strategy| format!("{strategy:?}"))
+                .unwrap_or_else(|| "default".to_string()),
+        );
+
+        match &config.resolver {
+            Some(resolver) => {
+                let problem_keys = resolver.registry().problem_keys();
+                diagnostics.insert("aot.resolver.present".to_string(), "true".to_string());
+                diagnostics.insert(
+                    "aot.resolver.entries".to_string(),
+                    problem_keys.len().to_string(),
+                );
+                diagnostics.insert(
+                    "aot.resolver.problem_keys".to_string(),
+                    if problem_keys.is_empty() {
+                        "none".to_string()
+                    } else {
+                        problem_keys.join(",")
+                    },
+                );
+            }
+            None => {
+                diagnostics.insert("aot.resolver.present".to_string(), "false".to_string());
+                diagnostics.insert("aot.resolver.entries".to_string(), "0".to_string());
+                diagnostics.insert("aot.resolver.problem_keys".to_string(), "none".to_string());
+            }
+        }
     }
 
     /// Returns the selected symbolic assembly backend.
@@ -1192,11 +1608,21 @@ impl NRBVP {
             let p = self.p;
             let y = &*self.y;
             log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
-            let jac_function = self.jac.as_mut().expect(
-                "Damped BVP Jacobian recalculation requires an installed Jacobian callback",
-            );
-            let jac_matrix = jac_function.call(p, y);
-            let inv_J_k = jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations);
+            let inv_J_k = if let Some(jac_function) = self.jac.as_mut() {
+                let jac_matrix = jac_function.call(p, y);
+                jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations)
+            } else {
+                let y_runtime =
+                    Vectors_type_casting(&y.to_DVectorType(), self.effective_runtime_method());
+                let jac_matrix = finite_difference_jacobian(&*self.fun, p, &*y_runtime, 1e-8);
+                let inv = jac_matrix
+                    .to_DMatrixType()
+                    .try_inverse()
+                    .unwrap_or_else(|| {
+                        panic!("Damped BVP FD Jacobian inversion failed: singular matrix")
+                    });
+                Box::new(inv)
+            };
             self.old_jac = Some(inv_J_k);
             self.m = 0;
             *self
@@ -1217,10 +1643,13 @@ impl NRBVP {
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let begin = Instant::now();
             self.custom_timer.jac_tic();
-            let jac_function = self.jac.as_mut().expect(
-                "Damped BVP timed Jacobian recalculation requires an installed Jacobian callback",
-            );
-            let jac_matrix = jac_function.call(p, y);
+            let jac_matrix = if let Some(jac_function) = self.jac.as_mut() {
+                jac_function.call(p, y)
+            } else {
+                let y_runtime =
+                    Vectors_type_casting(&y.to_DVectorType(), self.effective_runtime_method());
+                finite_difference_jacobian(&*self.fun, p, &*y_runtime, 1e-8)
+            };
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
@@ -1503,7 +1932,7 @@ impl NRBVP {
             let y: DVector<f64> = DVector::from_vec(y);
             self.result = Some(y.clone()); // save into result in case the very first iteration
             // with the current n_steps will go wrong and we shall need grid refinement
-            self.y = Vectors_type_casting(&y.clone(), self.method.clone());
+            self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
         let initial_res_nornal = self.calc_residual(self.y.clone_box());
@@ -1706,7 +2135,7 @@ impl NRBVP {
                 let y_dvector = self.result.clone().unwrap();
                 let y = crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting(
                     &y_dvector,
-                    self.method.clone(),
+                    self.effective_runtime_method(),
                 );
                 let residuals = fun.call(p, &*y);
                 let residuals = residuals.to_DVectorType();
@@ -1758,7 +2187,7 @@ impl NRBVP {
         );
 
         self.initial_guess = initial_guess_matrix;
-        self.y = Vectors_type_casting(&initial_guess, self.method.clone());
+        self.y = Vectors_type_casting(&initial_guess, self.effective_runtime_method());
         self.x_mesh = DVector::from_vec(new_mesh.clone());
         self.grid_refinemens += 1;
         info!(
@@ -2171,6 +2600,144 @@ mod tests {
     }
 
     #[test]
+    fn damped_statistics_expose_generated_runtime_diagnostics() {
+        let mut solver = NRBVP::default();
+        let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
+            Box::new(|_x, y: &DVector<f64>| y.clone());
+        let mut runtime_diagnostics = HashMap::new();
+        runtime_diagnostics.insert(
+            "aot.runtime.execution_policy".to_string(),
+            "Parallel".to_string(),
+        );
+        runtime_diagnostics.insert(
+            "aot.runtime.sparse_jacobian.actual_jobs".to_string(),
+            "4".to_string(),
+        );
+
+        solver.apply_generated_solver_state(DampedGeneratedSolverState {
+            fun: Box::new(FunEnum::Dense(fun0)),
+            jac: None,
+            bounds_vec: Vec::new(),
+            rel_tolerance_vec: Vec::new(),
+            variable_string: Vec::new(),
+            bandwidth: (0, 0),
+            bc_position_and_value: Vec::new(),
+            updated_resolver: None,
+            selected_backend:
+                crate::symbolic::codegen::codegen_backend_selection::SelectedBackendKind::AotCompiled,
+            runtime_diagnostics,
+        });
+
+        let stats = solver.get_statistics();
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.runtime.execution_policy")
+                .map(String::as_str),
+            Some("Parallel")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.runtime.sparse_jacobian.actual_jobs")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("generated.selected_backend")
+                .map(String::as_str),
+            Some("AotCompiled")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.build_policy")
+                .map(String::as_str),
+            Some("UseIfAvailable")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.resolver.present")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn damped_statistics_include_generated_lifecycle_configuration() {
+        let solver = sparse_surface_test_solver()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
+            .with_aot_execution_policy(AotExecutionPolicy::SequentialOnly)
+            .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt)
+            .with_aot_chunking_policy(AotChunkingPolicy::with_parts(
+                Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
+                Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
+            ))
+            .with_aot_resolver(Some(AotResolver::new(AotRegistry::new())));
+
+        let stats = solver.get_statistics();
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("generated.backend_policy")
+                .map(String::as_str),
+            Some("PreferAotThenLambdify")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("generated.selected_backend")
+                .map(String::as_str),
+            Some("not_generated")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.build_policy")
+                .map(String::as_str),
+            Some("RequirePrebuilt")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.execution_policy")
+                .map(String::as_str),
+            Some("SequentialOnly")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.chunking.residual")
+                .map(String::as_str),
+            Some("ByTargetChunkCount { target_chunks: 2 }")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.chunking.sparse_jacobian")
+                .map(String::as_str),
+            Some("ByTargetChunkCount { target_chunks: 3 }")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.resolver.present")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            stats
+                .diagnostics
+                .get("aot.resolver.entries")
+                .map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn generated_backend_surface_builder_methods_update_solver_config() {
         let solver = sparse_surface_test_solver()
             .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
@@ -2229,6 +2796,10 @@ mod tests {
         let solver = sparse_surface_test_solver().with_sparse_aot_build_if_missing_release();
 
         assert_eq!(
+            solver.symbolic_assembly_backend(),
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
             solver.backend_policy_override(),
             Some(BackendSelectionPolicy::PreferAotThenLambdify)
         );
@@ -2267,6 +2838,10 @@ mod tests {
         assert_eq!(options.scheme, "forward");
         assert_eq!(options.strategy, "Damped");
         assert_eq!(options.method, "Sparse");
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
         assert_eq!(
             options.generated_backend_config.backend_policy_override,
             Some(BackendSelectionPolicy::PreferAotThenLambdify)
@@ -2362,6 +2937,92 @@ mod tests {
         assert_eq!(solver.bounds_vec.len(), values.len() * n_steps);
         assert_eq!(solver.rel_tolerance_vec.len(), values.len() * n_steps);
         let _ = &solver.fun;
+    }
+
+    #[test]
+    fn numeric_only_without_numeric_rhs_is_rejected_instead_of_lambdify_fallback() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+
+        let err = solver
+            .try_eq_generate(None, None)
+            .expect_err("NumericOnly without numeric_rhs must not silently fall back to lambdify");
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::PipelinePanicked(message)
+                if message.contains("requires a numeric_rhs closure")
+        ));
+    }
+
+    #[test]
+    fn sparse_numeric_only_with_pure_numeric_rhs_uses_fd_jacobian_runtime_path() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+        solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
+            // y' = z, z' = -y (linear oscillator-like test fixture)
+            DVector::from_vec(vec![y[1], -y[0]])
+        })));
+
+        solver
+            .try_eq_generate(None, None)
+            .expect("pure numeric generation should succeed");
+
+        // In pure numeric mode we intentionally rely on FD Jacobian in the solver.
+        assert!(solver.jac.is_none());
+        assert!(!solver.variable_string.is_empty());
+        assert!(!solver.BC_position_and_value.is_empty());
+
+        let runtime_y = Col::from_fn(solver.values.len() * solver.n_steps, |index| {
+            0.2 + index as f64 * 0.01
+        });
+        let residual = solver.fun.call(solver.p, &runtime_y);
+        assert_eq!(residual.len(), runtime_y.nrows());
+
+        solver.y = Box::new(runtime_y);
+        solver.jac_recalc = true;
+        solver.recalc_jacobian();
+        assert!(solver.old_jac.is_some());
+    }
+
+    #[test]
+    fn recalc_jacobian_can_fallback_to_fd_when_symbolic_jacobian_is_missing() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver
+            .try_eq_generate(None, None)
+            .expect("baseline sparse generation should succeed");
+
+        solver.y = Box::new(Col::from_fn(
+            solver.values.len() * solver.n_steps,
+            |index| 0.2 + index as f64 * 0.01,
+        ));
+        solver.jac = None;
+        solver.jac_recalc = true;
+        solver.recalc_jacobian();
+
+        assert!(solver.old_jac.is_some());
+    }
+
+    #[test]
+    fn banded_default_atomview_lambdify_generation_produces_runtime_callbacks() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_generated_backend_config(GeneratedBackendConfig::from_banded_mode(
+            BandedGeneratedBackendMode::Lambdify,
+        ));
+
+        assert_eq!(
+            solver.symbolic_assembly_backend(),
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        solver
+            .try_eq_generate(None, None)
+            .expect("default banded AtomView lambdify generation should succeed");
+
+        assert!(solver.jac.is_some());
+        let runtime_y = Col::from_fn(solver.values.len() * solver.n_steps, |index| {
+            0.2 + index as f64 * 0.01
+        });
+        let residual = solver.fun.call(solver.p, &runtime_y);
+        assert_eq!(residual.len(), runtime_y.nrows());
     }
 
     #[test]

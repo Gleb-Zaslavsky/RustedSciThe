@@ -15,7 +15,11 @@ use nalgebra::{DMatrix, DVector};
 use log::info;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
+
+type BeNativeRhs = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
+type BeNativeJac = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
 pub enum Equation {
     LHS(Vec<Expr>),
     RHS(Vec<Expr>),
@@ -157,6 +161,8 @@ pub struct BE {
     neighborhood_check: f64,
     generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     statistics: IvpBackendStatistics,
+    native_rhs: Option<BeNativeRhs>,
+    native_jac: Option<BeNativeJac>,
 }
 impl Display for BE {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -199,6 +205,8 @@ impl BE {
             neighborhood_check: 1e-6,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             statistics: IvpBackendStatistics::default(),
+            native_rhs: None,
+            native_jac: None,
         }
     }
 
@@ -423,6 +431,19 @@ impl BE {
         self.neighborhood_check = tolerance;
     }
 
+    /// Installs pure numerical ODE callbacks for Backward Euler.
+    ///
+    /// If `jac` is `None`, Newton iterations use a finite-difference Jacobian.
+    pub fn set_native_ode_callbacks<F, J>(&mut self, rhs: F, jac: Option<J>)
+    where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        self.native_rhs = Some(Arc::new(rhs));
+        self.native_jac = jac.map(|j| Arc::new(j) as BeNativeJac);
+        self.newton.jac = None;
+    }
+
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
         if let Some(ref conditions) = self.stop_condition {
             for (var_name, target_value) in conditions {
@@ -569,6 +590,16 @@ impl BE {
     } //
 
     pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
+        if let Some(rhs) = self.native_rhs.clone() {
+            let jac = self.native_jac.clone();
+            self.newton.set_native_callbacks(
+                Box::new(move |t: f64, y: &DVector<f64>| rhs(t, y)),
+                jac.map(|jac_fun| {
+                    Box::new(move |t: f64, y: &DVector<f64>| jac_fun(t, y))
+                        as Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>
+                }),
+            );
+        }
         if self.newton.jac.is_none() {
             let start = Instant::now();
             let mut options = crate::symbolic::symbolic_ivp::SymbolicIvpProblemOptions::new();

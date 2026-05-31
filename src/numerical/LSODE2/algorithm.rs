@@ -3,10 +3,10 @@ use super::adams_engine::{
 };
 
 pub use super::method_switch::{
+    Lsode2ControllerMode, Lsode2MethodFamily, Lsode2MethodSwitchPolicy, Lsode2MethodSwitchState,
+    Lsode2SwitchDecision, Lsode2SwitchReason, Lsode2SwitchTelemetry,
     LSODE2_DEFAULT_METHOD_SWITCH_PROBE_STEPS, LSODE2_DEFAULT_STIFFNESS_RATIO_THRESHOLD,
-    LSODE2_MAX_ADAMS_ORDER, LSODE2_MAX_BDF_ORDER, Lsode2ControllerMode, Lsode2MethodFamily,
-    Lsode2MethodSwitchPolicy, Lsode2MethodSwitchState, Lsode2SwitchDecision, Lsode2SwitchReason,
-    Lsode2SwitchTelemetry,
+    LSODE2_MAX_ADAMS_ORDER, LSODE2_MAX_BDF_ORDER,
 };
 
 /// Algorithm-level configuration independent of symbolic/linear backends.
@@ -435,6 +435,8 @@ impl Lsode2ControllerConfig {
 pub struct Lsode2AlgorithmSnapshot {
     pub controller_mode: &'static str,
     pub active_family: &'static str,
+    pub mused_family: &'static str,
+    pub mcur_family: &'static str,
     pub preferred_family: &'static str,
     pub executed_family: Option<&'static str>,
     pub switch_reason: &'static str,
@@ -446,6 +448,8 @@ pub struct Lsode2AlgorithmSnapshot {
     pub method_switch_probe_steps: usize,
     pub switch_probe_countdown: isize,
     pub switch_probe_ready: bool,
+    pub tsw: Option<f64>,
+    pub last_handoff_jstart: Option<i32>,
     pub bdf_current_order: Option<usize>,
     pub bdf_max_order_cap: Option<usize>,
     pub bdf_equal_step_count: Option<usize>,
@@ -540,6 +544,16 @@ impl Lsode2AlgorithmController {
         self.last_decision = Some(decision);
     }
 
+    pub fn record_switch_decision_at(
+        &mut self,
+        decision: Lsode2SwitchDecision,
+        switch_time: Option<f64>,
+    ) {
+        self.switch_state.record_decision_at(decision, switch_time);
+        self.active_family = self.switch_state.mcur;
+        self.last_decision = Some(decision);
+    }
+
     pub fn record_accepted_steps_for_switch_probe(&mut self, accepted_steps: usize) {
         if self.config.mode != Lsode2ControllerMode::AutomaticAdamsBdf {
             return;
@@ -586,6 +600,8 @@ impl Lsode2AlgorithmController {
         Lsode2AlgorithmSnapshot {
             controller_mode: self.config.mode.label(),
             active_family: self.active_family.label(),
+            mused_family: self.switch_state.mused.label(),
+            mcur_family: self.switch_state.mcur.label(),
             preferred_family: decision.preferred_family.label(),
             executed_family: decision.executed_family().map(Lsode2MethodFamily::label),
             switch_reason: decision.reason.label(),
@@ -597,6 +613,8 @@ impl Lsode2AlgorithmController {
             method_switch_probe_steps: self.config.method_switch_probe_steps,
             switch_probe_countdown: self.switch_state.switch_probe_countdown(),
             switch_probe_ready: self.switch_state.switch_probe_ready(),
+            tsw: self.switch_state.tsw,
+            last_handoff_jstart: self.switch_state.last_handoff_jstart,
             bdf_current_order,
             bdf_max_order_cap,
             bdf_equal_step_count,
@@ -641,11 +659,9 @@ mod tests {
         assert_eq!(snapshot.executed_family, None);
         assert_eq!(snapshot.switch_reason, "fixed_controller");
         assert!(!snapshot.method_switching_enabled);
-        assert!(
-            snapshot
-                .note
-                .contains("requires native Adams execution support")
-        );
+        assert!(snapshot
+            .note
+            .contains("requires native Adams execution support"));
     }
 
     #[test]
@@ -681,72 +697,50 @@ mod tests {
 
     #[test]
     fn controller_config_rejects_invalid_order_caps() {
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_max_adams_order(0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_max_adams_order(LSODE2_MAX_ADAMS_ORDER + 1)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_max_bdf_order(0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_max_bdf_order(LSODE2_MAX_BDF_ORDER + 1)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_stiffness_ratio_threshold(0.0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::bdf_only()
-                .with_method_switch_probe_steps(0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::automatic_adams_bdf()
-                .with_convergence_failure_threshold(0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::automatic_adams_bdf()
-                .with_rejection_threshold(0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::automatic_adams_bdf()
-                .with_adams_cost_ratio_for_switch(0.0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::automatic_adams_bdf()
-                .with_bdf_cost_ratio_for_switch(0.0)
-                .validate()
-                .is_err()
-        );
-        assert!(
-            Lsode2ControllerConfig::automatic_adams_bdf()
-                .with_min_cost_samples_for_switch(0)
-                .validate()
-                .is_err()
-        );
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_max_adams_order(0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_max_adams_order(LSODE2_MAX_ADAMS_ORDER + 1)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_max_bdf_order(0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_max_bdf_order(LSODE2_MAX_BDF_ORDER + 1)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_stiffness_ratio_threshold(0.0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::bdf_only()
+            .with_method_switch_probe_steps(0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_convergence_failure_threshold(0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_rejection_threshold(0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_adams_cost_ratio_for_switch(0.0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_bdf_cost_ratio_for_switch(0.0)
+            .validate()
+            .is_err());
+        assert!(Lsode2ControllerConfig::automatic_adams_bdf()
+            .with_min_cost_samples_for_switch(0)
+            .validate()
+            .is_err());
     }
 
     #[test]

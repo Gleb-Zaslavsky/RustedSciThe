@@ -29,17 +29,30 @@
 //!   Hypothesis: `AtomView` plus fast native compilation nearly closes the
 //!   bootstrap gap to `Lambdify`, while clearly winning on runtime throughput.
 
+use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
+use crate::somelinalg::banded::banded_assembly::BandedAssembly;
+use crate::somelinalg::banded::block_tridiagonal_lu_consistent::BlockTridiagonalLuConsistent;
+use crate::somelinalg::banded::lapack_style_banded::LapackStyleBandedLuFaithful;
+use crate::somelinalg::banded::linear_solver::{build_linear_solver, build_solver_for_system};
+use crate::somelinalg::banded::node_major_layout::NodeMajorLayout;
+use crate::somelinalg::banded::solver_policy::{
+    FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
+};
+use crate::somelinalg::banded::superblock_layout::SuperBlockLayout;
+use crate::somelinalg::banded::{solver_traits::DirectLinearSolver, LinearSystemRef};
 use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
     CAotBuildProfile, CAotBuildRequest, CAotCompileConfig, ExecutedCAotBuild,
 };
 use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::register_generated_c_sparse_backend;
-use crate::symbolic::codegen::codegen_adapters::{banded_ir_blocks, residual_ir_blocks, sparse_ir_blocks};
+use crate::symbolic::codegen::codegen_adapters::{
+    banded_ir_blocks, residual_ir_blocks, sparse_ir_blocks,
+};
 use crate::symbolic::codegen::codegen_aot_driver::{AotCodegenBackend, GeneratedAotArtifact};
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedSparseAotBackend, register_generated_sparse_cdylib_backend,
-    unregister_linked_sparse_backend,
+    register_generated_sparse_cdylib_backend, unregister_linked_sparse_backend,
+    LinkedSparseAotBackend,
 };
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_provider_api::{MatrixBackend, PreparedProblem};
@@ -55,19 +68,7 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_build::{
 };
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_registry::register_zig_build_in_registry;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::register_generated_zig_sparse_backend;
-use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
-use crate::somelinalg::banded::banded_assembly::BandedAssembly;
-use crate::somelinalg::banded::block_tridiagonal_lu_consistent::BlockTridiagonalLuConsistent;
-use crate::somelinalg::banded::lapack_style_banded::{
-    LapackStyleBandedLuFaithful, 
-};
-use crate::somelinalg::banded::linear_solver::{build_linear_solver, build_solver_for_system};
-use crate::somelinalg::banded::node_major_layout::NodeMajorLayout;
-use crate::somelinalg::banded::solver_policy::{
-    FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
-};
-use crate::somelinalg::banded::superblock_layout::SuperBlockLayout;
-use crate::somelinalg::banded::{LinearSystemRef, solver_traits::DirectLinearSolver};
+use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::symbolic_functions_BVP::{
     BvpPreparedSparseAotProblem, BvpSymbolicAssemblyBackend, Jacobian,
 };
@@ -99,6 +100,7 @@ struct ScenarioSpec {
 
 struct ScenarioData {
     label: &'static str,
+    symbolic_backend: BvpSymbolicAssemblyBackend,
     runtime_iters: usize,
     runtime_samples: usize,
     symbolic_ms: f64,
@@ -109,11 +111,27 @@ struct ScenarioData {
 }
 
 struct BuildAndLinkMetrics {
+    symbolic_backend: &'static str,
     variant_label: String,
     preset_label: &'static str,
     artifact_ms: f64,
+    jacobian_prepare_ms: f64,
+    atom_sparse_lookup_prepare_ms: f64,
+    atom_sparse_jacobian_build_ms: f64,
+    atom_finalize_codegen_plan_ms: f64,
+    atom_lower_many_ms: f64,
+    atom_peephole_ms: f64,
+    atom_reuse_temps_ms: f64,
+    atom_push_ms: f64,
+    prepared_module_init_ms: f64,
+    prepared_residual_blocks_ms: f64,
+    prepared_jacobian_blocks_ms: f64,
     module_ms: f64,
     source_ms: f64,
+    source_probe_emit_ms: f64,
+    language_source_emit_ms: f64,
+    c_header_emit_ms: f64,
+    artifact_packaging_ms: f64,
     source_kb: f64,
     materialize_ms: f64,
     build_ms: f64,
@@ -124,6 +142,91 @@ struct BuildAndLinkMetrics {
     jacobian_diff: f64,
     status: String,
     linked: Option<LinkedSparseAotBackend>,
+}
+
+#[derive(Clone)]
+struct PipelineBootstrapSample {
+    route: &'static str,
+    symbolic_backend: &'static str,
+    variant_label: String,
+    preset_label: &'static str,
+    symbolic_ms: f64,
+    callable_prep_ms: f64,
+    artifact_ms: f64,
+    jacobian_prepare_ms: f64,
+    atom_sparse_lookup_prepare_ms: f64,
+    atom_sparse_jacobian_build_ms: f64,
+    atom_finalize_codegen_plan_ms: f64,
+    atom_lower_many_ms: f64,
+    atom_peephole_ms: f64,
+    atom_reuse_temps_ms: f64,
+    atom_push_ms: f64,
+    prepared_module_init_ms: f64,
+    prepared_residual_blocks_ms: f64,
+    prepared_jacobian_blocks_ms: f64,
+    module_ms: f64,
+    source_ms: f64,
+    source_probe_emit_ms: f64,
+    language_source_emit_ms: f64,
+    c_header_emit_ms: f64,
+    artifact_packaging_ms: f64,
+    source_kb: f64,
+    materialize_ms: f64,
+    build_ms: f64,
+    link_ms: f64,
+    first_issue_ms: f64,
+    total_to_outputs_ms: f64,
+    residual_diff: f64,
+    jacobian_diff: f64,
+    status: String,
+}
+
+#[derive(Clone, Copy)]
+struct PipelineMetricAggregate {
+    count: usize,
+    mean: f64,
+    std: f64,
+    min: f64,
+    max: f64,
+}
+
+struct PipelineBootstrapAggregate {
+    route: &'static str,
+    symbolic_backend: &'static str,
+    variant_label: String,
+    preset_label: &'static str,
+    runs: usize,
+    ok_runs: usize,
+    symbolic_ms: PipelineMetricAggregate,
+    callable_prep_ms: PipelineMetricAggregate,
+    artifact_ms: PipelineMetricAggregate,
+    jacobian_prepare_ms: PipelineMetricAggregate,
+    atom_sparse_lookup_prepare_ms: PipelineMetricAggregate,
+    atom_sparse_jacobian_build_ms: PipelineMetricAggregate,
+    atom_finalize_codegen_plan_ms: PipelineMetricAggregate,
+    atom_lower_many_ms: PipelineMetricAggregate,
+    atom_peephole_ms: PipelineMetricAggregate,
+    atom_reuse_temps_ms: PipelineMetricAggregate,
+    atom_push_ms: PipelineMetricAggregate,
+    prepared_module_init_ms: PipelineMetricAggregate,
+    prepared_residual_blocks_ms: PipelineMetricAggregate,
+    prepared_jacobian_blocks_ms: PipelineMetricAggregate,
+    module_ms: PipelineMetricAggregate,
+    source_ms: PipelineMetricAggregate,
+    source_probe_emit_ms: PipelineMetricAggregate,
+    language_source_emit_ms: PipelineMetricAggregate,
+    c_header_emit_ms: PipelineMetricAggregate,
+    artifact_packaging_ms: PipelineMetricAggregate,
+    artifact_other_ms: PipelineMetricAggregate,
+    source_kb: PipelineMetricAggregate,
+    materialize_ms: PipelineMetricAggregate,
+    build_ms: PipelineMetricAggregate,
+    link_ms: PipelineMetricAggregate,
+    first_issue_ms: PipelineMetricAggregate,
+    total_to_outputs_ms: PipelineMetricAggregate,
+    residual_diff: PipelineMetricAggregate,
+    jacobian_diff: PipelineMetricAggregate,
+    status: String,
 }
 
 struct RuntimeRow {
@@ -293,7 +396,10 @@ fn available_backend_variants() -> Vec<BackendVariant> {
         });
     }
 
-    emit_progress(format!("finished backend probe: {} variant(s)", variants.len()));
+    emit_progress(format!(
+        "finished backend probe: {} variant(s)",
+        variants.len()
+    ));
     variants
 }
 
@@ -346,6 +452,7 @@ fn short_scenario_label(label: &str) -> &'static str {
         "small-damp1-24" => "sd24",
         "combustion-100" => "cb100",
         "combustion-1000" => "cb1000",
+        "combustion-3000" => "cb3000",
         _ => "bvp",
     }
 }
@@ -441,10 +548,7 @@ fn compile_mode_label(variant: &BackendVariant, preset: BuildPreset) -> String {
             BuildPreset::DevFastest => "cargo-release(O0,cgu16)".to_string(),
         },
         AotCodegenBackend::C => {
-            let compiler = variant
-                .c_compiler
-                .as_deref()
-                .unwrap_or("gcc");
+            let compiler = variant.c_compiler.as_deref().unwrap_or("gcc");
             match preset {
                 BuildPreset::Production => format!("{compiler} -O3"),
                 BuildPreset::FastBuild => format!("{compiler} -O1"),
@@ -468,7 +572,9 @@ fn compile_banded_lambdify<'a>(prepared: &'a BvpPreparedSparseAotProblem) -> Vec
         .iter()
         .flat_map(|chunk| chunk.entries.iter())
         .map(|entry| {
-            let fun = entry.expr.lambdify_borrowed_thread_safe(input_names.as_slice());
+            let fun = entry
+                .expr
+                .lambdify_borrowed_thread_safe(input_names.as_slice());
             Box::new(move |args: &[f64]| fun(args)) as EvalFn<'a>
         })
         .collect()
@@ -499,7 +605,10 @@ fn max_abs_diff(lhs: &[f64], rhs: &[f64]) -> f64 {
 }
 
 fn vector_linf_norm(values: &[f64]) -> f64 {
-    values.iter().map(|value| value.abs()).fold(0.0_f64, f64::max)
+    values
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max)
 }
 
 fn relative_x_diff(lhs: &[f64], rhs: &[f64]) -> f64 {
@@ -574,11 +683,10 @@ fn preferred_superblock_group_for_scenario(label: &str, n_total: usize) -> usize
     }
 }
 
-fn solve_sparse_lu(
-    matrix: &faer::sparse::SparseColMat<usize, f64>,
-    rhs: &[f64],
-) -> Vec<f64> {
-    let lu = matrix.sp_lu().expect("sparse LU factorization should succeed");
+fn solve_sparse_lu(matrix: &faer::sparse::SparseColMat<usize, f64>, rhs: &[f64]) -> Vec<f64> {
+    let lu = matrix
+        .sp_lu()
+        .expect("sparse LU factorization should succeed");
     let rhs_col = Col::from_fn(rhs.len(), |index| rhs[index]);
     let solution = lu.solve(&rhs_col);
     solution.iter().copied().collect()
@@ -660,7 +768,8 @@ fn solve_banded_consistent_direct_for_scenario(
     refinement_steps: usize,
 ) -> (LinearSolveMetrics, Vec<f64>) {
     let node_layout = infer_node_major_layout_for_scenario(scenario_label, assembly.n());
-    let nodes_per_superblock = preferred_superblock_group_for_scenario(scenario_label, assembly.n());
+    let nodes_per_superblock =
+        preferred_superblock_group_for_scenario(scenario_label, assembly.n());
     let (layout, block) = if nodes_per_superblock == 1 {
         (
             format!("{}x{}", node_layout.n_blocks(), node_layout.block_size()),
@@ -688,7 +797,9 @@ fn solve_banded_consistent_direct_for_scenario(
         Err(err) => {
             return (
                 LinearSolveMetrics {
-                    linear_solver: format!("block_tridiagonal_lu_consistent+refine{refinement_steps}"),
+                    linear_solver: format!(
+                        "block_tridiagonal_lu_consistent+refine{refinement_steps}"
+                    ),
                     layout,
                     refinement: format!("auto/{refinement_steps}"),
                     direct_rr: f64::NAN,
@@ -732,7 +843,9 @@ fn solve_banded_consistent_direct_for_scenario(
         Err(err) => {
             return (
                 LinearSolveMetrics {
-                    linear_solver: format!("block_tridiagonal_lu_consistent+refine{refinement_steps}"),
+                    linear_solver: format!(
+                        "block_tridiagonal_lu_consistent+refine{refinement_steps}"
+                    ),
                     layout,
                     refinement: format!("auto/{refinement_steps}"),
                     direct_rr: f64::NAN,
@@ -757,7 +870,11 @@ fn solve_banded_consistent_direct_for_scenario(
                 "{}/{}{}",
                 report.accepted_steps,
                 report.requested_steps,
-                if report.refinement_attempted { "" } else { " skipped" }
+                if report.refinement_attempted {
+                    ""
+                } else {
+                    " skipped"
+                }
             ),
             direct_rr: report.direct_relative_residual,
             final_rr: report.final_relative_residual,
@@ -856,7 +973,7 @@ fn metrics_solution_legacy(
             iterative_refinement_steps: 0,
         },
     )
-        .expect("legacy banded solver should either factorize or fallback");
+    .expect("legacy banded solver should either factorize or fallback");
     let mut rhs_owned = rhs.to_vec();
     solver
         .solve_in_place(rhs_owned.as_mut_slice())
@@ -889,11 +1006,7 @@ fn solve_banded_solver_for_scenario(
     }
 }
 
-fn average_linear_solve_ms(
-    samples: usize,
-    iters: usize,
-    mut run_once: impl FnMut(),
-) -> f64 {
+fn average_linear_solve_ms(samples: usize, iters: usize, mut run_once: impl FnMut()) -> f64 {
     let mut totals = Vec::with_capacity(samples);
     for _ in 0..samples {
         let begin = Instant::now();
@@ -908,7 +1021,12 @@ fn average_linear_solve_ms(
 fn measure_lambdify_matrix_runtime(
     scenario: &ScenarioData,
     matrix_backend: MatrixBackend,
-) -> (CallableStoryRow, CallbackRuntimeMatrixRow, Vec<f64>, Option<BandedAssembly>) {
+) -> (
+    CallableStoryRow,
+    CallbackRuntimeMatrixRow,
+    Vec<f64>,
+    Option<BandedAssembly>,
+) {
     let compile_begin = Instant::now();
     let residual_fns = compile_residual_lambdify(&scenario.prepared);
     let jacobian_fns = match matrix_backend {
@@ -980,11 +1098,16 @@ fn measure_lambdify_matrix_runtime(
             residual_ms: format!("{:.3}", residual_ms),
             jacobian_ms: format!("{:.3}", jacobian_ms),
             total_ms: format!("{:.3}", residual_ms + jacobian_ms),
-            residual_diff: format!("{:.3e}", max_abs_diff(&residual_once, &scenario.lambdify_residual)),
+            residual_diff: format!(
+                "{:.3e}",
+                max_abs_diff(&residual_once, &scenario.lambdify_residual)
+            ),
             jacobian_diff: match matrix_backend {
                 MatrixBackend::Banded => {
                     let dense = banded_assembly_to_dense(
-                        banded_assembly.as_ref().expect("banded assembly should exist"),
+                        banded_assembly
+                            .as_ref()
+                            .expect("banded assembly should exist"),
                     );
                     let sparse_dense = scenario
                         .prepared
@@ -992,9 +1115,15 @@ fn measure_lambdify_matrix_runtime(
                         .jacobian_plan
                         .assemble_sparse_col_mat(scenario.lambdify_jacobian.as_slice())
                         .to_DMatrixType();
-                    format!("{:.3e}", max_abs_diff(dense.as_slice(), sparse_dense.as_slice()))
+                    format!(
+                        "{:.3e}",
+                        max_abs_diff(dense.as_slice(), sparse_dense.as_slice())
+                    )
                 }
-                _ => format!("{:.3e}", max_abs_diff(&jacobian_once, &scenario.lambdify_jacobian)),
+                _ => format!(
+                    "{:.3e}",
+                    max_abs_diff(&jacobian_once, &scenario.lambdify_jacobian)
+                ),
             },
             status: "ok".to_string(),
         },
@@ -1011,6 +1140,7 @@ fn build_jacobian_for_spec(
         "small-damp1-24" => build_real_bvp_damp1_case_with_backend(24, symbolic_backend),
         "combustion-100" => build_combustion_bvp_case_with_backend(100, symbolic_backend),
         "combustion-1000" => build_combustion_bvp_case_with_backend(1000, symbolic_backend),
+        "combustion-3000" => build_combustion_bvp_case_with_backend(3000, symbolic_backend),
         _ => {
             let mut jac = (spec.build_jacobian)();
             jac.set_symbolic_assembly_backend(symbolic_backend);
@@ -1050,6 +1180,7 @@ fn build_scenario_data_with_backend(
 
     let scenario = ScenarioData {
         label: spec.label,
+        symbolic_backend,
         runtime_iters: spec.runtime_iters,
         runtime_samples: spec.runtime_samples,
         symbolic_ms,
@@ -1066,6 +1197,13 @@ fn build_scenario_data_with_backend(
         scenario.prepared.sparse_entries.len()
     ));
     scenario
+}
+
+fn symbolic_backend_label(backend: BvpSymbolicAssemblyBackend) -> &'static str {
+    match backend {
+        BvpSymbolicAssemblyBackend::ExprLegacy => "ExprLegacy",
+        BvpSymbolicAssemblyBackend::AtomView => "AtomView",
+    }
 }
 
 #[derive(tabled::Tabled)]
@@ -1157,8 +1295,10 @@ fn bvp_sparse_banded_correctness_matrix_table() {
                 sparse_baseline_dense.as_slice(),
             );
             let sparse_ir_diff = max_abs_diff(&sparse_ir_values, &scenario.lambdify_jacobian);
-            let banded_ir_diff =
-                max_abs_diff(banded_ir_jacobian.as_slice(), sparse_baseline_dense.as_slice());
+            let banded_ir_diff = max_abs_diff(
+                banded_ir_jacobian.as_slice(),
+                sparse_baseline_dense.as_slice(),
+            );
             let residual_lambdify_diff =
                 max_abs_diff(&residual_lambdify, &scenario.lambdify_residual);
             let residual_ir_diff = max_abs_diff(&residual_ir, &scenario.lambdify_residual);
@@ -1196,7 +1336,11 @@ fn bvp_sparse_banded_correctness_matrix_table() {
                 status: "ok".to_string(),
             });
 
-            let tol = if spec.label == "combustion-1000" { 1.0e-9 } else { 1.0e-11 };
+            let tol = if spec.label == "combustion-1000" {
+                1.0e-9
+            } else {
+                1.0e-11
+            };
             assert!(sparse_lambdify_diff <= tol);
             assert!(banded_lambdify_diff <= tol);
             assert!(sparse_ir_diff <= tol);
@@ -1243,14 +1387,18 @@ fn build_and_link_backend(
     let metrics = build_and_link_backend_with_preset(scenario, variant, preset);
     emit_progress(format!(
         "backend `{}` for scenario `{}` finished with status `{}` (build {:.3} ms, total {:.3} ms)",
-        variant.label, scenario.label, metrics.status, metrics.build_ms, metrics.total_to_outputs_ms
+        variant.label,
+        scenario.label,
+        metrics.status,
+        metrics.build_ms,
+        metrics.total_to_outputs_ms
     ));
     metrics
 }
 
 fn pipeline_build_preset(scenario: &ScenarioData, variant: &BackendVariant) -> BuildPreset {
     match scenario.label {
-        "combustion-1000" => BuildPreset::DevFastest,
+        "combustion-1000" | "combustion-3000" => BuildPreset::DevFastest,
         _ => match variant.backend {
             AotCodegenBackend::Rust => BuildPreset::FastBuild,
             _ => BuildPreset::Production,
@@ -1270,17 +1418,39 @@ fn failed_build_metrics(
     status: String,
 ) -> BuildAndLinkMetrics {
     BuildAndLinkMetrics {
+        symbolic_backend: symbolic_backend_label(scenario.symbolic_backend),
         variant_label: variant.label.clone(),
         preset_label,
         artifact_ms,
+        jacobian_prepare_ms: breakdown.jacobian_prepare_ms,
+        atom_sparse_lookup_prepare_ms: breakdown.atom_sparse_lookup_prepare_ms,
+        atom_sparse_jacobian_build_ms: breakdown.atom_sparse_jacobian_build_ms,
+        atom_finalize_codegen_plan_ms: breakdown.atom_finalize_codegen_plan_ms,
+        atom_lower_many_ms: breakdown.atom_residual_lower_many_ms
+            + breakdown.atom_sparse_lower_many_ms,
+        atom_peephole_ms: breakdown.atom_residual_peephole_ms + breakdown.atom_sparse_peephole_ms,
+        atom_reuse_temps_ms: breakdown.atom_residual_reuse_temps_ms
+            + breakdown.atom_sparse_reuse_temps_ms,
+        atom_push_ms: breakdown.atom_residual_push_ms + breakdown.atom_sparse_push_ms,
+        prepared_module_init_ms: breakdown.prepared_module_init_ms,
+        prepared_residual_blocks_ms: breakdown.prepared_residual_blocks_ms,
+        prepared_jacobian_blocks_ms: breakdown.prepared_jacobian_blocks_ms,
         module_ms: breakdown.module_build_ms,
         source_ms: breakdown.source_emit_ms,
+        source_probe_emit_ms: breakdown.source_probe_emit_ms,
+        language_source_emit_ms: breakdown.language_source_emit_ms,
+        c_header_emit_ms: breakdown.c_header_emit_ms,
+        artifact_packaging_ms: breakdown.artifact_packaging_ms,
         source_kb: breakdown.source_kb,
         materialize_ms,
         build_ms,
         link_ms,
         first_issue_ms: 0.0,
-        total_to_outputs_ms: scenario.symbolic_ms + artifact_ms + materialize_ms + build_ms + link_ms,
+        total_to_outputs_ms: scenario.symbolic_ms
+            + artifact_ms
+            + materialize_ms
+            + build_ms
+            + link_ms,
         residual_diff: f64::NAN,
         jacobian_diff: f64::NAN,
         status,
@@ -1319,11 +1489,29 @@ fn successful_build_metrics(
     (linked.jacobian_values_eval)(scenario.args.as_slice(), &mut jacobian_out);
     let first_issue_ms = issue_begin.elapsed().as_secs_f64() * 1_000.0;
     BuildAndLinkMetrics {
+        symbolic_backend: symbolic_backend_label(scenario.symbolic_backend),
         variant_label: variant.label.clone(),
         preset_label,
         artifact_ms,
+        jacobian_prepare_ms: breakdown.jacobian_prepare_ms,
+        atom_sparse_lookup_prepare_ms: breakdown.atom_sparse_lookup_prepare_ms,
+        atom_sparse_jacobian_build_ms: breakdown.atom_sparse_jacobian_build_ms,
+        atom_finalize_codegen_plan_ms: breakdown.atom_finalize_codegen_plan_ms,
+        atom_lower_many_ms: breakdown.atom_residual_lower_many_ms
+            + breakdown.atom_sparse_lower_many_ms,
+        atom_peephole_ms: breakdown.atom_residual_peephole_ms + breakdown.atom_sparse_peephole_ms,
+        atom_reuse_temps_ms: breakdown.atom_residual_reuse_temps_ms
+            + breakdown.atom_sparse_reuse_temps_ms,
+        atom_push_ms: breakdown.atom_residual_push_ms + breakdown.atom_sparse_push_ms,
+        prepared_module_init_ms: breakdown.prepared_module_init_ms,
+        prepared_residual_blocks_ms: breakdown.prepared_residual_blocks_ms,
+        prepared_jacobian_blocks_ms: breakdown.prepared_jacobian_blocks_ms,
         module_ms: breakdown.module_build_ms,
         source_ms: breakdown.source_emit_ms,
+        source_probe_emit_ms: breakdown.source_probe_emit_ms,
+        language_source_emit_ms: breakdown.language_source_emit_ms,
+        c_header_emit_ms: breakdown.c_header_emit_ms,
+        artifact_packaging_ms: breakdown.artifact_packaging_ms,
         source_kb: breakdown.source_kb,
         materialize_ms,
         build_ms,
@@ -1342,57 +1530,535 @@ fn successful_build_metrics(
     }
 }
 
-fn print_pipeline_overview_table(scenario: &ScenarioData, rows: &[BuildAndLinkMetrics]) {
+fn lambdify_pipeline_sample(scenario: &ScenarioData) -> PipelineBootstrapSample {
+    let callable_begin = Instant::now();
+    let residual_fns = compile_residual_lambdify(&scenario.prepared);
+    let jacobian_fns = compile_sparse_lambdify(&scenario.prepared);
+    let callable_prep_ms = callable_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    let first_issue_begin = Instant::now();
+    let residual_out = eval_functions(&residual_fns, scenario.args.as_slice());
+    let jacobian_out = eval_functions(&jacobian_fns, scenario.args.as_slice());
+    let first_issue_ms = first_issue_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    PipelineBootstrapSample {
+        route: "Lambdify",
+        symbolic_backend: symbolic_backend_label(scenario.symbolic_backend),
+        variant_label: "Lambdify".to_string(),
+        preset_label: "n/a",
+        symbolic_ms: scenario.symbolic_ms,
+        callable_prep_ms,
+        artifact_ms: 0.0,
+        jacobian_prepare_ms: 0.0,
+        atom_sparse_lookup_prepare_ms: 0.0,
+        atom_sparse_jacobian_build_ms: 0.0,
+        atom_finalize_codegen_plan_ms: 0.0,
+        atom_lower_many_ms: 0.0,
+        atom_peephole_ms: 0.0,
+        atom_reuse_temps_ms: 0.0,
+        atom_push_ms: 0.0,
+        prepared_module_init_ms: 0.0,
+        prepared_residual_blocks_ms: 0.0,
+        prepared_jacobian_blocks_ms: 0.0,
+        module_ms: 0.0,
+        source_ms: 0.0,
+        source_probe_emit_ms: 0.0,
+        language_source_emit_ms: 0.0,
+        c_header_emit_ms: 0.0,
+        artifact_packaging_ms: 0.0,
+        source_kb: 0.0,
+        materialize_ms: 0.0,
+        build_ms: 0.0,
+        link_ms: 0.0,
+        first_issue_ms,
+        total_to_outputs_ms: scenario.symbolic_ms + callable_prep_ms + first_issue_ms,
+        residual_diff: max_abs_diff(&residual_out, &scenario.lambdify_residual),
+        jacobian_diff: max_abs_diff(&jacobian_out, &scenario.lambdify_jacobian),
+        status: "ok".to_string(),
+    }
+}
+
+fn atom_profile_artifact_pipeline_sample(
+    scenario: &ScenarioData,
+    backend: AotCodegenBackend,
+    profile: AtomOptimizationProfile,
+) -> PipelineBootstrapSample {
+    let variant_label = match backend {
+        AotCodegenBackend::Rust => "rust",
+        AotCodegenBackend::C => "c_source",
+        AotCodegenBackend::Zig => "zig_source",
+    };
+    let artifact_name = format!("profile_{}_{}", variant_label, profile.label());
+    let module_name = format!("profile_module_{}_{}", variant_label, profile.label());
+    let artifact_begin = Instant::now();
+    let (_artifact, breakdown) = scenario
+        .prepared
+        .generated_aot_artifact_with_breakdown_for_matrix_backend_and_atom_profile(
+            artifact_name,
+            &module_name,
+            backend,
+            MatrixBackend::SparseCol,
+            profile,
+        );
+    let artifact_ms = artifact_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    PipelineBootstrapSample {
+        route: "AOT-profile",
+        symbolic_backend: symbolic_backend_label(scenario.symbolic_backend),
+        variant_label: format!("{variant_label}/{}", profile.label()),
+        preset_label: "artifact_only",
+        symbolic_ms: scenario.symbolic_ms,
+        callable_prep_ms: artifact_ms,
+        artifact_ms,
+        jacobian_prepare_ms: breakdown.jacobian_prepare_ms,
+        atom_sparse_lookup_prepare_ms: breakdown.atom_sparse_lookup_prepare_ms,
+        atom_sparse_jacobian_build_ms: breakdown.atom_sparse_jacobian_build_ms,
+        atom_finalize_codegen_plan_ms: breakdown.atom_finalize_codegen_plan_ms,
+        atom_lower_many_ms: breakdown.atom_residual_lower_many_ms
+            + breakdown.atom_sparse_lower_many_ms,
+        atom_peephole_ms: breakdown.atom_residual_peephole_ms + breakdown.atom_sparse_peephole_ms,
+        atom_reuse_temps_ms: breakdown.atom_residual_reuse_temps_ms
+            + breakdown.atom_sparse_reuse_temps_ms,
+        atom_push_ms: breakdown.atom_residual_push_ms + breakdown.atom_sparse_push_ms,
+        prepared_module_init_ms: breakdown.prepared_module_init_ms,
+        prepared_residual_blocks_ms: breakdown.prepared_residual_blocks_ms,
+        prepared_jacobian_blocks_ms: breakdown.prepared_jacobian_blocks_ms,
+        module_ms: breakdown.module_build_ms,
+        source_ms: breakdown.source_emit_ms,
+        source_probe_emit_ms: breakdown.source_probe_emit_ms,
+        language_source_emit_ms: breakdown.language_source_emit_ms,
+        c_header_emit_ms: breakdown.c_header_emit_ms,
+        artifact_packaging_ms: breakdown.artifact_packaging_ms,
+        source_kb: breakdown.source_kb,
+        materialize_ms: 0.0,
+        build_ms: 0.0,
+        link_ms: 0.0,
+        first_issue_ms: 0.0,
+        total_to_outputs_ms: scenario.symbolic_ms + artifact_ms,
+        residual_diff: 0.0,
+        jacobian_diff: 0.0,
+        status: "ok".to_string(),
+    }
+}
+
+#[test]
+fn generated_aot_artifact_skips_source_probe_without_changing_c_source() {
+    let spec = ScenarioSpec {
+        label: "small-damp1-probe-skip",
+        runtime_iters: 1,
+        runtime_samples: 1,
+        build_jacobian: || build_real_bvp_damp1_case(8),
+    };
+    let scenario = build_scenario_data(&spec);
+
+    let (mut probed_module, probed_breakdown) = scenario
+        .prepared
+        .codegen_module_with_breakdown_for_matrix_backend(
+            "generated_probe_skip",
+            MatrixBackend::SparseCol,
+        );
+    probed_module.set_language(crate::symbolic::codegen::CodegenIR::CodegenLanguage::C);
+    let expected_c_source = probed_module.emit_source();
+
+    let (artifact, artifact_breakdown) = scenario
+        .prepared
+        .generated_aot_artifact_with_breakdown_for_matrix_backend(
+            "generated_probe_skip_artifact",
+            "generated_probe_skip",
+            AotCodegenBackend::C,
+            MatrixBackend::SparseCol,
+        );
+
+    assert!(
+        probed_breakdown.source_probe_emit_ms >= 0.0,
+        "module-only diagnostic path should still own the source probe timing"
+    );
+    assert_eq!(
+        artifact_breakdown.source_probe_emit_ms, 0.0,
+        "artifact path should not emit source once for a diagnostic probe and once for the real artifact"
+    );
+    assert!(
+        artifact_breakdown.language_source_emit_ms >= 0.0,
+        "artifact path should record the one real language-source emission"
+    );
+    assert!(
+        artifact_breakdown.source_kb > 0.0,
+        "artifact path should fill source_kb from the real emitted source"
+    );
+
+    let GeneratedAotArtifact::C(c_artifact) = artifact else {
+        panic!("C backend should produce a generated C artifact");
+    };
+    assert_eq!(
+        c_artifact.c_source, expected_c_source,
+        "skipping the diagnostic probe must not change generated C source"
+    );
+    assert!(c_artifact.c_source.contains("eval_residual"));
+    assert!(c_artifact.c_source.contains("eval_sparse_values"));
+}
+
+fn compiled_pipeline_sample(
+    metrics: &BuildAndLinkMetrics,
+    symbolic_ms: f64,
+) -> PipelineBootstrapSample {
+    PipelineBootstrapSample {
+        route: "AOT",
+        symbolic_backend: metrics.symbolic_backend,
+        variant_label: metrics.variant_label.clone(),
+        preset_label: metrics.preset_label,
+        symbolic_ms,
+        callable_prep_ms: metrics.artifact_ms
+            + metrics.materialize_ms
+            + metrics.build_ms
+            + metrics.link_ms,
+        artifact_ms: metrics.artifact_ms,
+        jacobian_prepare_ms: metrics.jacobian_prepare_ms,
+        atom_sparse_lookup_prepare_ms: metrics.atom_sparse_lookup_prepare_ms,
+        atom_sparse_jacobian_build_ms: metrics.atom_sparse_jacobian_build_ms,
+        atom_finalize_codegen_plan_ms: metrics.atom_finalize_codegen_plan_ms,
+        atom_lower_many_ms: metrics.atom_lower_many_ms,
+        atom_peephole_ms: metrics.atom_peephole_ms,
+        atom_reuse_temps_ms: metrics.atom_reuse_temps_ms,
+        atom_push_ms: metrics.atom_push_ms,
+        prepared_module_init_ms: metrics.prepared_module_init_ms,
+        prepared_residual_blocks_ms: metrics.prepared_residual_blocks_ms,
+        prepared_jacobian_blocks_ms: metrics.prepared_jacobian_blocks_ms,
+        module_ms: metrics.module_ms,
+        source_ms: metrics.source_ms,
+        source_probe_emit_ms: metrics.source_probe_emit_ms,
+        language_source_emit_ms: metrics.language_source_emit_ms,
+        c_header_emit_ms: metrics.c_header_emit_ms,
+        artifact_packaging_ms: metrics.artifact_packaging_ms,
+        source_kb: metrics.source_kb,
+        materialize_ms: metrics.materialize_ms,
+        build_ms: metrics.build_ms,
+        link_ms: metrics.link_ms,
+        first_issue_ms: metrics.first_issue_ms,
+        total_to_outputs_ms: metrics.total_to_outputs_ms,
+        residual_diff: metrics.residual_diff,
+        jacobian_diff: metrics.jacobian_diff,
+        status: metrics.status.clone(),
+    }
+}
+
+fn pipeline_metric_aggregate(values: impl IntoIterator<Item = f64>) -> PipelineMetricAggregate {
+    let values = values
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return PipelineMetricAggregate {
+            count: 0,
+            mean: f64::NAN,
+            std: f64::NAN,
+            min: f64::NAN,
+            max: f64::NAN,
+        };
+    }
+    let count = values.len();
+    let mean = values.iter().sum::<f64>() / count as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / count as f64;
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    PipelineMetricAggregate {
+        count,
+        mean,
+        std: variance.sqrt(),
+        min,
+        max,
+    }
+}
+
+fn fmt_pipeline_metric(value: PipelineMetricAggregate) -> String {
+    if value.count == 0 {
+        "-".to_string()
+    } else if value.count == 1 {
+        format!("{:.3}", value.mean)
+    } else {
+        format!(
+            "{:.3}+/-{:.3} [{:.3},{:.3}]",
+            value.mean, value.std, value.min, value.max
+        )
+    }
+}
+
+fn fmt_pipeline_short(value: PipelineMetricAggregate) -> String {
+    if value.count == 0 {
+        "-".to_string()
+    } else if value.count == 1 {
+        format!("{:.3}", value.mean)
+    } else {
+        format!("{:.3}+/-{:.3}", value.mean, value.std)
+    }
+}
+
+fn summarize_pipeline_status(samples: &[&PipelineBootstrapSample]) -> String {
+    let ok_runs = samples
+        .iter()
+        .filter(|sample| sample.status == "ok")
+        .count();
+    if ok_runs == samples.len() {
+        format!("ok {ok_runs}/{}", samples.len())
+    } else {
+        let first_failure = samples
+            .iter()
+            .find(|sample| sample.status != "ok")
+            .map(|sample| sample.status.as_str())
+            .unwrap_or("unknown");
+        format!(
+            "ok {ok_runs}/{}, first_failure={first_failure}",
+            samples.len()
+        )
+    }
+}
+
+fn aggregate_pipeline_samples(
+    samples: &[PipelineBootstrapSample],
+) -> Vec<PipelineBootstrapAggregate> {
+    let mut keys = Vec::<(&'static str, &'static str, String, &'static str)>::new();
+    for sample in samples {
+        let key = (
+            sample.route,
+            sample.symbolic_backend,
+            sample.variant_label.clone(),
+            sample.preset_label,
+        );
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.into_iter()
+        .map(|(route, symbolic_backend, variant_label, preset_label)| {
+            let rows = samples
+                .iter()
+                .filter(|sample| {
+                    sample.route == route
+                        && sample.symbolic_backend == symbolic_backend
+                        && sample.variant_label == variant_label
+                        && sample.preset_label == preset_label
+                })
+                .collect::<Vec<_>>();
+            let ok_rows = rows
+                .iter()
+                .copied()
+                .filter(|sample| sample.status == "ok")
+                .collect::<Vec<_>>();
+            PipelineBootstrapAggregate {
+                route,
+                symbolic_backend,
+                variant_label,
+                preset_label,
+                runs: rows.len(),
+                ok_runs: ok_rows.len(),
+                symbolic_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.symbolic_ms),
+                ),
+                callable_prep_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.callable_prep_ms),
+                ),
+                artifact_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.artifact_ms),
+                ),
+                jacobian_prepare_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.jacobian_prepare_ms),
+                ),
+                atom_sparse_lookup_prepare_ms: pipeline_metric_aggregate(
+                    rows.iter()
+                        .map(|sample| sample.atom_sparse_lookup_prepare_ms),
+                ),
+                atom_sparse_jacobian_build_ms: pipeline_metric_aggregate(
+                    rows.iter()
+                        .map(|sample| sample.atom_sparse_jacobian_build_ms),
+                ),
+                atom_finalize_codegen_plan_ms: pipeline_metric_aggregate(
+                    rows.iter()
+                        .map(|sample| sample.atom_finalize_codegen_plan_ms),
+                ),
+                atom_lower_many_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.atom_lower_many_ms),
+                ),
+                atom_peephole_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.atom_peephole_ms),
+                ),
+                atom_reuse_temps_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.atom_reuse_temps_ms),
+                ),
+                atom_push_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.atom_push_ms),
+                ),
+                prepared_module_init_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.prepared_module_init_ms),
+                ),
+                prepared_residual_blocks_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.prepared_residual_blocks_ms),
+                ),
+                prepared_jacobian_blocks_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.prepared_jacobian_blocks_ms),
+                ),
+                module_ms: pipeline_metric_aggregate(rows.iter().map(|sample| sample.module_ms)),
+                source_ms: pipeline_metric_aggregate(rows.iter().map(|sample| sample.source_ms)),
+                source_probe_emit_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.source_probe_emit_ms),
+                ),
+                language_source_emit_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.language_source_emit_ms),
+                ),
+                c_header_emit_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.c_header_emit_ms),
+                ),
+                artifact_packaging_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.artifact_packaging_ms),
+                ),
+                artifact_other_ms: pipeline_metric_aggregate(rows.iter().map(|sample| {
+                    (sample.artifact_ms
+                        - sample.module_ms
+                        - sample.source_probe_emit_ms
+                        - sample.language_source_emit_ms
+                        - sample.c_header_emit_ms
+                        - sample.artifact_packaging_ms)
+                        .max(0.0)
+                })),
+                source_kb: pipeline_metric_aggregate(rows.iter().map(|sample| sample.source_kb)),
+                materialize_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.materialize_ms),
+                ),
+                build_ms: pipeline_metric_aggregate(rows.iter().map(|sample| sample.build_ms)),
+                link_ms: pipeline_metric_aggregate(rows.iter().map(|sample| sample.link_ms)),
+                first_issue_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.first_issue_ms),
+                ),
+                total_to_outputs_ms: pipeline_metric_aggregate(
+                    rows.iter().map(|sample| sample.total_to_outputs_ms),
+                ),
+                residual_diff: pipeline_metric_aggregate(
+                    ok_rows.iter().map(|sample| sample.residual_diff),
+                ),
+                jacobian_diff: pipeline_metric_aggregate(
+                    ok_rows.iter().map(|sample| sample.jacobian_diff),
+                ),
+                status: summarize_pipeline_status(&rows),
+            }
+        })
+        .collect()
+}
+
+fn pipeline_sample_runs() -> usize {
+    env::var("BVP_PIPELINE_RUNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|runs| *runs > 0)
+        .unwrap_or(3)
+}
+
+fn print_pipeline_bootstrap_summary_table(
+    scenario: &ScenarioData,
+    rows: &[PipelineBootstrapAggregate],
+) {
     println!(
-        "[BVP backend pipeline compare] scenario={}, residuals={}, vars={}, nnz={}",
+        "[BVP backend pipeline compare] scenario={}, residuals={}, vars={}, nnz={}, multi-run bootstrap summary",
         scenario.label,
         scenario.prepared.residuals.len(),
         scenario.prepared.shape.1,
         scenario.prepared.sparse_entries.len()
     );
     println!(
-        "variant        | preset      | symbolic_ms | artifact_ms | materialize_ms | build_ms | link_ms | first_issue_ms | total_to_outputs_ms | status"
+        "route    | assembly   | variant        | preset      | ok/runs | symbolic_ms mean+/-std [min,max] | callable_prep_ms mean+/-std [min,max] | artifact_ms | materialize_ms | build_ms | link_ms | first_issue_ms | total_to_outputs_ms mean+/-std [min,max] | status"
     );
-    println!("{}", "-".repeat(152));
+    println!("{}", "-".repeat(273));
     for row in rows {
         println!(
-            "{:<14} | {:<11} | {:>11.3} | {:>11.3} | {:>14.3} | {:>8.3} | {:>7.3} | {:>14.3} | {:>19.3} | {}",
+            "{:<8} | {:<10} | {:<14} | {:<11} | {:>3}/{:<3} | {:<34} | {:<39} | {:<11} | {:<14} | {:<8} | {:<7} | {:<14} | {:<43} | {}",
+            row.route,
+            row.symbolic_backend,
             row.variant_label,
             row.preset_label,
-            scenario.symbolic_ms,
-            row.artifact_ms,
-            row.materialize_ms,
-            row.build_ms,
-            row.link_ms,
-            row.first_issue_ms,
-            row.total_to_outputs_ms,
+            row.ok_runs,
+            row.runs,
+            fmt_pipeline_metric(row.symbolic_ms),
+            fmt_pipeline_metric(row.callable_prep_ms),
+            fmt_pipeline_short(row.artifact_ms),
+            fmt_pipeline_short(row.materialize_ms),
+            fmt_pipeline_short(row.build_ms),
+            fmt_pipeline_short(row.link_ms),
+            fmt_pipeline_short(row.first_issue_ms),
+            fmt_pipeline_metric(row.total_to_outputs_ms),
             row.status,
         );
     }
     flush_stdout();
 }
 
-fn print_pipeline_codegen_table(rows: &[BuildAndLinkMetrics]) {
+fn print_pipeline_codegen_summary_table(rows: &[PipelineBootstrapAggregate]) {
     println!(
-        "variant        | module_ms | source_ms | source_kb"
+        "AtomView-only planning stages. ExprLegacy rows are expected to be zero here; use the module/source table below for the active legacy module-build cost."
     );
-    println!("{}", "-".repeat(54));
+    println!(
+        "route    | assembly   | variant        | preset      | jac_prepare | lookup | jac_build | chunk_plan | lower | peephole | temp_reuse | module_push"
+    );
+    println!("{}", "-".repeat(145));
     for row in rows {
         println!(
-            "{:<14} | {:>9.3} | {:>9.3} | {:>9.1}",
-            row.variant_label, row.module_ms, row.source_ms, row.source_kb
+            "{:<8} | {:<10} | {:<14} | {:<11} | {:<11} | {:<6} | {:<9} | {:<10} | {:<6} | {:<8} | {:<10} | {:<11}",
+            row.route,
+            row.symbolic_backend,
+            row.variant_label,
+            row.preset_label,
+            fmt_pipeline_short(row.jacobian_prepare_ms),
+            fmt_pipeline_short(row.atom_sparse_lookup_prepare_ms),
+            fmt_pipeline_short(row.atom_sparse_jacobian_build_ms),
+            fmt_pipeline_short(row.atom_finalize_codegen_plan_ms),
+            fmt_pipeline_short(row.atom_lower_many_ms),
+            fmt_pipeline_short(row.atom_peephole_ms),
+            fmt_pipeline_short(row.atom_reuse_temps_ms),
+            fmt_pipeline_short(row.atom_push_ms),
+        );
+    }
+    println!(
+        "route    | assembly   | variant        | preset      | module_ms | module_init | residual_lower | jacobian_lower | source_probe | source_emit | c_header | packaging | artifact_other | source_kb"
+    );
+    println!("{}", "-".repeat(205));
+    for row in rows {
+        println!(
+            "{:<8} | {:<10} | {:<14} | {:<11} | {:<9} | {:<11} | {:<14} | {:<14} | {:<12} | {:<11} | {:<8} | {:<9} | {:<14} | {:<9}",
+            row.route,
+            row.symbolic_backend,
+            row.variant_label,
+            row.preset_label,
+            fmt_pipeline_short(row.module_ms),
+            fmt_pipeline_short(row.prepared_module_init_ms),
+            fmt_pipeline_short(row.prepared_residual_blocks_ms),
+            fmt_pipeline_short(row.prepared_jacobian_blocks_ms),
+            fmt_pipeline_short(row.source_probe_emit_ms),
+            fmt_pipeline_short(row.language_source_emit_ms),
+            fmt_pipeline_short(row.c_header_emit_ms),
+            fmt_pipeline_short(row.artifact_packaging_ms),
+            fmt_pipeline_short(row.artifact_other_ms),
+            fmt_pipeline_short(row.source_kb),
         );
     }
     flush_stdout();
 }
 
-fn print_pipeline_correctness_table(rows: &[BuildAndLinkMetrics]) {
-    println!("variant        | residual_diff | jacobian_diff | status");
-    println!("{}", "-".repeat(70));
+fn print_pipeline_correctness_summary_table(rows: &[PipelineBootstrapAggregate]) {
+    println!("route    | assembly   | variant        | preset      | residual_diff | jacobian_diff | status");
+    println!("{}", "-".repeat(117));
     for row in rows {
         println!(
-            "{:<14} | {:>13.6e} | {:>13.6e} | {}",
-            row.variant_label, row.residual_diff, row.jacobian_diff, row.status
+            "{:<8} | {:<10} | {:<14} | {:<11} | {:<13.6e} | {:<13.6e} | {}",
+            row.route,
+            row.symbolic_backend,
+            row.variant_label,
+            row.preset_label,
+            row.residual_diff.max,
+            row.jacobian_diff.max,
+            row.status,
         );
     }
     flush_stdout();
@@ -1498,19 +2164,10 @@ fn build_and_link_backend_with_preset(
     let scenario_tag = short_scenario_label(scenario.label);
     let variant_tag = short_variant_label(variant);
     let preset_tag = short_preset_label(preset);
-    let artifact_name = format!(
-        "gbc_{}_{}_{}",
-        scenario_tag,
-        variant_tag,
-        preset_tag
-    );
-    let module_name = format!(
-        "gbcm_{}_{}_{}",
-        scenario_tag,
-        variant_tag,
-        preset_tag
-    );
-    let output_parent_dir = unique_compare_artifact_dir(scenario_tag, &format!("{variant_tag}-{preset_tag}"));
+    let artifact_name = format!("gbc_{}_{}_{}", scenario_tag, variant_tag, preset_tag);
+    let module_name = format!("gbcm_{}_{}_{}", scenario_tag, variant_tag, preset_tag);
+    let output_parent_dir =
+        unique_compare_artifact_dir(scenario_tag, &format!("{variant_tag}-{preset_tag}"));
 
     let artifact_begin = Instant::now();
     let (artifact, breakdown) = scenario.prepared.generated_aot_artifact_with_breakdown(
@@ -1592,7 +2249,9 @@ fn build_and_link_backend_with_preset(
                     ),
                 );
             }
-            let registered = registry.register_materialized_build(manifest, &build).clone();
+            let registered = registry
+                .register_materialized_build(manifest, &build)
+                .clone();
             let link_begin = Instant::now();
             let linked = match register_generated_sparse_cdylib_backend(&registered) {
                 Ok(linked) => linked,
@@ -1786,7 +2445,8 @@ fn build_and_link_backend_with_preset(
                     ),
                 );
             }
-            let registered = register_zig_build_in_registry(&mut registry, manifest, &build).clone();
+            let registered =
+                register_zig_build_in_registry(&mut registry, manifest, &build).clone();
             let link_begin = Instant::now();
             let linked = match register_generated_zig_sparse_backend(&registered) {
                 Ok(linked) => linked,
@@ -1867,10 +2527,18 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
     let variant_tag = short_variant_label(variant);
     let preset_tag = short_preset_label(preset);
     let backend_tag = matrix_backend_label(matrix_backend).to_ascii_lowercase();
-    let artifact_name = format!("gbc_{}_{}_{}_{}", scenario_tag, variant_tag, preset_tag, backend_tag);
-    let module_name = format!("gbcm_{}_{}_{}_{}", scenario_tag, variant_tag, preset_tag, backend_tag);
-    let output_parent_dir =
-        unique_compare_artifact_dir(scenario_tag, &format!("{variant_tag}-{preset_tag}-{backend_tag}"));
+    let artifact_name = format!(
+        "gbc_{}_{}_{}_{}",
+        scenario_tag, variant_tag, preset_tag, backend_tag
+    );
+    let module_name = format!(
+        "gbcm_{}_{}_{}_{}",
+        scenario_tag, variant_tag, preset_tag, backend_tag
+    );
+    let output_parent_dir = unique_compare_artifact_dir(
+        scenario_tag,
+        &format!("{variant_tag}-{preset_tag}-{backend_tag}"),
+    );
 
     let artifact_begin = Instant::now();
     let (artifact, breakdown) = scenario
@@ -1883,8 +2551,11 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
         );
     let artifact_ms = artifact_begin.elapsed().as_secs_f64() * 1_000.0;
 
-    let manifest =
-        PreparedProblemManifest::from(&scenario.prepared.as_prepared_problem_for_matrix_backend(matrix_backend));
+    let manifest = PreparedProblemManifest::from(
+        &scenario
+            .prepared
+            .as_prepared_problem_for_matrix_backend(matrix_backend),
+    );
     let mut registry = AotRegistry::new();
 
     match (variant.backend, artifact) {
@@ -1895,9 +2566,13 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                 BuildPreset::DevFastest => AotCompileConfig::dev_fastest(),
             };
             let materialize_begin = Instant::now();
-            let build = match AotBuildRequest::new(crate_spec, &output_parent_dir, AotBuildProfile::Release)
-                .with_compile_config(compile)
-                .materialize()
+            let build = match AotBuildRequest::new(
+                crate_spec,
+                &output_parent_dir,
+                AotBuildProfile::Release,
+            )
+            .with_compile_config(compile)
+            .materialize()
             {
                 Ok(build) => build,
                 Err(err) => {
@@ -1943,10 +2618,16 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                     materialize_ms,
                     build_ms,
                     0.0,
-                    summarize_process_failure(executed.status_code, &executed.stdout, &executed.stderr),
+                    summarize_process_failure(
+                        executed.status_code,
+                        &executed.stdout,
+                        &executed.stderr,
+                    ),
                 );
             }
-            let registered = registry.register_materialized_build(manifest, &build).clone();
+            let registered = registry
+                .register_materialized_build(manifest, &build)
+                .clone();
             let link_begin = Instant::now();
             let linked = match register_generated_sparse_cdylib_backend(&registered) {
                 Ok(linked) => linked,
@@ -1978,7 +2659,10 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
             )
         }
         (AotCodegenBackend::C, GeneratedAotArtifact::C(library_spec)) => {
-            let compiler = variant.c_compiler.clone().unwrap_or_else(|| "gcc".to_string());
+            let compiler = variant
+                .c_compiler
+                .clone()
+                .unwrap_or_else(|| "gcc".to_string());
             let compile = match preset {
                 BuildPreset::Production => CAotCompileConfig::production(),
                 BuildPreset::FastBuild => CAotCompileConfig::fast_build(),
@@ -1986,9 +2670,13 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
             }
             .with_compiler(compiler);
             let materialize_begin = Instant::now();
-            let build = match CAotBuildRequest::new(library_spec, &output_parent_dir, CAotBuildProfile::Release)
-                .with_compile_config(compile)
-                .materialize()
+            let build = match CAotBuildRequest::new(
+                library_spec,
+                &output_parent_dir,
+                CAotBuildProfile::Release,
+            )
+            .with_compile_config(compile)
+            .materialize()
             {
                 Ok(build) => build,
                 Err(err) => {
@@ -2034,7 +2722,11 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                     materialize_ms,
                     build_ms,
                     0.0,
-                    summarize_process_failure(executed.status_code, &executed.stdout, &executed.stderr),
+                    summarize_process_failure(
+                        executed.status_code,
+                        &executed.stdout,
+                        &executed.stderr,
+                    ),
                 );
             }
             let registered = register_c_build_in_registry(&mut registry, manifest, &build).clone();
@@ -2075,7 +2767,8 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                 BuildPreset::DevFastest => ZigAotBuildProfile::Debug,
             };
             let materialize_begin = Instant::now();
-            let build = match ZigAotBuildRequest::new(library_spec, &output_parent_dir, profile).materialize()
+            let build = match ZigAotBuildRequest::new(library_spec, &output_parent_dir, profile)
+                .materialize()
             {
                 Ok(build) => build,
                 Err(err) => {
@@ -2121,10 +2814,15 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                     materialize_ms,
                     build_ms,
                     0.0,
-                    summarize_process_failure(executed.status_code, &executed.stdout, &executed.stderr),
+                    summarize_process_failure(
+                        executed.status_code,
+                        &executed.stdout,
+                        &executed.stderr,
+                    ),
                 );
             }
-            let registered = register_zig_build_in_registry(&mut registry, manifest, &build).clone();
+            let registered =
+                register_zig_build_in_registry(&mut registry, manifest, &build).clone();
             let link_begin = Instant::now();
             let linked = match register_generated_zig_sparse_backend(&registered) {
                 Ok(linked) => linked,
@@ -2188,7 +2886,10 @@ fn measure_linked_runtime_avg_against_baseline(
         let residual_begin = Instant::now();
         for _ in 0..iters {
             let mut residual_out = vec![0.0; linked.residual_len];
-            (linked.residual_eval)(black_box(scenario.args.as_slice()), black_box(&mut residual_out));
+            (linked.residual_eval)(
+                black_box(scenario.args.as_slice()),
+                black_box(&mut residual_out),
+            );
             black_box(residual_out);
         }
         residual_samples.push(residual_begin.elapsed().as_secs_f64() * 1_000.0);
@@ -2373,10 +3074,7 @@ fn build_atomview_compiled_end_to_end_row(
     }
 }
 
-fn print_end_to_end_callable_pipeline_table(
-    scenario: &ScenarioData,
-    rows: &[EndToEndCallableRow],
-) {
+fn print_end_to_end_callable_pipeline_table(scenario: &ScenarioData, rows: &[EndToEndCallableRow]) {
     println!(
         "[BVP end-to-end callable compare] scenario={}, residuals={}, vars={}, nnz={}",
         scenario.label,
@@ -2454,11 +3152,7 @@ fn print_end_to_end_callable_break_even_table(rows: &[EndToEndCallableRow]) {
 
         println!(
             "{:<14} | {:>29.3} | {:>24.3} | {:>16.3} | {}",
-            row.variant,
-            extra_bootstrap_ms,
-            runtime_gain_ms_per_call,
-            break_even_calls,
-            row.status
+            row.variant, extra_bootstrap_ms, runtime_gain_ms_per_call, break_even_calls, row.status
         );
     }
     flush_stdout();
@@ -2528,12 +3222,28 @@ fn scenario_specs() -> Vec<ScenarioSpec> {
     ]
 }
 
+/// Keeps the largest cold-bootstrap case out of the separate runtime and
+/// compile-preset matrices: those stories answer different questions and
+/// would otherwise rebuild this expensive artifact unnecessarily.
+fn pipeline_scenario_specs() -> Vec<ScenarioSpec> {
+    let mut specs = scenario_specs();
+    specs.push(ScenarioSpec {
+        label: "combustion-3000",
+        runtime_iters: 1,
+        runtime_samples: 1,
+        build_jacobian: || build_combustion_bvp_case(3000),
+    });
+    specs
+}
+
 /// Answers:
 /// - which backend/compiler reaches the first callable outputs fastest,
 /// - whether compiler choice dominates total bootstrap latency,
 /// - whether all generated outputs still numerically match the lambdify baseline.
 ///
 /// This test is the main evidence for the "time-to-first-output" hypothesis.
+/// Set `BVP_PIPELINE_SCENARIO_FILTER=combustion-3000` to isolate the largest
+/// stress scenario without rebuilding the three smaller pipeline cases.
 #[test]
 #[ignore = "diagnostic pipeline/build/correctness compare for BVP backends and compilers"]
 fn bvp_generated_backend_pipeline_comparison_table() {
@@ -2544,23 +3254,140 @@ fn bvp_generated_backend_pipeline_comparison_table() {
         "expected at least one generated backend variant"
     );
     print_backend_probe_summary(&variants);
+    let runs = pipeline_sample_runs();
+    emit_progress(format!(
+        "pipeline comparison will collect {runs} run(s) per scenario/route; set BVP_PIPELINE_RUNS to override"
+    ));
 
-    for spec in scenario_specs() {
-        emit_progress(format!("pipeline comparison entering scenario `{}`", spec.label));
-        let scenario = build_scenario_data(&spec);
-        let mut rows = Vec::new();
-        for variant in &variants {
-            let metrics = build_and_link_backend(&scenario, variant);
-            if metrics.linked.is_some() {
-                let _ = unregister_linked_sparse_backend(&scenario.prepared.problem_key());
-            }
-            rows.push(metrics);
-        }
-        print_pipeline_overview_table(&scenario, &rows);
-        print_pipeline_codegen_table(&rows);
-        print_pipeline_correctness_table(&rows);
-        emit_progress(format!("pipeline comparison finished scenario `{}`", scenario.label));
+    let scenario_filter = env::var("BVP_PIPELINE_SCENARIO_FILTER")
+        .ok()
+        .map(|filter| filter.trim().to_ascii_lowercase())
+        .filter(|filter| !filter.is_empty());
+    let specs: Vec<_> = pipeline_scenario_specs()
+        .into_iter()
+        .filter(|spec| {
+            scenario_filter.as_ref().map_or(true, |filter| {
+                spec.label.to_ascii_lowercase().contains(filter)
+            })
+        })
+        .collect();
+    assert!(
+        !specs.is_empty(),
+        "BVP_PIPELINE_SCENARIO_FILTER={:?} did not match any pipeline scenario",
+        scenario_filter
+    );
+    if let Some(filter) = &scenario_filter {
+        emit_progress(format!(
+            "pipeline comparison restricted to scenario labels containing `{filter}`"
+        ));
     }
+
+    for spec in specs {
+        emit_progress(format!(
+            "pipeline comparison entering scenario `{}`",
+            spec.label
+        ));
+        let mut samples = Vec::new();
+        let mut last_scenario = None;
+        for run_idx in 0..runs {
+            emit_progress(format!(
+                "pipeline comparison scenario `{}` run {}/{}",
+                spec.label,
+                run_idx + 1,
+                runs
+            ));
+            let scenario = build_scenario_data(&spec);
+            samples.push(lambdify_pipeline_sample(&scenario));
+            for variant in &variants {
+                let metrics = build_and_link_backend(&scenario, variant);
+                samples.push(compiled_pipeline_sample(&metrics, scenario.symbolic_ms));
+                if metrics.linked.is_some() {
+                    let _ = unregister_linked_sparse_backend(&scenario.prepared.problem_key());
+                }
+            }
+            last_scenario = Some(scenario);
+        }
+        let scenario = last_scenario.expect("at least one pipeline run should execute");
+        let rows = aggregate_pipeline_samples(&samples);
+        print_pipeline_bootstrap_summary_table(&scenario, &rows);
+        print_pipeline_codegen_summary_table(&rows);
+        print_pipeline_correctness_summary_table(&rows);
+        emit_progress(format!(
+            "pipeline comparison finished scenario `{}`",
+            scenario.label
+        ));
+    }
+}
+
+/// Answers:
+/// - how much cold-start time is spent in optional AtomView IR cleanup passes,
+/// - whether skipping those passes materially reduces AOT artifact preparation,
+/// - and which source emitter should be used for the next compile-stage test.
+///
+/// This intentionally stops before compiler invocation: it isolates the second
+/// AOT stage (`AtomView -> IR -> source/artifact`) that dominates tcc cold
+/// bootstrap once the external compiler is already fast.
+#[test]
+#[ignore = "diagnostic AtomView AOT optimization-profile bootstrap compare"]
+fn bvp_atomview_aot_optimization_profile_bootstrap_table() {
+    emit_progress("starting AtomView AOT optimization-profile bootstrap compare");
+    let runs = pipeline_sample_runs();
+    emit_progress(format!(
+        "optimization-profile comparison will collect {runs} run(s); set BVP_PIPELINE_RUNS to override"
+    ));
+
+    let spec = ScenarioSpec {
+        label: "combustion-1000",
+        runtime_iters: 1,
+        runtime_samples: 1,
+        build_jacobian: || {
+            build_combustion_bvp_case_with_backend(1000, BvpSymbolicAssemblyBackend::AtomView)
+        },
+    };
+    let profiles = [
+        AtomOptimizationProfile::Full,
+        AtomOptimizationProfile::FastBootstrap,
+        AtomOptimizationProfile::NoPeephole,
+        AtomOptimizationProfile::NoTempReuse,
+    ];
+    let backends = [
+        AotCodegenBackend::C,
+        AotCodegenBackend::Rust,
+        AotCodegenBackend::Zig,
+    ];
+
+    let mut samples = Vec::new();
+    let mut last_scenario = None;
+    for run_idx in 0..runs {
+        emit_progress(format!(
+            "optimization-profile comparison run {}/{}",
+            run_idx + 1,
+            runs
+        ));
+        let scenario =
+            build_scenario_data_with_backend(&spec, BvpSymbolicAssemblyBackend::AtomView);
+        for backend in backends {
+            for profile in profiles {
+                samples.push(atom_profile_artifact_pipeline_sample(
+                    &scenario, backend, profile,
+                ));
+            }
+        }
+        last_scenario = Some(scenario);
+    }
+
+    let scenario = last_scenario.expect("at least one optimization-profile run should execute");
+    let rows = aggregate_pipeline_samples(&samples);
+    println!(
+        "\n[BVP codegen] AtomView AOT optimization-profile bootstrap table; scenario={}",
+        scenario.label
+    );
+    println!(
+        "note: artifact_only isolates AtomView -> IR/source/artifact packaging; build/link are intentionally excluded"
+    );
+    print_pipeline_bootstrap_summary_table(&scenario, &rows);
+    print_pipeline_codegen_summary_table(&rows);
+    emit_progress("optimization-profile bootstrap compare finished");
 }
 
 /// Answers:
@@ -2581,13 +3408,20 @@ fn bvp_generated_backend_runtime_comparison_table() {
     print_backend_probe_summary(&variants);
 
     for spec in scenario_specs() {
-        emit_progress(format!("runtime comparison entering scenario `{}`", spec.label));
+        emit_progress(format!(
+            "runtime comparison entering scenario `{}`",
+            spec.label
+        ));
         let scenario = build_scenario_data(&spec);
         let mut rows = vec![measure_lambdify_runtime_avg(&scenario)];
         for variant in &variants {
             let metrics = build_and_link_backend(&scenario, variant);
             if let Some(linked) = metrics.linked.as_ref() {
-                rows.push(measure_linked_runtime_avg(&scenario, &variant.label, linked));
+                rows.push(measure_linked_runtime_avg(
+                    &scenario,
+                    &variant.label,
+                    linked,
+                ));
             } else {
                 rows.push(RuntimeRow {
                     label: variant.label.clone(),
@@ -2602,7 +3436,10 @@ fn bvp_generated_backend_runtime_comparison_table() {
             let _ = unregister_linked_sparse_backend(&scenario.prepared.problem_key());
         }
         print_runtime_table(&scenario, &rows);
-        emit_progress(format!("runtime comparison finished scenario `{}`", scenario.label));
+        emit_progress(format!(
+            "runtime comparison finished scenario `{}`",
+            scenario.label
+        ));
     }
 }
 
@@ -2694,7 +3531,10 @@ fn bvp_generated_backend_compile_preset_tradeoff_table() {
     );
     print_backend_probe_summary(&variants);
     for spec in scenario_specs() {
-        emit_progress(format!("compile-preset comparison entering scenario `{}`", spec.label));
+        emit_progress(format!(
+            "compile-preset comparison entering scenario `{}`",
+            spec.label
+        ));
         let scenario = build_scenario_data(&spec);
         let mut rows = Vec::new();
 
@@ -2724,7 +3564,9 @@ fn bvp_generated_backend_compile_preset_tradeoff_table() {
                         residual_ms: runtime.residual_ms,
                         jacobian_ms: runtime.jacobian_ms,
                         total_ms: runtime.total_ms,
-                        speedup_vs_baseline: if runtime.total_ms.is_finite() && runtime.total_ms > 0.0 {
+                        speedup_vs_baseline: if runtime.total_ms.is_finite()
+                            && runtime.total_ms > 0.0
+                        {
                             baseline / runtime.total_ms
                         } else {
                             f64::NAN
@@ -2754,7 +3596,10 @@ fn bvp_generated_backend_compile_preset_tradeoff_table() {
 
         print_preset_build_table(&scenario, &rows);
         print_preset_runtime_table(&scenario, &rows);
-        emit_progress(format!("compile-preset comparison finished scenario `{}`", scenario.label));
+        emit_progress(format!(
+            "compile-preset comparison finished scenario `{}`",
+            scenario.label
+        ));
     }
 }
 
@@ -2797,7 +3642,9 @@ fn bvp_generated_compiled_sparse_banded_matrix_backend_table() {
                         preset,
                         matrix_backend,
                     );
-                    let problem_key = scenario.prepared.problem_key_for_matrix_backend(matrix_backend);
+                    let problem_key = scenario
+                        .prepared
+                        .problem_key_for_matrix_backend(matrix_backend);
                     if let Some(linked) = metrics.linked.as_ref() {
                         let runtime = match matrix_backend {
                             MatrixBackend::Banded => measure_linked_runtime_avg_against_baseline(
@@ -2982,8 +3829,7 @@ fn bvp_callable_and_linear_solver_story_table() {
                             rhs.as_slice(),
                             banded_solver,
                         );
-                        metrics.solve_diff =
-                            max_abs_diff(&baseline_solution, &solution_once);
+                        metrics.solve_diff = max_abs_diff(&baseline_solution, &solution_once);
                         metrics.relative_x_diff =
                             relative_x_diff(&solution_once, &baseline_solution);
                         metrics.solve_rr =
@@ -3091,7 +3937,10 @@ fn bvp_callable_and_linear_solver_story_table() {
                         });
 
                         let mut compiled_values = vec![0.0; linked.nnz];
-                        (linked.jacobian_values_eval)(scenario.args.as_slice(), &mut compiled_values);
+                        (linked.jacobian_values_eval)(
+                            scenario.args.as_slice(),
+                            &mut compiled_values,
+                        );
 
                         match matrix_backend {
                             MatrixBackend::SparseCol => {
@@ -3140,12 +3989,13 @@ fn bvp_callable_and_linear_solver_story_table() {
                                     .assemble_banded_assembly(compiled_values.as_slice());
                                 let dense = banded_assembly_to_dense(&assembly);
                                 for banded_solver in BandedSolverUnderTest::variants() {
-                                    let (mut metrics, solution_once) = solve_banded_solver_for_scenario(
-                                        scenario.label,
-                                        &assembly,
-                                        rhs.as_slice(),
-                                        banded_solver,
-                                    );
+                                    let (mut metrics, solution_once) =
+                                        solve_banded_solver_for_scenario(
+                                            scenario.label,
+                                            &assembly,
+                                            rhs.as_slice(),
+                                            banded_solver,
+                                        );
                                     metrics.solve_rr = relative_dense_residual(
                                         &dense,
                                         &solution_once,
@@ -3185,10 +4035,7 @@ fn bvp_callable_and_linear_solver_story_table() {
                                             "{:.3e}",
                                             max_abs_diff(&baseline_solution, &solution_once)
                                         ),
-                                        relative_x_diff: format!(
-                                            "{:.3e}",
-                                            metrics.relative_x_diff
-                                        ),
+                                        relative_x_diff: format!("{:.3e}", metrics.relative_x_diff),
                                         status: metrics.status,
                                     });
                                 }
@@ -3348,7 +4195,7 @@ fn bvp_callable_and_linear_solver_story_table() {
         ));
     }
 }
-/* 
+/*
 #[test]
 #[ignore = "heavy combustion-1000 diagnostic for lapack-style banded factorization on a real generated Jacobian"]
 fn diagnose_combustion_1000_real_banded_jacobian_lapack_factorization() {

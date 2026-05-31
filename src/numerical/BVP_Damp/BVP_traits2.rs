@@ -1,8 +1,8 @@
 #![allow(non_camel_case_types)] //
 use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
+use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
 use crate::somelinalg::iterative_solvers_cpu::LUsolver::invers_Mat_LU;
 use crate::somelinalg::iterative_solvers_cpu::Lx_eq_b::{solve_csmat, solve_sys_SparseColMat};
-use crate::somelinalg::iterative_solvers_cpu::some_matrix_inv::invers_csmat;
 
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
@@ -1010,11 +1010,16 @@ pub fn convert_to_jac(f: Box<dyn Fn(f64, &dyn VectorType) -> Box<dyn MatrixType>
 //_________________________________________________Y___________________________________________________________
 pub trait Y: Any {
     fn as_any(&self) -> Box<&dyn Any>;
+    fn clone_box(&self) -> Box<dyn Y>;
 }
 
 impl Y for DVector<f64> {
     fn as_any(&self) -> Box<&dyn Any> {
         Box::new(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn Y> {
+        Box::new(self.clone())
     }
 }
 
@@ -1022,11 +1027,15 @@ impl Y for CsVec<f64> {
     fn as_any(&self) -> Box<&dyn Any> {
         Box::new(self)
     }
+
+    fn clone_box(&self) -> Box<dyn Y> {
+        Box::new(self.clone())
+    }
 }
 
 impl Clone for Box<dyn Y> {
     fn clone(&self) -> Self {
-        self.clone()
+        self.clone_box()
     }
 }
 ///////////////////////////////
@@ -1058,6 +1067,38 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         panic!("Unsupported vector type: {}", desired_type);
     };
     res
+}
+
+#[cfg(test)]
+mod y_trait_object_clone_tests {
+    use super::*;
+
+    #[test]
+    fn boxed_y_clone_preserves_dense_payload_without_recursion() {
+        let original: Box<dyn Y> = Box::new(DVector::from_vec(vec![1.0, -2.0, 3.5]));
+        let cloned = original.clone();
+        let any = cloned.as_any();
+        let dense = (*any)
+            .downcast_ref::<DVector<f64>>()
+            .expect("cloned Box<dyn Y> should keep dense payload type");
+
+        assert_eq!(dense.as_slice(), &[1.0, -2.0, 3.5]);
+    }
+
+    #[test]
+    fn boxed_y_clone_preserves_sparse_payload_without_recursion() {
+        let sparse = CsVec::new(5, vec![0, 3], vec![2.0, -4.0]);
+        let original: Box<dyn Y> = Box::new(sparse);
+        let cloned = original.clone();
+        let any = cloned.as_any();
+        let sparse = (*any)
+            .downcast_ref::<CsVec<f64>>()
+            .expect("cloned Box<dyn Y> should keep sparse payload type");
+
+        assert_eq!(sparse.dim(), 5);
+        assert_eq!(sparse.indices(), &[0, 3]);
+        assert_eq!(sparse.data(), &[2.0, -4.0]);
+    }
 }
 //________________________________________
 #[allow(dead_code)]

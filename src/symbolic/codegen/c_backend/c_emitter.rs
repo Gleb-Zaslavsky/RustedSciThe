@@ -14,6 +14,7 @@
 
 use super::super::CodegenIR::{Instr, LinearBlock, LinearExpr, Temp};
 use std::f64::consts::PI;
+use std::fmt::Write as _;
 
 /// Target language for code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,14 @@ pub enum CodegenLanguage {
 pub struct CEmitter;
 
 impl CEmitter {
+    fn linear_expr_capacity_hint(ir: &LinearExpr) -> usize {
+        256 + ir.instructions.len() * 72 + ir.num_temps * 8
+    }
+
+    fn linear_block_capacity_hint(ir: &LinearBlock) -> usize {
+        320 + ir.instructions.len() * 72 + ir.outputs.len() * 32 + ir.num_temps * 8
+    }
+
     /// Validates that an identifier is a valid C identifier.
     fn validate_identifier(identifier: &str, kind: &str) {
         let mut chars = identifier.chars();
@@ -42,9 +51,8 @@ impl CEmitter {
         );
     }
 
-    /// Returns the C variable name for a temporary register.
-    fn temp_name(t: Temp) -> String {
-        format!("t{}", t.0)
+    fn push_temp_name(out: &mut String, t: Temp) {
+        let _ = write!(out, "t{}", t.0);
     }
 
     /// Formats a floating-point value as a C literal.
@@ -71,9 +79,17 @@ impl CEmitter {
     ///
     /// Signature: `double function_name(const double* inputs)`
     pub fn emit_function(ir: &LinearExpr, fn_name: &str, arity: usize) -> String {
-        Self::validate_identifier(fn_name, "function");
+        let mut out = String::with_capacity(Self::linear_expr_capacity_hint(ir));
+        Self::emit_function_into(ir, fn_name, arity, &mut out);
+        out
+    }
 
-        let mut out = String::new();
+    /// Emits a scalar-returning C function into an existing source buffer.
+    ///
+    /// This avoids constructing one temporary `String` per generated function
+    /// when a large module is assembled from thousands of blocks.
+    pub fn emit_function_into(ir: &LinearExpr, fn_name: &str, arity: usize, out: &mut String) {
+        Self::validate_identifier(fn_name, "function");
 
         // Function signature
         out.push_str(&format!("double {}(const double* inputs) {{\n", fn_name));
@@ -85,7 +101,7 @@ impl CEmitter {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&Self::temp_name(Temp(i)));
+                Self::push_temp_name(out, Temp(i));
             }
             out.push_str(";\n");
         }
@@ -96,22 +112,33 @@ impl CEmitter {
 
         // Instructions
         for instr in &ir.instructions {
-            Self::emit_instruction(instr, &mut out);
+            Self::emit_instruction(instr, out);
         }
 
         // Return statement
-        out.push_str(&format!("    return {};\n", Self::temp_name(ir.output)));
+        out.push_str("    return ");
+        Self::push_temp_name(out, ir.output);
+        out.push_str(";\n");
         out.push_str("}\n");
-        out
     }
 
     /// Emits a C function that writes multiple outputs to an array.
     ///
     /// Signature: `void function_name(const double* inputs, double* outputs)`
     pub fn emit_block_function(ir: &LinearBlock, fn_name: &str, arity: usize) -> String {
-        Self::validate_identifier(fn_name, "function");
+        let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir));
+        Self::emit_block_function_into(ir, fn_name, arity, &mut out);
+        out
+    }
 
-        let mut out = String::new();
+    /// Emits an output-buffer C function into an existing source buffer.
+    pub fn emit_block_function_into(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        out: &mut String,
+    ) {
+        Self::validate_identifier(fn_name, "function");
 
         // Function signature
         out.push_str(&format!(
@@ -126,7 +153,7 @@ impl CEmitter {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&Self::temp_name(Temp(i)));
+                Self::push_temp_name(out, Temp(i));
             }
             out.push_str(";\n");
         }
@@ -137,20 +164,17 @@ impl CEmitter {
 
         // Instructions
         for instr in &ir.instructions {
-            Self::emit_instruction(instr, &mut out);
+            Self::emit_instruction(instr, out);
         }
 
         // Output assignments
         for (index, output) in ir.outputs.iter().enumerate() {
-            out.push_str(&format!(
-                "    outputs[{}] = {};\n",
-                index,
-                Self::temp_name(*output)
-            ));
+            let _ = write!(out, "    outputs[{}] = ", index);
+            Self::push_temp_name(out, *output);
+            out.push_str(";\n");
         }
 
         out.push_str("}\n");
-        out
     }
 
     /// Emits a residual block function with metadata comment.
@@ -160,10 +184,21 @@ impl CEmitter {
         arity: usize,
         len: usize,
     ) -> String {
-        let mut out = String::new();
-        out.push_str(&format!("/* Residual block: {} outputs */\n", len));
-        out.push_str(&Self::emit_block_function(ir, fn_name, arity));
+        let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir) + 64);
+        Self::emit_residual_block_function_into(ir, fn_name, arity, len, &mut out);
         out
+    }
+
+    /// Emits a residual block function with metadata comment into an existing buffer.
+    pub fn emit_residual_block_function_into(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        len: usize,
+        out: &mut String,
+    ) {
+        out.push_str(&format!("/* Residual block: {} outputs */\n", len));
+        Self::emit_block_function_into(ir, fn_name, arity, out);
     }
 
     /// Emits a dense Jacobian block function with metadata comment.
@@ -174,13 +209,25 @@ impl CEmitter {
         rows: usize,
         cols: usize,
     ) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir) + 96);
+        Self::emit_dense_jacobian_block_function_into(ir, fn_name, arity, rows, cols, &mut out);
+        out
+    }
+
+    /// Emits a dense Jacobian block function with metadata comment into an existing buffer.
+    pub fn emit_dense_jacobian_block_function_into(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        rows: usize,
+        cols: usize,
+        out: &mut String,
+    ) {
         out.push_str(&format!(
             "/* Dense Jacobian block: {} rows x {} cols */\n",
             rows, cols
         ));
-        out.push_str(&Self::emit_block_function(ir, fn_name, arity));
-        out
+        Self::emit_block_function_into(ir, fn_name, arity, out);
     }
 
     /// Emits a sparse Jacobian values block function with metadata comment.
@@ -192,147 +239,128 @@ impl CEmitter {
         cols: usize,
         nnz: usize,
     ) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir) + 128);
+        Self::emit_sparse_values_block_function_into(ir, fn_name, arity, rows, cols, nnz, &mut out);
+        out
+    }
+
+    /// Emits a sparse Jacobian values block function with metadata comment into an existing buffer.
+    pub fn emit_sparse_values_block_function_into(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        rows: usize,
+        cols: usize,
+        nnz: usize,
+        out: &mut String,
+    ) {
         out.push_str(&format!(
             "/* Sparse Jacobian values block: {} rows x {} cols, {} non-zero values */\n",
             rows, cols, nnz
         ));
-        out.push_str(&Self::emit_block_function(ir, fn_name, arity));
-        out
+        Self::emit_block_function_into(ir, fn_name, arity, out);
     }
 
     /// Emits a single IR instruction as C code.
     fn emit_instruction(instr: &Instr, out: &mut String) {
         match instr {
             Instr::Const { dst, value } => {
-                out.push_str(&format!(
-                    "    {} = {};\n",
-                    Self::temp_name(*dst),
-                    Self::fmt_f64(*value)
-                ));
+                out.push_str("    ");
+                Self::push_temp_name(out, *dst);
+                out.push_str(" = ");
+                out.push_str(&Self::fmt_f64(*value));
+                out.push_str(";\n");
             }
             Instr::Input { dst, index } => {
-                out.push_str(&format!(
-                    "    {} = inputs[{}];\n",
-                    Self::temp_name(*dst),
-                    index
-                ));
+                out.push_str("    ");
+                Self::push_temp_name(out, *dst);
+                let _ = write!(out, " = inputs[{}];\n", index);
             }
 
             Instr::Add { dst, a, b } => {
-                out.push_str(&format!(
-                    "    {} = {} + {};\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*a),
-                    Self::temp_name(*b),
-                ));
+                Self::emit_binary_instruction(out, *dst, *a, " + ", *b);
             }
             Instr::Sub { dst, a, b } => {
-                out.push_str(&format!(
-                    "    {} = {} - {};\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*a),
-                    Self::temp_name(*b),
-                ));
+                Self::emit_binary_instruction(out, *dst, *a, " - ", *b);
             }
             Instr::Mul { dst, a, b } => {
-                out.push_str(&format!(
-                    "    {} = {} * {};\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*a),
-                    Self::temp_name(*b),
-                ));
+                Self::emit_binary_instruction(out, *dst, *a, " * ", *b);
             }
             Instr::Div { dst, a, b } => {
-                out.push_str(&format!(
-                    "    {} = {} / {};\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*a),
-                    Self::temp_name(*b),
-                ));
+                Self::emit_binary_instruction(out, *dst, *a, " / ", *b);
             }
             Instr::Pow { dst, base, exp } => {
-                out.push_str(&format!(
-                    "    {} = pow({}, {});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*base),
-                    Self::temp_name(*exp),
-                ));
+                out.push_str("    ");
+                Self::push_temp_name(out, *dst);
+                out.push_str(" = pow(");
+                Self::push_temp_name(out, *base);
+                out.push_str(", ");
+                Self::push_temp_name(out, *exp);
+                out.push_str(");\n");
             }
 
             Instr::Exp { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = exp({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "exp", *x);
             }
             Instr::Ln { dst, x } => {
                 // C uses log() for natural logarithm
-                out.push_str(&format!(
-                    "    {} = log({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "log", *x);
             }
             Instr::Sin { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = sin({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "sin", *x);
             }
             Instr::Cos { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = cos({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "cos", *x);
             }
             Instr::Tg { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = tan({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "tan", *x);
             }
             Instr::Ctg { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = 1.0 / tan({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                out.push_str("    ");
+                Self::push_temp_name(out, *dst);
+                out.push_str(" = 1.0 / tan(");
+                Self::push_temp_name(out, *x);
+                out.push_str(");\n");
             }
             Instr::ArcSin { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = asin({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "asin", *x);
             }
             Instr::ArcCos { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = acos({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "acos", *x);
             }
             Instr::ArcTg { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = atan({});\n",
-                    Self::temp_name(*dst),
-                    Self::temp_name(*x)
-                ));
+                Self::emit_unary_call(out, *dst, "atan", *x);
             }
             Instr::ArcCtg { dst, x } => {
-                out.push_str(&format!(
-                    "    {} = {} - atan({});\n",
-                    Self::temp_name(*dst),
-                    Self::fmt_f64(PI / 2.0),
-                    Self::temp_name(*x)
-                ));
+                out.push_str("    ");
+                Self::push_temp_name(out, *dst);
+                out.push_str(" = ");
+                out.push_str(&Self::fmt_f64(PI / 2.0));
+                out.push_str(" - atan(");
+                Self::push_temp_name(out, *x);
+                out.push_str(");\n");
             }
         }
+    }
+
+    fn emit_binary_instruction(out: &mut String, dst: Temp, a: Temp, op: &str, b: Temp) {
+        out.push_str("    ");
+        Self::push_temp_name(out, dst);
+        out.push_str(" = ");
+        Self::push_temp_name(out, a);
+        out.push_str(op);
+        Self::push_temp_name(out, b);
+        out.push_str(";\n");
+    }
+
+    fn emit_unary_call(out: &mut String, dst: Temp, func: &str, x: Temp) {
+        out.push_str("    ");
+        Self::push_temp_name(out, dst);
+        out.push_str(" = ");
+        out.push_str(func);
+        out.push('(');
+        Self::push_temp_name(out, x);
+        out.push_str(");\n");
     }
 
     /// Generates a complete C header file with function declarations.

@@ -9,7 +9,7 @@
 //! callers should not need to rebuild a `CodegenModule` by hand once they
 //! already have a [`PreparedProblem`](crate::symbolic::codegen_provider_api::PreparedProblem).
 
-use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
+use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule, GeneratedBlock};
 use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
     CAotBuildProfile, CAotBuildRequest, CAotBuildResult, CAotCompileConfig, ExecutedCAotBuild,
 };
@@ -28,6 +28,7 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::GeneratedZig
 use log::info;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Backend selected for one emitted AOT artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,22 @@ pub enum AotCodegenBackend {
     Rust,
     C,
     Zig,
+}
+
+/// Timing split for lowering one prepared residual/Jacobian problem into a
+/// [`CodegenModule`].
+///
+/// This deliberately sits at the driver layer rather than in BVP tests: the
+/// module build stage is shared by sparse, banded, dense, Rust, C, and Zig AOT
+/// paths, and it is a real cold-bootstrap cost, not a story-test wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct PreparedModuleBuildBreakdown {
+    pub module_init_ms: f64,
+    pub residual_blocks_ms: f64,
+    pub jacobian_blocks_ms: f64,
+    pub total_ms: f64,
+    pub residual_chunks: usize,
+    pub jacobian_chunks: usize,
 }
 
 impl Default for AotCodegenBackend {
@@ -230,6 +247,65 @@ pub fn codegen_module_from_prepared_dense_problem(
     module
 }
 
+fn codegen_module_from_prepared_dense_problem_with_breakdown(
+    module_name: &str,
+    problem: &PreparedDenseProblem<'_>,
+) -> (CodegenModule, PreparedModuleBuildBreakdown) {
+    info!(
+        "Building dense AOT codegen module '{}' (residual_chunks={}, jacobian_chunks={})",
+        module_name,
+        problem.residual_plan.chunks.len(),
+        problem.jacobian_plan.chunks.len()
+    );
+    let total_begin = Instant::now();
+    let init_begin = Instant::now();
+    let mut module = CodegenModule::new(module_name);
+    let module_init_ms = init_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    let ((residual_blocks, residual_blocks_ms), (jacobian_blocks, jacobian_blocks_ms)) =
+        rayon::join(
+            || {
+                let residual_begin = Instant::now();
+                let blocks = problem
+                    .residual_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_residual_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, residual_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+            || {
+                let jacobian_begin = Instant::now();
+                let blocks = problem
+                    .jacobian_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_dense_jacobian_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, jacobian_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+        );
+    for block in residual_blocks {
+        module.push_generated_block(block);
+    }
+    for block in jacobian_blocks {
+        module.push_generated_block(block);
+    }
+
+    let total_ms = total_begin.elapsed().as_secs_f64() * 1_000.0;
+    (
+        module,
+        PreparedModuleBuildBreakdown {
+            module_init_ms,
+            residual_blocks_ms,
+            jacobian_blocks_ms,
+            total_ms,
+            residual_chunks: problem.residual_plan.chunks.len(),
+            jacobian_chunks: problem.jacobian_plan.chunks.len(),
+        },
+    )
+}
+
 fn codegen_module_from_prepared_dense_problem_with_language(
     module_name: &str,
     problem: &PreparedDenseProblem<'_>,
@@ -266,6 +342,65 @@ pub fn codegen_module_from_prepared_sparse_problem(
     module
 }
 
+fn codegen_module_from_prepared_sparse_problem_with_breakdown(
+    module_name: &str,
+    problem: &PreparedSparseProblem<'_>,
+) -> (CodegenModule, PreparedModuleBuildBreakdown) {
+    info!(
+        "Building sparse AOT codegen module '{}' (residual_chunks={}, jacobian_chunks={})",
+        module_name,
+        problem.residual_plan.chunks.len(),
+        problem.jacobian_plan.chunks.len()
+    );
+    let total_begin = Instant::now();
+    let init_begin = Instant::now();
+    let mut module = CodegenModule::new(module_name);
+    let module_init_ms = init_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    let ((residual_blocks, residual_blocks_ms), (jacobian_blocks, jacobian_blocks_ms)) =
+        rayon::join(
+            || {
+                let residual_begin = Instant::now();
+                let blocks = problem
+                    .residual_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_residual_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, residual_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+            || {
+                let jacobian_begin = Instant::now();
+                let blocks = problem
+                    .jacobian_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_sparse_values_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, jacobian_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+        );
+    for block in residual_blocks {
+        module.push_generated_block(block);
+    }
+    for block in jacobian_blocks {
+        module.push_generated_block(block);
+    }
+
+    let total_ms = total_begin.elapsed().as_secs_f64() * 1_000.0;
+    (
+        module,
+        PreparedModuleBuildBreakdown {
+            module_init_ms,
+            residual_blocks_ms,
+            jacobian_blocks_ms,
+            total_ms,
+            residual_chunks: problem.residual_plan.chunks.len(),
+            jacobian_chunks: problem.jacobian_plan.chunks.len(),
+        },
+    )
+}
+
 /// Builds a `CodegenModule` for a prepared banded problem.
 ///
 /// The generated Jacobian chunks still lower to flat values-writing code blocks.
@@ -290,6 +425,65 @@ pub fn codegen_module_from_prepared_banded_problem(
         module.push_sparse_values_plan(&chunk.plan);
     }
     module
+}
+
+fn codegen_module_from_prepared_banded_problem_with_breakdown(
+    module_name: &str,
+    problem: &PreparedBandedProblem<'_>,
+) -> (CodegenModule, PreparedModuleBuildBreakdown) {
+    info!(
+        "Building banded AOT codegen module '{}' (residual_chunks={}, jacobian_chunks={})",
+        module_name,
+        problem.residual_plan.chunks.len(),
+        problem.jacobian_plan.chunks.len()
+    );
+    let total_begin = Instant::now();
+    let init_begin = Instant::now();
+    let mut module = CodegenModule::new(module_name);
+    let module_init_ms = init_begin.elapsed().as_secs_f64() * 1_000.0;
+
+    let ((residual_blocks, residual_blocks_ms), (jacobian_blocks, jacobian_blocks_ms)) =
+        rayon::join(
+            || {
+                let residual_begin = Instant::now();
+                let blocks = problem
+                    .residual_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_residual_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, residual_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+            || {
+                let jacobian_begin = Instant::now();
+                let blocks = problem
+                    .jacobian_plan
+                    .chunks
+                    .iter()
+                    .map(|chunk| GeneratedBlock::from_sparse_values_plan(&chunk.plan))
+                    .collect::<Vec<_>>();
+                (blocks, jacobian_begin.elapsed().as_secs_f64() * 1_000.0)
+            },
+        );
+    for block in residual_blocks {
+        module.push_generated_block(block);
+    }
+    for block in jacobian_blocks {
+        module.push_generated_block(block);
+    }
+
+    let total_ms = total_begin.elapsed().as_secs_f64() * 1_000.0;
+    (
+        module,
+        PreparedModuleBuildBreakdown {
+            module_init_ms,
+            residual_blocks_ms,
+            jacobian_blocks_ms,
+            total_ms,
+            residual_chunks: problem.residual_plan.chunks.len(),
+            jacobian_chunks: problem.jacobian_plan.chunks.len(),
+        },
+    )
 }
 
 fn codegen_module_from_prepared_sparse_problem_with_language(
@@ -336,6 +530,25 @@ pub fn codegen_module_from_prepared_problem(
         }
         PreparedProblem::Sparse(problem) => {
             codegen_module_from_prepared_sparse_problem(module_name, problem)
+        }
+    }
+}
+
+/// Builds a `CodegenModule` and reports where the prepared-problem lowering
+/// time was spent.
+pub fn codegen_module_from_prepared_problem_with_breakdown(
+    module_name: &str,
+    problem: &PreparedProblem<'_>,
+) -> (CodegenModule, PreparedModuleBuildBreakdown) {
+    match problem {
+        PreparedProblem::Dense(problem) => {
+            codegen_module_from_prepared_dense_problem_with_breakdown(module_name, problem)
+        }
+        PreparedProblem::Banded(problem) => {
+            codegen_module_from_prepared_banded_problem_with_breakdown(module_name, problem)
+        }
+        PreparedProblem::Sparse(problem) => {
+            codegen_module_from_prepared_sparse_problem_with_breakdown(module_name, problem)
         }
     }
 }
@@ -610,6 +823,67 @@ mod tests {
             crate_spec
                 .module_source
                 .contains("pub fn eval_sparse_values")
+        );
+    }
+
+    #[test]
+    fn prepared_problem_module_breakdown_preserves_sparse_source() {
+        let residuals = vec![
+            Expr::parse_expression("x + p"),
+            Expr::parse_expression("y - p"),
+        ];
+        let vars = vec!["x", "y"];
+        let params = vec!["p"];
+        let entry0 = Expr::parse_expression("1");
+        let entry1 = Expr::parse_expression("2");
+        let entries = vec![
+            SparseExprEntry {
+                row: 0,
+                col: 0,
+                expr: &entry0,
+            },
+            SparseExprEntry {
+                row: 1,
+                col: 1,
+                expr: &entry1,
+            },
+        ];
+
+        let prepared = PreparedProblem::sparse(PreparedSparseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::SparseCol,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: Some(&params),
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            SparseJacobianTask {
+                fn_name: "eval_sparse_values",
+                shape: (2, 2),
+                entries: &entries,
+                variables: &vars,
+                params: Some(&params),
+            }
+            .runtime_plan(SparseChunkingStrategy::Whole),
+        ));
+
+        let plain = codegen_module_from_prepared_problem("sparse_breakdown_fixture", &prepared);
+        let (instrumented, breakdown) = codegen_module_from_prepared_problem_with_breakdown(
+            "sparse_breakdown_fixture",
+            &prepared,
+        );
+
+        assert_eq!(plain.emit_source(), instrumented.emit_source());
+        assert_eq!(breakdown.residual_chunks, 1);
+        assert_eq!(breakdown.jacobian_chunks, 1);
+        assert!(
+            breakdown.total_ms
+                >= breakdown
+                    .residual_blocks_ms
+                    .max(breakdown.jacobian_blocks_ms),
+            "parallel module timing should include the slower independent lowering branch"
         );
     }
 

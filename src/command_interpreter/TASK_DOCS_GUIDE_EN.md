@@ -292,7 +292,7 @@ In `solver_options`, parser supports:
 
 - `generated_backend` presets (for example `banded_lambdify`, `banded_aot_tcc`, `sparse_aot_gcc`, etc.)
 - `matrix_backend: dense | sparse | banded`
-- `backend_policy: numeric_only | lambdify_only | aot_only | prefer_aot_then_lambdify | ...`
+- `backend_policy: lambdify_only | aot_only | prefer_aot_then_lambdify`
 - `symbolic_backend: ExprLegacy | AtomView`
 - `aot_codegen_backend: rust | c | zig`
 - `aot_c_compiler` (for C routes, e.g. `tcc`/`gcc`)
@@ -304,6 +304,8 @@ In `solver_options`, parser supports:
 - `refinement_steps`
 
 Note: parser currently rejects `aot_execution_policy: parallel` for BVP task docs because exposing full parallel executor config in task docs is not yet finished.
+
+Also note that BVP task documents are symbolic inputs. They contain equations as text, not Rust closures, so they intentionally do not support `backend_policy: numeric_only`, `backend_policy: prefer_aot_then_numeric`, or `backend_policy: prefer_lambdify_then_numeric`. The pure numerical BVP route exists in the Rust API of the damped Newton solver: call `NRBVP::set_numeric_rhs(...)` or `NRBVP::with_numeric_rhs(...)`, set `BackendSelectionPolicy::NumericOnly`, and the solver will discretize that closure and build the Newton Jacobian by finite differences. The frozen BVP solver remains a symbolic Lambdify/AOT route by design; there is no frozen pure-numeric closure path.
 
 ---
 

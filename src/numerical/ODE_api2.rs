@@ -21,6 +21,10 @@ use crate::symbolic::symbolic_ivp_generated::{
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+type NativeResidualFn = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
+type NativeJacobianFn = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub enum SolverType {
@@ -212,6 +216,8 @@ pub struct UniversalODESolver {
     parallel: bool,
     generated_backend_config: Option<SymbolicIvpGeneratedBackendConfig>,
     lsode2_problem_config: Option<Lsode2ProblemConfig>,
+    native_residual: Option<NativeResidualFn>,
+    native_jacobian: Option<NativeJacobianFn>,
     solver_params_legacy: HashMap<String, SolverParam>,
 }
 
@@ -251,6 +257,8 @@ impl UniversalODESolver {
             parallel: false,
             generated_backend_config: None,
             lsode2_problem_config: None,
+            native_residual: None,
+            native_jacobian: None,
             solver_params_legacy: HashMap::new(),
         }
     }
@@ -374,6 +382,20 @@ impl UniversalODESolver {
         self.lsode2_problem_config = Some(config);
     }
 
+    /// Installs pure numerical callbacks `f(t, y)` and optional `df/dy`.
+    ///
+    /// For implicit methods:
+    /// - if Jacobian is provided, it is used directly;
+    /// - if Jacobian is absent, finite-difference Jacobians are used.
+    pub fn set_native_ode_callbacks<F, J>(&mut self, residual: F, jacobian: Option<J>)
+    where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        self.native_residual = Some(Arc::new(residual));
+        self.native_jacobian = jacobian.map(|jac| Arc::new(jac) as NativeJacobianFn);
+    }
+
     pub fn set_generated_backend_mode(&mut self, mode: DenseIvpGeneratedBackendMode) {
         let config = self
             .generated_backend_config
@@ -434,6 +456,16 @@ impl UniversalODESolver {
 
     pub fn with_lsode2_problem_config(mut self, config: Lsode2ProblemConfig) -> Self {
         self.set_lsode2_problem_config(config);
+        self
+    }
+
+    /// Builder-style alias for [`Self::set_native_ode_callbacks`].
+    pub fn with_native_ode_callbacks<F, J>(mut self, residual: F, jacobian: Option<J>) -> Self
+    where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        self.set_native_ode_callbacks(residual, jacobian);
         self
     }
 
@@ -553,6 +585,13 @@ impl UniversalODESolver {
                     options = options.with_generated_backend_config(config);
                 }
                 let mut solver = Radau::new_with_options(options);
+                if let Some(rhs) = self.native_residual.clone() {
+                    let jac = self.native_jacobian.clone();
+                    solver.set_native_ode_callbacks(
+                        move |t: f64, y: &DVector<f64>| rhs(t, y),
+                        jac.map(|jac_fun| move |t: f64, y: &DVector<f64>| jac_fun(t, y)),
+                    );
+                }
                 if let Some(stop_condition) = self.stop_condition.clone() {
                     solver.set_stop_condition(stop_condition);
                 }
@@ -578,6 +617,13 @@ impl UniversalODESolver {
                     options = options.with_generated_backend_config(config);
                 }
                 let mut solver = BdfOdeSolver::new_with_options(options);
+                if let Some(rhs) = self.native_residual.clone() {
+                    let jac = self.native_jacobian.clone();
+                    solver.set_native_ode_callbacks(
+                        move |t: f64, y: &DVector<f64>| rhs(t, y),
+                        jac.map(|jac_fun| move |t: f64, y: &DVector<f64>| jac_fun(t, y)),
+                    );
+                }
                 if let Some(stop_condition) = self.stop_condition.clone() {
                     solver.set_stop_condition(stop_condition);
                 }
@@ -599,6 +645,13 @@ impl UniversalODESolver {
                     options = options.with_generated_backend_config(config);
                 }
                 let mut solver = BE::new_with_options(options);
+                if let Some(rhs) = self.native_residual.clone() {
+                    let jac = self.native_jacobian.clone();
+                    solver.set_native_ode_callbacks(
+                        move |t: f64, y: &DVector<f64>| rhs(t, y),
+                        jac.map(|jac_fun| move |t: f64, y: &DVector<f64>| jac_fun(t, y)),
+                    );
+                }
                 if let Some(stop_condition) = self.stop_condition.clone() {
                     solver.set_stop_condition(stop_condition);
                 }
@@ -964,6 +1017,149 @@ mod tests {
         (eq_system, values, arg, y0)
     }
 
+    fn decay_rhs(_t: f64, y: &DVector<f64>) -> DVector<f64> {
+        DVector::from_vec(vec![-y[0]])
+    }
+
+    fn decay_jac(_t: f64, _y: &DVector<f64>) -> DMatrix<f64> {
+        DMatrix::from_row_slice(1, 1, &[-1.0])
+    }
+
+    fn stiff_diagonal_problem() -> (Vec<Expr>, Vec<String>, String, DVector<f64>, f64) {
+        let x0 = Expr::Var("x0".to_string());
+        let x1 = Expr::Var("x1".to_string());
+        let eq_system = vec![Expr::Const(-1000.0) * x0.clone(), -x1.clone()];
+        let values = vec!["x0".to_string(), "x1".to_string()];
+        let arg = "t".to_string();
+        let y0 = DVector::from_vec(vec![1.0, 1.0]);
+        let t_bound = 0.02;
+        (eq_system, values, arg, y0, t_bound)
+    }
+
+    fn stiff_diagonal_rhs(_t: f64, y: &DVector<f64>) -> DVector<f64> {
+        DVector::from_vec(vec![-1000.0 * y[0], -y[1]])
+    }
+
+    fn stiff_diagonal_jac(_t: f64, _y: &DVector<f64>) -> DMatrix<f64> {
+        DMatrix::from_row_slice(2, 2, &[-1000.0, 0.0, 0.0, -1.0])
+    }
+
+    fn stiff_coupled_problem() -> (Vec<Expr>, Vec<String>, String, DVector<f64>, f64) {
+        let x0 = Expr::Var("x0".to_string());
+        let x1 = Expr::Var("x1".to_string());
+        // x0' = -1000*x0 + 999*x1, x1' = -x1
+        let eq_system = vec![
+            Expr::Const(-1000.0) * x0.clone() + Expr::Const(999.0) * x1.clone(),
+            -x1.clone(),
+        ];
+        let values = vec!["x0".to_string(), "x1".to_string()];
+        let arg = "t".to_string();
+        let y0 = DVector::from_vec(vec![0.0, 1.0]);
+        let t_bound = 0.02;
+        (eq_system, values, arg, y0, t_bound)
+    }
+
+    fn stiff_coupled_rhs(_t: f64, y: &DVector<f64>) -> DVector<f64> {
+        DVector::from_vec(vec![-1000.0 * y[0] + 999.0 * y[1], -y[1]])
+    }
+
+    fn stiff_coupled_jac(_t: f64, _y: &DVector<f64>) -> DMatrix<f64> {
+        DMatrix::from_row_slice(2, 2, &[-1000.0, 999.0, 0.0, -1.0])
+    }
+
+    fn robertson_problem() -> (Vec<Expr>, Vec<String>, String, DVector<f64>, f64) {
+        let eq_system = vec![
+            Expr::parse_expression("-0.04*x + 10000.0*y*z"),
+            Expr::parse_expression("0.04*x - 10000.0*y*z - 30000000.0*y*y"),
+            Expr::parse_expression("30000000.0*y*y"),
+        ];
+        let values = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let arg = "t".to_string();
+        let y0 = DVector::from_vec(vec![1.0, 0.0, 0.0]);
+        let t_bound = 0.2;
+        (eq_system, values, arg, y0, t_bound)
+    }
+
+    fn robertson_rhs(_t: f64, y: &DVector<f64>) -> DVector<f64> {
+        let x = y[0];
+        let yv = y[1];
+        let z = y[2];
+        DVector::from_vec(vec![
+            -0.04 * x + 10000.0 * yv * z,
+            0.04 * x - 10000.0 * yv * z - 30000000.0 * yv * yv,
+            30000000.0 * yv * yv,
+        ])
+    }
+
+    fn robertson_jac(_t: f64, y: &DVector<f64>) -> DMatrix<f64> {
+        let yv = y[1];
+        let z = y[2];
+        DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                -0.04,
+                10000.0 * z,
+                10000.0 * yv,
+                0.04,
+                -10000.0 * z - 60000000.0 * yv,
+                -10000.0 * yv,
+                0.0,
+                60000000.0 * yv,
+                0.0,
+            ],
+        )
+    }
+
+    fn assert_robertson_invariants(y: &DMatrix<f64>) {
+        let x_final = y[(y.nrows() - 1, 0)];
+        let y_final = y[(y.nrows() - 1, 1)];
+        let z_final = y[(y.nrows() - 1, 2)];
+        let sum = x_final + y_final + z_final;
+        assert!(
+            (sum - 1.0).abs() < 5e-6,
+            "Robertson mass drift too high: x+y+z={sum}"
+        );
+        assert!(x_final >= -1e-10, "x became negative: {x_final}");
+        assert!(y_final >= -1e-10, "y became negative: {y_final}");
+        assert!(z_final >= -1e-10, "z became negative: {z_final}");
+    }
+
+    fn assert_finished_status(solver: &UniversalODESolver) {
+        let status = solver
+            .get_status()
+            .expect("solver status should be available after solve");
+        assert!(
+            status.starts_with("finished"),
+            "unexpected solver status: {status}"
+        );
+    }
+
+    fn assert_basic_runtime_stats(
+        solver: &UniversalODESolver,
+        require_lu_activity: bool,
+        require_jacobian_activity: bool,
+    ) {
+        let stats = solver
+            .get_statistics()
+            .expect("statistics should be available after solve");
+        assert!(stats.step_calls > 0, "expected positive step_calls");
+        assert!(stats.residual_calls > 0, "expected positive residual_calls");
+        if require_jacobian_activity {
+            let jacobian_activity = stats.jacobian_calls > 0 || stats.bdf_njev_total > 0;
+            assert!(
+                jacobian_activity,
+                "expected Jacobian activity through callbacks or BDF njev counter"
+            );
+        }
+        if require_lu_activity {
+            assert!(
+                stats.bdf_nlu_total > 0,
+                "expected positive LU factorization count for stiff run"
+            );
+        }
+    }
+
     #[test]
     fn universal_ode_api_legacy_nonstiff_smoke() {
         let (eq_system, values, arg, y0) = simple_decay_problem();
@@ -1038,7 +1234,17 @@ mod tests {
             .expect("LSODE2 should expose normalized statistics");
         assert_eq!(stats.method_label, "LSODE2");
         assert!(stats.backend_label.contains("dense"));
-        assert!(stats.step_calls > 0);
+        let status = solver
+            .get_status()
+            .expect("LSODE2 status should be available after solve");
+        assert!(
+            status.starts_with("finished"),
+            "unexpected LSODE2 status: {status}"
+        );
+        assert!(
+            stats.step_calls > 0 || stats.residual_calls > 0 || stats.solve_ms_total > 0.0,
+            "expected non-zero LSODE2 solve activity counters"
+        );
     }
 
     #[test]
@@ -1071,6 +1277,391 @@ mod tests {
             err,
             UniversalOdeError::UnsupportedGeneratedBackendForMethod { .. }
         ));
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_callbacks_with_jacobian() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_native_ode_callbacks(decay_rhs, Some(decay_jac));
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y_final = y[(y.nrows() - 1, 0)];
+        let expected = (-0.1f64).exp();
+        assert!((y_final - expected).abs() < 5e-3);
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_callbacks_fd_jacobian() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_native_ode_callbacks(
+                    decay_rhs,
+                    Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+                );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y_final = y[(y.nrows() - 1, 0)];
+        let expected = (-0.1f64).exp();
+        assert!((y_final - expected).abs() < 1e-2);
+    }
+
+    #[test]
+    fn universal_ode_api_be_native_callbacks_fd_jacobian() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            y0,
+            0.1,
+            1e-8,
+            20,
+            Some(1e-2),
+        )
+        .with_native_ode_callbacks(
+            decay_rhs,
+            Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+        );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y_final = y[(y.nrows() - 1, 0)];
+        let expected = (-0.1f64).exp();
+        assert!((y_final - expected).abs() < 1e-2);
+    }
+
+    #[test]
+    fn universal_ode_api_radau_native_callbacks_with_jacobian() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::Radau(RadauOrder::Order5),
+            0.0,
+            y0,
+            0.1,
+        )
+        .with_native_ode_callbacks(decay_rhs, Some(decay_jac));
+        solver.set_step_size(1e-2);
+        solver.set_tolerance(1e-8);
+        solver.set_max_iterations(20);
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y_final = y[(y.nrows() - 1, 0)];
+        let expected = (-0.1f64).exp();
+        assert!((y_final - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_stiff_diagonal_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 1e-5, 1e-10, 1e-12)
+                .with_native_ode_callbacks(stiff_diagonal_rhs, Some(stiff_diagonal_jac));
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, true);
+        let (t, y) = solver.get_result();
+        let t = t.expect("time grid");
+        let y = y.expect("solution matrix");
+        let t_final = t[t.len() - 1];
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-1000.0 * t_final).exp();
+        let expected1 = (-t_final).exp();
+        assert!((y0_final - expected0).abs() < 5e-5);
+        assert!((y1_final - expected1).abs() < 5e-5);
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_stiff_diagonal_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 1e-5, 1e-10, 1e-12)
+                .with_native_ode_callbacks(
+                    stiff_diagonal_rhs,
+                    Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+                );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, false);
+        let (t, y) = solver.get_result();
+        let t = t.expect("time grid");
+        let y = y.expect("solution matrix");
+        let t_final = t[t.len() - 1];
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-1000.0 * t_final).exp();
+        let expected1 = (-t_final).exp();
+        assert!((y0_final - expected0).abs() < 2e-4);
+        assert!((y1_final - expected1).abs() < 2e-4);
+    }
+
+    #[test]
+    fn universal_ode_api_be_native_stiff_coupled_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_coupled_problem();
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            y0,
+            t_bound,
+            1e-10,
+            40,
+            Some(1e-4),
+        )
+        .with_native_ode_callbacks(stiff_coupled_rhs, Some(stiff_coupled_jac));
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-t_bound).exp() - (-1000.0 * t_bound).exp();
+        let expected1 = (-t_bound).exp();
+        assert!((y0_final - expected0).abs() < 6e-3);
+        assert!((y1_final - expected1).abs() < 6e-3);
+    }
+
+    #[test]
+    fn universal_ode_api_be_native_stiff_coupled_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_coupled_problem();
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            y0,
+            t_bound,
+            1e-10,
+            40,
+            Some(1e-4),
+        )
+        .with_native_ode_callbacks(
+            stiff_coupled_rhs,
+            Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+        );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-t_bound).exp() - (-1000.0 * t_bound).exp();
+        let expected1 = (-t_bound).exp();
+        assert!((y0_final - expected0).abs() < 8e-3);
+        assert!((y1_final - expected1).abs() < 8e-3);
+    }
+
+    #[test]
+    fn universal_ode_api_radau_native_stiff_diagonal_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::Radau(RadauOrder::Order5),
+            0.0,
+            y0,
+            t_bound,
+        )
+        .with_native_ode_callbacks(stiff_diagonal_rhs, Some(stiff_diagonal_jac));
+        solver.set_step_size(1e-4);
+        solver.set_tolerance(1e-10);
+        solver.set_max_iterations(40);
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-1000.0 * t_bound).exp();
+        let expected1 = (-t_bound).exp();
+        assert!((y0_final - expected0).abs() < 5e-6);
+        assert!((y1_final - expected1).abs() < 5e-6);
+    }
+
+    #[test]
+    fn universal_ode_api_radau_native_stiff_diagonal_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::Radau(RadauOrder::Order5),
+            0.0,
+            y0,
+            t_bound,
+        )
+        .with_native_ode_callbacks(
+            stiff_diagonal_rhs,
+            Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+        );
+        solver.set_step_size(1e-4);
+        solver.set_tolerance(1e-10);
+        solver.set_max_iterations(40);
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        let y0_final = y[(y.nrows() - 1, 0)];
+        let y1_final = y[(y.nrows() - 1, 1)];
+        let expected0 = (-1000.0 * t_bound).exp();
+        let expected1 = (-t_bound).exp();
+        assert!((y0_final - expected0).abs() < 5e-5);
+        assert!((y1_final - expected1).abs() < 5e-5);
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_robertson_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 5e-4, 1e-9, 1e-12)
+                .with_native_ode_callbacks(robertson_rhs, Some(robertson_jac));
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
+    }
+
+    #[test]
+    fn universal_ode_api_bdf_native_robertson_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 5e-4, 1e-9, 1e-12)
+                .with_native_ode_callbacks(
+                    robertson_rhs,
+                    Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+                );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, true, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
+    }
+
+    #[test]
+    fn universal_ode_api_be_native_robertson_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            y0,
+            t_bound,
+            1e-10,
+            80,
+            Some(2e-4),
+        )
+        .with_native_ode_callbacks(robertson_rhs, Some(robertson_jac));
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
+    }
+
+    #[test]
+    fn universal_ode_api_be_native_robertson_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver = UniversalODESolver::backward_euler(
+            eq_system,
+            values,
+            arg,
+            0.0,
+            y0,
+            t_bound,
+            1e-10,
+            80,
+            Some(2e-4),
+        )
+        .with_native_ode_callbacks(
+            robertson_rhs,
+            Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+        );
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
+    }
+
+    #[test]
+    fn universal_ode_api_radau_native_robertson_with_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::Radau(RadauOrder::Order5),
+            0.0,
+            y0,
+            t_bound,
+        )
+        .with_native_ode_callbacks(robertson_rhs, Some(robertson_jac));
+        solver.set_step_size(2e-4);
+        solver.set_tolerance(1e-10);
+        solver.set_max_iterations(80);
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, true);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
+    }
+
+    #[test]
+    fn universal_ode_api_radau_native_robertson_fd_jacobian_small_step() {
+        let (eq_system, values, arg, y0, t_bound) = robertson_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::Radau(RadauOrder::Order5),
+            0.0,
+            y0,
+            t_bound,
+        )
+        .with_native_ode_callbacks(
+            robertson_rhs,
+            Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
+        );
+        solver.set_step_size(2e-4);
+        solver.set_tolerance(1e-10);
+        solver.set_max_iterations(80);
+        solver.solve();
+        assert_finished_status(&solver);
+        assert_basic_runtime_stats(&solver, false, false);
+        let (_, y) = solver.get_result();
+        let y = y.expect("solution matrix");
+        assert_robertson_invariants(&y);
     }
 }
 

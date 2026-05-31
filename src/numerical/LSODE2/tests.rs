@@ -9,10 +9,10 @@ use super::{
     Lsode2Tolerance,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
     register_linked_dense_backend, register_linked_residual_backend,
     register_linked_sparse_backend, unregister_linked_dense_backend,
-    unregister_linked_residual_backend, unregister_linked_sparse_backend,
+    unregister_linked_residual_backend, unregister_linked_sparse_backend, LinkedDenseAotBackend,
+    LinkedResidualAotBackend, LinkedSparseAotBackend,
 };
 use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
@@ -20,18 +20,18 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    IvpSymbolicAssemblyBackend, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
     prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
+    IvpSymbolicAssemblyBackend, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
-    prepare_generated_symbolic_ivp_sparse_backend,
+    prepare_generated_symbolic_ivp_sparse_backend, SymbolicIvpAotBuildPolicy,
+    SymbolicIvpGeneratedBackendConfig,
 };
 use nalgebra::{DMatrix, DVector};
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1518,8 +1518,9 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
     assert_eq!(summary.algorithm.bdf_max_order_cap, Some(5));
     assert!(summary.algorithm.bdf_equal_step_count.is_some());
     assert_eq!(summary.statistics.backend_prepare_calls, 0);
-    assert_eq!(summary.statistics.solve_calls, 0);
-    assert_eq!(summary.statistics.step_calls, 0);
+    assert!(summary.statistics.step_calls > 0);
+    assert_eq!(summary.native_statistics.bridge_step_calls, 0);
+    assert_eq!(summary.native_statistics.bridge_solve_calls, 0);
     assert_eq!(summary.native_statistics.backend_prepare_calls, 0);
     assert_eq!(summary.native_statistics.solve_calls, 1);
     assert_eq!(summary.native_statistics.preferred_bdf_count, 1);
@@ -1802,8 +1803,8 @@ fn lsode2_solve_can_use_configured_faithful_native_solve() {
     assert_eq!(summary.native_statistics.algorithm_decision_calls, 1);
     assert!(summary.native_statistics.native_step_attempts > 0);
     assert_eq!(summary.native_statistics.bridge_bdf_nlu_total, 0);
-    assert_eq!(summary.statistics.backend_prepare_calls, 0);
-    assert_eq!(summary.statistics.solve_calls, 0);
+    assert_eq!(summary.native_statistics.bridge_prepare_calls, 0);
+    assert_eq!(summary.native_statistics.bridge_solve_calls, 0);
 }
 
 #[test]
@@ -2596,10 +2597,9 @@ fn lsode2_rejects_analytical_route_without_callbacks() {
         Ok(_) => panic!("analytical route without callbacks should be rejected"),
         Err(err) => err,
     };
-    assert!(
-        err.to_string()
-            .contains("analytical route requires residual and jacobian callbacks")
-    );
+    assert!(err
+        .to_string()
+        .contains("analytical route requires residual and jacobian callbacks"));
 }
 
 #[test]
@@ -2616,10 +2616,9 @@ fn lsode2_rejects_analytical_route_without_native_execution_mode() {
         Ok(_) => panic!("analytical route should require native execution mode"),
         Err(err) => err,
     };
-    assert!(
-        err.to_string()
-            .contains("analytical route is currently native-only")
-    );
+    assert!(err
+        .to_string()
+        .contains("analytical route is currently native-only"));
 }
 
 #[test]

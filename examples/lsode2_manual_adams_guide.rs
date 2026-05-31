@@ -32,9 +32,7 @@ fn main() {
     .with_linear_system_structure(Lsode2LinearSystemStructure::Dense)
     .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
     // Explicit manual LSODE-style method choice:
-    .with_adams_only_controller()
-    // Native solve path (same "faithful" execution entrypoint).
-    .with_faithful_bdf_solve(100_000, 100_000);
+    .with_adams_only_controller();
 
     let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
     solver.solve();

@@ -6,12 +6,12 @@
 
 use crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
-    register_linked_dense_backend, register_linked_residual_backend,
+    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedResidualChunk, LinkedSparseAotBackend,
+    LinkedSparseJacobianChunk, register_linked_dense_backend, register_linked_residual_backend,
     register_linked_sparse_backend,
 };
 use libloading::Library;
-use log::info;
+use log::{info, warn};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -63,6 +63,92 @@ fn load_c_library(path: &Path) -> Result<Arc<LoadedCLibrary>, String> {
         residual_eval,
         jacobian_eval,
     }))
+}
+
+fn chunk_export_symbol(fn_name: &str) -> String {
+    format!("rustedscithe_aot_chunk_{fn_name}")
+}
+
+fn load_c_sparse_residual_chunks(
+    loaded: &Arc<LoadedCLibrary>,
+    artifact: &RegisteredAotArtifact,
+) -> Vec<LinkedResidualChunk> {
+    let mut chunks = Vec::with_capacity(artifact.manifest.functions.residual_chunks.len());
+    for chunk in &artifact.manifest.functions.residual_chunks {
+        let symbol_name = chunk_export_symbol(&chunk.fn_name);
+        let eval = unsafe {
+            match loaded._library.get::<AbiWholeEval>(symbol_name.as_bytes()) {
+                Ok(symbol) => *symbol,
+                Err(err) => {
+                    warn!(
+                        "C sparse AOT residual chunk symbol '{}' is unavailable for problem_key='{}': {err}; falling back to whole residual callback",
+                        symbol_name, artifact.problem_key
+                    );
+                    return Vec::new();
+                }
+            }
+        };
+        let chunk_loaded = Arc::clone(loaded);
+        let output_len = chunk.len;
+        let callback = Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert_eq!(
+                out.len(),
+                output_len,
+                "generated C sparse residual chunk output length mismatch"
+            );
+            let ok = unsafe { (eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len()) };
+            assert!(
+                ok != 0,
+                "generated C sparse residual chunk callback returned false"
+            );
+            let _keep_library_loaded = &chunk_loaded;
+        });
+        chunks.push(LinkedResidualChunk::new(chunk.offset, chunk.len, callback));
+    }
+    chunks
+}
+
+fn load_c_sparse_jacobian_chunks(
+    loaded: &Arc<LoadedCLibrary>,
+    artifact: &RegisteredAotArtifact,
+) -> Vec<LinkedSparseJacobianChunk> {
+    let mut chunks = Vec::with_capacity(artifact.manifest.functions.jacobian_chunks.len());
+    for chunk in &artifact.manifest.functions.jacobian_chunks {
+        let symbol_name = chunk_export_symbol(&chunk.fn_name);
+        let eval = unsafe {
+            match loaded._library.get::<AbiWholeEval>(symbol_name.as_bytes()) {
+                Ok(symbol) => *symbol,
+                Err(err) => {
+                    warn!(
+                        "C sparse AOT Jacobian chunk symbol '{}' is unavailable for problem_key='{}': {err}; falling back to whole Jacobian callback",
+                        symbol_name, artifact.problem_key
+                    );
+                    return Vec::new();
+                }
+            }
+        };
+        let chunk_loaded = Arc::clone(loaded);
+        let value_len = chunk.len;
+        let callback = Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert_eq!(
+                out.len(),
+                value_len,
+                "generated C sparse Jacobian chunk output length mismatch"
+            );
+            let ok = unsafe { (eval)(args.as_ptr(), args.len(), out.as_mut_ptr(), out.len()) };
+            assert!(
+                ok != 0,
+                "generated C sparse Jacobian chunk callback returned false"
+            );
+            let _keep_library_loaded = &chunk_loaded;
+        });
+        chunks.push(LinkedSparseJacobianChunk::new(
+            chunk.offset,
+            chunk.len,
+            callback,
+        ));
+    }
+    chunks
 }
 
 fn load_c_residual_library(path: &Path) -> Result<Arc<LoadedCResidualLibrary>, String> {
@@ -174,6 +260,9 @@ pub fn register_generated_c_sparse_backend(
         );
     });
 
+    let residual_chunks = load_c_sparse_residual_chunks(&loaded, artifact);
+    let jacobian_value_chunks = load_c_sparse_jacobian_chunks(&loaded, artifact);
+
     let backend = LinkedSparseAotBackend::new(
         artifact.problem_key.clone(),
         residual_len,
@@ -181,7 +270,8 @@ pub fn register_generated_c_sparse_backend(
         nnz,
         residual_eval,
         jacobian_values_eval,
-    );
+    )
+    .with_chunked_evaluators(residual_chunks, jacobian_value_chunks);
     register_linked_sparse_backend(backend.clone());
     info!(
         "Registered C sparse AOT backend with problem_key='{}'",

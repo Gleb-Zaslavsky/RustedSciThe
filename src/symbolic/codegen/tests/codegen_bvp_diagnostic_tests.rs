@@ -2,6 +2,7 @@
 
 use super::codegen_bvp_performance_tests::{
     run_diagnose_chunk_granularity_and_fallback,
+    run_diagnose_combustion_chunk_ir_amplification,
     run_diagnose_combustion_banded_native_zero_pivot,
     run_diagnose_combustion_superblock_groupings,
     run_diagnose_problem_size_crossover,
@@ -33,6 +34,13 @@ fn diagnose_rayon_overhead_baseline() {
 #[test]
 fn diagnose_chunk_granularity_and_fallback() {
     run_diagnose_chunk_granularity_and_fallback();
+}
+
+/// Prints whole-vs-chunk IR/source amplification for combustion BVP callbacks.
+#[test]
+#[ignore = "diagnostic for chunked IR/source amplification; use BVP_CHUNK_IR_STEPS to scale"]
+fn diagnose_combustion_chunk_ir_amplification() {
+    run_diagnose_combustion_chunk_ir_amplification();
 }
 
 /// IR-level crossover sweep for when parallel sparse Jacobian execution wins.

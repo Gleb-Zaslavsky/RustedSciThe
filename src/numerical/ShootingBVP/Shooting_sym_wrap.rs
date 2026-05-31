@@ -324,9 +324,9 @@ impl BVPShooting {
         }
     }
 
-    /// Solve the BVP using the shooting method with a modern typed IVP
+    /// Solve the BVP using the shooting method with a generic typed IVP
     /// configurator instead of the legacy `HashMap<String, SolverParam>` bag.
-    pub fn solve_with_certain_ivp_modern<F>(
+    pub fn solve_with_certain_ivp_generic<F>(
         &mut self,
         initial_guess: f64,
         tolerance: f64,
@@ -342,7 +342,7 @@ impl BVPShooting {
         let (left_bc, right_bc) = self.BC_create();
 
         let problem = BoundaryValueProblem::new(ode_system, t0, tend, left_bc, right_bc);
-        let ivp_closure = Self::creating_IVP_closure_modern(
+        let ivp_closure = Self::creating_IVP_closure_generic(
             self.eq_vec.clone(),
             self.values.clone(),
             self.arg.clone(),
@@ -418,7 +418,7 @@ impl BVPShooting {
         }
     }
 
-    pub fn IVP_solver_modern<F>(
+    pub fn IVP_solver_generic<F>(
         eq_system: Vec<Expr>,
         values: Vec<String>,
         arg: String,
@@ -483,7 +483,7 @@ impl BVPShooting {
         f
     }
 
-    pub fn creating_IVP_closure_modern<F>(
+    pub fn creating_IVP_closure_generic<F>(
         eq_system: Vec<Expr>,
         values: Vec<String>,
         arg: String,
@@ -496,7 +496,7 @@ impl BVPShooting {
         Box::new(
             move |t0: f64, ivp_initial_condition: DVector<f64>, t_end, _step| {
                 info!("\n ivp_initial_condition: {:}", ivp_initial_condition);
-                match Self::IVP_solver_modern(
+                match Self::IVP_solver_generic(
                     eq_system.clone(),
                     values.clone(),
                     arg.clone(),

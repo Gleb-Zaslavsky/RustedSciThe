@@ -6,9 +6,47 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::{
     GeneratedZigAotLibrary, WrittenZigAotLibrary,
 };
 use log::info;
+use std::env;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
+
+fn absolute_nonverbatim(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::Prefix(prefix) => match prefix.kind() {
+                    Prefix::VerbatimDisk(disk) => {
+                        normalized.push(format!("{}:", char::from(disk)));
+                    }
+                    Prefix::VerbatimUNC(server, share) => {
+                        normalized.push(format!(
+                            "\\\\{}\\{}",
+                            server.to_string_lossy(),
+                            share.to_string_lossy()
+                        ));
+                    }
+                    _ => normalized.push(component.as_os_str()),
+                },
+                _ => normalized.push(component.as_os_str()),
+            }
+        }
+        Ok(normalized)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(absolute)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZigAotBuildProfile {
@@ -82,6 +120,13 @@ impl ZigAotBuildRequest {
             self.library_spec.library_name, self.profile
         );
         let written = self.library_spec.write_to_dir(&self.output_parent_dir)?;
+        let library_dir = absolute_nonverbatim(&written.library_dir)?;
+        let written = WrittenZigAotLibrary {
+            build_zig: library_dir.join("build.zig"),
+            generated_zig: library_dir.join("generated.zig"),
+            aot_interface_zig: library_dir.join("aot_interface.zig"),
+            library_dir,
+        };
 
         let expected_filename = if cfg!(target_os = "windows") {
             format!("{}.dll", self.library_spec.library_name)
@@ -98,6 +143,7 @@ impl ZigAotBuildRequest {
         } else {
             written.library_dir.join("zig-out").join("lib")
         };
+        let artifact_dir = absolute_nonverbatim(&artifact_dir)?;
         let expected_so = artifact_dir.join(expected_filename);
 
         let build_args = vec![
@@ -108,6 +154,8 @@ impl ZigAotBuildRequest {
         let global_cache_dir = written.library_dir.join(".zig-global-cache");
         std::fs::create_dir_all(&local_cache_dir)?;
         std::fs::create_dir_all(&global_cache_dir)?;
+        let local_cache_dir = absolute_nonverbatim(&local_cache_dir)?;
+        let global_cache_dir = absolute_nonverbatim(&global_cache_dir)?;
         let build_env = vec![
             (
                 "ZIG_LOCAL_CACHE_DIR".to_string(),
@@ -177,7 +225,6 @@ impl ExecutedZigAotBuild {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
     use crate::symbolic::codegen::codegen_provider_api::{
         BackendKind, MatrixBackend, PreparedDenseProblem,
     };
@@ -185,6 +232,7 @@ mod tests {
         DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
     };
     use crate::symbolic::codegen::codegen_tasks::{JacobianTask, ResidualTask};
+    use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
     use crate::symbolic::symbolic_engine::Expr;
     use tempfile::tempdir;
 
@@ -238,6 +286,16 @@ mod tests {
         assert!(result.written.build_zig.exists());
         assert!(result.written.generated_zig.exists());
         assert!(result.written.aot_interface_zig.exists());
+        assert!(result.build_workdir().is_absolute());
+        assert!(result.expected_so.is_absolute());
+        for (key, value) in &result.build_env {
+            if key == "ZIG_LOCAL_CACHE_DIR" || key == "ZIG_GLOBAL_CACHE_DIR" {
+                assert!(
+                    Path::new(value).is_absolute(),
+                    "{key} must be absolute so `zig build` does not resolve it relative to the generated crate"
+                );
+            }
+        }
     }
 
     #[test]
@@ -272,9 +330,10 @@ mod tests {
             &module,
         );
         let dir = tempdir().expect("tempdir should exist");
-        let request =
-            ZigAotBuildRequest::new(library_spec, dir.path(), ZigAotBuildProfile::Debug);
-        let result = request.materialize().expect("debug Zig build should materialize");
+        let request = ZigAotBuildRequest::new(library_spec, dir.path(), ZigAotBuildProfile::Debug);
+        let result = request
+            .materialize()
+            .expect("debug Zig build should materialize");
 
         assert_eq!(
             result.build_args,

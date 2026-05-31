@@ -83,33 +83,6 @@ fn select_default_c_compiler() -> String {
     "gcc".to_string()
 }
 
-fn resolve_compiler_path(program: &str) -> Option<PathBuf> {
-    let candidate = compiler_override(program)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(program));
-    if candidate.components().count() > 1 && candidate.exists() {
-        return Some(candidate);
-    }
-
-    #[cfg(target_os = "windows")]
-    let locator = "where";
-    #[cfg(not(target_os = "windows"))]
-    let locator = "which";
-
-    Command::new(locator)
-        .arg(candidate.as_os_str())
-        .output()
-        .ok()
-        .and_then(|output| {
-            if !output.status.success() {
-                return None;
-            }
-            String::from_utf8(output.stdout)
-                .ok()
-                .and_then(|stdout| stdout.lines().next().map(|line| PathBuf::from(line.trim())))
-        })
-}
-
 fn absolute_nonverbatim(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -327,11 +300,12 @@ impl CAotBuildRequest {
             .compiler
             .clone()
             .unwrap_or_else(select_default_c_compiler);
-        let resolved_program = resolve_compiler_path(&requested_program);
-        let build_program = resolved_program
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or(requested_program);
+        // Bare compiler names are resolved by process spawning itself. Running
+        // `where`/`which` here adds a full subprocess to every cold AOT
+        // materialization, which is significant for fast compilers such as
+        // tcc. Explicit environment overrides are still honored verbatim.
+        let build_program = compiler_override(&requested_program).unwrap_or(requested_program);
+        let build_program_path = PathBuf::from(&build_program);
         let mut build_args = vec![
             self.profile.optimization_flag().to_string(),
             "-shared".to_string(),
@@ -348,10 +322,11 @@ impl CAotBuildRequest {
         }
 
         let mut build_env = Vec::new();
-        if let Some(path) = resolved_program
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|parent| parent.to_path_buf())
+        if let Some(path) = (build_program_path.components().count() > 1)
+            .then(|| build_program_path.parent())
+            .flatten()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
         {
             let mut merged = path.to_string_lossy().into_owned();
             if let Some(existing) = env::var_os("PATH") {

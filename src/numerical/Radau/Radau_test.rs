@@ -1726,10 +1726,20 @@ mod tests_statistics_and_options {
 #[cfg(test)]
 mod tests_generated_backend_compare {
     use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions};
+    use crate::symbolic::codegen::codegen_runtime_api::{
+        recommended_dense_jacobian_chunking_for_parallelism,
+        recommended_residual_chunking_for_parallelism,
+    };
+    use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_ivp::SymbolicIvpAotOptions;
+    use crate::symbolic::symbolic_ivp_generated::{
+        DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    };
     use nalgebra::DVector;
+    use std::path::PathBuf;
     use std::process::Command;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[derive(Clone)]
     struct RadauScenario {
@@ -1759,6 +1769,40 @@ mod tests_generated_backend_compare {
         max_abs_solution: f64,
         solution_diff: f64,
         status: &'static str,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Toolchain {
+        Ctcc,
+        Cgcc,
+        Zig,
+        Rust,
+    }
+
+    impl Toolchain {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Ctcc => "AOT-C-tcc",
+                Self::Cgcc => "AOT-C-gcc",
+                Self::Zig => "AOT-Zig",
+                Self::Rust => "AOT-Rust",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ChunkingMode {
+        Whole,
+        Parallel2,
+    }
+
+    impl ChunkingMode {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Whole => "whole",
+                Self::Parallel2 => "parallel(auto,x2)",
+            }
+        }
     }
 
     fn stiff_2_scenario() -> RadauScenario {
@@ -1863,6 +1907,69 @@ mod tests_generated_backend_compare {
 
     fn zig_available() -> bool {
         command_exists("zig", "version")
+    }
+
+    fn toolchain_available(toolchain: Toolchain) -> bool {
+        match toolchain {
+            Toolchain::Ctcc => tcc_available(),
+            Toolchain::Cgcc => gcc_available(),
+            Toolchain::Zig => zig_available(),
+            Toolchain::Rust => true,
+        }
+    }
+
+    fn chunking_options(var_count: usize, mode: ChunkingMode) -> SymbolicIvpAotOptions {
+        match mode {
+            ChunkingMode::Whole => SymbolicIvpAotOptions::default(),
+            ChunkingMode::Parallel2 => SymbolicIvpAotOptions {
+                residual_strategy: recommended_residual_chunking_for_parallelism(var_count, 2),
+                jacobian_strategy: recommended_dense_jacobian_chunking_for_parallelism(
+                    var_count, 2,
+                ),
+            },
+        }
+    }
+
+    fn unique_output_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        PathBuf::from(format!(
+            "target/generated-radau-heavy-story/{prefix}/pid{}_{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn make_generated_backend_config(
+        out_dir: PathBuf,
+        toolchain: Toolchain,
+        chunking: ChunkingMode,
+        var_count: usize,
+    ) -> SymbolicIvpGeneratedBackendConfig {
+        let base = SymbolicIvpGeneratedBackendConfig::from_mode(
+            DenseIvpGeneratedBackendMode::BuildIfMissingRelease,
+        )
+        .with_output_parent_dir(Some(out_dir))
+        .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+            profile: AotBuildProfile::Release,
+        })
+        .with_aot_options(chunking_options(var_count, chunking));
+
+        match toolchain {
+            Toolchain::Ctcc => base.with_c_tcc(),
+            Toolchain::Cgcc => base.with_c_gcc(),
+            Toolchain::Zig => base.with_zig(),
+            Toolchain::Rust => base.with_rust(),
+        }
+    }
+
+    fn scenario_options_with_generated_backend(
+        scenario: &RadauScenario,
+        config: SymbolicIvpGeneratedBackendConfig,
+    ) -> RadauSolverOptions {
+        scenario_options(scenario).with_generated_backend_config(config)
     }
 
     fn make_solver_quiet(mut solver: Radau) -> Radau {
@@ -2146,6 +2253,118 @@ mod tests_generated_backend_compare {
         print_production_like_table(scenario, &rows);
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|row| row.status == "finished"));
+    }
+
+    #[test]
+    #[ignore]
+    fn radau_dense_aot_heavy_toolchain_chunking_matrix_story() {
+        let scenarios = vec![robertson_3_scenario(), hires_8_scenario()];
+        println!(
+            "[Radau AOT heavy] dense toolchain+chunking matrix; all time columns are milliseconds"
+        );
+        println!(
+            "scenario    | route        | chunking         | total_ms | setup_ms | solve_ms | final_diff_vs_lambdify | residual_calls | jacobian_calls | steps | status"
+        );
+        println!(
+            "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
+        );
+
+        let mut any_finished = false;
+
+        for scenario in &scenarios {
+            let mut baseline_solver =
+                make_solver_quiet(Radau::new_with_options(scenario_options(scenario)));
+            let (baseline_row, baseline_solution) =
+                run_solver("Lambdify", &mut baseline_solver, None);
+            any_finished |= baseline_row.status == "finished";
+            println!(
+                "{:<11} | {:<12} | {:<16} | {:>8.3} | {:>8.3} | {:>8.3} | {:>22.3e} | {:>14} | {:>14} | {:>5} | {}",
+                scenario.label,
+                baseline_row.variant,
+                "n/a",
+                baseline_row.total.as_secs_f64() * 1_000.0,
+                baseline_row.setup_ms,
+                baseline_row.solve_ms,
+                baseline_row.solution_diff,
+                baseline_row.residual_calls,
+                baseline_row.jacobian_calls,
+                baseline_row.step_calls,
+                baseline_row.status
+            );
+
+            for toolchain in [
+                Toolchain::Ctcc,
+                Toolchain::Cgcc,
+                Toolchain::Zig,
+                Toolchain::Rust,
+            ] {
+                if !toolchain_available(toolchain) {
+                    println!(
+                        "[Radau AOT heavy] skipping {} on scenario {}: compiler/runtime unavailable",
+                        toolchain.label(),
+                        scenario.label
+                    );
+                    continue;
+                }
+
+                for chunking in [ChunkingMode::Whole, ChunkingMode::Parallel2] {
+                    let out_dir = unique_output_root(&format!(
+                        "{}_{}_{}",
+                        scenario.label,
+                        toolchain.label(),
+                        chunking.label()
+                    ));
+                    let config = make_generated_backend_config(
+                        out_dir,
+                        toolchain,
+                        chunking,
+                        scenario.values.len().max(1),
+                    );
+                    let mut solver = make_solver_quiet(Radau::new_with_options(
+                        scenario_options_with_generated_backend(scenario, config),
+                    ));
+                    let (row, _) =
+                        run_solver(toolchain.label(), &mut solver, Some(&baseline_solution));
+                    any_finished |= row.status == "finished";
+                    println!(
+                        "{:<11} | {:<12} | {:<16} | {:>8.3} | {:>8.3} | {:>8.3} | {:>22.3e} | {:>14} | {:>14} | {:>5} | {}",
+                        scenario.label,
+                        row.variant,
+                        chunking.label(),
+                        row.total.as_secs_f64() * 1_000.0,
+                        row.setup_ms,
+                        row.solve_ms,
+                        row.solution_diff,
+                        row.residual_calls,
+                        row.jacobian_calls,
+                        row.step_calls,
+                        row.status
+                    );
+
+                    assert_eq!(
+                        row.status,
+                        "finished",
+                        "Radau dense AOT route failed: scenario={} route={} chunking={}",
+                        scenario.label,
+                        row.variant,
+                        chunking.label()
+                    );
+                    assert!(
+                        row.solution_diff <= 1e-7 * (1.0 + baseline_solution.amax()),
+                        "Radau dense AOT parity drift too large: scenario={} route={} chunking={} diff={:e}",
+                        scenario.label,
+                        row.variant,
+                        chunking.label(),
+                        row.solution_diff
+                    );
+                }
+            }
+        }
+
+        assert!(
+            any_finished,
+            "at least one heavy dense Radau route should finish"
+        );
     }
 
     #[test]

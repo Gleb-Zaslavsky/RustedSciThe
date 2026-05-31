@@ -42,6 +42,10 @@ fn main() {
     println!("    LSODE2 manual LSODE-style BDF-only selection.");
     println!("  - examples/lsode2_manual_adams_guide.rs");
     println!("    LSODE2 manual LSODE-style Adams-only selection.");
+    println!("  - src/numerical/IVP_USER_GUIDE_EN.md");
+    println!("    Full IVP guide (BDF/Radau/BE + RK45/DOPRI/AB4 + Universal API).");
+    println!("  - src/numerical/IVP_USER_GUIDE_RU.md");
+    println!("    Full IVP guide in Russian (same scope and examples).");
     println!("  - examples/bvp_backends_guide.rs");
     println!("    Backend-oriented BVP comparison guide.");
     println!("  - examples/banded_solvers_guide.rs");

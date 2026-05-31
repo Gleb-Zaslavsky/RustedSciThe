@@ -18,6 +18,7 @@ use crate::symbolic::codegen::codegen_provider_api::{
 use log::info;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Description of one generated AOT crate ready to be written to disk.
@@ -152,7 +153,7 @@ impl GeneratedAotCrate {
         let manifest_rs = src_dir.join("manifest.rs");
 
         fs::write(&cargo_toml, self.emit_cargo_toml())?;
-        fs::write(&generated_rs, self.emit_generated_rs())?;
+        self.write_generated_rs(&generated_rs)?;
         fs::write(&manifest_rs, self.emit_manifest_rs())?;
         fs::write(&lib_rs, self.emit_lib_rs())?;
 
@@ -178,13 +179,13 @@ impl GeneratedAotCrate {
         )
     }
 
-    fn emit_generated_rs(&self) -> String {
-        let mut source = String::new();
-        source.push_str("// AUTO-GENERATED AOT MODULE SOURCE.\n");
-        source.push_str("// This file is written by codegen_aot_crate.rs.\n\n");
-        source.push_str(self.module_source.trim());
-        source.push('\n');
-        source
+    fn write_generated_rs(&self, path: &Path) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(b"// AUTO-GENERATED AOT MODULE SOURCE.\n")?;
+        file.write_all(b"// This file is written by codegen_aot_crate.rs.\n\n")?;
+        file.write_all(self.module_source.trim().as_bytes())?;
+        file.write_all(b"\n")?;
+        Ok(())
     }
 
     fn emit_manifest_rs(&self) -> String {
@@ -245,6 +246,68 @@ pub const JACOBIAN_CHUNK_NAMES: &[&str] = &[\n{}];\n",
     }
 
     fn emit_lib_rs(&self) -> String {
+        let residual_chunk_exports = self
+            .manifest
+            .functions
+            .residual_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\n#[unsafe(no_mangle)]\n\
+pub unsafe extern \"C\" fn rustedscithe_aot_chunk_{fn_name}(\n\
+    args_ptr: *const f64,\n\
+    args_len: usize,\n\
+    out_ptr: *mut f64,\n\
+    out_len: usize,\n\
+) -> bool {{\n\
+    if args_ptr.is_null() || out_ptr.is_null() || out_len != {out_len} {{\n\
+        return false;\n\
+    }}\n\
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
+        let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
+        let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
+        generated::{module_name}::{fn_name}(args, out);\n\
+    }}));\n\
+    result.is_ok()\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    module_name = self.module_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let jacobian_chunk_exports = self
+            .manifest
+            .functions
+            .jacobian_chunks
+            .iter()
+            .map(|chunk| {
+                format!(
+                    "\n#[unsafe(no_mangle)]\n\
+pub unsafe extern \"C\" fn rustedscithe_aot_chunk_{fn_name}(\n\
+    args_ptr: *const f64,\n\
+    args_len: usize,\n\
+    out_ptr: *mut f64,\n\
+    out_len: usize,\n\
+) -> bool {{\n\
+    if args_ptr.is_null() || out_ptr.is_null() || out_len != {out_len} {{\n\
+        return false;\n\
+    }}\n\
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
+        let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
+        let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
+        generated::{module_name}::{fn_name}(args, out);\n\
+    }}));\n\
+    result.is_ok()\n\
+}}\n",
+                    fn_name = chunk.fn_name,
+                    module_name = self.module_name,
+                    out_len = chunk.len,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
         let residual_dispatch = if self.manifest.functions.residual_chunks.is_empty() {
             format!(
                 "generated::{}(args, out);",
@@ -304,10 +367,12 @@ pub unsafe extern \"C\" fn rustedscithe_aot_eval_residual(\n\
     if args_ptr.is_null() || out_ptr.is_null() || out_len != manifest::RESIDUAL_LEN {{\n\
         return false;\n\
     }}\n\
-    let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
-    let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
-    {}\n\
-    true\n\
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
+        let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
+        let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
+        {}\n\
+    }}));\n\
+    result.is_ok()\n\
 }}\n\
 \n\
 #[unsafe(no_mangle)]\n\
@@ -324,14 +389,17 @@ pub unsafe extern \"C\" fn rustedscithe_aot_eval_jacobian_values(\n\
     if out_len != expected_out_len {{\n\
         return false;\n\
     }}\n\
-    let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
-    let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
-    {}\n\
-    true\n\
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
+        let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
+        let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
+        {}\n\
+    }}));\n\
+    result.is_ok()\n\
 }}\n",
             residual_dispatch.replace("generated::", &format!("generated::{}::", self.module_name)),
             jacobian_dispatch.replace("generated::", &format!("generated::{}::", self.module_name))
-        )
+        ) + residual_chunk_exports.as_str()
+            + jacobian_chunk_exports.as_str()
     }
 }
 
@@ -425,6 +493,41 @@ mod tests {
         PreparedProblemManifest::from(&prepared)
     }
 
+    fn sample_chunked_dense_manifest() -> PreparedProblemManifest {
+        let residuals = vec![
+            Expr::parse_expression("x + 1"),
+            Expr::parse_expression("y + 2"),
+        ];
+        let jacobian = vec![
+            vec![Expr::parse_expression("1"), Expr::parse_expression("0")],
+            vec![Expr::parse_expression("0"), Expr::parse_expression("1")],
+        ];
+        let vars = vec!["x", "y"];
+
+        let prepared = PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::ByOutputCount {
+                max_outputs_per_chunk: 1,
+            }),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 1 }),
+        );
+
+        PreparedProblemManifest::from(&prepared)
+    }
+
     #[test]
     fn generated_aot_crate_writes_expected_file_layout() {
         let module_source = CodegenModule::new("generated_fixture")
@@ -458,9 +561,29 @@ mod tests {
 
         assert!(cargo_toml.contains("name = \"generated_aot_fixture\""));
         assert!(lib_rs.contains("pub mod generated;"));
+        assert!(lib_rs.contains("std::panic::catch_unwind"));
+        assert!(lib_rs.contains("result.is_ok()"));
         assert!(generated_rs.contains("pub mod generated_fixture"));
         assert!(manifest_rs.contains("pub const BACKEND_KIND: &str = \"aot\";"));
         assert!(manifest_rs.contains("pub const RESIDUAL_FN_NAME: &str = \"eval_residual\";"));
+    }
+
+    #[test]
+    fn generated_aot_crate_exports_chunk_ffi_symbols() {
+        let module_source = CodegenModule::new("generated_fixture").emit_source();
+        let crate_spec = GeneratedAotCrate::new(
+            "generated_aot_fixture",
+            "generated_fixture",
+            module_source,
+            sample_chunked_dense_manifest(),
+        );
+
+        let lib_rs = crate_spec.emit_lib_rs();
+
+        assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_residual_chunk_0"));
+        assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
+        assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
+        assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
     }
 
     #[test]

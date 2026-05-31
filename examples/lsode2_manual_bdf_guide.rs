@@ -36,7 +36,8 @@ fn main() {
     .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
     .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
     // Explicit manual LSODE-style method choice:
-    .with_controller(Lsode2ControllerConfig::bdf_only())
+    .with_bdf_only_controller()
+    // or .with_controller(Lsode2ControllerConfig::bdf_only())
     // Native faithful BDF stepping path.
     .with_faithful_bdf_solve(100_000, 100_000);
 

@@ -1,4 +1,6 @@
-use crate::numerical::LSODE2::algorithm::Lsode2ControllerExecutionCapabilities;
+use crate::numerical::LSODE2::algorithm::{
+    Lsode2AlgorithmController, Lsode2ControllerExecutionCapabilities,
+};
 use crate::numerical::LSODE2::step_cycle::Lsode2StepMethod;
 use crate::numerical::LSODE2::{
     Lsode2ControllerConfig, Lsode2CorrectionAssessment, Lsode2CorrectionControlConfig,
@@ -680,6 +682,178 @@ fn dstoda_switch_choreography_branch_precedence_matrix_matches_fortran_style_ord
             case.label
         );
     }
+}
+
+#[test]
+fn lsoda_method_switch_handoff_preserves_history_and_step_counters_like_jstart_minus_one() {
+    let mut state = Lsode2RuntimeState::new(
+        0.0,
+        &[1.0],
+        0.1,
+        5,
+        Lsode2StepControlConfig {
+            raise_order_after_accepts: 1,
+            ..Lsode2StepControlConfig::default()
+        },
+    )
+    .expect("runtime state should initialize");
+    state
+        .reconcile_first_nordsieck_derivative(&[0.1])
+        .expect("initial derivative refresh should clear");
+
+    let accepted = [
+        (0.1, 1.1, 2usize),
+        (0.2, 1.21, 3usize),
+        (0.3, 1.331, 3usize),
+    ];
+    for (t, y, q) in accepted {
+        state
+            .accept_step(t, &[y], 1.0, 0.1, q)
+            .expect("accepted setup step should succeed");
+    }
+    state.set_order(3).expect("test state order should be set");
+
+    let before = state.snapshot();
+    let history_before = (0..=3)
+        .map(|age| state.y_history().block(age).unwrap()[0])
+        .collect::<Vec<_>>();
+    let nordsieck_before = (0..=3)
+        .map(|order| state.nordsieck().col(order).unwrap()[0])
+        .collect::<Vec<_>>();
+
+    state
+        .prepare_for_method_switch_handoff(12)
+        .expect("BDF->Adams handoff should expand max order without cold restart");
+
+    let after = state.snapshot();
+    assert_eq!(
+        after.accepted_steps, before.accepted_steps,
+        "LSODA JSTART=-1 handoff must not reset NST-like accepted-step count"
+    );
+    assert_eq!(
+        after.rejected_steps, before.rejected_steps,
+        "LSODA JSTART=-1 handoff must not reset rejection counters"
+    );
+    assert_eq!(after.t, before.t);
+    assert_eq!(after.h, before.h);
+    assert_eq!(after.order, before.order);
+    assert_eq!(after.max_order, 12);
+    assert!(
+        after.first_derivative_refresh_requested,
+        "JSTART=-1 class handoff should force YH(:,2) refresh on next predictor"
+    );
+    for age in 0..=3 {
+        assert_eq!(
+            state.y_history().block(age).unwrap()[0],
+            history_before[age],
+            "raw solution history age {age} should survive method handoff"
+        );
+    }
+    for order in 0..=3 {
+        assert_eq!(
+            state.nordsieck().col(order).unwrap()[0],
+            nordsieck_before[order],
+            "available Nordsieck column {order} should survive method handoff"
+        );
+    }
+    assert_eq!(
+        state.nordsieck().col(6).unwrap()[0],
+        0.0,
+        "newly exposed higher-order columns should start clean after expansion"
+    );
+}
+
+#[test]
+fn lsoda_method_switch_handoff_to_bdf_clamps_order_and_marks_matrix_stale() {
+    let state = Lsode2RuntimeState::new(0.0, &[1.0], 0.1, 12, Lsode2StepControlConfig::default())
+        .expect("runtime state should initialize");
+    let error_control = Lsode2ErrorController::new(
+        Lsode2Tolerance::scalar(1.0e-6, 1.0e-9),
+        Lsode2ErrorControlConfig::default(),
+    )
+    .expect("error control should initialize");
+    let mut cycle =
+        Lsode2StepCycle::new_with_method(state, error_control, Lsode2StepMethod::AdamsLike);
+    cycle
+        .state_mut()
+        .set_order(8)
+        .expect("high Adams order should be legal before BDF switch");
+
+    cycle
+        .prepare_for_method_switch_handoff(Lsode2StepMethod::BdfLike, 5)
+        .expect("Adams->BDF handoff should clamp to BDF MAXORD");
+
+    assert_eq!(cycle.method(), Lsode2StepMethod::BdfLike);
+    assert_eq!(cycle.state().order(), 5);
+    assert_eq!(cycle.state().max_order(), 5);
+    assert!(
+        !cycle.jacobian_currency().is_current(),
+        "Adams->BDF handoff should not carry an Adams-family current matrix into BDF"
+    );
+    assert!(
+        cycle.state().first_derivative_refresh_requested(),
+        "new BDF family should enter next predictor through JSTART=-1-style refresh"
+    );
+}
+
+#[test]
+fn lsoda_switch_state_records_mused_mcur_tsw_and_jstart_minus_one_on_real_switch() {
+    let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+        Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(1),
+        Lsode2ControllerExecutionCapabilities {
+            adams_engine_available: true,
+        },
+    );
+    let initial = controller.switch_state();
+    assert_eq!(
+        initial.mcur,
+        Lsode2MethodFamily::Adams,
+        "LSODA automatic mode starts in Adams/METH=1 when native Adams is available"
+    );
+    assert_eq!(initial.mused, Lsode2MethodFamily::Adams);
+    assert_eq!(initial.tsw, None);
+    assert_eq!(initial.last_handoff_jstart, None);
+
+    let decision = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_stiffness_ratio(1.0e6)
+            .with_accepted_steps(1),
+    );
+    assert_eq!(decision.executed_family(), Some(Lsode2MethodFamily::Bdf));
+    controller.record_switch_decision_at(decision, Some(0.125));
+
+    let switched = controller.switch_state();
+    assert_eq!(switched.mused, Lsode2MethodFamily::Adams);
+    assert_eq!(switched.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(
+        switched.tsw,
+        Some(0.125),
+        "LSODA driver sets TSW=TN when METH changes after an accepted step"
+    );
+    assert_eq!(
+        switched.last_handoff_jstart,
+        Some(-1),
+        "Rust handoff visibility should expose the LSODA JSTART=-1 class setup"
+    );
+
+    let hold = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_stiffness_ratio(1.0e6)
+            .with_accepted_steps(2),
+    );
+    controller.record_switch_decision_at(hold, Some(0.25));
+    let held = controller.switch_state();
+    assert_eq!(held.mused, Lsode2MethodFamily::Bdf);
+    assert_eq!(held.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(
+        held.tsw,
+        Some(0.125),
+        "TSW should remain the previous switch time when no new method change occurs"
+    );
+    assert_eq!(
+        held.last_handoff_jstart, None,
+        "No-switch decision must not masquerade as a JSTART=-1 handoff"
+    );
 }
 
 #[test]
@@ -1492,8 +1666,8 @@ fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran
 }
 
 #[test]
-fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran_style_reset_for_adams()
- {
+fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran_style_reset_for_adams(
+) {
     let h0 = f64::EPSILON / 4.0;
     let step_config = Lsode2StepControlConfig {
         h_min: 1.0e-300,

@@ -19,7 +19,7 @@ use super::dstoda_state::{
 use super::error_control::{
     Lsode2ErrorControlError, Lsode2ErrorController, Lsode2ErrorTestAction, Lsode2ErrorTestResult,
 };
-use super::history::{Lsode2HistoryError, weighted_rms_norm};
+use super::history::{weighted_rms_norm, Lsode2HistoryError};
 use super::order_selection::{
     Lsode2OrderCandidate, Lsode2OrderSelectionDecision, Lsode2OrderSelectionError,
 };
@@ -199,6 +199,25 @@ impl Lsode2StepCycle {
 
     pub fn method(&self) -> Lsode2StepMethod {
         self.method
+    }
+
+    pub fn prepare_for_method_switch_handoff(
+        &mut self,
+        method: Lsode2StepMethod,
+        max_order: usize,
+    ) -> Result<(), Lsode2StepCycleError> {
+        self.method = method;
+        self.state.prepare_for_method_switch_handoff(max_order)?;
+        self.dstoda = Lsode2DstodaState::default();
+        if matches!(method, Lsode2StepMethod::BdfLike) {
+            self.dstoda.mark_jacobian_stale();
+        }
+        self.adams_pdest = 0.0;
+        self.adams_pdlast = 0.0;
+        self.last_stiffness_ratio_estimate = None;
+        self.last_adams_step_size_cap_estimate = None;
+        self.last_bdf_step_size_cap_estimate = None;
+        Ok(())
     }
 
     pub fn adams_pdest(&self) -> f64 {
@@ -1321,11 +1340,9 @@ mod tests {
 
         let telemetry = cycle.switch_telemetry(None);
         assert!(telemetry.bdf_step_size_cap_estimate.is_some());
-        assert!(
-            telemetry
-                .bdf_step_size_cap_estimate
-                .is_some_and(|value| value.is_finite() && value > 0.0)
-        );
+        assert!(telemetry
+            .bdf_step_size_cap_estimate
+            .is_some_and(|value| value.is_finite() && value > 0.0));
         assert!(telemetry.adams_step_size_cap_estimate.is_none());
     }
 
@@ -1336,16 +1353,12 @@ mod tests {
 
         let telemetry = cycle.switch_telemetry(None);
         assert!(telemetry.adams_step_size_cap_estimate.is_some());
-        assert!(
-            telemetry
-                .adams_step_size_cap_estimate
-                .is_some_and(|value| value.is_finite() && value > 0.0)
-        );
-        assert!(
-            telemetry
-                .stiffness_ratio
-                .is_some_and(|value| value.is_finite() && value > 0.0)
-        );
+        assert!(telemetry
+            .adams_step_size_cap_estimate
+            .is_some_and(|value| value.is_finite() && value > 0.0));
+        assert!(telemetry
+            .stiffness_ratio
+            .is_some_and(|value| value.is_finite() && value > 0.0));
     }
 
     #[test]

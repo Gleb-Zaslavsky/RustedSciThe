@@ -17,7 +17,9 @@ use crate::numerical::BVP_Damp::generated_solver_handoff::{
 };
 use crate::somelinalg::banded::LinearSolverConfig;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
-use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::codegen::codegen_backend_selection::{
+    BackendSelectionPolicy, SelectedBackendKind,
+};
 use crate::symbolic::symbolic_functions_BVP::{
     BvpBackendIntegrationError, BvpSymbolicAssemblyBackend,
 };
@@ -47,6 +49,14 @@ pub struct FrozenSolverOptions {
     pub max_iterations: usize,
     /// Generated-backend configuration used by sparse solver paths.
     pub generated_backend_config: GeneratedBackendConfig,
+}
+
+/// Runtime counters, timers, and generated-backend diagnostics for Frozen Newton.
+#[derive(Clone, Debug)]
+pub struct FrozenBvpStatistics {
+    pub counters: HashMap<String, usize>,
+    pub timers: HashMap<String, String>,
+    pub diagnostics: HashMap<String, String>,
 }
 
 impl FrozenSolverOptions {
@@ -297,6 +307,10 @@ pub struct NRBVP {
     variable_string: Vec<String>, // vector of indexed variable names
     bandwidth: (usize, usize),
     generated_backend_config: GeneratedBackendConfig,
+    generated_backend_selected_backend: Option<SelectedBackendKind>,
+    generated_backend_runtime_diagnostics: HashMap<String, String>,
+    calc_statistics: HashMap<String, usize>,
+    custom_timer: CustomTimer,
     no_reports: bool,
 }
 
@@ -309,6 +323,8 @@ impl ApplyFrozenGeneratedSolverState for NRBVP {
         self.jac = state.jac;
         self.variable_string = state.variable_string;
         self.bandwidth = state.bandwidth;
+        self.generated_backend_selected_backend = Some(state.selected_backend);
+        self.generated_backend_runtime_diagnostics = state.runtime_diagnostics;
     }
 }
 
@@ -348,6 +364,11 @@ impl BuildFrozenSolverRequest for NRBVP {
 }
 
 impl NRBVP {
+    #[inline]
+    fn effective_runtime_method(&self) -> String {
+        self.generated_backend_config.effective_method(&self.method)
+    }
+
     pub fn new(
         eq_system: Vec<Expr>,        //
         initial_guess: DMatrix<f64>, // initial guess
@@ -406,6 +427,14 @@ impl NRBVP {
             variable_string: Vec::new(), // vector of indexed variable names
             bandwidth: (0, 0),
             generated_backend_config: GeneratedBackendConfig::default(),
+            generated_backend_selected_backend: None,
+            generated_backend_runtime_diagnostics: HashMap::new(),
+            calc_statistics: HashMap::from([
+                ("number of iterations".to_string(), 0),
+                ("number of jacobians recalculations".to_string(), 0),
+                ("number of solving linear systems".to_string(), 0),
+            ]),
+            custom_timer: CustomTimer::new(),
             no_reports: false,
         }
     }
@@ -655,6 +684,16 @@ impl NRBVP {
     pub fn try_eq_generate(&mut self) -> Result<(), BvpBackendIntegrationError> {
         self.task_check();
         strategy_check(&self.strategy, &self.strategy_params);
+        let effective_method = self.generated_backend_config.effective_method(&self.method);
+        let effective_policy = self
+            .generated_backend_config
+            .effective_backend_policy(&effective_method);
+        if effective_policy == BackendSelectionPolicy::NumericOnly {
+            return Err(BvpBackendIntegrationError::PipelinePanicked(
+                "NumericOnly is intentionally not available for the frozen BVP solver; use the damped solver with numeric_rhs for pure numeric finite-difference discretization, or use symbolic Lambdify/AOT with Frozen"
+                    .to_string(),
+            ));
+        }
         try_generate_and_apply_frozen_solver_state(
             self,
             "building frozen BVP generated solver state",
@@ -796,6 +835,86 @@ impl NRBVP {
         &self.generated_backend_config
     }
 
+    /// Returns accumulated operation statistics and actual backend diagnostics.
+    pub fn get_statistics(&self) -> FrozenBvpStatistics {
+        let mut counters = self.calc_statistics.clone();
+        if let Some(jac) = &self.old_jac {
+            let shape = jac.shape();
+            counters.insert("number of jacobian elements".to_string(), shape.0 * shape.1);
+        }
+        counters.insert("length of y vector".to_string(), self.y.len());
+        counters.insert("number of grid points".to_string(), self.x_mesh.len());
+        let mut diagnostics = self.generated_backend_runtime_diagnostics.clone();
+        self.append_generated_backend_diagnostics(&mut diagnostics);
+        FrozenBvpStatistics {
+            counters,
+            timers: self.custom_timer.get_all(),
+            diagnostics,
+        }
+    }
+
+    fn append_generated_backend_diagnostics(&self, diagnostics: &mut HashMap<String, String>) {
+        let config = &self.generated_backend_config;
+        let effective_method = self.effective_runtime_method();
+        diagnostics.insert(
+            "generated.backend_policy".to_string(),
+            format!("{:?}", config.effective_backend_policy(&effective_method)),
+        );
+        diagnostics.insert("generated.effective_method".to_string(), effective_method);
+        diagnostics.insert(
+            "generated.selected_backend".to_string(),
+            self.generated_backend_selected_backend
+                .map(|backend| format!("{backend:?}"))
+                .unwrap_or_else(|| "not_generated".to_string()),
+        );
+        diagnostics.insert(
+            "generated.symbolic_assembly_backend".to_string(),
+            format!("{:?}", config.symbolic_assembly_backend),
+        );
+        diagnostics.insert(
+            "generated.matrix_backend_override".to_string(),
+            config
+                .matrix_backend_override
+                .map(|backend| format!("{backend:?}"))
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        diagnostics.insert(
+            "aot.build_policy".to_string(),
+            config.aot_build_policy.as_str().to_string(),
+        );
+        diagnostics.insert(
+            "aot.execution_policy".to_string(),
+            config.aot_execution_policy.as_str().to_string(),
+        );
+        diagnostics.insert(
+            "aot.codegen_backend".to_string(),
+            format!("{:?}", config.aot_codegen_backend),
+        );
+        diagnostics.insert(
+            "aot.c_compiler".to_string(),
+            config
+                .aot_c_compiler
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        diagnostics.insert(
+            "aot.chunking.residual".to_string(),
+            config
+                .aot_chunking_policy
+                .residual
+                .map(|strategy| format!("{strategy:?}"))
+                .unwrap_or_else(|| "default".to_string()),
+        );
+        diagnostics.insert(
+            "aot.chunking.sparse_jacobian".to_string(),
+            config
+                .aot_chunking_policy
+                .sparse_jacobian
+                .map(|strategy| format!("{strategy:?}"))
+                .unwrap_or_else(|| "default".to_string()),
+        );
+    }
+
     /// Returns the selected symbolic assembly backend.
     pub fn symbolic_assembly_backend(&self) -> BvpSymbolicAssemblyBackend {
         self.generated_backend_config.symbolic_assembly_backend
@@ -815,7 +934,9 @@ impl NRBVP {
         let p = self.p;
         let y = &*self.y;
         let fun = &self.fun;
+        let fun_begin = Instant::now();
         let new_fun = fun.call(p, y);
+        self.custom_timer.append_to_fun_time(fun_begin.elapsed());
         let jac = self
             .jac
             .as_mut()
@@ -825,13 +946,19 @@ impl NRBVP {
         let new_j = if self.jac_recalc {
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let begin = Instant::now();
+            self.custom_timer.jac_tic();
             let new_j = jac.call(p, y);
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
+            self.custom_timer.jac_tac();
             // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             self.old_jac = Some(new_j.clone_box());
             self.m = 0;
+            *self
+                .calc_statistics
+                .entry("number of jacobians recalculations".to_string())
+                .or_insert(0) += 1;
             new_j
         } else {
             self.m = self.m + 1;
@@ -844,6 +971,7 @@ impl NRBVP {
         };
 
         //   println!("new fun = {:?}", &new_fun);
+        let linear_begin = Instant::now();
         let delta: Box<dyn VectorType> = new_j.solve_sys(
             &*new_fun,
             self.linear_sys_method.clone(),
@@ -852,6 +980,12 @@ impl NRBVP {
             self.bandwidth,
             y,
         );
+        self.custom_timer
+            .append_to_linear_sys_time(linear_begin.elapsed());
+        *self
+            .calc_statistics
+            .entry("number of solving linear systems".to_string())
+            .or_insert(0) += 1;
         let elapsed = now.elapsed();
         elapsed_time(elapsed);
         //  println!(" \n \n dy= {:?}", &delta);
@@ -876,6 +1010,10 @@ impl NRBVP {
         let mut i = 0;
 
         while i < self.max_iterations {
+            *self
+                .calc_statistics
+                .entry("number of iterations".to_string())
+                .or_insert(0) += 1;
             let new_y = self.iteration();
             let y1 = new_y.subtract(&*self.y);
             let dy: Box<dyn VectorType> = y1.clone_box();
@@ -912,7 +1050,10 @@ impl NRBVP {
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         // TODO! сравнить явный мэш с неявным
         // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
+        self.custom_timer.start();
+        self.custom_timer.symbolic_operations_tic();
         self.try_eq_generate()?;
+        self.custom_timer.symbolic_operations_tac();
         let begin = Instant::now();
         let res = self.try_main_loop()?;
         let end = begin.elapsed();
@@ -1045,8 +1186,9 @@ mod tests {
     use super::*;
     use crate::numerical::BVP_Damp::generated_solver_handoff::{
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
-        GeneratedBackendConfig, SparseGeneratedBackendMode,
+        BandedGeneratedBackendMode, GeneratedBackendConfig, SparseGeneratedBackendMode,
     };
+    use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
@@ -1056,6 +1198,7 @@ mod tests {
     use crate::symbolic::codegen::codegen_orchestrator::{
         ParallelExecutorConfig, ParallelFallbackPolicy,
     };
+    use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
     use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
     use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
     use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
@@ -1099,6 +1242,657 @@ mod tests {
             8,
             options,
         )
+    }
+
+    fn frozen_linear_solver(n_steps: usize, options: FrozenSolverOptions) -> NRBVP {
+        // y'' = 0 represented as y' = z, z' = 0 with
+        // y(0)=0 and z(0)=1. This gives y=x, z=1 and is exact for
+        // the forward first-order BVP stencil, so backend coverage is not
+        // polluted by discretization error.
+        let values = vec!["y".to_string(), "z".to_string()];
+        let t0 = 0.0;
+        let t_end = 1.0;
+        let h = (t_end - t0) / n_steps as f64;
+        let mut guess = vec![0.0; values.len() * n_steps];
+        for i in 0..n_steps {
+            let x = t0 + (i as f64) * h;
+            guess[i * values.len()] = x;
+            guess[i * values.len() + 1] = 1.0;
+        }
+
+        NRBVP::new_with_options(
+            vec![Expr::parse_expression("z"), Expr::parse_expression("0.0")],
+            DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(guess).as_slice()),
+            values,
+            "x".to_string(),
+            HashMap::from([
+                ("y".to_string(), vec![(0usize, 0.0f64)]),
+                ("z".to_string(), vec![(0usize, 1.0f64)]),
+            ]),
+            t0,
+            t_end,
+            n_steps,
+            options,
+        )
+    }
+
+    fn assert_frozen_linear_solution_quality(
+        solver: &NRBVP,
+        n_steps: usize,
+        rms_tol: f64,
+        max_abs_tol: f64,
+    ) {
+        let solution = solver
+            .get_result()
+            .expect("frozen BVP solver should store a solution matrix");
+        assert_eq!(solution.nrows(), n_steps);
+        assert_eq!(solution.ncols(), 2);
+
+        let h = 1.0 / n_steps as f64;
+        let mut sq_sum = 0.0;
+        let mut max_abs = 0.0;
+        for i in 0..solution.nrows() {
+            // Frozen stores the reduced unknown vector. With both linear BVP
+            // boundary conditions placed at the left edge, row 0 corresponds
+            // to the first free mesh point, not to the boundary itself.
+            let x = (i + 1) as f64 * h;
+            let y_err = (solution[(i, 0)] - x).abs();
+            let z_err = (solution[(i, 1)] - 1.0).abs();
+            assert!(
+                solution[(i, 0)].is_finite(),
+                "frozen y contains non-finite values"
+            );
+            assert!(
+                solution[(i, 1)].is_finite(),
+                "frozen z contains non-finite values"
+            );
+            let err = y_err.max(z_err);
+            sq_sum += err * err;
+            max_abs = f64::max(max_abs, err);
+        }
+        let rms = (sq_sum / solution.nrows() as f64).sqrt();
+        assert!(
+            rms <= rms_tol,
+            "frozen linear BVP RMS error too large: rms={rms:e}, tol={rms_tol:e}"
+        );
+        assert!(
+            max_abs <= max_abs_tol,
+            "frozen linear BVP max error too large: max={max_abs:e}, tol={max_abs_tol:e}"
+        );
+    }
+
+    #[derive(Debug)]
+    struct FrozenCombustionStoryRow {
+        source: &'static str,
+        variant: &'static str,
+        total_ms: f64,
+        solution_diff: f64,
+        symbolic_ms: f64,
+        linear_ms: f64,
+        jacobian_ms: f64,
+        residual_ms: f64,
+        initial_generate_ms: f64,
+        initial_symbolic_jacobian_ms: f64,
+        post_build_rebind_ms: f64,
+        compile_link_ms: f64,
+        residual_jobs: f64,
+        jacobian_jobs: f64,
+        iterations: usize,
+        linear_solves: usize,
+        jacobian_rebuilds: usize,
+        selected_backend: String,
+        build_policy: String,
+    }
+
+    fn frozen_combustion_solver(
+        n_steps: usize,
+        matrix: &'static str,
+        config: GeneratedBackendConfig,
+    ) -> NRBVP {
+        let names = vec!["Teta", "q", "C0", "J0", "C1", "J1"];
+        let unknowns = Expr::parse_vector_expression(names.clone());
+        let teta = unknowns[0].clone();
+        let q = unknowns[1].clone();
+        let c0 = unknowns[2].clone();
+        let j0 = unknowns[3].clone();
+        let j1 = unknowns[5].clone();
+
+        let dt = Expr::Const(600.0);
+        let t_scale = Expr::Const(600.0);
+        let lambda = Expr::Const(0.07);
+        let q_heat = Expr::Const(3000.0 * 1e3 * 0.034);
+        let a = Expr::Const(1.3e5);
+        let e = Expr::Const(5000.0 * 4.184);
+        let m = Expr::Const(34.2 / 1000.0);
+        let gas_r = Expr::Const(8.314);
+        let ro_m = Expr::Const((34.2 / 1000.0) * 2e6 / (8.314 * 1500.0));
+        let qm = Expr::Const((3e-4_f64).powi(2) / 600.0);
+        let qs = Expr::Const((3e-4_f64).powi(2));
+        let ro_d = Expr::Const(2.88e-4);
+        let pe_d = Expr::Const(1.50e-3);
+        let rate = a
+            * Expr::exp(-e / (gas_r * (teta.clone() * t_scale.clone() + dt.clone())))
+            * c0.clone()
+            * (ro_m.clone() / Expr::Const(0.342));
+        let eqs = vec![
+            q.clone() / lambda,
+            q * Expr::Const(0.0090168) - q_heat * rate.clone() * qm,
+            j0.clone() / ro_d.clone(),
+            j0 * pe_d.clone()
+                - (m.clone() * Expr::Const(-1.0) * rate.clone() * ro_m.clone() / m.clone())
+                    * qs.clone(),
+            j1.clone() / ro_d,
+            j1 * pe_d - (m.clone() * rate * ro_m / m) * qs,
+        ];
+        let boundary_conditions = HashMap::from([
+            ("Teta".to_string(), vec![(0, (1000.0 - 600.0) / 600.0)]),
+            ("q".to_string(), vec![(1, 1e-10)]),
+            ("C0".to_string(), vec![(0, 1.0)]),
+            ("J0".to_string(), vec![(1, 1e-7)]),
+            ("C1".to_string(), vec![(0, 1e-3)]),
+            ("J1".to_string(), vec![(1, 1e-7)]),
+        ]);
+        let initial_guess = DMatrix::from_element(names.len(), n_steps, 0.99);
+        let options = match matrix {
+            "Sparse" => FrozenSolverOptions::sparse_frozen(),
+            "Banded" => FrozenSolverOptions::banded_frozen(),
+            _ => panic!("unsupported Frozen combustion story matrix route: {matrix}"),
+        }
+        .with_generated_backend_config(config)
+        .with_tolerance(1e-6)
+        .with_max_iterations(100);
+        let mut solver = NRBVP::new_with_options(
+            eqs,
+            initial_guess,
+            names.iter().map(|name| (*name).to_string()).collect(),
+            "x".to_string(),
+            boundary_conditions,
+            0.0,
+            1.0,
+            n_steps,
+            options,
+        );
+        solver.dont_save_log(true);
+        solver
+    }
+
+    fn frozen_story_timer_ms(stats: &FrozenBvpStatistics, prefix: &str) -> f64 {
+        stats
+            .timers
+            .iter()
+            .find(|(name, _)| name.starts_with(prefix))
+            .and_then(|(name, value)| {
+                let value = value
+                    .split(',')
+                    .next_back()
+                    .and_then(|raw| raw.trim().parse::<f64>().ok())?;
+                Some(if name.contains("ms") {
+                    value
+                } else {
+                    value * 1_000.0
+                })
+            })
+            .unwrap_or(f64::NAN)
+    }
+
+    fn frozen_story_diagnostic_ms(stats: &FrozenBvpStatistics, key: &str) -> f64 {
+        stats
+            .diagnostics
+            .get(key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(f64::NAN)
+    }
+
+    fn frozen_story_diagnostic_string(stats: &FrozenBvpStatistics, key: &str) -> String {
+        stats
+            .diagnostics
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    fn frozen_story_linf_diff(lhs: &DMatrix<f64>, rhs: &DMatrix<f64>) -> f64 {
+        lhs.iter()
+            .zip(rhs.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn run_frozen_combustion_story_row(
+        n_steps: usize,
+        matrix: &'static str,
+        source: &'static str,
+        variant: &'static str,
+        config: GeneratedBackendConfig,
+        baseline: Option<&DMatrix<f64>>,
+    ) -> (
+        FrozenCombustionStoryRow,
+        DMatrix<f64>,
+        GeneratedBackendConfig,
+    ) {
+        let begin = Instant::now();
+        let mut solver = frozen_combustion_solver(n_steps, matrix, config);
+        solver.try_solve().unwrap_or_else(|err| {
+            panic!("{source}/{variant} Frozen combustion solve failed: {err:?}")
+        });
+        let total_ms = begin.elapsed().as_secs_f64() * 1_000.0;
+        let solution = solver
+            .get_result()
+            .expect("successful Frozen combustion solve should expose its result");
+        assert!(
+            solution.iter().all(|value| value.is_finite()),
+            "{source}/{variant} returned non-finite values"
+        );
+        let stats = solver.get_statistics();
+        let row = FrozenCombustionStoryRow {
+            source,
+            variant,
+            total_ms,
+            solution_diff: baseline
+                .map(|reference| frozen_story_linf_diff(&solution, reference))
+                .unwrap_or(0.0),
+            symbolic_ms: frozen_story_timer_ms(&stats, "Symbolic Operations"),
+            linear_ms: frozen_story_timer_ms(&stats, "Linear System"),
+            jacobian_ms: frozen_story_timer_ms(&stats, "Jacobian"),
+            residual_ms: frozen_story_timer_ms(&stats, "Function"),
+            initial_generate_ms: frozen_story_diagnostic_ms(
+                &stats,
+                "generated.handoff.initial_generate_wall_ms",
+            ),
+            initial_symbolic_jacobian_ms: frozen_story_diagnostic_ms(
+                &stats,
+                "generated.handoff.initial.symbolic_jacobian_time_ms",
+            ),
+            post_build_rebind_ms: frozen_story_diagnostic_ms(
+                &stats,
+                "generated.handoff.post_build_rebind_wall_ms",
+            ),
+            compile_link_ms: frozen_story_diagnostic_ms(&stats, "generated.aot.compile_link_ms"),
+            residual_jobs: frozen_story_diagnostic_ms(&stats, "aot.runtime.residual.actual_jobs"),
+            jacobian_jobs: frozen_story_diagnostic_ms(
+                &stats,
+                "aot.runtime.sparse_jacobian.actual_jobs",
+            ),
+            iterations: stats.counters["number of iterations"],
+            linear_solves: stats.counters["number of solving linear systems"],
+            jacobian_rebuilds: stats.counters["number of jacobians recalculations"],
+            selected_backend: frozen_story_diagnostic_string(&stats, "generated.selected_backend"),
+            build_policy: frozen_story_diagnostic_string(&stats, "aot.build_policy"),
+        };
+        (row, solution, solver.generated_backend_config().clone())
+    }
+
+    fn frozen_story_mean_std(values: &[f64]) -> (f64, f64) {
+        let finite = values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        if finite.is_empty() {
+            return (f64::NAN, f64::NAN);
+        }
+        let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+        let variance = finite
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / finite.len() as f64;
+        (mean, variance.sqrt())
+    }
+
+    fn print_frozen_combustion_story(title: &str, rows: &[FrozenCombustionStoryRow]) {
+        println!("[BVP Frozen story] {title}: correctness/backend selection");
+        println!("source   | variant    | selected_backend | build_policy    | solve_diff");
+        println!("{}", "-".repeat(82));
+        for row in rows {
+            println!(
+                "{:<8} | {:<10} | {:<16} | {:<15} | {:.6e}",
+                row.source, row.variant, row.selected_backend, row.build_policy, row.solution_diff
+            );
+        }
+        println!();
+        println!("[BVP Frozen story] {title}: wall-clock and Newton stages; milliseconds");
+        println!(
+            "source   | variant    | total_ms | symbolic_ms | linear_ms | jac_ms | fun_ms | iters | linsys | jac_re"
+        );
+        println!("{}", "-".repeat(118));
+        for row in rows {
+            println!(
+                "{:<8} | {:<10} | {:>8.3} | {:>11.3} | {:>9.3} | {:>6.3} | {:>6.3} | {:>5} | {:>6} | {:>6}",
+                row.source,
+                row.variant,
+                row.total_ms,
+                row.symbolic_ms,
+                row.linear_ms,
+                row.jacobian_ms,
+                row.residual_ms,
+                row.iterations,
+                row.linear_solves,
+                row.jacobian_rebuilds,
+            );
+        }
+        println!();
+        println!(
+            "[BVP Frozen story] {title}: generated handoff and compiled callback stages; milliseconds"
+        );
+        println!(
+            "source   | variant    | initial_generate | initial_sym_jac | rebind_ms | compile_link | res_jobs | jac_jobs"
+        );
+        println!("{}", "-".repeat(120));
+        for row in rows {
+            println!(
+                "{:<8} | {:<10} | {:>16.3} | {:>15.3} | {:>9.3} | {:>12.3} | {:>8.3} | {:>8.3}",
+                row.source,
+                row.variant,
+                row.initial_generate_ms,
+                row.initial_symbolic_jacobian_ms,
+                row.post_build_rebind_ms,
+                row.compile_link_ms,
+                row.residual_jobs,
+                row.jacobian_jobs,
+            );
+        }
+        println!();
+        println!("[BVP Frozen story] {title}: repeated-run summary; milliseconds");
+        println!(
+            "source   | variant    | total_ms mean+/-std | symbolic_ms mean+/-std | linear_ms mean+/-std | max_solution_diff"
+        );
+        println!("{}", "-".repeat(126));
+        let mut identities = rows
+            .iter()
+            .map(|row| (row.source, row.variant))
+            .collect::<Vec<_>>();
+        identities.sort_unstable();
+        identities.dedup();
+        for (source, variant) in identities {
+            let selected = rows
+                .iter()
+                .filter(|row| row.source == source && row.variant == variant)
+                .collect::<Vec<_>>();
+            let (total_mean, total_std) =
+                frozen_story_mean_std(&selected.iter().map(|row| row.total_ms).collect::<Vec<_>>());
+            let (symbolic_mean, symbolic_std) = frozen_story_mean_std(
+                &selected
+                    .iter()
+                    .map(|row| row.symbolic_ms)
+                    .collect::<Vec<_>>(),
+            );
+            let (linear_mean, linear_std) = frozen_story_mean_std(
+                &selected.iter().map(|row| row.linear_ms).collect::<Vec<_>>(),
+            );
+            let max_diff = selected
+                .iter()
+                .map(|row| row.solution_diff)
+                .fold(0.0_f64, f64::max);
+            println!(
+                "{:<8} | {:<10} | {:>9.3} +/- {:<9.3} | {:>12.3} +/- {:<9.3} | {:>10.3} +/- {:<9.3} | {:.6e}",
+                source,
+                variant,
+                total_mean,
+                total_std,
+                symbolic_mean,
+                symbolic_std,
+                linear_mean,
+                linear_std,
+                max_diff,
+            );
+        }
+    }
+
+    fn frozen_tcc_config(
+        matrix: &'static str,
+        policy: AotBuildPolicy,
+        chunking: AotChunkingPolicy,
+        execution: AotExecutionPolicy,
+    ) -> GeneratedBackendConfig {
+        let config = match matrix {
+            "Sparse" => GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(),
+            "Banded" => GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(),
+            _ => panic!("unsupported Frozen tcc story matrix route: {matrix}"),
+        };
+        config
+            .with_aot_codegen_backend(AotCodegenBackend::C)
+            .with_aot_c_compiler("tcc")
+            .with_aot_compile_dev_fastest()
+            .with_aot_chunking_policy(chunking)
+            .with_aot_execution_policy(execution)
+            .with_aot_build_policy(policy)
+    }
+
+    fn frozen_whole_chunking() -> AotChunkingPolicy {
+        AotChunkingPolicy::with_parts(
+            Some(ResidualChunkingStrategy::Whole),
+            Some(SparseChunkingStrategy::Whole),
+        )
+    }
+
+    fn frozen_chunk4_execution() -> (AotChunkingPolicy, AotExecutionPolicy) {
+        (
+            AotChunkingPolicy::with_parts(
+                Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 4 }),
+                Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 4 }),
+            ),
+            AotExecutionPolicy::Parallel(ParallelExecutorConfig {
+                jobs_per_worker: 1,
+                max_residual_jobs: Some(4),
+                max_sparse_jobs: Some(4),
+                fallback_policy: ParallelFallbackPolicy::Never,
+            }),
+        )
+    }
+
+    #[test]
+    #[ignore = "heavy Frozen combustion-1000 Banded AtomView Lambdify vs tcc whole/chunk4 end-to-end story; run in release with --nocapture"]
+    fn frozen_combustion_1000_banded_atomview_lambdify_vs_tcc_aot_end_to_end_story() {
+        let n_steps = 1_000;
+        let repetitions = 2;
+        let mut rows = Vec::new();
+        let (chunk4, parallel) = frozen_chunk4_execution();
+
+        for _ in 0..repetitions {
+            let (baseline_row, baseline, _) = run_frozen_combustion_story_row(
+                n_steps,
+                "Banded",
+                "Lambdify",
+                "AtomView",
+                GeneratedBackendConfig::banded_lambdify_defaults(),
+                None,
+            );
+            rows.push(baseline_row);
+
+            let (whole_row, _, _) = run_frozen_combustion_story_row(
+                n_steps,
+                "Banded",
+                "AOT",
+                "tcc/whole",
+                frozen_tcc_config(
+                    "Banded",
+                    AotBuildPolicy::RebuildAlways {
+                        profile: AotBuildProfile::Release,
+                    },
+                    frozen_whole_chunking(),
+                    AotExecutionPolicy::SequentialOnly,
+                ),
+                Some(&baseline),
+            );
+            rows.push(whole_row);
+
+            let (chunked_row, _, _) = run_frozen_combustion_story_row(
+                n_steps,
+                "Banded",
+                "AOT",
+                "tcc/chunk4",
+                frozen_tcc_config(
+                    "Banded",
+                    AotBuildPolicy::RebuildAlways {
+                        profile: AotBuildProfile::Release,
+                    },
+                    chunk4,
+                    parallel.clone(),
+                ),
+                Some(&baseline),
+            );
+            rows.push(chunked_row);
+        }
+
+        print_frozen_combustion_story(
+            "combustion-1000 Banded AtomView Lambdify vs tcc AOT cold routes",
+            &rows,
+        );
+        assert!(
+            rows.iter().all(|row| row.solution_diff <= 1e-5),
+            "Frozen AOT variants must remain equivalent to the Lambdify baseline"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.source == "AOT")
+                .all(|row| row.selected_backend == "AotCompiled"),
+            "Frozen AOT cold routes must execute freshly compiled callbacks"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.variant == "tcc/chunk4")
+                .all(|row| row.residual_jobs > 1.0 && row.jacobian_jobs > 1.0),
+            "Frozen chunk4 route must expose real callback-level parallel execution"
+        );
+    }
+
+    #[test]
+    #[ignore = "heavy Frozen combustion-1000 AOT artifact lifecycle story: BuildIfMissing followed by strict RequirePrebuilt reuse"]
+    fn frozen_combustion_1000_banded_atomview_tcc_build_then_require_prebuilt_story() {
+        let n_steps = 1_000;
+        let (baseline_row, baseline, _) = run_frozen_combustion_story_row(
+            n_steps,
+            "Banded",
+            "Lambdify",
+            "AtomView",
+            GeneratedBackendConfig::banded_lambdify_defaults(),
+            None,
+        );
+        let (built_row, _, built_config) = run_frozen_combustion_story_row(
+            n_steps,
+            "Banded",
+            "AOT",
+            "build",
+            frozen_tcc_config(
+                "Banded",
+                AotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Release,
+                },
+                frozen_whole_chunking(),
+                AotExecutionPolicy::SequentialOnly,
+            ),
+            Some(&baseline),
+        );
+        assert!(
+            built_config.resolver.is_some(),
+            "BuildIfMissing must leave a resolver snapshot for strict reuse"
+        );
+        let strict_config = built_config.with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+        let mut rows = vec![baseline_row, built_row];
+        for _ in 0..3 {
+            let (prebuilt_row, _, _) = run_frozen_combustion_story_row(
+                n_steps,
+                "Banded",
+                "AOT",
+                "prebuilt",
+                strict_config.clone(),
+                Some(&baseline),
+            );
+            rows.push(prebuilt_row);
+        }
+
+        print_frozen_combustion_story(
+            "combustion-1000 Banded AtomView tcc BuildIfMissing -> RequirePrebuilt lifecycle",
+            &rows,
+        );
+        assert!(
+            rows.iter().all(|row| row.solution_diff <= 1e-5),
+            "Frozen lifecycle rows must remain equivalent to Lambdify"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.source == "AOT")
+                .all(|row| row.selected_backend == "AotCompiled"),
+            "both built and strict prebuilt rows must execute compiled callbacks"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.variant == "prebuilt")
+                .all(|row| row.build_policy == "RequirePrebuilt"),
+            "warm rows must be strict RequirePrebuilt executions, not fallback builds"
+        );
+    }
+
+    #[test]
+    #[ignore = "heavy Frozen combustion-1000 Sparse AtomView tcc artifact lifecycle: BuildIfMissing followed by strict RequirePrebuilt reuse"]
+    fn frozen_combustion_1000_sparse_atomview_tcc_build_then_require_prebuilt_story() {
+        let n_steps = 1_000;
+        let sparse_lambdify = GeneratedBackendConfig::sparse_defaults()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly));
+        let (baseline_row, baseline, _) = run_frozen_combustion_story_row(
+            n_steps,
+            "Sparse",
+            "Lambdify",
+            "AtomView",
+            sparse_lambdify,
+            None,
+        );
+        let (built_row, _, built_config) = run_frozen_combustion_story_row(
+            n_steps,
+            "Sparse",
+            "AOT",
+            "build",
+            frozen_tcc_config(
+                "Sparse",
+                AotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Release,
+                },
+                frozen_whole_chunking(),
+                AotExecutionPolicy::SequentialOnly,
+            ),
+            Some(&baseline),
+        );
+        assert!(
+            built_config.resolver.is_some(),
+            "Sparse BuildIfMissing must leave a resolver snapshot for strict reuse"
+        );
+        let strict_config = built_config.with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+        let mut rows = vec![baseline_row, built_row];
+        for _ in 0..3 {
+            let (prebuilt_row, _, _) = run_frozen_combustion_story_row(
+                n_steps,
+                "Sparse",
+                "AOT",
+                "prebuilt",
+                strict_config.clone(),
+                Some(&baseline),
+            );
+            rows.push(prebuilt_row);
+        }
+
+        print_frozen_combustion_story(
+            "combustion-1000 Sparse AtomView tcc BuildIfMissing -> RequirePrebuilt lifecycle",
+            &rows,
+        );
+        assert!(
+            rows.iter().all(|row| row.solution_diff <= 1e-5),
+            "Frozen Sparse lifecycle rows must remain equivalent to Lambdify"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.source == "AOT")
+                .all(|row| row.selected_backend == "AotCompiled"),
+            "Frozen Sparse build and strict prebuilt rows must execute compiled callbacks"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.variant == "prebuilt")
+                .all(|row| {
+                    row.build_policy == "RequirePrebuilt" && row.compile_link_ms.is_nan()
+                }),
+            "Frozen Sparse prebuilt rows must neither fall back nor compile again"
+        );
     }
 
     #[test]
@@ -1152,6 +1946,141 @@ mod tests {
         assert_eq!(
             solver.generated_backend_config().symbolic_assembly_backend,
             BvpSymbolicAssemblyBackend::ExprLegacy
+        );
+    }
+
+    #[test]
+    fn banded_frozen_lambdify_mode_sets_banded_matrix_and_lambdify_policy() {
+        let options = FrozenSolverOptions::banded_frozen().with_banded_lambdify();
+
+        assert_eq!(options.method, "Sparse");
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
+            options.generated_backend_config.backend_policy_override,
+            Some(BackendSelectionPolicy::LambdifyOnly)
+        );
+        assert_eq!(
+            options.generated_backend_config.matrix_backend_override,
+            Some(MatrixBackend::Banded)
+        );
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_build_policy,
+            AotBuildPolicy::UseIfAvailable
+        );
+    }
+
+    #[test]
+    fn banded_frozen_generated_backend_mode_build_if_missing_sets_release_aot_policy() {
+        let options = FrozenSolverOptions::banded_frozen()
+            .with_banded_generated_backend_mode(BandedGeneratedBackendMode::BuildIfMissingRelease);
+
+        assert_eq!(
+            options.generated_backend_config.backend_policy_override,
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            options.generated_backend_config.matrix_backend_override,
+            Some(MatrixBackend::Banded)
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_build_policy,
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+    }
+
+    #[test]
+    fn frozen_sparse_lambdify_linear_bvp_solves_against_exact_profile() {
+        let options = FrozenSolverOptions::sparse_frozen()
+            .with_generated_backend_config(
+                GeneratedBackendConfig::sparse_defaults()
+                    .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly)),
+            )
+            .with_strategy_params(Some(HashMap::from([("Frozen_naive".to_string(), None)])))
+            .with_tolerance(1e-8)
+            .with_max_iterations(20);
+        let mut solver = frozen_linear_solver(24, options);
+        solver.dont_save_log(true);
+
+        solver
+            .try_solve()
+            .expect("sparse frozen lambdify linear BVP should solve");
+
+        assert_frozen_linear_solution_quality(&solver, 24, 1e-10, 1e-9);
+        assert!(
+            solver.jac.is_some(),
+            "sparse frozen route should prepare a Jacobian"
+        );
+        assert!(
+            !solver.variable_string.is_empty(),
+            "sparse frozen route should prepare reduced variable metadata"
+        );
+    }
+
+    #[test]
+    fn frozen_banded_default_atomview_lambdify_linear_bvp_solves_against_exact_profile() {
+        let options = FrozenSolverOptions::banded_frozen()
+            .with_banded_lambdify()
+            .with_strategy_params(Some(HashMap::from([("Frozen_naive".to_string(), None)])))
+            .with_tolerance(1e-8)
+            .with_max_iterations(20);
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        let mut solver = frozen_linear_solver(24, options);
+        solver.dont_save_log(true);
+
+        solver
+            .try_solve()
+            .expect("default banded frozen AtomView lambdify linear BVP should solve");
+
+        assert_frozen_linear_solution_quality(&solver, 24, 1e-7, 1e-6);
+        assert!(
+            solver.jac.is_some(),
+            "banded frozen route should prepare a Jacobian"
+        );
+        assert!(
+            solver.bandwidth.0 + solver.bandwidth.1 > 0,
+            "banded frozen route should expose non-empty bandwidth metadata"
+        );
+        let stats = solver.get_statistics();
+        assert_eq!(
+            stats.diagnostics.get("generated.selected_backend"),
+            Some(&"Lambdify".to_string()),
+            "Frozen statistics must report the backend that supplied callbacks"
+        );
+        assert_eq!(
+            stats.diagnostics.get("generated.symbolic_assembly_backend"),
+            Some(&"AtomView".to_string())
+        );
+        assert!(
+            stats
+                .diagnostics
+                .contains_key("generated.handoff.initial_generate_wall_ms"),
+            "Frozen must preserve symbolic handoff timing diagnostics"
+        );
+        assert!(
+            stats.counters["number of iterations"] > 0
+                && stats.counters["number of jacobians recalculations"] > 0
+                && stats.counters["number of solving linear systems"] > 0,
+            "Frozen end-to-end solve must expose its Newton work counters: {:?}",
+            stats.counters
+        );
+        assert!(
+            stats
+                .timers
+                .keys()
+                .any(|key| key.starts_with("Symbolic Operations")),
+            "Frozen end-to-end solve must expose backend preparation timing"
         );
     }
 
@@ -1228,6 +2157,10 @@ mod tests {
 
         assert_eq!(options.strategy, "Frozen");
         assert_eq!(options.method, "Sparse");
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
         assert_eq!(
             options.generated_backend_config.backend_policy_override,
             Some(BackendSelectionPolicy::PreferAotThenLambdify)
@@ -1372,6 +2305,21 @@ mod tests {
         assert!(!solver.variable_string.is_empty());
         assert!(solver.bandwidth.0 + solver.bandwidth.1 > 0);
         let _ = &solver.fun;
+    }
+
+    #[test]
+    fn numeric_only_is_rejected_for_frozen_solver_instead_of_lambdify_fallback() {
+        let mut solver = sparse_surface_test_solver_with_naive_strategy();
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+
+        let err = solver
+            .try_eq_generate()
+            .expect_err("Frozen NumericOnly must not silently fall back to symbolic lambdify");
+        assert!(matches!(
+            err,
+            BvpBackendIntegrationError::PipelinePanicked(message)
+                if message.contains("not available for the frozen BVP solver")
+        ));
     }
 
     #[test]

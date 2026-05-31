@@ -836,4 +836,22 @@ mod tests {
             "trapezoid".to_string(),
         );
     }
+
+    #[test]
+    fn atom_discretization_preserves_fractional_flux_coefficients() {
+        compare_atom_and_expr_discretization(
+            vec![Expr::parse_expression("J / 0.000288"), Expr::Const(0.0)],
+            vec!["C".to_string(), "J".to_string()],
+            "x".to_string(),
+            0.0,
+            2,
+            HashMap::from([
+                ("C".to_string(), vec![(0, 0.001)]),
+                ("J".to_string(), vec![(1, 0.0)]),
+            ]),
+            None,
+            None,
+            "forward".to_string(),
+        );
+    }
 }

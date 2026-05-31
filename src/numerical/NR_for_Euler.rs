@@ -13,6 +13,30 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+fn finite_difference_jacobian(
+    fun: &dyn Fn(f64, &DVector<f64>) -> DVector<f64>,
+    t: f64,
+    y: &DVector<f64>,
+) -> DMatrix<f64> {
+    let n = y.len();
+    if n == 0 {
+        return DMatrix::zeros(0, 0);
+    }
+    let f0 = fun(t, y);
+    let mut jac = DMatrix::zeros(n, n);
+    let eps_base = f64::EPSILON.sqrt();
+    for col in 0..n {
+        let mut y_pert = y.clone();
+        let h = eps_base * (1.0 + y[col].abs());
+        y_pert[col] += h;
+        let f1 = fun(t, &y_pert);
+        for row in 0..n {
+            jac[(row, col)] = (f1[row] - f0[row]) / h;
+        }
+    }
+    jac
+}
 // solve algebraic nonlinear system with free parameter t
 //#[derive(Debug)]
 #[derive(Clone)]
@@ -439,6 +463,60 @@ impl NRE {
     }
     pub fn set_initial_guess(&mut self, initial_guess: DVector<f64>) {
         self.initial_guess = initial_guess;
+    }
+
+    /// Installs pure numerical callbacks for Newton iterations.
+    ///
+    /// `fun` is interpreted as ODE RHS `f(t, y)`. If `jac` is `None`, a finite
+    /// difference Jacobian of `f` is used.
+    pub fn set_native_callbacks(
+        &mut self,
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
+    ) {
+        use std::sync::Arc;
+        let fun = Arc::new(fun);
+        let stats_for_fun = self.statistics_handle();
+        let fun_for_eval = Arc::clone(&fun);
+        let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
+            let start = Instant::now();
+            let out = fun_for_eval(t, y);
+            stats_for_fun
+                .lock()
+                .expect("IVP statistics lock poisoned")
+                .record_residual_duration(start.elapsed());
+            out
+        });
+
+        let stats_for_jac = self.statistics_handle();
+        let wrapped_jac: Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>> = match jac {
+            Some(jac_fun) => Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                let start = Instant::now();
+                let out = jac_fun(t, y);
+                stats_for_jac
+                    .lock()
+                    .expect("IVP statistics lock poisoned")
+                    .record_jacobian_duration(start.elapsed());
+                out
+            }),
+            None => {
+                let fd_fun = Arc::clone(&fun);
+                Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
+                    let start = Instant::now();
+                    let out = finite_difference_jacobian(fd_fun.as_ref().as_ref(), t, y);
+                    stats_for_jac
+                        .lock()
+                        .expect("IVP statistics lock poisoned")
+                        .record_jacobian_duration(start.elapsed());
+                    out
+                })
+            }
+        };
+
+        self.fun = wrapped_fun;
+        self.jac = Some(wrapped_jac);
+        self.n = self.values.len().max(self.initial_guess.len());
+        self.jacobian = None;
     }
 
     ///Newton-Raphson method

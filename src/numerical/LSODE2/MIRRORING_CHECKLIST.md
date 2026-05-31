@@ -84,6 +84,32 @@ This file is the single source of truth. Historical duplicate audit bullets were
 - [x] `rh1/rh2` style step-advantage gate is wired.
 - [x] Native DSTODA stiffness telemetry is propagated into switch decisions.
 - [x] LSODA-first cost/stiffness choreography is closed at controller surface.
+- [x] Mid-run LSODA-style method switching is wired for the native full solve.
+  Rust native solve now keeps automatic Adams/BDF re-evaluation active across
+  accepted steps in one user solve call.  Method-family changes now use an
+  explicit `JSTART=-1`-style handoff: current `(t, y, h)`, accepted/rejected
+  counters and available history are preserved, `MAXORD`/`NQ` are adjusted for
+  the new family, and the next predictor refreshes `YH(:,2)` instead of
+  treating the switch as a fresh initial call.  Diagnostic evidence:
+  - `numerical::LSODE2::story_tests2::lsode2_mixed_regime_ramp_auto_switch_diagnostic_story`
+    observes both Adams and BDF execution on a mixed-regime ramp problem.
+  Locked by:
+  - `numerical::LSODE2::story_tests2::lsode2_mixed_regime_ramp_native_switches_adams_to_bdf_acceptance`
+- [x] Cold-rebuild method-switch gap closed at runtime-state/step-cycle level.
+  Locked by:
+  - `numerical::LSODE2::parity_micro::lsoda_method_switch_handoff_preserves_history_and_step_counters_like_jstart_minus_one`
+  - `numerical::LSODE2::parity_micro::lsoda_method_switch_handoff_to_bdf_clamps_order_and_marks_matrix_stale`
+- [x] Basic LSODA switch handoff trace visibility is locked for real method changes.
+  The controller now records `MUSED/MCUR`, preserves the previous `TSW` on
+  no-switch decisions, sets `TSW=TN` only on real family changes, and exposes the
+  `JSTART=-1` handoff class for the switch step.
+  Locked by:
+  - `numerical::LSODE2::parity_micro::lsoda_switch_state_records_mused_mcur_tsw_and_jstart_minus_one_on_real_switch`
+- [ ] Full Fortran-grade switch handoff remains a trace-audit item.
+  The implementation no longer cold-rebuilds the cycle and basic `TSW/JSTART`
+  visibility is parity-locked, but harder switch/retry windows still need
+  side-by-side trace evidence for exact `METH/MUSED/MCUR/TSW/JSTART` ordering
+  through retry/error branches.
 - [x] Label-by-label replay for narrow switch branches (reason/cost/stiff gates) is locked.
   Locked by:
   - `numerical::LSODE2::tests::lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates`
@@ -117,7 +143,7 @@ This file is the single source of truth. Historical duplicate audit bullets were
 - [ ] Multi-run noise-robust summaries as default (median/IQR or mean/std + outlier handling).
 
 ## H. Current action plan (short)
-1. Close remaining BDF stiff edge-case parity (`MSBP/MXNCF` + retry/order traces).
+1. Audit the remaining Fortran-grade method-switch handoff details (`METH/MUSED/MCUR/TSW/JSTART` history behavior).
 2. Keep LSODA switch parity strict with side-by-side trace evidence on probe-window behavior.
 3. Harden AOT infra reliability (retry/locks/diagnostics) without touching math semantics.
 4. Finalize CI split: mandatory parity vs advisory quality/perf.

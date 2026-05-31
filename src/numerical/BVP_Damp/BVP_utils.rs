@@ -4,6 +4,7 @@ use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 use regex::Regex;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::System;
@@ -15,6 +16,46 @@ fn percent_of_total(part: f64, total: f64) -> f64 {
     } else {
         100.0 * part / total
     }
+}
+
+thread_local! {
+    static CALLBACK_STAGE_TIMERS: RefCell<HashMap<String, Duration>> = RefCell::new(HashMap::new());
+}
+
+pub fn reset_callback_stage_timers() {
+    CALLBACK_STAGE_TIMERS.with(|timers| timers.borrow_mut().clear());
+}
+
+pub fn record_callback_stage_time(label: &'static str, duration: Duration) {
+    CALLBACK_STAGE_TIMERS.with(|timers| {
+        let mut timers = timers.borrow_mut();
+        *timers
+            .entry(label.to_string())
+            .or_insert_with(|| Duration::from_secs(0)) += duration;
+    });
+}
+
+pub fn callback_stage_timer_snapshot() -> HashMap<String, Duration> {
+    CALLBACK_STAGE_TIMERS.with(|timers| timers.borrow().clone())
+}
+
+fn insert_duration_timer(
+    timer_data: &mut HashMap<String, String>,
+    label: &str,
+    duration: Duration,
+    total_time_ns: f64,
+) {
+    let duration_ns = duration.as_nanos() as f64;
+    let percent = percent_of_total(duration_ns, total_time_ns);
+    let duration_ms = duration.as_secs_f64() * 1000.0;
+    timer_data.insert(
+        format!("{label} (%, ms)"),
+        format!(
+            "{:.3}, {:.6}",
+            (percent * 1000.0).round() / 1000.0,
+            duration_ms
+        ),
+    );
 }
 
 pub fn elapsed_time(elapsed: Duration) -> (String, f64) {
@@ -66,6 +107,7 @@ impl CustomTimer {
         }
     }
     pub fn start(&mut self) {
+        reset_callback_stage_timers();
         self.start = Instant::now();
         self.jac_time = Instant::now();
         self.jac = Duration::from_secs(0);
@@ -168,57 +210,60 @@ impl CustomTimer {
             format!("{}", total_time_string.1),
         );
 
-        if grid_refinement_time_percent > 0.5 {
-            timer_data.insert(
-                "Grid Refinement (%, ".to_string() + grid_refinement_total_string.0.as_str() + ")",
-                format!(
-                    "{}, {}",
-                    (grid_refinement_time_percent * 1000.0).round() / 1000.0,
-                    grid_refinement_total_string.1
-                ),
-            );
-        }
-        if jac_time_percent > 0.5 {
-            timer_data.insert(
-                "Jacobian (%, ".to_string() + jac_total_string.0.as_str() + ")",
-                format!(
-                    "{}, {}",
-                    (jac_time_percent * 1000.0).round() / 1000.0,
-                    jac_total_string.1
-                ),
-            );
-        }
-        if fun_time_percent > 0.5 {
-            timer_data.insert(
-                "Function (%, ".to_string() + fun_total_string.0.as_str() + ")",
-                format!(
-                    "{}, {}",
-                    (fun_time_percent * 1000.0).round() / 1000.0,
-                    fun_total_string.1
-                ),
-            );
-        }
-        if linear_system_time_percent > 0.5 {
-            timer_data.insert(
-                "Linear System (%, ".to_string() + linear_system_total_string.0.as_str() + ")",
-                format!(
-                    "{}, {}",
-                    (linear_system_time_percent * 1000.0).round() / 1000.0,
-                    linear_system_total_string.1
-                ),
-            );
-        }
-        if symbolic_operations_time_percent > 0.5 {
-            timer_data.insert(
-                "Symbolic Operations (%, ".to_string()
-                    + symbolic_operations_total_string.0.as_str()
-                    + ")",
-                format!(
-                    "{}, {}",
-                    (symbolic_operations_time_percent * 1000.0).round() / 1000.0,
-                    symbolic_operations_total_string.1
-                ),
-            );
+        timer_data.insert(
+            "Grid Refinement (%, ".to_string() + grid_refinement_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (grid_refinement_time_percent * 1000.0).round() / 1000.0,
+                grid_refinement_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Jacobian (%, ".to_string() + jac_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (jac_time_percent * 1000.0).round() / 1000.0,
+                jac_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Function (%, ".to_string() + fun_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (fun_time_percent * 1000.0).round() / 1000.0,
+                fun_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Linear System (%, ".to_string() + linear_system_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (linear_system_time_percent * 1000.0).round() / 1000.0,
+                linear_system_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Symbolic Operations (%, ".to_string()
+                + symbolic_operations_total_string.0.as_str()
+                + ")",
+            format!(
+                "{}, {}",
+                (symbolic_operations_time_percent * 1000.0).round() / 1000.0,
+                symbolic_operations_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Backend Preparation (%, ".to_string()
+                + symbolic_operations_total_string.0.as_str()
+                + ")",
+            format!(
+                "{}, {}",
+                (symbolic_operations_time_percent * 1000.0).round() / 1000.0,
+                symbolic_operations_total_string.1
+            ),
+        );
+        for (label, duration) in callback_stage_timer_snapshot() {
+            insert_duration_timer(&mut timer_data, label.as_str(), duration, total_time);
         }
         let mut table = Builder::from(timer_data.clone()).build();
         table.with(Style::modern_rounded());
@@ -677,6 +722,48 @@ mod tests {
         assert!(
             data.values().all(|value| !value.contains("NaN")),
             "timer output should not contain NaN values: {data:?}"
+        );
+        assert!(
+            data.keys()
+                .any(|key| key.starts_with("Symbolic Operations")),
+            "legacy symbolic timer key should remain available for existing story tables"
+        );
+        assert!(
+            data.keys()
+                .any(|key| key.starts_with("Backend Preparation")),
+            "backend preparation timer alias should be available for numeric/codegen diagnostics"
+        );
+    }
+
+    #[test]
+    fn custom_timer_reports_and_resets_callback_stage_timers() {
+        reset_callback_stage_timers();
+        record_callback_stage_time("Callback Jacobian Values", Duration::from_millis(2));
+        record_callback_stage_time("Callback Jacobian Values", Duration::from_millis(3));
+
+        let data = CustomTimer::new().get_all();
+        let key = "Callback Jacobian Values (%, ms)";
+        let value = data
+            .get(key)
+            .unwrap_or_else(|| panic!("callback stage timer should be exported under {key}"));
+        let millis = value
+            .split(',')
+            .nth(1)
+            .expect("timer value should use 'percent, milliseconds' format")
+            .trim()
+            .parse::<f64>()
+            .expect("callback timer milliseconds should be numeric");
+        assert!(
+            (millis - 5.0).abs() < 1.0e-9,
+            "callback timer should accumulate repeated measurements, got {millis}"
+        );
+
+        let mut timer = CustomTimer::new();
+        timer.start();
+        let data_after_reset = timer.get_all();
+        assert!(
+            !data_after_reset.contains_key(key),
+            "CustomTimer::start should reset callback stage timers"
         );
     }
 }

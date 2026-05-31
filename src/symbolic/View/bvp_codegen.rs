@@ -13,7 +13,8 @@ use crate::symbolic::View::bvp::DiscretizedBvpAtomSystem;
 use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianEntry};
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::CodegenIR::{
-    AtomGeneratedBlockBreakdown, AtomTempReusePolicy, CodegenModule, GeneratedBlock,
+    AtomGeneratedBlockBreakdown, AtomOptimizationProfile, AtomTempReusePolicy, CodegenModule,
+    GeneratedBlock,
 };
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, SparseChunkingStrategy};
@@ -79,12 +80,40 @@ impl PreparedSparseAtomBvpCodegen {
         &self,
         module_name: &str,
     ) -> (CodegenModule, AtomBvpCodegenModuleBreakdown) {
-        self.codegen_module_with_breakdown_and_reuse_policy(module_name, AtomTempReusePolicy::Auto)
+        self.codegen_module_with_breakdown_and_optimization_profile(
+            module_name,
+            AtomOptimizationProfile::Full,
+        )
+    }
+
+    pub fn codegen_module_with_breakdown_and_optimization_profile(
+        &self,
+        module_name: &str,
+        optimization_profile: AtomOptimizationProfile,
+    ) -> (CodegenModule, AtomBvpCodegenModuleBreakdown) {
+        self.codegen_module_with_breakdown_with_options(
+            module_name,
+            optimization_profile,
+            AtomTempReusePolicy::Auto,
+        )
     }
 
     pub fn codegen_module_with_breakdown_and_reuse_policy(
         &self,
         module_name: &str,
+        reuse_policy: AtomTempReusePolicy,
+    ) -> (CodegenModule, AtomBvpCodegenModuleBreakdown) {
+        self.codegen_module_with_breakdown_with_options(
+            module_name,
+            AtomOptimizationProfile::Full,
+            reuse_policy,
+        )
+    }
+
+    fn codegen_module_with_breakdown_with_options(
+        &self,
+        module_name: &str,
+        optimization_profile: AtomOptimizationProfile,
         reuse_policy: AtomTempReusePolicy,
     ) -> (CodegenModule, AtomBvpCodegenModuleBreakdown) {
         let mut module = CodegenModule::new(module_name);
@@ -107,12 +136,13 @@ impl PreparedSparseAtomBvpCodegen {
                     .collect::<Vec<_>>();
                 let residual_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
                 let (block, atom_breakdown) =
-                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_reuse_policy(
+                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
                         fn_name,
                         &views,
                         &self.input_names,
                         &self.input_symbols,
                         Some(CodegenOutputLayout::Vector { len: views.len() }),
+                        optimization_profile,
                         reuse_policy,
                     );
                 (block, residual_view_collect_ms, atom_breakdown)
@@ -144,7 +174,7 @@ impl PreparedSparseAtomBvpCodegen {
                     .collect::<Vec<_>>();
                 let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
                 let (block, atom_breakdown) =
-                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_reuse_policy(
+                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
                         fn_name,
                         &views,
                         &self.input_names,
@@ -154,6 +184,7 @@ impl PreparedSparseAtomBvpCodegen {
                             cols: self.shape.1,
                             nnz: entries.len(),
                         }),
+                        optimization_profile,
                         reuse_policy,
                     );
                 (block, sparse_view_collect_ms, atom_breakdown)

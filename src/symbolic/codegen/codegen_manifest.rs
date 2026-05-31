@@ -10,6 +10,7 @@ use crate::symbolic::codegen::codegen_provider_api::{
     PreparedSparseProblem,
 };
 use crate::symbolic::codegen::codegen_runtime_api::ResidualRuntimePlan;
+use crate::symbolic::symbolic_engine::Expr;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -108,83 +109,117 @@ impl PreparedProblemManifest {
                 jacobian_chunk_names: Vec::new(),
                 jacobian_chunks: Vec::new(),
             },
-            expression_signature: hash_expr_texts(
+            expression_signature: hash_expr_structures(
                 residual_plan
                     .chunks
                     .iter()
-                    .flat_map(|chunk| chunk.residuals.iter().map(|expr| expr.to_string()))
-                    .collect::<Vec<_>>()
-                    .iter()
-                    .map(|text| text.as_str()),
+                    .flat_map(|chunk| chunk.residuals.iter()),
             ),
         }
     }
 }
 
-fn hash_expr_texts<'a>(texts: impl IntoIterator<Item = &'a str>) -> u64 {
+/// Hash symbolic structure directly rather than rendering an entire generated
+/// problem to temporary strings just to construct an artifact identity.
+///
+/// The signature is an internal cache key. Changing from textual to structural
+/// hashing can invalidate previously materialized artifacts once, but preserves
+/// the required invariant: different symbolic systems do not share one key.
+fn hash_expr_structures<'a>(exprs: impl IntoIterator<Item = &'a Expr>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for text in texts {
-        text.hash(&mut hasher);
+    for expr in exprs {
+        hash_expr_structure(expr, &mut hasher);
     }
     hasher.finish()
 }
 
+fn hash_expr_structure(expr: &Expr, hasher: &mut DefaultHasher) {
+    match expr {
+        Expr::Var(name) => {
+            1_u8.hash(hasher);
+            name.hash(hasher);
+        }
+        Expr::Const(value) => {
+            2_u8.hash(hasher);
+            value.to_bits().hash(hasher);
+        }
+        Expr::Add(lhs, rhs) => hash_binary_expr(3, lhs, rhs, hasher),
+        Expr::Sub(lhs, rhs) => hash_binary_expr(4, lhs, rhs, hasher),
+        Expr::Mul(lhs, rhs) => hash_binary_expr(5, lhs, rhs, hasher),
+        Expr::Div(lhs, rhs) => hash_binary_expr(6, lhs, rhs, hasher),
+        Expr::Pow(base, exp) => hash_binary_expr(7, base, exp, hasher),
+        Expr::Exp(inner) => hash_unary_expr(8, inner, hasher),
+        Expr::Ln(inner) => hash_unary_expr(9, inner, hasher),
+        Expr::sin(inner) => hash_unary_expr(10, inner, hasher),
+        Expr::cos(inner) => hash_unary_expr(11, inner, hasher),
+        Expr::tg(inner) => hash_unary_expr(12, inner, hasher),
+        Expr::ctg(inner) => hash_unary_expr(13, inner, hasher),
+        Expr::arcsin(inner) => hash_unary_expr(14, inner, hasher),
+        Expr::arccos(inner) => hash_unary_expr(15, inner, hasher),
+        Expr::arctg(inner) => hash_unary_expr(16, inner, hasher),
+        Expr::arcctg(inner) => hash_unary_expr(17, inner, hasher),
+    }
+}
+
+fn hash_binary_expr(tag: u8, lhs: &Expr, rhs: &Expr, hasher: &mut DefaultHasher) {
+    tag.hash(hasher);
+    hash_expr_structure(lhs, hasher);
+    hash_expr_structure(rhs, hasher);
+}
+
+fn hash_unary_expr(tag: u8, inner: &Expr, hasher: &mut DefaultHasher) {
+    tag.hash(hasher);
+    hash_expr_structure(inner, hasher);
+}
+
 fn dense_expression_signature(problem: &PreparedDenseProblem<'_>) -> u64 {
-    hash_expr_texts(
+    hash_expr_structures(
         problem
             .residual_plan
             .chunks
             .iter()
-            .flat_map(|chunk| chunk.residuals.iter().map(|expr| expr.to_string()))
-            .chain(problem.jacobian_plan.chunks.iter().flat_map(|chunk| {
-                chunk
-                    .jacobian_rows
+            .flat_map(|chunk| chunk.residuals.iter())
+            .chain(
+                problem
+                    .jacobian_plan
+                    .chunks
                     .iter()
-                    .flat_map(|row| row.iter().map(|expr| expr.to_string()))
-            }))
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|text| text.as_str()),
+                    .flat_map(|chunk| chunk.jacobian_rows.iter().flat_map(|row| row.iter())),
+            ),
     )
 }
 
 fn sparse_expression_signature(problem: &PreparedSparseProblem<'_>) -> u64 {
-    hash_expr_texts(
+    hash_expr_structures(
         problem
             .residual_plan
             .chunks
             .iter()
-            .flat_map(|chunk| chunk.residuals.iter().map(|expr| expr.to_string()))
+            .flat_map(|chunk| chunk.residuals.iter())
             .chain(
                 problem
                     .jacobian_plan
                     .chunks
                     .iter()
-                    .flat_map(|chunk| chunk.entries.iter().map(|entry| entry.expr.to_string())),
-            )
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|text| text.as_str()),
+                    .flat_map(|chunk| chunk.entries.iter().map(|entry| entry.expr)),
+            ),
     )
 }
 
 fn banded_expression_signature(problem: &PreparedBandedProblem<'_>) -> u64 {
-    hash_expr_texts(
+    hash_expr_structures(
         problem
             .residual_plan
             .chunks
             .iter()
-            .flat_map(|chunk| chunk.residuals.iter().map(|expr| expr.to_string()))
+            .flat_map(|chunk| chunk.residuals.iter())
             .chain(
                 problem
                     .jacobian_plan
                     .chunks
                     .iter()
-                    .flat_map(|chunk| chunk.entries.iter().map(|entry| entry.expr.to_string())),
-            )
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|text| text.as_str()),
+                    .flat_map(|chunk| chunk.entries.iter().map(|entry| entry.expr)),
+            ),
     )
 }
 

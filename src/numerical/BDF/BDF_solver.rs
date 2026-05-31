@@ -552,6 +552,30 @@ where
     (converged, k_ + 1, y, d)
 }
 
+fn finite_difference_jacobian_rhs(
+    fun: &dyn Fn(f64, &DVector<f64>) -> DVector<f64>,
+    t: f64,
+    y: &DVector<f64>,
+) -> DMatrix<f64> {
+    let n = y.len();
+    if n == 0 {
+        return DMatrix::zeros(0, 0);
+    }
+    let f0 = fun(t, y);
+    let mut jac = DMatrix::zeros(n, n);
+    let eps_base = f64::EPSILON.sqrt();
+    for col in 0..n {
+        let mut y_pert = y.clone();
+        let h = eps_base * (1.0 + y[col].abs());
+        y_pert[col] += h;
+        let f1 = fun(t, &y_pert);
+        for row in 0..n {
+            jac[(row, col)] = (f1[row] - f0[row]) / h;
+        }
+    }
+    jac
+}
+
 /// Backward Differentiation Formula (BDF) solver for stiff ODEs.
 ///
 /// This struct implements a variable-order, variable-step-size BDF method
@@ -1060,6 +1084,9 @@ impl BDF {
                     } else {
                         None
                     };
+                self.J =
+                    BdfJacobian::from_dense(finite_difference_jacobian_rhs(&*self.fun, t0, &y0));
+                self.jac = None;
             }
         };
 
@@ -1216,7 +1243,13 @@ impl BDF {
                     if current_jac {
                         break;
                     }
-                    J = self.jac.as_mut().unwrap()(t_new, &y_predict);
+                    J = if let Some(jac_fun) = self.jac.as_mut() {
+                        jac_fun(t_new, &y_predict)
+                    } else {
+                        BdfJacobian::from_dense(finite_difference_jacobian_rhs(
+                            &*self.fun, t_new, &y_predict,
+                        ))
+                    };
                     self.njev += 1;
                     linear_factorization = None;
                     current_jac = true;
