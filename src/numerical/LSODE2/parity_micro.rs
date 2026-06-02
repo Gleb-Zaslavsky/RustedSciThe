@@ -857,6 +857,105 @@ fn lsoda_switch_state_records_mused_mcur_tsw_and_jstart_minus_one_on_real_switch
 }
 
 #[test]
+fn lsoda_switch_probe_gate_and_tsw_ordering_survive_warmup_and_reset_windows() {
+    let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+        Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(2),
+        Lsode2ControllerExecutionCapabilities {
+            adams_engine_available: true,
+        },
+    );
+
+    assert_eq!(
+        controller.switch_state().switch_probe_countdown(),
+        2,
+        "DSTODA-style ICOUNT starts at the configured probe window"
+    );
+
+    controller.record_accepted_steps_for_switch_probe(1);
+    assert!(
+        !controller.switch_state().switch_probe_ready(),
+        "ICOUNT=2 should not permit a method-switch probe after only one accepted step"
+    );
+    let warmup = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_accepted_steps(1)
+            .with_adams_step_size_cap_estimate(0.1)
+            .with_bdf_step_size_cap_estimate(1.0),
+    );
+    assert_eq!(warmup.reason, Lsode2SwitchReason::SwitchProbeWarmup);
+    assert_eq!(warmup.executed_family(), Some(Lsode2MethodFamily::Adams));
+    controller.record_switch_decision_at(warmup, Some(0.05));
+    assert_eq!(controller.switch_state().mused, Lsode2MethodFamily::Adams);
+    assert_eq!(controller.switch_state().mcur, Lsode2MethodFamily::Adams);
+    assert_eq!(
+        controller.switch_state().tsw,
+        None,
+        "TSW must not be populated by warmup/no-switch decisions"
+    );
+    assert_eq!(controller.switch_state().last_handoff_jstart, None);
+
+    controller.record_accepted_steps_for_switch_probe(2);
+    assert!(
+        controller.switch_state().switch_probe_ready(),
+        "Fortran ICOUNT semantics permit the first probe only after the window crosses below zero"
+    );
+    let switch_to_bdf = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_accepted_steps(3)
+            .with_adams_step_size_cap_estimate(0.1)
+            .with_bdf_step_size_cap_estimate(1.0),
+    );
+    assert_eq!(switch_to_bdf.reason, Lsode2SwitchReason::StiffnessSuspected);
+    assert_eq!(
+        switch_to_bdf.executed_family(),
+        Some(Lsode2MethodFamily::Bdf)
+    );
+    controller.record_switch_decision_at(switch_to_bdf, Some(0.30));
+    let switched = controller.switch_state();
+    assert_eq!(switched.mused, Lsode2MethodFamily::Adams);
+    assert_eq!(switched.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(switched.tsw, Some(0.30));
+    assert_eq!(switched.last_handoff_jstart, Some(-1));
+    assert_eq!(
+        switched.switch_probe_countdown(),
+        2,
+        "A real method switch resets the DSTODA ICOUNT probe window"
+    );
+    assert!(
+        !switched.switch_probe_ready(),
+        "A real method switch consumes and resets probe readiness"
+    );
+
+    let post_switch_warmup = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_accepted_steps(4)
+            .with_adams_step_size_cap_estimate(10.0)
+            .with_bdf_step_size_cap_estimate(1.0),
+    );
+    assert_eq!(
+        post_switch_warmup.reason,
+        Lsode2SwitchReason::SwitchProbeWarmup
+    );
+    assert_eq!(
+        post_switch_warmup.executed_family(),
+        Some(Lsode2MethodFamily::Bdf)
+    );
+    controller.record_switch_decision_at(post_switch_warmup, Some(0.35));
+    let held = controller.switch_state();
+    assert_eq!(held.mused, Lsode2MethodFamily::Bdf);
+    assert_eq!(held.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(
+        held.tsw,
+        Some(0.30),
+        "TSW must remain the last real switch time through post-switch warmup holds"
+    );
+    assert_eq!(
+        held.last_handoff_jstart, None,
+        "post-switch warmup hold must not report a fresh JSTART=-1 handoff"
+    );
+}
+
+#[test]
 fn dstoda_label_by_label_matrix_terminal_near_terminal_replay_matches_fortran_style() {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Row {
@@ -1666,8 +1765,8 @@ fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran
 }
 
 #[test]
-fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran_style_reset_for_adams(
-) {
+fn dstoda_label_520_full_trace_null_step_heavy_h_sequence_replay_matches_fortran_style_reset_for_adams()
+ {
     let h0 = f64::EPSILON / 4.0;
     let step_config = Lsode2StepControlConfig {
         h_min: 1.0e-300,

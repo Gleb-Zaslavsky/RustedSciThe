@@ -169,10 +169,21 @@ fn load_zig_residual_library(path: &Path) -> Result<Arc<LoadedZigResidualLibrary
     }))
 }
 
+fn ensure_artifact_manifest_key_matches(artifact: &RegisteredAotArtifact) -> Result<(), String> {
+    if artifact.manifest_key_matches() {
+        return Ok(());
+    }
+    Err(format!(
+        "Zig AOT artifact manifest key mismatch before dynamic load: {}",
+        artifact.lifecycle_contract_summary()
+    ))
+}
+
 /// Registers a compiled Zig AOT residual-only backend.
 pub fn register_generated_zig_residual_backend(
     artifact: &RegisteredAotArtifact,
 ) -> Result<LinkedResidualAotBackend, String> {
+    ensure_artifact_manifest_key_matches(artifact)?;
     let path = &artifact.expected_cdylib;
     if !path.exists() {
         return Err(format!(
@@ -205,6 +216,7 @@ pub fn register_generated_zig_residual_backend(
 pub fn register_generated_zig_sparse_backend(
     artifact: &RegisteredAotArtifact,
 ) -> Result<LinkedSparseAotBackend, String> {
+    ensure_artifact_manifest_key_matches(artifact)?;
     let path = &artifact.expected_cdylib;
     if !path.exists() {
         return Err(format!(
@@ -281,6 +293,7 @@ pub fn register_generated_zig_banded_backend(
 pub fn register_generated_zig_dense_backend(
     artifact: &RegisteredAotArtifact,
 ) -> Result<LinkedDenseAotBackend, String> {
+    ensure_artifact_manifest_key_matches(artifact)?;
     let path = &artifact.expected_cdylib;
     if !path.exists() {
         return Err(format!(
@@ -336,6 +349,67 @@ pub fn register_generated_zig_dense_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::codegen::codegen_manifest::{
+        GeneratedFunctionsManifest, PreparedProblemManifest, ProblemIoManifest,
+    };
+    use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend};
+    use std::path::PathBuf;
+
+    fn dummy_manifest() -> PreparedProblemManifest {
+        PreparedProblemManifest {
+            backend_kind: BackendKind::Aot,
+            matrix_backend: MatrixBackend::SparseCol,
+            io: ProblemIoManifest {
+                input_names: vec!["x".to_string()],
+                residual_len: 1,
+                jacobian_rows: 1,
+                jacobian_cols: 1,
+                jacobian_nnz: Some(1),
+            },
+            functions: GeneratedFunctionsManifest {
+                residual_fn_name: "eval_residual".to_string(),
+                residual_chunk_names: Vec::new(),
+                residual_chunks: Vec::new(),
+                jacobian_fn_name: "eval_jacobian_values".to_string(),
+                jacobian_chunk_names: Vec::new(),
+                jacobian_chunks: Vec::new(),
+            },
+            expression_signature: 11,
+        }
+    }
+
+    fn mismatched_artifact() -> RegisteredAotArtifact {
+        RegisteredAotArtifact {
+            problem_key: "stale-zig-problem-key".to_string(),
+            crate_name: "generated_zig_mismatch_fixture".to_string(),
+            manifest: dummy_manifest(),
+            crate_dir: PathBuf::from("generated_zig_mismatch_fixture"),
+            manifest_file: PathBuf::from("generated_zig_mismatch_fixture/aot_manifest.zig"),
+            artifact_dir: PathBuf::from("generated_zig_mismatch_fixture/zig-out"),
+            expected_rlib: PathBuf::from("generated_zig_mismatch_fixture/zig-out/libfixture.a"),
+            expected_cdylib: PathBuf::from("generated_zig_mismatch_fixture/zig-out/fixture.dll"),
+            cargo_program: "zig".to_string(),
+            cargo_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generated_zig_registration_rejects_manifest_key_mismatch_before_loading() {
+        let artifact = mismatched_artifact();
+        let err = match register_generated_zig_sparse_backend(&artifact) {
+            Ok(_) => panic!("mismatched Zig artifact must not be dynamically loaded"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("manifest key mismatch"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !err.contains("compiled Zig sparse library does not exist"),
+            "manifest mismatch must be checked before filesystem/load errors: {err}"
+        );
+    }
 
     #[test]
     fn load_zig_library_fails_gracefully_for_missing_file() {

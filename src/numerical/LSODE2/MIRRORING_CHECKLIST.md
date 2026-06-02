@@ -76,7 +76,10 @@ This file is the single source of truth. Historical duplicate audit bullets were
   Locked by:
   - `numerical::LSODE2::nonstiff_parity_tests::lsode2_adams_nonstiff_scalar_exact_sparse_matches_closed_form`
   - `numerical::LSODE2::nonstiff_parity_tests::lsode2_adams_nonstiff_two_scale_exact_banded_matches_closed_form`
-- [ ] Accuracy/performance parity vs expected Adams behavior on non-stiff corpus is not yet closed.
+- [x] Accuracy/performance behavior on non-stiff Adams corpus is covered beyond
+  closed-form solution matching.
+  Locked by:
+  - `numerical::LSODE2::story_tests2::lsode2_nonstiff_adams_corpus_sparse_banded_dashboard`
 
 ## D. Method switching (LSODA-style extension)
 - [x] Automatic controller mode exists (`automatic_adams_bdf`) with probe gate (`ICOUNT`-like).
@@ -105,11 +108,12 @@ This file is the single source of truth. Historical duplicate audit bullets were
   `JSTART=-1` handoff class for the switch step.
   Locked by:
   - `numerical::LSODE2::parity_micro::lsoda_switch_state_records_mused_mcur_tsw_and_jstart_minus_one_on_real_switch`
+  - `numerical::LSODE2::parity_micro::lsoda_switch_probe_gate_and_tsw_ordering_survive_warmup_and_reset_windows`
 - [ ] Full Fortran-grade switch handoff remains a trace-audit item.
   The implementation no longer cold-rebuilds the cycle and basic `TSW/JSTART`
-  visibility is parity-locked, but harder switch/retry windows still need
-  side-by-side trace evidence for exact `METH/MUSED/MCUR/TSW/JSTART` ordering
-  through retry/error branches.
+  visibility is parity-locked, including probe-window reset/hold behavior, but
+  harder switch/retry windows still need side-by-side trace evidence for exact
+  `METH/MUSED/MCUR/TSW/JSTART` ordering through retry/error branches.
 - [x] Label-by-label replay for narrow switch branches (reason/cost/stiff gates) is locked.
   Locked by:
   - `numerical::LSODE2::tests::lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates`
@@ -128,10 +132,34 @@ This file is the single source of truth. Historical duplicate audit bullets were
 - [x] Symbolic Lambdify and AOT routes integrated for Dense/Sparse/Banded.
 - [x] Analytical residual/jacobian route integrated.
 - [ ] Infra hardening still needed (toolchain/file-lock/spawn issues):
-  - [ ] Retry logic for external toolchains (C, Zig).
-  - [ ] File-lock detection and cleanup for AOT artifacts.
-  - [ ] Better actionable diagnostics for spawn failures.
-- [ ] Add AOT reproducibility checks (deterministic artifacts/hashes).
+  - [x] Limited retry logic exists for transient external toolchain/file-lock
+    failures and is covered by IVP generated-backend diagnostics tests.
+  - [x] `RequirePrebuilt`/missing-runtime diagnostics now include route,
+    problem key, build policy, codegen backend, compiler and output directory.
+  - [x] Build retry exhaustion and dynamic runtime registration errors now
+    include actionable classification/context (`attempts`, transient vs
+    deterministic failure, route, backend, problem key and artifact path).
+    Locked by:
+    - `symbolic::symbolic_ivp_generated::tests::generated_ivp_aot_diagnostic_messages_include_context`
+    - `symbolic::symbolic_ivp_generated::tests::generated_ivp_require_prebuilt_surfaces_missing_artifact`
+  - [x] Rebuild-time file-lock collision is avoided for IVP/LSODE2 AOT:
+    `RebuildAlways` materializes into an isolated output subdirectory instead
+    of overwriting a possibly loaded DLL/cdylib in place.
+    Locked by:
+    - `symbolic::symbolic_ivp_generated::tests::generated_ivp_rebuild_always_uses_isolated_output_parent_dirs`
+  - [ ] Optional disk cleanup policy for old isolated rebuild directories.
+    This is deliberately separate from correctness: deleting loaded artifacts
+    on Windows is unsafe while callbacks may still be alive in-process.
+- [x] Manifest-derived AOT identity reproducibility is covered.
+  Identical prepared manifests produce the same `problem_key`, while route-level
+  backend identity changes (for example dense values vs values-only) change the
+  key and prevent stale cross-route artifact reuse.  Binary artifact content
+  hashing is intentionally not treated as closed here; it belongs to a stricter
+  artifact-cache integrity story if/when we need it.
+  Locked by:
+  - `symbolic::codegen::codegen_manifest::tests::dense_problem_key_is_reproducible_and_tracks_backend_identity`
+  - `symbolic::codegen::codegen_manifest::tests::dense_problem_key_changes_when_expressions_change_but_shape_stays_the_same`
+  - `symbolic::codegen::codegen_manifest::tests::manifest_problem_key_changes_with_function_layout`
 - [x] Add Lambdify vs AOT residual/Jacobian elementwise equivalence tests.
   Locked by:
   - `numerical::LSODE2::tests::lsode2_lambdify_vs_prelinked_aot_elementwise_equivalence_exprlegacy`
@@ -139,14 +167,16 @@ This file is the single source of truth. Historical duplicate audit bullets were
 
 ## G. Story/quality gates
 - [x] Story tables for backend and native-vs-bridge quality exist.
-- [ ] Strict separation: parity gates vs diagnostics/perf tables.
+- [x] Strict separation: parity gates vs diagnostics/perf tables.
+  The mandatory mirroring gates live in unit/parity modules and this checklist.
+  Story tests are advisory performance/quality evidence unless explicitly named
+  as acceptance gates.
 - [ ] Multi-run noise-robust summaries as default (median/IQR or mean/std + outlier handling).
 
 ## H. Current action plan (short)
 1. Audit the remaining Fortran-grade method-switch handoff details (`METH/MUSED/MCUR/TSW/JSTART` history behavior).
-2. Keep LSODA switch parity strict with side-by-side trace evidence on probe-window behavior.
-3. Harden AOT infra reliability (retry/locks/diagnostics) without touching math semantics.
-4. Finalize CI split: mandatory parity vs advisory quality/perf.
+2. Harden AOT infra reliability (retry/locks/diagnostics) without touching math semantics.
+3. Keep LSODE2 story conclusions release-backed and mark superseded diagnostics explicitly.
 
 ## I. Solver-first code gaps (implementation priority)
 - [x] Native finite-difference Jacobian backend wired in runtime.

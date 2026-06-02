@@ -29,10 +29,10 @@ use super::history::Lsode2Tolerance;
 use super::linear_backends::{
     DenseLuBdfLinearBackend, FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend,
 };
-use super::native_executor::{jacobian_abs_max, Lsode2NativeCallbackExecutor};
+use super::native_executor::{Lsode2NativeCallbackExecutor, jacobian_abs_max};
 use super::native_jacobian::{
-    compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle, NativeJacobianStorage,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -41,8 +41,8 @@ use super::step_control::{Lsode2RetryAction, Lsode2StepControlConfig};
 use super::step_cycle::{
     Lsode2PredictedStep, Lsode2StepCycle, Lsode2StepCycleOutcome, Lsode2StepMethod,
 };
-use crate::numerical::BDF::common::{norm, scale_func, NumberOrVec};
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
+use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
@@ -891,11 +891,7 @@ fn initial_native_step_size(config: &Lsode2ProblemConfig, residual: &NativeResid
         })
         .abs()
         .max(f64::EPSILON);
-    if direction > 0.0 {
-        mag
-    } else {
-        -mag
-    }
+    if direction > 0.0 { mag } else { -mag }
 }
 
 fn map_generated_backend_error(
@@ -1082,11 +1078,13 @@ mod tests {
             .state_mut()
             .reset_after_repeated_error_failures()
             .unwrap();
-        assert!(inner
-            .driver
-            .cycle()
-            .state()
-            .first_derivative_refresh_requested());
+        assert!(
+            inner
+                .driver
+                .cycle()
+                .state()
+                .first_derivative_refresh_requested()
+        );
 
         inner.refresh_first_derivative_if_requested().unwrap();
 
@@ -1119,11 +1117,13 @@ mod tests {
             .unwrap();
         assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
         assert_eq!(retry.order_new, 1);
-        assert!(inner
-            .driver
-            .cycle()
-            .state()
-            .first_derivative_refresh_requested());
+        assert!(
+            inner
+                .driver
+                .cycle()
+                .state()
+                .first_derivative_refresh_requested()
+        );
 
         inner.refresh_first_derivative_if_requested().unwrap();
 

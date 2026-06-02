@@ -1,3 +1,6 @@
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
 use crate::symbolic::symbolic_engine::Expr;
@@ -304,6 +307,24 @@ impl BVP {
                 panic!("Invalid structure!");
             }
         }
+    }
+    pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
+        if let Some(structure) = &self.structure {
+            return structure.postprocess_dataset();
+        }
+        if let Some(structure_damp) = &self.structure_damp {
+            return structure_damp.postprocess_dataset();
+        }
+        Err(PostprocessError::InvalidDataset(
+            "BVP postprocess_dataset requires an initialized solver structure".to_string(),
+        ))
+    }
+    pub fn execute_postprocessing(
+        &self,
+        plan: &PostprocessPlan,
+    ) -> Result<PostprocessReport, PostprocessError> {
+        let dataset = self.postprocess_dataset()?;
+        plan.execute(&dataset)
     }
     pub fn save_to_file(&mut self, filename: Option<String>) {
         if let Some(structure) = &mut self.structure {

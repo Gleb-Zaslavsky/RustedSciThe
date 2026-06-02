@@ -70,6 +70,15 @@ Most users should not build it from scratch every time. Presets like `native_spa
 
 Important current constraint: `AnalyticClosure` and `FiniteDifference` are valid on native solve paths; bridge mode is not designed for those routes.
 
+For the pure numerical route, prefer the explicit constructors:
+`Lsode2ProblemConfig::new_numeric_fd_with_options(...)` when you provide only
+the RHS/residual closure and want LSODE2 to approximate the Jacobian by finite
+differences, or `Lsode2ProblemConfig::new_numeric_with_jacobian_options(...)`
+when you also provide the analytical Jacobian closure. These constructors do
+not ask user code for symbolic `Expr` equations; the shared internal
+`Lsode2ProblemConfig` still stores placeholders, but that is now an
+implementation detail rather than user-facing syntax.
+
 ### `Lsode2LinearSolverBackend`
 
 `Dense` uses dense LU,  
@@ -85,6 +94,48 @@ At API level, it is often better to specify structure plus policy (`Auto`/`Force
 `Force(...)` is useful for targeted experiments, parity diagnostics, and backend-specific performance investigations.
 
 In production, “set structure first, use Auto second” is usually the most robust and reproducible pattern.
+
+## Backend route syntax: `with_backend` vs `with_linear_solver_policy`
+
+LSODE2 examples may show two similar-looking styles:
+
+```rust
+.with_backend(
+    Lsode2BackendConfig::native_banded_faithful()
+        .with_generated_backend_target_chunks(4, 4),
+)
+```
+
+and:
+
+```rust
+.with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+```
+
+They are not interchangeable. `with_backend(...)` is the high-level route
+selector. It describes the complete LSODE2 backend preset: dense/sparse/banded
+matrix structure, concrete linear algebra backend, symbolic/generated backend
+lifecycle, AOT toolchain, and generated callback chunking knobs. This is the
+recommended syntax for user-facing examples and production code because the
+whole execution route is visible in one place.
+
+```rust
+let config = base.with_backend(
+    Lsode2BackendConfig::native_sparse_faer()
+        .with_generated_backend_target_chunks(4, 4),
+);
+```
+
+`with_linear_solver_policy(...)` is lower-level. It only controls how the linear
+solver is selected after the linear system structure is already known. `Auto`
+maps dense systems to dense LU, sparse systems to faer sparse LU, and banded
+systems to faithful LAPACK-style banded LU. `Force(...)` is useful in parity
+tests, diagnostics, and legacy compatibility examples where you explicitly want
+to prove that a particular linear solver was selected.
+
+Practical rule: use `with_backend(...)` when you are choosing a real LSODE2
+route; use `with_linear_solver_policy(...)` when a test or diagnostic is about
+the linear-policy resolver itself.
 
 ## Symbolic assembly backends: `ExprLegacy` and `AtomView`
 
@@ -104,6 +155,29 @@ AOT (ahead-of-time) makes a different trade. You pay an upfront cost for code ge
 In RustedSciThe, AOT supports several toolchains: C with `gcc`, C with `tcc`, `zig`, and Rust toolchain. The corresponding compilers must be available in your environment.
 
 `Debug` vs `Release` profile keeps the standard meaning. Debug usually compiles faster but runs slower; Release compiles longer but lowers runtime cost inside the integration loop.
+
+The practical AOT lifecycle has two common production modes. `BuildIfMissing`
+or `BuildIfMissingRelease` builds an artifact when it is absent and returns a
+resolver that can be reused. `RequirePrebuilt` is strict: it fails unless the
+artifact is already known and built. This is the right route for production
+runs where startup must not silently compile code.
+
+In strict `RequirePrebuilt` mode, error messages are intentionally verbose.
+They should report the route (`dense`, `sparse`, or `residual-only`), the
+`problem_key`, build policy, generated backend, C compiler when relevant, and
+the output parent directory. Treat `problem_key` as the artifact identity for
+that symbolic problem plus frontend/matrix/toolchain/chunking options. If a
+strict prebuilt run fails, run the same LSODE2 configuration once with
+`BuildIfMissingRelease` or `RebuildAlways`, then reuse the returned resolver or
+the same artifact directory for the strict run.
+
+`RebuildAlways` is intentionally lock-safe on Windows-oriented workflows: it
+materializes each rebuild into an isolated subdirectory under the configured
+output parent instead of overwriting a DLL/cdylib that may already be loaded by
+the current process. This avoids file-lock failures without pretending that a
+loaded dynamic library can be safely deleted. If you use `RebuildAlways` in long
+diagnostic sessions, old isolated rebuild directories can be cleaned later when
+no process is using them.
 
 ## AOT parallelism/chunking and performance
 

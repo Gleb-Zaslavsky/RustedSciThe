@@ -523,6 +523,52 @@ mod tests {
     }
 
     #[test]
+    fn dense_problem_key_is_reproducible_and_tracks_backend_identity() {
+        let residuals = vec![Expr::parse_expression("x + y")];
+        let jacobian = vec![vec![
+            Expr::parse_expression("1"),
+            Expr::parse_expression("1"),
+        ]];
+        let vars = vec!["x", "y"];
+
+        let make_prepared = |matrix_backend| {
+            PreparedDenseProblem::new(
+                BackendKind::Aot,
+                matrix_backend,
+                ResidualTask {
+                    fn_name: "eval_residual",
+                    residuals: &residuals,
+                    variables: &vars,
+                    params: None,
+                }
+                .runtime_plan(ResidualChunkingStrategy::Whole),
+                JacobianTask {
+                    fn_name: "eval_jacobian",
+                    jacobian: &jacobian,
+                    variables: &vars,
+                    params: None,
+                }
+                .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+            )
+        };
+
+        let dense0 = PreparedProblemManifest::from(&make_prepared(MatrixBackend::Dense));
+        let dense1 = PreparedProblemManifest::from(&make_prepared(MatrixBackend::Dense));
+        let values_only = PreparedProblemManifest::from(&make_prepared(MatrixBackend::ValuesOnly));
+
+        assert_eq!(
+            dense0.problem_key(),
+            dense1.problem_key(),
+            "identical manifests must produce stable reusable artifact keys"
+        );
+        assert_ne!(
+            dense0.problem_key(),
+            values_only.problem_key(),
+            "artifact keys must include backend identity to avoid stale cross-route reuse"
+        );
+    }
+
+    #[test]
     fn sparse_manifest_keeps_nnz_and_chunk_names() {
         let residuals = vec![
             Expr::parse_expression("p + x"),

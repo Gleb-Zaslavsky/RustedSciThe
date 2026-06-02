@@ -41,36 +41,6 @@
 
 Важно понимать, что математика метода при этом не меняется. Меняется только инфраструктура вычислителей.
 
-### 3.1 Синтаксис настройки LSODE2 backend
-
-У LSODE2 есть отдельный подробный гайд, но один API-момент важен для всех IVP-пользователей, потому что в примерах встречаются два похожих стиля:
-
-```rust
-.with_backend(
-    Lsode2BackendConfig::native_banded_faithful()
-        .with_generated_backend_target_chunks(4, 4),
-)
-```
-
-и:
-
-```rust
-.with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
-```
-
-Это не одно и то же. `with_backend(...)` — высокоуровневый выбор полного маршрута LSODE2. Он задает dense/sparse/banded структуру матрицы, конкретный backend линейной алгебры, symbolic/generated lifecycle, AOT toolchain и chunking-настройки generated callbacks. Именно этот стиль лучше использовать в пользовательских примерах и production-коде, потому что весь route виден в одном месте.
-
-```rust
-let config = base.with_backend(
-    Lsode2BackendConfig::native_sparse_faer()
-        .with_generated_backend_target_chunks(4, 4),
-);
-```
-
-`with_linear_solver_policy(...)` — более низкоуровневая настройка. Она управляет только тем, как выбирается linear solver после того, как структура линейной системы уже известна. `Auto` сопоставляет dense-системы с dense LU, sparse-системы с faer sparse LU, а banded-системы с faithful LAPACK-style banded LU. `Force(...)` полезен в parity-тестах, diagnostics и legacy examples, где нужно явно доказать, что выбран конкретный linear solver.
-
-Практическое правило: когда вы выбираете реальный solver route, используйте `with_backend(...)`; когда тестируете именно resolver политики линейного solver, используйте `with_linear_solver_policy(...)`.
-
 ## 4. UniversalODESolver: один фасад, несколько методов
 
 `UniversalODESolver` позволяет держать единый каркас задачи и менять метод/маршрут с минимальными правками.

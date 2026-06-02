@@ -357,7 +357,7 @@ fn animate_line(
 
         // Draw coordinate axes from origin
         let x_end = Vec3::X * axis_length; // Red X-axis
-        let y_end = Vec3::Y * axis_length; // Green Y-axis  
+        let y_end = Vec3::Y * axis_length; // Green Y-axis
         let z_end = Vec3::Z * axis_length; // Blue Z-axis
 
         // Draw axis lines with standard colors

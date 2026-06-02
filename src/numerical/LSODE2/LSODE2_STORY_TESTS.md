@@ -52,8 +52,10 @@ when hardware, compiler versions or backend internals change.
    chunking overhead to amortize. Evidence:
    `lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard` and
    `lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix`.
-   A larger synthetic chain story now exists to test whether that conclusion
-   changes when the IVP dimension grows:
+   A larger synthetic chain story at `n=96` confirms the same conclusion for
+   the current LSODE2 generated callback workload: `tcc-whole` and `tcc-chunk`
+   are correctness-equivalent, but chunking does not reduce warm wall-clock or
+   hot Jacobian time. Evidence:
    `lsode2_large_chain_tcc_chunking_sparse_banded_warm_story`.
 
 6. Banded linear algebra is the preferred route when the IVP Jacobian is truly
@@ -82,6 +84,12 @@ cargo test --release <test_name> -- --ignored --nocapture --test-threads=1
 
 `--test-threads=1` serializes test functions only. It does not turn off parallel
 symbolic work or generated AOT callback chunking selected by the solver.
+
+Mandatory LSODE2 mirroring gates are the focused unit/parity tests listed in
+`MIRRORING_CHECKLIST.md`. Story tests are advisory quality/performance evidence
+unless a section explicitly calls a row an acceptance gate. In other words, a
+story table can guide backend recommendations, but Fortran-faithful algorithmic
+parity is locked by the parity modules first.
 
 Interpret stage columns carefully. `total_ms` is the wall-clock user experience.
 `prepare_ms` includes symbolic/backend preparation and, for cold AOT routes, build
@@ -1156,6 +1164,7 @@ Environment knobs:
 
 ```powershell
 $env:LSODE2_LARGE_CHUNK_DIM="96"       # default problem dimension
+$env:LSODE2_LARGE_CHUNK_DIMS="96,192,384" # optional multi-size sweep; overrides LSODE2_LARGE_CHUNK_DIM
 $env:LSODE2_LARGE_CHUNK_REPEATS="3"   # default measured repetitions per row
 $env:LSODE2_LARGE_CHUNK_TARGET="4"    # default residual/Jacobian target chunks
 ```
@@ -1166,10 +1175,34 @@ Paste-ready release command:
 cargo test --release lsode2_large_chain_tcc_chunking_sparse_banded_warm_story -- --ignored --nocapture --test-threads=1
 ```
 
+Release result, CPU 12 Core, `n=96`, `repeats=3`, `target_chunks=4`:
+
+running 1 test
+test numerical::LSODE2::story_tests2::lsode2_large_chain_tcc_chunking_sparse_banded_warm_story ... [LSODE2 large chunking] AtomView Lambdify vs tcc whole/chunk4 warm prebuilt: n=96; correctness/wall-clock
+matrix | route           | policy          | ok/runs | total_ms mean+/-std [min,max] | prepare_ms | solve_ms | final_linf | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Sparse | lambdify        | UseIfAvailable  |     3/3 | 5.097+/-0.040 [5.065,5.154]     | 1.124+/-0.014 | 3.853+/-0.046 | 0.000e0+/-0.0e0 | ok 3/3
+Sparse | tcc-whole       | RequirePrebuilt |     3/3 | 7.677+/-0.149 [7.532,7.882]     | 2.491+/-0.175 | 5.090+/-0.048 | 0.000e0+/-0.0e0 | ok 3/3
+Sparse | tcc-chunk       | RequirePrebuilt |     3/3 | 7.650+/-0.052 [7.578,7.696]     | 2.389+/-0.086 | 5.168+/-0.051 | 0.000e0+/-0.0e0 | ok 3/3
+Banded | lambdify        | UseIfAvailable  |     3/3 | 3.208+/-0.049 [3.139,3.249]     | 1.001+/-0.009 | 2.130+/-0.046 | 0.000e0+/-0.0e0 | ok 3/3
+Banded | tcc-whole       | RequirePrebuilt |     3/3 | 5.865+/-0.141 [5.671,5.998]     | 2.315+/-0.036 | 3.461+/-0.101 | 0.000e0+/-0.0e0 | ok 3/3
+Banded | tcc-chunk       | RequirePrebuilt |     3/3 | 6.190+/-0.426 [5.832,6.789]     | 2.530+/-0.204 | 3.559+/-0.239 | 0.000e0+/-0.0e0 | ok 3/3
+[LSODE2 large chunking] AtomView Lambdify vs tcc whole/chunk4 warm prebuilt: hot-stage timers and counters
+matrix | route           | residual_ms | jacobian_ms | linear_ms | residual_calls | jacobian_calls | linear_calls
+---------------------------------------------------------------------------------------------------------------------------------
+Sparse | lambdify        | 0.091+/-0.000 | 0.060+/-0.001 | 0.224+/-0.003 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+Sparse | tcc-whole       | 0.097+/-0.005 | 0.047+/-0.001 | 0.228+/-0.001 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+Sparse | tcc-chunk       | 0.096+/-0.007 | 0.049+/-0.006 | 0.227+/-0.003 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+Banded | lambdify        | 0.090+/-0.000 | 0.059+/-0.001 | 0.156+/-0.007 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+Banded | tcc-whole       | 0.092+/-0.001 | 0.053+/-0.001 | 0.164+/-0.009 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+Banded | tcc-chunk       | 0.092+/-0.003 | 0.056+/-0.002 | 0.155+/-0.002 | 193.0+/-0.0    | 120.0+/-0.0    | 189.0+/-0.0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2333 filtered out; finished in 0.34s
 Short debug smoke command:
 
 ```powershell
-$env:LSODE2_LARGE_CHUNK_DIM="8"
+$env:LSODE2_LARGE_CHUNK_DIMS="8"
 $env:LSODE2_LARGE_CHUNK_REPEATS="1"
 $env:LSODE2_LARGE_CHUNK_TARGET="2"
 cargo test lsode2_large_chain_tcc_chunking_sparse_banded_warm_story -- --ignored --nocapture
@@ -1180,32 +1213,45 @@ Debug smoke result on this branch: `n=8`, Sparse/Banded, Lambdify,
 the Lambdify baseline. This validates the harness and strict prebuilt flow; it
 is not a performance conclusion because `n=8` is intentionally tiny.
 
-Result:
-
-```text
-TODO: paste release result here.
-```
-
 Analysis:
 
-TODO after release run. The key comparison is not cold total time; it is warm
-`jacobian_ms`, `residual_ms`, `solve_ms`, and total wall-clock across
-`tcc-whole` and `tcc-chunk`. If chunked rows still lose at `n=96`, increase
-`LSODE2_LARGE_CHUNK_DIM` before concluding that LSODE2 generated callback
-chunking has no practical break-even point.
+The release run answers the first large-chain question clearly. All rows are
+correct (`ok 3/3`, `final_linf = 0`), so `Lambdify`, `tcc-whole`, and
+`tcc-chunk` are numerically equivalent for Sparse and Banded routes.
+
+At `n=96`, explicit chunking is still not a performance win. Sparse
+`tcc-whole` and `tcc-chunk` are effectively tied in total wall-clock
+(`7.677` vs `7.650` ms), while chunking has slightly worse solve time
+(`5.090` vs `5.168` ms) and no meaningful hot-stage advantage. Banded
+`tcc-chunk` is slower than `tcc-whole` in total wall-clock (`6.190` vs
+`5.865` ms) and solve time (`3.559` vs `3.461` ms). Hot Jacobian timers are
+tiny in absolute terms: `tcc-whole` is slightly faster than Lambdify on Sparse
+Jacobian evaluation (`0.047` vs `0.060` ms), but that saving is far below the
+fixed generated-backend prepare/solve overhead at this scale.
+
+Banded remains the preferred matrix route for this tridiagonal chain:
+Lambdify Banded total time is `3.208` ms versus Sparse `5.097` ms, and Banded
+linear time is lower (`0.156` vs `0.224` ms). The practical recommendation is:
+use Banded for banded IVPs, use Lambdify or prebuilt `tcc-whole` depending on
+whether artifact lifecycle is already amortized, and do not force chunking for
+`n=96`. If we still want a LSODE2 chunking break-even point, the next release
+sweep should use `LSODE2_LARGE_CHUNK_DIMS="192,384"` rather than repeating
+`n=96`.
 
 ## Remaining Story Work
 
 The current LSODE2 story suite covers correctness parity, Sparse/Banded
 consistency, AtomView/ExprLegacy frontend cost, cold AOT toolchain behavior,
 the `BuildIfMissing -> RequirePrebuilt` lifecycle, a warm prebuilt-vs-Lambdify
-runtime comparison, one larger synthetic chunking story, and one acceptance gate
-for automatic BDF execution. The remaining gaps are more specific:
+runtime comparison, one larger synthetic chunking story, a non-stiff Adams
+corpus, a symbolic-vs-pure-numerical closure dashboard, and acceptance evidence
+for both stiff BDF execution and mixed-regime Adams -> BDF switching. The
+remaining gaps are now narrow:
 
-1. Run and analyze the larger IVP chunking stress story in release. The harness
-   now exists, but the break-even conclusion must come from release data on the
-   12-core machine, possibly with several dimensions (`96`, `192`, `384`) if
-   the default is still too small.
+1. Optional: extend the larger IVP chunking stress story beyond `n=96`.
+   The `n=96` release run is green and shows no chunking win. If we still want
+   to search for a break-even point, run a multi-size sweep through
+   `LSODE2_LARGE_CHUNK_DIMS="192,384"` on the 12-core machine.
 
 2. Add cold-AOT pipeline-stage telemetry if cold startup remains a target.
    LSODE2 currently reports solver-level stages, but not the BVP-style internal
@@ -1213,16 +1259,12 @@ for automatic BDF execution. The remaining gaps are more specific:
    runtime registration. This should be backend-collected telemetry, not
    hand-written timing wrappers in tests.
 
-3. Diagnostic added in
-   `lsode2_mixed_regime_ramp_auto_switch_diagnostic_story`. It shows that the
-   current native solve makes an early method-family decision and does not yet
-   re-evaluate Adams/BDF selection during the full solve. The remaining work is
-   implementation-level: add mid-run method-family re-evaluation and then
-   promote this diagnostic into an acceptance story requiring both Adams and BDF
-   execution with small final drift.
+3. Keep the remaining Fortran-grade switch handoff trace audit in the parity
+   checklist, not in the story backlog. The runtime no longer cold-rebuilds on
+   method switches and the mixed-regime acceptance story is green, but harder
+   retry/error windows can still receive side-by-side `METH/MUSED/MCUR/TSW/JSTART`
+   trace tests as future parity hardening.
 
-4. Closed in `lsode2_symbolic_vs_numerical_closure_sparse_banded_dashboard`:
-   the pure numerical closure route now has a story comparing symbolic
-   Lambdify, user analytical Jacobian closures, and FD Jacobian closures on the
-   same IVP for Sparse and Banded native paths. A future extension can add AOT
-   to this same dashboard if we want a generated-backend comparison as well.
+4. Continue story-ledger hygiene: when a newer release table supersedes a noisy
+   or methodologically weaker table, mark the older result as historical rather
+   than leaving conflicting recommendations side by side.

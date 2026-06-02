@@ -3,16 +3,16 @@ use super::{
     Lsode2ErrorController, Lsode2IterationMode, Lsode2JacobianBackend, Lsode2LinearSolverBackend,
     Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     Lsode2MethodFamily, Lsode2NativeExecutionConfig, Lsode2NativeIntegrationLimits,
-    Lsode2NativeStatistics, Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2RetryAction,
-    Lsode2RuntimeState, Lsode2Solver, Lsode2StepControlConfig, Lsode2StepCycle, Lsode2SwitchReason,
-    Lsode2SwitchTelemetry, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
-    Lsode2Tolerance,
+    Lsode2NativeStatistics, Lsode2NumericProblemOptions, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2RetryAction, Lsode2RuntimeState, Lsode2Solver,
+    Lsode2StepControlConfig, Lsode2StepCycle, Lsode2SwitchReason, Lsode2SwitchTelemetry,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode, Lsode2Tolerance,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
+    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
     register_linked_dense_backend, register_linked_residual_backend,
     register_linked_sparse_backend, unregister_linked_dense_backend,
-    unregister_linked_residual_backend, unregister_linked_sparse_backend, LinkedDenseAotBackend,
-    LinkedResidualAotBackend, LinkedSparseAotBackend,
+    unregister_linked_residual_backend, unregister_linked_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
@@ -20,18 +20,18 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
     IvpSymbolicAssemblyBackend, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
+    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_sparse_backend, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_sparse_backend,
 };
 use nalgebra::{DMatrix, DVector};
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +47,33 @@ fn exponential_decay_config() -> Lsode2ProblemConfig {
         1e-6,
         1e-8,
     )
+}
+
+#[test]
+fn lsode2_solver_execute_postprocessing_writes_report_and_csv() {
+    let dir = tempfile::tempdir().expect("tempdir should be created");
+    let csv_path = dir.path().join("lsode2_solution.csv");
+    let report_path = dir.path().join("lsode2_report.md");
+    let mut solver =
+        Lsode2Solver::new(exponential_decay_config()).expect("LSODE2 config should build");
+
+    solver.solve().expect("LSODE2 solve should complete");
+    let report = solver
+        .execute_postprocessing(
+            &crate::Utils::postprocessing::PostprocessPlan::new()
+                .save_csv(&csv_path)
+                .write_report(&report_path),
+        )
+        .expect("LSODE2 postprocessing should complete");
+
+    assert!(report.all_done());
+    assert!(csv_path.exists());
+    assert!(report_path.exists());
+    let csv = std::fs::read_to_string(csv_path).expect("CSV should be readable");
+    assert!(csv.contains("t,y"));
+    let report_text = std::fs::read_to_string(report_path).expect("report should be readable");
+    assert!(report_text.contains("Solver Result Report"));
+    assert!(report_text.contains("axis: t"));
 }
 
 // --- Adams parity micro-tests (C. Adams numeric path) ---
@@ -2507,6 +2534,104 @@ fn lsode2_fd_jacobian_backend_solves_exponential_decay_for_dense_sparse_and_band
 }
 
 #[test]
+fn lsode2_numeric_fd_constructor_hides_symbolic_placeholders() {
+    let options = Lsode2NumericProblemOptions::new(
+        vec!["y".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0]),
+        1.0,
+        0.05,
+        1e-6,
+        1e-8,
+    )
+    .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+    .with_faithful_bdf_solve(4096, 4096);
+
+    let config = Lsode2ProblemConfig::new_numeric_fd_with_options(options, |_t, y| {
+        DVector::from_vec(vec![-y[0]])
+    });
+
+    assert_eq!(config.eq_system, vec![Expr::Const(0.0)]);
+    assert_eq!(
+        config.residual_jacobian_source,
+        Lsode2ResidualJacobianSource::Analytical
+    );
+    assert_eq!(
+        config.backend.jacobian_backend,
+        Lsode2JacobianBackend::FiniteDifference
+    );
+    assert_eq!(
+        config.backend.linear_solver_backend,
+        Lsode2LinearSolverBackend::SparseFaer
+    );
+
+    let mut solver = Lsode2Solver::new(config).expect("numeric FD config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("numeric FD solve should finish");
+
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("numeric FD solve should produce final y")[0];
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "numeric FD decay mismatch: got={y_final:e}, expected={expected:e}"
+    );
+    assert!(
+        summary.native_statistics.native_jacobian_calls > 0,
+        "numeric FD constructor should route Jacobian calls to finite differences"
+    );
+}
+
+#[test]
+fn lsode2_numeric_with_jacobian_constructor_uses_user_jacobian() {
+    let config = Lsode2ProblemConfig::new_numeric_with_jacobian(
+        vec!["y".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0]),
+        1.0,
+        0.05,
+        1e-6,
+        1e-8,
+        |_t, y| DVector::from_vec(vec![-y[0]]),
+        |_t, _y| DMatrix::from_row_slice(1, 1, &[-1.0]),
+    )
+    .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+    .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+    .with_faithful_bdf_solve(4096, 4096);
+
+    assert_eq!(config.eq_system, vec![Expr::Const(0.0)]);
+    assert_eq!(
+        config.residual_jacobian_source,
+        Lsode2ResidualJacobianSource::Analytical
+    );
+    assert_eq!(
+        config.backend.jacobian_backend,
+        Lsode2JacobianBackend::AnalyticClosure
+    );
+
+    let mut solver =
+        Lsode2Solver::new(config).expect("numeric analytical-Jacobian config should build");
+    let summary = solver
+        .solve_with_summary()
+        .expect("numeric analytical-Jacobian solve should finish");
+
+    let y_final = summary
+        .final_y
+        .as_ref()
+        .expect("numeric analytical-Jacobian solve should produce final y")[0];
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final - expected).abs() < 1e-4,
+        "numeric analytical-Jacobian decay mismatch: got={y_final:e}, expected={expected:e}"
+    );
+}
+
+#[test]
 fn lsode2_analytical_native_sparse_backend_solves_exponential_decay() {
     let config = exponential_decay_config()
         .with_native_sparse_faer_backend()
@@ -2597,9 +2722,10 @@ fn lsode2_rejects_analytical_route_without_callbacks() {
         Ok(_) => panic!("analytical route without callbacks should be rejected"),
         Err(err) => err,
     };
-    assert!(err
-        .to_string()
-        .contains("analytical route requires residual and jacobian callbacks"));
+    assert!(
+        err.to_string()
+            .contains("analytical route requires residual and jacobian callbacks")
+    );
 }
 
 #[test]
@@ -2616,9 +2742,10 @@ fn lsode2_rejects_analytical_route_without_native_execution_mode() {
         Ok(_) => panic!("analytical route should require native execution mode"),
         Err(err) => err,
     };
-    assert!(err
-        .to_string()
-        .contains("analytical route is currently native-only"));
+    assert!(
+        err.to_string()
+            .contains("analytical route is currently native-only")
+    );
 }
 
 #[test]

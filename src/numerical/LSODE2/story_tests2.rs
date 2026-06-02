@@ -4,20 +4,20 @@ use super::{
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    register_linked_residual_backend, unregister_linked_residual_backend, LinkedResidualAotBackend,
+    LinkedResidualAotBackend, register_linked_residual_backend, unregister_linked_residual_backend,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    prepare_symbolic_ivp_residual_problem, SymbolicIvpProblemOptions,
+    SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
 };
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
 use nalgebra::{DMatrix, DVector};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
@@ -4845,6 +4845,19 @@ fn large_ivp_chunking_dim() -> usize {
     lifecycle_repetitions("LSODE2_LARGE_CHUNK_DIM", 96).max(8)
 }
 
+fn large_ivp_chunking_dims() -> Vec<usize> {
+    std::env::var("LSODE2_LARGE_CHUNK_DIMS")
+        .ok()
+        .map(|raw| {
+            raw.split(|ch| ch == ',' || ch == ';' || ch == ' ')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|n| *n >= 8)
+                .collect::<Vec<_>>()
+        })
+        .filter(|dims| !dims.is_empty())
+        .unwrap_or_else(|| vec![large_ivp_chunking_dim()])
+}
+
 fn large_ivp_chunking_repeats() -> usize {
     lifecycle_repetitions("LSODE2_LARGE_CHUNK_REPEATS", 3)
 }
@@ -5152,120 +5165,125 @@ fn print_large_ivp_chunking_tables(title: &str, n: usize, rows: &[LargeIvpChunki
 #[test]
 #[ignore = "release story: larger LSODE2 generated IVP checks whether tcc callback chunking can amortize"]
 fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
-    let n = large_ivp_chunking_dim();
+    let dims = large_ivp_chunking_dims();
     let repeats = large_ivp_chunking_repeats();
     let target_chunks = large_ivp_chunking_chunks();
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
-    let mut rows = Vec::new();
 
-    for matrix in matrices {
-        let mut baseline_solver =
-            Lsode2Solver::new(large_ivp_lambdify_config(matrix, n)).expect("baseline config");
-        let baseline_summary = baseline_solver
-            .solve_with_summary()
-            .expect("baseline solve should finish");
-        let baseline = baseline_summary
-            .final_y
-            .expect("baseline final state should exist");
+    for n in dims {
+        let mut rows = Vec::new();
 
-        let whole_dir = PathBuf::from(format!(
-            "target/l2-large-chain-chunking/{}/whole/{}",
-            matrix.label().to_ascii_lowercase(),
-            unique_story_short_tag()
-        ));
-        let chunk_dir = PathBuf::from(format!(
-            "target/l2-large-chain-chunking/{}/chunk{}/{}",
-            matrix.label().to_ascii_lowercase(),
-            target_chunks,
-            unique_story_short_tag()
-        ));
+        for matrix in matrices {
+            let mut baseline_solver =
+                Lsode2Solver::new(large_ivp_lambdify_config(matrix, n)).expect("baseline config");
+            let baseline_summary = baseline_solver
+                .solve_with_summary()
+                .expect("baseline solve should finish");
+            let baseline = baseline_summary
+                .final_y
+                .expect("baseline final state should exist");
 
-        for (route, dir, chunks) in [
-            ("tcc-whole", whole_dir.clone(), 1usize),
-            ("tcc-chunk", chunk_dir.clone(), target_chunks),
-        ] {
-            let setup = large_ivp_tcc_config(
-                matrix,
+            let whole_dir = PathBuf::from(format!(
+                "target/l2-large-chain-chunking/n{}/{}/whole/{}",
                 n,
-                dir.clone(),
-                SymbolicIvpAotBuildPolicy::BuildIfMissing {
-                    profile: AotBuildProfile::Release,
-                },
-                chunks,
-            );
-            let setup_sample = run_large_ivp_chunking_sample(setup, &baseline)
-                .unwrap_or_else(|err| panic!("{} {route} setup failed: {err}", matrix.label()));
-            assert!(
-                setup_sample.3 <= 5.0e-4,
-                "{} {} setup drift too large: {:e}",
-                matrix.label(),
-                route,
-                setup_sample.3
-            );
-        }
+                matrix.label().to_ascii_lowercase(),
+                unique_story_short_tag()
+            ));
+            let chunk_dir = PathBuf::from(format!(
+                "target/l2-large-chain-chunking/n{}/{}/chunk{}/{}",
+                n,
+                matrix.label().to_ascii_lowercase(),
+                target_chunks,
+                unique_story_short_tag()
+            ));
 
-        let route_configs = [
-            (
-                "lambdify",
-                "UseIfAvailable",
-                large_ivp_lambdify_config(matrix, n),
-            ),
-            (
-                "tcc-whole",
-                "RequirePrebuilt",
-                large_ivp_tcc_config(
+            for (route, dir, chunks) in [
+                ("tcc-whole", whole_dir.clone(), 1usize),
+                ("tcc-chunk", chunk_dir.clone(), target_chunks),
+            ] {
+                let setup = large_ivp_tcc_config(
                     matrix,
                     n,
-                    whole_dir,
-                    SymbolicIvpAotBuildPolicy::RequirePrebuilt,
-                    1,
-                ),
-            ),
-            (
-                "tcc-chunk",
-                "RequirePrebuilt",
-                large_ivp_tcc_config(
-                    matrix,
-                    n,
-                    chunk_dir,
-                    SymbolicIvpAotBuildPolicy::RequirePrebuilt,
-                    target_chunks,
-                ),
-            ),
-        ];
-
-        for (route, policy, config) in route_configs {
-            let mut row = LargeIvpChunkingRow::new(matrix.label(), route, policy);
-            for _ in 0..repeats {
-                row.runs_total += 1;
-                match run_large_ivp_chunking_sample(config.clone(), &baseline) {
-                    Ok(sample) => push_large_ivp_sample(&mut row, sample),
-                    Err(err) => row.record_failure(err),
-                }
+                    dir.clone(),
+                    SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                        profile: AotBuildProfile::Release,
+                    },
+                    chunks,
+                );
+                let setup_sample = run_large_ivp_chunking_sample(setup, &baseline)
+                    .unwrap_or_else(|err| panic!("{} {route} setup failed: {err}", matrix.label()));
+                assert!(
+                    setup_sample.3 <= 5.0e-4,
+                    "{} {} setup drift too large: {:e}",
+                    matrix.label(),
+                    route,
+                    setup_sample.3
+                );
             }
-            rows.push(row);
+
+            let route_configs = [
+                (
+                    "lambdify",
+                    "UseIfAvailable",
+                    large_ivp_lambdify_config(matrix, n),
+                ),
+                (
+                    "tcc-whole",
+                    "RequirePrebuilt",
+                    large_ivp_tcc_config(
+                        matrix,
+                        n,
+                        whole_dir,
+                        SymbolicIvpAotBuildPolicy::RequirePrebuilt,
+                        1,
+                    ),
+                ),
+                (
+                    "tcc-chunk",
+                    "RequirePrebuilt",
+                    large_ivp_tcc_config(
+                        matrix,
+                        n,
+                        chunk_dir,
+                        SymbolicIvpAotBuildPolicy::RequirePrebuilt,
+                        target_chunks,
+                    ),
+                ),
+            ];
+
+            for (route, policy, config) in route_configs {
+                let mut row = LargeIvpChunkingRow::new(matrix.label(), route, policy);
+                for _ in 0..repeats {
+                    row.runs_total += 1;
+                    match run_large_ivp_chunking_sample(config.clone(), &baseline) {
+                        Ok(sample) => push_large_ivp_sample(&mut row, sample),
+                        Err(err) => row.record_failure(err),
+                    }
+                }
+                rows.push(row);
+            }
         }
+
+        print_large_ivp_chunking_tables(
+            &format!("AtomView Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
+            n,
+            &rows,
+        );
+
+        assert!(
+            rows.iter().all(|row| row.runs_ok == row.runs_total),
+            "all large LSODE2 chunking rows must solve for n={n}"
+        );
+        assert!(
+            rows.iter().all(|row| {
+                row.final_linf
+                    .summary()
+                    .map(|(mean, _, _, _)| mean <= 5.0e-4)
+                    .unwrap_or(false)
+            }),
+            "large LSODE2 chunking rows must remain numerically equivalent for n={n}"
+        );
     }
-
-    print_large_ivp_chunking_tables(
-        &format!("AtomView Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
-        n,
-        &rows,
-    );
-
-    assert!(
-        rows.iter().all(|row| row.runs_ok == row.runs_total),
-        "all large LSODE2 chunking rows must solve"
-    );
-    assert!(
-        rows.iter().all(|row| {
-            row.final_linf
-                .summary()
-                .map(|(mean, _, _, _)| mean <= 5.0e-4)
-                .unwrap_or(false)
-        }),
-        "large LSODE2 chunking rows must remain numerically equivalent"
-    );
 }
 
 #[test]

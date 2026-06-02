@@ -56,8 +56,8 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
 };
 use crate::symbolic::symbolic_ivp::{
     prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem, IvpBackendError,
-    PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
-    SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
+    PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem, SymbolicIvpAotOptions,
+    SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_aot::{
     generated_aot_artifact_from_symbolic_ivp_problem,
@@ -66,8 +66,11 @@ use crate::symbolic::symbolic_ivp_aot::{
 use log::{info, warn};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static REBUILD_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Aggregated runtime/setup statistics for one symbolic IVP solver instance.
 #[derive(Debug, Clone, Default)]
@@ -420,12 +423,32 @@ fn is_transient_aot_infra_failure(text: &str) -> bool {
         || low.contains("sharing violation")
 }
 
+fn retry_exhausted_aot_message(
+    build_context: &str,
+    attempts: usize,
+    detail: &str,
+    transient: bool,
+) -> String {
+    let class = if transient {
+        "transient infrastructure failure"
+    } else {
+        "deterministic build failure"
+    };
+    format!(
+        "AOT build execution failed ({build_context}) after {attempts} attempt(s); classified as {class}. \
+If this is a transient infrastructure failure, check stale compiler processes, file locks and antivirus/indexer interference; \
+otherwise inspect compiler stdout/stderr below.\n\
+detail:\n{detail}"
+    )
+}
+
 fn execute_generated_build_with_retry(
     build: &GeneratedAotBuildResult,
     build_context: &str,
 ) -> Result<ExecutedGeneratedAotBuild, SymbolicIvpGeneratedError> {
     const MAX_ATTEMPTS: usize = 3;
     let mut last_failure: Option<String> = None;
+    let mut last_transient = false;
 
     for attempt in 1..=MAX_ATTEMPTS {
         match build.execute() {
@@ -436,6 +459,7 @@ fn execute_generated_build_with_retry(
                 let (status, stdout, stderr) = executed_process_output(&executed);
                 let detail = format!("status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
                 let transient = is_transient_aot_infra_failure(&detail);
+                last_transient = transient;
                 last_failure = Some(detail);
                 if transient && attempt < MAX_ATTEMPTS {
                     sleep(Duration::from_millis((attempt as u64) * 120));
@@ -445,6 +469,7 @@ fn execute_generated_build_with_retry(
             Err(err) => {
                 let detail = err.to_string();
                 let transient = is_transient_aot_infra_failure(&detail);
+                last_transient = transient;
                 last_failure = Some(detail);
                 if transient && attempt < MAX_ATTEMPTS {
                     sleep(Duration::from_millis((attempt as u64) * 120));
@@ -456,9 +481,75 @@ fn execute_generated_build_with_retry(
     }
 
     let detail = last_failure.unwrap_or_else(|| "unknown build failure".to_string());
-    Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
-        "AOT build execution failed ({build_context}) after retry policy; detail:\n{detail}"
-    )))
+    Err(SymbolicIvpGeneratedError::AotBuildFailed(
+        retry_exhausted_aot_message(build_context, MAX_ATTEMPTS, &detail, last_transient),
+    ))
+}
+
+fn runtime_registration_error_message(
+    route: &str,
+    backend: AotCodegenBackend,
+    problem_key: &str,
+    artifact_path: &std::path::Path,
+    err: String,
+) -> String {
+    format!(
+        "symbolic IVP {route} compiled AOT artifact could not be registered as a linked runtime \
+(backend={backend:?}; problem_key={problem_key}; artifact_path={}). \
+This usually means dynamic loading failed, the artifact is stale/incompatible, or the file is still locked by another process. \
+Rebuild the artifact, check toolchain ABI compatibility, and make sure no stale process keeps the library open. detail: {err}",
+        artifact_path.display()
+    )
+}
+
+fn aot_context_message(
+    route: &str,
+    problem_key: &str,
+    config: &SymbolicIvpGeneratedBackendConfig,
+) -> String {
+    let compiler = config.aot_c_compiler.as_deref().unwrap_or("-");
+    let output_parent = config
+        .output_parent_dir
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "route={route}; problem_key={problem_key}; build_policy={:?}; codegen_backend={:?}; c_compiler={compiler}; output_parent_dir={output_parent}",
+        config.build_policy, config.aot_codegen_backend
+    )
+}
+
+fn missing_aot_message(
+    route: &str,
+    problem_key: &str,
+    config: &SymbolicIvpGeneratedBackendConfig,
+) -> String {
+    format!(
+        "symbolic IVP {route} AOT artifact is missing ({context}). For strict RequirePrebuilt, run BuildIfMissing/RebuildAlways once with the same problem, frontend, matrix backend, toolchain and chunking policy, then reuse the returned resolver.",
+        context = aot_context_message(route, problem_key, config)
+    )
+}
+
+fn not_built_aot_message(
+    route: &str,
+    problem_key: &str,
+    config: &SymbolicIvpGeneratedBackendConfig,
+) -> String {
+    format!(
+        "symbolic IVP {route} AOT artifact is registered but the expected compiled file is not present ({context}). Rebuild the artifact or clean the stale resolver entry before using RequirePrebuilt.",
+        context = aot_context_message(route, problem_key, config)
+    )
+}
+
+fn runtime_unavailable_aot_message(
+    route: &str,
+    problem_key: &str,
+    config: &SymbolicIvpGeneratedBackendConfig,
+) -> String {
+    format!(
+        "symbolic IVP {route} compiled AOT artifact exists but no linked runtime is registered ({context}). Re-register the generated artifact or rebuild it in this process before using RequirePrebuilt.",
+        context = aot_context_message(route, problem_key, config)
+    )
 }
 
 /// Result of preparing one IVP symbolic problem through the high-level
@@ -565,6 +656,42 @@ fn generated_sparse_names(
     (crate_name, module_name)
 }
 
+fn rebuild_isolated_output_parent_dir(base: &Path, route: &str, problem_key: &str) -> PathBuf {
+    let short_key = problem_key
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .replace('-', "_");
+    let route = route.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_");
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let seq = REBUILD_OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    base.join(format!("rebuild_{route}_{short_key}_{pid}_{nanos}_{seq}"))
+}
+
+fn output_parent_dir_for_requested_build(
+    config: &SymbolicIvpGeneratedBackendConfig,
+    route: &str,
+    problem_key: &str,
+) -> Result<PathBuf, SymbolicIvpGeneratedError> {
+    let base = config.output_parent_dir()?.to_path_buf();
+    if matches!(
+        config.build_policy,
+        SymbolicIvpAotBuildPolicy::RebuildAlways { .. }
+    ) {
+        Ok(rebuild_isolated_output_parent_dir(
+            &base,
+            route,
+            problem_key,
+        ))
+    } else {
+        Ok(base)
+    }
+}
+
 fn select_backend(
     problem: &PreparedSymbolicIvpProblem,
     resolver: Option<&AotResolver>,
@@ -619,10 +746,9 @@ fn select_sparse_backend(
     problem: &PreparedSparseProblem<'_>,
     resolver: Option<&AotResolver>,
 ) -> SelectedSymbolicIvpBackendKind {
-    let problem_key = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
-        problem,
-    )
-    .problem_key();
+    let problem_key =
+        crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(problem)
+            .problem_key();
     if let Some(linked) = resolve_linked_sparse_backend(problem_key.as_str()) {
         if linked.problem_key == problem_key {
             return SelectedSymbolicIvpBackendKind::AotCompiled;
@@ -700,59 +826,137 @@ fn register_ivp_build_result_in_registry(
 }
 
 fn register_ivp_runtime_backend(
+    route: &str,
     backend: AotCodegenBackend,
     resolver: &AotResolver,
     problem_key: &str,
 ) -> Result<(), SymbolicIvpGeneratedError> {
     let resolved = resolver.resolve_by_problem_key(problem_key);
+    let artifact_path = resolved.registered.expected_cdylib.clone();
     match backend {
         AotCodegenBackend::Rust => register_generated_dense_cdylib_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::C => register_generated_c_dense_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::Zig => register_generated_zig_dense_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
     }
 }
 
 fn register_ivp_residual_runtime_backend(
+    route: &str,
     backend: AotCodegenBackend,
     resolver: &AotResolver,
     problem_key: &str,
 ) -> Result<(), SymbolicIvpGeneratedError> {
     let resolved = resolver.resolve_by_problem_key(problem_key);
+    let artifact_path = resolved.registered.expected_cdylib.clone();
     match backend {
         AotCodegenBackend::Rust => register_generated_residual_cdylib_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::C => register_generated_c_residual_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::Zig => register_generated_zig_residual_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
     }
 }
 
 fn register_ivp_sparse_runtime_backend(
+    route: &str,
     backend: AotCodegenBackend,
     resolver: &AotResolver,
     problem_key: &str,
 ) -> Result<(), SymbolicIvpGeneratedError> {
     let resolved = resolver.resolve_by_problem_key(problem_key);
+    let artifact_path = resolved.registered.expected_cdylib.clone();
     match backend {
         AotCodegenBackend::Rust => register_generated_sparse_cdylib_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::C => register_generated_c_sparse_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
         AotCodegenBackend::Zig => register_generated_zig_sparse_backend(&resolved.registered)
             .map(|_| ())
-            .map_err(SymbolicIvpGeneratedError::AotBuildFailed),
+            .map_err(|err| {
+                SymbolicIvpGeneratedError::AotBuildFailed(runtime_registration_error_message(
+                    route,
+                    backend,
+                    problem_key,
+                    &artifact_path,
+                    err,
+                ))
+            }),
     }
 }
 
@@ -779,8 +983,10 @@ fn perform_requested_build(
         config.aot_options,
         config.aot_codegen_backend,
     );
+    let output_parent_dir =
+        output_parent_dir_for_requested_build(config, "dense", prepared.problem_key().as_str())?;
     let mut request =
-        generated_aot_build_request_from_artifact(artifact, config.output_parent_dir()?, preset);
+        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
     if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
         (&mut request, config.aot_c_compiler.as_ref())
     {
@@ -808,6 +1014,7 @@ fn perform_requested_build(
     let resolver =
         register_ivp_build_result_in_registry(resolver_snapshot, prepared.manifest(), &build)?;
     register_ivp_runtime_backend(
+        "dense",
         config.aot_codegen_backend,
         &resolver,
         prepared.problem_key().as_str(),
@@ -838,8 +1045,13 @@ fn perform_requested_residual_build(
         config.aot_options,
         config.aot_codegen_backend,
     );
+    let output_parent_dir = output_parent_dir_for_requested_build(
+        config,
+        "residual-only",
+        prepared.problem_key().as_str(),
+    )?;
     let mut request =
-        generated_aot_build_request_from_artifact(artifact, config.output_parent_dir()?, preset);
+        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
     if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
         (&mut request, config.aot_c_compiler.as_ref())
     {
@@ -867,6 +1079,7 @@ fn perform_requested_residual_build(
     let resolver =
         register_ivp_build_result_in_registry(resolver_snapshot, prepared.manifest(), &build)?;
     register_ivp_residual_runtime_backend(
+        "residual-only",
         config.aot_codegen_backend,
         &resolver,
         prepared.problem_key().as_str(),
@@ -884,7 +1097,8 @@ fn perform_requested_sparse_build(
         None => return Ok((None, resolver_snapshot)),
     };
 
-    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(problem);
+    let manifest =
+        crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(problem);
     let problem_key = manifest.problem_key();
     let (crate_name, module_name) = generated_sparse_names(&problem_key, config);
     info!(
@@ -898,8 +1112,10 @@ fn perform_requested_sparse_build(
         &prepared_problem,
         config.aot_codegen_backend,
     );
+    let output_parent_dir =
+        output_parent_dir_for_requested_build(config, "sparse", problem_key.as_str())?;
     let mut request =
-        generated_aot_build_request_from_artifact(artifact, config.output_parent_dir()?, preset);
+        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
     if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
         (&mut request, config.aot_c_compiler.as_ref())
     {
@@ -924,7 +1140,12 @@ fn perform_requested_sparse_build(
     )?;
 
     let resolver = register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)?;
-    register_ivp_sparse_runtime_backend(config.aot_codegen_backend, &resolver, problem_key.as_str())?;
+    register_ivp_sparse_runtime_backend(
+        "sparse",
+        config.aot_codegen_backend,
+        &resolver,
+        problem_key.as_str(),
+    )?;
     Ok((Some(build), Some(resolver)))
 }
 
@@ -946,12 +1167,15 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         .iter()
         .map(|value| value.as_str())
         .collect::<Vec<_>>();
-    let parameter_refs = baseline_problem.equation_parameters.as_ref().map(|parameters| {
-        parameters
-            .iter()
-            .map(|value| value.as_str())
-            .collect::<Vec<_>>()
-    });
+    let parameter_refs = baseline_problem
+        .equation_parameters
+        .as_ref()
+        .map(|parameters| {
+            parameters
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        });
     let mut sparse_param_refs = Vec::with_capacity(1 + parameter_refs.as_ref().map_or(0, Vec::len));
     sparse_param_refs.push(baseline_problem.time_arg.as_str());
     if let Some(params) = parameter_refs.as_ref() {
@@ -1016,15 +1240,15 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         };
 
     let final_selection = select_sparse_backend(&prepared_sparse, resolver_snapshot.as_ref());
-    let problem_key = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
-        &prepared_sparse,
-    )
-    .problem_key();
+    let problem_key =
+        crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(&prepared_sparse)
+            .problem_key();
 
     let mut linked_backend = resolve_linked_sparse_backend(problem_key.as_str());
     if linked_backend.is_none() {
         if let Some(resolver) = resolver_snapshot.as_ref() {
             let _ = register_ivp_sparse_runtime_backend(
+                "sparse",
                 config.aot_codegen_backend,
                 resolver,
                 problem_key.as_str(),
@@ -1037,8 +1261,7 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         SelectedSymbolicIvpBackendKind::AotCompiled => {
             if linked_backend.is_none() {
                 return Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
-                    "symbolic IVP sparse compiled AOT artifact exists but no linked runtime is registered"
-                        .to_string(),
+                    runtime_unavailable_aot_message("sparse", problem_key.as_str(), &config),
                 ));
             }
             Ok(PreparedGeneratedSymbolicIvpSparseBackend {
@@ -1050,18 +1273,18 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
                 build_result,
             })
         }
-        SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => Err(
-            SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
-                "symbolic IVP sparse AOT artifact is registered but not built".to_string(),
-            ),
-        ),
+        SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => {
+            Err(SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
+                not_built_aot_message("sparse", problem_key.as_str(), &config),
+            ))
+        }
         SelectedSymbolicIvpBackendKind::AotMissing | SelectedSymbolicIvpBackendKind::Lambdify => {
             match config.build_policy {
-                SymbolicIvpAotBuildPolicy::RequirePrebuilt => Err(
-                    SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
-                        "symbolic IVP sparse AOT artifact is missing".to_string(),
-                    ),
-                ),
+                SymbolicIvpAotBuildPolicy::RequirePrebuilt => {
+                    Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
+                        missing_aot_message("sparse", problem_key.as_str(), &config),
+                    ))
+                }
                 _ => Ok(PreparedGeneratedSymbolicIvpSparseBackend {
                     problem_key,
                     selected_backend: SelectedSymbolicIvpBackendKind::Lambdify,
@@ -1101,12 +1324,15 @@ pub fn prepare_generated_symbolic_ivp_problem(
         resolver_snapshot.as_ref(),
         config.aot_options,
     );
+    let problem_key = baseline_problem
+        .prepare_dense_aot_problem(config.aot_options)
+        .problem_key();
     match final_selection {
         SelectedSymbolicIvpBackendKind::Lambdify | SelectedSymbolicIvpBackendKind::AotMissing => {
             match config.build_policy {
                 SymbolicIvpAotBuildPolicy::RequirePrebuilt => {
                     Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
-                        "symbolic IVP AOT artifact is missing".to_string(),
+                        missing_aot_message("dense", problem_key.as_str(), &config),
                     ))
                 }
                 _ => Ok(PreparedGeneratedSymbolicIvpProblem {
@@ -1119,7 +1345,7 @@ pub fn prepare_generated_symbolic_ivp_problem(
         }
         SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => {
             Err(SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
-                "symbolic IVP AOT artifact is registered but not built".to_string(),
+                not_built_aot_message("dense", problem_key.as_str(), &config),
             ))
         }
         SelectedSymbolicIvpBackendKind::AotCompiled => {
@@ -1134,12 +1360,11 @@ pub fn prepare_generated_symbolic_ivp_problem(
                 })
             } else {
                 match config.build_policy {
-                    SymbolicIvpAotBuildPolicy::RequirePrebuilt => Err(
-                        SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
-                            "symbolic IVP compiled AOT artifact exists but no linked runtime is registered"
-                                .to_string(),
-                        ),
-                    ),
+                    SymbolicIvpAotBuildPolicy::RequirePrebuilt => {
+                        Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+                            runtime_unavailable_aot_message("dense", problem_key.as_str(), &config),
+                        ))
+                    }
                     _ => {
                         warn!(
                             "Symbolic IVP compiled AOT artifact exists but no linked runtime is registered; falling back to lambdify"
@@ -1189,12 +1414,15 @@ pub fn prepare_generated_symbolic_ivp_residual_problem(
         resolver_snapshot.as_ref(),
         config.aot_options,
     );
+    let problem_key = baseline_problem
+        .prepare_residual_aot_problem(config.aot_options)
+        .problem_key();
     match final_selection {
         SelectedSymbolicIvpBackendKind::Lambdify | SelectedSymbolicIvpBackendKind::AotMissing => {
             match config.build_policy {
                 SymbolicIvpAotBuildPolicy::RequirePrebuilt => {
                     Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
-                        "symbolic IVP residual-only AOT artifact is missing".to_string(),
+                        missing_aot_message("residual-only", problem_key.as_str(), &config),
                     ))
                 }
                 _ => Ok(PreparedGeneratedSymbolicIvpResidualProblem {
@@ -1207,7 +1435,7 @@ pub fn prepare_generated_symbolic_ivp_residual_problem(
         }
         SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => {
             Err(SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
-                "symbolic IVP residual-only AOT artifact is registered but not built".to_string(),
+                not_built_aot_message("residual-only", problem_key.as_str(), &config),
             ))
         }
         SelectedSymbolicIvpBackendKind::AotCompiled => {
@@ -1222,12 +1450,15 @@ pub fn prepare_generated_symbolic_ivp_residual_problem(
                 })
             } else {
                 match config.build_policy {
-                    SymbolicIvpAotBuildPolicy::RequirePrebuilt => Err(
-                        SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
-                            "symbolic IVP residual-only compiled AOT artifact exists but no linked runtime is registered"
-                                .to_string(),
-                        ),
-                    ),
+                    SymbolicIvpAotBuildPolicy::RequirePrebuilt => {
+                        Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+                            runtime_unavailable_aot_message(
+                                "residual-only",
+                                problem_key.as_str(),
+                                &config,
+                            ),
+                        ))
+                    }
                     _ => {
                         warn!(
                             "Symbolic IVP residual-only compiled AOT artifact exists but no linked runtime is registered; falling back to lambdify"
@@ -1258,9 +1489,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn sample_problem() -> (Vec<Expr>, Vec<String>, String, SymbolicIvpProblemOptions) {
+        sample_problem_with_offset(0.0)
+    }
+
+    fn sample_problem_with_offset(
+        offset: f64,
+    ) -> (Vec<Expr>, Vec<String>, String, SymbolicIvpProblemOptions) {
         (
             vec![
-                Expr::parse_expression("a*t + y + b*z"),
+                Expr::parse_expression(&format!("a*t + y + b*z + {offset:.17}")),
                 Expr::parse_expression("c*y - z + b*t"),
             ],
             vec!["y".to_string(), "z".to_string()],
@@ -1302,10 +1539,97 @@ mod tests {
         );
 
         match result {
-            Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(_)) => {}
+            Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(message)) => {
+                assert!(message.contains("route=dense"));
+                assert!(message.contains("problem_key="));
+                assert!(message.contains("build_policy=RequirePrebuilt"));
+                assert!(message.contains("codegen_backend="));
+                assert!(message.contains("output_parent_dir="));
+                assert!(message.contains("BuildIfMissing/RebuildAlways"));
+            }
             Err(other) => panic!("expected missing compiled artifact error, got {other}"),
             Ok(_) => panic!("missing prebuilt artifact should be surfaced"),
         }
+    }
+
+    #[test]
+    fn generated_ivp_aot_diagnostic_messages_include_context() {
+        let config = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+            .with_c_tcc()
+            .with_output_parent_dir(Some(PathBuf::from("target/ivp-diagnostics")));
+        let message = missing_aot_message("sparse", "abc123", &config);
+
+        assert!(message.contains("route=sparse"));
+        assert!(message.contains("problem_key=abc123"));
+        assert!(message.contains("build_policy=RequirePrebuilt"));
+        assert!(message.contains("codegen_backend=C"));
+        assert!(message.contains("c_compiler=tcc"));
+        assert!(message.contains("target/ivp-diagnostics"));
+
+        let not_built = not_built_aot_message("residual-only", "def456", &config);
+        assert!(not_built.contains("registered but the expected compiled file is not present"));
+        assert!(not_built.contains("problem_key=def456"));
+
+        let runtime = runtime_unavailable_aot_message("dense", "ghi789", &config);
+        assert!(runtime.contains("compiled AOT artifact exists but no linked runtime"));
+        assert!(runtime.contains("problem_key=ghi789"));
+
+        let retry = retry_exhausted_aot_message(
+            "ivp-dense backend=C key=abc123",
+            3,
+            "failed to spawn build runner",
+            true,
+        );
+        assert!(retry.contains("after 3 attempt(s)"));
+        assert!(retry.contains("transient infrastructure failure"));
+        assert!(retry.contains("stale compiler processes"));
+
+        let load = runtime_registration_error_message(
+            "dense",
+            AotCodegenBackend::C,
+            "abc123",
+            std::path::Path::new("target/example.dll"),
+            "load failed".to_string(),
+        );
+        assert!(load.contains("symbolic IVP dense"));
+        assert!(load.contains("problem_key=abc123"));
+        assert!(load.contains("artifact_path=target/example.dll"));
+        assert!(load.contains("stale/incompatible"));
+    }
+
+    #[test]
+    fn generated_ivp_rebuild_always_uses_isolated_output_parent_dirs() {
+        let base = PathBuf::from("target/ivp-rebuild-lock-safety");
+        let stable = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(base.clone());
+        let stable_dir =
+            output_parent_dir_for_requested_build(&stable, "sparse", "abcdef0123456789")
+                .expect("stable build path should resolve");
+        assert_eq!(stable_dir, base);
+
+        let rebuild = SymbolicIvpGeneratedBackendConfig::new()
+            .with_output_parent_dir(Some(base.clone()))
+            .with_build_policy(SymbolicIvpAotBuildPolicy::RebuildAlways {
+                profile: AotBuildProfile::Release,
+            });
+        let first = output_parent_dir_for_requested_build(&rebuild, "sparse", "abcdef0123456789")
+            .expect("first rebuild path should resolve");
+        let second = output_parent_dir_for_requested_build(&rebuild, "sparse", "abcdef0123456789")
+            .expect("second rebuild path should resolve");
+
+        assert!(first.starts_with(&base));
+        assert!(second.starts_with(&base));
+        assert_ne!(
+            first, second,
+            "RebuildAlways must not overwrite a possibly loaded AOT artifact"
+        );
+        assert!(
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("rebuild_sparse_abcdef0123456789")),
+            "isolated rebuild path should remain diagnosable: {:?}",
+            first
+        );
     }
 
     #[test]
@@ -1348,7 +1672,7 @@ mod tests {
 
     #[test]
     fn generated_ivp_build_if_missing_materializes_build_and_updates_resolver() {
-        let (equations, variables, time_arg, options) = sample_problem();
+        let (equations, variables, time_arg, options) = sample_problem_with_offset(0.125);
         let dir = tempdir().expect("tempdir should exist");
         let prepared = prepare_generated_symbolic_ivp_problem(
             equations,
@@ -1376,7 +1700,7 @@ mod tests {
 
     #[test]
     fn generated_ivp_reuses_updated_resolver_with_linked_runtime() {
-        let (equations, variables, time_arg, options) = sample_problem();
+        let (equations, variables, time_arg, options) = sample_problem_with_offset(0.25);
         let dir = tempdir().expect("tempdir should exist");
         let first = prepare_generated_symbolic_ivp_problem(
             equations.clone(),
@@ -1411,7 +1735,7 @@ mod tests {
                 let c = args[3];
                 let y = args[4];
                 let z = args[5];
-                out[0] = a * t + y + b * z;
+                out[0] = a * t + y + b * z + 0.25;
                 out[1] = c * y - z + b * t;
             }),
             Arc::new(|args: &[f64], out: &mut [f64]| {
@@ -1425,7 +1749,7 @@ mod tests {
 
         let second = prepare_generated_symbolic_ivp_problem(
             vec![
-                Expr::parse_expression("a*t + y + b*z"),
+                Expr::parse_expression("a*t + y + b*z + 0.25"),
                 Expr::parse_expression("c*y - z + b*t"),
             ],
             vec!["y".to_string(), "z".to_string()],

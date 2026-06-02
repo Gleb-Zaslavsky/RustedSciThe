@@ -46,6 +46,9 @@ use chrono::Local;
 
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use crate::Utils::plots::{plots, plots_gnulot, plots_terminal};
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting, finite_difference_jacobian,
 };
@@ -110,6 +113,24 @@ pub struct AdaptiveGridConfig {
     pub max_refinements: usize,
     /// Grid refinement algorithm to use
     pub grid_method: GridRefinementMethod,
+}
+
+/// Discretization scheme used to assemble the BVP residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BvpDerivativeScheme {
+    /// One-sided forward discretization used by the legacy default route.
+    Forward,
+    /// Trapezoidal/collocation-style discretization using both interval endpoints.
+    Trapezoid,
+}
+
+impl BvpDerivativeScheme {
+    fn as_legacy_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Trapezoid => "trapezoid",
+        }
+    }
 }
 
 impl Default for SolverParams {
@@ -190,6 +211,32 @@ impl DampedSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Selects the residual discretization scheme with a typed public API.
+    ///
+    /// The solver still stores the legacy string internally because the older
+    /// symbolic/numeric assembly layers use string flags. New user code should
+    /// prefer this method over passing raw `"forward"` / `"trapezoid"` strings.
+    pub fn with_scheme(mut self, scheme: BvpDerivativeScheme) -> Self {
+        self.scheme = scheme.as_legacy_str().to_string();
+        self
+    }
+
+    /// Selects the legacy forward derivative discretization.
+    pub fn forward_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Forward)
+    }
+
+    /// Selects the trapezoid derivative discretization.
+    pub fn trapezoid_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Trapezoid)
+    }
+
+    /// Compatibility escape hatch for legacy/custom scheme strings.
+    pub fn with_scheme_name(mut self, scheme: impl Into<String>) -> Self {
+        self.scheme = scheme.into();
         self
     }
 
@@ -998,6 +1045,28 @@ impl NRBVP {
     /// Returns a solver configured with the provided generated-backend settings.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Returns a solver configured with the selected residual discretization scheme.
+    pub fn with_scheme(mut self, scheme: BvpDerivativeScheme) -> Self {
+        self.scheme = scheme.as_legacy_str().to_string();
+        self
+    }
+
+    /// Returns a solver configured with the legacy forward derivative discretization.
+    pub fn forward_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Forward)
+    }
+
+    /// Returns a solver configured with the trapezoid derivative discretization.
+    pub fn trapezoid_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Trapezoid)
+    }
+
+    /// Compatibility escape hatch for legacy/custom scheme strings.
+    pub fn with_scheme_name(mut self, scheme: impl Into<String>) -> Self {
+        self.scheme = scheme.into();
         self
     }
 
@@ -2403,6 +2472,31 @@ impl NRBVP {
         self.full_result.clone()
     }
 
+    /// Converts the computed solution into the unified postprocessing dataset.
+    pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
+        let values = self.get_result().ok_or_else(|| {
+            PostprocessError::InvalidDataset(
+                "Damped BVP postprocess_dataset requires a computed full solution matrix"
+                    .to_string(),
+            )
+        })?;
+        PostprocessDataset::new(
+            self.arg.clone(),
+            self.values.clone(),
+            self.x_mesh.clone(),
+            values,
+        )
+    }
+
+    /// Executes a declarative postprocessing plan using the modern facade.
+    pub fn execute_postprocessing(
+        &self,
+        plan: &PostprocessPlan,
+    ) -> Result<PostprocessReport, PostprocessError> {
+        let dataset = self.postprocess_dataset()?;
+        plan.execute(&dataset)
+    }
+
     /// Processes raw solution vector into full solution matrix
     ///
     /// Reconstructs complete solution by adding boundary conditions
@@ -2859,6 +2953,36 @@ mod tests {
         assert_eq!(options.scheme, "forward");
         assert_eq!(options.strategy, "Damped");
         assert_eq!(options.method, "Dense");
+    }
+
+    #[test]
+    fn damped_options_scheme_builder_methods_set_legacy_scheme_flag() {
+        let options = DampedSolverOptions::sparse_damped().trapezoid_derivative();
+        assert_eq!(options.scheme, "trapezoid");
+
+        let options = options.forward_derivative();
+        assert_eq!(options.scheme, "forward");
+
+        let options = options.with_scheme(BvpDerivativeScheme::Trapezoid);
+        assert_eq!(options.scheme, "trapezoid");
+
+        let options = options.with_scheme_name("custom-experimental");
+        assert_eq!(options.scheme, "custom-experimental");
+    }
+
+    #[test]
+    fn damped_solver_scheme_builder_methods_set_solver_scheme_flag() {
+        let solver = sparse_surface_test_solver().trapezoid_derivative();
+        assert_eq!(solver.scheme, "trapezoid");
+
+        let solver = solver.forward_derivative();
+        assert_eq!(solver.scheme, "forward");
+
+        let solver = solver.with_scheme(BvpDerivativeScheme::Trapezoid);
+        assert_eq!(solver.scheme, "trapezoid");
+
+        let solver = solver.with_scheme_name("custom-experimental");
+        assert_eq!(solver.scheme, "custom-experimental");
     }
 
     #[test]

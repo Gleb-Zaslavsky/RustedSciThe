@@ -8,8 +8,8 @@ use super::adams_engine::{Lsode2AdamsDcfodeError, Lsode2AdamsDcfodeTables};
 use super::algorithm::Lsode2SwitchTelemetry;
 use super::dcfode::{Lsode2BdfDcfodeTables, Lsode2DcfodeError};
 use super::history::{
-    backward_differences_to_nordsieck, reconcile_first_nordsieck_derivative, Lsode2HistoryError,
-    Lsode2NordsieckHistory, Lsode2YHistory,
+    Lsode2HistoryError, Lsode2NordsieckHistory, Lsode2YHistory, backward_differences_to_nordsieck,
+    reconcile_first_nordsieck_derivative,
 };
 use super::step_control::{
     Lsode2AcceptDecision, Lsode2NullStepWarningLevel, Lsode2RetryAction, Lsode2RetryDecision,

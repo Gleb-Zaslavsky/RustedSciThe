@@ -6018,6 +6018,21 @@ mod tests {
             status: String,
         }
 
+        fn repetitions() -> usize {
+            std::env::var("BVP_BANDED_LAPACK_REPETITIONS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(5)
+        }
+
+        fn lapack_refine_cooldown_ms() -> u64 {
+            std::env::var("BVP_BANDED_LAPACK_COOLDOWN_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(5_000)
+        }
+
         fn solution_max_abs(solution: &DMatrix<f64>) -> f64 {
             solution
                 .iter()
@@ -6231,33 +6246,46 @@ mod tests {
             ("Compiled", "Zig", zig_config),
         ];
 
-        let mut rows = Vec::new();
-        let mut baseline_solution: Option<DMatrix<f64>> = None;
+        let repetitions = repetitions();
+        let cooldown_ms = lapack_refine_cooldown_ms();
+        let mut rows: Vec<(usize, EndToEndRow)> = Vec::new();
+        let mut baseline_count = 0usize;
 
-        for (source, variant, config) in runs {
-            let (mut row, solution) = run_variant(n_steps, source, variant, config);
-            if source == "Lambdify" && variant == "ExprLegacy" {
-                baseline_solution = solution.clone();
+        for rep in 1..=repetitions {
+            let mut baseline_solution: Option<DMatrix<f64>> = None;
+
+            for (source, variant, config) in runs.clone() {
+                if !rows.is_empty() && cooldown_ms > 0 {
+                    thread::sleep(Duration::from_millis(cooldown_ms));
+                }
+                let (mut row, solution) = run_variant(n_steps, source, variant, config);
+                if source == "Lambdify" && variant == "ExprLegacy" {
+                    baseline_solution = solution.clone();
+                    if baseline_solution.is_some() {
+                        baseline_count += 1;
+                    }
+                }
+                if let (Some(solution), Some(baseline)) =
+                    (solution.as_ref(), baseline_solution.as_ref())
+                {
+                    row.solve_diff = solution_linf_diff(solution, baseline);
+                    row.rel_x_diff = solution_rel_diff(solution, baseline);
+                }
+                rows.push((rep, row));
             }
-            if let (Some(solution), Some(baseline)) =
-                (solution.as_ref(), baseline_solution.as_ref())
-            {
-                row.solve_diff = solution_linf_diff(solution, baseline);
-                row.rel_x_diff = solution_rel_diff(solution, baseline);
-            }
-            rows.push(row);
         }
 
         println!(
-            "[BVP Damp end-to-end] combustion-1000 full solve with banded backends using lapack_style_banded_lu"
+            "[BVP Damp end-to-end] combustion-1000 full solve with banded backends using lapack_style_banded_lu; repetitions={repetitions}, cooldown_ms={cooldown_ms}"
         );
-        if baseline_solution.is_none() {
+        if baseline_count < repetitions {
             println!(
-                "[BVP Damp end-to-end] Lambdify baseline did not converge; solve_diff and rel_x_diff are unavailable for this run"
+                "[BVP Damp end-to-end] Lambdify baseline converged in {baseline_count}/{repetitions} repetitions; solve_diff and rel_x_diff may be unavailable for failed repetitions"
             );
         }
         println!(
-            "{:<10} | {:<10} | {:>12} | {:>10} | {:>10} | {:>12} | {:>12} | {:>12} | {:>7} | {:>7} | {:>7} | {:<18} | {:<18} | {:<18} | {:<8}",
+            "{:>3} | {:<10} | {:<10} | {:>12} | {:>10} | {:>10} | {:>12} | {:>12} | {:>12} | {:>7} | {:>7} | {:>7} | {:<18} | {:<18} | {:<18} | {:<8}",
+            "rep",
             "source",
             "variant",
             "bootstrap_ms",
@@ -6274,10 +6302,11 @@ mod tests {
             "fun_timer",
             "status"
         );
-        println!("{}", "-".repeat(220));
-        for row in &rows {
+        println!("{}", "-".repeat(228));
+        for (rep, row) in &rows {
             println!(
-                "{:<10} | {:<10} | {:>12.3} | {:>10.3} | {:>10.3} | {:>12.6e} | {:>12} | {:>12} | {:>7} | {:>7} | {:>7} | {:<18} | {:<18} | {:<18} | {:<8}",
+                "{:>3} | {:<10} | {:<10} | {:>12.3} | {:>10.3} | {:>10.3} | {:>12.6e} | {:>12} | {:>12} | {:>7} | {:>7} | {:>7} | {:<18} | {:<18} | {:<18} | {:<8}",
+                rep,
                 row.source,
                 row.variant,
                 row.bootstrap_ms,
@@ -6296,25 +6325,83 @@ mod tests {
             );
         }
 
+        println!();
+        println!(
+            "[BVP Damp end-to-end] combustion-1000 banded lapack-style summary; all time columns are milliseconds"
+        );
+        println!(
+            "{:<10} | {:<10} | {:>7} | {:<36} | {:<36} | {:<36} | {:<18} | {:<18} | {:<18} | {:<18}",
+            "source",
+            "variant",
+            "ok/runs",
+            "total_ms mean+/-std [min,max]",
+            "bootstrap_ms mean+/-std [min,max]",
+            "solve_ms mean+/-std [min,max]",
+            "linear_solves",
+            "jac_rebuilds",
+            "solve_diff",
+            "rel_x_diff"
+        );
+        println!("{}", "-".repeat(220));
+        for (source, variant, _) in runs {
+            let samples = rows
+                .iter()
+                .filter_map(|(_, row)| {
+                    (row.source == source && row.variant == variant && row.status == "ok")
+                        .then_some(row)
+                })
+                .collect::<Vec<_>>();
+            let ok = samples.len();
+            println!(
+                "{:<10} | {:<10} | {:>2}/{:<4} | {:<36} | {:<36} | {:<36} | {:<18} | {:<18} | {:<18} | {:<18}",
+                source,
+                variant,
+                ok,
+                repetitions,
+                fmt_tuning_agg(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.total_ms)
+                )),
+                fmt_tuning_agg(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.bootstrap_ms)
+                )),
+                fmt_tuning_agg(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.solve_ms)
+                )),
+                fmt_tuning_short(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.linear_solves as f64)
+                )),
+                fmt_tuning_short(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.jac_rebuilds as f64)
+                )),
+                fmt_tuning_exp(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.solve_diff)
+                )),
+                fmt_tuning_exp(runtime_tuning_aggregate(
+                    samples.iter().map(|row| row.rel_x_diff)
+                )),
+            );
+        }
+
         assert!(
             !rows.is_empty(),
             "combustion-1000 end-to-end banded diagnostic should produce at least one row"
         );
-        if let Some(baseline_solution) = baseline_solution {
-            assert!(
-                baseline_solution.iter().all(|value| value.is_finite()),
-                "lambdify banded combustion-1000 baseline solution should remain finite"
+        assert_eq!(
+            baseline_count, repetitions,
+            "lambdify banded combustion-1000 baseline should converge in every repetition"
+        );
+        for (rep, row) in &rows {
+            assert_eq!(
+                row.status, "ok",
+                "rep {rep}: {} {} end-to-end banded row should solve successfully, got {}",
+                row.source, row.variant, row.status
             );
-            for row in &rows {
-                if row.status == "ok" {
-                    assert!(
-                        row.max_abs_solution.is_finite(),
-                        "{} {} end-to-end banded result should stay finite",
-                        row.source,
-                        row.variant
-                    );
-                }
-            }
+            assert!(
+                row.max_abs_solution.is_finite(),
+                "rep {rep}: {} {} end-to-end banded result should stay finite",
+                row.source,
+                row.variant
+            );
         }
     }
 

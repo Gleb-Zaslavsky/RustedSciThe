@@ -41,49 +41,6 @@ For stiff solvers in RustedSciThe, “method” and “backend route” are sepa
 
 The important conceptual point is that all three routes feed the same numerical integrator. You are not changing mathematics, you are changing evaluator infrastructure.
 
-### 3.1 LSODE2 backend configuration syntax
-
-LSODE2 has its own dedicated guide, but one API convention is important for IVP
-users because examples may show two similar-looking styles:
-
-```rust
-.with_backend(
-    Lsode2BackendConfig::native_banded_faithful()
-        .with_generated_backend_target_chunks(4, 4),
-)
-```
-
-and:
-
-```rust
-.with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
-```
-
-They are not interchangeable. `with_backend(...)` is the high-level route
-selector. It describes the complete LSODE2 backend preset: dense/sparse/banded
-matrix structure, concrete linear algebra backend, symbolic/generated backend
-lifecycle, AOT toolchain, and generated callback chunking knobs. This is the
-recommended syntax for user-facing examples and production code because the
-whole execution route is visible in one place.
-
-```rust
-let config = base.with_backend(
-    Lsode2BackendConfig::native_sparse_faer()
-        .with_generated_backend_target_chunks(4, 4),
-);
-```
-
-`with_linear_solver_policy(...)` is lower-level. It only controls how the linear
-solver is selected after the linear system structure is already known. `Auto`
-maps dense systems to dense LU, sparse systems to faer sparse LU, and banded
-systems to the faithful LAPACK-style banded LU. `Force(...)` is useful in parity
-tests, diagnostics, and legacy compatibility examples where you explicitly want
-to prove that a particular linear solver was selected.
-
-Practical rule: use `with_backend(...)` when you are choosing a real solver
-route; use `with_linear_solver_policy(...)` when a test or diagnostic is about
-the linear-policy resolver itself.
-
 ## 4. UniversalODESolver: One Surface, Many Methods
 
 `UniversalODESolver` lets you keep one integration shell and vary method/backend policy with minimal code movement.

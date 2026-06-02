@@ -1,9 +1,9 @@
 use super::algorithm::Lsode2ControllerConfig;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_runtime_api::{
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
     recommended_dense_jacobian_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
-    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
@@ -25,6 +25,89 @@ pub type Lsode2AnalyticalJacobianCallback =
 pub struct Lsode2AnalyticalCallbacks {
     pub residual: Lsode2AnalyticalResidualCallback,
     pub jacobian: Lsode2AnalyticalJacobianCallback,
+}
+
+/// User-facing setup for a pure numerical LSODE2 IVP.
+///
+/// This keeps the numerical route free from symbolic `Expr` placeholders at
+/// the public API boundary. Internally LSODE2 still stores one shared
+/// [`Lsode2ProblemConfig`] shape for symbolic and numerical routes, but callers
+/// that already have Rust closures should not have to construct meaningless
+/// symbolic equations.
+#[derive(Clone)]
+pub struct Lsode2NumericProblemOptions {
+    pub values: Vec<String>,
+    pub arg: String,
+    pub t0: f64,
+    pub y0: DVector<f64>,
+    pub t_bound: f64,
+    pub max_step: f64,
+    pub rtol: f64,
+    pub atol: f64,
+    pub linear_system_structure: Lsode2LinearSystemStructure,
+    pub linear_solver_policy: Lsode2LinearSolverPolicy,
+    pub controller: Lsode2ControllerConfig,
+    pub native_execution: Lsode2NativeExecutionConfig,
+}
+
+impl Lsode2NumericProblemOptions {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+    ) -> Self {
+        Self {
+            values,
+            arg,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol,
+            atol,
+            linear_system_structure: Lsode2LinearSystemStructure::Sparse,
+            linear_solver_policy: Lsode2LinearSolverPolicy::Auto,
+            controller: Lsode2ControllerConfig::default(),
+            native_execution: Lsode2NativeExecutionConfig::default(),
+        }
+    }
+
+    pub fn with_linear_system_structure(mut self, structure: Lsode2LinearSystemStructure) -> Self {
+        self.linear_system_structure = structure;
+        self
+    }
+
+    pub fn with_linear_solver_policy(mut self, policy: Lsode2LinearSolverPolicy) -> Self {
+        self.linear_solver_policy = policy;
+        self
+    }
+
+    pub fn with_controller(mut self, controller: Lsode2ControllerConfig) -> Self {
+        self.controller = controller;
+        self
+    }
+
+    pub fn with_native_execution(mut self, native_execution: Lsode2NativeExecutionConfig) -> Self {
+        self.native_execution = native_execution;
+        self
+    }
+
+    pub fn with_faithful_bdf_solve(
+        self,
+        max_step_attempts: usize,
+        max_accepted_steps: usize,
+    ) -> Self {
+        self.with_native_execution(Lsode2NativeExecutionConfig::faithful_bdf_solve(
+            max_step_attempts,
+            max_accepted_steps,
+        ))
+    }
 }
 
 /// Time-integration family selected by the LSODE2 facade.
@@ -762,6 +845,130 @@ impl Lsode2ProblemConfig {
             backend: Lsode2BackendConfig::default(),
             native_execution: Lsode2NativeExecutionConfig::default(),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_fd<R>(
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+        residual: R,
+    ) -> Self
+    where
+        R: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+    {
+        Self::new_numeric_fd_with_options(
+            Lsode2NumericProblemOptions::new(values, arg, t0, y0, t_bound, max_step, rtol, atol),
+            residual,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_numeric_with_jacobian<R, J>(
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+        residual: R,
+        jacobian: J,
+    ) -> Self
+    where
+        R: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        Self::new_numeric_with_jacobian_options(
+            Lsode2NumericProblemOptions::new(values, arg, t0, y0, t_bound, max_step, rtol, atol),
+            residual,
+            jacobian,
+        )
+    }
+
+    pub fn new_numeric_fd_with_options<R>(options: Lsode2NumericProblemOptions, residual: R) -> Self
+    where
+        R: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+    {
+        let n = options.y0.len();
+        Self::new_numeric_with_callbacks(
+            options,
+            residual,
+            move |_t, _y: &DVector<f64>| DMatrix::zeros(n, n),
+            Lsode2JacobianBackend::FiniteDifference,
+        )
+    }
+
+    pub fn new_numeric_with_jacobian_options<R, J>(
+        options: Lsode2NumericProblemOptions,
+        residual: R,
+        jacobian: J,
+    ) -> Self
+    where
+        R: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        Self::new_numeric_with_callbacks(
+            options,
+            residual,
+            jacobian,
+            Lsode2JacobianBackend::AnalyticClosure,
+        )
+    }
+
+    fn new_numeric_with_callbacks<R, J>(
+        options: Lsode2NumericProblemOptions,
+        residual: R,
+        jacobian: J,
+        jacobian_backend: Lsode2JacobianBackend,
+    ) -> Self
+    where
+        R: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+        J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
+    {
+        assert_eq!(
+            options.values.len(),
+            options.y0.len(),
+            "LSODE2 numerical options require one variable name per initial value"
+        );
+        assert!(
+            matches!(
+                jacobian_backend,
+                Lsode2JacobianBackend::AnalyticClosure | Lsode2JacobianBackend::FiniteDifference
+            ),
+            "LSODE2 numerical constructors only accept analytical or finite-difference Jacobian backends"
+        );
+
+        let eq_system = vec![Expr::Const(0.0); options.y0.len()];
+        let mut config = Self::new(
+            eq_system,
+            options.values,
+            options.arg,
+            options.t0,
+            options.y0,
+            options.t_bound,
+            options.max_step,
+            options.rtol,
+            options.atol,
+        );
+        config.linear_system_structure = options.linear_system_structure;
+        config.linear_solver_policy = options.linear_solver_policy;
+        config.controller = options.controller;
+        config.native_execution = options.native_execution;
+        config.analytical_callbacks = Some(Lsode2AnalyticalCallbacks {
+            residual: Arc::new(residual),
+            jacobian: Arc::new(jacobian),
+        });
+        config.residual_jacobian_source = Lsode2ResidualJacobianSource::Analytical;
+        config.backend.jacobian_backend = jacobian_backend;
+        config.sync_legacy_backend_from_policy();
+        config
     }
 
     pub fn with_controller(mut self, controller: Lsode2ControllerConfig) -> Self {

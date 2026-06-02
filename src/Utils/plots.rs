@@ -52,6 +52,8 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
             .border_style(&BLACK)
             .draw()
             .unwrap();
+
+        root_area.present().unwrap();
     }
 }
 

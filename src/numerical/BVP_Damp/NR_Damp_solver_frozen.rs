@@ -5,6 +5,9 @@ use std::time::Instant;
 
 use crate::Utils::logger::save_matrix_to_file;
 use crate::Utils::plots::plots;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
@@ -1151,6 +1154,35 @@ impl NRBVP {
         Some(permutted_results)
     }
 
+    /// Converts the computed solution into the unified postprocessing dataset.
+    pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
+        if self.result.is_none() {
+            return Err(PostprocessError::InvalidDataset(
+                "Frozen BVP postprocess_dataset requires a converged solution vector".to_string(),
+            ));
+        }
+        let values = self.get_result().ok_or_else(|| {
+            PostprocessError::InvalidDataset(
+                "Frozen BVP postprocess_dataset requires a converged solution vector".to_string(),
+            )
+        })?;
+        PostprocessDataset::new(
+            self.arg.clone(),
+            self.values.clone(),
+            self.x_mesh.clone(),
+            values,
+        )
+    }
+
+    /// Executes a declarative postprocessing plan using the modern facade.
+    pub fn execute_postprocessing(
+        &self,
+        plan: &PostprocessPlan,
+    ) -> Result<PostprocessReport, PostprocessError> {
+        let dataset = self.postprocess_dataset()?;
+        plan.execute(&dataset)
+    }
+
     pub fn plot_result(&self) {
         let number_of_Ys = self.values.len();
         let n_steps = self.n_steps;
@@ -1475,10 +1507,24 @@ mod tests {
         solver.try_solve().unwrap_or_else(|err| {
             panic!("{source}/{variant} Frozen combustion solve failed: {err:?}")
         });
+        collect_frozen_story_row(begin, solver, source, variant, baseline)
+    }
+
+    fn collect_frozen_story_row(
+        begin: Instant,
+        solver: NRBVP,
+        source: &'static str,
+        variant: &'static str,
+        baseline: Option<&DMatrix<f64>>,
+    ) -> (
+        FrozenCombustionStoryRow,
+        DMatrix<f64>,
+        GeneratedBackendConfig,
+    ) {
         let total_ms = begin.elapsed().as_secs_f64() * 1_000.0;
         let solution = solver
             .get_result()
-            .expect("successful Frozen combustion solve should expose its result");
+            .expect("successful Frozen solve should expose its result");
         assert!(
             solution.iter().all(|value| value.is_finite()),
             "{source}/{variant} returned non-finite values"
@@ -1520,6 +1566,76 @@ mod tests {
             build_policy: frozen_story_diagnostic_string(&stats, "aot.build_policy"),
         };
         (row, solution, solver.generated_backend_config().clone())
+    }
+
+    fn frozen_polynomial_two_point_solver(n_steps: usize, config: GeneratedBackendConfig) -> NRBVP {
+        // Non-combustion nonlinear BVP with exact solution y = 1 + x^2:
+        // y' = z,
+        // z' = 2 + 0.1 * (y - (1 + x^2))^2.
+        //
+        // Frozen currently requires a boundary-condition key for every state
+        // variable, so we use y(-1) and z(1), both taken from the exact profile.
+        let values = vec!["y".to_string(), "z".to_string()];
+        let t0 = -1.0;
+        let t_end = 1.0;
+        let h = (t_end - t0) / n_steps as f64;
+        let mut guess = vec![0.0; values.len() * n_steps];
+        for i in 0..n_steps {
+            let x = t0 + i as f64 * h;
+            let y = 1.0 + x * x;
+            let z = 2.0 * x;
+            guess[i * values.len()] = y;
+            guess[i * values.len() + 1] = z;
+        }
+
+        let y_left = 2.0;
+        let z_right = 2.0;
+        let options = FrozenSolverOptions::banded_frozen()
+            .with_generated_backend_config(config)
+            .with_tolerance(1e-6)
+            .with_max_iterations(40);
+        let mut solver = NRBVP::new_with_options(
+            vec![
+                Expr::parse_expression("z"),
+                Expr::parse_expression("2.0 + 0.1*(y - (1.0 + x*x))^2"),
+            ],
+            DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(guess).as_slice()),
+            values,
+            "x".to_string(),
+            HashMap::from([
+                ("y".to_string(), vec![(0usize, y_left)]),
+                ("z".to_string(), vec![(1usize, z_right)]),
+            ]),
+            t0,
+            t_end,
+            n_steps,
+            options,
+        );
+        solver.dont_save_log(true);
+        solver
+    }
+
+    fn run_frozen_polynomial_story_row(
+        n_steps: usize,
+        source: &'static str,
+        variant: &'static str,
+        config: GeneratedBackendConfig,
+        baseline: Option<&DMatrix<f64>>,
+    ) -> (
+        FrozenCombustionStoryRow,
+        DMatrix<f64>,
+        GeneratedBackendConfig,
+    ) {
+        let begin = Instant::now();
+        let mut solver = frozen_polynomial_two_point_solver(n_steps, config);
+        let solve_result = solver.try_solve().unwrap_or_else(|err| {
+            panic!("{source}/{variant} Frozen nonlinear polynomial solve failed: {err:?}")
+        });
+        assert!(
+            solve_result.is_some(),
+            "{source}/{variant} Frozen nonlinear polynomial solve did not converge within the configured iteration/tolerance budget"
+        );
+        collect_frozen_story_row(begin, solver, source, variant, baseline)
     }
 
     fn frozen_story_mean_std(values: &[f64]) -> (f64, f64) {
@@ -1892,6 +2008,72 @@ mod tests {
                     row.build_policy == "RequirePrebuilt" && row.compile_link_ms.is_nan()
                 }),
             "Frozen Sparse prebuilt rows must neither fall back nor compile again"
+        );
+    }
+
+    #[test]
+    #[ignore = "Frozen non-combustion nonlinear polynomial BVP: Banded AtomView Lambdify vs tcc BuildIfMissing -> RequirePrebuilt"]
+    fn frozen_polynomial_banded_atomview_tcc_build_then_require_prebuilt_story() {
+        let n_steps = 80;
+        let (baseline_row, baseline, _) = run_frozen_polynomial_story_row(
+            n_steps,
+            "Lambdify",
+            "AtomView",
+            GeneratedBackendConfig::banded_lambdify_defaults(),
+            None,
+        );
+        let (built_row, _, built_config) = run_frozen_polynomial_story_row(
+            n_steps,
+            "AOT",
+            "build",
+            frozen_tcc_config(
+                "Banded",
+                AotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Release,
+                },
+                frozen_whole_chunking(),
+                AotExecutionPolicy::SequentialOnly,
+            ),
+            Some(&baseline),
+        );
+        assert!(
+            built_config.resolver.is_some(),
+            "Polynomial BuildIfMissing must leave a resolver snapshot for strict reuse"
+        );
+        let strict_config = built_config.with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+        let mut rows = vec![baseline_row, built_row];
+        for _ in 0..2 {
+            let (prebuilt_row, _, _) = run_frozen_polynomial_story_row(
+                n_steps,
+                "AOT",
+                "prebuilt",
+                strict_config.clone(),
+                Some(&baseline),
+            );
+            rows.push(prebuilt_row);
+        }
+
+        print_frozen_combustion_story(
+            "nonlinear polynomial BVP Banded AtomView tcc BuildIfMissing -> RequirePrebuilt lifecycle",
+            &rows,
+        );
+        assert!(
+            rows.iter().all(|row| row.solution_diff <= 1e-6),
+            "Frozen nonlinear polynomial lifecycle rows must remain equivalent to Lambdify"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.source == "AOT")
+                .all(|row| row.selected_backend == "AotCompiled"),
+            "Frozen nonlinear polynomial build and strict prebuilt rows must execute compiled callbacks"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.variant == "prebuilt")
+                .all(|row| {
+                    row.build_policy == "RequirePrebuilt" && row.compile_link_ms.is_nan()
+                }),
+            "Frozen nonlinear polynomial prebuilt rows must neither fall back nor compile again"
         );
     }
 

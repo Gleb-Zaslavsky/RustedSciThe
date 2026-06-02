@@ -13,8 +13,8 @@
 //! layers.
 
 use crate::symbolic::codegen::codegen_runtime_api::{
-    RuntimeArguments, extract_sparse_entries_from_dense_jacobian,
-    recommended_row_chunking_for_parallelism,
+    extract_sparse_entries_from_dense_jacobian, recommended_row_chunking_for_parallelism,
+    RuntimeArguments,
 };
 use crate::symbolic::codegen::codegen_tasks::{
     ResidualTask, SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
@@ -291,17 +291,15 @@ fn real_bvp_sparse_jacobian_runtime_plan_matches_existing_lambdify_values() {
         .collect();
     let entries_owned = jac.symbolic_jacobian_sparse_entries_owned();
     let entries = borrowed_sparse_entries(&entries_owned);
+    let matrix_dim = jac.variable_string.len();
     let task = SparseJacobianTask {
         fn_name: "eval_bvp_sparse_values",
-        shape: (jac.symbolic_jacobian.len(), jac.symbolic_jacobian.len()),
+        shape: (matrix_dim, matrix_dim),
         entries: &entries,
         variables: &variable_names,
         params: None,
     };
-    let runtime_plan = task.runtime_plan(recommended_row_chunking_for_parallelism(
-        jac.symbolic_jacobian.len(),
-        4,
-    ));
+    let runtime_plan = task.runtime_plan(recommended_row_chunking_for_parallelism(matrix_dim, 4));
 
     let flat_args: Vec<f64> = (0..jac.variable_string.len())
         .map(|index| 0.2 + index as f64 * 0.01)
@@ -336,8 +334,8 @@ fn real_bvp_sparse_jacobian_runtime_plan_matches_existing_lambdify_values() {
     }
 
     let sparse_matrix = runtime_plan.assemble_sparse_col_mat(&actual);
-    assert_eq!(sparse_matrix.nrows(), jac.symbolic_jacobian.len());
-    assert_eq!(sparse_matrix.ncols(), jac.symbolic_jacobian.len());
+    assert_eq!(sparse_matrix.nrows(), matrix_dim);
+    assert_eq!(sparse_matrix.ncols(), matrix_dim);
     assert_eq!(sparse_matrix.compute_nnz(), expected.len());
 }
 

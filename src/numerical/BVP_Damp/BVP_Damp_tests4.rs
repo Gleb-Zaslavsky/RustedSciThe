@@ -3220,6 +3220,491 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy combustion-1000 AtomView+tcc Auto chunking production diagnostics"]
+    fn combustion_1000_tcc_auto_chunking_sparse_banded_end_to_end_story() {
+        #[derive(Clone)]
+        struct AutoVariant {
+            source: &'static str,
+            matrix: &'static str,
+            variant: &'static str,
+            config: GeneratedBackendConfig,
+        }
+
+        #[derive(Clone)]
+        struct AutoSample {
+            source: &'static str,
+            matrix: &'static str,
+            variant: &'static str,
+            total_ms: f64,
+            solve_diff: f64,
+            rel_x_diff: f64,
+            selected_backend: String,
+            runtime_execution_policy: String,
+            runtime_parallel_requested: String,
+            auto_execution_mode: String,
+            auto_workers: f64,
+            auto_min_work_per_job: f64,
+            auto_residual_reason: String,
+            auto_sparse_reason: String,
+            auto_residual_work_per_job: f64,
+            auto_sparse_work_per_job: f64,
+            auto_residual_work_per_chunk: f64,
+            auto_sparse_work_per_chunk: f64,
+            residual_actual_jobs: f64,
+            sparse_actual_jobs: f64,
+            residual_runtime_work_per_job: f64,
+            sparse_runtime_work_per_job: f64,
+            residual_fallback_reason: String,
+            sparse_fallback_reason: String,
+            residual_values_ms: f64,
+            jacobian_values_ms: f64,
+            jacobian_assembly_ms: f64,
+            linear_ms: f64,
+            symbolic_ms: f64,
+            status: String,
+        }
+
+        fn auto_release_tcc_config(config: GeneratedBackendConfig) -> GeneratedBackendConfig {
+            release_matrix_config(
+                config,
+                AotChunkingPolicy::default(),
+                AotExecutionPolicy::Auto,
+            )
+        }
+
+        fn run_auto_sample(
+            n_steps: usize,
+            variant: &AutoVariant,
+        ) -> (AutoSample, Option<DMatrix<f64>>) {
+            let total_begin = Instant::now();
+            let mut solver = make_combustion_solver(n_steps, variant.config.clone());
+            let solve_status = catch_unwind(AssertUnwindSafe(|| solver.try_solver()));
+            let total_ms = total_begin.elapsed().as_secs_f64() * 1_000.0;
+            let statistics = solver.get_statistics();
+
+            let mut sample = AutoSample {
+                source: variant.source,
+                matrix: variant.matrix,
+                variant: variant.variant,
+                total_ms,
+                solve_diff: f64::NAN,
+                rel_x_diff: f64::NAN,
+                selected_backend: stats_diagnostic_string(
+                    &statistics,
+                    "generated.selected_backend",
+                ),
+                runtime_execution_policy: stats_diagnostic_string(
+                    &statistics,
+                    "aot.runtime.execution_policy",
+                ),
+                runtime_parallel_requested: stats_diagnostic_string(
+                    &statistics,
+                    "aot.runtime.parallel_requested",
+                ),
+                auto_execution_mode: stats_diagnostic_string(
+                    &statistics,
+                    "aot.auto.execution_mode",
+                ),
+                auto_workers: stats_diagnostic_usize(&statistics, "aot.auto.workers"),
+                auto_min_work_per_job: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.auto.min_work_per_job",
+                ),
+                auto_residual_reason: stats_diagnostic_string(
+                    &statistics,
+                    "aot.auto.residual.reason",
+                ),
+                auto_sparse_reason: stats_diagnostic_string(
+                    &statistics,
+                    "aot.auto.sparse_jacobian.reason",
+                ),
+                auto_residual_work_per_job: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.auto.residual.work_per_job",
+                ),
+                auto_sparse_work_per_job: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.auto.sparse_jacobian.work_per_job",
+                ),
+                auto_residual_work_per_chunk: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.auto.residual.work_per_chunk",
+                ),
+                auto_sparse_work_per_chunk: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.auto.sparse_jacobian.work_per_chunk",
+                ),
+                residual_actual_jobs: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.runtime.residual.actual_jobs",
+                ),
+                sparse_actual_jobs: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.runtime.sparse_jacobian.actual_jobs",
+                ),
+                residual_runtime_work_per_job: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.runtime.residual.work_per_job",
+                ),
+                sparse_runtime_work_per_job: stats_diagnostic_usize(
+                    &statistics,
+                    "aot.runtime.sparse_jacobian.work_per_job",
+                ),
+                residual_fallback_reason: stats_diagnostic_string(
+                    &statistics,
+                    "aot.runtime.residual.fallback_reason",
+                ),
+                sparse_fallback_reason: stats_diagnostic_string(
+                    &statistics,
+                    "aot.runtime.sparse_jacobian.fallback_reason",
+                ),
+                residual_values_ms: callback_residual_values_ms(&statistics),
+                jacobian_values_ms: callback_jacobian_values_ms(&statistics),
+                jacobian_assembly_ms: callback_jacobian_assembly_ms(&statistics),
+                linear_ms: stats_timer_ms(&statistics, "Linear System"),
+                symbolic_ms: stats_timer_ms(&statistics, "Symbolic Operations"),
+                status: "not_run".to_string(),
+            };
+
+            match solve_status {
+                Ok(Ok(_)) => match solver.get_result() {
+                    Some(solution) => {
+                        sample.status = "ok".to_string();
+                        (sample, Some(solution))
+                    }
+                    None => {
+                        sample.status = "no_result".to_string();
+                        (sample, None)
+                    }
+                },
+                Ok(Err(err)) => {
+                    sample.status = format!("solve_error({err:?})");
+                    (sample, None)
+                }
+                Err(_) => {
+                    sample.status = "solve_panicked".to_string();
+                    (sample, None)
+                }
+            }
+        }
+
+        fn fill_auto_diffs(samples: &mut [AutoSample], solutions: &[Option<DMatrix<f64>>]) {
+            let baseline = samples
+                .iter()
+                .zip(solutions.iter())
+                .find_map(|(sample, solution)| {
+                    (sample.source == "Lambdify" && sample.status == "ok")
+                        .then_some(solution.as_ref())
+                        .flatten()
+                });
+            let Some(baseline) = baseline else {
+                return;
+            };
+
+            for (sample, solution) in samples.iter_mut().zip(solutions.iter()) {
+                let Some(solution) = solution.as_ref() else {
+                    continue;
+                };
+                if solution.shape() != baseline.shape() {
+                    sample.status = format!(
+                        "shape_mismatch({:?}!={:?})",
+                        solution.shape(),
+                        baseline.shape()
+                    );
+                    continue;
+                }
+                sample.solve_diff = solution_linf_diff(solution, baseline);
+                sample.rel_x_diff = solution_rel_diff(solution, baseline);
+            }
+        }
+
+        fn fmt_value(value: f64) -> String {
+            if value.is_finite() {
+                format!("{value:.3}")
+            } else {
+                "-".to_string()
+            }
+        }
+
+        fn fmt_scientific(value: f64) -> String {
+            if value.is_finite() {
+                format!("{value:.3e}")
+            } else {
+                "-".to_string()
+            }
+        }
+
+        fn fmt_aggregate(value: Aggregate) -> String {
+            if value.mean.is_finite() {
+                format!(
+                    "{:.3} +/- {:.3} [{:.3}, {:.3}]",
+                    value.mean, value.stddev, value.min, value.max
+                )
+            } else {
+                "-".to_string()
+            }
+        }
+
+        fn print_auto_sample_table(samples: &[AutoSample]) {
+            println!("[BVP Damp Auto] combustion-1000 AtomView+tcc Auto per-run table");
+            println!(
+                "source   | matrix | variant    | total_ms | solve_diff | selected_backend | policy | auto_mode | parallel_requested | residual_values_ms | jacobian_values_ms | jacobian_assembly_ms | status"
+            );
+            println!(
+                "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+            );
+            for sample in samples {
+                println!(
+                    "{:<8} | {:<6} | {:<10} | {:>8} | {:>10} | {:<16} | {:<6} | {:<9} | {:<18} | {:>18} | {:>18} | {:>20} | {}",
+                    sample.source,
+                    sample.matrix,
+                    sample.variant,
+                    fmt_value(sample.total_ms),
+                    fmt_scientific(sample.solve_diff),
+                    sample.selected_backend,
+                    sample.runtime_execution_policy,
+                    sample.auto_execution_mode,
+                    sample.runtime_parallel_requested,
+                    fmt_value(sample.residual_values_ms),
+                    fmt_value(sample.jacobian_values_ms),
+                    fmt_value(sample.jacobian_assembly_ms),
+                    sample.status
+                );
+            }
+        }
+
+        fn print_auto_summary_table(variants: &[AutoVariant], samples: &[AutoSample]) {
+            println!();
+            println!("[BVP Damp Auto] combustion-1000 AtomView+tcc Auto summary table");
+            println!(
+                "source   | matrix | variant    | ok/runs | total_ms mean+/-std [min,max] | solve_diff mean+/-std | symbolic_ms | linear_ms | residual_values_ms | jacobian_values_ms | jacobian_assembly_ms | selected | policy | auto_mode | parallel_requested"
+            );
+            println!(
+                "----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+            );
+            for variant in variants {
+                let rows = samples
+                    .iter()
+                    .filter(|sample| {
+                        sample.source == variant.source
+                            && sample.matrix == variant.matrix
+                            && sample.variant == variant.variant
+                    })
+                    .collect::<Vec<_>>();
+                let ok_runs = rows.iter().filter(|sample| sample.status == "ok").count();
+                println!(
+                    "{:<8} | {:<6} | {:<10} | {:>2}/{:<3} | {:<31} | {:>9.3e} +/- {:<9.1e} | {:<11} | {:<9} | {:<18} | {:<18} | {:<20} | {:<8} | {:<6} | {:<9} | {}",
+                    variant.source,
+                    variant.matrix,
+                    variant.variant,
+                    ok_runs,
+                    rows.len(),
+                    fmt_aggregate(aggregate(rows.iter().map(|sample| sample.total_ms))),
+                    aggregate(rows.iter().map(|sample| sample.solve_diff)).mean,
+                    aggregate(rows.iter().map(|sample| sample.solve_diff)).stddev,
+                    fmt_aggregate(aggregate(rows.iter().map(|sample| sample.symbolic_ms))),
+                    fmt_aggregate(aggregate(rows.iter().map(|sample| sample.linear_ms))),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.residual_values_ms)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.jacobian_values_ms)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.jacobian_assembly_ms)
+                    )),
+                    summarize_reason(rows.iter().map(|sample| sample.selected_backend.as_str())),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.runtime_execution_policy.as_str())
+                    ),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.auto_execution_mode.as_str())
+                    ),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.runtime_parallel_requested.as_str())
+                    )
+                );
+            }
+        }
+
+        fn print_auto_runtime_table(variants: &[AutoVariant], samples: &[AutoSample]) {
+            println!();
+            println!("[BVP Damp Auto] combustion-1000 AtomView+tcc Auto planned/runtime jobs");
+            println!(
+                "source   | matrix | variant    | auto_workers | min_work/job | auto_res_reason | auto_jac_reason | auto_res_work/job | auto_jac_work/job | auto_res_work/chunk | auto_jac_work/chunk | res_actual_jobs | jac_actual_jobs | res_runtime_work/job | jac_runtime_work/job | res_fallback | jac_fallback"
+            );
+            println!(
+                "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+            );
+            for variant in variants {
+                let rows = samples
+                    .iter()
+                    .filter(|sample| {
+                        sample.source == variant.source
+                            && sample.matrix == variant.matrix
+                            && sample.variant == variant.variant
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{:<8} | {:<6} | {:<10} | {:<12} | {:<12} | {:<15} | {:<15} | {:<17} | {:<17} | {:<19} | {:<19} | {:<15} | {:<15} | {:<20} | {:<20} | {:<12} | {}",
+                    variant.source,
+                    variant.matrix,
+                    variant.variant,
+                    fmt_aggregate(aggregate(rows.iter().map(|sample| sample.auto_workers))),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.auto_min_work_per_job)
+                    )),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.auto_residual_reason.as_str())
+                    ),
+                    summarize_reason(rows.iter().map(|sample| sample.auto_sparse_reason.as_str())),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.auto_residual_work_per_job)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.auto_sparse_work_per_job)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter()
+                            .map(|sample| sample.auto_residual_work_per_chunk)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.auto_sparse_work_per_chunk)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.residual_actual_jobs)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.sparse_actual_jobs)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter()
+                            .map(|sample| sample.residual_runtime_work_per_job)
+                    )),
+                    fmt_aggregate(aggregate(
+                        rows.iter().map(|sample| sample.sparse_runtime_work_per_job)
+                    )),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.residual_fallback_reason.as_str())
+                    ),
+                    summarize_reason(
+                        rows.iter()
+                            .map(|sample| sample.sparse_fallback_reason.as_str())
+                    )
+                );
+            }
+        }
+
+        let n_steps = 1000usize;
+        let repetitions = 2usize;
+        let variants = [
+            AutoVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "AtomView",
+                config: sparse_atomview_lambdify_baseline(),
+            },
+            AutoVariant {
+                source: "Lambdify",
+                matrix: "Banded",
+                variant: "AtomView",
+                config: banded_atomview_lambdify_baseline(),
+            },
+            AutoVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/Auto",
+                config: auto_release_tcc_config(
+                    GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(),
+                ),
+            },
+            AutoVariant {
+                source: "AOT",
+                matrix: "Banded",
+                variant: "tcc/Auto",
+                config: auto_release_tcc_config(
+                    GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(),
+                ),
+            },
+        ];
+
+        let mut samples = Vec::with_capacity(variants.len() * repetitions);
+        for repetition in 0..repetitions {
+            println!(
+                "[BVP Damp Auto] starting repetition {}/{}",
+                repetition + 1,
+                repetitions
+            );
+            let mut repetition_samples = Vec::with_capacity(variants.len());
+            let mut repetition_solutions = Vec::with_capacity(variants.len());
+            for variant in &variants {
+                println!(
+                    "[BVP Damp Auto] running source={} matrix={} variant={}",
+                    variant.source, variant.matrix, variant.variant
+                );
+                let _ = io::stdout().flush();
+                let (sample, solution) = run_auto_sample(n_steps, variant);
+                println!(
+                    "[BVP Damp Auto] finished source={} matrix={} variant={} status={}",
+                    sample.source, sample.matrix, sample.variant, sample.status
+                );
+                repetition_samples.push(sample);
+                repetition_solutions.push(solution);
+            }
+            fill_auto_diffs(&mut repetition_samples, &repetition_solutions);
+            samples.extend(repetition_samples);
+        }
+
+        print_auto_sample_table(&samples);
+        print_auto_summary_table(&variants, &samples);
+        print_auto_runtime_table(&variants, &samples);
+
+        assert!(
+            samples
+                .iter()
+                .filter(|sample| sample.source == "Lambdify")
+                .all(|sample| sample.status == "ok"),
+            "Lambdify baselines must solve successfully before Auto AOT diagnostics are interpreted"
+        );
+        assert!(
+            samples
+                .iter()
+                .filter(|sample| sample.source == "AOT")
+                .all(|sample| sample.status == "ok"),
+            "Auto AOT rows must solve successfully"
+        );
+        assert!(
+            samples
+                .iter()
+                .filter(|sample| sample.source == "AOT")
+                .all(|sample| sample.solve_diff.is_finite() && sample.solve_diff <= 1e-6),
+            "Auto AOT rows must remain numerically equivalent to the Lambdify baseline"
+        );
+        assert!(
+            samples
+                .iter()
+                .filter(|sample| sample.source == "AOT")
+                .all(|sample| {
+                    sample.selected_backend == "AotCompiled"
+                        && sample.runtime_execution_policy == "Auto"
+                        && sample.auto_min_work_per_job.is_finite()
+                        && sample.auto_residual_reason != "-"
+                        && sample.auto_sparse_reason != "-"
+                        && sample.residual_actual_jobs.is_finite()
+                        && sample.residual_actual_jobs >= 1.0
+                        && sample.sparse_actual_jobs.is_finite()
+                        && sample.sparse_actual_jobs >= 1.0
+                }),
+            "Auto AOT rows must expose selected backend, planned work, actual jobs, and fallback diagnostics"
+        );
+    }
+
+    #[test]
     fn isolated_cold_race_payload_round_trips_metrics_and_solution() {
         let variant = RaceVariant {
             source: "AOT",

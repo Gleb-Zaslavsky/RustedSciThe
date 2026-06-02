@@ -269,6 +269,47 @@ Current BVP combustion story tests show a nuanced result: chunking is correct an
 
 Even that large run does not make forced chunking a universal default: full cold times for `tcc/whole` and `tcc/chunk4` were statistically close, because hot callback work is only one part of the solve. This is why `Auto` fallback matters. If the chunk/job workload is too small, the runtime may intentionally use the sequential path to avoid scheduling overhead. That is not a hidden failure; it is the desired production behavior. If you want to study break-even points on your machine, use the diagnostic tests and inspect `actual_jobs`, `fallback`, `residual_ms`, `jacobian_ms`, and `linear_ms`. In production, leave chunking on `Auto` unless a measured model-specific configuration earns an explicit override.
 
+The most direct production spelling is to leave chunking at its default and ask
+the compiled backend to decide at runtime:
+
+```rust
+let generated = GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc()
+    .with_aot_execution_policy(AotExecutionPolicy::Auto);
+```
+
+After `solver.try_solver()?`, inspect the diagnostics map rather than guessing
+from the requested configuration:
+
+```rust
+let stats = solver.get_statistics();
+let d = &stats.diagnostics;
+
+let auto_mode = d.get("aot.auto.execution_mode");
+let auto_residual_reason = d.get("aot.auto.residual.reason");
+let auto_jacobian_reason = d.get("aot.auto.sparse_jacobian.reason");
+let residual_jobs = d.get("aot.runtime.residual.actual_jobs");
+let jacobian_jobs = d.get("aot.runtime.sparse_jacobian.actual_jobs");
+let residual_fallback = d.get("aot.runtime.residual.fallback_reason");
+let jacobian_fallback = d.get("aot.runtime.sparse_jacobian.fallback_reason");
+let parallel_requested = d.get("aot.runtime.parallel_requested");
+
+println!(
+    "Auto={auto_mode:?}, residual={auto_residual_reason:?}/{residual_jobs:?}/{residual_fallback:?}, \
+     jacobian={auto_jacobian_reason:?}/{jacobian_jobs:?}/{jacobian_fallback:?}, \
+     parallel_requested={parallel_requested:?}"
+);
+```
+
+The important point is semantic, not cosmetic: `aot.auto.*` describes the plan,
+while `aot.runtime.*` describes what the linked callback actually did. In the
+12-core `combustion-1000` AtomView+tcc story, `Auto` chose `Sequential` for both
+Sparse and Banded. The plan said `work_per_chunk_too_small` for the Jacobian
+stage and `single_chunk_or_job` for the residual stage; runtime diagnostics
+matched that with `actual_jobs = 1`, `parallel_requested = false`, and
+`single_requested_job`. That is a successful Auto decision. Forced chunking
+should only be used when a larger model, or a break-even test, proves that there
+is enough callback work per job to pay for scheduling.
+
 ### Comparing cold and warm runs
 
 `total_ms` is meaningful only when the lifecycle included in a run is clear. A cold wall-clock test starts a fresh process and includes symbolic frontend construction, code generation, compilation, linking, and the Newton solve; it answers "how long from pressing the button until a result?" A warm or `RequirePrebuilt` run starts with an existing artifact and answers a different question: "how expensive is one more solve in a series?"

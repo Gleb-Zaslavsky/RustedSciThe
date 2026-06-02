@@ -6,9 +6,10 @@
 //! and normalizes user input, while solver execution and postprocessing remain
 //! explicit follow-up steps.
 
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use crate::command_interpreter::task_parser_common::{
-    apply_symbolic_substitutions_to_vec, parse_symbolic_substitutions, validate_symbol_names,
+    SharedEquationParseError, parse_symbolic_equation_system,
 };
 use crate::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
@@ -19,9 +20,8 @@ use crate::numerical::LSODE2::{
 use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
 use crate::numerical::Radau::Radau_main::RadauOrder;
 use crate::symbolic::symbolic_engine::Expr;
-use csv::Writer;
 use nalgebra::{DMatrix, DVector};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level family selector for text-driven task shells.
@@ -143,7 +143,61 @@ pub enum Lsode2TaskExecutionSpec {
 pub struct PostprocessingSpec {
     pub save_csv: bool,
     pub csv_path: Option<String>,
+    pub save_txt: bool,
+    pub txt_path: Option<String>,
+    pub write_report: bool,
+    pub report_path: Option<String>,
+    pub plotters_png: bool,
+    pub plotters_dir: Option<String>,
+    pub gnuplot_png: bool,
+    pub gnuplot_dir: Option<String>,
+    pub terminal_plot: bool,
     pub plot: bool,
+}
+
+impl PostprocessingSpec {
+    fn to_plan(&self, default_csv_path: &str) -> PostprocessPlan {
+        let mut plan = PostprocessPlan::new();
+        if self.save_csv {
+            plan = plan.save_csv(
+                self.csv_path
+                    .clone()
+                    .unwrap_or_else(|| default_csv_path.to_string()),
+            );
+        }
+        if self.save_txt {
+            plan = plan.save_txt(
+                self.txt_path
+                    .clone()
+                    .unwrap_or_else(|| "ivp_result.txt".to_string()),
+            );
+        }
+        if self.write_report {
+            plan = plan.write_report(
+                self.report_path
+                    .clone()
+                    .unwrap_or_else(|| "ivp_report.md".to_string()),
+            );
+        }
+        if self.plotters_png {
+            plan = plan.plotters_png(
+                self.plotters_dir
+                    .clone()
+                    .unwrap_or_else(|| "ivp_plotters".to_string()),
+            );
+        }
+        if self.gnuplot_png {
+            plan = plan.gnuplot_png(
+                self.gnuplot_dir
+                    .clone()
+                    .unwrap_or_else(|| "ivp_gnuplot".to_string()),
+            );
+        }
+        if self.terminal_plot {
+            plan = plan.terminal_plot();
+        }
+        plan
+    }
 }
 
 /// Fully normalized textual IVP task ready to be turned into a solver.
@@ -435,10 +489,10 @@ pub fn run_ivp_task_from_str(input: &str) -> Result<IvpTaskRunResult, IvpTaskErr
 
 /// Solve a normalized IVP task and optionally execute lightweight postprocessing.
 ///
-/// At the moment postprocessing is intentionally conservative:
-/// - CSV export is supported
-/// - plot requests are parsed and preserved in the spec, but plotting is left
-///   to higher-level wrappers instead of being triggered implicitly here
+/// Parser-side postprocessing is routed through the unified
+/// [`PostprocessPlan`] facade. The historical `plot` flag is still parsed and
+/// preserved, but graphical output is only executed for explicit modern
+/// actions such as `plotters_png` or `gnuplot_png`.
 pub fn run_ivp_task(spec: IvpTaskSpec) -> Result<IvpTaskRunResult, IvpTaskError> {
     let mut solver = build_ivp_solver_from_spec(&spec)?;
     solver
@@ -446,19 +500,21 @@ pub fn run_ivp_task(spec: IvpTaskSpec) -> Result<IvpTaskRunResult, IvpTaskError>
         .map_err(|err| IvpTaskError::Solver(err.to_string()))?;
     let (t_result, y_result) = solver.get_result();
     let status = solver.get_status();
-    if spec.postprocessing.save_csv {
-        let csv_path = spec
-            .postprocessing
-            .csv_path
-            .clone()
-            .unwrap_or_else(|| "ivp_result.csv".to_string());
-        write_ivp_result_to_csv(
-            &csv_path,
-            &spec.equations.arg,
-            &spec.equations.unknowns,
-            t_result.as_ref(),
-            y_result.as_ref(),
-        )?;
+    let plan = spec.postprocessing.to_plan("ivp_result.csv");
+    if !plan.actions.is_empty() {
+        let dataset = PostprocessDataset::new(
+            spec.equations.arg.clone(),
+            spec.equations.unknowns.clone(),
+            t_result.clone().ok_or_else(|| {
+                IvpTaskError::Solver("cannot write CSV because t_result is missing".to_string())
+            })?,
+            y_result.clone().ok_or_else(|| {
+                IvpTaskError::Solver("cannot write CSV because y_result is missing".to_string())
+            })?,
+        )
+        .map_err(|err| IvpTaskError::Solver(err.to_string()))?;
+        plan.execute(&dataset)
+            .map_err(|err| IvpTaskError::Solver(err.to_string()))?;
     }
     Ok(IvpTaskRunResult {
         specification: spec,
@@ -499,6 +555,15 @@ parallel: false
 postprocessing
 save_csv: false
 csv_path: ivp_result.csv
+save_txt: false
+txt_path: ivp_result.txt
+write_report: false
+report_path: ivp_report.md
+plotters_png: false
+plotters_dir: ivp_plotters
+gnuplot_png: false
+gnuplot_dir: ivp_gnuplot
+terminal_plot: false
 plot: false
 "#;
 
@@ -545,144 +610,36 @@ fn parse_solver_selection(document: &DocumentMap) -> Result<SolverSelectionSpec,
 /// The second form is often nicer for humans, so we preserve variable names in
 /// the `equations` section when lowercasing other configuration keys.
 fn parse_equations(document: &DocumentMap) -> Result<EquationSpec, IvpTaskError> {
-    let section = get_required_section(document, "equations")?;
-    let arg = get_optional_string(section, "arg", "equations")?.unwrap_or_else(|| "t".to_string());
-
-    let parameter_names =
-        get_optional_string_list(section, "parameters", "equations")?.unwrap_or_default();
-    let parameter_values_vec =
-        get_optional_float_list(section, "parameter_values", "equations")?.unwrap_or_default();
-    if parameter_names.len() != parameter_values_vec.len() {
-        return Err(IvpTaskError::InvalidField {
-            section: "equations".to_string(),
-            field: "parameter_values".to_string(),
-            message: format!(
-                "expected {} parameter values, got {}",
-                parameter_names.len(),
-                parameter_values_vec.len()
-            ),
-        });
-    }
-    let parameter_values: HashMap<String, f64> = parameter_names
-        .iter()
-        .cloned()
-        .zip(parameter_values_vec)
-        .collect();
-
-    validate_symbol_names(&arg, &parameter_names).map_err(IvpTaskError::Semantic)?;
-
-    let (unknowns, rhs_raw) = if section.contains_key("unknowns") || section.contains_key("rhs") {
-        let unknowns = get_required_string_list(section, "equations", "unknowns")?;
-        let rhs = get_required_string_list(section, "equations", "rhs")?;
-        (unknowns, rhs)
-    } else {
-        parse_pair_style_equations(section)?
-    };
-
-    if unknowns.len() != rhs_raw.len() {
-        return Err(IvpTaskError::InconsistentEquationCounts {
-            unknowns: unknowns.len(),
-            rhs: rhs_raw.len(),
-        });
-    }
-
-    let unknown_set: HashSet<&str> = unknowns.iter().map(String::as_str).collect();
-    if unknown_set.contains(arg.as_str()) {
-        return Err(IvpTaskError::Semantic(format!(
-            "argument `{arg}` cannot also be listed as an unknown"
-        )));
-    }
-    for parameter in &parameter_names {
-        if unknown_set.contains(parameter.as_str()) {
-            return Err(IvpTaskError::Semantic(format!(
-                "parameter `{parameter}` cannot also be listed as an unknown"
-            )));
-        }
-        if parameter == &arg {
-            return Err(IvpTaskError::Semantic(format!(
-                "parameter `{parameter}` cannot also be the independent argument"
-            )));
-        }
-    }
-
-    let substitutions =
-        parse_symbolic_substitutions(document).map_err(|message| IvpTaskError::InvalidField {
-            section: "where/substitute".to_string(),
-            field: "*".to_string(),
-            message,
-        })?;
-    let rhs = rhs_raw
-        .iter()
-        .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
-        .into_iter()
-        .map(|expr| expr.set_variable_from_map(&parameter_values))
-        .collect();
-
+    let parsed = parse_symbolic_equation_system(document, "t").map_err(map_equation_error)?;
     Ok(EquationSpec {
-        arg,
-        unknowns,
-        rhs,
-        parameter_names,
-        parameter_values,
+        arg: parsed.arg,
+        unknowns: parsed.unknowns,
+        rhs: parsed.rhs,
+        parameter_names: parsed.parameter_names,
+        parameter_values: parsed.parameter_values,
     })
 }
 
-fn parse_expr_safe(expr_text: &str, section: &str, field: &str) -> Result<Expr, IvpTaskError> {
-    std::panic::catch_unwind(|| Expr::parse_expression(expr_text)).map_err(|_| {
-        IvpTaskError::InvalidField {
-            section: section.to_string(),
-            field: field.to_string(),
-            message: format!("failed to parse symbolic expression `{expr_text}`"),
+fn map_equation_error(error: SharedEquationParseError) -> IvpTaskError {
+    match error {
+        SharedEquationParseError::MissingSection(section) => IvpTaskError::MissingSection(section),
+        SharedEquationParseError::MissingField { section, field } => {
+            IvpTaskError::MissingField { section, field }
         }
-    })
-}
-
-/// Extract pair-style equations where each field name is itself an unknown.
-fn parse_pair_style_equations(
-    section: &GenericSectionMap,
-) -> Result<(Vec<String>, Vec<String>), IvpTaskError> {
-    let reserved = ["arg", "parameters", "parameter_values", "unknowns", "rhs"];
-    let mut unknowns = Vec::new();
-    let mut rhs = Vec::new();
-
-    for (key, _) in section {
-        if reserved.contains(&key.as_str()) {
-            continue;
+        SharedEquationParseError::InvalidField {
+            section,
+            field,
+            message,
+        } => IvpTaskError::InvalidField {
+            section,
+            field,
+            message,
+        },
+        SharedEquationParseError::InconsistentEquationCounts { unknowns, rhs } => {
+            IvpTaskError::InconsistentEquationCounts { unknowns, rhs }
         }
-        let expr = get_required_symbolic_expr(section, "equations", key)?;
-        unknowns.push(key.clone());
-        rhs.push(expr);
+        SharedEquationParseError::Semantic(message) => IvpTaskError::Semantic(message),
     }
-
-    if unknowns.is_empty() {
-        return Err(IvpTaskError::Semantic(
-            "equations section must contain either `unknowns`/`rhs` lists or variable-to-rhs pairs"
-                .to_string(),
-        ));
-    }
-
-    Ok((unknowns, rhs))
-}
-
-fn get_required_symbolic_expr(
-    section: &GenericSectionMap,
-    section_name: &str,
-    field: &str,
-) -> Result<String, IvpTaskError> {
-    let values = get_required_values(section, section_name, field)?;
-    if values.is_empty() {
-        return Err(IvpTaskError::MissingField {
-            section: section_name.to_string(),
-            field: field.to_string(),
-        });
-    }
-    Ok(values
-        .iter()
-        .map(Value::to_string_value)
-        .collect::<Vec<_>>()
-        .join(" "))
 }
 
 /// Parse `t0`, `t_end`, and the initial state vector.
@@ -769,6 +726,15 @@ fn parse_postprocessing(document: &DocumentMap) -> Result<PostprocessingSpec, Iv
     Ok(PostprocessingSpec {
         save_csv: get_optional_bool(section, "save_csv")?.unwrap_or(false),
         csv_path: get_optional_string(section, "csv_path", "postprocessing")?,
+        save_txt: get_optional_bool(section, "save_txt")?.unwrap_or(false),
+        txt_path: get_optional_string(section, "txt_path", "postprocessing")?,
+        write_report: get_optional_bool(section, "write_report")?.unwrap_or(false),
+        report_path: get_optional_string(section, "report_path", "postprocessing")?,
+        plotters_png: get_optional_bool(section, "plotters_png")?.unwrap_or(false),
+        plotters_dir: get_optional_string(section, "plotters_dir", "postprocessing")?,
+        gnuplot_png: get_optional_bool(section, "gnuplot_png")?.unwrap_or(false),
+        gnuplot_dir: get_optional_string(section, "gnuplot_dir", "postprocessing")?,
+        terminal_plot: get_optional_bool(section, "terminal_plot")?.unwrap_or(false),
         plot: get_optional_bool(section, "plot")?.unwrap_or(false),
     })
 }
@@ -979,66 +945,6 @@ fn parse_lsode2_native_execution(
     Ok(Some(mode))
 }
 
-/// Save a solved IVP trajectory as a simple CSV table.
-///
-/// The first column is the independent variable, followed by one column per
-/// unknown in solver order.
-fn write_ivp_result_to_csv(
-    path: &str,
-    arg_name: &str,
-    unknowns: &[String],
-    t_result: Option<&DVector<f64>>,
-    y_result: Option<&DMatrix<f64>>,
-) -> Result<(), IvpTaskError> {
-    let t_result = t_result.ok_or_else(|| {
-        IvpTaskError::Solver("cannot write CSV because t_result is missing".to_string())
-    })?;
-    let y_result = y_result.ok_or_else(|| {
-        IvpTaskError::Solver("cannot write CSV because y_result is missing".to_string())
-    })?;
-
-    if y_result.nrows() != t_result.len() {
-        return Err(IvpTaskError::Solver(format!(
-            "cannot write CSV because time grid has {} points but solution matrix has {} rows",
-            t_result.len(),
-            y_result.nrows()
-        )));
-    }
-    if y_result.ncols() != unknowns.len() {
-        return Err(IvpTaskError::Solver(format!(
-            "cannot write CSV because solution matrix has {} columns but there are {} unknowns",
-            y_result.ncols(),
-            unknowns.len()
-        )));
-    }
-
-    let mut writer = Writer::from_path(path)
-        .map_err(|err| IvpTaskError::Solver(format!("failed to create CSV `{path}`: {err}")))?;
-
-    let mut header = Vec::with_capacity(unknowns.len() + 1);
-    header.push(arg_name.to_string());
-    header.extend(unknowns.iter().cloned());
-    writer
-        .write_record(&header)
-        .map_err(|err| IvpTaskError::Solver(format!("failed to write CSV header: {err}")))?;
-
-    for row in 0..t_result.len() {
-        let mut record = Vec::with_capacity(unknowns.len() + 1);
-        record.push(t_result[row].to_string());
-        for col in 0..y_result.ncols() {
-            record.push(y_result[(row, col)].to_string());
-        }
-        writer
-            .write_record(&record)
-            .map_err(|err| IvpTaskError::Solver(format!("failed to write CSV row: {err}")))?;
-    }
-
-    writer
-        .flush()
-        .map_err(|err| IvpTaskError::Solver(format!("failed to flush CSV `{path}`: {err}")))?;
-    Ok(())
-}
-
 fn get_required_section<'a>(
     document: &'a DocumentMap,
     section: &'static str,
@@ -1098,33 +1004,6 @@ fn get_optional_string(
             }
             Ok(Some(value_to_string(&values[0], section_name, field)?))
         }
-        _ => Ok(None),
-    }
-}
-
-fn get_required_string_list(
-    section: &GenericSectionMap,
-    section_name: &str,
-    field: &str,
-) -> Result<Vec<String>, IvpTaskError> {
-    let values = get_required_values(section, section_name, field)?;
-    values
-        .iter()
-        .map(|value| value_to_string(value, section_name, field))
-        .collect()
-}
-
-fn get_optional_string_list(
-    section: &GenericSectionMap,
-    field: &str,
-    section_name: &str,
-) -> Result<Option<Vec<String>>, IvpTaskError> {
-    match section.get(field) {
-        Some(Some(values)) => values
-            .iter()
-            .map(|value| value_to_string(value, section_name, field))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some),
         _ => Ok(None),
     }
 }
@@ -1248,17 +1127,6 @@ fn get_required_float_list(
     values_to_float_list(values, section_name, field)
 }
 
-fn get_optional_float_list(
-    section: &GenericSectionMap,
-    field: &str,
-    section_name: &str,
-) -> Result<Option<Vec<f64>>, IvpTaskError> {
-    match section.get(field) {
-        Some(Some(values)) => values_to_float_list(values, section_name, field).map(Some),
-        _ => Ok(None),
-    }
-}
-
 fn values_to_float_list(
     values: &[Value],
     section_name: &str,
@@ -1371,6 +1239,36 @@ step_size: 1e-3
     }
 
     #[test]
+    fn ivp_task_parser_reports_bad_where_expression() {
+        let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+y: heat - y
+
+where
+heat: sin(
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+"#;
+
+        let err = parse_ivp_task_from_str(input)
+            .expect_err("bad where expression should be reported as an IVP parser error");
+        let message = err.to_string();
+        assert!(message.contains("where/substitute"));
+        assert!(message.contains("failed to parse symbolic expression"));
+    }
+
+    #[test]
     fn ivp_task_runner_solves_simple_decay() {
         let input = r#"
 task
@@ -1433,6 +1331,48 @@ csv_path: {}
         let contents =
             std::fs::read_to_string(&csv_path).expect("CSV file should be readable after solve");
         assert!(contents.contains("t,y"));
+    }
+
+    #[test]
+    fn ivp_task_runner_can_execute_modern_postprocessing_plan() {
+        let dir = tempdir().expect("tempdir should be created");
+        let txt_path = dir.path().join("ivp_task_output.txt");
+        let report_path = dir.path().join("ivp_task_report.md");
+        let input = format!(
+            r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+
+postprocessing
+save_txt: true
+txt_path: {}
+write_report: true
+report_path: {}
+"#,
+            txt_path.display(),
+            report_path.display()
+        );
+
+        let result = run_ivp_task_from_str(&input).expect("IVP task should solve and postprocess");
+        assert_eq!(result.status.as_deref(), Some("finished"));
+        assert!(txt_path.exists());
+        let report = std::fs::read_to_string(&report_path)
+            .expect("report should be readable after postprocessing");
+        assert!(report.contains("Solver Result Report"));
+        assert!(report.contains("axis: t"));
     }
 
     #[test]

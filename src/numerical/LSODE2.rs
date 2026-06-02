@@ -67,9 +67,10 @@ pub use config::{
     Lsode2AnalyticalCallbacks, Lsode2AnalyticalJacobianCallback, Lsode2AnalyticalResidualCallback,
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2BackendConfig, Lsode2JacobianBackend,
     Lsode2LinearSolverBackend, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
-    Lsode2LinearSystemStructure, Lsode2Method, Lsode2NativeExecutionConfig, Lsode2ProblemConfig,
-    Lsode2ResidualJacobianSource, Lsode2ResolvedPlan, Lsode2StopComparator, Lsode2StopCondition,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    Lsode2LinearSystemStructure, Lsode2Method, Lsode2NativeExecutionConfig,
+    Lsode2NumericProblemOptions, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
+    Lsode2ResolvedPlan, Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
 };
 pub use correction::{
     Lsode2CorrectionAssessment, Lsode2CorrectionControlConfig, Lsode2CorrectionController,

@@ -208,11 +208,7 @@ where
 }
 
 fn reached_t_bound(t: f64, t_bound: f64, h: f64) -> bool {
-    if h >= 0.0 {
-        t >= t_bound
-    } else {
-        t <= t_bound
-    }
+    if h >= 0.0 { t >= t_bound } else { t <= t_bound }
 }
 
 #[derive(Debug, Clone)]

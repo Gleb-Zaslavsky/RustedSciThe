@@ -8,7 +8,7 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
     register_generated_c_banded_backend, register_generated_c_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
-use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+use crate::symbolic::codegen::codegen_aot_registry::{AotRegistry, RegisteredAotArtifact};
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     register_generated_banded_cdylib_backend, register_generated_sparse_cdylib_backend,
@@ -41,7 +41,14 @@ use crate::symbolic::symbolic_functions_BVP::{
 use log::{error, info};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn bvp_aot_lifecycle_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn insert_elapsed_ms(diagnostics: &mut HashMap<String, String>, key: &str, began: Instant) {
     diagnostics.insert(
@@ -80,6 +87,130 @@ fn append_aot_artifact_breakdown(
             format!("{value:.6}"),
         );
     }
+}
+
+fn append_registered_artifact_contract(
+    diagnostics: &mut HashMap<String, String>,
+    artifact: &RegisteredAotArtifact,
+) {
+    diagnostics.insert(
+        "generated.aot.artifact.problem_key".to_string(),
+        artifact.problem_key.clone(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.manifest_key".to_string(),
+        artifact.manifest_problem_key(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.manifest_key_matches".to_string(),
+        artifact.manifest_key_matches().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.manifest_file".to_string(),
+        artifact.manifest_file.display().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.manifest_file_exists".to_string(),
+        artifact.manifest_file_exists().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.expected_cdylib".to_string(),
+        artifact.expected_cdylib.display().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.expected_cdylib_exists".to_string(),
+        artifact.expected_cdylib.exists().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.expected_rlib".to_string(),
+        artifact.expected_rlib.display().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.expected_rlib_exists".to_string(),
+        artifact.expected_rlib.exists().to_string(),
+    );
+    diagnostics.insert(
+        "generated.aot.artifact.contract_issues".to_string(),
+        artifact.lifecycle_contract_issues().join(" | "),
+    );
+}
+
+fn is_transient_aot_infra_failure(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("permission denied")
+        || low.contains("access is denied")
+        || low.contains("being used by another process")
+        || low.contains("resource busy")
+        || low.contains("temporarily unavailable")
+        || low.contains("failed to spawn")
+        || low.contains("failed to spawn build runner")
+        || low.contains("could not write")
+        || low.contains("file is locked")
+        || low.contains("sharing violation")
+}
+
+fn retry_exhausted_aot_message(
+    build_context: &str,
+    attempts: usize,
+    detail: &str,
+    transient: bool,
+) -> String {
+    let class = if transient {
+        "transient infrastructure failure"
+    } else {
+        "deterministic build failure"
+    };
+    format!(
+        "BVP AOT build execution failed ({build_context}) after {attempts} attempt(s); classified as {class}. \
+If this is a transient infrastructure failure, check stale compiler processes, file locks and antivirus/indexer interference; \
+otherwise inspect compiler stdout/stderr below.\n\
+detail:\n{detail}"
+    )
+}
+
+fn execute_aot_build_with_retry<F>(mut execute: F, build_context: &str) -> Result<(), String>
+where
+    F: FnMut() -> Result<(bool, Option<i32>, String, String), String>,
+{
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_failure: Option<String> = None;
+    let mut last_transient = false;
+    let mut attempts_used = 0usize;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        attempts_used = attempt;
+        match execute() {
+            Ok((true, _, _, _)) => return Ok(()),
+            Ok((false, status, stdout, stderr)) => {
+                let detail = format!("status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+                let transient = is_transient_aot_infra_failure(&detail);
+                last_transient = transient;
+                last_failure = Some(detail);
+                if transient && attempt < MAX_ATTEMPTS {
+                    sleep(Duration::from_millis((attempt as u64) * 120));
+                    continue;
+                }
+            }
+            Err(err) => {
+                let transient = is_transient_aot_infra_failure(&err);
+                last_transient = transient;
+                last_failure = Some(err);
+                if transient && attempt < MAX_ATTEMPTS {
+                    sleep(Duration::from_millis((attempt as u64) * 120));
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    let detail = last_failure.unwrap_or_else(|| "unknown build failure".to_string());
+    Err(retry_exhausted_aot_message(
+        build_context,
+        attempts_used,
+        &detail,
+        last_transient,
+    ))
 }
 
 /// Unified callback/metadata handoff for the damped sparse BVP solver.
@@ -932,6 +1063,20 @@ pub fn generate_damped_solver_state(
     if matches!(method.as_str(), "Sparse" | "Banded")
         || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
     {
+        let lifecycle_lock_begin = Instant::now();
+        let _lifecycle_guard = aot_lifecycle_needs_serialization(backend_policy, aot_build_policy)
+            .then(|| {
+                bvp_aot_lifecycle_lock()
+                    .lock()
+                    .expect("BVP AOT lifecycle lock poisoned")
+            });
+        if _lifecycle_guard.is_some() {
+            insert_elapsed_ms(
+                &mut handoff_diagnostics,
+                "generated.aot.lifecycle_lock_wait_ms",
+                lifecycle_lock_begin,
+            );
+        }
         let retry_eq_system = eq_system.clone();
         let retry_values = values.clone();
         let retry_arg = arg.clone();
@@ -1133,6 +1278,20 @@ pub fn generate_frozen_solver_state(
     if matches!(method.as_str(), "Sparse" | "Banded")
         || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
     {
+        let lifecycle_lock_begin = Instant::now();
+        let _lifecycle_guard = aot_lifecycle_needs_serialization(backend_policy, aot_build_policy)
+            .then(|| {
+                bvp_aot_lifecycle_lock()
+                    .lock()
+                    .expect("BVP AOT lifecycle lock poisoned")
+            });
+        if _lifecycle_guard.is_some() {
+            insert_elapsed_ms(
+                &mut handoff_diagnostics,
+                "generated.aot.lifecycle_lock_wait_ms",
+                lifecycle_lock_begin,
+            );
+        }
         let retry_eq_system = eq_system.clone();
         let retry_values = values.clone();
         let retry_arg = arg.clone();
@@ -1313,6 +1472,18 @@ fn backend_policy_targets_aot(policy: BackendSelectionPolicy) -> bool {
         BackendSelectionPolicy::AotOnly
             | BackendSelectionPolicy::PreferAotThenLambdify
             | BackendSelectionPolicy::PreferAotThenNumeric
+    )
+}
+
+fn aot_lifecycle_needs_serialization(
+    _backend_policy: BackendSelectionPolicy,
+    build_policy: AotBuildPolicy,
+) -> bool {
+    matches!(
+        build_policy,
+        AotBuildPolicy::BuildIfMissing { .. }
+            | AotBuildPolicy::RequirePrebuilt
+            | AotBuildPolicy::RebuildAlways { .. }
     )
 }
 
@@ -1777,10 +1948,28 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 build.written.crate_dir.display()
             );
             let compile_link_begin = Instant::now();
-            let executed = build.execute().map_err(|err| {
+            let build_context = format!(
+                "bvp {:?} Rust key={} output={}",
+                selected.matrix_backend,
+                problem_key,
+                build.written.crate_dir.display()
+            );
+            execute_aot_build_with_retry(
+                || {
+                    let executed = build.execute().map_err(|err| err.to_string())?;
+                    Ok((
+                        executed.succeeded(),
+                        executed.status_code,
+                        executed.stdout.clone(),
+                        executed.stderr.clone(),
+                    ))
+                },
+                &build_context,
+            )
+            .map_err(|message| {
                 BvpBackendIntegrationError::AutomaticAotBuildFailed {
                     problem_key: problem_key.clone(),
-                    message: err.to_string(),
+                    message,
                 }
             })?;
             insert_elapsed_ms(
@@ -1788,23 +1977,11 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 "generated.aot.compile_link_ms",
                 compile_link_begin,
             );
-            if !executed.succeeded() {
-                error!(
-                    "sparse Rust AOT build failed for problem_key={} with status={:?}",
-                    problem_key, executed.status_code
-                );
-                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
-                    problem_key,
-                    message: format!(
-                        "cargo build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-                        executed.status_code, executed.stdout, executed.stderr
-                    ),
-                });
-            }
             let registration_begin = Instant::now();
             let registered = registry
                 .register_materialized_build(manifest, &build)
                 .clone();
+            append_registered_artifact_contract(diagnostics, &registered);
             let runtime_registration = match selected.matrix_backend {
                 MatrixBackend::Banded => register_generated_banded_cdylib_backend(&registered),
                 _ => register_generated_sparse_cdylib_backend(&registered),
@@ -1860,10 +2037,28 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 build.written.library_dir.display()
             );
             let compile_link_begin = Instant::now();
-            let executed = build.execute().map_err(|err| {
+            let build_context = format!(
+                "bvp {:?} C key={} output={}",
+                selected.matrix_backend,
+                problem_key,
+                build.written.library_dir.display()
+            );
+            execute_aot_build_with_retry(
+                || {
+                    let executed = build.execute().map_err(|err| err.to_string())?;
+                    Ok((
+                        executed.succeeded(),
+                        executed.status_code,
+                        executed.stdout.clone(),
+                        executed.stderr.clone(),
+                    ))
+                },
+                &build_context,
+            )
+            .map_err(|message| {
                 BvpBackendIntegrationError::AutomaticAotBuildFailed {
                     problem_key: problem_key.clone(),
-                    message: err.to_string(),
+                    message,
                 }
             })?;
             insert_elapsed_ms(
@@ -1871,21 +2066,9 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 "generated.aot.compile_link_ms",
                 compile_link_begin,
             );
-            if !executed.succeeded() {
-                error!(
-                    "sparse C AOT build failed for problem_key={} with status={:?}",
-                    problem_key, executed.status_code
-                );
-                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
-                    problem_key,
-                    message: format!(
-                        "C build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-                        executed.status_code, executed.stdout, executed.stderr
-                    ),
-                });
-            }
             let registration_begin = Instant::now();
             let registered = register_c_build_in_registry(&mut registry, manifest, &build).clone();
+            append_registered_artifact_contract(diagnostics, &registered);
             let runtime_registration = match selected.matrix_backend {
                 MatrixBackend::Banded => register_generated_c_banded_backend(&registered),
                 _ => register_generated_c_sparse_backend(&registered),
@@ -1933,10 +2116,28 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 build.written.library_dir.display()
             );
             let compile_link_begin = Instant::now();
-            let executed = build.execute().map_err(|err| {
+            let build_context = format!(
+                "bvp {:?} Zig key={} output={}",
+                selected.matrix_backend,
+                problem_key,
+                build.written.library_dir.display()
+            );
+            execute_aot_build_with_retry(
+                || {
+                    let executed = build.execute().map_err(|err| err.to_string())?;
+                    Ok((
+                        executed.succeeded(),
+                        executed.status_code,
+                        executed.stdout.clone(),
+                        executed.stderr.clone(),
+                    ))
+                },
+                &build_context,
+            )
+            .map_err(|message| {
                 BvpBackendIntegrationError::AutomaticAotBuildFailed {
                     problem_key: problem_key.clone(),
-                    message: err.to_string(),
+                    message,
                 }
             })?;
             insert_elapsed_ms(
@@ -1944,22 +2145,10 @@ fn try_materialize_and_build_sparse_aot_bundle(
                 "generated.aot.compile_link_ms",
                 compile_link_begin,
             );
-            if !executed.succeeded() {
-                error!(
-                    "sparse Zig AOT build failed for problem_key={} with status={:?}",
-                    problem_key, executed.status_code
-                );
-                return Err(BvpBackendIntegrationError::AutomaticAotBuildFailed {
-                    problem_key,
-                    message: format!(
-                        "Zig build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-                        executed.status_code, executed.stdout, executed.stderr
-                    ),
-                });
-            }
             let registration_begin = Instant::now();
             let registered =
                 register_zig_build_in_registry(&mut registry, manifest, &build).clone();
+            append_registered_artifact_contract(diagnostics, &registered);
             let runtime_registration = match selected.matrix_backend {
                 MatrixBackend::Banded => register_generated_zig_banded_backend(&registered),
                 _ => register_generated_zig_sparse_backend(&registered),
@@ -2002,6 +2191,12 @@ fn try_link_sparse_runtime_from_resolution(
         return false;
     };
     if !resolved.is_compiled() {
+        error!(
+            "resolved sparse generated {:?} artifact for problem_key={} is not compiled/callable by contract: {}",
+            aot_codegen_backend,
+            problem_key,
+            resolved.registered.lifecycle_contract_summary()
+        );
         return false;
     }
 
@@ -2013,8 +2208,11 @@ fn try_link_sparse_runtime_from_resolution(
         Ok(_) => true,
         Err(err) => {
             error!(
-                "failed to register sparse generated {:?} runtime for problem_key={}: {}",
-                aot_codegen_backend, problem_key, err
+                "failed to register sparse generated {:?} runtime for problem_key={}: {}; artifact_contract={}",
+                aot_codegen_backend,
+                problem_key,
+                err,
+                resolved.registered.lifecycle_contract_summary()
             );
             false
         }
@@ -2415,8 +2613,8 @@ mod tests {
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
-        LinkedResidualChunk, LinkedSparseAotBackend, LinkedSparseJacobianChunk,
-        register_linked_sparse_backend, unregister_linked_sparse_backend,
+        register_linked_sparse_backend, unregister_linked_sparse_backend, LinkedResidualChunk,
+        LinkedSparseAotBackend, LinkedSparseJacobianChunk,
     };
     use crate::symbolic::codegen::codegen_backend_selection::{
         BackendSelectionPolicy, SelectedBackendKind,
@@ -2437,7 +2635,10 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn real_bvp_inputs() -> (
@@ -2488,6 +2689,54 @@ mod tests {
         border_conditions.insert("u".to_string(), vec![(0, 0.0)]);
         border_conditions.insert("v".to_string(), vec![(0, 1.0)]);
         (eq_system, values, arg, border_conditions)
+    }
+
+    #[test]
+    fn transient_aot_failure_classifier_marks_windows_lock_and_spawn_failures() {
+        assert!(super::is_transient_aot_infra_failure(
+            "The process cannot access the file because it is being used by another process"
+        ));
+        assert!(super::is_transient_aot_infra_failure(
+            "failed to spawn build runner: Access is denied"
+        ));
+        assert!(!super::is_transient_aot_infra_failure(
+            "error[E0425]: cannot find value `x` in this scope"
+        ));
+    }
+
+    #[test]
+    fn execute_aot_build_with_retry_retries_transient_failures_only() {
+        let transient_attempts = AtomicUsize::new(0);
+        super::execute_aot_build_with_retry(
+            || {
+                let attempt = transient_attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err("failed to spawn build runner: sharing violation".to_string())
+                } else {
+                    Ok((true, Some(0), String::new(), String::new()))
+                }
+            },
+            "test transient retry",
+        )
+        .expect("transient infrastructure failure should be retried");
+        assert_eq!(transient_attempts.load(Ordering::SeqCst), 2);
+
+        let deterministic_attempts = AtomicUsize::new(0);
+        let err = super::execute_aot_build_with_retry(
+            || {
+                deterministic_attempts.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    false,
+                    Some(1),
+                    String::new(),
+                    "error: expected expression".to_string(),
+                ))
+            },
+            "test deterministic failure",
+        )
+        .expect_err("deterministic compiler failure should not be retried");
+        assert_eq!(deterministic_attempts.load(Ordering::SeqCst), 1);
+        assert!(err.contains("deterministic build failure"));
     }
 
     #[test]

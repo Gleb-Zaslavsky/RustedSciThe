@@ -10,17 +10,20 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
-    run_native_integration_for_method_with_policy, Lsode2NativeIntegrationLimits,
-    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
+    run_native_integration_for_method_with_policy,
 };
 use super::native_jacobian::{
-    compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle, NativeJacobianStorage,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle,
 };
-use super::native_preflight::{run_native_step_preflight, Lsode2NativeStepProbeSummary};
+use super::native_preflight::{Lsode2NativeStepProbeSummary, run_native_step_preflight};
 use super::native_step_engine::Lsode2NativeStepMethod;
 use super::statistics::Lsode2NativeStatistics;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
@@ -365,6 +368,26 @@ impl Lsode2Solver {
         self.native_override_result
             .clone()
             .unwrap_or_else(|| self.inner.get_result())
+    }
+
+    /// Converts the current LSODE2 result into the unified postprocessing dataset.
+    pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
+        let (axis, values) = self.get_result();
+        PostprocessDataset::new(
+            self.config.arg.clone(),
+            self.config.values.clone(),
+            axis,
+            values,
+        )
+    }
+
+    /// Executes a declarative postprocessing plan using the modern facade.
+    pub fn execute_postprocessing(
+        &self,
+        plan: &PostprocessPlan,
+    ) -> Result<PostprocessReport, PostprocessError> {
+        let dataset = self.postprocess_dataset()?;
+        plan.execute(&dataset)
     }
 
     pub fn status(&self) -> &str {

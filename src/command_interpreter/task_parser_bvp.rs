@@ -14,11 +14,13 @@
 //! - `solver_options` can select Lambdify/AOT, Sparse/Banded matrix assembly,
 //!   AOT compiler/build policy, symbolic assembly backend, and native banded
 //!   linear solver policy
-//! - postprocessing currently supports CSV saving and optional plot flag parsing
+//! - postprocessing is routed through the unified postprocessing facade, while
+//!   the historical plot flag remains available for legacy plotters output
 
+use crate::Utils::postprocessing::PostprocessPlan;
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use crate::command_interpreter::task_parser_common::{
-    apply_symbolic_substitutions_to_vec, parse_symbolic_substitutions, validate_symbol_names,
+    SharedEquationParseError, parse_symbolic_equation_system,
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
@@ -158,7 +160,61 @@ pub struct BvpGeneratedBackendSpec {
 pub struct BvpPostprocessingSpec {
     pub save_csv: bool,
     pub csv_path: Option<String>,
+    pub save_txt: bool,
+    pub txt_path: Option<String>,
+    pub write_report: bool,
+    pub report_path: Option<String>,
+    pub plotters_png: bool,
+    pub plotters_dir: Option<String>,
+    pub gnuplot_png: bool,
+    pub gnuplot_dir: Option<String>,
+    pub terminal_plot: bool,
     pub plot: bool,
+}
+
+impl BvpPostprocessingSpec {
+    fn to_plan(&self, default_csv_path: &str) -> PostprocessPlan {
+        let mut plan = PostprocessPlan::new();
+        if self.save_csv {
+            plan = plan.save_csv(
+                self.csv_path
+                    .clone()
+                    .unwrap_or_else(|| default_csv_path.to_string()),
+            );
+        }
+        if self.save_txt {
+            plan = plan.save_txt(
+                self.txt_path
+                    .clone()
+                    .unwrap_or_else(|| "bvp_result.txt".to_string()),
+            );
+        }
+        if self.write_report {
+            plan = plan.write_report(
+                self.report_path
+                    .clone()
+                    .unwrap_or_else(|| "bvp_report.md".to_string()),
+            );
+        }
+        if self.plotters_png {
+            plan = plan.plotters_png(
+                self.plotters_dir
+                    .clone()
+                    .unwrap_or_else(|| "bvp_plotters".to_string()),
+            );
+        }
+        if self.gnuplot_png {
+            plan = plan.gnuplot_png(
+                self.gnuplot_dir
+                    .clone()
+                    .unwrap_or_else(|| "bvp_gnuplot".to_string()),
+            );
+        }
+        if self.terminal_plot {
+            plan = plan.terminal_plot();
+        }
+        plan
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,8 +429,11 @@ pub fn run_bvp_task_from_str(input: &str) -> Result<BvpTaskRunResult, BvpTaskErr
 pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
     let mut solver = build_bvp_solver_from_spec(&spec)?;
     solver.solve();
-    if spec.postprocessing.save_csv {
-        solver.save_to_csv(spec.postprocessing.csv_path.clone());
+    let plan = spec.postprocessing.to_plan("bvp_result.csv");
+    if !plan.actions.is_empty() {
+        solver
+            .execute_postprocessing(&plan)
+            .map_err(|err| BvpTaskError::Solver(err.to_string()))?;
     }
     if spec.postprocessing.plot {
         solver.plot_result();
@@ -424,6 +483,15 @@ loglevel: warn
 postprocessing
 save_csv: false
 csv_path: bvp_result.csv
+save_txt: false
+txt_path: bvp_result.txt
+write_report: false
+report_path: bvp_report.md
+plotters_png: false
+plotters_dir: bvp_plotters
+gnuplot_png: false
+gnuplot_dir: bvp_gnuplot
+terminal_plot: false
 plot: false
 "#;
 
@@ -474,98 +542,36 @@ fn parse_bvp_solver_selection(
 }
 
 fn parse_bvp_equations(document: &DocumentMap) -> Result<BvpEquationSpec, BvpTaskError> {
-    let section = get_required_section(document, "equations")?;
-    let arg = get_optional_string(section, "arg", "equations")?.unwrap_or_else(|| "x".to_string());
-
-    let parameter_names =
-        get_optional_string_list(section, "parameters", "equations")?.unwrap_or_default();
-    let parameter_values_vec =
-        get_optional_float_list(section, "parameter_values", "equations")?.unwrap_or_default();
-    if parameter_names.len() != parameter_values_vec.len() {
-        return Err(BvpTaskError::InvalidField {
-            section: "equations".to_string(),
-            field: "parameter_values".to_string(),
-            message: format!(
-                "expected {} parameter values, got {}",
-                parameter_names.len(),
-                parameter_values_vec.len()
-            ),
-        });
-    }
-    let parameter_values: HashMap<String, f64> = parameter_names
-        .iter()
-        .cloned()
-        .zip(parameter_values_vec)
-        .collect();
-
-    validate_symbol_names(&arg, &parameter_names).map_err(BvpTaskError::Semantic)?;
-
-    let (unknowns, rhs_raw) = if section.contains_key("unknowns") || section.contains_key("rhs") {
-        let unknowns = get_required_string_list(section, "equations", "unknowns")?;
-        let rhs = get_required_string_list(section, "equations", "rhs")?;
-        (unknowns, rhs)
-    } else {
-        parse_pair_style_equations(section)?
-    };
-
-    if unknowns.len() != rhs_raw.len() {
-        return Err(BvpTaskError::InconsistentEquationCounts {
-            unknowns: unknowns.len(),
-            rhs: rhs_raw.len(),
-        });
-    }
-
-    let unknown_set: HashSet<&str> = unknowns.iter().map(String::as_str).collect();
-    if unknown_set.contains(arg.as_str()) {
-        return Err(BvpTaskError::Semantic(format!(
-            "argument `{arg}` cannot also be listed as an unknown"
-        )));
-    }
-    for parameter in &parameter_names {
-        if unknown_set.contains(parameter.as_str()) {
-            return Err(BvpTaskError::Semantic(format!(
-                "parameter `{parameter}` cannot also be listed as an unknown"
-            )));
-        }
-        if parameter == &arg {
-            return Err(BvpTaskError::Semantic(format!(
-                "parameter `{parameter}` cannot also be the independent argument"
-            )));
-        }
-    }
-
-    let substitutions =
-        parse_symbolic_substitutions(document).map_err(|message| BvpTaskError::InvalidField {
-            section: "where/substitute".to_string(),
-            field: "*".to_string(),
-            message,
-        })?;
-    let rhs = rhs_raw
-        .iter()
-        .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
-        .into_iter()
-        .map(|expr| expr.set_variable_from_map(&parameter_values))
-        .collect();
-
+    let parsed = parse_symbolic_equation_system(document, "x").map_err(map_equation_error)?;
     Ok(BvpEquationSpec {
-        arg,
-        unknowns,
-        rhs,
-        parameter_names,
-        parameter_values,
+        arg: parsed.arg,
+        unknowns: parsed.unknowns,
+        rhs: parsed.rhs,
+        parameter_names: parsed.parameter_names,
+        parameter_values: parsed.parameter_values,
     })
 }
 
-fn parse_expr_safe(expr_text: &str, section: &str, field: &str) -> Result<Expr, BvpTaskError> {
-    std::panic::catch_unwind(|| Expr::parse_expression(expr_text)).map_err(|_| {
-        BvpTaskError::InvalidField {
-            section: section.to_string(),
-            field: field.to_string(),
-            message: format!("failed to parse symbolic expression `{expr_text}`"),
+fn map_equation_error(error: SharedEquationParseError) -> BvpTaskError {
+    match error {
+        SharedEquationParseError::MissingSection(section) => BvpTaskError::MissingSection(section),
+        SharedEquationParseError::MissingField { section, field } => {
+            BvpTaskError::MissingField { section, field }
         }
-    })
+        SharedEquationParseError::InvalidField {
+            section,
+            field,
+            message,
+        } => BvpTaskError::InvalidField {
+            section,
+            field,
+            message,
+        },
+        SharedEquationParseError::InconsistentEquationCounts { unknowns, rhs } => {
+            BvpTaskError::InconsistentEquationCounts { unknowns, rhs }
+        }
+        SharedEquationParseError::Semantic(message) => BvpTaskError::Semantic(message),
+    }
 }
 
 fn parse_boundary_conditions(
@@ -971,57 +977,20 @@ fn parse_bvp_postprocessing(document: &DocumentMap) -> Result<BvpPostprocessingS
     Ok(BvpPostprocessingSpec {
         save_csv: get_optional_bool(section, "save_csv", "postprocessing")?.unwrap_or(false),
         csv_path: get_optional_string(section, "csv_path", "postprocessing")?,
+        save_txt: get_optional_bool(section, "save_txt", "postprocessing")?.unwrap_or(false),
+        txt_path: get_optional_string(section, "txt_path", "postprocessing")?,
+        write_report: get_optional_bool(section, "write_report", "postprocessing")?
+            .unwrap_or(false),
+        report_path: get_optional_string(section, "report_path", "postprocessing")?,
+        plotters_png: get_optional_bool(section, "plotters_png", "postprocessing")?
+            .unwrap_or(false),
+        plotters_dir: get_optional_string(section, "plotters_dir", "postprocessing")?,
+        gnuplot_png: get_optional_bool(section, "gnuplot_png", "postprocessing")?.unwrap_or(false),
+        gnuplot_dir: get_optional_string(section, "gnuplot_dir", "postprocessing")?,
+        terminal_plot: get_optional_bool(section, "terminal_plot", "postprocessing")?
+            .unwrap_or(false),
         plot: get_optional_bool(section, "plot", "postprocessing")?.unwrap_or(false),
     })
-}
-
-fn parse_pair_style_equations(
-    section: &GenericSectionMap,
-) -> Result<(Vec<String>, Vec<String>), BvpTaskError> {
-    // `DocumentParser` currently stores section entries in a `HashMap`, so
-    // pair-style equations are best suited to scalar problems or cases where
-    // the exact ordering is otherwise irrelevant. For multi-equation BVPs the
-    // recommended text form is explicit `unknowns` + `rhs`.
-    let reserved = ["arg", "parameters", "parameter_values", "unknowns", "rhs"];
-    let mut unknowns = Vec::new();
-    let mut rhs = Vec::new();
-
-    for key in section.keys() {
-        if reserved.contains(&key.as_str()) {
-            continue;
-        }
-        let expr = get_required_symbolic_expr(section, "equations", key)?;
-        unknowns.push(key.clone());
-        rhs.push(expr);
-    }
-
-    if unknowns.is_empty() {
-        return Err(BvpTaskError::Semantic(
-            "equations section must contain either `unknowns`/`rhs` lists or variable-to-rhs pairs"
-                .to_string(),
-        ));
-    }
-
-    Ok((unknowns, rhs))
-}
-
-fn get_required_symbolic_expr(
-    section: &GenericSectionMap,
-    section_name: &str,
-    field: &str,
-) -> Result<String, BvpTaskError> {
-    let values = get_required_values(section, section_name, field)?;
-    if values.is_empty() {
-        return Err(BvpTaskError::MissingField {
-            section: section_name.to_string(),
-            field: field.to_string(),
-        });
-    }
-    Ok(values
-        .iter()
-        .map(Value::to_string_value)
-        .collect::<Vec<_>>()
-        .join(" "))
 }
 
 fn default_bvp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
@@ -1060,6 +1029,10 @@ fn default_bvp_pseudonyms() -> (HashMap<String, Vec<String>>, HashMap<String, Ve
         ),
     ]);
     let fields = HashMap::from([
+        (
+            "parameters".to_string(),
+            vec!["params".to_string(), "parameter_names".to_string()],
+        ),
         (
             "parameter_values".to_string(),
             vec!["params_values".to_string(), "param_values".to_string()],
@@ -1131,33 +1104,6 @@ fn get_optional_string(
             }
             Ok(Some(value_to_string(&values[0], section_name, field)?))
         }
-        _ => Ok(None),
-    }
-}
-
-fn get_required_string_list(
-    section: &GenericSectionMap,
-    section_name: &str,
-    field: &str,
-) -> Result<Vec<String>, BvpTaskError> {
-    let values = get_required_values(section, section_name, field)?;
-    values
-        .iter()
-        .map(|value| value_to_string(value, section_name, field))
-        .collect()
-}
-
-fn get_optional_string_list(
-    section: &GenericSectionMap,
-    field: &str,
-    section_name: &str,
-) -> Result<Option<Vec<String>>, BvpTaskError> {
-    match section.get(field) {
-        Some(Some(values)) => values
-            .iter()
-            .map(|value| value_to_string(value, section_name, field))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some),
         _ => Ok(None),
     }
 }
@@ -1283,17 +1229,6 @@ fn get_required_float_list(
     values_to_float_list(values, section_name, field)
 }
 
-fn get_optional_float_list(
-    section: &GenericSectionMap,
-    field: &str,
-    section_name: &str,
-) -> Result<Option<Vec<f64>>, BvpTaskError> {
-    match section.get(field) {
-        Some(Some(values)) => values_to_float_list(values, section_name, field).map(Some),
-        _ => Ok(None),
-    }
-}
-
 fn values_to_float_list(
     values: &[Value],
     section_name: &str,
@@ -1412,6 +1347,81 @@ y: 0.0
     }
 
     #[test]
+    fn bvp_task_parser_accepts_params_alias_and_where_substitution() {
+        let input = r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+params: a
+parameter_values: 2.0
+y: heat - a*y
+
+where
+heat: 1.0 + x
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+"#;
+
+        let spec =
+            parse_bvp_task_from_str(input).expect("BVP should accept IVP-style params alias");
+        assert_eq!(spec.equations.parameter_names, vec!["a".to_string()]);
+        assert_eq!(spec.equations.parameter_values["a"], 2.0);
+        let expr = spec.equations.rhs[0].clone();
+        let f = expr.lambdify_borrowed_thread_safe(&["x", "y"]);
+        let value = f(&[0.5, 1.0]);
+        assert!((value + 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bvp_task_parser_reports_bad_where_expression() {
+        let input = r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+y: heat - y
+
+where
+heat: sin(
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+"#;
+
+        let err = parse_bvp_task_from_str(input)
+            .expect_err("bad where expression should be reported as a BVP parser error");
+        let message = err.to_string();
+        assert!(message.contains("where/substitute"));
+        assert!(message.contains("failed to parse symbolic expression"));
+    }
+
+    #[test]
     fn bvp_task_parser_maps_banded_lambdify_generated_backend_config() {
         let input = r#"
 task
@@ -1462,7 +1472,7 @@ refinement_steps: 0
         );
         assert_eq!(
             config.symbolic_assembly_backend,
-            BvpSymbolicAssemblyBackend::ExprLegacy
+            BvpSymbolicAssemblyBackend::AtomView
         );
         assert_eq!(
             config.banded_linear_solver_config.policy,
@@ -1729,5 +1739,61 @@ plot: false
         let result = run_bvp_task_from_str(&input).expect("BVP task should solve and save CSV");
         assert!(result.result.is_some());
         assert!(csv_path.exists());
+    }
+
+    #[test]
+    fn bvp_task_runner_can_execute_modern_postprocessing_plan() {
+        let dir = tempdir().expect("tempdir should be created");
+        let txt_path = dir.path().join("bvp_task_output.txt");
+        let report_path = dir.path().join("bvp_task_report.md");
+        let input = format!(
+            r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+unknowns: z, y
+rhs: y-z, -z^3
+
+boundary_conditions
+z_left: 1.0
+y_right: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+initial_guess
+z: 0.0
+y: 0.0
+
+solver_options
+tolerance: 1e-5
+max_iterations: 20
+loglevel: off
+
+postprocessing
+save_txt: true
+txt_path: {}
+write_report: true
+report_path: {}
+plot: false
+"#,
+            txt_path.display(),
+            report_path.display()
+        );
+
+        let result = run_bvp_task_from_str(&input).expect("BVP task should solve and postprocess");
+        assert!(result.result.is_some());
+        assert!(txt_path.exists());
+        let report = std::fs::read_to_string(&report_path)
+            .expect("report should be readable after postprocessing");
+        assert!(report.contains("Solver Result Report"));
+        assert!(report.contains("axis: x"));
     }
 }

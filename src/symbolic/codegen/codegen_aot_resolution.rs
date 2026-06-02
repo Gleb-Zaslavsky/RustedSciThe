@@ -99,6 +99,7 @@ impl AotResolver {
                         expression_signature: 0,
                     },
                     crate_dir: Default::default(),
+                    manifest_file: Default::default(),
                     artifact_dir: Default::default(),
                     expected_rlib: Default::default(),
                     expected_cdylib: Default::default(),
@@ -140,6 +141,7 @@ impl AotResolver {
                         expression_signature: 0,
                     },
                     crate_dir: Default::default(),
+                    manifest_file: Default::default(),
                     artifact_dir: Default::default(),
                     expected_rlib: Default::default(),
                     expected_cdylib: Default::default(),
@@ -152,7 +154,7 @@ impl AotResolver {
     }
 
     fn resolved_from_registered(registered: RegisteredAotArtifact) -> ResolvedAotArtifact {
-        let status = if registered.expected_cdylib.exists() || registered.expected_rlib.exists() {
+        let status = if registered.manifest_key_matches() && registered.compiled_artifact_exists() {
             AotResolutionStatus::Compiled
         } else {
             AotResolutionStatus::RegisteredButNotBuilt

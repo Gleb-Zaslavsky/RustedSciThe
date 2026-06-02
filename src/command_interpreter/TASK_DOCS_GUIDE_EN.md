@@ -360,9 +360,22 @@ Both IVP and BVP task docs support:
 
 - `save_csv: true/false`
 - `csv_path: ...`
+- `save_txt: true/false`
+- `txt_path: ...`
+- `write_report: true/false`
+- `report_path: ...`
+- `plotters_png: true/false`
+- `plotters_dir: ...`
+- `gnuplot_png: true/false`
+- `gnuplot_dir: ...`
+- `terminal_plot: true/false`
 - `plot: true/false`
 
-CSV export is already wired. Plot behavior depends on the specific solver path and available plotting setup.
+CSV, TXT and markdown report export are routed through the unified
+`PostprocessPlan` facade. `plotters_png`, `gnuplot_png` and `terminal_plot`
+are explicit modern plotting actions; `plot` remains a legacy compatibility flag
+and its behavior depends on the specific solver path and available plotting
+setup.
 
 ---
 
