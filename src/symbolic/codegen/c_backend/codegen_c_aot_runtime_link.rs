@@ -6,9 +6,9 @@
 
 use crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    register_linked_dense_backend, register_linked_residual_backend,
-    register_linked_sparse_backend, LinkedDenseAotBackend, LinkedResidualAotBackend,
-    LinkedResidualChunk, LinkedSparseAotBackend, LinkedSparseJacobianChunk,
+    LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedResidualChunk, LinkedSparseAotBackend,
+    LinkedSparseJacobianChunk, register_linked_dense_backend, register_linked_residual_backend,
+    register_linked_sparse_backend,
 };
 use libloading::Library;
 use log::{info, warn};

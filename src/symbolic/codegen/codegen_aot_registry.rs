@@ -324,10 +324,12 @@ mod tests {
         assert!(registered.manifest_key_matches());
         assert!(registered.manifest_file_exists());
         assert!(!registered.compiled_artifact_exists());
-        assert!(registered
-            .lifecycle_contract_issues()
-            .iter()
-            .any(|issue| issue.contains("compiled artifact is missing")));
+        assert!(
+            registered
+                .lifecycle_contract_issues()
+                .iter()
+                .any(|issue| issue.contains("compiled artifact is missing"))
+        );
         assert_eq!(
             registry
                 .get_by_manifest(&manifest)
@@ -375,9 +377,11 @@ mod tests {
             .get_by_manifest(&manifest)
             .expect("manifest lookup should still work");
         assert!(refreshed.compiled_artifact_exists());
-        assert!(refreshed
-            .lifecycle_contract_summary()
-            .contains("manifest_key_matches=true"));
+        assert!(
+            refreshed
+                .lifecycle_contract_summary()
+                .contains("manifest_key_matches=true")
+        );
     }
 
     #[test]
@@ -409,9 +413,11 @@ mod tests {
         assert!(removed);
         assert!(!build.written.crate_dir.exists());
         assert!(registry.get_by_problem_key(&problem_key).is_none());
-        assert!(registry
-            .get_by_crate_name("generated_registry_cleanup_fixture")
-            .is_none());
+        assert!(
+            registry
+                .get_by_crate_name("generated_registry_cleanup_fixture")
+                .is_none()
+        );
     }
 
     #[test]
@@ -477,9 +483,11 @@ mod tests {
         registry.register_materialized_build(manifest.clone(), &build1);
 
         assert_eq!(registry.len(), 1);
-        assert!(registry
-            .get_by_crate_name("generated_registry_old")
-            .is_none());
+        assert!(
+            registry
+                .get_by_crate_name("generated_registry_old")
+                .is_none()
+        );
 
         let registered = registry
             .get_by_crate_name("generated_registry_new")

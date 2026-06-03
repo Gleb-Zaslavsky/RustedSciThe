@@ -2613,8 +2613,8 @@ mod tests {
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
-        register_linked_sparse_backend, unregister_linked_sparse_backend, LinkedResidualChunk,
-        LinkedSparseAotBackend, LinkedSparseJacobianChunk,
+        LinkedResidualChunk, LinkedSparseAotBackend, LinkedSparseJacobianChunk,
+        register_linked_sparse_backend, unregister_linked_sparse_backend,
     };
     use crate::symbolic::codegen::codegen_backend_selection::{
         BackendSelectionPolicy, SelectedBackendKind,
@@ -2636,8 +2636,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 

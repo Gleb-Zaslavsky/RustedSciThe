@@ -1,5 +1,9 @@
-use RustedSciThe::command_interpreter::task_parser_bvp::create_bvp_template_file;
-use RustedSciThe::command_interpreter::task_parser_ivp::create_ivp_template_file;
+//use RustedSciThe::command_interpreter::task_parser_bvp::create_bvp_template_file;
+//use RustedSciThe::command_interpreter::task_parser_ivp::create_ivp_template_file;
+
+use RustedSciThe::command_interpreter::ivp_dialogue::run_ivp_template_dialogue;
+
+use RustedSciThe::command_interpreter::bvp_dialogue::run_bvp_template_dialogue;
 use RustedSciThe::command_interpreter::task_runner::{
     TaskDocumentKind, TaskRunResult, parse_task_spec_from_file, render_task_preview,
     run_task_from_spec,
@@ -121,12 +125,10 @@ fn main() {
         };
         match args[2].to_ascii_lowercase().as_str() {
             "ivp" => {
-                create_ivp_template_file(output);
-                println!("IVP template created.");
+                run_ivp_template_dialogue(output);
             }
             "bvp" => {
-                create_bvp_template_file(output);
-                println!("BVP template created.");
+                run_bvp_template_dialogue(output);
             }
             other => {
                 eprintln!("Unknown template kind `{other}` (expected `ivp` or `bvp`).");

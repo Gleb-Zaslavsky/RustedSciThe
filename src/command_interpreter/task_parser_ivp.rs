@@ -12,10 +12,10 @@ use crate::command_interpreter::task_parser_common::{
     SharedEquationParseError, parse_symbolic_equation_system,
 };
 use crate::numerical::LSODE2::{
-    Lsode2AotProfile, Lsode2AotToolchain, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
-    Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2NativeExecutionConfig,
-    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
-    Lsode2SymbolicExecutionMode,
+    Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend,
+    Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
+    Lsode2NativeExecutionConfig, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
 use crate::numerical::Radau::Radau_main::RadauOrder;
@@ -122,6 +122,7 @@ pub struct IvpSolverOptionsSpec {
 /// LSODE2-specific options parsed from `solver_options`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Lsode2TaskOptionsSpec {
+    pub controller: Option<Lsode2ControllerConfig>,
     pub symbolic_assembly: Option<Lsode2SymbolicAssemblyBackend>,
     pub symbolic_execution: Option<Lsode2TaskExecutionSpec>,
     pub linear_system_structure: Option<Lsode2LinearSystemStructure>,
@@ -413,6 +414,9 @@ fn build_lsode2_problem_config_from_spec(
     }
 
     if let Some(options) = spec.solver_options.lsode2.as_ref() {
+        if let Some(controller) = options.controller {
+            config = config.with_controller(controller);
+        }
         let symbolic_assembly = options
             .symbolic_assembly
             .unwrap_or(Lsode2SymbolicAssemblyBackend::ExprLegacy);
@@ -689,6 +693,7 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
 fn parse_lsode2_options(
     section: &GenericSectionMap,
 ) -> Result<Option<Lsode2TaskOptionsSpec>, IvpTaskError> {
+    let controller = parse_lsode2_controller(section)?;
     let assembly = match get_optional_string(section, "lsode2_symbolic_assembly", "solver_options")?
     {
         Some(raw) => Some(parse_lsode2_symbolic_assembly(&raw)?),
@@ -701,6 +706,7 @@ fn parse_lsode2_options(
 
     let has_any = assembly.is_some()
         || execution.is_some()
+        || controller.is_some()
         || linear_structure.is_some()
         || linear_policy.is_some()
         || native_execution.is_some();
@@ -709,6 +715,7 @@ fn parse_lsode2_options(
     }
 
     Ok(Some(Lsode2TaskOptionsSpec {
+        controller,
         symbolic_assembly: assembly,
         symbolic_execution: execution,
         linear_system_structure: linear_structure,
@@ -798,6 +805,34 @@ fn parse_lsode2_symbolic_assembly(
             ),
         }),
     }
+}
+
+fn parse_lsode2_controller(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2ControllerConfig>, IvpTaskError> {
+    let raw = match get_optional_string(section, "lsode2_method_family", "solver_options")? {
+        Some(value) => value,
+        None => match get_optional_string(section, "lsode2_controller", "solver_options")? {
+            Some(value) => value,
+            None => return Ok(None),
+        },
+    };
+    let value = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let controller = match value.as_str() {
+        "auto" | "automatic" | "automatic_adams_bdf" | "lsoda" | "adams_bdf" => {
+            Lsode2ControllerConfig::automatic_adams_bdf()
+        }
+        "adams" | "adams_only" | "lsode_adams" => Lsode2ControllerConfig::adams_only(),
+        "bdf" | "bdf_only" | "lsode_bdf" | "lsode" => Lsode2ControllerConfig::bdf_only(),
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_method_family".to_string(),
+                message: format!("unknown LSODE2 method family `{other}` (use auto, adams or bdf)"),
+            });
+        }
+    };
+    Ok(Some(controller))
 }
 
 fn parse_lsode2_execution(
@@ -1500,6 +1535,53 @@ lsode2_native_execution: faithful_bdf_solve
             lsode2.linear_system_structure,
             Some(Lsode2LinearSystemStructure::Sparse)
         );
+    }
+
+    #[test]
+    fn ivp_task_parser_maps_lsode2_method_family_to_controller_config() {
+        use crate::numerical::LSODE2::Lsode2ControllerMode;
+
+        let cases = [
+            ("LSODA", "auto", Lsode2ControllerMode::AutomaticAdamsBdf),
+            ("LSODE", "adams", Lsode2ControllerMode::AdamsOnly),
+            ("LSODE", "bdf", Lsode2ControllerMode::BdfOnly),
+        ];
+
+        for (method, family, expected_mode) in cases {
+            let input = format!(
+                r#"
+task
+solver: IVP
+method: {method}
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_method_family: {family}
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: auto
+"#
+            );
+            let spec =
+                parse_ivp_task_from_str(&input).expect("LSODE2 controller document should parse");
+            let config = build_lsode2_problem_config_from_spec(&spec)
+                .expect("LSODE2 controller document should build problem config");
+            assert_eq!(
+                config.controller.mode, expected_mode,
+                "{method}/{family} should map to the expected controller mode"
+            );
+        }
     }
 
     #[test]
