@@ -2,7 +2,7 @@
 mod tests {
     use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
     use crate::numerical::BVP_sci::BVP_sci_numerical::{
-        NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode, solve_numerical_bvp,
+        solve_numerical_bvp, NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
     };
     use faer::sparse::Triplet;
 

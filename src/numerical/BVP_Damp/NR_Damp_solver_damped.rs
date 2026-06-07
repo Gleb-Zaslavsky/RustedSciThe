@@ -68,6 +68,7 @@ use crate::numerical::BVP_Damp::numeric_discretization::{
     NumericBvpJacobian, NumericBvpRhs, build_numeric_generated_solver_state,
 };
 use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
@@ -86,6 +87,11 @@ use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};
 
 use crate::numerical::BVP_Damp::grid_api::{GridRefinementMethod, new_grid};
+use crate::numerical::BVP_Damp::solver_common::{
+    DEFAULT_FORWARD_SCHEME, DEFAULT_MAX_ITERATIONS, cleanup_registered_aot_artifacts,
+    damped_interval_mesh, default_dense_method_name, default_forward_scheme_name,
+    default_placeholder_y, default_sparse_method_name,
+};
 
 /// Configuration parameters for the damped Newton solver
 ///
@@ -125,9 +131,9 @@ pub enum BvpDerivativeScheme {
 }
 
 impl BvpDerivativeScheme {
-    fn as_legacy_str(self) -> &'static str {
+    pub(crate) fn as_legacy_str(self) -> &'static str {
         match self {
-            Self::Forward => "forward",
+            Self::Forward => DEFAULT_FORWARD_SCHEME,
             Self::Trapezoid => "trapezoid",
         }
     }
@@ -211,6 +217,18 @@ impl DampedSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Returns options with an explicit AtomView AOT optimization profile.
+    ///
+    /// The default is `AtomOptimizationProfile::Full`, which preserves the
+    /// historical CSE-enabled pipeline. Diagnostic profiles such as `NoCse`
+    /// are useful for correctness and performance A/B checks.
+    pub fn with_atom_optimization_profile(mut self, profile: AtomOptimizationProfile) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_atom_optimization_profile(profile);
         self
     }
 
@@ -334,7 +352,7 @@ impl DampedSolverOptions {
     /// need sparse/AOT-specific behavior.
     pub fn dense_damped() -> Self {
         Self {
-            method: "Dense".to_string(),
+            method: default_dense_method_name(),
             ..Self::default()
         }
     }
@@ -426,14 +444,14 @@ impl DampedSolverOptions {
 impl Default for DampedSolverOptions {
     fn default() -> Self {
         Self {
-            scheme: "forward".to_string(),
+            scheme: default_forward_scheme_name(),
             strategy: "Damped".to_string(),
             strategy_params: Some(SolverParams::default()),
             linear_sys_method: None,
-            method: "Sparse".to_string(),
+            method: default_sparse_method_name(),
             abs_tolerance: 1e-6,
             rel_tolerance: None,
-            max_iterations: 25,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
             bounds: None,
             loglevel: None,
             generated_backend_config: GeneratedBackendConfig::default(),
@@ -565,6 +583,7 @@ impl BuildDampedSolverRequest for NRBVP {
             aot_codegen_backend: self.generated_backend_config.aot_codegen_backend,
             aot_c_compiler: self.generated_backend_config.aot_c_compiler.clone(),
             aot_chunking_policy: self.generated_backend_config.aot_chunking_policy,
+            atom_optimization_profile: self.generated_backend_config.atom_optimization_profile,
             symbolic_assembly_backend: self.generated_backend_config.symbolic_assembly_backend,
             matrix_backend_override: self.generated_backend_config.matrix_backend_override,
             banded_linear_solver_config: self.generated_backend_config.banded_linear_solver_config,
@@ -632,15 +651,12 @@ impl NRBVP {
         loglevel: Option<String>,
     ) -> NRBVP {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
-        let y0 = Box::new(DVector::from_vec(vec![0.0, 0.0]));
+        let y0 = default_placeholder_y();
 
         let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             Box::new(|_x, y: &DVector<f64>| y.clone());
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun0));
-        let h = (t_end - t0) / n_steps as f64;
-        let T_list: Vec<f64> = (0..n_steps + 1)
-            .map(|i| t0 + (i as f64) * h)
-            .collect::<Vec<_>>();
+        let x_mesh = damped_interval_mesh(t0, t_end, n_steps);
 
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         let new_grid_enabled_: bool = if let Some(ref params) = strategy_params {
@@ -680,7 +696,7 @@ impl NRBVP {
             no_reports: false,
             result: None,
             full_result: None,
-            x_mesh: DVector::from_vec(T_list),
+            x_mesh,
             fun: boxed_fun,
             BC_position_and_value: Vec::new(),
             jac: None,
@@ -1179,13 +1195,16 @@ impl NRBVP {
         self
     }
 
-    pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
-        let h = (t_end - t0) / n_steps as f64;
-        let T_list: Vec<f64> = (0..n_steps + 1)
-            .map(|i| t0 + (i as f64) * h)
-            .collect::<Vec<_>>();
+    /// Returns a solver with an explicit AtomView AOT optimization profile.
+    pub fn with_atom_optimization_profile(mut self, profile: AtomOptimizationProfile) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_atom_optimization_profile(profile);
+        self
+    }
 
-        self.x_mesh = DVector::from_vec(T_list);
+    pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
+        self.x_mesh = damped_interval_mesh(t0, t_end, n_steps);
     }
 
     /// Installs a pure numeric RHS callback used by the `NumericOnly` backend route.
@@ -1471,6 +1490,16 @@ impl NRBVP {
         self.generated_backend_config.aot_chunking_policy
     }
 
+    /// Installs an explicit AtomView AOT optimization profile.
+    pub fn set_atom_optimization_profile(&mut self, profile: AtomOptimizationProfile) {
+        self.generated_backend_config.atom_optimization_profile = profile;
+    }
+
+    /// Returns the configured AtomView AOT optimization profile.
+    pub fn atom_optimization_profile(&self) -> AtomOptimizationProfile {
+        self.generated_backend_config.atom_optimization_profile
+    }
+
     /// Returns the configured compiled AOT resolver, if present.
     pub fn aot_resolver(&self) -> Option<&AotResolver> {
         self.generated_backend_config.resolver.as_ref()
@@ -1533,6 +1562,15 @@ impl NRBVP {
     /// Returns the full generated-backend configuration.
     pub fn generated_backend_config(&self) -> &GeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    /// Removes registered generated AOT artifact directories owned by this solver resolver.
+    ///
+    /// This is an explicit lifecycle operation for cold-build/story/debug workflows. Call it only
+    /// after compiled callbacks from this solver are no longer needed; the method does not try to
+    /// unregister process-local linked callbacks or unload dynamic libraries.
+    pub fn cleanup_registered_aot_artifacts(&mut self) -> std::io::Result<usize> {
+        cleanup_registered_aot_artifacts(&mut self.generated_backend_config)
     }
 
     /// Returns accumulated nonlinear/callback/linear-solve statistics for the current solver.
@@ -1719,7 +1757,6 @@ impl NRBVP {
                     Vectors_type_casting(&y.to_DVectorType(), self.effective_runtime_method());
                 finite_difference_jacobian(&*self.fun, p, &*y_runtime, 1e-8)
             };
-            // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
@@ -1780,7 +1817,6 @@ impl NRBVP {
         );
         let residual_norm = F_k.norm();
         info!("\n \n residual norm = {:?} ", residual_norm);
-        // jac_rowwise_printing(&J_k);
         //    println!(" \n \n F_k = {:?} \n \n", F_k.to_DVectorType());
         for el in F_k.iterate() {
             if el.is_nan() {
@@ -2639,6 +2675,7 @@ mod tests {
     use crate::symbolic::codegen::codegen_orchestrator::{
         ParallelExecutorConfig, ParallelFallbackPolicy,
     };
+    use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
     use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
     use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
     use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
@@ -2840,7 +2877,8 @@ mod tests {
             .with_aot_chunking_policy(AotChunkingPolicy::with_parts(
                 Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
-            ));
+            ))
+            .with_atom_optimization_profile(AtomOptimizationProfile::NoCse);
 
         assert_eq!(
             solver.backend_policy_override(),
@@ -2857,6 +2895,10 @@ mod tests {
                 Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
             )
+        );
+        assert_eq!(
+            solver.atom_optimization_profile(),
+            AtomOptimizationProfile::NoCse
         );
     }
 
@@ -2943,6 +2985,32 @@ mod tests {
         assert_eq!(
             options.generated_backend_config.aot_build_policy,
             AotBuildPolicy::UseIfAvailable
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_execution_policy,
+            AotExecutionPolicy::Auto
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_chunking_policy,
+            AotChunkingPolicy::default()
+        );
+    }
+
+    #[test]
+    fn banded_damped_options_preset_uses_auto_aot_chunking_defaults() {
+        let options = DampedSolverOptions::banded_damped();
+
+        assert_eq!(
+            options.generated_backend_config.matrix_backend_override,
+            Some(MatrixBackend::Banded)
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_execution_policy,
+            AotExecutionPolicy::Auto
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_chunking_policy,
+            AotChunkingPolicy::default()
         );
     }
 
@@ -3225,6 +3293,15 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_registered_aot_artifacts_is_safe_without_registered_artifacts() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        assert_eq!(solver.cleanup_registered_aot_artifacts().unwrap(), 0);
+
+        solver.set_aot_resolver(Some(AotResolver::new(AotRegistry::new())));
+        assert_eq!(solver.cleanup_registered_aot_artifacts().unwrap(), 0);
+    }
+
+    #[test]
     fn build_solver_request_carries_surface_aot_policies() {
         let config = GeneratedBackendConfig::new()
             .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
@@ -3243,7 +3320,8 @@ mod tests {
                     max_outputs_per_chunk: 8,
                 }),
                 Some(SparseChunkingStrategy::ByRowCount { rows_per_chunk: 4 }),
-            ));
+            ))
+            .with_atom_optimization_profile(AtomOptimizationProfile::NoCse);
 
         let mut solver =
             sparse_surface_test_solver_with_tolerances().with_generated_backend_config(config);
@@ -3264,6 +3342,10 @@ mod tests {
         assert_eq!(
             request.aot_chunking_policy.sparse_jacobian,
             Some(SparseChunkingStrategy::ByRowCount { rows_per_chunk: 4 })
+        );
+        assert_eq!(
+            request.atom_optimization_profile,
+            AtomOptimizationProfile::NoCse
         );
         match request.aot_execution_policy {
             AotExecutionPolicy::Parallel(inner) => {

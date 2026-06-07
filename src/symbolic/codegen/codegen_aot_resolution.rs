@@ -58,6 +58,14 @@ impl AotResolver {
         &self.registry
     }
 
+    /// Safely removes the generated on-disk tree for a registered artifact.
+    ///
+    /// This mutates only this resolver snapshot and delegates all filesystem
+    /// safety checks to [`AotRegistry::cleanup_artifact_by_problem_key`].
+    pub fn cleanup_artifact_by_problem_key(&mut self, problem_key: &str) -> std::io::Result<bool> {
+        self.registry.cleanup_artifact_by_problem_key(problem_key)
+    }
+
     /// Resolves an AOT backend by manifest.
     pub fn resolve_by_manifest(&self, manifest: &PreparedProblemManifest) -> ResolvedAotArtifact {
         self.resolve_by_problem_key(&manifest.problem_key())

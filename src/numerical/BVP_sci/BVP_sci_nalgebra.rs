@@ -448,17 +448,6 @@ pub fn compute_jac_indices(n: usize, m: usize, k: usize) -> (Vec<usize>, Vec<usi
     (i_indices, j_indices)
 }
 
-/// Stacked matrix multiplication: out[i,:,:] = a[i,:,:] * b[i,:,:]
-/// This is a simplified version - the Python original had optimization for large matrices
-pub fn stacked_matmul(a: &[DMatrix<f64>], b: &[DMatrix<f64>]) -> Vec<DMatrix<f64>> {
-    assert_eq!(a.len(), b.len());
-
-    a.iter()
-        .zip(b.iter())
-        .map(|(a_mat, b_mat)| a_mat * b_mat)
-        .collect()
-}
-
 /// Evaluate collocation residuals
 ///
 /// This function implements the core collocation method. The solution is sought
@@ -500,26 +489,14 @@ pub fn collocation_fun(
     }
 
     // Evaluate RHS at middle points
-    // The ODE function expects x and y to have consistent dimensions
-    // We evaluate the function at each middle point individually
-    let mut f_middle = DMatrix::zeros(n, m - 1);
+    // The ODE function already supports batched evaluation across multiple points
+    // (same as the mesh-node call above). Build a single vector of all
+    // midpoints and evaluate in one call for optimal performance.
+    let mut x_mid_all = DVector::zeros(m - 1);
     for j in 0..(m - 1) {
-        let x_mid = x[j] + 0.5 * h[j];
-        let x_single = DVector::from_vec(vec![x_mid]);
-
-        // Extract the j-th column of y_middle for evaluation as a column vector
-        let mut y_single = DMatrix::zeros(n, 1);
-        for i in 0..n {
-            y_single[(i, 0)] = y_middle[(i, j)];
-        }
-
-        let f_result = fun(&x_single, &y_single, p);
-
-        // Copy the result to the j-th column of f_middle
-        for i in 0..n {
-            f_middle[(i, j)] = f_result[(i, 0)];
-        }
+        x_mid_all[j] = x[j] + 0.5 * h[j];
     }
+    let f_middle = fun(&x_mid_all, &y_middle, p);
 
     // Compute collocation residuals
     let mut col_res = DMatrix::zeros(n, m - 1);
@@ -947,7 +924,7 @@ pub fn create_spline(
 
             // Cubic spline coefficients (highest degree first)
             c[0][j][i] = t / h[j]; // x^3 coefficient
-            c[1][j][i] = (slope - yp[(i, j)]) / h[j] - t; // x^2 coefficient  
+            c[1][j][i] = (slope - yp[(i, j)]) / h[j] - t; // x^2 coefficient
             c[2][j][i] = yp[(i, j)]; // x^1 coefficient
             c[3][j][i] = y[(i, j)]; // x^0 coefficient
         }

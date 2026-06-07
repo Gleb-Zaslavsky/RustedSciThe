@@ -18,8 +18,8 @@
 
 use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    BCFunction, BCJacobian, BVPResult, ODEFunction, ODEJacobian, faer_col, faer_dense_mat,
-    faer_mat, solve_bvp,
+    faer_col, faer_dense_mat, faer_mat, solve_bvp, BCFunction, BCJacobian, BVPResult, ODEFunction,
+    ODEJacobian,
 };
 use faer::sparse::Triplet;
 use std::sync::Arc;

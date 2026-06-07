@@ -12,13 +12,20 @@ use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::BvpDerivativeScheme;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyFrozenGeneratedSolverState,
     BandedGeneratedBackendMode, BuildFrozenSolverRequest, FrozenGeneratedSolverState,
     FrozenSolverBuildRequest, GeneratedBackendConfig, SparseGeneratedBackendMode,
     try_generate_and_apply_frozen_solver_state,
 };
+use crate::numerical::BVP_Damp::solver_common::{
+    DEFAULT_MAX_ITERATIONS, cleanup_registered_aot_artifacts, default_dense_method_name,
+    default_forward_scheme_name, default_placeholder_y, default_sparse_method_name,
+    frozen_point_mesh,
+};
 use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
@@ -38,6 +45,8 @@ use std::fs::File;
 /// User-facing setup options for the frozen BVP solver.
 #[derive(Clone)]
 pub struct FrozenSolverOptions {
+    /// Residual discretization scheme name.
+    pub scheme: String,
     /// Nonlinear solver strategy name.
     pub strategy: String,
     /// Optional strategy-specific parameters.
@@ -73,6 +82,7 @@ impl FrozenSolverOptions {
         max_iterations: usize,
     ) -> Self {
         Self {
+            scheme: default_forward_scheme_name(),
             strategy,
             strategy_params,
             linear_sys_method,
@@ -86,6 +96,44 @@ impl FrozenSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Returns options with an explicit AtomView AOT optimization profile.
+    ///
+    /// The default is `AtomOptimizationProfile::Full`, which preserves the
+    /// historical CSE-enabled pipeline. Diagnostic profiles such as `NoCse`
+    /// are useful for correctness and performance A/B checks.
+    pub fn with_atom_optimization_profile(mut self, profile: AtomOptimizationProfile) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_atom_optimization_profile(profile);
+        self
+    }
+
+    /// Selects the residual discretization scheme with a typed public API.
+    ///
+    /// The stored value is still the legacy string consumed by the symbolic
+    /// discretization layer, but user code should prefer this method over raw
+    /// `"forward"` / `"trapezoid"` strings.
+    pub fn with_scheme(mut self, scheme: BvpDerivativeScheme) -> Self {
+        self.scheme = scheme.as_legacy_str().to_string();
+        self
+    }
+
+    /// Selects the legacy forward derivative discretization.
+    pub fn forward_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Forward)
+    }
+
+    /// Selects the trapezoid derivative discretization.
+    pub fn trapezoid_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Trapezoid)
+    }
+
+    /// Compatibility escape hatch for legacy/custom scheme strings.
+    pub fn with_scheme_name(mut self, scheme: impl Into<String>) -> Self {
+        self.scheme = scheme.into();
         self
     }
 
@@ -166,7 +214,7 @@ impl FrozenSolverOptions {
     /// Creates production-oriented dense frozen solver options with standard defaults.
     pub fn dense_frozen() -> Self {
         Self {
-            method: "Dense".to_string(),
+            method: default_dense_method_name(),
             ..Self::default()
         }
     }
@@ -267,12 +315,13 @@ impl FrozenSolverOptions {
 impl Default for FrozenSolverOptions {
     fn default() -> Self {
         Self {
+            scheme: default_forward_scheme_name(),
             strategy: "Frozen".to_string(),
             strategy_params: Some(HashMap::from([("Frozen_naive".to_string(), None)])),
             linear_sys_method: None,
-            method: "Sparse".to_string(),
+            method: default_sparse_method_name(),
             tolerance: 1e-6,
-            max_iterations: 25,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
             generated_backend_config: GeneratedBackendConfig::default(),
         }
     }
@@ -289,6 +338,7 @@ pub struct NRBVP {
     pub t0: f64,
     pub t_end: f64,
     pub n_steps: usize,
+    pub scheme: String,
     pub strategy: String,
     pub strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
     pub linear_sys_method: Option<String>,
@@ -346,7 +396,7 @@ impl BuildFrozenSolverRequest for NRBVP {
             h: Some(h),
             mesh: None,
             border_conditions: self.BorderConditions.clone(),
-            scheme: "forward".to_string(),
+            scheme: self.scheme.clone(),
             method: effective_method.clone(),
             bandwidth: None,
             backend_policy: self
@@ -359,6 +409,7 @@ impl BuildFrozenSolverRequest for NRBVP {
             aot_codegen_backend: self.generated_backend_config.aot_codegen_backend,
             aot_c_compiler: self.generated_backend_config.aot_c_compiler.clone(),
             aot_chunking_policy: self.generated_backend_config.aot_chunking_policy,
+            atom_optimization_profile: self.generated_backend_config.atom_optimization_profile,
             symbolic_assembly_backend: self.generated_backend_config.symbolic_assembly_backend,
             matrix_backend_override: self.generated_backend_config.matrix_backend_override,
             banded_linear_solver_config: self.generated_backend_config.banded_linear_solver_config,
@@ -389,15 +440,12 @@ impl NRBVP {
         max_iterations: usize, // max number of iterations
     ) -> NRBVP {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
-        let y0 = Box::new(DVector::from_vec(vec![0.0, 0.0]));
+        let y0 = default_placeholder_y();
 
         let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             Box::new(|_x, y: &DVector<f64>| y.clone());
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun0));
-        let h = (t_end - t0) / (n_steps - 1) as f64;
-        let T_list: Vec<f64> = (0..n_steps)
-            .map(|i| t0 + (i as f64) * h)
-            .collect::<Vec<_>>();
+        let x_mesh = frozen_point_mesh(t0, t_end, n_steps);
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         NRBVP {
             eq_system,
@@ -410,6 +458,7 @@ impl NRBVP {
             t0,
             t_end,
             n_steps,
+            scheme: BvpDerivativeScheme::Forward.as_legacy_str().to_string(),
             tolerance,
             strategy,
             strategy_params,
@@ -418,7 +467,7 @@ impl NRBVP {
             max_iterations,
             max_error: 0.0,
             result: None,
-            x_mesh: DVector::from_vec(T_list),
+            x_mesh,
             fun: boxed_fun,
             jac: None,
             p: 0.0,
@@ -550,11 +599,34 @@ impl NRBVP {
             options.max_iterations,
             options.generated_backend_config,
         )
+        .with_scheme_name(options.scheme)
     }
 
     /// Returns a solver configured with the provided generated-backend settings.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Returns a solver configured with the selected residual discretization scheme.
+    pub fn with_scheme(mut self, scheme: BvpDerivativeScheme) -> Self {
+        self.scheme = scheme.as_legacy_str().to_string();
+        self
+    }
+
+    /// Returns a solver configured with the legacy forward derivative discretization.
+    pub fn forward_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Forward)
+    }
+
+    /// Returns a solver configured with the trapezoid derivative discretization.
+    pub fn trapezoid_derivative(self) -> Self {
+        self.with_scheme(BvpDerivativeScheme::Trapezoid)
+    }
+
+    /// Compatibility escape hatch for legacy/custom scheme strings.
+    pub fn with_scheme_name(mut self, scheme: impl Into<String>) -> Self {
+        self.scheme = scheme.into();
         self
     }
 
@@ -638,6 +710,14 @@ impl NRBVP {
     /// Returns a solver with explicit solver-level AOT chunking overrides.
     pub fn with_aot_chunking_policy(mut self, policy: AotChunkingPolicy) -> Self {
         self.generated_backend_config.aot_chunking_policy = policy;
+        self
+    }
+
+    /// Returns a solver with an explicit AtomView AOT optimization profile.
+    pub fn with_atom_optimization_profile(mut self, profile: AtomOptimizationProfile) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_atom_optimization_profile(profile);
         self
     }
 
@@ -748,6 +828,16 @@ impl NRBVP {
         self.generated_backend_config.aot_chunking_policy
     }
 
+    /// Installs an explicit AtomView AOT optimization profile.
+    pub fn set_atom_optimization_profile(&mut self, profile: AtomOptimizationProfile) {
+        self.generated_backend_config.atom_optimization_profile = profile;
+    }
+
+    /// Returns the configured AtomView AOT optimization profile.
+    pub fn atom_optimization_profile(&self) -> AtomOptimizationProfile {
+        self.generated_backend_config.atom_optimization_profile
+    }
+
     /// Returns the configured compiled AOT resolver, if present.
     pub fn aot_resolver(&self) -> Option<&AotResolver> {
         self.generated_backend_config.resolver.as_ref()
@@ -836,6 +926,15 @@ impl NRBVP {
     /// Returns the full generated-backend configuration.
     pub fn generated_backend_config(&self) -> &GeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    /// Removes registered generated AOT artifact directories owned by this solver resolver.
+    ///
+    /// This is an explicit lifecycle operation for cold-build/story/debug workflows. Call it only
+    /// after compiled callbacks from this solver are no longer needed; the method does not try to
+    /// unregister process-local linked callbacks or unload dynamic libraries.
+    pub fn cleanup_registered_aot_artifacts(&mut self) -> std::io::Result<usize> {
+        cleanup_registered_aot_artifacts(&mut self.generated_backend_config)
     }
 
     /// Returns accumulated operation statistics and actual backend diagnostics.
@@ -955,7 +1054,6 @@ impl NRBVP {
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
             self.custom_timer.jac_tac();
-            // println!(" \n \n new_j = {:?} ", jac_rowwise_printing(&*&new_j) );
             self.old_jac = Some(new_j.clone_box());
             self.m = 0;
             *self
@@ -2086,7 +2184,8 @@ mod tests {
             .with_aot_chunking_policy(AotChunkingPolicy::with_parts(
                 Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
-            ));
+            ))
+            .with_atom_optimization_profile(AtomOptimizationProfile::NoCse);
 
         assert_eq!(
             solver.backend_policy_override(),
@@ -2103,6 +2202,10 @@ mod tests {
                 Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
             )
+        );
+        assert_eq!(
+            solver.atom_optimization_profile(),
+            AtomOptimizationProfile::NoCse
         );
     }
 
@@ -2337,6 +2440,7 @@ mod tests {
     fn sparse_frozen_options_preset_sets_production_defaults() {
         let options = FrozenSolverOptions::sparse_frozen();
 
+        assert_eq!(options.scheme, "forward");
         assert_eq!(options.strategy, "Frozen");
         assert_eq!(options.method, "Sparse");
         assert_eq!(
@@ -2351,6 +2455,66 @@ mod tests {
             options.generated_backend_config.aot_build_policy,
             AotBuildPolicy::UseIfAvailable
         );
+        assert_eq!(
+            options.generated_backend_config.aot_execution_policy,
+            AotExecutionPolicy::Auto
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_chunking_policy,
+            AotChunkingPolicy::default()
+        );
+    }
+
+    #[test]
+    fn banded_frozen_options_preset_uses_auto_aot_chunking_defaults() {
+        let options = FrozenSolverOptions::banded_frozen();
+
+        assert_eq!(
+            options.generated_backend_config.matrix_backend_override,
+            Some(MatrixBackend::Banded)
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_execution_policy,
+            AotExecutionPolicy::Auto
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_chunking_policy,
+            AotChunkingPolicy::default()
+        );
+    }
+
+    #[test]
+    fn frozen_options_scheme_builder_methods_set_legacy_scheme_flag() {
+        let options = FrozenSolverOptions::sparse_frozen().trapezoid_derivative();
+        assert_eq!(options.scheme, "trapezoid");
+
+        let options = options.forward_derivative();
+        assert_eq!(options.scheme, "forward");
+
+        let options = options.with_scheme(BvpDerivativeScheme::Trapezoid);
+        assert_eq!(options.scheme, "trapezoid");
+
+        let options = options.with_scheme_name("custom-experimental");
+        assert_eq!(options.scheme, "custom-experimental");
+    }
+
+    #[test]
+    fn frozen_solver_scheme_builder_methods_feed_generated_request() {
+        let solver = sparse_surface_test_solver().trapezoid_derivative();
+        assert_eq!(solver.scheme, "trapezoid");
+        assert_eq!(solver.build_solver_request().scheme, "trapezoid");
+
+        let solver = solver.forward_derivative();
+        assert_eq!(solver.scheme, "forward");
+        assert_eq!(solver.build_solver_request().scheme, "forward");
+
+        let solver = solver.with_scheme(BvpDerivativeScheme::Trapezoid);
+        assert_eq!(solver.scheme, "trapezoid");
+        assert_eq!(solver.build_solver_request().scheme, "trapezoid");
+
+        let solver = solver.with_scheme_name("custom-experimental");
+        assert_eq!(solver.scheme, "custom-experimental");
+        assert_eq!(solver.build_solver_request().scheme, "custom-experimental");
     }
 
     #[test]
@@ -2579,6 +2743,15 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_registered_aot_artifacts_is_safe_without_registered_artifacts() {
+        let mut solver = sparse_surface_test_solver_with_naive_strategy();
+        assert_eq!(solver.cleanup_registered_aot_artifacts().unwrap(), 0);
+
+        solver.set_aot_resolver(Some(AotResolver::new(AotRegistry::new())));
+        assert_eq!(solver.cleanup_registered_aot_artifacts().unwrap(), 0);
+    }
+
+    #[test]
     fn build_solver_request_carries_surface_aot_policies() {
         let config = GeneratedBackendConfig::new()
             .with_backend_policy_override(Some(BackendSelectionPolicy::PreferAotThenLambdify))
@@ -2595,7 +2768,8 @@ mod tests {
                     max_outputs_per_chunk: 6,
                 }),
                 Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
-            ));
+            ))
+            .with_atom_optimization_profile(AtomOptimizationProfile::NoCse);
 
         let solver =
             sparse_surface_test_solver_with_naive_strategy().with_generated_backend_config(config);
@@ -2611,6 +2785,10 @@ mod tests {
         assert_eq!(
             request.aot_chunking_policy.sparse_jacobian,
             Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 })
+        );
+        assert_eq!(
+            request.atom_optimization_profile,
+            AtomOptimizationProfile::NoCse
         );
         match request.aot_execution_policy {
             AotExecutionPolicy::Parallel(inner) => {

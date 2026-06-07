@@ -62,19 +62,19 @@
 //!    No symbolic machinery at all: users provide ordinary numerical closures directly to
 //!    the `faer` solver core in [`BVP_sci_faer`].
 //!
-use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
-use crate::Utils::plots::{plots, plots_gnulot};
-use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
+use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, CustomTimer};
 use crate::numerical::BVP_sci::BVP_sci_aot::{
     BvpSciGeneratedBackendConfig, BvpSciGeneratedBackendMode,
 };
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    BCFunction, BCJacobian, BVPResult, ODEFunction, ODEJacobian, faer_col, faer_dense_mat,
-    faer_mat, solve_bvp,
+    faer_col, faer_dense_mat, faer_mat, solve_bvp_with_strategy_and_linear_policy, BCFunction,
+    BCJacobian, BVPResult, BvpSciLinearSolvePolicy, ODEFunction, ODEJacobian,
 };
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
 use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
+use crate::Utils::plots::{plots, plots_gnulot};
 use chrono::Local;
 use faer::mat::Mat;
 use log::{error, info};
@@ -110,6 +110,7 @@ pub struct BvpSciSolverOptions {
     pub bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
     pub loglevel: Option<String>,
     pub generated_backend_config: BvpSciGeneratedBackendConfig,
+    pub linear_solve_policy: BvpSciLinearSolvePolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +154,7 @@ impl BvpSciSolverOptions {
             bounds: None,
             loglevel: Some("info".to_string()),
             generated_backend_config: BvpSciGeneratedBackendConfig::default(),
+            linear_solve_policy: BvpSciLinearSolvePolicy::Sparse,
         }
     }
 
@@ -174,6 +176,19 @@ impl BvpSciSolverOptions {
     pub fn with_generated_backend_config(mut self, config: BvpSciGeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
         self
+    }
+
+    pub fn with_linear_solve_policy(mut self, policy: BvpSciLinearSolvePolicy) -> Self {
+        self.linear_solve_policy = policy;
+        self
+    }
+
+    pub fn with_auto_banded_linear_solver(self) -> Self {
+        self.with_linear_solve_policy(BvpSciLinearSolvePolicy::AutoBanded)
+    }
+
+    pub fn with_experimental_bordered_banded_linear_solver(self) -> Self {
+        self.with_linear_solve_policy(BvpSciLinearSolvePolicy::ExperimentalBorderedBanded)
     }
 
     pub fn with_generated_backend_mode(self, mode: BvpSciGeneratedBackendMode) -> Self {
@@ -251,7 +266,7 @@ impl Display for BvpSciBackendError {
 
 impl Error for BvpSciBackendError {}
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BvpSciStatistics {
     pub symbolic_prepare_ms_total: f64,
     pub residual_ms_total: f64,
@@ -264,6 +279,33 @@ pub struct BvpSciStatistics {
     pub number_of_jacobian_recalculations: usize,
     pub number_of_grid_refinements: usize,
     pub number_of_grid_points: usize,
+    /// Extensible counters (e.g. "number of backtracking steps", "number of jacobian evaluations")
+    pub counters: HashMap<String, usize>,
+    /// Extensible timers as "key" → "value_ms" strings (e.g. "aot_build_ms" → "123.456")
+    pub timers: HashMap<String, String>,
+    /// Extensible diagnostics (e.g. "aot_backend" → "CTcc", "matrix_nnz" → "1024")
+    pub diagnostics: HashMap<String, String>,
+}
+
+impl Default for BvpSciStatistics {
+    fn default() -> Self {
+        Self {
+            symbolic_prepare_ms_total: 0.0,
+            residual_ms_total: 0.0,
+            jacobian_ms_total: 0.0,
+            linear_system_ms_total: 0.0,
+            grid_refinement_ms_total: 0.0,
+            measured_total_ms: 0.0,
+            number_of_iterations: 0,
+            number_of_linear_solves: 0,
+            number_of_jacobian_recalculations: 0,
+            number_of_grid_refinements: 0,
+            number_of_grid_points: 0,
+            counters: HashMap::new(),
+            timers: HashMap::new(),
+            diagnostics: HashMap::new(),
+        }
+    }
 }
 
 impl BvpSciStatistics {
@@ -285,6 +327,18 @@ impl BvpSciStatistics {
             + linear_system_ms_total
             + grid_refinement_ms_total;
 
+        // Populate counters from calc_statistics HashMap
+        let mut counters = HashMap::new();
+        for (k, v) in &result.calc_statistics {
+            counters.insert(k.clone(), *v);
+        }
+
+        // Populate timers from CustomTimer::get_all()
+        let timers = result.custom_timer.get_all();
+
+        // Populate diagnostics (currently empty — BVPResult has no diagnostics field)
+        let diagnostics = HashMap::new();
+
         Self {
             symbolic_prepare_ms_total,
             residual_ms_total,
@@ -297,24 +351,78 @@ impl BvpSciStatistics {
             number_of_jacobian_recalculations: get_count("number of jacobians recalculations"),
             number_of_grid_refinements: get_count("number of grid refinements"),
             number_of_grid_points: grid_points,
+            counters,
+            timers,
+            diagnostics,
         }
     }
 
+    /// Set a timer value (formatted as ms with 3 decimal places).
+    pub fn set_timer(&mut self, key: impl Into<String>, value_ms: f64) {
+        self.timers.insert(key.into(), format!("{:.3}", value_ms));
+    }
+
+    /// Set a diagnostic string.
+    pub fn set_diagnostic(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.diagnostics.insert(key.into(), value.into());
+    }
+
+    /// Increment a counter by `delta` (default 1).
+    pub fn increment_counter(&mut self, key: impl Into<String>, delta: usize) {
+        *self.counters.entry(key.into()).or_insert(0) += delta;
+    }
+
+    /// Get a timer value parsed back to f64, if present.
+    pub fn get_timer_ms(&self, key: &str) -> Option<f64> {
+        self.timers.get(key).and_then(|v| v.parse::<f64>().ok())
+    }
+
+    /// Get a diagnostic string by key.
+    pub fn get_diagnostic_string(&self, key: &str) -> Option<&str> {
+        self.diagnostics.get(key).map(|s| s.as_str())
+    }
+
+    /// Get a counter value by key.
+    pub fn get_counter(&self, key: &str) -> Option<usize> {
+        self.counters.get(key).copied()
+    }
+
     pub fn table_report(&self) -> String {
-        format!(
-            "symbolic_prepare_ms_total={:.3} residual_ms_total={:.3} jacobian_ms_total={:.3} linear_system_ms_total={:.3} grid_refinement_ms_total={:.3} measured_total_ms={:.3} iterations={} linear_solves={} jacobian_recalculations={} grid_refinements={} grid_points={}",
-            self.symbolic_prepare_ms_total,
-            self.residual_ms_total,
-            self.jacobian_ms_total,
-            self.linear_system_ms_total,
-            self.grid_refinement_ms_total,
-            self.measured_total_ms,
-            self.number_of_iterations,
-            self.number_of_linear_solves,
-            self.number_of_jacobian_recalculations,
-            self.number_of_grid_refinements,
-            self.number_of_grid_points,
-        )
+        let mut parts = vec![
+            format!(
+                "symbolic_prepare_ms_total={:.3}",
+                self.symbolic_prepare_ms_total
+            ),
+            format!("residual_ms_total={:.3}", self.residual_ms_total),
+            format!("jacobian_ms_total={:.3}", self.jacobian_ms_total),
+            format!("linear_system_ms_total={:.3}", self.linear_system_ms_total),
+            format!(
+                "grid_refinement_ms_total={:.3}",
+                self.grid_refinement_ms_total
+            ),
+            format!("measured_total_ms={:.3}", self.measured_total_ms),
+            format!("iterations={}", self.number_of_iterations),
+            format!("linear_solves={}", self.number_of_linear_solves),
+            format!(
+                "jacobian_recalculations={}",
+                self.number_of_jacobian_recalculations
+            ),
+            format!("grid_refinements={}", self.number_of_grid_refinements),
+            format!("grid_points={}", self.number_of_grid_points),
+        ];
+        // Append counters
+        for (k, v) in &self.counters {
+            parts.push(format!("counter_{}={}", k, v));
+        }
+        // Append timers
+        for (k, v) in &self.timers {
+            parts.push(format!("timer_{}={}ms", k, v));
+        }
+        // Append diagnostics
+        for (k, v) in &self.diagnostics {
+            parts.push(format!("diag_{}={}", k, v));
+        }
+        parts.join(" ")
     }
 }
 pub struct BVPwrap {
@@ -353,6 +461,7 @@ pub struct BVPwrap {
     pub use_analytical_jacobian: bool,
     pub loglevel: Option<String>,
     pub generated_backend_config: BvpSciGeneratedBackendConfig,
+    pub linear_solve_policy: BvpSciLinearSolvePolicy,
     pub result: BVPResult,
     full_result: Option<DMatrix<f64>>,
     custom_timer: CustomTimer,
@@ -613,6 +722,7 @@ impl BVPwrap {
             options.loglevel,
         );
         solver.set_generated_backend_config(options.generated_backend_config);
+        solver.set_linear_solve_policy(options.linear_solve_policy);
         solver
     }
 
@@ -674,6 +784,7 @@ impl BVPwrap {
             use_analytical_jacobian: true,
             loglevel: Some("info".to_string()), // default log level
             generated_backend_config: BvpSciGeneratedBackendConfig::default(),
+            linear_solve_policy: BvpSciLinearSolvePolicy::Sparse,
             custom_timer: CustomTimer::new(),
         }
     }
@@ -697,7 +808,25 @@ impl BVPwrap {
             bounds: self.Bounds.clone(),
             loglevel: self.loglevel.clone(),
             generated_backend_config: self.generated_backend_config.clone(),
+            linear_solve_policy: self.linear_solve_policy,
         }
+    }
+
+    pub fn set_linear_solve_policy(&mut self, policy: BvpSciLinearSolvePolicy) {
+        self.linear_solve_policy = policy;
+    }
+
+    pub fn with_linear_solve_policy(mut self, policy: BvpSciLinearSolvePolicy) -> Self {
+        self.set_linear_solve_policy(policy);
+        self
+    }
+
+    pub fn with_auto_banded_linear_solver(self) -> Self {
+        self.with_linear_solve_policy(BvpSciLinearSolvePolicy::AutoBanded)
+    }
+
+    pub fn with_experimental_bordered_banded_linear_solver(self) -> Self {
+        self.with_linear_solve_policy(BvpSciLinearSolvePolicy::ExperimentalBorderedBanded)
     }
 
     pub fn set_generated_backend_config(&mut self, config: BvpSciGeneratedBackendConfig) {
@@ -725,87 +854,6 @@ impl BVPwrap {
         self
     }
 
-    pub fn with_sparse_atomview_c_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
-        self.with_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc(
-                output_parent_dir,
-            ),
-        )
-    }
-
-    pub fn set_sparse_atomview_rust(&mut self, output_parent_dir: impl Into<PathBuf>) {
-        self.set_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_rust(
-                output_parent_dir,
-            ),
-        );
-    }
-
-    pub fn with_sparse_atomview_rust(self, output_parent_dir: impl Into<PathBuf>) -> Self {
-        self.with_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_rust(
-                output_parent_dir,
-            ),
-        )
-    }
-
-    pub fn set_sparse_atomview_c_gcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
-        self.set_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc(
-                output_parent_dir,
-            ),
-        );
-    }
-
-    pub fn with_sparse_atomview_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
-        self.with_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
-                output_parent_dir,
-            ),
-        )
-    }
-
-    pub fn set_sparse_atomview_c_tcc(&mut self, output_parent_dir: impl Into<PathBuf>) {
-        self.set_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
-                output_parent_dir,
-            ),
-        );
-    }
-
-    pub fn with_sparse_atomview_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
-        self.with_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_zig(
-                output_parent_dir,
-            ),
-        )
-    }
-
-    pub fn set_sparse_atomview_zig(&mut self, output_parent_dir: impl Into<PathBuf>) {
-        self.set_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_zig(
-                output_parent_dir,
-            ),
-        );
-    }
-
-    pub fn with_sparse_atomview_for_repeated_solves(
-        self,
-        output_parent_dir: impl Into<PathBuf>,
-    ) -> Self {
-        self.with_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_for_repeated_solves(output_parent_dir),
-        )
-    }
-
-    pub fn set_sparse_atomview_for_repeated_solves(
-        &mut self,
-        output_parent_dir: impl Into<PathBuf>,
-    ) {
-        self.set_generated_backend_config(
-            BvpSciGeneratedBackendConfig::sparse_atomview_for_repeated_solves(output_parent_dir),
-        );
-    }
     pub fn set_additional_parameters(
         &mut self,
         use_analytical_jacobian: Option<bool>,
@@ -972,11 +1020,12 @@ impl BVPwrap {
         verbose: u8,
         bc_tol: Option<f64>,
         custom_timer: CustomTimer,
+        strategy_params: Option<&HashMap<String, Vec<f64>>>,
     ) {
         let begin = Instant::now();
 
         info!("BVP solver started");
-        let bvpres = solve_bvp(
+        let bvpres = solve_bvp_with_strategy_and_linear_policy(
             fun,
             bc,
             x,
@@ -990,6 +1039,8 @@ impl BVPwrap {
             verbose,
             bc_tol,
             Some(custom_timer),
+            strategy_params,
+            self.linear_solve_policy,
         );
 
         match bvpres {
@@ -1042,6 +1093,7 @@ impl BVPwrap {
             2,    // verbose level
             None, // bc_tol
             custom_timer.clone(),
+            None, // strategy_params
         );
         let end = begin.elapsed();
         // let's now calculate paramters of jacobian
@@ -1137,6 +1189,7 @@ impl BVPwrap {
             2,
             None,
             custom_timer.clone(),
+            None, // strategy_params
         );
         let end = begin.elapsed();
         let x_mesh = &self.result.x;
@@ -1307,12 +1360,25 @@ impl BVPwrap {
 
     fn calc_statistics(&self) {
         let mut stats = self.result.calc_statistics.clone();
-        let typed_stats = self.get_statistics();
+        let mut typed_stats = self.get_statistics();
 
         stats.insert(
             "number of grid points".to_string(),
             self.x_mesh_col.nrows() as usize,
         );
+
+        // Record diagnostics
+        let n_variables = self.result.y.nrows();
+        let n_mesh_points = self.x_mesh_col.nrows();
+        typed_stats.set_diagnostic("n_variables", n_variables.to_string());
+        typed_stats.set_diagnostic("n_mesh_points", n_mesh_points.to_string());
+        if let Some(nnz) = stats.get("matrix_nnz") {
+            typed_stats.set_diagnostic("matrix_nnz", nnz.to_string());
+        }
+        if let Some(strategy) = stats.get("solver_strategy") {
+            typed_stats.set_diagnostic("solver_strategy", strategy.to_string());
+        }
+
         let mut table = Builder::from(stats).build();
         table.with(Style::modern_rounded());
         info!("\n \n CALC STATISTICS \n \n {}", table.to_string());
@@ -1326,8 +1392,8 @@ impl BVPwrap {
 #[cfg(test)]
 mod tests_phase1 {
     use super::{
-        BVPwrap, BvpSciBackendError, BvpSciGeneratedBackendMode, BvpSciSolverOptions,
-        BvpSciWorkflow, Jacobian_sci_faer,
+        BVPwrap, BvpSciBackendError, BvpSciGeneratedBackendConfig, BvpSciGeneratedBackendMode,
+        BvpSciSolverOptions, BvpSciWorkflow, Jacobian_sci_faer,
     };
     use crate::numerical::BVP_sci::BVP_sci_faer::faer_col;
     use crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_sparse_backend;
@@ -1836,7 +1902,11 @@ mod tests_phase1 {
             32,
             initial_guess,
         )
-        .with_sparse_atomview_c_tcc(generated_test_artifact_dir("ctcc-param-dfdp"));
+        .with_generated_backend_config(
+            BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                generated_test_artifact_dir("ctcc-param-dfdp"),
+            ),
+        );
 
         let (jacobian, _, _) = solver
             .try_eq_generate()

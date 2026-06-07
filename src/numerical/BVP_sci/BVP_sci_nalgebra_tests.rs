@@ -3,7 +3,6 @@ mod tests {
     use crate::numerical::BVP_sci::BVP_sci_nalgebra::{
         collocation_fun, compute_jac_indices, construct_global_jac, create_spline, estimate_bc_jac,
         estimate_fun_jac, estimate_rms_residuals, modify_mesh, solve_bvp, solve_newton,
-        stacked_matmul,
     };
     use nalgebra::{DMatrix, DVector};
 
@@ -51,7 +50,7 @@ mod tests {
         let x = DVector::from_vec(vec![0.0, std::f64::consts::PI]);
         let mut y = DMatrix::zeros(2, 2);
         y[(0, 0)] = 0.0; // y1(0) = 0
-        y[(0, 1)] = 0.0; // y1(π) = 0  
+        y[(0, 1)] = 0.0; // y1(π) = 0
         y[(1, 0)] = 1.0; // y2(0) = 1
         y[(1, 1)] = -1.0; // y2(π) = -1
 
@@ -374,7 +373,7 @@ mod tests {
         // Test the global Jacobian construction with known structure
 
         let n = 2; // 2 equations
-        let m = 3; // 3 mesh points  
+        let m = 3; // 3 mesh points
         let k = 0; // 0 parameters
 
         let h = DVector::from_vec(vec![0.5, 0.5]);
@@ -465,9 +464,9 @@ mod tests {
     fn test_collocation_residual_ordering() {
         // Test that collocation residuals are computed with correct ordering
 
-        let fun = |_x: &DVector<f64>, _y: &DMatrix<f64>, _p: &DVector<f64>| {
+        let fun = |_x: &DVector<f64>, y: &DMatrix<f64>, _p: &DVector<f64>| {
             // Simple derivative: dy/dx = 0 (constant function)
-            DMatrix::zeros(2, 3)
+            DMatrix::zeros(2, y.ncols())
         };
 
         let x = DVector::from_vec(vec![0.0, 1.0, 2.0]);
@@ -1019,38 +1018,6 @@ mod tests {
         }
 
         println!("Mesh refinement test passed!");
-    }
-
-    #[test]
-    fn test_stacked_matmul() {
-        // Test stacked matrix multiplication
-        let a1 = DMatrix::from_vec(2, 2, vec![1.0, 2.0, 3.0, 4.0]);
-        let a2 = DMatrix::from_vec(2, 2, vec![5.0, 6.0, 7.0, 8.0]);
-        let a = vec![a1, a2];
-
-        let b1 = DMatrix::from_vec(2, 2, vec![1.0, 0.0, 0.0, 1.0]); // Identity
-        let b2 = DMatrix::from_vec(2, 2, vec![2.0, 0.0, 0.0, 2.0]); // 2*Identity
-        let b = vec![b1, b2];
-
-        let result = stacked_matmul(&a, &b);
-
-        assert_eq!(result.len(), 2);
-
-        // First multiplication: a1 * I = a1
-        for i in 0..2 {
-            for j in 0..2 {
-                assert!((result[0][(i, j)] - a[0][(i, j)]).abs() < 1e-10);
-            }
-        }
-
-        // Second multiplication: a2 * 2I = 2*a2
-        for i in 0..2 {
-            for j in 0..2 {
-                assert!((result[1][(i, j)] - 2.0 * a[1][(i, j)]).abs() < 1e-10);
-            }
-        }
-
-        println!("Stacked matrix multiplication test passed!");
     }
 
     #[test]

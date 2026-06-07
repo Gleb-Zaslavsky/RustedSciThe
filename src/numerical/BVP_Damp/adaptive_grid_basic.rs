@@ -20,7 +20,8 @@
 //! - Mesh adaptation criteria based on solution gradients
 //!
 //! ## Interesting Code Features
-//! - **HashMap-based marking system**: Efficiently tracks which intervals need refinement
+//! - **Deterministic marking system**: Tracks which intervals need refinement and
+//!   keeps the parallel marking phase lock-free.
 //! - **Biased indexing**: Clever index management during mesh construction to handle variable insertion
 //! - **Multi-row analysis**: Each algorithm analyzes all solution components simultaneously
 //! - **Buffering mechanisms**: Prevents abrupt mesh size changes that could hurt accuracy
@@ -45,7 +46,73 @@ use log::info;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
+
+fn merge_legacy_shifted_mark(mark: &mut [i32], trigger_idx: usize, value: i32) {
+    if trigger_idx > 0 && trigger_idx < mark.len() && value > mark[trigger_idx] {
+        mark[trigger_idx - 1] = value;
+    }
+}
+
+fn construct_refined_grid_from_marks(
+    y_DMatrix: &DMatrix<f64>,
+    x_mesh: &DVector<f64>,
+    mark: &[i32],
+) -> (Vec<f64>, DMatrix<f64>, usize) {
+    assert_eq!(
+        mark.len(),
+        x_mesh.len(),
+        "grid-refinement mark vector must have one entry per old mesh point"
+    );
+    let total_new_points: usize = mark
+        .iter()
+        .map(|&n| {
+            assert!(n >= 0, "grid-refinement mark count cannot be negative");
+            n as usize
+        })
+        .sum();
+    let (n_rows, _) = y_DMatrix.shape();
+    let mut new_grid: Vec<f64> = Vec::with_capacity(x_mesh.len() + total_new_points);
+    let mut new_initial_guess: DMatrix<f64> =
+        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points);
+    let mut biased_i = 0;
+
+    for i in 0..x_mesh.len() {
+        let y = y_DMatrix.column(i);
+        new_grid.push(x_mesh[i]);
+        new_initial_guess.column_mut(biased_i).copy_from(&y);
+        biased_i += 1;
+
+        let n_inserted = mark[i];
+        if n_inserted > 0 && i < x_mesh.len() - 1 {
+            let h_i = x_mesh[i + 1] - x_mesh[i];
+            let y_next = y_DMatrix.column(i + 1);
+            let dy_i = y_next - y;
+            for k in 1..=n_inserted {
+                let theta = k as f64 / (n_inserted as f64 + 1.0);
+                let x_new = x_mesh[i] + h_i * theta;
+                new_grid.push(x_new);
+                let column_to_add = y + &dy_i * theta;
+                new_initial_guess
+                    .column_mut(biased_i)
+                    .copy_from(&column_to_add);
+                biased_i += 1;
+            }
+        }
+    }
+
+    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
+    (new_grid, new_initial_guess, total_new_points)
+}
+
+fn marks_from_hashmap(mark: &HashMap<usize, i32>, len: usize) -> Vec<i32> {
+    let mut marks = vec![0_i32; len];
+    for (&idx, &value) in mark {
+        if idx < len {
+            marks[idx] = value;
+        }
+    }
+    marks
+}
 /*
 Some math considerations...
 1. truncation error analysis
@@ -100,50 +167,12 @@ pub fn refine_all_grid(
     y_DMatrix: &DMatrix<f64>,
     x_mesh: &DVector<f64>,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
-    let mut h: Vec<f64> = Vec::new();
-    for i in 0..x_mesh.len() - 1 {
-        let h_i = x_mesh[i + 1] - x_mesh[i];
-        h.push(h_i);
+    let mut mark = vec![1_i32; x_mesh.len()];
+    if let Some(last) = mark.last_mut() {
+        *last = 0;
     }
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
-    let mut biased_i = 0;
-    let number_of_nonzero_keys = x_mesh.len() - 1;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + number_of_nonzero_keys);
-    // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
-    for i in 0..x_mesh.len() - 1 {
-        let y = y_DMatrix.column(i);
-        // copy points from the old grid to the new one
-        new_grid.push(x_mesh[i]);
-        // adding points to the grid
-        let h_i = x_mesh[i + 1] - x_mesh[i];
-        let x_new = x_mesh[i] + h_i * 0.5;
-        new_grid.push(x_new);
-
-        // copy points from the previous step solution to the new guess
-        new_initial_guess.column_mut(biased_i).copy_from(&y);
-        biased_i += 1;
-        //
-        // making interpolation between neighbor points of the previous step solution to form the new initial guess
-
-        let y_pl_1 = y_DMatrix.column(i + 1);
-        let dy_i = y_pl_1 - y;
-        // add new point to new_initial_guess
-        let column_to_add = y + &dy_i * 0.5;
-        new_initial_guess
-            .column_mut(biased_i as usize)
-            .copy_from(&column_to_add);
-        biased_i += 1;
-
-        // add all points from the old grid to the new grid
-    }
-    // add right border points to the new grid
-    let y_last = y_DMatrix.column(x_mesh.len() - 1);
-    new_grid.push(x_mesh[x_mesh.len() - 1]);
-    new_initial_guess
-        .column_mut(biased_i as usize)
-        .copy_from(&y_last);
+    let (new_grid, new_initial_guess, number_of_nonzero_keys) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
         "\n \n new_initial_guess of shape{:?}",
@@ -151,7 +180,6 @@ pub fn refine_all_grid(
         new_initial_guess.shape()
     );
 
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, number_of_nonzero_keys)
 }
 
@@ -160,50 +188,15 @@ pub fn refine_all_grid_par(
     y_DMatrix: &DMatrix<f64>,
     x_mesh: &DVector<f64>,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
-    let (n_rows, _) = y_DMatrix.shape();
-    let number_of_nonzero_keys = x_mesh.len() - 1;
-    let mut new_grid: Vec<f64> = Vec::with_capacity(x_mesh.len() + number_of_nonzero_keys);
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + number_of_nonzero_keys);
-
-    // Parallel computation of grid points and interpolated values
-    let grid_data: Vec<(f64, f64, DVector<f64>)> = (0..x_mesh.len() - 1)
-        .into_par_iter()
-        .map(|i| {
-            let h_i = x_mesh[i + 1] - x_mesh[i];
-            let x_new = x_mesh[i] + h_i * 0.5;
-            let y = y_DMatrix.column(i);
-            let y_pl_1 = y_DMatrix.column(i + 1);
-            let dy_i = y_pl_1 - y;
-            let column_to_add = y + &dy_i * 0.5;
-            (x_mesh[i], x_new, column_to_add)
-        })
-        .collect();
-
-    // Sequential assembly (required for proper ordering)
-    let mut biased_i = 0;
-    for (i, (x_orig, x_new, interpolated)) in grid_data.into_iter().enumerate() {
-        new_grid.push(x_orig);
-        new_grid.push(x_new);
-
-        let y = y_DMatrix.column(i);
-        new_initial_guess.column_mut(biased_i).copy_from(&y);
-        biased_i += 1;
-        new_initial_guess
-            .column_mut(biased_i)
-            .copy_from(&interpolated);
-        biased_i += 1;
+    let mut mark = vec![1_i32; x_mesh.len()];
+    if let Some(last) = mark.last_mut() {
+        *last = 0;
     }
-
-    // Add final point
-    let y_last = y_DMatrix.column(x_mesh.len() - 1);
-    new_grid.push(x_mesh[x_mesh.len() - 1]);
-    new_initial_guess.column_mut(biased_i).copy_from(&y_last);
-
+    let (new_grid, new_initial_guess, number_of_nonzero_keys) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
     log::info!("created new grid of length {}", new_grid.len());
     log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
 
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
     (new_grid, new_initial_guess, number_of_nonzero_keys)
 }
 
@@ -221,8 +214,6 @@ pub fn easy_grid_refinement(
         y_DMatrix.ncols()
     );
     info!("x_mesh len {:?}", x_mesh.len());
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
     let mut mark: DVector<i32> = DVector::zeros(x_mesh.len());
 
     // Mark columns that need refinement by checking all rows
@@ -250,42 +241,16 @@ pub fn easy_grid_refinement(
     let total_new_points: i32 = mark.sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-    // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-
-        // Always add the original point first
-        new_grid.push(x_mesh[i]);
-        new_initial_guess.column_mut(biased_i).copy_from(&y);
-        biased_i += 1;
-
-        if mark[i] != 0_i32 && i < x_mesh.len() - 1 {
-            // Add new point between current and next
-            let h_i = x_mesh[i + 1] - x_mesh[i];
-            let x_new = x_mesh[i] + h_i * 0.5;
-            new_grid.push(x_new);
-
-            // Interpolate for new initial guess
-            let y_pl_1 = y_DMatrix.column(i + 1);
-            let dy_i = y_pl_1 - y;
-            let column_to_add = y + &dy_i * 0.5;
-            new_initial_guess
-                .column_mut(biased_i as usize)
-                .copy_from(&column_to_add);
-            biased_i += 1;
-        }
-    }
+    let mark: Vec<i32> = mark.iter().copied().collect();
+    let (new_grid, new_initial_guess, total_new_points) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    (new_grid, new_initial_guess, total_new_points)
 }
 
 /// Parallel version of easy_grid_refinement - parallelizes the marking phase
@@ -301,15 +266,10 @@ pub fn easy_grid_refinement_par(
     );
     info!("x_mesh len {:?}", x_mesh.len());
     let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
-    let mark = Mutex::new(DVector::zeros(x_mesh.len()));
-
-    // Parallel marking phase - each row processed in parallel
-    y_DMatrix
-        .row_iter()
-        .enumerate()
-        .par_bridge()
-        .for_each(|(j, y)| {
+    let local_marks: Vec<Vec<usize>> = (0..n_rows)
+        .into_par_iter()
+        .map(|j| {
+            let y = y_DMatrix.row(j);
             let y_j_max = y.max();
             let y_j_min = y.min();
             let delta = tolerance * (y_j_max - y_j_min);
@@ -324,55 +284,27 @@ pub fn easy_grid_refinement_par(
                 }
             }
 
-            // Update global mark under lock
-            if !local_mark.is_empty() {
-                let mut global_mark = mark.lock().unwrap();
-                for &idx in &local_mark {
-                    global_mark[idx] = 1;
-                }
-            }
-
             info!("for row {} found {} intervals to mark", j, local_mark.len());
-        });
+            local_mark
+        })
+        .collect();
 
-    let mark = mark.into_inner().unwrap();
+    let mut mark: DVector<i32> = DVector::zeros(x_mesh.len());
+    for row_marks in local_marks {
+        for idx in row_marks {
+            mark[idx] = 1;
+        }
+    }
     let total_new_points: i32 = mark.sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    // Sequential insertion phase (required for proper ordering)
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-
-        // Always add the original point first
-        new_grid.push(x_mesh[i]);
-        new_initial_guess.column_mut(biased_i).copy_from(&y);
-        biased_i += 1;
-
-        if mark[i] != 0_i32 && i < x_mesh.len() - 1 {
-            // Add new point between current and next
-            let h_i = x_mesh[i + 1] - x_mesh[i];
-            let x_new = x_mesh[i] + h_i * 0.5;
-            new_grid.push(x_new);
-
-            // Interpolate for new initial guess
-            let y_pl_1 = y_DMatrix.column(i + 1);
-            let dy_i = y_pl_1 - y;
-            let column_to_add = y + &dy_i * 0.5;
-            new_initial_guess
-                .column_mut(biased_i as usize)
-                .copy_from(&column_to_add);
-            biased_i += 1;
-        }
-    }
+    let mark: Vec<i32> = mark.iter().copied().collect();
+    let (new_grid, new_initial_guess, total_new_points) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    (new_grid, new_initial_guess, total_new_points)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -415,8 +347,6 @@ pub fn pearson_grid_refinement(
         let h_i = x_mesh[i + 1] - x_mesh[i];
         h.push(h_i);
     }
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
     // hashmap key: in what position insert points, value: how many points to insert
     // mark[i] = how many points to insert in i-th position
     let mut mark: HashMap<usize, i32> = HashMap::new();
@@ -522,56 +452,9 @@ pub fn pearson_grid_refinement(
     let total_new_points: i32 = mark.values().sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-    // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-        if mark.get(&i).unwrap() != &0 {
-            //
-            // adding points to the grid
-            let N = *mark.get(&i).unwrap();
-            if i < x_mesh.len() - 1 {
-                let h_i = x_mesh[i + 1] - x_mesh[i];
-                for k in 0..N + 1 {
-                    // k=0 refers to yhe element existing in the old mesh
-                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                    if k != 0 {
-                        log::info!("\n \n points added: {} at index {} ", x_new, i);
-                    }
-                    new_grid.push(x_new);
-                }
-                //
-                // making interpolation between neighbor points of the previous step solution to form the new initial guess
-                let y_pl_1 = y_DMatrix.column(i + 1);
-                let dy_i = y_pl_1 - y;
-                for k in 0..N + 1 {
-                    // add new point to new_initial_guess
-                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    if k != 0 {
-                        // log::info!( "\n \n column added: {} at index {} ", column_to_add,biased_i);
-                    }
-                    new_initial_guess
-                        .column_mut(biased_i as usize)
-                        .copy_from(&column_to_add);
-                    biased_i += 1;
-                }
-            } else {
-                // Last point - just copy
-                new_grid.push(x_mesh[i]);
-                new_initial_guess.column_mut(biased_i).copy_from(&y);
-                biased_i += 1;
-            }
-        } else {
-            // copy points from the old grid to the new one
-            new_grid.push(x_mesh[i]);
-            //
-            // copy points from the previous step solution to the new guess
-            new_initial_guess.column_mut(biased_i).copy_from(&y);
-            biased_i += 1;
-        } // add all points from the old grid to the new grid
-    }
+    let marks = marks_from_hashmap(&mark, x_mesh.len());
+    let (new_grid, new_initial_guess, total_new_points) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &marks);
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
@@ -579,8 +462,7 @@ pub fn pearson_grid_refinement(
         new_initial_guess.shape()
     );
 
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    (new_grid, new_initial_guess, total_new_points)
 }
 
 /// Parallel version of pearson_grid_refinement - parallelizes the marking phase
@@ -590,22 +472,16 @@ pub fn pearson_grid_refinement_par(
     d: f64,
     C: f64,
 ) -> (Vec<f64>, DMatrix<f64>, usize) {
+    let n_rows = y_DMatrix.nrows();
     let mut h: Vec<f64> = Vec::new();
     for i in 0..x_mesh.len() - 1 {
         let h_i = x_mesh[i + 1] - x_mesh[i];
         h.push(h_i);
     }
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
-    let mark = Mutex::new(HashMap::new());
-
-    // Parallel marking phase
-    y_DMatrix
-        .clone()
-        .row_iter()
-        .enumerate()
-        .par_bridge()
-        .for_each(|(j, y)| {
+    let local_marks_by_row: Vec<Vec<(usize, i32)>> = (0..n_rows)
+        .into_par_iter()
+        .map(|j| {
+            let y = y_DMatrix.row(j);
             let threshold = 1e-4;
             let y_j_max = y.max();
             let y_j_min = y.min();
@@ -625,83 +501,44 @@ pub fn pearson_grid_refinement_par(
                         } else {
                             1
                         };
-                        local_marks.push((i - 1, N));
+                        local_marks.push((i, N));
                     }
                 }
             }
 
-            if !local_marks.is_empty() {
-                let mut global_mark = mark.lock().unwrap();
-                for (idx, N) in local_marks {
-                    let current_N = *global_mark.get(&idx).unwrap_or(&0);
-                    if N > current_N {
-                        global_mark.insert(idx, N);
-                    }
-                }
-            }
-        });
+            local_marks
+        })
+        .collect();
 
-    let mut mark = mark.into_inner().unwrap();
+    let mut mark = vec![0_i32; x_mesh.len()];
+    for local_marks in local_marks_by_row {
+        for (trigger_idx, N) in local_marks {
+            merge_legacy_shifted_mark(&mut mark, trigger_idx, N);
+        }
+    }
 
     // Sequential bufferization
     for i in 1..x_mesh.len() - 1 {
         let buffer_condition_1 = h[i] / h[i - 1] <= C;
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
         if !buffer_condition_1 && (i - 1) != 0 {
-            let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+            let current_N = mark[i - 1];
             if 1 > current_N {
-                mark.insert(i - 1, 1);
+                mark[i - 1] = 1;
             }
         }
         if !buffer_condition_2 {
-            let current_N = *mark.get(&i).unwrap_or(&0);
+            let current_N = mark[i];
             if 1 > current_N {
-                mark.insert(i - 1, 1);
+                mark[i - 1] = 1;
             }
         }
     }
 
-    let total_new_points: i32 = mark.values().sum();
+    let total_new_points: i32 = mark.iter().sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    // Sequential grid construction
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-        if mark.get(&i).unwrap_or(&0) != &0 {
-            let N = *mark.get(&i).unwrap();
-            if i < x_mesh.len() - 1 {
-                let h_i = x_mesh[i + 1] - x_mesh[i];
-                for k in 0..N + 1 {
-                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                    new_grid.push(x_new);
-                }
-                let y_pl_1 = y_DMatrix.column(i + 1);
-                let dy_i = y_pl_1 - y;
-                for k in 0..N + 1 {
-                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    new_initial_guess
-                        .column_mut(biased_i as usize)
-                        .copy_from(&column_to_add);
-                    biased_i += 1;
-                }
-            } else {
-                new_grid.push(x_mesh[i]);
-                new_initial_guess.column_mut(biased_i).copy_from(&y);
-                biased_i += 1;
-            }
-        } else {
-            new_grid.push(x_mesh[i]);
-            new_initial_guess.column_mut(biased_i).copy_from(&y);
-            biased_i += 1;
-        }
-    }
-
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -746,8 +583,6 @@ pub fn grcar_smooke_grid_refinement(
         let h_i = x_mesh[i + 1] - x_mesh[i];
         h.push(h_i);
     }
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
     // hashmap key: in what position insert points, value: how many points to insert
     // mark[i] = how many points to insert in i-th position
     let mut mark: HashMap<usize, i32> = HashMap::new();
@@ -891,60 +726,9 @@ pub fn grcar_smooke_grid_refinement(
     let total_new_points: i32 = mark.values().sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-    // println!("mark {:?}, x_mesh {} ", mark, x_mesh);
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-        if mark.get(&i).unwrap() != &0 {
-            //
-            // adding points to the grid
-            let N = *mark.get(&i).unwrap();
-            if i < x_mesh.len() - 1 {
-                let h_i = x_mesh[i + 1] - x_mesh[i];
-                for k in 0..N + 1 {
-                    // k=0 refers to yhe element existing in the old mesh
-                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                    if k != 0 {
-                        log::info!("\n \n points added: {} at index {} ", x_new, i);
-                    }
-                    new_grid.push(x_new);
-                }
-                //
-                // making interpolation between neighbor points of the previous step solution to form the new initial guess
-                let y_pl_1 = y_DMatrix.column(i + 1);
-                let dy_i = y_pl_1 - y;
-                for k in 0..N + 1 {
-                    // add new point to new_initial_guess
-                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    if k != 0 {
-                        log::info!(
-                            "\n \n column added: {} at index {} ",
-                            column_to_add,
-                            biased_i
-                        );
-                    }
-                    new_initial_guess
-                        .column_mut(biased_i as usize)
-                        .copy_from(&column_to_add);
-                    biased_i += 1;
-                }
-            } else {
-                // Last point - just copy
-                new_grid.push(x_mesh[i]);
-                new_initial_guess.column_mut(biased_i).copy_from(&y);
-                biased_i += 1;
-            }
-        } else {
-            // copy points from the old grid to the new one
-            new_grid.push(x_mesh[i]);
-            //
-            // copy points from the previous step solution to the new guess
-            new_initial_guess.column_mut(biased_i).copy_from(&y);
-            biased_i += 1;
-        } // add all points from the old grid to the new grid
-    }
+    let marks = marks_from_hashmap(&mark, x_mesh.len());
+    let (new_grid, new_initial_guess, total_new_points) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &marks);
 
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
@@ -952,8 +736,7 @@ pub fn grcar_smooke_grid_refinement(
         new_initial_guess.shape()
     );
 
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    (new_grid, new_initial_guess, total_new_points)
 }
 
 /// Parallel version of grcar_smooke_grid_refinement - parallelizes the marking phase
@@ -969,17 +752,11 @@ pub fn grcar_smooke_grid_refinement_par(
         let h_i = x_mesh[i + 1] - x_mesh[i];
         h.push(h_i);
     }
-    let (n_rows, _) = y_DMatrix.shape();
-    let mut new_grid: Vec<f64> = Vec::new();
-    let mark = Mutex::new(HashMap::new());
-
-    // Parallel marking phase
-    y_DMatrix
-        .clone()
-        .row_iter()
-        .enumerate()
-        .par_bridge()
-        .for_each(|(j, y)| {
+    let n_rows = y_DMatrix.nrows();
+    let local_marks_by_row: Vec<Vec<(usize, i32)>> = (0..n_rows)
+        .into_par_iter()
+        .map(|j| {
+            let y = y_DMatrix.row(j);
             let threshold = 1e-4;
             let y_j_max = y.max();
             let y_j_min = y.min();
@@ -1042,24 +819,22 @@ pub fn grcar_smooke_grid_refinement_par(
                         } else {
                             1
                         };
-                        local_marks.push((i - 1, N));
+                        local_marks.push((i, N));
                         info!(" conditions vaiolation at index {}, => N = {}", i, N);
                     }
                 }
             }
 
-            if !local_marks.is_empty() {
-                let mut global_mark = mark.lock().unwrap();
-                for (idx, N) in local_marks {
-                    let current_N = *global_mark.get(&idx).unwrap_or(&0);
-                    if N > current_N {
-                        global_mark.insert(idx, N);
-                    }
-                }
-            }
-        });
+            local_marks
+        })
+        .collect();
 
-    let mut mark = mark.into_inner().unwrap();
+    let mut mark = vec![0_i32; x_mesh.len()];
+    for local_marks in local_marks_by_row {
+        for (trigger_idx, N) in local_marks {
+            merge_legacy_shifted_mark(&mut mark, trigger_idx, N);
+        }
+    }
 
     // Sequential bufferization
     for i in 1..x_mesh.len() - 1 {
@@ -1072,9 +847,9 @@ pub fn grcar_smooke_grid_refinement_par(
                 h[i],
                 h[i - 1]
             );
-            let current_N = *mark.get(&(i - 1)).unwrap_or(&0);
+            let current_N = mark[i - 1];
             if 1 > current_N {
-                mark.insert(i - 1, 1);
+                mark[i - 1] = 1;
             }
         }
         if !buffer_condition_2 {
@@ -1084,64 +859,24 @@ pub fn grcar_smooke_grid_refinement_par(
                 h[i],
                 h[i - 1]
             );
-            let current_N = *mark.get(&i).unwrap_or(&0);
+            let current_N = mark[i];
             if 1 > current_N {
-                mark.insert(i - 1, 1);
+                mark[i - 1] = 1;
             }
         }
     }
 
-    let total_new_points: i32 = mark.values().sum();
+    let total_new_points: i32 = mark.iter().sum();
     log::info!("total new points to add: {}", total_new_points);
 
-    // Sequential grid construction
-    let mut biased_i = 0;
-    let mut new_initial_guess: DMatrix<f64> =
-        DMatrix::zeros(n_rows, x_mesh.len() + total_new_points as usize);
-
-    for i in 0..x_mesh.len() {
-        let y = y_DMatrix.column(i);
-        if mark.get(&i).unwrap_or(&0) != &0 {
-            let N = *mark.get(&i).unwrap();
-            if i < x_mesh.len() - 1 {
-                let h_i = x_mesh[i + 1] - x_mesh[i];
-                for k in 0..N + 1 {
-                    let x_new = x_mesh[i] + h_i * (k as f64) / (N as f64 + 1.0);
-                    log::info!("\n \n points added: {} at index {} ", x_new, i);
-                    new_grid.push(x_new);
-                }
-                let y_pl_1 = y_DMatrix.column(i + 1);
-                let dy_i = y_pl_1 - y;
-                for k in 0..N + 1 {
-                    let column_to_add = y + &dy_i * (k as f64) / (N as f64 + 1.0);
-                    log::info!(
-                        "\n \n column added: {} at index {} ",
-                        column_to_add,
-                        biased_i
-                    );
-                    new_initial_guess
-                        .column_mut(biased_i as usize)
-                        .copy_from(&column_to_add);
-                    biased_i += 1;
-                }
-            } else {
-                new_grid.push(x_mesh[i]);
-                new_initial_guess.column_mut(biased_i).copy_from(&y);
-                biased_i += 1;
-            }
-        } else {
-            new_grid.push(x_mesh[i]);
-            new_initial_guess.column_mut(biased_i).copy_from(&y);
-            biased_i += 1;
-        }
-    }
+    let (new_grid, new_initial_guess, total_new_points) =
+        construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
     log::info!("created new grid of length {}", new_grid.len());
     log::info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
-    assert_eq!(new_initial_guess.len(), new_grid.len() * n_rows);
-    (new_grid, new_initial_guess, total_new_points as usize)
+    (new_grid, new_initial_guess, total_new_points)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -1251,4 +986,322 @@ pub fn interpolate_solution(
     }
 
     new_y
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn boundary_layer_fixture(n_points: usize) -> (DMatrix<f64>, DVector<f64>) {
+        let x_mesh = DVector::from_iterator(
+            n_points,
+            (0..n_points).map(|i| i as f64 / (n_points - 1) as f64),
+        );
+        let y = DMatrix::from_fn(3, n_points, |row, col| {
+            let x = x_mesh[col];
+            match row {
+                0 => 1.2 + (18.0 * (x - 0.38)).tanh(),
+                1 => 0.8 + (7.0 * x).sin() + 0.15 * x,
+                _ => 0.2 + (-70.0 * (x - 0.72).powi(2)).exp(),
+            }
+        });
+        (y, x_mesh)
+    }
+
+    fn flat_fixture(n_points: usize) -> (DMatrix<f64>, DVector<f64>) {
+        let x_mesh = DVector::from_iterator(
+            n_points,
+            (0..n_points).map(|i| i as f64 / (n_points - 1) as f64),
+        );
+        let y = DMatrix::from_element(3, n_points, 2.5);
+        (y, x_mesh)
+    }
+
+    fn assert_grid_strictly_increasing(grid: &[f64]) {
+        for pair in grid.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "refined grid must be strictly increasing, got [{}, {}]",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    fn assert_column_close(lhs: &DMatrix<f64>, lhs_col: usize, rhs: &DMatrix<f64>, rhs_col: usize) {
+        for row in 0..lhs.nrows() {
+            let diff = (lhs[(row, lhs_col)] - rhs[(row, rhs_col)]).abs();
+            assert!(
+                diff <= 1e-12,
+                "column mismatch at row {row}, lhs col {lhs_col}, rhs col {rhs_col}: {diff:e}"
+            );
+        }
+    }
+
+    fn assert_refinement_invariants(
+        old_y: &DMatrix<f64>,
+        old_x: &DVector<f64>,
+        refined: &(Vec<f64>, DMatrix<f64>, usize),
+    ) {
+        let (new_grid, new_guess, inserted) = refined;
+        assert_eq!(old_y.ncols(), old_x.len(), "old y/x shape mismatch");
+        assert_eq!(new_guess.nrows(), old_y.nrows(), "row count changed");
+        assert_eq!(
+            new_guess.ncols(),
+            new_grid.len(),
+            "guess/grid length mismatch"
+        );
+        assert_eq!(
+            *inserted,
+            new_grid.len() - old_x.len(),
+            "inserted-node count must match grid-size delta"
+        );
+        assert_grid_strictly_increasing(new_grid);
+
+        let eps = 1e-12;
+        assert!((new_grid[0] - old_x[0]).abs() <= eps, "left boundary moved");
+        assert!(
+            (new_grid[new_grid.len() - 1] - old_x[old_x.len() - 1]).abs() <= eps,
+            "right boundary moved"
+        );
+
+        let mut new_idx = 0;
+        for old_idx in 0..old_x.len() {
+            while new_idx < new_grid.len() && new_grid[new_idx] < old_x[old_idx] - eps {
+                new_idx += 1;
+            }
+            assert!(
+                new_idx < new_grid.len() && (new_grid[new_idx] - old_x[old_idx]).abs() <= eps,
+                "old mesh point {} at x={} was not preserved",
+                old_idx,
+                old_x[old_idx]
+            );
+            assert_column_close(old_y, old_idx, new_guess, new_idx);
+        }
+
+        let mut old_left = 0;
+        for (new_col, &x_new) in new_grid.iter().enumerate() {
+            while old_left + 1 < old_x.len() && x_new > old_x[old_left + 1] + eps {
+                old_left += 1;
+            }
+            if (x_new - old_x[old_left]).abs() <= eps {
+                continue;
+            }
+            if old_left + 1 < old_x.len() && (x_new - old_x[old_left + 1]).abs() <= eps {
+                continue;
+            }
+            assert!(
+                old_left + 1 < old_x.len(),
+                "new point {x_new} is outside the old mesh"
+            );
+            let x_l = old_x[old_left];
+            let x_r = old_x[old_left + 1];
+            assert!(
+                x_l < x_new && x_new < x_r,
+                "inserted point {x_new} must lie strictly inside [{x_l}, {x_r}]"
+            );
+            let theta = (x_new - x_l) / (x_r - x_l);
+            for row in 0..old_y.nrows() {
+                let expected = old_y[(row, old_left)]
+                    + (old_y[(row, old_left + 1)] - old_y[(row, old_left)]) * theta;
+                let diff = (new_guess[(row, new_col)] - expected).abs();
+                assert!(
+                    diff <= 1e-12,
+                    "inserted guess is not linear interpolation at x={x_new}, row={row}: {diff:e}"
+                );
+            }
+        }
+    }
+
+    fn assert_refinement_same(
+        sequential: &(Vec<f64>, DMatrix<f64>, usize),
+        parallel: &(Vec<f64>, DMatrix<f64>, usize),
+    ) {
+        let (seq_grid, seq_guess, seq_added) = sequential;
+        let (par_grid, par_guess, par_added) = parallel;
+        assert_eq!(seq_added, par_added, "number of inserted nodes differs");
+        assert_eq!(seq_grid.len(), par_grid.len(), "new grid length differs");
+        assert_eq!(seq_guess.shape(), par_guess.shape(), "guess shape differs");
+
+        let grid_diff = seq_grid
+            .iter()
+            .zip(par_grid.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        let guess_diff = seq_guess
+            .iter()
+            .zip(par_guess.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(grid_diff <= 1e-14, "seq/par grid mismatch: {grid_diff:e}");
+        assert!(
+            guess_diff <= 1e-14,
+            "seq/par initial-guess mismatch: {guess_diff:e}"
+        );
+    }
+
+    #[test]
+    fn adaptive_grid_parallel_marking_matches_sequential_on_coarse_mesh() {
+        let (y, x) = boundary_layer_fixture(16);
+
+        let easy_seq = easy_grid_refinement(&y, &x, 0.08);
+        let easy_par = easy_grid_refinement_par(&y, &x, 0.08);
+        assert_refinement_same(&easy_seq, &easy_par);
+        assert_refinement_invariants(&y, &x, &easy_seq);
+
+        let pearson_seq = pearson_grid_refinement(&y, &x, 0.08, 1.5);
+        let pearson_par = pearson_grid_refinement_par(&y, &x, 0.08, 1.5);
+        assert_refinement_same(&pearson_seq, &pearson_par);
+        assert_refinement_invariants(&y, &x, &pearson_seq);
+
+        let grcar_seq = grcar_smooke_grid_refinement(&y, &x, 0.08, 0.08, 1.5);
+        let grcar_par = grcar_smooke_grid_refinement_par(&y, &x, 0.08, 0.08, 1.5);
+        assert_refinement_same(&grcar_seq, &grcar_par);
+        assert_refinement_invariants(&y, &x, &grcar_seq);
+    }
+
+    #[test]
+    fn adaptive_grid_uniform_refinement_preserves_boundaries_and_midpoints() {
+        let (y, x) = boundary_layer_fixture(12);
+        let seq = refine_all_grid(&y, &x);
+        let par = refine_all_grid_par(&y, &x);
+
+        assert_refinement_same(&seq, &par);
+        assert_refinement_invariants(&y, &x, &seq);
+        assert_eq!(seq.2, x.len() - 1);
+        for i in 0..x.len() - 1 {
+            let midpoint_col = 2 * i + 1;
+            let expected_midpoint = 0.5 * (x[i] + x[i + 1]);
+            assert!(
+                (seq.0[midpoint_col] - expected_midpoint).abs() <= 1e-14,
+                "uniform refinement inserted a non-midpoint at interval {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_grid_no_refinement_is_identity_for_flat_solution() {
+        let (y, x) = flat_fixture(14);
+        let residual = DVector::from_element(x.len(), 1e-8);
+        let cases = [
+            easy_grid_refinement(&y, &x, 0.08),
+            easy_grid_refinement_par(&y, &x, 0.08),
+            pearson_grid_refinement(&y, &x, 0.08, 1.5),
+            pearson_grid_refinement_par(&y, &x, 0.08, 1.5),
+            grcar_smooke_grid_refinement(&y, &x, 0.08, 0.08, 1.5),
+            grcar_smooke_grid_refinement_par(&y, &x, 0.08, 0.08, 1.5),
+            scipy_grid_refinement(&y, &x, 1e-4, Some(residual)),
+        ];
+
+        for refined in cases {
+            assert_eq!(refined.2, 0, "flat solution should not request new nodes");
+            assert_refinement_invariants(&y, &x, &refined);
+            assert_eq!(refined.0.len(), x.len(), "identity grid changed length");
+            assert_eq!(refined.1.shape(), y.shape(), "identity guess changed shape");
+        }
+    }
+
+    #[test]
+    fn adaptive_grid_scipy_residual_thresholds_insert_expected_nodes() {
+        let (y, x) = boundary_layer_fixture(5);
+        let tolerance = 1e-3;
+        let residual = DVector::from_vec(vec![
+            2.0 * tolerance,
+            100.0 * tolerance,
+            0.1 * tolerance,
+            0.1 * tolerance,
+            0.0,
+        ]);
+        let refined = scipy_grid_refinement(&y, &x, tolerance, Some(residual));
+
+        assert_eq!(refined.2, 3, "SciPy-style refinement should add 1+2 nodes");
+        assert_refinement_invariants(&y, &x, &refined);
+        assert!(
+            refined
+                .0
+                .iter()
+                .any(|&x_new| (x_new - 0.125).abs() <= 1e-14),
+            "single-node interval midpoint was not inserted"
+        );
+        assert!(
+            refined
+                .0
+                .iter()
+                .any(|&x_new| (x_new - (1.0 / 3.0)).abs() <= 1e-14),
+            "first two-node interval point was not inserted"
+        );
+        assert!(
+            refined
+                .0
+                .iter()
+                .any(|&x_new| (x_new - (5.0 / 12.0)).abs() <= 1e-14),
+            "second two-node interval point was not inserted"
+        );
+    }
+
+    fn median_ms(mut values: Vec<f64>) -> f64 {
+        values.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+        values[values.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn adaptive_grid_parallel_marking_coarse_mesh_benchmark_table() {
+        const REPEATS: usize = 7;
+        let sizes = [12_usize, 20, 40, 80];
+        println!(
+            "\n[adaptive grid] seq/par coarse-mesh marking benchmark; times are median milliseconds"
+        );
+        println!("method        | points | seq_ms | par_ms | inserted | status");
+        println!("----------------------------------------------------------------");
+
+        for &n_points in &sizes {
+            let (y, x) = boundary_layer_fixture(n_points);
+            let cases: [(
+                &str,
+                fn(&DMatrix<f64>, &DVector<f64>) -> (Vec<f64>, DMatrix<f64>, usize),
+                fn(&DMatrix<f64>, &DVector<f64>) -> (Vec<f64>, DMatrix<f64>, usize),
+            ); 3] = [
+                (
+                    "easy",
+                    |y, x| easy_grid_refinement(y, x, 0.08),
+                    |y, x| easy_grid_refinement_par(y, x, 0.08),
+                ),
+                (
+                    "pearson",
+                    |y, x| pearson_grid_refinement(y, x, 0.08, 1.5),
+                    |y, x| pearson_grid_refinement_par(y, x, 0.08, 1.5),
+                ),
+                (
+                    "grcar",
+                    |y, x| grcar_smooke_grid_refinement(y, x, 0.08, 0.08, 1.5),
+                    |y, x| grcar_smooke_grid_refinement_par(y, x, 0.08, 0.08, 1.5),
+                ),
+            ];
+
+            for (label, seq_fn, par_fn) in cases {
+                let mut seq_times = Vec::with_capacity(REPEATS);
+                let mut par_times = Vec::with_capacity(REPEATS);
+                let mut inserted = 0;
+                for _ in 0..REPEATS {
+                    let seq_start = Instant::now();
+                    let seq = seq_fn(&y, &x);
+                    seq_times.push(seq_start.elapsed().as_secs_f64() * 1_000.0);
+
+                    let par_start = Instant::now();
+                    let par = par_fn(&y, &x);
+                    par_times.push(par_start.elapsed().as_secs_f64() * 1_000.0);
+                    inserted = seq.2;
+                    assert_refinement_same(&seq, &par);
+                    assert_refinement_invariants(&y, &x, &seq);
+                }
+                println!(
+                    "{label:13} | {n_points:6} | {:6.3} | {:6.3} | {inserted:8} | ok",
+                    median_ms(seq_times),
+                    median_ms(par_times)
+                );
+            }
+        }
+    }
 }

@@ -130,6 +130,25 @@ pub fn plots_terminal(
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+    use std::path::{Path, PathBuf};
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn change_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("current dir should be available");
+            std::env::set_current_dir(path).expect("current dir should switch to tempdir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
 
     #[test]
     fn test_plots_terminal() {
@@ -154,5 +173,40 @@ mod tests {
 
         println!("Testing terminal plots with sine and cosine functions:");
         plots_terminal(arg, values, t_result, y_matrix);
+    }
+
+    #[test]
+    fn legacy_plotters_plots_writes_one_png_per_series() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let _guard = CurrentDirGuard::change_to(dir.path());
+
+        let n_points = 50;
+        let t: Vec<f64> = (0..n_points)
+            .map(|i| i as f64 * 2.0 * PI / (n_points - 1) as f64)
+            .collect();
+        let t_result = DVector::from_vec(t.clone());
+
+        let mut y_matrix = DMatrix::zeros(n_points, 2);
+        for (i, x) in t.iter().enumerate() {
+            y_matrix[(i, 0)] = x.sin();
+            y_matrix[(i, 1)] = x.cos();
+        }
+
+        plots(
+            "t".to_string(),
+            vec!["sin".to_string(), "cos".to_string()],
+            t_result,
+            y_matrix,
+        );
+
+        for filename in ["sin.png", "cos.png"] {
+            let path = dir.path().join(filename);
+            assert!(path.exists(), "{filename} should be created by plots()");
+            let metadata = std::fs::metadata(&path).expect("plot file metadata should be readable");
+            assert!(
+                metadata.len() > 0,
+                "{filename} should not be an empty PNG file"
+            );
+        }
     }
 }

@@ -54,6 +54,40 @@ Toolchain discovery for generated backends uses the normal executable lookup and
 also honors these environment variables when present: `RUSTEDSCITHE_TCC`,
 `RUSTEDSCITHE_GCC`, and `RUSTEDSCITHE_ZIG`.
 
+## Story Taxonomy And Source Of Truth
+
+This ledger intentionally mixes correctness gates, diagnostics, cold-bootstrap
+benchmarks, and warm/runtime benchmarks.  Do not compare `total_ms` across rows
+unless the test section says they share the same lifecycle.  In particular,
+artifact-only bootstrap tables, cold compiler tables, linked callback throughput
+tables, and solver-level end-to-end BVP stories answer different questions.
+
+Use this taxonomy before reading a large pasted table:
+
+| Test | Kind | Primary question |
+| --- | --- | --- |
+| `bvp_sparse_banded_correctness_matrix_table` | correctness gate | Do sparse and banded generated values match the lambdify baseline? |
+| `real_bvp_parallel2_and_generated_aot_match_exactly_on_same_inputs` | correctness gate | Does the generated path agree with the legacy `parallel2` semantic baseline? |
+| `bvp_atomview_aot_optimization_profile_bootstrap_table` | diagnostic / artifact-only cold bootstrap | Which AtomView optimization passes affect artifact preparation before materialization or compiler time? |
+| `bvp_generated_backend_pipeline_comparison_table` | cold benchmark | What is time-to-first-callable-output for Lambdify vs Rust/C/Zig AOT, including symbolic preparation, materialization, compiler/linker, link, and first callback issue? |
+| `bvp_generated_backend_runtime_comparison_table` | warm/runtime benchmark | How fast are already-linked callbacks, ignoring cold compiler cost? |
+| `bvp_lambdify_vs_atomview_callable_leaders_compare` | cold + warm break-even benchmark | How many repeated callback evaluations are needed for AOT bootstrap overhead to pay back? |
+| `bvp_generated_backend_compile_preset_tradeoff_table` | cold compiler benchmark | Which compiler/profile preset is useful for generated BVP artifacts? |
+| `bvp_generated_compiled_sparse_banded_matrix_backend_table` | correctness + warm runtime benchmark | Do compiled sparse and banded matrix backends agree, and how do their callback costs compare? |
+| `bvp_callable_and_linear_solver_story_table` | diagnostic / mixed callback+linear algebra | Is the bottleneck generated callback work or downstream linear solve work? |
+| `diagnose_rayon_overhead_baseline` | diagnostic | What is the machine-specific Rayon scheduling floor? |
+| `diagnose_chunk_granularity_and_fallback` | diagnostic | Did Auto request real jobs, did it fallback, and how much work lands in each job/chunk? |
+| `diagnose_combustion_chunk_ir_amplification` | diagnostic | Does chunking duplicate generated IR/source before runtime parallelism can help? |
+| `diagnose_problem_size_crossover` | diagnostic / synthetic crossover | At what synthetic problem size does parallel evaluation begin to beat sequential? |
+| `benchmark_stress_multifield_parallel_crossover` | diagnostic / stress crossover | Does the larger stress family confirm the crossover trend? |
+| `benchmark_compiled_stress_sparse_parallel_job_counts` | warm runtime benchmark | Which requested job count wins on the compiled sparse stress fixture? |
+| `benchmark_compiled_xlarge_stress_seq_vs_par` | positive-control warm runtime benchmark | Can compiled parallel callbacks clearly beat sequential when each job is large enough? |
+
+Older sections may still contain `TODO: paste latest ...` placeholders.  Treat
+those placeholders as a ledger-maintenance backlog, not as an experimental
+conclusion.  The current source of truth is the newest release table or the
+explicit conclusion paragraph in the same section / Results Log.
+
 ## Correctness Gates
 
 ### `bvp_sparse_banded_correctness_matrix_table`
@@ -212,10 +246,14 @@ when the user cares about time-to-first-solve?
 
 The default `Full` profile is the historical behavior. `FastBootstrap` skips
 the optional peephole/temporary-reuse cleanup passes during Atom lowering, while
-`NoPeephole` and `NoTempReuse` are diagnostic splits used to see which pass is
-actually expensive. At the time this section was added, BVP `Auto` temporary
-reuse was already conservative for residual vectors and sparse values, so the
-main expected delta is `peephole_ms`.
+`NoPeephole`, `NoTempReuse`, and `NoCse` are diagnostic splits used to see which
+pass is actually expensive. `NoCse` is the important correctness/performance
+A/B knob for structural common-subexpression elimination: it should preserve
+callback values, but it may trade less bootstrap work for slower generated
+callbacks. At the time this section was added, BVP `Auto` temporary reuse was
+already conservative for residual vectors and sparse values, so the main
+expected deltas are `peephole_ms`, CSE lowering cost, and generated callback
+runtime.
 
 Current result:
 
@@ -320,43 +358,106 @@ AOT      | ExprLegacy | C-tcc          | DevFastest  | 4.440892e-16  | 6.661338e
 AOT      | ExprLegacy | Zig            | DevFastest  | 4.440892e-16  | 2.220446e-16  | ok 10/10
 [BVP backend compare] pipeline comparison finished scenario `combustion-1000`
 
+12  Core
+
+[BVP codegen] AtomView AOT optimization-profile bootstrap table; scenario=combustion-1000
+note: artifact_only isolates AtomView -> IR/source/artifact packaging; build/link are intentionally excluded
+[BVP backend pipeline compare] scenario=combustion-1000, residuals=6000, vars=6000, nnz=20988, multi-run bootstrap summary
+route    | assembly   | variant        | preset      | ok/runs | symbolic_ms mean+/-std [min,max] | callable_prep_ms mean+/-std [min,max] | artifact_ms | materialize_ms | build_ms | link_ms | first_issue_ms | total_to_outputs_ms mean+/-std [min,max] | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+AOT-profile | AtomView   | c_source/full  | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 37.616+/-2.392 [34.356,40.853]          | 37.616+/-2.392 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 140.323+/-3.317 [135.373,143.755]           | ok 4/4
+AOT-profile | AtomView   | c_source/fast_bootstrap | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 34.443+/-2.188 [32.618,38.164]          | 34.443+/-2.188 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 137.150+/-2.482 [134.204,141.066]           | ok 4/4
+AOT-profile | AtomView   | c_source/no_peephole | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 35.939+/-2.874 [32.355,39.557]          | 35.939+/-2.874 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 138.645+/-3.828 [133.371,142.459]           | ok 4/4
+AOT-profile | AtomView   | c_source/no_temp_reuse | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 35.423+/-1.894 [33.046,37.765]          | 35.423+/-1.894 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 138.129+/-3.011 [134.062,142.087]           | ok 4/4
+AOT-profile | AtomView   | c_source/no_cse | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 29.942+/-0.590 [29.171,30.768]          | 29.942+/-0.590 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 132.649+/-1.182 [130.694,133.670]           | ok 4/4
+AOT-profile | AtomView   | rust/full      | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 53.207+/-1.667 [51.561,55.447]          | 53.207+/-1.667 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 155.913+/-1.094 [154.145,157.077]           | ok 4/4
+AOT-profile | AtomView   | rust/fast_bootstrap | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 54.657+/-5.655 [50.210,64.322]          | 54.657+/-5.655 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 157.364+/-4.650 [153.888,165.338]           | ok 4/4
+AOT-profile | AtomView   | rust/no_peephole | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 54.460+/-2.826 [50.167,57.224]          | 54.460+/-2.826 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 157.166+/-1.927 [154.490,159.809]           | ok 4/4
+AOT-profile | AtomView   | rust/no_temp_reuse | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 53.103+/-3.791 [49.621,59.280]          | 53.103+/-3.791 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 155.809+/-2.928 [152.206,160.297]           | ok 4/4
+AOT-profile | AtomView   | rust/no_cse    | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 64.085+/-3.448 [60.103,67.824]          | 64.085+/-3.448 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 166.791+/-3.546 [162.688,171.502]           | ok 4/4
+AOT-profile | AtomView   | zig_source/full | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 58.824+/-1.742 [56.054,60.873]          | 58.824+/-1.742 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 161.530+/-1.792 [158.638,163.555]           | ok 4/4
+AOT-profile | AtomView   | zig_source/fast_bootstrap | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 57.111+/-2.431 [53.779,60.605]          | 57.111+/-2.431 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 159.817+/-2.046 [156.363,161.621]           | ok 4/4
+AOT-profile | AtomView   | zig_source/no_peephole | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 56.516+/-1.755 [53.500,57.857]          | 56.516+/-1.755 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 159.222+/-1.213 [157.822,160.759]           | ok 4/4
+AOT-profile | AtomView   | zig_source/no_temp_reuse | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 57.445+/-1.061 [56.062,58.630]          | 57.445+/-1.061 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 160.151+/-0.883 [158.964,161.101]           | ok 4/4
+AOT-profile | AtomView   | zig_source/no_cse | artifact_only |   4/4   | 102.706+/-1.175 [101.017,104.323]  | 72.791+/-4.367 [67.854,79.781]          | 72.791+/-4.367 | 0.000+/-0.000  | 0.000+/-0.000 | 0.000+/-0.000 | 0.000+/-0.000  | 175.498+/-4.294 [170.756,182.366]           | ok 4/4
+AtomView-only planning stages. ExprLegacy rows are expected to be zero here; use the module/source table below for the active legacy module-build cost.
+route    | assembly   | variant        | preset      | jac_prepare | lookup | jac_build | chunk_plan | lower | peephole | temp_reuse | module_push
+-------------------------------------------------------------------------------------------------------------------------------------------------
+AOT-profile | AtomView   | c_source/full  | artifact_only | 10.289+/-0.324 | 3.453+/-0.281 | 4.899+/-0.285 | 1.567+/-0.225 | 14.296+/-1.290 | 0.596+/-0.062 | 0.229+/-0.049 | 0.001+/-0.000
+AOT-profile | AtomView   | c_source/fast_bootstrap | artifact_only | 9.377+/-0.422 | 3.202+/-0.159 | 4.440+/-0.261 | 1.315+/-0.099 | 13.528+/-1.114 | 0.000+/-0.000 | 0.214+/-0.029 | 0.001+/-0.000
+AOT-profile | AtomView   | c_source/no_peephole | artifact_only | 9.741+/-0.479 | 3.513+/-0.342 | 4.524+/-0.194 | 1.318+/-0.179 | 14.617+/-2.126 | 0.000+/-0.000 | 0.217+/-0.041 | 0.001+/-0.000
+AOT-profile | AtomView   | c_source/no_temp_reuse | artifact_only | 9.248+/-0.193 | 3.181+/-0.071 | 4.378+/-0.158 | 1.305+/-0.089 | 13.221+/-0.912 | 0.533+/-0.065 | 0.204+/-0.035 | 0.001+/-0.000
+AOT-profile | AtomView   | c_source/no_cse | artifact_only | 9.304+/-0.410 | 3.134+/-0.063 | 4.383+/-0.291 | 1.383+/-0.137 | 4.101+/-0.096 | 1.060+/-0.065 | 0.412+/-0.033 | 0.001+/-0.000
+AOT-profile | AtomView   | rust/full      | artifact_only | 9.306+/-0.308 | 3.194+/-0.117 | 4.384+/-0.346 | 1.341+/-0.074 | 13.955+/-0.704 | 0.531+/-0.059 | 0.202+/-0.025 | 0.001+/-0.000
+AOT-profile | AtomView   | rust/fast_bootstrap | artifact_only | 9.582+/-0.545 | 3.292+/-0.255 | 4.452+/-0.301 | 1.446+/-0.127 | 15.023+/-3.106 | 0.000+/-0.000 | 0.245+/-0.052 | 0.001+/-0.000
+AOT-profile | AtomView   | rust/no_peephole | artifact_only | 9.544+/-0.401 | 3.235+/-0.192 | 4.510+/-0.222 | 1.409+/-0.086 | 13.527+/-0.847 | 0.000+/-0.000 | 0.216+/-0.039 | 0.001+/-0.000
+AOT-profile | AtomView   | rust/no_temp_reuse | artifact_only | 9.406+/-0.424 | 3.290+/-0.307 | 4.418+/-0.176 | 1.325+/-0.109 | 13.912+/-1.606 | 0.461+/-0.029 | 0.218+/-0.030 | 0.001+/-0.000
+AOT-profile | AtomView   | rust/no_cse    | artifact_only | 9.454+/-0.379 | 3.447+/-0.268 | 4.307+/-0.218 | 1.303+/-0.070 | 4.094+/-0.276 | 1.068+/-0.041 | 0.422+/-0.017 | 0.000+/-0.000
+AOT-profile | AtomView   | zig_source/full | artifact_only | 10.218+/-1.082 | 4.023+/-1.110 | 4.362+/-0.070 | 1.430+/-0.129 | 14.019+/-1.200 | 0.464+/-0.040 | 0.199+/-0.017 | 0.001+/-0.000
+AOT-profile | AtomView   | zig_source/fast_bootstrap | artifact_only | 9.498+/-0.420 | 3.338+/-0.213 | 4.311+/-0.341 | 1.431+/-0.140 | 13.039+/-0.586 | 0.000+/-0.000 | 0.204+/-0.015 | 0.000+/-0.000
+AOT-profile | AtomView   | zig_source/no_peephole | artifact_only | 9.129+/-0.352 | 3.133+/-0.155 | 4.282+/-0.183 | 1.317+/-0.108 | 12.334+/-0.458 | 0.000+/-0.000 | 0.197+/-0.011 | 0.000+/-0.000
+AOT-profile | AtomView   | zig_source/no_temp_reuse | artifact_only | 9.157+/-0.340 | 3.248+/-0.148 | 4.269+/-0.305 | 1.252+/-0.038 | 12.861+/-0.675 | 0.454+/-0.043 | 0.192+/-0.022 | 0.001+/-0.000
+AOT-profile | AtomView   | zig_source/no_cse | artifact_only | 9.456+/-0.342 | 3.288+/-0.223 | 4.368+/-0.217 | 1.390+/-0.140 | 4.057+/-0.112 | 1.042+/-0.053 | 0.428+/-0.015 | 0.001+/-0.001
+route    | assembly   | variant        | preset      | module_ms | module_init | residual_lower | jacobian_lower | source_probe | source_emit | c_header | packaging | artifact_other | source_kb
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+AOT-profile | AtomView   | c_source/full  | artifact_only | 15.523+/-1.411 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 4.689+/-0.170 | 0.005+/-0.002 | 4.387+/-0.595 | 13.012+/-0.686 | 3419.406+/-0.000
+AOT-profile | AtomView   | c_source/fast_bootstrap | artifact_only | 14.071+/-1.157 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 4.594+/-0.099 | 0.004+/-0.001 | 4.000+/-0.199 | 11.774+/-1.217 | 3419.189+/-0.000
+AOT-profile | AtomView   | c_source/no_peephole | artifact_only | 15.170+/-2.183 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 4.694+/-0.116 | 0.004+/-0.001 | 3.979+/-0.178 | 12.092+/-1.208 | 3419.189+/-0.000
+AOT-profile | AtomView   | c_source/no_temp_reuse | artifact_only | 14.324+/-1.005 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 5.439+/-1.383 | 0.005+/-0.002 | 4.052+/-0.390 | 11.603+/-0.802 | 3419.406+/-0.000
+AOT-profile | AtomView   | c_source/no_cse | artifact_only | 6.025+/-0.180 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 8.023+/-0.228 | 0.004+/-0.001 | 4.141+/-0.356 | 11.750+/-1.145 | 5851.541+/-0.000
+AOT-profile | AtomView   | rust/full      | artifact_only | 15.074+/-0.768 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 22.404+/-1.173 | 0.000+/-0.000 | 4.011+/-0.350 | 11.717+/-0.992 | 3428.040+/-0.000
+AOT-profile | AtomView   | rust/fast_bootstrap | artifact_only | 15.636+/-3.230 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 22.813+/-1.714 | 0.000+/-0.000 | 4.104+/-0.328 | 12.103+/-0.952 | 3427.775+/-0.000
+AOT-profile | AtomView   | rust/no_peephole | artifact_only | 14.074+/-0.899 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 24.353+/-2.944 | 0.000+/-0.000 | 4.126+/-0.533 | 11.906+/-0.968 | 3427.772+/-0.000
+AOT-profile | AtomView   | rust/no_temp_reuse | artifact_only | 14.960+/-1.662 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 22.527+/-1.502 | 0.000+/-0.000 | 3.998+/-0.311 | 11.618+/-0.933 | 3428.049+/-0.000
+AOT-profile | AtomView   | rust/no_cse    | artifact_only | 6.035+/-0.332 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 41.893+/-3.380 | 0.000+/-0.000 | 4.331+/-0.775 | 11.826+/-0.809 | 5869.942+/-0.000
+AOT-profile | AtomView   | zig_source/full | artifact_only | 15.066+/-1.169 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 27.094+/-1.320 | 0.000+/-0.000 | 3.946+/-0.276 | 12.718+/-1.246 | 3715.221+/-0.000
+AOT-profile | AtomView   | zig_source/fast_bootstrap | artifact_only | 13.590+/-0.610 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 27.723+/-2.495 | 0.000+/-0.000 | 4.244+/-0.528 | 11.554+/-1.092 | 3715.397+/-0.000
+AOT-profile | AtomView   | zig_source/no_peephole | artifact_only | 12.841+/-0.484 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 28.407+/-1.904 | 0.000+/-0.000 | 4.032+/-0.273 | 11.237+/-0.870 | 3715.397+/-0.000
+AOT-profile | AtomView   | zig_source/no_temp_reuse | artifact_only | 13.877+/-0.738 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 28.208+/-1.815 | 0.000+/-0.000 | 4.030+/-0.276 | 11.330+/-1.163 | 3715.221+/-0.000
+AOT-profile | AtomView   | zig_source/no_cse | artifact_only | 5.988+/-0.160 | 0.000+/-0.000 | 0.000+/-0.000  | 0.000+/-0.000  | 0.000+/-0.000 | 50.798+/-4.460 | 0.000+/-0.000 | 4.163+/-0.266 | 11.842+/-0.716 | 6525.824+/-0.000
+[BVP backend compare] optimization-profile bootstrap compare finished
 ok
 ```text
-Latest release table is pasted above.  The combustion-1000 run is the current
-best source for cold-bootstrap economics because it includes Lambdify, Rust,
-C-gcc, C-tcc, and Zig with ten runs each.
+Latest 12 Core release table is pasted above.  The `AOT-profile` rows are an
+artifact-only AtomView profile experiment: they include symbolic preparation,
+AtomView lowering, module/source/artifact packaging, and correctness checks, but
+they intentionally exclude materialization, external compiler/linker time,
+runtime linking, and first callback execution.
 ```
 
 Conclusion:
 
 ```text
-For combustion-1000, the common symbolic stage costs about 1.90 s for every
-route. Lambdify then needs about 0.35 s of callable preparation and reaches
-first callable outputs in about 2.26 s. This means a cold AOT route must keep
-its whole artifact/materialize/build/link overhead very small to beat Lambdify
-on a one-shot solve.
+The profile experiment proves that `NoCse` is semantically safe on this case:
+all profile rows complete successfully and residual/Jacobian values remain at
+the same correctness level.  Performance-wise it is not a universal win.
 
-C-tcc is the only AOT route currently close to Lambdify for cold one-shot use:
-about 2.82 s total-to-outputs. The stage that pulls it down is not the external
-compiler. The measured C-tcc split is: artifact/source/module work ~0.64 s,
-materialization ~0.11 s, tcc build ~0.15 s, dynamic link ~0.009 s, and first
-callback issue ~0.002 s. In other words, tcc itself is already fast; the main
-AOT tax is the pre-compiler factory that constructs and emits the generated
-artifact.
+`NoCse` does remove real Atom lowering work.  The `lower` stage drops from about
+`14-15 ms` to about `4 ms`, and `module_ms` drops from about `15 ms` to about
+`6 ms`.  That is the good news: the CSE pass is visible and the switch is a real
+A/B knob rather than a cosmetic flag.
 
-Inside the C-tcc artifact block, the largest visible substage is module
-construction (~0.41 s), followed by source-size probe plus final source emission
-(~0.18 s total), then packaging (~0.045 s). `artifact_other` is now tiny
-(~0.002 s), so the former opaque container is mostly explained. The practical
-optimization target is therefore module construction/source emission, not
-peephole/temp-reuse toggles and not tcc compilation.
+The cost is larger generated source.  For C source, `NoCse` grows the generated
+source from about `3.42 MB` to about `5.85 MB`; for Rust from about `3.43 MB` to
+about `5.87 MB`; for Zig from about `3.72 MB` to about `6.53 MB`.  That extra
+source already hurts `source_emit`: Rust `NoCse` rises to about `41.9 ms` versus
+`22.4 ms` for `Full`, and Zig `NoCse` rises to about `50.8 ms` versus `27.1 ms`
+for `Full`.
 
-Implementation note: the artifact path has now been changed so the source-size
-probe is not paid during real AOT artifact creation.  Module-only diagnostics
-can still measure `source_probe`, but generated artifacts now emit language
-source once and fill `source_kb` from that real source string.  Re-running this
-table should therefore show `source_probe ~= 0` for AOT artifact rows and should
-move roughly the old probe cost out of `artifact_ms`/`callable_prep_ms`.
+The total artifact-only result matches that tradeoff.  C source benefits a
+little in this isolated table (`no_cse` about `132.6 ms` versus `full` about
+`140.3 ms`).  Rust and Zig lose overall (`rust/no_cse` about `166.8 ms` versus
+`rust/full` about `155.9 ms`; `zig/no_cse` about `175.5 ms` versus `zig/full`
+about `161.5 ms`).
+
+Therefore `Full` should remain the default production profile.  `NoCse` is a
+useful diagnostic and may be worth testing for C/tcc cold-start cases, but the
+artifact-only table is not enough to promote it: the larger source may increase
+compiler time and may change runtime callback throughput.  The follow-up
+solver-level story
+`combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story` confirms the
+same practical decision: `NoCse` is correct, but does not show a robust enough
+end-to-end win to replace `Full` as the default.
 
 The source emitter also now reserves a conservative output buffer based on
 module size before pushing generated code into the final `String`.  This is a

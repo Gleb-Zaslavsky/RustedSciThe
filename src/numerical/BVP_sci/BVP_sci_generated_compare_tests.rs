@@ -39,15 +39,15 @@
 //!   provide useful baselines from the symbolic, convenience-numerical, and
 //!   high-performance pure numerical sides respectively.
 //!
-//! The production-like test intentionally reports only total end-to-end time,
-//! while the compare-table test also exposes stage breakdowns so we can see
-//! whether wins come from residuals, Jacobians, linear solves, or mesh work.
+//! The production-like test keeps one compact user-facing table, while the
+//! compare-table test also exposes stage breakdowns so we can see whether wins
+//! come from residuals, Jacobians, linear solves, or mesh work.
 #[cfg(test)]
 mod tests_generated_backend_compare {
     use crate::numerical::BVP_sci::BVP_sci_aot::BvpSciGeneratedBackendConfig;
     use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
     use crate::numerical::BVP_sci::BVP_sci_numerical::{
-        NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode, solve_numerical_bvp,
+        solve_numerical_bvp, NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
     };
     use crate::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciSolverOptions};
     use crate::numerical::Examples_and_utils::NonlinEquation;
@@ -56,10 +56,11 @@ mod tests_generated_backend_compare {
     use nalgebra::DMatrix;
     use std::collections::HashMap;
     use std::process::Command;
-    use std::time::Instant;
-    use tabled::{Table, Tabled, settings::Style};
+    use std::sync::OnceLock;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use tabled::{settings::Style, Table, Tabled};
 
-    const GENERATED_TEST_ARTIFACT_REV: &str = "rev2-bounds";
+    const GENERATED_TEST_ARTIFACT_REV: &str = "r2";
     const DEFAULT_COMPARE_REPEATS: usize = 5;
 
     #[derive(Clone)]
@@ -104,8 +105,18 @@ mod tests_generated_backend_compare {
     struct CompareProductionRow {
         variant: String,
         total_ms: String,
+        setup_ms: String,
+        solve_ms: String,
+        speedup_vs_lambdify: String,
         max_abs_solution: String,
         solution_diff_vs_lambdify: String,
+        residual_ms_total: String,
+        jacobian_ms_total: String,
+        linear_ms_total: String,
+        niter: usize,
+        linear_solves: usize,
+        jacobian_rebuilds: usize,
+        nodes: usize,
         status: String,
     }
 
@@ -137,7 +148,7 @@ mod tests_generated_backend_compare {
         max_rms_residual: f64,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum CompareVariant {
         Lambdify,
         DirectNumericFd,
@@ -439,20 +450,76 @@ mod tests_generated_backend_compare {
         ]
     }
 
-    fn compare_output_dir(scenario: &str, variant: CompareVariant) -> String {
+    fn compare_output_dir(
+        scenario: &str,
+        variant: CompareVariant,
+        namespace: &str,
+        repeat_index: Option<usize>,
+    ) -> String {
         let suffix = match variant {
-            CompareVariant::Lambdify => "lambdify",
-            CompareVariant::DirectNumericFd => "direct-numeric-fd",
-            CompareVariant::DirectNumeric => "direct-numeric",
-            CompareVariant::Rust => "rust",
-            CompareVariant::RustWarm => "rust-warm",
-            CompareVariant::CGcc => "cgcc",
-            CompareVariant::CTcc => "ctcc",
-            CompareVariant::Zig => "zig",
+            CompareVariant::Lambdify => "l",
+            CompareVariant::DirectNumericFd => "dnfd",
+            CompareVariant::DirectNumeric => "dn",
+            CompareVariant::Rust => "r",
+            CompareVariant::RustWarm => "rw",
+            CompareVariant::CGcc => "cg",
+            CompareVariant::CTcc => "ct",
+            CompareVariant::Zig => "z",
         };
-        format!(
-            "target/generated-bvp-sci-compare/{GENERATED_TEST_ARTIFACT_REV}/{scenario}/{suffix}"
-        )
+        let scenario = match scenario {
+            "linear-2" => "l2",
+            "exponential-2" => "e2",
+            "exponential-2-512" => "e512",
+            "lane-emden-2-512" => "le512",
+            "combustion-1000" => "c1000",
+            other => other,
+        };
+        let base =
+            format!("target/bsc/{GENERATED_TEST_ARTIFACT_REV}/{namespace}/{scenario}/{suffix}");
+        match repeat_index {
+            Some(index) => format!("{base}/run-{index:02}"),
+            None => base,
+        }
+    }
+
+    fn compare_invocation_id() -> &'static str {
+        static INVOCATION_ID: OnceLock<String> = OnceLock::new();
+        INVOCATION_ID.get_or_init(|| {
+            let millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            format!("p{:x}-{:x}", std::process::id(), millis % 0x100000000)
+        })
+    }
+
+    fn compare_run_namespace(base: &str) -> String {
+        format!("{base}-{}", compare_invocation_id())
+    }
+
+    #[test]
+    fn compare_output_dirs_isolate_rust_cold_builds_from_loaded_dlls() {
+        let cold_0 = compare_output_dir("lane-emden-2-512", CompareVariant::Rust, "story", Some(0));
+        let cold_1 = compare_output_dir("lane-emden-2-512", CompareVariant::Rust, "story", Some(1));
+        let warm = compare_output_dir("lane-emden-2-512", CompareVariant::RustWarm, "story", None);
+
+        assert_ne!(cold_0, cold_1);
+        assert_ne!(cold_0, warm);
+        assert!(cold_0.ends_with("r/run-00"));
+        assert!(cold_1.ends_with("r/run-01"));
+        assert!(warm.ends_with("rw"));
+    }
+
+    #[test]
+    fn compare_run_namespace_is_process_unique_for_stale_dll_hardening() {
+        let namespace = compare_run_namespace("production-like");
+        assert!(namespace.starts_with("production-like-p"));
+        assert!(namespace.contains(&format!("{:x}", std::process::id())));
+
+        let cold = compare_output_dir("linear-2", CompareVariant::Rust, &namespace, Some(0));
+        assert!(cold.contains(&namespace));
+        assert!(cold.ends_with("r/run-00"));
+        assert!(cold.starts_with("target/bsc/r2/"));
     }
 
     fn make_solver_quiet(mut options: BvpSciSolverOptions) -> BvpSciSolverOptions {
@@ -736,6 +803,8 @@ mod tests_generated_backend_compare {
     fn configure_variant(
         scenario: &CompareScenario,
         variant: CompareVariant,
+        namespace: &str,
+        repeat_index: usize,
     ) -> BvpSciSolverOptions {
         let options = make_solver_quiet(scenario.options.clone());
         match variant {
@@ -746,25 +815,39 @@ mod tests_generated_backend_compare {
             CompareVariant::DirectNumeric => {
                 panic!("DirectNumeric variant bypasses symbolic configuration")
             }
-            CompareVariant::Rust => {
-                options.with_sparse_atomview_rust(compare_output_dir(scenario.label, variant))
-            }
+            CompareVariant::Rust => options.with_sparse_atomview_rust(compare_output_dir(
+                scenario.label,
+                variant,
+                namespace,
+                Some(repeat_index),
+            )),
             CompareVariant::RustWarm => options.with_generated_backend_config(
                 BvpSciGeneratedBackendConfig::sparse_atomview_require_prebuilt()
                     .with_output_parent_dir(compare_output_dir(
                         scenario.label,
-                        CompareVariant::Rust,
+                        CompareVariant::RustWarm,
+                        namespace,
+                        None,
                     )),
             ),
-            CompareVariant::CGcc => {
-                options.with_sparse_atomview_c_gcc(compare_output_dir(scenario.label, variant))
-            }
-            CompareVariant::CTcc => {
-                options.with_sparse_atomview_c_tcc(compare_output_dir(scenario.label, variant))
-            }
-            CompareVariant::Zig => {
-                options.with_sparse_atomview_zig(compare_output_dir(scenario.label, variant))
-            }
+            CompareVariant::CGcc => options.with_sparse_atomview_c_gcc(compare_output_dir(
+                scenario.label,
+                variant,
+                namespace,
+                Some(repeat_index),
+            )),
+            CompareVariant::CTcc => options.with_sparse_atomview_c_tcc(compare_output_dir(
+                scenario.label,
+                variant,
+                namespace,
+                Some(repeat_index),
+            )),
+            CompareVariant::Zig => options.with_sparse_atomview_zig(compare_output_dir(
+                scenario.label,
+                variant,
+                namespace,
+                Some(repeat_index),
+            )),
         }
     }
 
@@ -956,6 +1039,42 @@ mod tests_generated_backend_compare {
         }
     }
 
+    fn failed_compare_outcome(
+        variant: CompareVariant,
+        status: impl Into<String>,
+    ) -> CompareOutcome {
+        CompareOutcome {
+            timing: CompareTimingRow {
+                variant: variant.label().to_string(),
+                total_ms: "NaN".to_string(),
+                setup_ms: "NaN".to_string(),
+                solve_ms: "NaN".to_string(),
+                max_abs_solution: "NaN".to_string(),
+                status: status.into(),
+            },
+            breakdown: CompareBreakdownRow {
+                variant: variant.label().to_string(),
+                speedup_vs_lambdify: "NaNx".to_string(),
+                solution_diff_vs_lambdify: "NaN".to_string(),
+                residual_ms_total: "NaN".to_string(),
+                jacobian_ms_total: "NaN".to_string(),
+                linear_ms_total: "NaN".to_string(),
+                grid_refine_ms_total: "NaN".to_string(),
+            },
+            work: CompareWorkRow {
+                variant: variant.label().to_string(),
+                niter: 0,
+                linear_solves: 0,
+                jacobian_rebuilds: 0,
+                grid_refinements: 0,
+                nodes: 0,
+                max_rms_residual: "NaN".to_string(),
+            },
+            solution: None,
+            total_ms_value: None,
+        }
+    }
+
     fn median_of(values: &mut [f64]) -> f64 {
         if values.is_empty() {
             return f64::NAN;
@@ -1101,6 +1220,8 @@ mod tests_generated_backend_compare {
         variant: CompareVariant,
         baseline_solution: Option<&DMatrix<f64>>,
         baseline_total_ms: Option<f64>,
+        namespace: &str,
+        repeat_index: usize,
     ) -> CompareOutcome {
         if matches!(
             variant,
@@ -1113,7 +1234,12 @@ mod tests_generated_backend_compare {
                 baseline_total_ms,
             );
         }
-        let mut solver = BVPwrap::new_with_options(configure_variant(scenario, variant));
+        let mut solver = BVPwrap::new_with_options(configure_variant(
+            scenario,
+            variant,
+            namespace,
+            repeat_index,
+        ));
         let begin = Instant::now();
         let result = solver.try_solve();
         let total_ms = begin.elapsed().as_secs_f64() * 1_000.0;
@@ -1211,13 +1337,20 @@ mod tests_generated_backend_compare {
         baseline_solution: Option<&DMatrix<f64>>,
         baseline_total_ms: Option<f64>,
         repeats: usize,
+        namespace: &str,
     ) -> CompareOutcome {
         let mut runs = Vec::with_capacity(repeats);
         let mut final_solution = None;
 
-        for _ in 0..repeats {
-            let outcome =
-                run_compare_variant(scenario, variant, baseline_solution, baseline_total_ms);
+        for repeat_index in 0..repeats {
+            let outcome = run_compare_variant(
+                scenario,
+                variant,
+                baseline_solution,
+                baseline_total_ms,
+                namespace,
+                repeat_index,
+            );
             if outcome.solution.is_none() {
                 return outcome;
             }
@@ -1309,16 +1442,17 @@ mod tests_generated_backend_compare {
         baseline_solution: Option<&DMatrix<f64>>,
         baseline_total_ms: Option<f64>,
         repeats: usize,
+        namespace: &str,
     ) -> CompareOutcome {
         if matches!(variant, CompareVariant::RustWarm) {
             let mut warmup_solver = BVPwrap::new_with_options(
                 make_solver_quiet(scenario.options.clone()).with_sparse_atomview_rust(
-                    compare_output_dir(scenario.label, CompareVariant::Rust),
+                    compare_output_dir(scenario.label, CompareVariant::RustWarm, namespace, None),
                 ),
             );
-            warmup_solver
-                .try_solve()
-                .expect("Rust warmup solve should build and link the generated backend");
+            if let Err(err) = warmup_solver.try_solve() {
+                return failed_compare_outcome(variant, format!("warmup_failed: {err}"));
+            }
         }
         run_compare_variant_repeated(
             scenario,
@@ -1326,6 +1460,7 @@ mod tests_generated_backend_compare {
             baseline_solution,
             baseline_total_ms,
             repeats,
+            namespace,
         )
     }
 
@@ -1334,6 +1469,8 @@ mod tests_generated_backend_compare {
     fn bvp_sci_generated_backend_compare_table() {
         let scenarios = compare_scenarios();
         let repeats = compare_repeats();
+        let namespace = compare_run_namespace("compare-table");
+        println!("[BVP_sci backend compare] artifact namespace={namespace}");
 
         for scenario in scenarios {
             let mut outcomes = Vec::new();
@@ -1343,6 +1480,7 @@ mod tests_generated_backend_compare {
                 None,
                 None,
                 repeats,
+                &namespace,
             );
             let baseline_solution = baseline_outcome
                 .solution
@@ -1358,6 +1496,7 @@ mod tests_generated_backend_compare {
                 Some(&baseline_solution),
                 Some(baseline_total_ms),
                 repeats,
+                &namespace,
             ));
             outcomes.push(run_compare_variant_repeated(
                 &scenario,
@@ -1365,6 +1504,7 @@ mod tests_generated_backend_compare {
                 Some(&baseline_solution),
                 Some(baseline_total_ms),
                 repeats,
+                &namespace,
             ));
 
             if rust_codegen_is_available() {
@@ -1374,6 +1514,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
                 outcomes.push(run_compare_variant_with_warmup(
                     &scenario,
@@ -1381,6 +1522,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if gcc_is_available() {
@@ -1390,6 +1532,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if tcc_is_available() {
@@ -1399,6 +1542,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if zig_is_available() {
@@ -1408,6 +1552,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
 
@@ -1495,6 +1640,8 @@ mod tests_generated_backend_compare {
     fn bvp_sci_production_like_end_to_end_compare_table() {
         let scenarios = compare_scenarios();
         let repeats = compare_repeats();
+        let namespace = compare_run_namespace("production-like");
+        println!("[BVP_sci production-like] artifact namespace={namespace}");
 
         for scenario in scenarios {
             let mut outcomes = Vec::new();
@@ -1504,6 +1651,7 @@ mod tests_generated_backend_compare {
                 None,
                 None,
                 repeats,
+                &namespace,
             );
             let baseline_solution = baseline_outcome
                 .solution
@@ -1519,6 +1667,7 @@ mod tests_generated_backend_compare {
                 Some(&baseline_solution),
                 Some(baseline_total_ms),
                 repeats,
+                &namespace,
             ));
             outcomes.push(run_compare_variant_repeated(
                 &scenario,
@@ -1526,6 +1675,7 @@ mod tests_generated_backend_compare {
                 Some(&baseline_solution),
                 Some(baseline_total_ms),
                 repeats,
+                &namespace,
             ));
 
             if rust_codegen_is_available() {
@@ -1535,6 +1685,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
                 outcomes.push(run_compare_variant_with_warmup(
                     &scenario,
@@ -1542,6 +1693,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if gcc_is_available() {
@@ -1551,6 +1703,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if tcc_is_available() {
@@ -1560,6 +1713,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
             if zig_is_available() {
@@ -1569,6 +1723,7 @@ mod tests_generated_backend_compare {
                     Some(&baseline_solution),
                     Some(baseline_total_ms),
                     repeats,
+                    &namespace,
                 ));
             }
 
@@ -1577,8 +1732,18 @@ mod tests_generated_backend_compare {
                 .map(|outcome| CompareProductionRow {
                     variant: outcome.timing.variant.clone(),
                     total_ms: outcome.timing.total_ms.clone(),
+                    setup_ms: outcome.timing.setup_ms.clone(),
+                    solve_ms: outcome.timing.solve_ms.clone(),
+                    speedup_vs_lambdify: outcome.breakdown.speedup_vs_lambdify.clone(),
                     max_abs_solution: outcome.timing.max_abs_solution.clone(),
                     solution_diff_vs_lambdify: outcome.breakdown.solution_diff_vs_lambdify.clone(),
+                    residual_ms_total: outcome.breakdown.residual_ms_total.clone(),
+                    jacobian_ms_total: outcome.breakdown.jacobian_ms_total.clone(),
+                    linear_ms_total: outcome.breakdown.linear_ms_total.clone(),
+                    niter: outcome.work.niter,
+                    linear_solves: outcome.work.linear_solves,
+                    jacobian_rebuilds: outcome.work.jacobian_rebuilds,
+                    nodes: outcome.work.nodes,
                     status: outcome.timing.status.clone(),
                 })
                 .collect::<Vec<_>>();

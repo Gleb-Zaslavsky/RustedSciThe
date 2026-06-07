@@ -3349,6 +3349,7 @@ fn bvp_atomview_aot_optimization_profile_bootstrap_table() {
         AtomOptimizationProfile::FastBootstrap,
         AtomOptimizationProfile::NoPeephole,
         AtomOptimizationProfile::NoTempReuse,
+        AtomOptimizationProfile::NoCse,
     ];
     let backends = [
         AotCodegenBackend::C,

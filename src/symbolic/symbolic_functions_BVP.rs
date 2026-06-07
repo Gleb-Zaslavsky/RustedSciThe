@@ -71,7 +71,8 @@
 //! - **Dense (nalgebra)**: `lambdify_jacobian_DMatrix_par()`, `lambdify_residual_DVector()`
 //! - **Sparse (faer)**: `lambdify_jacobian_SparseColMat_parallel2()`, `lambdify_residual_Col_parallel2()`
 //! - **Sparse (sprs)**: `lambdify_jacobian_CsMat()`, `lambdify_residual_CsVec()`
-//! - **Sparse (nalgebra)**: `lambdify_jacobian_CsMatrix()`, residual functions
+//! - Historical `Sparse_2`/nalgebra `CsMatrix` BVP runtime was removed because
+//!   its solver implementation was incomplete.
 //!
 //! #### Utility Functions
 //! - `find_bandwidths()`: Automatic sparse matrix bandwidth detection
@@ -120,11 +121,11 @@
 //! - **Trapezoidal**: `"trapezoid"` - Second-order implicit scheme with better stability
 //!
 //! ### Matrix Backend Strategy
-//! The module supports 4 different matrix backends, each optimized for different scenarios:
+//! The module supports several matrix backends, each optimized for different scenarios:
 //! - **Dense (nalgebra)**: Best for small, dense systems
 //! - **Sparse (faer)**: Modern, high-performance sparse matrices with excellent parallel support
 //! - **Sparse (sprs)**: Mature Rust sparse matrix library
-//! - **Sparse (nalgebra)**: Integrated with nalgebra ecosystem
+//! - **Banded**: Lapack-style banded storage/solve path for narrow-band BVP Jacobians
 //!
 //! This multi-backend approach allows users to choose the optimal performance characteristics
 //! for their specific problem size and sparsity pattern.
@@ -237,7 +238,6 @@ pub enum BvpBackendKind {
 pub enum BvpMatrixBackend {
     Dense,
     SprsCsMat,
-    NalgebraCsMatrix,
     FaerSparseCol,
     Banded,
 }
@@ -247,7 +247,6 @@ impl BvpMatrixBackend {
         match self {
             Self::Dense => "Dense",
             Self::SprsCsMat => "Sparse_1",
-            Self::NalgebraCsMatrix => "Sparse_2",
             Self::FaerSparseCol => "Sparse",
             Self::Banded => "Banded",
         }
@@ -257,7 +256,6 @@ impl BvpMatrixBackend {
         match method {
             "Dense" => Some(Self::Dense),
             "Sparse_1" => Some(Self::SprsCsMat),
-            "Sparse_2" => Some(Self::NalgebraCsMatrix),
             "Sparse" => Some(Self::FaerSparseCol),
             "Banded" => Some(Self::Banded),
             _ => None,
@@ -270,7 +268,7 @@ impl BvpMatrixBackend {
             MatrixBackend::Banded => Self::Banded,
             MatrixBackend::SparseCol => Self::FaerSparseCol,
             MatrixBackend::CsMat => Self::SprsCsMat,
-            MatrixBackend::CsMatrix => Self::NalgebraCsMatrix,
+            MatrixBackend::CsMatrix => Self::FaerSparseCol,
             MatrixBackend::ValuesOnly => Self::FaerSparseCol,
         }
     }
@@ -419,7 +417,8 @@ pub struct Jacobian {
     pub lambdified_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64>>,
 
     /// String identifier for the matrix backend method being used.
-    /// Values: "Dense", "Sparse", "Sparse_1" (sprs), "Sparse_2" (nalgebra), "Sparse_3" (faer)
+    /// Values: "Dense", "Sparse" (faer), "Sparse_1" (sprs), or "Banded".
+    /// Historical "Sparse_2" / nalgebra CsMatrix is no longer exposed as a solver backend.
     pub method: String,
 
     /// Explicit backend configuration used by the modernized BVP entrypoints.
@@ -476,7 +475,8 @@ pub struct Jacobian {
     pub lambdified_jac_element: Option<Box<dyn Fn(f64, usize, usize) -> f64>>,
 
     /// Compiled numerical Jacobian function as trait object.
-    /// Supports multiple backends through JacEnum variants (Dense, Sparse_1, Sparse_2, Sparse_3)
+    /// Supports multiple active backends through JacEnum variants (Dense, Sparse_1, Sparse_3)
+    /// plus the separate banded runtime path.
     pub jac_function: Option<Box<dyn Jac>>,
 
     /// Compiled numerical residual function as trait object.
@@ -3294,7 +3294,6 @@ impl Jacobian {
             BvpMatrixBackend::Banded => MatrixBackend::Banded,
             BvpMatrixBackend::FaerSparseCol => MatrixBackend::SparseCol,
             BvpMatrixBackend::SprsCsMat => MatrixBackend::CsMat,
-            BvpMatrixBackend::NalgebraCsMatrix => MatrixBackend::CsMatrix,
         };
         let prepared =
             prepared_binding.as_prepared_problem_for_matrix_backend(requested_matrix_backend);
@@ -3340,7 +3339,6 @@ impl Jacobian {
             BvpMatrixBackend::Banded => MatrixBackend::Banded,
             BvpMatrixBackend::FaerSparseCol => MatrixBackend::SparseCol,
             BvpMatrixBackend::SprsCsMat => MatrixBackend::CsMat,
-            BvpMatrixBackend::NalgebraCsMatrix => MatrixBackend::CsMatrix,
         };
         let prepared =
             prepared_binding.as_prepared_problem_for_matrix_backend(requested_matrix_backend);
@@ -3855,9 +3853,6 @@ impl Jacobian {
         match matrix_backend {
             BvpMatrixBackend::Dense => self.lambdify_jacobian_DMatrix_par(arg, variable_str),
             BvpMatrixBackend::SprsCsMat => self.lambdify_jacobian_CsMat(arg, variable_str),
-            BvpMatrixBackend::NalgebraCsMatrix => {
-                self.lambdify_jacobian_CsMatrix(arg, variable_str)
-            }
             BvpMatrixBackend::FaerSparseCol => {
                 self.lambdify_jacobian_SparseColMat_parallel2(arg, variable_str)
             }
@@ -3874,7 +3869,6 @@ impl Jacobian {
         match matrix_backend {
             BvpMatrixBackend::Dense => self.lambdify_residual_DVector(arg, variable_str),
             BvpMatrixBackend::SprsCsMat => self.lambdify_residual_CsVec(arg, variable_str),
-            BvpMatrixBackend::NalgebraCsMatrix => self.lambdify_residual_DVector(arg, variable_str),
             BvpMatrixBackend::FaerSparseCol => {
                 self.lambdify_residual_Col_parallel2(arg, variable_str)
             }
@@ -4901,31 +4895,20 @@ impl Jacobian {
     /// # Backend Details
     /// - Uses nalgebra::sparse::CsMatrix format
     /// - Sequential evaluation with dense intermediate storage
-    /// - Wrapped in JacEnum::Sparse_2 variant
+    /// - Historical reference only: this route is no longer wired into
+    ///   `JacEnum` or solver backend selection.
     ///
     /// # When to Use
     /// - Integration with nalgebra's sparse linear algebra
     /// - When nalgebra CsMatrix format is specifically required
     /// - Medium-sized sparse systems
     pub fn lambdify_jacobian_CsMatrix(&mut self, arg: &str, variable_str: Vec<&str>) {
-        let symbolic_jacobian = self.symbolic_jacobian.clone();
-        let symbolic_jacobian_rc = symbolic_jacobian.clone();
-
-        let vector_of_functions_len = self.vector_of_functions.len();
-        let vector_of_variables_len = self.vector_of_variables.len();
-
-        let new_jac = Jacobian::jacobian_generate_CsMatrix(
-            symbolic_jacobian_rc,
-            vector_of_functions_len,
-            vector_of_variables_len,
-            variable_str.iter().map(|s| s.to_string()).collect(),
-            arg.to_string(),
+        let _ = (arg, variable_str);
+        panic!(
+            "BVP nalgebra CsMatrix (`Sparse_2`) runtime backend was removed because its \
+             MatrixType implementation was incomplete. Use `Sparse`/faer, `Banded`, \
+             `Sparse_1`/sprs, or `Dense` instead."
         );
-        //  let mut boxed_jacobian: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> = Box::new(|arg, variable_str_| {
-        //    DMatrix::from_rows(&new_jac) }) ;
-
-        let boxed_jac: Box<dyn Jac> = Box::new(JacEnum::Sparse_2(new_jac));
-        self.jac_function = Some(boxed_jac);
     }
     ////////////////////////////////////////////////////////////////////////////////////////
     ///         FAER SPARSE CRATE
@@ -5733,14 +5716,14 @@ impl Jacobian {
     /// * `Bounds` - Variable bounds for constrained solving
     /// * `rel_tolerance` - Per-variable relative tolerances
     /// * `scheme` - Discretization scheme ("forward" or "trapezoid")
-    /// * `method` - Matrix backend ("Dense", "Sparse", "Sparse_1", "Sparse_2")
+    /// * `method` - Matrix backend ("Dense", "Sparse", "Sparse_1", or "Banded")
     /// * `bandwidth` - Optional pre-computed bandwidth (auto-detected if None)
     ///
     /// # Supported Matrix Backends
     /// - **"Dense"**: nalgebra DMatrix - best for small, dense systems
     /// - **"Sparse"**: faer SparseColMat - recommended for large sparse systems
     /// - **"Sparse_1"**: sprs CsMat - legacy sparse support
-    /// - **"Sparse_2"**: nalgebra CsMatrix - nalgebra ecosystem integration
+    /// - **"Banded"**: Lapack-style banded storage for narrow-band Jacobians
     ///
     /// # Performance Features
     /// - Comprehensive timing analysis with percentage breakdown

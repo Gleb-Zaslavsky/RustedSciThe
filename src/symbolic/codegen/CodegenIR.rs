@@ -37,7 +37,7 @@
 //! - CSE and other IR passes,
 //! - residual/Jacobian-specific batch code generation.
 
-use crate::symbolic::View::CodegenIR_atom::Lowerer as AtomLowerer;
+use crate::symbolic::View::CodegenIR_atom::{AtomCsePolicy, Lowerer as AtomLowerer};
 use crate::symbolic::View::atom::AtomView;
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, CodegenTaskPlan};
@@ -1576,6 +1576,7 @@ impl Default for AtomTempReusePolicy {
 pub enum AtomOptimizationProfile {
     Full,
     FastBootstrap,
+    NoCse,
     NoPeephole,
     NoTempReuse,
 }
@@ -1591,10 +1592,19 @@ impl AtomOptimizationProfile {
         !matches!(self, Self::FastBootstrap | Self::NoPeephole)
     }
 
+    fn cse_policy(self) -> AtomCsePolicy {
+        match self {
+            Self::NoCse => AtomCsePolicy::Disabled,
+            Self::Full | Self::FastBootstrap | Self::NoPeephole | Self::NoTempReuse => {
+                AtomCsePolicy::Enabled
+            }
+        }
+    }
+
     fn effective_reuse_policy(self, requested: AtomTempReusePolicy) -> AtomTempReusePolicy {
         match self {
             Self::FastBootstrap | Self::NoTempReuse => AtomTempReusePolicy::Never,
-            Self::Full | Self::NoPeephole => requested,
+            Self::Full | Self::NoCse | Self::NoPeephole => requested,
         }
     }
 
@@ -1602,6 +1612,7 @@ impl AtomOptimizationProfile {
         match self {
             Self::Full => "full",
             Self::FastBootstrap => "fast_bootstrap",
+            Self::NoCse => "no_cse",
             Self::NoPeephole => "no_peephole",
             Self::NoTempReuse => "no_temp_reuse",
         }
@@ -1749,7 +1760,8 @@ impl GeneratedBlock {
         reuse_policy: AtomTempReusePolicy,
     ) -> (Self, AtomGeneratedBlockBreakdown) {
         let lower_begin = std::time::Instant::now();
-        let lowered = AtomLowerer::new(symbols).lower_many(views);
+        let lowered = AtomLowerer::new_with_cse_policy(symbols, optimization_profile.cse_policy())
+            .lower_many(views);
         let lower_many_ms = lower_begin.elapsed().as_secs_f64() * 1_000.0;
 
         let (optimized, peephole_ms) = if optimization_profile.use_peephole() {

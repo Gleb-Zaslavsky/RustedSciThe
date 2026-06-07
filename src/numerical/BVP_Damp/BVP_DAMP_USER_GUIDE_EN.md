@@ -53,22 +53,7 @@ The Damped numeric route expects a well-posed first-order BVP: the total number 
 
 ## 3. `DampedSolverOptions`: the main configuration surface
 
-`DampedSolverOptions` groups the values that used to be passed through long positional constructors. The explicit constructor is:
-
-```rust
-pub fn new(
-    scheme: String,
-    strategy: String,
-    strategy_params: Option<SolverParams>,
-    linear_sys_method: Option<String>,
-    method: String,
-    abs_tolerance: f64,
-    rel_tolerance: Option<HashMap<String, f64>>,
-    max_iterations: usize,
-    bounds: Option<HashMap<String, (f64, f64)>>,
-    loglevel: Option<String>,
-) -> Self
-```
+`DampedSolverOptions` groups the values that used to be passed through long positional constructors. The explicit `new(...)` constructor is retained for compatibility, but new code should normally start from a preset and refine it with builder methods. In particular, do not pass derivative schemes as raw strings unless you are intentionally using a legacy/custom escape hatch.
 
 In everyday code, start from one of the presets:
 
@@ -89,6 +74,7 @@ let strategy = SolverParams {
 };
 
 let options = DampedSolverOptions::banded_damped()
+    .trapezoid_derivative()
     .with_strategy_params(Some(strategy))
     .with_abs_tolerance(1e-8)
     .with_rel_tolerance(HashMap::from([
@@ -103,7 +89,7 @@ let options = DampedSolverOptions::banded_damped()
     .with_loglevel(Some("none".to_string()));
 ```
 
-`scheme` selects the discretization scheme. `strategy` is usually `"Damped"`. `linear_sys_method` can normally stay `None` when the matrix route is selected through `method` and generated backend configuration. `method` is the broad matrix route: `"Dense"`, `"Sparse"`, or `"Banded"`.
+The derivative-scheme builder selects the discretization scheme. `strategy` is usually `"Damped"`. `linear_sys_method` can normally stay `None` when the matrix route is selected through `method` and generated backend configuration. `method` is the broad matrix route: `"Dense"`, `"Sparse"`, or `"Banded"`.
 
 `FrozenSolverOptions` is similar but smaller. It does not expose the same bounds and per-variable relative tolerance surface as Damped:
 
@@ -112,6 +98,23 @@ let options = FrozenSolverOptions::banded_frozen()
     .with_tolerance(1e-8)
     .with_max_iterations(40);
 ```
+
+The derivative scheme builder is shared conceptually by Damped and Frozen:
+
+```rust
+use RustedSciThe::numerical::BVP_Damp::BvpDerivativeScheme;
+
+let options = DampedSolverOptions::sparse_damped()
+    .with_scheme(BvpDerivativeScheme::Trapezoid);
+
+let options = DampedSolverOptions::sparse_damped()
+    .forward_derivative();
+
+let options = FrozenSolverOptions::banded_frozen()
+    .trapezoid_derivative();
+```
+
+`with_scheme_name("...")` exists only as a compatibility escape hatch for legacy or experimental scheme names.
 
 ## 4. Dense, Sparse, Banded: a cost model, not a style preference
 
@@ -233,6 +236,57 @@ measured benefit pays back after roughly eight subsequent solves. This is the
 intended meaning of the repeated-solve preset: not an unconditional one-shot
 victory, but a compiled route that becomes useful when the same large model is
 solved again.
+
+### AOT artifact lifecycle and cleanup
+
+AOT artifacts are generated under the crate `target` directory and are tracked
+by the solver's `AotResolver` through a problem key and manifest metadata. Treat
+that registry as the source of truth: do not hand-edit generated directories or
+try to infer correctness from a filename alone. If the mesh/discretized problem,
+symbolic frontend, matrix route, toolchain, or chunking policy changes, treat it
+as a distinct artifact lifecycle and let the manifest/resolver contract decide
+whether an existing artifact can be reused.
+
+The recommended lifecycle is explicit:
+
+1. Use `BuildIfMissing` for a setup/warmup run when the artifact is allowed to
+   be created.
+2. Switch to `RequirePrebuilt` for the measured or production loop, so a missing
+   artifact is a typed error rather than hidden compilation.
+3. If this is a cold-build benchmark or a cleanup/debug workflow, call
+   `cleanup_registered_aot_artifacts()` only after the compiled callbacks from
+   that solver are no longer needed.
+
+```rust
+use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotBuildPolicy;
+
+// First pass: BuildIfMissing preset, for example
+// GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc().
+solver.try_eq_generate()?;
+solver.solve();
+
+// Strict repeated-solve pass: reuse the already built artifact.
+let strict_cfg = solver
+    .generated_backend_config()
+    .clone()
+    .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+solver.set_generated_backend_config(strict_cfg);
+
+solver.try_eq_generate()?;
+solver.solve();
+
+// Optional explicit cleanup for story/debug/cold-build workflows.
+// Do this only when no live callback from this solver is still needed.
+let removed = solver.cleanup_registered_aot_artifacts()?;
+println!("removed {removed} generated AOT artifact trees");
+```
+
+Cleanup is deliberately not automatic on `drop`. Compiled callbacks may still be
+alive in the process, and on Windows a loaded dynamic library can also keep file
+handles open. The cleanup method only removes registered generated trees owned
+by the current resolver snapshot; it does not unregister linked callbacks or
+unload dynamic libraries. That conservative behavior is less magical, but it is
+the safer production contract.
 
 ## 8. Chunking and parallel execution: the honest measurement story
 

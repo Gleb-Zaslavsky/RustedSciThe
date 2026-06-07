@@ -10,7 +10,7 @@
 //! solver core in `BVP_sci_faer` unchanged.
 
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    BCFunction, ODEFunction, ODEJacobian, faer_col, faer_dense_mat, faer_mat,
+    faer_col, faer_dense_mat, faer_mat, BCFunction, ODEFunction, ODEJacobian,
 };
 use crate::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciBackendError};
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
@@ -18,9 +18,9 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_build::CAotCompileConfig;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::register_generated_c_sparse_backend;
 use crate::symbolic::codegen::codegen_aot_driver::{
+    generated_aot_artifact_from_prepared_problem, generated_aot_build_request_from_artifact,
     AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildRequest,
-    GeneratedAotBuildResult, generated_aot_artifact_from_prepared_problem,
-    generated_aot_build_request_from_artifact,
+    GeneratedAotBuildResult,
 };
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
@@ -50,15 +50,52 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// Backend mode for BVP_sci generated (AOT-compiled) sparse Jacobian/residual evaluation.
+///
+/// # Constraint
+///
+/// **All 8 variants operate exclusively on the sparse matrix backend.**
+/// There is no dense AOT path in BVP_sci. If you need a dense generated backend,
+/// use the BVP_Damp solver infrastructure instead.
+///
+/// # Variant overview
+///
+/// | Variant | Description |
+/// |---------|-------------|
+/// | [`LambdifyOnly`](BvpSciGeneratedBackendMode::LambdifyOnly) | Pure interpreted lambdify — no AOT compilation. |
+/// | [`RequirePrebuiltAot`](BvpSciGeneratedBackendMode::RequirePrebuiltAot) | Fail if no pre-built AOT artifact is found. |
+/// | [`BuildIfMissingRelease`](BvpSciGeneratedBackendMode::BuildIfMissingRelease) | Build C AOT (default C backend) if missing, release profile. |
+/// | [`AtomViewBuildIfMissingReleaseRust`](BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseRust) | Build Rust AOT if missing, release profile. |
+/// | [`AtomViewBuildIfMissingReleaseGcc`](BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseGcc) | Build C AOT (GCC) if missing, release profile. |
+/// | [`AtomViewBuildIfMissingReleaseTcc`](BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseTcc) | Build C AOT (TCC) if missing, release profile. |
+/// | [`AtomViewBuildIfMissingReleaseZig`](BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseZig) | Build Zig AOT if missing, release profile. |
+/// | [`AtomViewForRepeatedSolves`](BvpSciGeneratedBackendMode::AtomViewForRepeatedSolves) | Build once, reuse across repeated solves. |
+///
+/// # Future variants
+///
+/// This enum is `#[non_exhaustive]` — adding new backends (e.g. dense AOT,
+/// GPU offload) is a non-breaking change.
+#[non_exhaustive]
 pub enum BvpSciGeneratedBackendMode {
+    /// Pure interpreted lambdify — no AOT compilation.
+    /// Uses the ExprLegacySmartSparseLambdify workflow.
     #[default]
     LambdifyOnly,
+    /// Fail with an error if no pre-built AOT artifact is found.
+    /// Useful in CI/deployment where the artifact must already exist.
     RequirePrebuiltAot,
+    /// Build C AOT (default C backend) if missing, release profile.
     BuildIfMissingRelease,
+    /// Build Rust AOT if missing, release profile.
     AtomViewBuildIfMissingReleaseRust,
+    /// Build C AOT (GCC) if missing, release profile.
     AtomViewBuildIfMissingReleaseGcc,
+    /// Build C AOT (TCC) if missing, release profile.
     AtomViewBuildIfMissingReleaseTcc,
+    /// Build Zig AOT if missing, release profile.
     AtomViewBuildIfMissingReleaseZig,
+    /// Build once, reuse across repeated solves.
+    /// The artifact is cached and not rebuilt on subsequent solver calls.
     AtomViewForRepeatedSolves,
 }
 

@@ -337,6 +337,7 @@ mod tests {
             0,
             None,
             custom_timer,
+            None, // strategy_params
         );
 
         // Check that result was stored
@@ -408,6 +409,7 @@ mod tests {
             0,
             None,
             custom_timer,
+            None, // strategy_params
         );
 
         if bvp_wrap.result.success {
@@ -482,6 +484,7 @@ mod tests {
             0,
             None,
             custom_timer,
+            None, // strategy_params
         );
 
         if bvp_wrap.result.success {

@@ -27,6 +27,7 @@ pub use super::super::codegen::CodegenIR::{Instr, LinearBlock, LinearExpr, Temp}
 pub struct Lowerer {
     instructions: Vec<Instr>,
     next_temp: usize,
+    cse_policy: AtomCsePolicy,
     /// Symbol id → input slot index.
     var_index_map: HashMap<u32, usize>,
     input_cache: HashMap<usize, Temp>,
@@ -43,6 +44,18 @@ pub struct Lowerer {
 enum CseLookup {
     Hit(Temp),
     Miss(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomCsePolicy {
+    Enabled,
+    Disabled,
+}
+
+impl Default for AtomCsePolicy {
+    fn default() -> Self {
+        Self::Enabled
+    }
 }
 
 type NodeId = usize;
@@ -103,10 +116,19 @@ impl Lowerer {
     /// Build a lowerer where `vars` lists the [`Symbol`]s that map to input slots
     /// in order.
     pub fn new(vars: &[Symbol]) -> Self {
+        Self::new_with_cse_policy(vars, AtomCsePolicy::Enabled)
+    }
+
+    /// Build a lowerer with explicit structural CSE control.
+    ///
+    /// Disabling CSE is meant for diagnostics and benchmarking. The default
+    /// production route keeps CSE enabled.
+    pub fn new_with_cse_policy(vars: &[Symbol], cse_policy: AtomCsePolicy) -> Self {
         let var_index_map = vars.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
         Self {
             instructions: Vec::new(),
             next_temp: 0,
+            cse_policy,
             var_index_map,
             input_cache: HashMap::new(),
             const_cache: HashMap::new(),
@@ -186,6 +208,10 @@ impl Lowerer {
             AtomView::Var(v) => return self.lower_var(v.get_symbol()),
             AtomView::Num(_) => return self.lower_num(view),
             _ => {}
+        }
+
+        if self.cse_policy == AtomCsePolicy::Disabled {
+            return self.lower_composite(view);
         }
 
         match self.cse_lookup(view) {
@@ -343,6 +369,15 @@ impl Lowerer {
 
     /// Lower multiple expressions sharing a single instruction stream (CSE across outputs).
     pub fn lower_many(mut self, views: &[AtomView<'_>]) -> LinearBlock {
+        if self.cse_policy == AtomCsePolicy::Disabled {
+            let outputs = views.iter().map(|&view| self.lower_view(view)).collect();
+            return LinearBlock {
+                instructions: self.instructions,
+                outputs,
+                num_temps: self.next_temp,
+            };
+        }
+
         let dag = BlockDag::build(views);
         let outputs = dag
             .outputs
@@ -705,6 +740,44 @@ mod tests {
         // After normalization Symbolica may fold this to (x+1)^2; either way
         // the result at x=3 must be 16.
         assert!((eval(&ir, &[3.0]) - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cse_policy_preserves_values_when_disabled() {
+        let expr = parse!("(x+y)*(x+y)+(x+y)").unwrap();
+        let (x, y) = symbol!("x", "y");
+        let enabled =
+            Lowerer::new_with_cse_policy(&[x, y], AtomCsePolicy::Enabled).lower(expr.as_view());
+        let disabled =
+            Lowerer::new_with_cse_policy(&[x, y], AtomCsePolicy::Disabled).lower(expr.as_view());
+
+        for args in [[1.0, 2.0], [-0.5, 3.25], [4.0, -1.0]] {
+            let a = eval(&enabled, &args);
+            let b = eval(&disabled, &args);
+            assert!(
+                (a - b).abs() < 1e-12,
+                "CSE policy must not change values: enabled={a}, disabled={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn cse_policy_reduces_repeated_subexpression_ir() {
+        let e1 = parse!("sin(x+y)+exp(x+y)").unwrap();
+        let e2 = parse!("sin(x+y)+exp(x+y)").unwrap();
+        let (x, y) = symbol!("x", "y");
+        let enabled = Lowerer::new_with_cse_policy(&[x, y], AtomCsePolicy::Enabled)
+            .lower_many(&[e1.as_view(), e2.as_view()]);
+        let disabled = Lowerer::new_with_cse_policy(&[x, y], AtomCsePolicy::Disabled)
+            .lower_many(&[e1.as_view(), e2.as_view()]);
+
+        assert_eq!(enabled.eval(&[2.0, 3.0]), disabled.eval(&[2.0, 3.0]));
+        assert!(
+            enabled.instructions.len() < disabled.instructions.len(),
+            "enabled CSE should reduce repeated-subexpression IR size: enabled={}, disabled={}",
+            enabled.instructions.len(),
+            disabled.instructions.len()
+        );
     }
 
     #[test]

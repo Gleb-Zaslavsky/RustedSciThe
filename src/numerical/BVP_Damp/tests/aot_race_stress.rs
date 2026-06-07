@@ -8,6 +8,7 @@ mod tests {
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
         GeneratedBackendConfig,
     };
+    use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
     use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
     use crate::symbolic::codegen::codegen_orchestrator::{
@@ -4107,6 +4108,13 @@ mod tests {
             &rows,
         );
         println!();
+        print_e2e_callback_stage_table(
+            &format!(
+                "[BVP Damp symbolic frontend cold] combustion-1000 {matrix} callback/runtime stages"
+            ),
+            &rows,
+        );
+        println!();
         print_e2e_lifecycle_table(
             &format!(
                 "[BVP Damp symbolic frontend cold] combustion-1000 {matrix} backend selection and symbolic totals"
@@ -4195,6 +4203,48 @@ mod tests {
                     bootstrap_hint: "atomview+rebuild+seq+whole",
                     config: release_matrix_config(
                         GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(),
+                        whole_chunking(),
+                        AotExecutionPolicy::SequentialOnly,
+                    ),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore = "process-isolated combustion-1000 Banded AtomView tcc Full vs NoCse optimization-profile end-to-end story"]
+    fn combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story() {
+        run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
+            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story",
+            "Banded",
+            vec![
+                RaceVariant {
+                    source: "Lambdify",
+                    matrix: "Banded",
+                    variant: "AtomView",
+                    bootstrap_hint: "atomview+lambdify",
+                    config: banded_atomview_lambdify_baseline(),
+                },
+                RaceVariant {
+                    source: "AOT",
+                    matrix: "Banded",
+                    variant: "tcc/full",
+                    bootstrap_hint: "atomview+full+seq+whole",
+                    config: release_matrix_config(
+                        GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc()
+                            .with_atom_optimization_profile(AtomOptimizationProfile::Full),
+                        whole_chunking(),
+                        AotExecutionPolicy::SequentialOnly,
+                    ),
+                },
+                RaceVariant {
+                    source: "AOT",
+                    matrix: "Banded",
+                    variant: "tcc/no_cse",
+                    bootstrap_hint: "atomview+no_cse+seq+whole",
+                    config: release_matrix_config(
+                        GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc()
+                            .with_atom_optimization_profile(AtomOptimizationProfile::NoCse),
                         whole_chunking(),
                         AotExecutionPolicy::SequentialOnly,
                     ),

@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)] //
-use crate::numerical::BVP_Damp::linear_sys_solvers_depot::nalgebra_solvers_depot;
+use crate::somelinalg::RustedLINPACK::lu_band_nalg::LU_nalgebra;
 use crate::somelinalg::banded::{
     LinearSystemRef, NodeMajorLayout, banded_assembly::BandedAssembly,
     linear_solver::build_solver_for_system, solver_policy::LinearSolverConfig,
@@ -15,7 +15,6 @@ use faer::mat::Mat;
 use faer::mat::MatRef;
 
 use faer::sparse::{SparseColMat, Triplet};
-use nalgebra::sparse::CsMatrix;
 use nalgebra::{DMatrix, DVector, Matrix};
 use sprs::{CsMat, CsVec, TriMat};
 use std::any::Any;
@@ -23,6 +22,30 @@ use std::fmt::{self, Debug};
 use std::ops::Sub;
 type faer_mat = SparseColMat<usize, f64>;
 type faer_col = Col<f64>; // Mat<f64>;
+
+fn solve_dense_nalgebra_linear_system(
+    matrix: &DMatrix<f64>,
+    rhs: &DVector<f64>,
+    bandwidth: (usize, usize),
+) -> DVector<f64> {
+    let condition_for_banded_matrix = matrix.nrows() > 10 * (bandwidth.0 + bandwidth.1);
+    if condition_for_banded_matrix {
+        let mut lu = LU_nalgebra::new(matrix.to_owned(), Some(bandwidth));
+        lu.LU();
+        lu.solve_linear_system_easy(rhs)
+    } else {
+        assert_eq!(
+            matrix.nrows(),
+            rhs.len(),
+            "dimensions of matrix and vector must match"
+        );
+        matrix
+            .to_owned()
+            .lu()
+            .solve(rhs)
+            .expect("dense nalgebra linear solve failed")
+    }
+}
 
 /*
 In RST BVP solvers there is an option to use different linear algebra crates
@@ -40,17 +63,15 @@ So there are generic types:
  "Dense" - nalgebra crate
  "Sparse" - faer crate
 "Sparse_1" - sprs crate
-"Sparse_2" - nalgebra sprs crate
 
 */
 ////////////////////////////////////////////////////////////////
 //  VECTORTYPE - geneic type to store vectors of residuals and Newton steps
 ////////////////////////////////////////////////////////////////
 pub enum YEnum {
-    Dense(DVector<f64>),    // dense vector NALGEBRA CRATE
-    Sparse_1(CsVec<f64>),   // sparse vector SPRS CRATE
-    Sparse_2(DVector<f64>), // dense vector NALGEBRA SPARSE CRATE
-    Sparse_3(faer_col),     // sparse vector  FAER CRATE
+    Dense(DVector<f64>),  // dense vector NALGEBRA CRATE
+    Sparse_1(CsVec<f64>), // sparse vector SPRS CRATE
+    Sparse_3(faer_col),   // sparse vector  FAER CRATE
 }
 // basic funcionality for vectors
 pub trait VectorType: Any {
@@ -88,7 +109,6 @@ impl Iterator for YEnum {
         match self {
             YEnum::Dense(vec) => vec.iter().next().copied(),
             YEnum::Sparse_1(vec) => vec.iter().map(|x| *x.1).next(),
-            YEnum::Sparse_2(vec) => vec.iter().next().copied(),
             YEnum::Sparse_3(vec) => vec.iter().next().copied(),
         }
     }
@@ -99,7 +119,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => vec,
             YEnum::Sparse_1(vec) => vec,
-            YEnum::Sparse_2(vec) => vec,
             YEnum::Sparse_3(vec) => vec,
         }
     }
@@ -123,15 +142,12 @@ impl VectorType for YEnum {
                 let subs = vec.sub(&other_faer);
                 Box::new(subs)
             }
-
-            _ => panic!("Type mismatch: expected DVector or CsVec"),
         }
     } // subtract
     fn norm(&self) -> f64 {
         match self {
             YEnum::Dense(vec) => Matrix::norm(vec),
             YEnum::Sparse_1(vec) => CsVec::l2_norm(vec),
-            YEnum::Sparse_2(vec) => Matrix::norm(vec),
             YEnum::Sparse_3(vec) => vec.norm_l2(),
         }
     }
@@ -143,7 +159,6 @@ impl VectorType for YEnum {
 
                 DVector::from_iterator(length, vec.iter().map(|x| *x.1))
             }
-            YEnum::Sparse_2(vec) => vec.clone(),
             YEnum::Sparse_3(vec) => {
                 let length = vec.nrows();
 
@@ -156,7 +171,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => Box::new(vec.clone()),
             YEnum::Sparse_1(vec) => Box::new(vec.clone()),
-            YEnum::Sparse_2(vec) => Box::new(vec.clone()),
             YEnum::Sparse_3(vec) => Box::new(vec.clone()),
         }
     }
@@ -165,7 +179,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => Box::new(vec.iter().map(|x| *x)),
             YEnum::Sparse_1(vec) => Box::new(vec.iter().map(|x| *x.1)),
-            YEnum::Sparse_2(vec) => Box::new(vec.iter().map(|x| *x)),
             YEnum::Sparse_3(vec) => Box::new(vec.iter().map(|x| *x)),
         }
     }
@@ -173,7 +186,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => vec[index],
             YEnum::Sparse_1(vec) => vec[index],
-            YEnum::Sparse_2(vec) => vec[index],
             YEnum::Sparse_3(vec) => vec[index],
         }
     }
@@ -181,7 +193,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => Box::new(vec * float),
             YEnum::Sparse_1(vec) => Box::new(vec.map(|x| x * (float))),
-            YEnum::Sparse_2(vec) => Box::new(vec * float),
             YEnum::Sparse_3(vec) => Box::new(vec * float),
         }
     }
@@ -189,7 +200,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(vec) => vec.len(),
             YEnum::Sparse_1(vec) => vec.len(),
-            YEnum::Sparse_2(vec) => vec.len(),
             YEnum::Sparse_3(vec) => vec.len(),
         }
     }
@@ -197,7 +207,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(_) => Box::new(DVector::zeros(len)),
             YEnum::Sparse_1(_) => Box::new(CsVec::empty(len)),
-            YEnum::Sparse_2(_) => Box::new(DVector::zeros(len)),
             YEnum::Sparse_3(_) => Box::new(faer_col::zeros(len)), // faer_col::zeros(len)
         }
     }
@@ -211,11 +220,6 @@ impl VectorType for YEnum {
             YEnum::Sparse_1(vec) => {
                 let mut new_vec = vec.clone();
                 new_vec.append(index, value);
-                Box::new(new_vec)
-            }
-            YEnum::Sparse_2(vec) => {
-                let mut new_vec = vec.clone();
-                new_vec[index] = value;
                 Box::new(new_vec)
             }
             YEnum::Sparse_3(vec) => {
@@ -242,11 +246,6 @@ impl VectorType for YEnum {
                 let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
                 Box::new(new_matrix)
             }
-            YEnum::Sparse_2(_) => {
-                let new_matrix: CsMatrix<f64> =
-                    DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
-                Box::new(new_matrix)
-            }
             YEnum::Sparse_3(_) => {
                 let triplet: Vec<Triplet<usize, usize, f64>> = non_zero_triplet
                     .iter()
@@ -262,7 +261,6 @@ impl VectorType for YEnum {
         match self {
             YEnum::Dense(_) => "Dense".to_string(),
             YEnum::Sparse_1(_) => "Sparse_1".to_string(),
-            YEnum::Sparse_2(_) => "Sparse_2".to_string(),
             YEnum::Sparse_3(_) => "Sparse_3".to_string(),
         }
     }
@@ -465,7 +463,6 @@ pub trait Fun {
 pub enum FunEnum {
     Dense(Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>),
     Sparse_1(Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>>),
-    Sparse_2(Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>),
     Sparse_3(Box<dyn Fn(f64, &faer_col) -> faer_col>),
 }
 
@@ -484,13 +481,6 @@ impl Fun for FunEnum {
                     Box::new(fun(x, d_vec))
                 } else {
                     panic!("Type mismatch: expected CsVec")
-                }
-            }
-            FunEnum::Sparse_2(fun) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(fun(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected DVector")
                 }
             }
             FunEnum::Sparse_3(fun) => {
@@ -551,7 +541,6 @@ impl fmt::Display for YEnum {
         match self {
             YEnum::Dense(vec) => write!(f, "Dense Vector: {:?}", vec),
             YEnum::Sparse_1(vec) => write!(f, "Sparse Vector 1: {:?}", vec),
-            YEnum::Sparse_2(vec) => write!(f, "Sparse Vector 2: {:?}", vec),
             YEnum::Sparse_3(vec) => write!(f, "Sparse Vector 3: {:?}", vec),
         }
     }
@@ -592,7 +581,6 @@ impl Debug for dyn VectorType {
 pub enum JacTypes {
     Dense(DMatrix<f64>),
     Sparse_1(CsMat<f64>),
-    Sparse_2(CsMatrix<f64>),
     Sparse_3(faer_mat),
 }
 
@@ -682,14 +670,12 @@ impl MatrixType for DMatrix<f64> {
     ) -> Box<dyn VectorType> {
         if let Some(mat_) = self.as_any().downcast_ref::<DMatrix<f64>>() {
             if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-                if linear_sys_method.is_none() {
-                    let res = nalgebra_solvers_depot(mat_, d_vec, linear_sys_method, bandwidth);
-                    // let lu = mat_.to_owned().lu();
-                    //  let res = lu.solve(d_vec).unwrap();
-                    Box::new(res)
-                } else {
-                    panic!("no such method for linear system")
-                }
+                assert!(
+                    linear_sys_method.is_none(),
+                    "Dense nalgebra BVP solve_sys only supports automatic full/banded selection"
+                );
+                let res = solve_dense_nalgebra_linear_system(mat_, d_vec, bandwidth);
+                Box::new(res)
             } else {
                 panic!("Type mismatch: expected DMatrix")
             }
@@ -764,46 +750,6 @@ impl MatrixType for CsMat<f64> {
     }
 }
 ////////////////////////////////////////////////////////////////
-//           NALGEBRA SPARCE CRATE
-////////////////////////////////////////////////////////////////
-impl MatrixType for CsMatrix<f64> {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn inverse(self) -> Box<dyn MatrixType> {
-        Box::new(self.clone())
-    } // NO IMPLEMENTATION
-    fn mul(&self, vec: &dyn VectorType) -> Box<dyn VectorType> {
-        if let Some(_d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-            panic!("Type mismatch: expected DVector")
-        } else {
-            panic!("Type mismatch: expected DVector")
-        }
-    }
-    fn clone_box(&self) -> Box<dyn MatrixType> {
-        Box::new(self.clone())
-    }
-    fn solve_sys(
-        &self,
-        _vec: &dyn VectorType,
-        _linear_sys_method: Option<String>,
-        _tol: f64,
-        _max_iter: usize,
-        _bandwidth: (usize, usize),
-        _old_vec: &dyn VectorType,
-    ) -> Box<dyn VectorType> {
-        panic!("method not written yet")
-    }
-    fn shape(&self) -> (usize, usize) {
-        self.shape()
-    }
-    fn to_DMatrixType(&self) -> DMatrix<f64> {
-        let t = self.to_owned();
-        let dense: DMatrix<f64> = t.into();
-        dense
-    }
-}
-////////////////////////////////////////////////////////////////
 //            FAER CRATE
 ////////////////////////////////////////////////////////////////
 impl MatrixType for faer_mat {
@@ -867,9 +813,6 @@ impl MatrixType for faer_mat {
                         } else {
                             panic!("old vec must be of type Col<f64>")
                         }
-                    }
-                    _ => {
-                        panic!("no such method for linear system")
                     }
                 }
             }
@@ -985,8 +928,6 @@ impl Debug for dyn MatrixType {
             write!(f, "{:?}", dense)
         } else if let Some(sparse) = self.as_any().downcast_ref::<CsMat<f64>>() {
             write!(f, "{:?}", sparse)
-        } else if let Some(cs_matrix) = self.as_any().downcast_ref::<CsMatrix<f64>>() {
-            write!(f, "{:?}", cs_matrix)
         } else if let Some(faer_mat) = self.as_any().downcast_ref::<faer_mat>() {
             write!(f, "{:?}", faer_mat)
         } else if let Some(banded) = self.as_any().downcast_ref::<BandedMatrixType>() {
@@ -1014,7 +955,6 @@ pub trait Jac {
 pub enum JacEnum {
     Dense(Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>),
     Sparse_1(Box<dyn FnMut(f64, &CsVec<f64>) -> CsMat<f64>>),
-    Sparse_2(Box<dyn FnMut(f64, &DVector<f64>) -> CsMatrix<f64>>),
     Sparse_3(Box<dyn FnMut(f64, &faer_col) -> faer_mat>),
 }
 
@@ -1033,13 +973,6 @@ impl Jac for JacEnum {
                     Box::new(jac(x, cs_vec))
                 } else {
                     panic!("Type mismatch: expected CsVec")
-                }
-            }
-            JacEnum::Sparse_2(jac) => {
-                if let Some(d_vec) = vec.as_any().downcast_ref::<DVector<f64>>() {
-                    Box::new(jac(x, d_vec))
-                } else {
-                    panic!("Type mismatch: expected DVector")
                 }
             }
             JacEnum::Sparse_3(jac) => {
@@ -1065,15 +998,6 @@ impl Jac for JacEnum {
                 if let Some(mat) = matrix.as_any().downcast_ref::<CsMat<f64>>() {
                     let inv_mat = invers_csmat(mat.to_owned(), tol, max_iter).unwrap();
                     Box::new(inv_mat)
-                } else {
-                    panic!("Type mismatch: expected CsMat")
-                }
-            }
-            JacEnum::Sparse_2(_jac) => {
-                if let Some(mat) = matrix.as_any().downcast_ref::<CsMatrix<f64>>() {
-                    //   let lower_triang = mat.to_owned().solve_lower_triangular_cs(bool::from(true));
-                    // NO IMPLEMENTATION!
-                    Box::new(mat.to_owned())
                 } else {
                     panic!("Type mismatch: expected CsMat")
                 }
@@ -1303,8 +1227,6 @@ pub fn Vectors_type_casting(vec: &DVector<f64>, desired_type: String) -> Box<dyn
         let Mat_vec = ColRef::from_slice(vec.as_slice()).to_owned();
 
         Box::new(YEnum::Sparse_3(Mat_vec))
-    } else if desired_type == "Sparse_2".to_string() {
-        Box::new(YEnum::Sparse_2(vec.to_owned()))
     } else {
         panic!("Unsupported vector type: {}", desired_type);
     };
@@ -1342,32 +1264,6 @@ mod y_trait_object_clone_tests {
         assert_eq!(sparse.data(), &[2.0, -4.0]);
     }
 }
-//________________________________________
-#[allow(dead_code)]
-pub fn jac_rowwise_printing(jac: &Box<dyn MatrixType>) {
-    if let Some(dense) = jac.as_any().downcast_ref::<DMatrix<f64>>() {
-        dense.row_iter().enumerate().for_each(|(i, row)| {
-            let row: Vec<&f64> = row.iter().collect();
-            println!("\n  {:?}-th row = {:?}", i, row);
-        })
-    } else if let Some(sparse) = jac.as_any().downcast_ref::<CsMat<f64>>() {
-        println!("{:?}", sparse)
-    } else if let Some(cs_matrix) = jac.as_any().downcast_ref::<CsMatrix<f64>>() {
-        println!("{:?}", cs_matrix)
-    } else if let Some(faer_mat) = jac.as_any().downcast_ref::<faer_mat>() {
-        for i in 0..faer_mat.nrows() {
-            let mut row_data: Vec<&f64> = Vec::new();
-            for j in 0..faer_mat.ncols() {
-                let element = faer_mat.as_dyn().get(i, j).unwrap_or(&0.0);
-                row_data.push(element);
-            }
-            println!("\n \n{:?}-th row = {:?}", i, row_data);
-        }
-    } else {
-        println!("Unknown MatrixType")
-    }
-}
-
 pub fn from_vector_to_matrix(
     vec_type: String,
     nrows: usize,
@@ -1382,11 +1278,6 @@ pub fn from_vector_to_matrix(
         }
         "Sparse_1" => {
             let new_matrix = sprs_triplet_to_csc(nrows, ncols, &non_zero_triplet);
-            Box::new(new_matrix)
-        }
-        "Sparse_2" => {
-            let new_matrix: CsMatrix<f64> =
-                DMatrix::from_row_slice(nrows, ncols, vec_with_zeros).into();
             Box::new(new_matrix)
         }
         "Sparse_3" => {

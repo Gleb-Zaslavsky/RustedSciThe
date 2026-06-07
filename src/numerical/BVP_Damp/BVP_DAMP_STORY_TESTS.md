@@ -442,7 +442,7 @@ baseline, AOT, and AOT chunking/toolchain options.
 
 ### `combustion_1000_lambdify_sparse_vs_banded_end_to_end_race`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 Hypothesis: for the same combustion-1000 problem, Lambdify Sparse and Lambdify Banded
 should solve to the same solution quality, while exposing the pure linear-backend
@@ -614,7 +614,7 @@ Implementation follow-up (confirmed by release rerun):
 
 ### `combustion_1000_aot_sparse_vs_banded_end_to_end_race`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 Hypothesis: for the same combustion-1000 problem, AOT Sparse and AOT Banded should
 produce equivalent solutions; timing differences should be attributable to matrix
@@ -806,7 +806,7 @@ Follow-up:
 
 ### `combustion_1000_aot_toolchain_chunking_sparse_banded_release_matrix`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 Hypothesis: for combustion-1000, Sparse and Banded AOT routes should stay
 numerically consistent across supported AOT emitters (`gcc`, `tcc`, `zig`, Rust)
@@ -956,7 +956,7 @@ cargo test debug_sparse_atomview_aot_whole_vs_chunk4_callback_equivalence_combus
 
 ### `combustion_3000_banded_lambdify_vs_aot_end_to_end_stress`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 Hypothesis: the previous `n_steps=200` and `n_steps=1000` matrices show that the
 Banded route is the practical route for structured combustion BVPs, and that C
@@ -1303,7 +1303,7 @@ ok
 
 ### `combustion_3000_banded_atomview_lambdify_vs_aot_end_to_end_stress`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 This is the production-facing companion to the `ExprLegacy` control above.
 The older stress row must remain available because it documents the removal
@@ -1929,7 +1929,7 @@ recommendation.
 
 ### `combustion_200_aot_toolchain_chunking_sparse_banded_end_to_end_matrix`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests4.rs`
+File: `src/numerical/BVP_Damp/tests/aot_race_stress.rs`
 
 Hypothesis: on a real combustion BVP solve with a moderate grid (`n_steps=200`),
 Sparse and Banded Lambdify baselines and AOT variants should produce the same
@@ -2188,7 +2188,7 @@ Follow-up:
 
 ### `combustion_1000_end_to_end_banded_lapack_refine_statistics`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests3.rs`
+File: `src/numerical/BVP_Damp/tests/aot_diagnostics.rs`
 
 Hypothesis: the Banded route using the LAPACK-style banded LU backend remains stable
 under the heavy combustion-1000 end-to-end solve, including refinement and statistics
@@ -2300,7 +2300,7 @@ statistics.
 
 ### `oscillator_lambdify_vs_atomview_aot_banded_end_to_end_heavy`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests3.rs`
+File: `src/numerical/BVP_Damp/tests/aot_diagnostics.rs`
 
 Hypothesis: a smaller but complete oscillator BVP should agree between Banded
 Lambdify and Banded AtomView+AOT. This is a useful system-level AOT check that is
@@ -3179,7 +3179,7 @@ Follow-up:
 
 ### `combustion_tcc_chunking_honest_wall_clock_table`
 
-File: `src/numerical/BVP_Damp/BVP_Damp_tests3.rs`
+File: `src/numerical/BVP_Damp/tests/aot_diagnostics.rs`
 
 This is the compact practical companion to the full multi-toolchain tuning
 map. It keeps only the Lambdify reference and the C-tcc AOT rows
@@ -3600,6 +3600,152 @@ Dedicated regressions cover both the repeating flux coefficient and the
 small nonzero combustion scale. The release table above is the replacement
 measurement: its AtomView `solve_diff = 4.079e-12` confirms the correction
 in a real cold end-to-end solve.
+
+### `combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story`
+
+This is the solver-level follow-up to the codegen-only
+`bvp_atomview_aot_optimization_profile_bootstrap_table`.  The codegen table
+showed that `NoCse` is correct and can reduce Atom lowering/module work, but
+also expands generated source substantially.  This BVP story answers the
+production question that artifact-only diagnostics cannot answer: does
+`NoCse` help or hurt a real Damped BVP solve once TCC compile/link, dynamic
+rebinding, Newton iterations, `jac_ms`, `fun_ms`, callback value timings and
+solution correctness are included?
+
+The test uses process-isolated cold rows with a Banded combustion-1000 problem:
+one AtomView Lambdify baseline, one AtomView+tcc `Full` AOT row, and one
+AtomView+tcc `NoCse` AOT row.  `Full` is still the production default; `NoCse`
+is a diagnostic profile and should only be promoted if this full story proves
+that its larger generated source does not hurt compile time or runtime callback
+throughput.
+
+Run with the same cold-isolation protocol used by the other honest wall-clock
+stories:
+
+```powershell
+$env:BVP_AOT_COLD_CLEAN_ARTIFACTS="1"
+$env:BVP_AOT_COLD_COOLDOWN_MS="5000"
+cargo test --release combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story -- --ignored --nocapture --test-threads=1
+Remove-Item Env:BVP_AOT_COLD_CLEAN_ARTIFACTS
+Remove-Item Env:BVP_AOT_COLD_COOLDOWN_MS
+```
+
+Current result:
+test numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story ... [BVP Damp symbolic frontend cold] protocol cooldown_ms=5000, cleanup_child_artifacts=true
+[BVP Damp isolated cold] launching repetition 1/3 source=Lambdify variant=AtomView
+[BVP Damp isolated cold] finished source=Lambdify variant=AtomView total_ms=2126.127 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 1/3 source=AOT variant=tcc/full
+[BVP Damp isolated cold] finished source=AOT variant=tcc/full total_ms=2420.912 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 1/3 source=AOT variant=tcc/no_cse
+[BVP Damp isolated cold] finished source=AOT variant=tcc/no_cse total_ms=2142.945 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 2/3 source=Lambdify variant=AtomView
+[BVP Damp isolated cold] finished source=Lambdify variant=AtomView total_ms=2098.014 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 2/3 source=AOT variant=tcc/full
+[BVP Damp isolated cold] finished source=AOT variant=tcc/full total_ms=2253.361 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 2/3 source=AOT variant=tcc/no_cse
+[BVP Damp isolated cold] finished source=AOT variant=tcc/no_cse total_ms=2214.478 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 3/3 source=Lambdify variant=AtomView
+[BVP Damp isolated cold] finished source=Lambdify variant=AtomView total_ms=2157.477 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 3/3 source=AOT variant=tcc/full
+[BVP Damp isolated cold] finished source=AOT variant=tcc/full total_ms=2184.357 symbolic_ms=2000.000 status=ok
+[BVP Damp isolated cold] launching repetition 3/3 source=AOT variant=tcc/no_cse
+[BVP Damp isolated cold] finished source=AOT variant=tcc/no_cse total_ms=2163.648 symbolic_ms=2000.000 status=ok
+[BVP Damp symbolic frontend cold] combustion-1000 Banded raw process-isolated observations
+[BVP Damp stress] raw process-isolated table: every row was executed in a fresh child process, while callback-internal parallel workers remain enabled.
+rep | pos | source   | variant    | total_ms | symbolic_ms | initial_sym_jac_ms | compile_link_ms | residual_values_ms | jacobian_values_ms | res_jobs | jac_jobs | status
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  1 |   1 | Lambdify | AtomView   | 2126.127 |    2000.000 |              8.948 |               - |                  - |                  - |        - |        - | ok
+  1 |   2 | AOT      | tcc/full   | 2420.912 |    2000.000 |             10.056 |         109.234 |              1.417 |              0.507 |    1.000 |    1.000 | ok
+  1 |   3 | AOT      | tcc/no_cse | 2142.945 |    2000.000 |              9.901 |          42.425 |              1.718 |              0.504 |    1.000 |    1.000 | ok
+  2 |   1 | Lambdify | AtomView   | 2098.014 |    2000.000 |              9.897 |               - |                  - |                  - |        - |        - | ok
+  2 |   2 | AOT      | tcc/full   | 2253.361 |    2000.000 |             10.137 |          41.465 |              1.537 |              0.499 |    1.000 |    1.000 | ok
+  2 |   3 | AOT      | tcc/no_cse | 2214.478 |    2000.000 |             10.552 |          40.800 |              1.574 |              0.500 |    1.000 |    1.000 | ok
+  3 |   1 | Lambdify | AtomView   | 2157.477 |    2000.000 |             10.245 |               - |                  - |                  - |        - |        - | ok
+  3 |   2 | AOT      | tcc/full   | 2184.357 |    2000.000 |              9.882 |          40.681 |              1.412 |              0.503 |    1.000 |    1.000 | ok
+  3 |   3 | AOT      | tcc/no_cse | 2163.648 |    2000.000 |              9.277 |          41.139 |              1.506 |              0.500 |    1.000 |    1.000 | ok
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded ExprLegacy/AtomView correctness
+[BVP Damp e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | chunking         | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | atomview+lambdify |  3/3   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 3/3
+AOT      | Banded | tcc/full   | atomview+full+seq+whole |  3/3   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+AOT      | Banded | tcc/no_cse | atomview+no_cse+seq+whole |  3/3   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded ExprLegacy/AtomView wall-clock and solver stages
+[BVP Damp e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | chunking         | total_ms mean+/-std [min,max] | solver_total_ms | symbolic_ms | linear_ms | jac_ms | fun_ms | iters | linsys | jac_re
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | atomview+lambdify | 2127.206 +/- 24.288 [2098.014, 2157.477] | 2000.000 +/- 0.000 | 2000.000 +/- 0.000 | 6.000 +/- 0.816 | 1.000 +/- 0.000 | 1.000 +/- 0.000 | 5.000 +/- 0.000 | 10.000 +/- 0.000 | 1.000 +/- 0.000
+AOT      | Banded | tcc/full   | atomview+full+seq+whole | 2286.210 +/- 99.327 [2184.357, 2420.912] | 2000.000 +/- 0.000 | 2000.000 +/- 0.000 | 6.000 +/- 0.000 | 0.000 +/- 0.000 | 0.000 +/- 0.000 | 5.000 +/- 0.000 | 10.000 +/- 0.000 | 1.000 +/- 0.000
+AOT      | Banded | tcc/no_cse | atomview+no_cse+seq+whole | 2173.690 +/- 30.054 [2142.945, 2214.478] | 2000.000 +/- 0.000 | 2000.000 +/- 0.000 | 6.000 +/- 0.000 | 0.000 +/- 0.000 | 0.333 +/- 0.471 | 5.000 +/- 0.000 | 10.000 +/- 0.000 | 1.000 +/- 0.000
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded callback/runtime stages
+[BVP Damp e2e] callback/runtime table: AOT linked callbacks report hot values, matrix assembly, actual jobs, fallback reason, and workload per job; Lambdify rows may be blank.
+source   | matrix | variant    | chunking         | residual_values_ms | jacobian_values_ms | jacobian_assembly_ms | res_jobs | jac_jobs | res_work/job | jac_work/job | res_fallback | jac_fallback
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | atomview+lambdify | -                  | -                  | -                    | -        | -        | -            | -            | -            | -           
+AOT      | Banded | tcc/full   | atomview+full+seq+whole | 1.455 +/- 0.058    | 0.503 +/- 0.003    | 0.113 +/- 0.003      | 1.000 +/- 0.000 | 1.000 +/- 0.000 | 6000.000 +/- 0.000 | 20988.000 +/- 0.000 | single_chunk | single_chunk
+AOT      | Banded | tcc/no_cse | atomview+no_cse+seq+whole | 1.599 +/- 0.088    | 0.502 +/- 0.002    | 0.112 +/- 0.001      | 1.000 +/- 0.000 | 1.000 +/- 0.000 | 6000.000 +/- 0.000 | 20988.000 +/- 0.000 | single_chunk | single_chunk
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded backend selection and symbolic totals
+[BVP Damp e2e] lifecycle table: refinement-triggered regeneration is part of real wall-clock time.
+source   | matrix | variant    | chunking         | assembly | selected_backend | build_policy | refinements | final_grid_points | symbolic_ms
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | atomview+lambdify | AtomView | Lambdify         | UseIfAvailable | 0.000 +/- 0.000    | 1001.000 +/- 0.000 | 2000.000 +/- 0.000
+AOT      | Banded | tcc/full   | atomview+full+seq+whole | AtomView | AotCompiled      | RebuildAlways | 0.000 +/- 0.000    | 1001.000 +/- 0.000 | 2000.000 +/- 0.000
+AOT      | Banded | tcc/no_cse | atomview+no_cse+seq+whole | AtomView | AotCompiled      | RebuildAlways | 0.000 +/- 0.000    | 1001.000 +/- 0.000 | 2000.000 +/- 0.000
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded symbolic handoff stages
+[BVP Damp e2e] generated handoff pass table: post_build symbolic columns must stay blank after direct rebinding of a freshly built AOT artifact.
+source   | matrix | variant    | initial_total | initial_discretize | initial_sym_jac | initial_prepare | initial_bind | post_build_total | post_discretize | post_sym_jac | post_prepare | post_bind | rebind_ms
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | 133.544 +/- 4.299 | 42.565 +/- 1.878   | 9.697 +/- 0.548 | 11.812 +/- 0.493 | 10.416 +/- 0.490 | -                | -               | -            | -            | -            | -           
+AOT      | Banded | tcc/full   | 107.920 +/- 0.334 | 43.860 +/- 0.099   | 10.025 +/- 0.107 | 11.788 +/- 0.239 | 0.001 +/- 0.000 | -                | -               | -            | -            | -            | 23.405 +/- 0.419
+AOT      | Banded | tcc/no_cse | 107.318 +/- 3.103 | 43.142 +/- 0.854   | 9.910 +/- 0.521 | 11.687 +/- 0.817 | 0.001 +/- 0.000 | -                | -               | -            | -            | -            | 23.186 +/- 0.491
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded internal initial symbolic-Jacobian stages
+[BVP Damp e2e] internal initial symbolic-Jacobian stages: dense_cache is expected to be near zero for Faer Sparse and Banded sparse-first routes.
+source   | matrix | variant    | initial_sym_jac | variable_sets | row_diff | dense_cache | sparse_flatten
+-------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | 9.697 +/- 0.548 | 2.922 +/- 0.252 | 4.838 +/- 0.256 | 0.000 +/- 0.000 | 1.317 +/- 0.084
+AOT      | Banded | tcc/full   | 10.025 +/- 0.107 | 2.907 +/- 0.061 | 5.188 +/- 0.068 | 0.000 +/- 0.000 | 1.320 +/- 0.007
+AOT      | Banded | tcc/no_cse | 9.910 +/- 0.521 | 2.863 +/- 0.173 | 5.131 +/- 0.356 | 0.000 +/- 0.000 | 1.324 +/- 0.014
+
+[BVP Damp symbolic frontend cold] combustion-1000 Banded tcc cold-build stages
+[BVP Damp e2e] AOT cold-build table: compile_link is the external compiler/linker interval; artifact/module/lowering/source/packaging are nested codegen diagnostics and must not be summed; rows without AOT build are blank.
+source   | matrix | variant    | artifact_total | module | residual_lower | jacobian_lower | source_emit | packaging | materialize | compile_link | register_link
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Banded | AtomView   | -                | -            | -              | -              | -            | -            | -            | -             | -            
+AOT      | Banded | tcc/full   | 24.201 +/- 0.330 | 16.350 +/- 0.165 | 16.293 +/- 0.160 | 10.528 +/- 0.147 | 3.920 +/- 0.076 | 2.351 +/- 0.046 | 3.369 +/- 0.129 | 63.794 +/- 32.133 | 9.246 +/- 0.303
+AOT      | Banded | tcc/no_cse | 24.879 +/- 1.001 | 16.886 +/- 0.983 | 16.834 +/- 0.995 | 10.619 +/- 0.061 | 3.926 +/- 0.109 | 2.491 +/- 0.104 | 2.927 +/- 0.473 | 41.454 +/- 0.700 | 9.629 +/- 0.208
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2394 filtered out; finished in 65.00s
+
+Interpretation:
+
+`NoCse` is solver-level correct on this case: both AOT rows match the
+Lambdify baseline at roundoff level (`2.220e-16` solution difference), and the
+generated callback route remains stable through cold process-isolated rebuilds.
+
+The performance signal is useful but not strong enough to promote `NoCse` to a
+production default.  Mean wall-clock is lower for `tcc/no_cse`
+(`2173.690 ms`) than for `tcc/full` (`2286.210 ms`), but the first `Full` row
+has a clear `compile_link` outlier (`109.234 ms` versus about `41 ms` in the
+other rows).  Once that noise is accounted for, `NoCse` is only modestly faster
+on total time.  The cold-build breakdown does not show a structural win:
+`artifact_total`, `module`, `residual_lower`, `jacobian_lower`, `source_emit`
+and `packaging` are all essentially equal or slightly worse for `NoCse`; only
+`materialize` is a little lower.  Hot callback timing is also not better:
+`jacobian_values_ms` is the same (`~0.50 ms`), while `residual_values_ms` is
+slightly worse for `NoCse` (`1.599 ms` versus `1.455 ms`).
+
+Conclusion: keep `AtomOptimizationProfile::Full` as the production default.
+`AtomOptimizationProfile::NoCse` is validated as a safe diagnostic/experimental
+profile, not as the default route.  If this question becomes important again,
+the next useful experiment is a larger-grid or 5-10 repetition story; this
+combustion-1000 release run is enough to avoid changing the default.
 
 ### `combustion_1000_sparse_symbolic_frontend_honest_wall_clock_table`
 
@@ -4497,3 +4643,4 @@ phase      | runs | total_ms mean+/-std [min,max] | symbolic_ms mean+/-std | lin
 lambdify   |    5 | 468.337 +/- 12.471 [456.181, 484.443] | 397.800 +/- 11.583    | 16.000 +/- 1.095      | 0.000000e0
 prebuilt   |    5 | 431.397 +/- 10.850 [423.439, 452.425] | 358.800 +/- 11.720    | 16.400 +/- 1.200      | 2.220446e-16
 test numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story ... ok
+

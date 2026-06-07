@@ -5,7 +5,11 @@ use nalgebra::DMatrix;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::SolverParams;
 use std::collections::HashMap;
 ////////////////////////////////////BOUND STEP  CONDITIONS////////////////////////////////////
-/// insired by MuliNewton cpp version of bound step
+/// Inspired by the Cantera MultiNewton bound-step guard.
+///
+/// This legacy helper takes an already proposed `y_new`. The active Damped
+/// solver path uses [`bound_step_Cantera2`] instead, because Newton steps are
+/// represented as additive updates there: `x_next = x + step`.
 pub fn bound_step_Cantera(
     y: &dyn VectorType,
     y_new: &dyn VectorType,
@@ -28,7 +32,10 @@ pub fn bound_step_Cantera(
     }
     fbound
 }
-/// insired by MuliNewton cpp version of bound step
+/// Inspired by the Cantera MultiNewton bound-step guard.
+///
+/// Production Damped BVP uses this additive-step contract:
+/// `x_next = x + lambda * step`, where `lambda <= fbound`.
 pub fn bound_step_Cantera2(
     x: &dyn VectorType,
     step: &dyn VectorType,
@@ -86,6 +93,92 @@ pub fn bound_step(y: &dyn VectorType, step: &dyn VectorType, bounds: &Vec<(f64, 
         }
     }
     fbound
+}
+
+#[cfg(test)]
+mod bound_step_tests {
+    use super::*;
+    use nalgebra::DVector;
+
+    fn dense(values: &[f64]) -> DVector<f64> {
+        DVector::from_column_slice(values)
+    }
+
+    fn assert_close(lhs: f64, rhs: f64) {
+        assert!((lhs - rhs).abs() < 1e-12, "expected {rhs}, got {lhs}");
+    }
+
+    #[test]
+    fn cantera2_keeps_full_step_when_trial_point_is_inside_bounds() {
+        let x = dense(&[0.5, -0.2]);
+        let step = dense(&[0.1, -0.3]);
+        let bounds = vec![(0.0, 1.0), (-1.0, 1.0)];
+
+        assert_close(bound_step_Cantera2(&x, &step, &bounds), 1.0);
+    }
+
+    #[test]
+    fn cantera2_clips_upper_and_lower_outward_steps() {
+        let upper_x = dense(&[0.8]);
+        let upper_step = dense(&[0.5]);
+        let lower_x = dense(&[0.2]);
+        let lower_step = dense(&[-0.5]);
+        let bounds = vec![(0.0, 1.0)];
+
+        assert_close(bound_step_Cantera2(&upper_x, &upper_step, &bounds), 0.4);
+        assert_close(bound_step_Cantera2(&lower_x, &lower_step, &bounds), 0.4);
+    }
+
+    #[test]
+    fn cantera2_uses_most_restrictive_component() {
+        let x = dense(&[0.8, 0.1, 0.5]);
+        let step = dense(&[0.5, -0.5, 0.1]);
+        let bounds = vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)];
+
+        assert_close(bound_step_Cantera2(&x, &step, &bounds), 0.2);
+    }
+
+    #[test]
+    fn cantera2_returns_zero_when_current_boundary_value_moves_outward() {
+        let at_upper = dense(&[1.0]);
+        let upper_step = dense(&[0.1]);
+        let at_lower = dense(&[0.0]);
+        let lower_step = dense(&[-0.1]);
+        let bounds = vec![(0.0, 1.0)];
+
+        assert_close(bound_step_Cantera2(&at_upper, &upper_step, &bounds), 0.0);
+        assert_close(bound_step_Cantera2(&at_lower, &lower_step, &bounds), 0.0);
+    }
+
+    #[test]
+    fn cantera2_scaled_step_does_not_cross_bounds() {
+        let x = dense(&[0.8, 0.2]);
+        let step = dense(&[0.5, -0.5]);
+        let bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+        let fbound = bound_step_Cantera2(&x, &step, &bounds);
+
+        for i in 0..x.len() {
+            let next = x[i] + fbound * step[i];
+            assert!(
+                next >= bounds[i].0 - 1e-12 && next <= bounds[i].1 + 1e-12,
+                "component {i}: {next} is outside {:?}",
+                bounds[i]
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_twopnt_bound_step_uses_different_step_sign_convention() {
+        let x = dense(&[0.8]);
+        let additive_step = dense(&[0.5]);
+        let bounds = vec![(0.0, 1.0)];
+
+        let additive_contract = bound_step_Cantera2(&x, &additive_step, &bounds);
+        let legacy_twopnt_contract = bound_step(&x, &additive_step, &bounds);
+
+        assert_close(additive_contract, 0.4);
+        assert_close(legacy_twopnt_contract, 1.0);
+    }
 }
 
 ////////////////////////////////////JACOBIAN RECALCULATION STRATEGY////////////////////////////////////

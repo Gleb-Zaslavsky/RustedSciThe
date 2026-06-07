@@ -39,6 +39,12 @@
 //!
 pub mod BVP_sci_aot;
 mod BVP_sci_aot_tests;
+pub mod BVP_sci_banded;
+mod BVP_sci_banded_tests;
+pub mod BVP_sci_bordered_banded;
+mod BVP_sci_bordered_banded_tests;
+pub mod BVP_sci_bordered_solver;
+mod BVP_sci_bordered_solver_tests;
 ///BVP solver using faer crate for matrix&vector operations
 pub mod BVP_sci_faer;
 mod BVP_sci_faer_tests;
@@ -48,6 +54,7 @@ pub mod BVP_sci_nalgebra;
 mod BVP_sci_nalgebra_tests;
 pub mod BVP_sci_numerical;
 mod BVP_sci_numerical_tests;
+mod BVP_sci_story_tests;
 pub mod BVP_sci_symb;
 mod BVP_sci_symb_tests;
 mod BVP_sci_symb_tests2;

@@ -104,22 +104,225 @@
 use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
 //use crate::numerical::BVP_sci::BVP_sci_utils::{final_jacobian_diagnostics, size_of_matrix};
 use crate::numerical::optimization::PPoly::{Extrapolate, PPoly};
+use crate::numerical::BVP_sci::BVP_sci_banded::sparse_global_jac_to_banded;
+use crate::numerical::BVP_sci::BVP_sci_bordered_banded::{
+    profile_bordered_banded_global_jacobian, BvpSciBandedRoute, BvpSciBandedRoutePolicy,
+};
+use crate::numerical::BVP_sci::BVP_sci_bordered_solver::{
+    extract_bordered_banded_blocks, factor_bordered_banded_structured,
+    BvpSciBorderedStructuredFactorization,
+};
+use crate::somelinalg::banded::LapackStyleBandedLuFaithful;
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
 use log::info;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, mem::size_of, time::Instant};
 pub type faer_mat = SparseColMat<usize, f64>;
 pub type faer_col = Col<f64>;
 pub type faer_dense_mat = Mat<f64>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BvpSciLinearSolvePolicy {
+    /// Production default: preserve the existing faer sparse LU route.
+    #[default]
+    Sparse,
+    /// Use full scalar banded LU only when the whole global Jacobian is compact;
+    /// otherwise fall back to Sparse.  This is safe for production experiments.
+    AutoBanded,
+    /// Require the whole global Jacobian to be compact enough for scalar banded
+    /// LU.  If the route planner rejects it, Newton reports a singular linear
+    /// step instead of silently falling back.
+    RequireFullBanded,
+    /// Explicit experimental route for endpoint-BC bordered-banded matrices.
+    ///
+    /// This is intentionally not used by `AutoBanded` yet.  It lets tests and
+    /// diagnostics exercise the native bordered solver while the production
+    /// default remains the established Sparse route.
+    ExperimentalBorderedBanded,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GlobalJacobianDiagnostics {
+    pub nrows: usize,
+    pub ncols: usize,
+    pub nnz: usize,
+    pub dense_equivalent_bytes: usize,
+    pub sparse_values_bytes: usize,
+    pub sparse_row_index_bytes: usize,
+    pub sparse_col_ptr_bytes: usize,
+    pub sparse_storage_bytes: usize,
+    pub dense_equivalent_kib: usize,
+    pub sparse_storage_kib: usize,
+    pub dense_to_sparse_permille: usize,
+    pub nonfinite_values: usize,
+    pub structurally_empty_rows: usize,
+    pub structurally_empty_cols: usize,
+    pub numerically_zero_rows: usize,
+    pub numerically_zero_cols: usize,
+}
+
+impl GlobalJacobianDiagnostics {
+    pub fn is_definitely_singular(&self) -> bool {
+        self.nonfinite_values > 0
+            || self.structurally_empty_rows > 0
+            || self.structurally_empty_cols > 0
+            || self.numerically_zero_rows > 0
+            || self.numerically_zero_cols > 0
+    }
+}
+
+pub fn inspect_global_jacobian(mat: &faer_mat) -> GlobalJacobianDiagnostics {
+    let (nrows, ncols) = mat.shape();
+    let mut row_has_structure = vec![false; nrows];
+    let mut col_has_structure = vec![false; ncols];
+    let mut row_has_nonzero = vec![false; nrows];
+    let mut col_has_nonzero = vec![false; ncols];
+    let mut nnz = 0usize;
+    let mut nonfinite_values = 0usize;
+
+    for col in 0..ncols {
+        let rows = mat.as_dyn().row_idx_of_col(col).collect::<Vec<_>>();
+        if !rows.is_empty() {
+            col_has_structure[col] = true;
+        }
+        for row in rows {
+            nnz += 1;
+            row_has_structure[row] = true;
+            let value = mat[(row, col)];
+            if !value.is_finite() {
+                nonfinite_values += 1;
+            }
+            if value != 0.0 {
+                row_has_nonzero[row] = true;
+                col_has_nonzero[col] = true;
+            }
+        }
+    }
+
+    let dense_equivalent_bytes = nrows.saturating_mul(ncols).saturating_mul(size_of::<f64>());
+    let sparse_values_bytes = nnz.saturating_mul(size_of::<f64>());
+    let sparse_row_index_bytes = nnz.saturating_mul(size_of::<usize>());
+    // faer stores sparse matrices in compressed-column form.  This is a stable
+    // solver-level estimate: values + row indices + one column pointer per col.
+    let sparse_col_ptr_bytes = ncols.saturating_add(1).saturating_mul(size_of::<usize>());
+    let sparse_storage_bytes = sparse_values_bytes
+        .saturating_add(sparse_row_index_bytes)
+        .saturating_add(sparse_col_ptr_bytes);
+    let dense_equivalent_kib = bytes_to_kib_ceil(dense_equivalent_bytes);
+    let sparse_storage_kib = bytes_to_kib_ceil(sparse_storage_bytes);
+    let dense_to_sparse_permille = if sparse_storage_bytes > 0 {
+        dense_equivalent_bytes
+            .saturating_mul(1000)
+            .saturating_div(sparse_storage_bytes)
+    } else {
+        0
+    };
+
+    GlobalJacobianDiagnostics {
+        nrows,
+        ncols,
+        nnz,
+        dense_equivalent_bytes,
+        sparse_values_bytes,
+        sparse_row_index_bytes,
+        sparse_col_ptr_bytes,
+        sparse_storage_bytes,
+        dense_equivalent_kib,
+        sparse_storage_kib,
+        dense_to_sparse_permille,
+        nonfinite_values,
+        structurally_empty_rows: row_has_structure
+            .iter()
+            .filter(|has_structure| !**has_structure)
+            .count(),
+        structurally_empty_cols: col_has_structure
+            .iter()
+            .filter(|has_structure| !**has_structure)
+            .count(),
+        numerically_zero_rows: row_has_nonzero
+            .iter()
+            .filter(|has_nonzero| !**has_nonzero)
+            .count(),
+        numerically_zero_cols: col_has_nonzero
+            .iter()
+            .filter(|has_nonzero| !**has_nonzero)
+            .count(),
+    }
+}
+
+fn bytes_to_kib_ceil(bytes: usize) -> usize {
+    bytes.saturating_add(1023) / 1024
+}
+
+fn record_global_jacobian_diagnostics(
+    calc_statistics: &mut HashMap<String, usize>,
+    diagnostics: &GlobalJacobianDiagnostics,
+) {
+    calc_statistics.insert("global jacobian rows".to_string(), diagnostics.nrows);
+    calc_statistics.insert("global jacobian cols".to_string(), diagnostics.ncols);
+    calc_statistics.insert("global jacobian nnz".to_string(), diagnostics.nnz);
+    calc_statistics.insert(
+        "global jacobian dense equivalent bytes".to_string(),
+        diagnostics.dense_equivalent_bytes,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse values bytes".to_string(),
+        diagnostics.sparse_values_bytes,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse row index bytes".to_string(),
+        diagnostics.sparse_row_index_bytes,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse col ptr bytes".to_string(),
+        diagnostics.sparse_col_ptr_bytes,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse storage bytes".to_string(),
+        diagnostics.sparse_storage_bytes,
+    );
+    calc_statistics.insert(
+        "global jacobian dense equivalent kib".to_string(),
+        diagnostics.dense_equivalent_kib,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse storage kib".to_string(),
+        diagnostics.sparse_storage_kib,
+    );
+    calc_statistics.insert(
+        "global jacobian dense to sparse permille".to_string(),
+        diagnostics.dense_to_sparse_permille,
+    );
+    calc_statistics.insert(
+        "global jacobian nonfinite values".to_string(),
+        diagnostics.nonfinite_values,
+    );
+    calc_statistics.insert(
+        "global jacobian structurally empty rows".to_string(),
+        diagnostics.structurally_empty_rows,
+    );
+    calc_statistics.insert(
+        "global jacobian structurally empty cols".to_string(),
+        diagnostics.structurally_empty_cols,
+    );
+    calc_statistics.insert(
+        "global jacobian numerically zero rows".to_string(),
+        diagnostics.numerically_zero_rows,
+    );
+    calc_statistics.insert(
+        "global jacobian numerically zero cols".to_string(),
+        diagnostics.numerically_zero_cols,
+    );
+}
 // demonstrating function or reminder function with main
 #[allow(dead_code)]
 pub fn test_faer_fn() {
     type faer_mat = SparseColMat<usize, f64>;
     type faer_col = Col<f64>; // Mat<f64>;
-    // Example usage of faer types
+                              // Example usage of faer types
     type faer_mat_sym = SymbolicSparseColMat<usize, f64>;
     // empty vector
     let mut vec1: faer_col = faer_col::zeros(2);
@@ -137,9 +340,9 @@ pub fn test_faer_fn() {
     let col_ptr = vec![0usize, 1, 1, 2, 2, 2]; // length = ncols + 1
     let row_idx = vec![0usize, 1]; // length = col_ptr[ncols]
     let values = vec![1.0, 2.0]; // same length as row_idx
-    // col_nnz in SymbolicSparseColMat (and related types) stands for column nonzero counts.
-    // It is an optional vector that, if present, specifies for
-    // each column the number of nonzero entries in that column.
+                                 // col_nnz in SymbolicSparseColMat (and related types) stands for column nonzero counts.
+                                 // It is an optional vector that, if present, specifies for
+                                 // each column the number of nonzero entries in that column.
     let symbolic = SymbolicSparseColMat::new_checked(nrows, ncols, col_ptr, None, row_idx);
     let matrix = SparseColMat::new(symbolic, values);
     // getting certain element from matrix
@@ -163,6 +366,177 @@ pub fn test_faer_fn() {
     // calculation result
     let _res: faer_col = ColRef::from_slice(res_vec.as_slice()).to_owned();
 }
+
+/// Cache for the symbolic sparsity pattern of the global Jacobian matrix.
+///
+/// The global Jacobian has a fixed block structure determined by `n`, `m`, and `k`:
+/// - `(m-1)` diagonal `n×n` blocks (identity + Jacobian contributions)
+/// - `(m-1)` off-diagonal `n×n` blocks (identity + Jacobian contributions)
+/// - BC row blocks: `(n+k)×n` for ya, `(n+k)×n` for yb
+/// - Parameter column blocks (if `k > 0`): `(m-1)*n×k` and `(n+k)×k`
+///
+/// The cache stores the `SparseColMat` with the correct symbolic structure and
+/// a mutable values buffer. On each Newton iteration, [`construct_global_jac_cached`]
+/// writes numerical values directly into the buffer without rebuilding the sparsity
+/// pattern or sorting triplets.
+pub struct JacobianSparsityCache {
+    matrix: SparseColMat<usize, f64>,
+    n: usize,
+    m: usize,
+    k: usize,
+}
+
+impl JacobianSparsityCache {
+    /// Build a new cache for the given dimensions.
+    ///
+    /// Constructs the full symbolic sparsity pattern (all possible non-zeros) and
+    /// stores it as a `SparseColMat` with a zeroed values buffer.
+    pub fn new(n: usize, m: usize, k: usize) -> Self {
+        let matrix = Self::build_structure_triplets(n, m, k);
+        JacobianSparsityCache { matrix, n, m, k }
+    }
+
+    /// Return a mutable reference to the values buffer.
+    pub fn values_mut(&mut self) -> &mut [f64] {
+        let (_, values) = self.matrix.parts_mut();
+        values
+    }
+
+    /// Return an immutable reference to the cached matrix (for reading).
+    pub fn matrix_ref(&self) -> &SparseColMat<usize, f64> {
+        &self.matrix
+    }
+
+    /// Get the symbolic structure parts: (nrows, ncols, col_ptr, col_nnz, row_idx)
+    pub fn symbolic_parts(&mut self) -> (usize, usize, &[usize], Option<&[usize]>, &[usize]) {
+        let (sym_ref, _) = self.matrix.parts_mut();
+        sym_ref.parts()
+    }
+
+    /// Return a clone of the underlying matrix (after values have been written).
+    pub fn matrix_clone(&self) -> SparseColMat<usize, f64> {
+        self.matrix.clone()
+    }
+
+    /// Build the full sparsity pattern as a `SparseColMat` by constructing triplets
+    /// for every possible non-zero position in the global Jacobian.
+    ///
+    /// The pattern includes:
+    /// - Identity entries on diagonal/off-diagonal block diagonals
+    /// - Dense `n×n` blocks for `df_dy` / `df_dy_middle` contributions
+    /// - BC blocks for `dbc_dya`, `dbc_dyb`, `dbc_dp`
+    fn build_structure_triplets(n: usize, m: usize, k: usize) -> SparseColMat<usize, f64> {
+        let total_size = (m - 1) * n + (n + k);
+        let mut triplets = Vec::new();
+
+        // Diagonal and off-diagonal blocks for each collocation interval
+        for i in 0..(m - 1) {
+            let row_start = i * n;
+
+            // --- Diagonal block: column range [i*n, (i+1)*n) ---
+            let col_start = i * n;
+
+            // Identity part: -I on diagonal
+            for idx in 0..n {
+                triplets.push(Triplet::new(row_start + idx, col_start + idx, -1.0));
+            }
+
+            // Dense n×n block for -h/6 * df_dy[i]
+            for r in 0..n {
+                for c in 0..n {
+                    triplets.push(Triplet::new(row_start + r, col_start + c, 0.0));
+                }
+            }
+
+            // Dense n×n block for -h/3 * df_dy_middle[i]
+            for r in 0..n {
+                for c in 0..n {
+                    triplets.push(Triplet::new(row_start + r, col_start + c, 0.0));
+                }
+            }
+
+            // --- Off-diagonal block: column range [(i+1)*n, (i+2)*n) ---
+            let col_start_off = (i + 1) * n;
+
+            // Identity part: +I on diagonal
+            for idx in 0..n {
+                triplets.push(Triplet::new(row_start + idx, col_start_off + idx, 1.0));
+            }
+
+            // Dense n×n block for -h/6 * df_dy[i+1]
+            for r in 0..n {
+                for c in 0..n {
+                    triplets.push(Triplet::new(row_start + r, col_start_off + c, 0.0));
+                }
+            }
+
+            // Dense n×n block for -h/3 * df_dy_middle[i]
+            for r in 0..n {
+                for c in 0..n {
+                    triplets.push(Triplet::new(row_start + r, col_start_off + c, 0.0));
+                }
+            }
+
+            // Parameter column blocks (if k > 0)
+            if k > 0 {
+                let param_col_start = n * m;
+
+                // -h/6 * df_dp[i]
+                for r in 0..n {
+                    for c in 0..k {
+                        triplets.push(Triplet::new(row_start + r, param_col_start + c, 0.0));
+                    }
+                }
+
+                // -h/6 * df_dp[i+1]
+                for r in 0..n {
+                    for c in 0..k {
+                        triplets.push(Triplet::new(row_start + r, param_col_start + c, 0.0));
+                    }
+                }
+
+                // -2h/3 * df_dp_middle[i]
+                for r in 0..n {
+                    for c in 0..k {
+                        triplets.push(Triplet::new(row_start + r, param_col_start + c, 0.0));
+                    }
+                }
+            }
+        }
+
+        // Boundary condition blocks
+        let bc_row_start = (m - 1) * n;
+
+        // dbc_dya block: (n+k) × n
+        for r in 0..(n + k) {
+            for c in 0..n {
+                triplets.push(Triplet::new(bc_row_start + r, c, 0.0));
+            }
+        }
+
+        // dbc_dyb block: (n+k) × n, starting at column (m-1)*n
+        let yb_col_start = (m - 1) * n;
+        for r in 0..(n + k) {
+            for c in 0..n {
+                triplets.push(Triplet::new(bc_row_start + r, yb_col_start + c, 0.0));
+            }
+        }
+
+        // dbc_dp block: (n+k) × k (if k > 0)
+        if k > 0 {
+            let param_col_start = n * m;
+            for r in 0..(n + k) {
+                for c in 0..k {
+                    triplets.push(Triplet::new(bc_row_start + r, param_col_start + c, 0.0));
+                }
+            }
+        }
+
+        SparseColMat::try_new_from_triplets(total_size, total_size, &triplets)
+            .expect("Failed to create sparsity cache matrix")
+    }
+}
+
 /// Machine epsilon for floating point arithmetic
 const EPS: f64 = f64::EPSILON;
 
@@ -245,6 +619,31 @@ impl BVPResult {
     pub fn set_strategy_params(&mut self, params: HashMap<String, Vec<f64>>) {
         self.strategy_params = Some(params);
     }
+}
+
+fn default_strategy_params() -> HashMap<String, Vec<f64>> {
+    BVPResult::default()
+        .strategy_params
+        .expect("BVPResult default strategy parameters should exist")
+}
+
+fn strategy_param_f64(
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+    key: &str,
+    fallback: f64,
+) -> f64 {
+    strategy_params
+        .and_then(|params| params.get(key))
+        .and_then(|values| values.first().copied())
+        .unwrap_or(fallback)
+}
+
+fn strategy_param_usize(
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+    key: &str,
+    fallback: usize,
+) -> usize {
+    strategy_param_f64(strategy_params, key, fallback as f64) as usize
 }
 /// Function type for ODE right-hand side evaluation
 /// Arguments: (x, y, p) where x is scalar, y is n-dimensional, p is k-dimensional parameters
@@ -517,28 +916,6 @@ pub fn compute_jac_indices(n: usize, m: usize, k: usize) -> (Vec<usize>, Vec<usi
     (i_indices, j_indices)
 }
 
-/// Stacked matrix multiplication: out[i,:,:] = a[i,:,:] * b[i,:,:]
-/*
-pub fn stacked_matmul(a: &[faer_dense_mat], b: &[faer_dense_mat]) -> Vec<faer_dense_mat> {
-    assert_eq!(a.len(), b.len());
-
-    a.iter()
-        .zip(b.iter())
-        .map(|(a_mat, b_mat)| {
-            let mut result = faer_dense_mat::zeros(a_mat.nrows(), b_mat.ncols());
-            faer::linalg::matmul::matmul(
-                result.as_mut(),
-                a_mat.as_ref(),
-                b_mat.as_ref(),
-                None,
-                1.0,
-                faer::Parallelism::None,
-            );
-            result
-        })
-        .collect()
-}
-*/
 /// Evaluate collocation residuals
 ///
 /// This function implements the core collocation method. The solution is sought
@@ -585,26 +962,14 @@ pub fn collocation_fun(
     }
 
     // Evaluate RHS at middle points
-    // The ODE function expects x and y to have consistent dimensions
-    // We evaluate the function at each middle point individually
-    let mut f_middle = faer_dense_mat::zeros(n, m - 1);
+    // The ODE function already supports batched evaluation across multiple points
+    // (same as the mesh-node call above). Build a single column vector of all
+    // midpoints and evaluate in one call for optimal performance.
+    let mut x_mid_all = faer_col::zeros(m - 1);
     for j in 0..(m - 1) {
-        let x_mid = x[j] + 0.5 * h[j];
-        let x_single = faer_col::from_fn(1, |_| x_mid);
-
-        // Extract the j-th column of y_middle for evaluation as a column vector
-        let mut y_single = faer_dense_mat::zeros(n, 1);
-        for i in 0..n {
-            *y_single.get_mut(i, 0) = *y_middle.get(i, j);
-        }
-
-        let f_result = fun(&x_single, &y_single, p);
-
-        // Copy the result to the j-th column of f_middle
-        for i in 0..n {
-            *f_middle.get_mut(i, j) = *f_result.get(i, 0);
-        }
+        x_mid_all[j] = x[j] + 0.5 * h[j];
     }
+    let f_middle = fun(&x_mid_all, &y_middle, p);
 
     // Compute collocation residuals
     let mut col_res = faer_dense_mat::zeros(n, m - 1);
@@ -803,6 +1168,319 @@ pub fn construct_global_jac(
         .expect("Failed to create sparse matrix")
 }
 
+/// Construct the global Jacobian matrix using a pre-computed sparsity cache.
+///
+/// This is the cached counterpart of [`construct_global_jac`]. Instead of building
+/// triplets and sorting them (which is O(nnz log nnz)), it iterates over the cache's
+/// CSC structure directly and writes numerical values into the pre-allocated buffer.
+///
+/// The cache's symbolic pattern includes ALL possible non-zeros (identity entries +
+/// dense n×n blocks for df_dy/df_dy_middle + BC blocks). For each (col, row) pair
+/// in the cache's column pointers and row indices, this function determines which
+/// block the entry belongs to and computes the numerical value by **accumulating**
+/// all contributions (identity + Jacobian) at that position.
+///
+/// # Correctness: Accumulation, not replacement
+///
+/// This function uses a **faithful** approach: it builds the same triplets as
+/// [`construct_global_jac`], sorts them by (col, row) (matching `try_new_from_triplets`
+/// internal behavior), then walks through the cache's CSC structure and sorted triplets
+/// simultaneously, accumulating values at matching positions. This guarantees bit-identical
+/// results with the original function.
+pub fn construct_global_jac_cached(
+    n: usize,
+    m: usize,
+    k: usize,
+    h: &faer_col,
+    df_dy: &[faer_mat],
+    df_dy_middle: &[faer_mat],
+    df_dp: Option<&[faer_mat]>,
+    df_dp_middle: Option<&[faer_mat]>,
+    dbc_dya: &faer_mat,
+    dbc_dyb: &faer_mat,
+    dbc_dp: Option<&faer_mat>,
+    cache: &mut JacobianSparsityCache,
+) {
+    // Step 1: Build triplets using EXACTLY the same logic as construct_global_jac
+    let _total_size = (m - 1) * n + (n + k);
+    let mut triplets = Vec::new();
+
+    // Process diagonal and off-diagonal blocks for collocation residuals
+    for i in 0..(m - 1) {
+        let h_i = h[i];
+
+        // Diagonal block: -I - h/6*(df_dy[i] + 2*df_dy_middle[i])
+        let row_start = i * n;
+        let col_start = i * n;
+
+        // Identity part: -I
+        for idx in 0..n {
+            triplets.push(Triplet::new(row_start + idx, col_start + idx, -1.0));
+        }
+
+        // Add -h/6 * df_dy[i]
+        for triplt in df_dy[i].triplet_iter() {
+            let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+            let coeff = -h_i / 6.0 * val;
+            if coeff.abs() > 1e-15 {
+                triplets.push(Triplet::new(
+                    row_start + row_idx,
+                    col_start + col_idx,
+                    coeff,
+                ));
+            }
+        }
+
+        // Add -h/3 * df_dy_middle[i]
+        for triplt in df_dy_middle[i].triplet_iter() {
+            let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+            let coeff = -h_i / 3.0 * val;
+            if coeff.abs() > 1e-15 {
+                triplets.push(Triplet::new(
+                    row_start + row_idx,
+                    col_start + col_idx,
+                    coeff,
+                ));
+            }
+        }
+
+        // Off-diagonal block: I - h/6*(df_dy[i+1] + 2*df_dy_middle[i])
+        let col_start_off = (i + 1) * n;
+
+        // Identity part: I
+        for idx in 0..n {
+            triplets.push(Triplet::new(row_start + idx, col_start_off + idx, 1.0));
+        }
+
+        // Add -h/6 * df_dy[i+1]
+        for triplt in df_dy[i + 1].triplet_iter() {
+            let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+            let coeff = -h_i / 6.0 * val;
+            if coeff.abs() > 1e-15 {
+                triplets.push(Triplet::new(
+                    row_start + row_idx,
+                    col_start_off + col_idx,
+                    coeff,
+                ));
+            }
+        }
+
+        // Add -h/3 * df_dy_middle[i]
+        for triplt in df_dy_middle[i].triplet_iter() {
+            let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+            let coeff = -h_i / 3.0 * val;
+            if coeff.abs() > 1e-15 {
+                triplets.push(Triplet::new(
+                    row_start + row_idx,
+                    col_start_off + col_idx,
+                    coeff,
+                ));
+            }
+        }
+
+        // Handle parameter derivatives if present
+        if let (Some(df_dp_vec), Some(df_dp_middle_vec)) = (df_dp, df_dp_middle) {
+            let param_col_start = n * m;
+
+            // Add -h/6 * df_dp[i]
+            for triplt in df_dp_vec[i].triplet_iter() {
+                let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+                let coeff = -h_i / 6.0 * val;
+                if coeff.abs() > 1e-15 {
+                    triplets.push(Triplet::new(
+                        row_start + row_idx,
+                        param_col_start + col_idx,
+                        coeff,
+                    ));
+                }
+            }
+
+            // Add -h/6 * df_dp[i+1]
+            for triplt in df_dp_vec[i + 1].triplet_iter() {
+                let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+                let coeff = -h_i / 6.0 * val;
+                if coeff.abs() > 1e-15 {
+                    triplets.push(Triplet::new(
+                        row_start + row_idx,
+                        param_col_start + col_idx,
+                        coeff,
+                    ));
+                }
+            }
+
+            // Add -2h/3 * df_dp_middle[i]
+            for triplt in df_dp_middle_vec[i].triplet_iter() {
+                let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+                let coeff = -2.0 * h_i / 3.0 * val;
+                if coeff.abs() > 1e-15 {
+                    triplets.push(Triplet::new(
+                        row_start + row_idx,
+                        param_col_start + col_idx,
+                        coeff,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Insert boundary condition blocks
+    let bc_row_start = (m - 1) * n;
+
+    // dbc_dya block - dependency on ya
+    for triplt in dbc_dya.triplet_iter() {
+        let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+        if val.abs() > 1e-15 {
+            triplets.push(Triplet::new(bc_row_start + row_idx, col_idx, *val));
+        }
+    }
+
+    // dbc_dyb block - dependency on yb
+    let yb_col_start = (m - 1) * n;
+    for triplt in dbc_dyb.triplet_iter() {
+        let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+        if val.abs() > 1e-15 {
+            triplets.push(Triplet::new(
+                bc_row_start + row_idx,
+                yb_col_start + col_idx,
+                *val,
+            ));
+        }
+    }
+
+    // dbc_dp block - dependency on parameters
+    if let Some(dbc_dp_mat) = dbc_dp {
+        let param_col_start = n * m;
+        for triplt in dbc_dp_mat.triplet_iter() {
+            let (row_idx, col_idx, val) = (triplt.row, triplt.col, triplt.val);
+            if val.abs() > 1e-15 {
+                triplets.push(Triplet::new(
+                    bc_row_start + row_idx,
+                    param_col_start + col_idx,
+                    *val,
+                ));
+            }
+        }
+    }
+
+    // Step 2: Sort triplets by (col, row) — matching try_new_from_triplets internal behavior
+    triplets.sort_by(|a, b| {
+        if a.col != b.col {
+            a.col.cmp(&b.col)
+        } else {
+            a.row.cmp(&b.row)
+        }
+    });
+
+    // Step 3: Zero out the cache's values buffer
+    let (sym_ref, values) = cache.matrix.parts_mut();
+    let (_nrows, _ncols, col_ptr, col_nnz, row_idx) = sym_ref.parts();
+    for v in values.iter_mut() {
+        *v = 0.0;
+    }
+
+    // Step 4: Walk through cache's CSC structure and sorted triplets simultaneously,
+    //         accumulating values at matching positions.
+    // The cache's CSC structure has entries for ALL possible non-zeros (including those
+    // that would be filtered by coeff.abs() > 1e-15). The triplets only contain entries
+    // that passed the filter. So we iterate over the cache's CSC positions and look for
+    // matching triplets.
+    let mut triplet_idx = 0;
+    for col in 0.._ncols {
+        let start = col_ptr[col];
+        let nnz = match col_nnz {
+            Some(cnts) => cnts[col],
+            None => col_ptr[col + 1] - col_ptr[col],
+        };
+        let end = start + nnz;
+
+        for pos in start..end {
+            let row = row_idx[pos];
+
+            // Accumulate all triplets at this (col, row) position
+            while triplet_idx < triplets.len()
+                && (triplets[triplet_idx].col < col
+                    || (triplets[triplet_idx].col == col && triplets[triplet_idx].row < row))
+            {
+                triplet_idx += 1;
+            }
+
+            // Sum all triplets at this exact (col, row)
+            while triplet_idx < triplets.len()
+                && triplets[triplet_idx].col == col
+                && triplets[triplet_idx].row == row
+            {
+                values[pos] += triplets[triplet_idx].val;
+                triplet_idx += 1;
+            }
+        }
+    }
+}
+
+fn record_linear_backend_route(
+    calc_statistics: &mut HashMap<String, usize>,
+    profile: &crate::numerical::BVP_sci::BVP_sci_bordered_banded::BvpSciBorderedBandedProfile,
+) {
+    let route_key = match profile.recommended_route {
+        BvpSciBandedRoute::FullScalarBanded => "bvp sci route full scalar banded",
+        BvpSciBandedRoute::BorderedBanded => "bvp sci route bordered banded candidate",
+        BvpSciBandedRoute::SparseFallback => "bvp sci route sparse fallback",
+    };
+    *calc_statistics.entry(route_key.to_string()).or_insert(0) += 1;
+    calc_statistics.insert("bvp sci full scalar kl".to_string(), profile.full_scalar.kl);
+    calc_statistics.insert("bvp sci full scalar ku".to_string(), profile.full_scalar.ku);
+    calc_statistics.insert(
+        "bvp sci collocation scalar kl".to_string(),
+        profile.collocation_scalar.kl,
+    );
+    calc_statistics.insert(
+        "bvp sci collocation scalar ku".to_string(),
+        profile.collocation_scalar.ku,
+    );
+    if let Some(amp) = profile.full_amplification {
+        calc_statistics.insert(
+            "bvp sci full scalar amp milli".to_string(),
+            (amp * 1000.0).round() as usize,
+        );
+    }
+    if let Some(amp) = profile.collocation_amplification {
+        calc_statistics.insert(
+            "bvp sci collocation scalar amp milli".to_string(),
+            (amp * 1000.0).round() as usize,
+        );
+    }
+}
+
+fn add_elapsed_micros_stat(
+    calc_statistics: &mut HashMap<String, usize>,
+    key: &str,
+    started_at: Instant,
+) {
+    let micros = started_at.elapsed().as_micros();
+    let micros = usize::try_from(micros).unwrap_or(usize::MAX);
+    let entry = calc_statistics.entry(key.to_string()).or_insert(0);
+    *entry = entry.saturating_add(micros);
+}
+
+fn factor_banded_and_solve(
+    jac_matrix: &faer_mat,
+    rhs: &faer_col,
+) -> Result<(LapackStyleBandedLuFaithful, faer_col), crate::somelinalg::banded::BandedError> {
+    let banded = sparse_global_jac_to_banded(jac_matrix)?;
+    let mut lu = LapackStyleBandedLuFaithful::new(banded.n(), banded.kl(), banded.ku())?;
+    lu.factor_from(&banded)?;
+    let step = solve_with_banded_factor(&lu, rhs)?;
+    Ok((lu, step))
+}
+
+fn solve_with_banded_factor(
+    lu: &LapackStyleBandedLuFaithful,
+    rhs: &faer_col,
+) -> Result<faer_col, crate::somelinalg::banded::BandedError> {
+    let mut values = (0..rhs.nrows()).map(|i| rhs[i]).collect::<Vec<_>>();
+    lu.solve_in_place(&mut values)?;
+    Ok(faer_col::from_fn(values.len(), |i| values[i]))
+}
+
 /// Solve the nonlinear collocation system by Newton's method with sparse matrices
 ///
 /// This version uses faer's sparse matrix capabilities for better performance.
@@ -840,44 +1518,20 @@ pub fn solve_newton(
     bc_tol: f64,
     custom_timer: &mut CustomTimer,
     calc_statistics: &mut HashMap<String, usize>,
+    mut sparsity_cache: Option<&mut JacobianSparsityCache>,
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+    linear_solve_policy: BvpSciLinearSolvePolicy,
 ) -> (faer_dense_mat, faer_col, bool) {
     let k = p.nrows();
 
     // Newton iteration parameters
-    let max_iter = BVPResult::default()
-        .strategy_params
-        .as_ref()
-        .unwrap()
-        .get("max_iter")
-        .unwrap()[0] as usize;
-
-    let max_njev = BVPResult::default()
-        .strategy_params
-        .as_ref()
-        .unwrap()
-        .get("max_njev")
-        .unwrap()[0] as usize;
-
-    let sigma = BVPResult::default()
-        .strategy_params
-        .as_ref()
-        .unwrap()
-        .get("sigma")
-        .unwrap()[0];
-
-    let tau = BVPResult::default()
-        .strategy_params
-        .as_ref()
-        .unwrap()
-        .get("tau")
-        .unwrap()[0];
-
-    let n_trial = BVPResult::default()
-        .strategy_params
-        .as_ref()
-        .unwrap()
-        .get("n_trial")
-        .unwrap()[0] as usize;
+    let defaults = default_strategy_params();
+    let strategy_params = strategy_params.or(Some(&defaults));
+    let max_iter = strategy_param_usize(strategy_params, "max_iter", 8);
+    let max_njev = strategy_param_usize(strategy_params, "max_njev", 4);
+    let sigma = strategy_param_f64(strategy_params, "sigma", 0.2);
+    let tau = strategy_param_f64(strategy_params, "tau", 0.5);
+    let n_trial = strategy_param_usize(strategy_params, "n_trial", 4);
 
     // Tolerance for collocation residuals
     let tol_r: faer_col = faer_col::from_fn(h.nrows(), |i| 2.0 / 3.0 * h[i] * 5e-2 * bvp_tol);
@@ -886,6 +1540,8 @@ pub fn solve_newton(
     let mut singular = false;
     let mut recompute_jac = true;
     let mut lu_solver: Option<faer::sparse::linalg::solvers::Lu<_, _>> = None;
+    let mut banded_solver: Option<LapackStyleBandedLuFaithful> = None;
+    let mut bordered_factorization: Option<BvpSciBorderedStructuredFactorization> = None;
     let mut cost = 0.0;
 
     info!("\n \n Starting Newton iterations for collocation system \n \n");
@@ -946,46 +1602,277 @@ pub fn solve_newton(
                 estimate_bc_jac(bc, &ya, &yb, &p, Some(&bc_res))
             };
 
-            // Construct global Jacobian
-            let jac_matrix: faer_mat = construct_global_jac(
+            // Construct global Jacobian (use cached path if available)
+            let jac_matrix: faer_mat = if let Some(cache) = sparsity_cache.as_mut() {
+                construct_global_jac_cached(
+                    n,
+                    m,
+                    k,
+                    h,
+                    &df_dy,
+                    &df_dy_middle,
+                    df_dp.as_ref().map(|v| v.as_slice()),
+                    df_dp_middle.as_ref().map(|v| v.as_slice()),
+                    &dbc_dya,
+                    &dbc_dyb,
+                    dbc_dp.as_ref(),
+                    cache,
+                );
+                // Clone the matrix from the cache after values have been written
+                let cached_mat = cache.matrix_clone();
+
+                cached_mat
+            } else {
+                construct_global_jac(
+                    n,
+                    m,
+                    k,
+                    h,
+                    &df_dy,
+                    &df_dy_middle,
+                    df_dp.as_ref().map(|v| v.as_slice()),
+                    df_dp_middle.as_ref().map(|v| v.as_slice()),
+                    &dbc_dya,
+                    &dbc_dyb,
+                    dbc_dp.as_ref(),
+                )
+            };
+            custom_timer.jac_tac();
+            custom_timer.linear_system_tic();
+            let jacobian_diagnostics = inspect_global_jacobian(&jac_matrix);
+            record_global_jacobian_diagnostics(calc_statistics, &jacobian_diagnostics);
+            if jacobian_diagnostics.is_definitely_singular() {
+                *calc_statistics
+                    .entry("global jacobian explicit singular precheck failures".to_string())
+                    .or_insert(0) += 1;
+                singular = true;
+                break;
+            }
+            lu_solver = None;
+            banded_solver = None;
+            bordered_factorization = None;
+
+            let route_profile = profile_bordered_banded_global_jacobian(
+                &jac_matrix,
                 n,
                 m,
                 k,
-                h,
-                &df_dy,
-                &df_dy_middle,
-                df_dp.as_ref().map(|v| v.as_slice()),
-                df_dp_middle.as_ref().map(|v| v.as_slice()),
-                &dbc_dya,
-                &dbc_dyb,
-                dbc_dp.as_ref(),
+                BvpSciBandedRoutePolicy::default(),
             );
-            custom_timer.jac_tac();
-            custom_timer.linear_system_tic();
-            // Attempt sparse LU decomposition
-            match jac_matrix.sp_lu() {
-                Ok(lu) => {
-                    let step = lu.solve(res.as_mat());
-                    let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
-
-                    lu_solver = Some(lu);
-                    cost = step_col.squared_norm_l2();
-                    *calc_statistics
-                        .entry("number of solving linear systems".to_string())
-                        .or_insert(0) += 1;
+            record_linear_backend_route(calc_statistics, &route_profile);
+            let should_try_bordered = match linear_solve_policy {
+                BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => {
+                    if route_profile.recommended_route != BvpSciBandedRoute::BorderedBanded {
+                        *calc_statistics
+                            .entry("bvp sci bordered structured route rejected".to_string())
+                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
+                    }
+                    true
                 }
-                Err(_) => {
-                    singular = true;
-                    break;
+                _ => false,
+            };
+            let should_try_banded = match linear_solve_policy {
+                BvpSciLinearSolvePolicy::Sparse => false,
+                BvpSciLinearSolvePolicy::AutoBanded => {
+                    route_profile.recommended_route == BvpSciBandedRoute::FullScalarBanded
+                }
+                BvpSciLinearSolvePolicy::RequireFullBanded => {
+                    if route_profile.recommended_route != BvpSciBandedRoute::FullScalarBanded {
+                        *calc_statistics
+                            .entry("bvp sci full banded route rejected".to_string())
+                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
+                    }
+                    true
+                }
+                BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => false,
+            };
+            let auto_banded_sparse_fallback =
+                linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded && !should_try_banded;
+
+            if should_try_bordered {
+                let extract_started = Instant::now();
+                let extracted_blocks = extract_bordered_banded_blocks(&jac_matrix, n, m, k);
+                add_elapsed_micros_stat(
+                    calc_statistics,
+                    "bvp sci bordered extraction us",
+                    extract_started,
+                );
+                *calc_statistics
+                    .entry("bvp sci bordered extraction calls".to_string())
+                    .or_insert(0) += 1;
+                match extracted_blocks.and_then(|blocks| {
+                    let factor_started = Instant::now();
+                    let factorization = factor_bordered_banded_structured(&blocks);
+                    add_elapsed_micros_stat(
+                        calc_statistics,
+                        "bvp sci bordered factorization us",
+                        factor_started,
+                    );
+                    *calc_statistics
+                        .entry("bvp sci bordered factorization calls".to_string())
+                        .or_insert(0) += 1;
+                    let factorization = factorization?;
+                    let solve_started = Instant::now();
+                    let step_col = factorization.solve(&res);
+                    add_elapsed_micros_stat(
+                        calc_statistics,
+                        "bvp sci bordered structured solve us",
+                        solve_started,
+                    );
+                    *calc_statistics
+                        .entry("bvp sci bordered structured solve calls".to_string())
+                        .or_insert(0) += 1;
+                    let step_col = step_col?;
+                    Ok((factorization, step_col))
+                }) {
+                    Ok((factorization, step_col)) => {
+                        bordered_factorization = Some(factorization);
+                        cost = step_col.squared_norm_l2();
+                        *calc_statistics
+                            .entry("number of solving linear systems".to_string())
+                            .or_insert(0) += 1;
+                        *calc_statistics
+                            .entry("bvp sci linear backend bordered structured solves".to_string())
+                            .or_insert(0) += 1;
+                        *calc_statistics
+                            .entry("bvp sci bordered initial solve calls".to_string())
+                            .or_insert(0) += 1;
+                    }
+                    Err(_) => {
+                        *calc_statistics
+                            .entry("bvp sci bordered structured solve failures".to_string())
+                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
+                    }
+                }
+            } else if should_try_banded {
+                match factor_banded_and_solve(&jac_matrix, &res) {
+                    Ok((lu, step_col)) => {
+                        banded_solver = Some(lu);
+                        cost = step_col.squared_norm_l2();
+                        *calc_statistics
+                            .entry("number of solving linear systems".to_string())
+                            .or_insert(0) += 1;
+                        *calc_statistics
+                            .entry("bvp sci linear backend full banded solves".to_string())
+                            .or_insert(0) += 1;
+                    }
+                    Err(_) if linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded => {
+                        *calc_statistics
+                            .entry("bvp sci full banded factor fallback to sparse".to_string())
+                            .or_insert(0) += 1;
+                        match jac_matrix.sp_lu() {
+                            Ok(lu) => {
+                                let step = lu.solve(res.as_mat());
+                                let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+
+                                lu_solver = Some(lu);
+                                cost = step_col.squared_norm_l2();
+                                *calc_statistics
+                                    .entry("number of solving linear systems".to_string())
+                                    .or_insert(0) += 1;
+                                *calc_statistics
+                                    .entry(
+                                        "bvp sci linear backend sparse fallback solves".to_string(),
+                                    )
+                                    .or_insert(0) += 1;
+                            }
+                            Err(_) => {
+                                *calc_statistics
+                                    .entry("global jacobian lu factorization failures".to_string())
+                                    .or_insert(0) += 1;
+                                singular = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        *calc_statistics
+                            .entry("bvp sci full banded factorization failures".to_string())
+                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
+                    }
+                }
+            } else {
+                // Attempt sparse LU decomposition
+                match jac_matrix.sp_lu() {
+                    Ok(lu) => {
+                        let step = lu.solve(res.as_mat());
+                        let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+
+                        lu_solver = Some(lu);
+                        cost = step_col.squared_norm_l2();
+                        *calc_statistics
+                            .entry("number of solving linear systems".to_string())
+                            .or_insert(0) += 1;
+                        let counter_key = if auto_banded_sparse_fallback {
+                            "bvp sci linear backend sparse fallback solves"
+                        } else {
+                            "bvp sci linear backend sparse solves"
+                        };
+                        *calc_statistics.entry(counter_key.to_string()).or_insert(0) += 1;
+                    }
+                    Err(_) => {
+                        *calc_statistics
+                            .entry("global jacobian lu factorization failures".to_string())
+                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
+                    }
                 }
             }
             njev += 1;
         }
         custom_timer.linear_system_tac();
-        if let Some(ref lu) = lu_solver {
+        let step_col = if let Some(ref lu) = lu_solver {
             let step: Mat<f64> = lu.solve(res.as_mat());
-            let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+            Some(faer_col::from_fn(step.nrows(), |i| *step.get(i, 0)))
+        } else if let Some(ref lu) = banded_solver {
+            match solve_with_banded_factor(lu, &res) {
+                Ok(step) => Some(step),
+                Err(_) => {
+                    *calc_statistics
+                        .entry("bvp sci full banded solve failures".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    None
+                }
+            }
+        } else if let Some(ref factorization) = bordered_factorization {
+            let solve_started = Instant::now();
+            let step_result = factorization.solve(&res);
+            add_elapsed_micros_stat(
+                calc_statistics,
+                "bvp sci bordered structured solve us",
+                solve_started,
+            );
+            *calc_statistics
+                .entry("bvp sci bordered structured solve calls".to_string())
+                .or_insert(0) += 1;
+            *calc_statistics
+                .entry("bvp sci bordered reuse solve calls".to_string())
+                .or_insert(0) += 1;
+            match step_result {
+                Ok(step) => Some(step),
+                Err(_) => {
+                    *calc_statistics
+                        .entry("bvp sci bordered structured solve failures".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
+        if let Some(step_col) = step_col {
             // Extract step components
             let mut y_step = faer_dense_mat::zeros(n, m);
             for j in 0..m {
@@ -1045,8 +1932,48 @@ pub fn solve_newton(
                     res_new[(m - 1) * n + i] = bc_res_new[i];
                 }
 
-                let step_new = lu.solve(res_new.as_mat());
-                let step_new_col = faer_col::from_fn(step_new.nrows(), |i| *step_new.get(i, 0));
+                let step_new_col = if let Some(ref lu) = lu_solver {
+                    let step_new = lu.solve(res_new.as_mat());
+                    faer_col::from_fn(step_new.nrows(), |i| *step_new.get(i, 0))
+                } else if let Some(ref lu) = banded_solver {
+                    match solve_with_banded_factor(lu, &res_new) {
+                        Ok(step) => step,
+                        Err(_) => {
+                            *calc_statistics
+                                .entry("bvp sci full banded solve failures".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
+                    }
+                } else if let Some(ref factorization) = bordered_factorization {
+                    let solve_started = Instant::now();
+                    let step_result = factorization.solve(&res_new);
+                    add_elapsed_micros_stat(
+                        calc_statistics,
+                        "bvp sci bordered structured solve us",
+                        solve_started,
+                    );
+                    *calc_statistics
+                        .entry("bvp sci bordered structured solve calls".to_string())
+                        .or_insert(0) += 1;
+                    *calc_statistics
+                        .entry("bvp sci bordered line search solve calls".to_string())
+                        .or_insert(0) += 1;
+                    match step_result {
+                        Ok(step) => step,
+                        Err(_) => {
+                            *calc_statistics
+                                .entry("bvp sci bordered structured solve failures".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
+                    }
+                } else {
+                    singular = true;
+                    break;
+                };
                 let cost_new = step_new_col.squared_norm_l2();
 
                 if cost_new < (1.0 - 2.0 * alpha * sigma) * cost {
@@ -1059,6 +1986,10 @@ pub fn solve_newton(
                 if trial < n_trial {
                     alpha *= tau;
                 }
+            }
+
+            if singular {
+                break;
             }
 
             y = best_y;
@@ -1153,7 +2084,7 @@ pub fn create_spline(y: &faer_dense_mat, yp: &faer_dense_mat, x: &faer_col, h: &
 
             // Cubic spline coefficients (highest degree first)
             c[0][j][i] = t / h[j]; // x^3 coefficient
-            c[1][j][i] = (slope - yp.get(i, j)) / h[j] - t; // x^2 coefficient  
+            c[1][j][i] = (slope - yp.get(i, j)) / h[j] - t; // x^2 coefficient
             c[2][j][i] = *yp.get(i, j); // x^1 coefficient
             c[3][j][i] = *y.get(i, j); // x^0 coefficient
         }
@@ -1307,8 +2238,80 @@ pub fn modify_mesh(x: &faer_col, insert_1: &[usize], insert_2: &[usize]) -> faer
     faer_col::from_fn(new_points.len(), |i| new_points[i])
 }
 
-/// BVP solver with mesh refinement
+/// BVP solver with mesh refinement.
+///
+/// This compatibility wrapper uses the default Newton/line-search strategy.
 pub fn solve_bvp(
+    fun: &ODEFunction,
+    bc: &BCFunction,
+    x: faer_col,
+    y: faer_dense_mat,
+    p: Option<faer_col>,
+    _s: Option<faer_dense_mat>, // Singular term not implemented
+    fun_jac: Option<&ODEJacobian>,
+    bc_jac: Option<&BCJacobian>,
+    tol: f64,
+    max_nodes: usize,
+    verbose: u8,
+    bc_tol: Option<f64>,
+    customtimer: Option<CustomTimer>,
+) -> Result<BVPResult, String> {
+    solve_bvp_with_strategy_params(
+        fun,
+        bc,
+        x,
+        y,
+        p,
+        _s,
+        fun_jac,
+        bc_jac,
+        tol,
+        max_nodes,
+        verbose,
+        bc_tol,
+        customtimer,
+        None,
+    )
+}
+
+/// BVP solver with mesh refinement and explicit Newton/line-search strategy.
+pub fn solve_bvp_with_strategy_params(
+    fun: &ODEFunction,
+    bc: &BCFunction,
+    x: faer_col,
+    y: faer_dense_mat,
+    p: Option<faer_col>,
+    _s: Option<faer_dense_mat>, // Singular term not implemented
+    fun_jac: Option<&ODEJacobian>,
+    bc_jac: Option<&BCJacobian>,
+    tol: f64,
+    max_nodes: usize,
+    verbose: u8,
+    bc_tol: Option<f64>,
+    customtimer: Option<CustomTimer>,
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+) -> Result<BVPResult, String> {
+    solve_bvp_with_strategy_and_linear_policy(
+        fun,
+        bc,
+        x,
+        y,
+        p,
+        _s,
+        fun_jac,
+        bc_jac,
+        tol,
+        max_nodes,
+        verbose,
+        bc_tol,
+        customtimer,
+        strategy_params,
+        BvpSciLinearSolvePolicy::Sparse,
+    )
+}
+
+/// BVP solver with explicit Newton strategy and linear backend policy.
+pub fn solve_bvp_with_strategy_and_linear_policy(
     fun: &ODEFunction,
     bc: &BCFunction,
     mut x: faer_col,
@@ -1322,6 +2325,8 @@ pub fn solve_bvp(
     verbose: u8,
     bc_tol: Option<f64>,
     customtimer: Option<CustomTimer>,
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+    linear_solve_policy: BvpSciLinearSolvePolicy,
 ) -> Result<BVPResult, String> {
     if fun_jac.is_none() {
         info!("\n \n No Jacobian provided, using numerical estimation \n \n");
@@ -1384,6 +2389,10 @@ pub fn solve_bvp(
         );
     }
 
+    // Create sparsity cache for Jacobian reuse across Newton iterations
+    let k = p.nrows();
+    let mut sparsity_cache: Option<JacobianSparsityCache> = None;
+
     loop {
         m = x.nrows();
 
@@ -1391,6 +2400,15 @@ pub fn solve_bvp(
         let mut h = faer_col::zeros(m - 1);
         for i in 0..(m - 1) {
             h[i] = x[i + 1] - x[i];
+        }
+
+        // Recreate cache if mesh size changed (m changes after grid refinement)
+        let needs_new_cache = match &sparsity_cache {
+            Some(cache) => cache.m != m || cache.n != n || cache.k != k,
+            None => true,
+        };
+        if needs_new_cache {
+            sparsity_cache = Some(JacobianSparsityCache::new(n, m, k));
         }
 
         // Solve Newton system
@@ -1409,6 +2427,9 @@ pub fn solve_bvp(
             bc_tol,
             &mut custom_timer,
             &mut calc_statistics,
+            sparsity_cache.as_mut(),
+            strategy_params,
+            linear_solve_policy,
         );
 
         y = y_new;
@@ -1565,19 +2586,26 @@ pub fn solve_bvp(
         success: status == 0,
         calc_statistics: calc_statistics,
         custom_timer: custom_timer,
-        strategy_params: BVPResult::default().strategy_params,
+        strategy_params: Some(
+            strategy_params
+                .cloned()
+                .unwrap_or_else(default_strategy_params),
+        ),
     })
 }
 
-/// BVP solver with mesh refinement using sparse matrices
-/// This version uses sparse matrix operations for better performance on large systems
+/// Compatibility alias for the production faer sparse BVP solver.
+///
+/// Historically this function duplicated the full solve loop. Keep the public
+/// name for callers, but route through the single implementation so strategy,
+/// timings, mesh refinement, and Jacobian-cache behavior cannot diverge.
 pub fn solve_bvp_sparse(
     fun: &ODEFunction,
     bc: &BCFunction,
-    mut x: faer_col,
-    mut y: faer_dense_mat,
+    x: faer_col,
+    y: faer_dense_mat,
     p: Option<faer_col>,
-    _s: Option<faer_dense_mat>, // Singular term not implemented
+    _s: Option<faer_dense_mat>,
     fun_jac: Option<&ODEJacobian>,
     bc_jac: Option<&BCJacobian>,
     tol: f64,
@@ -1586,244 +2614,20 @@ pub fn solve_bvp_sparse(
     bc_tol: Option<f64>,
     customtimer: Option<CustomTimer>,
 ) -> Result<BVPResult, String> {
-    let mut custom_timer = customtimer.unwrap_or_else(|| CustomTimer::new());
-    let vec_of_tuples = vec![
-        ("number of iterations".to_string(), 0),
-        ("number of solving linear systems".to_string(), 0),
-        ("number of jacobians recalculations".to_string(), 0),
-        ("number of grid refinements".to_string(), 0),
-    ];
-    let mut calc_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
-
-    let n = y.nrows();
-    let mut m = x.nrows();
-
-    if y.ncols() != m {
-        return Err("y must have same number of columns as x has elements".to_string());
-    }
-
-    let mut p = p.unwrap_or_else(|| faer_col::zeros(0));
-    let bc_tol = bc_tol.unwrap_or(tol);
-    let max_iteration = 10;
-
-    custom_timer.fun_tic();
-    // Initial validation
-    let f_test = fun(&x, &y, &p);
-    custom_timer.fun_tac();
-    if (f_test.nrows(), f_test.ncols()) != (y.nrows(), y.ncols()) {
-        return Err(format!(
-            "Function return shape ({}, {}) doesn't match y shape ({}, {})",
-            f_test.nrows(),
-            f_test.ncols(),
-            y.nrows(),
-            y.ncols()
-        ));
-    }
-
-    let ya_test = faer_col::from_fn(n, |i| *y.get(i, 0));
-    let yb_test = faer_col::from_fn(n, |i| *y.get(i, m - 1));
-    let bc_test = bc(&ya_test, &yb_test, &p);
-    let expected_bc_size = n + p.nrows();
-    if bc_test.nrows() != expected_bc_size {
-        return Err(format!(
-            "BC return size {} doesn't match expected size {}",
-            bc_test.nrows(),
-            expected_bc_size
-        ));
-    }
-
-    let mut status = 0;
-    let mut iteration = 0;
-
-    if verbose == 2 {
-        info!(
-            "{:^15}{:^15}{:^15}{:^15}{:^15}",
-            "Iteration", "Max residual", "Max BC residual", "Total nodes", "Nodes added"
-        );
-    }
-
-    loop {
-        m = x.nrows();
-
-        // Compute mesh intervals
-        let mut h = faer_col::zeros(m - 1);
-        for i in 0..(m - 1) {
-            h[i] = x[i + 1] - x[i];
-        }
-
-        // Solve Newton system using sparse solver
-        let (y_new, p_new, singular) = solve_newton(
-            n,
-            m,
-            &h,
-            fun,
-            bc,
-            fun_jac,
-            bc_jac,
-            y.clone(),
-            p.clone(),
-            &x,
-            tol,
-            bc_tol,
-            &mut custom_timer,
-            &mut calc_statistics,
-        );
-
-        y = y_new;
-        p = p_new;
-        iteration += 1;
-        *calc_statistics
-            .entry("number of iterations".to_string())
-            .or_insert(0) += 1;
-        custom_timer.fun_tic();
-        // Compute collocation residuals and boundary condition residuals
-        let (col_res, _y_middle, f, f_middle) = collocation_fun(fun, &y, &p, &x, &h);
-        custom_timer.fun_tac();
-        let ya_curr = faer_col::from_fn(n, |i| *y.get(i, 0));
-        let yb_curr = faer_col::from_fn(n, |i| *y.get(i, m - 1));
-        let bc_res = bc(&ya_curr, &yb_curr, &p);
-        let max_bc_res = (0..bc_res.nrows())
-            .map(|i| bc_res[i].abs())
-            .fold(0.0, f64::max);
-
-        if singular {
-            status = 2;
-            break;
-        }
-
-        // This relation is not trivial, but can be verified
-        let mut r_middle = faer_dense_mat::zeros(n, m - 1);
-        for j in 0..(m - 1) {
-            for i in 0..n {
-                *r_middle.get_mut(i, j) = 1.5 * col_res.get(i, j) / h[j];
-            }
-        }
-
-        let sol = create_spline(&y, &f, &x, &h);
-
-        custom_timer.fun_tic();
-        let rms_res = estimate_rms_residuals(fun, &sol, &x, &h, &p, &r_middle, &f_middle);
-        custom_timer.fun_tac();
-        let max_rms_res = (0..rms_res.nrows()).map(|i| rms_res[i]).fold(0.0, f64::max);
-
-        // Determine which intervals need refinement
-        let mut insert_1 = Vec::new();
-        let mut insert_2 = Vec::new();
-
-        for j in 0..(m - 1) {
-            if rms_res[j] > tol && rms_res[j] < 100.0 * tol {
-                insert_1.push(j);
-            } else if rms_res[j] >= 100.0 * tol {
-                insert_2.push(j);
-            }
-        }
-
-        let nodes_added = insert_1.len() + 2 * insert_2.len();
-
-        if m + nodes_added > max_nodes {
-            status = 1;
-            if verbose == 2 {
-                info!(
-                    "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
-                    iteration,
-                    max_rms_res,
-                    max_bc_res,
-                    m,
-                    format!("({})", nodes_added)
-                );
-            }
-            break;
-        }
-
-        if verbose == 2 {
-            info!(
-                "{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}",
-                iteration, max_rms_res, max_bc_res, m, nodes_added
-            );
-        }
-
-        if nodes_added > 0 {
-            custom_timer.grid_refinement_tic();
-            x = modify_mesh(&x, &insert_1, &insert_2);
-            // Evaluate solution at new mesh points
-            let x_eval: Vec<f64> = (0..x.nrows()).map(|i| x[i]).collect();
-            let y_new_vals = sol.call(&x_eval, &[x.nrows()], Some(0), None);
-            y = faer_dense_mat::from_fn(y_new_vals.ncols(), y_new_vals.nrows(), |i, j| {
-                y_new_vals[(j, i)]
-            });
-            custom_timer.grid_refinement_tac();
-            *calc_statistics
-                .entry("number of grid refinements".to_string())
-                .or_insert(0) += 1;
-        } else if max_bc_res <= bc_tol {
-            status = 0;
-            break;
-        } else if iteration >= max_iteration {
-            status = 3;
-            break;
-        }
-    }
-
-    if verbose > 0 {
-        match status {
-            0 => info!(
-                "Solved in {} iterations, number of nodes {}.",
-                iteration,
-                x.nrows()
-            ),
-            1 => log::warn!("Number of nodes exceeded after iteration {}.", iteration),
-            2 => log::warn!("Singular Jacobian encountered on iteration {}.", iteration),
-            3 => log::warn!(
-                "Unable to satisfy boundary conditions tolerance on iteration {}.",
-                iteration
-            ),
-            _ => {}
-        }
-    }
-    custom_timer.fun_tic();
-    let final_f = fun(&x, &y, &p);
-    custom_timer.fun_tac();
-    let final_h = faer_col::from_fn(x.nrows() - 1, |i| x[i + 1] - x[i]);
-    let (col_res_final, _y_middle_final, _, f_middle_final) =
-        collocation_fun(fun, &y, &p, &x, &final_h);
-    let mut r_middle_final = faer_dense_mat::zeros(n, x.nrows() - 1);
-    for j in 0..(x.nrows() - 1) {
-        for i in 0..n {
-            *r_middle_final.get_mut(i, j) = 1.5 * col_res_final.get(i, j) / final_h[j];
-        }
-    }
-    let final_sol = create_spline(&y, &final_f, &x, &final_h);
-    let final_rms_res = estimate_rms_residuals(
+    solve_bvp_with_strategy_params(
         fun,
-        &final_sol,
-        &x,
-        &final_h,
-        &p,
-        &r_middle_final,
-        &f_middle_final,
-    );
-
-    let message = match status {
-        0 => "The algorithm converged to the desired accuracy.",
-        1 => "The maximum number of mesh nodes is exceeded.",
-        2 => "A singular Jacobian encountered when solving the collocation system.",
-        3 => "The solver was unable to satisfy boundary conditions tolerance on iteration 10.",
-        _ => "Unknown status",
-    };
-
-    Ok(BVPResult {
-        sol: Some(final_sol),
-        p: if p.nrows() > 0 { Some(p) } else { None },
+        bc,
         x,
         y,
-        yp: final_f,
-        rms_residuals: final_rms_res,
-        niter: iteration,
-        status,
-        message: message.to_string(),
-        success: status == 0,
-        calc_statistics: calc_statistics,
-        custom_timer: custom_timer,
-        strategy_params: BVPResult::default().strategy_params,
-    })
+        p,
+        _s,
+        fun_jac,
+        bc_jac,
+        tol,
+        max_nodes,
+        verbose,
+        bc_tol,
+        customtimer,
+        None,
+    )
 }

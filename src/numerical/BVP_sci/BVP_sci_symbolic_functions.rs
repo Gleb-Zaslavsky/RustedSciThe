@@ -21,7 +21,7 @@
 
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    ODEFunction, ODEJacobian, faer_col, faer_dense_mat, faer_mat,
+    faer_col, faer_dense_mat, faer_mat, ODEFunction, ODEJacobian,
 };
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
