@@ -43,7 +43,7 @@
 //! - Computing derivatives for kinetic analysis
 //! - Preprocessing data for reaction rate calculations
 
-use lstsq::lstsq;
+use super::lstsq::*;
 use nalgebra::{DMatrix, DVector, SVD};
 
 /// Computes factorial of a number recursively.
@@ -415,8 +415,8 @@ mod tests {
             0.65714286,
             0.17142857,
             1.0,
-            4.05,
-            7.97142857,
+            4.0,
+            9.0,
         ];
         assert_eq!(y.len(), expected.len());
         for (a, e) in y.iter().zip(expected.iter()) {

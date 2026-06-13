@@ -665,7 +665,7 @@ mod tests {
         // to y data add some noise from -0.05 to 0.05
         let y_data = x_data
             .iter()
-            .map(|&x| 5.0 * x + 2.0 + rand::rng().random_range(-0.1..0.1))
+            .map(|&x| 5.0 * x + 2.0 + rand::random_range(-0.1..0.1))
             .collect::<Vec<f64>>();
         println!("noisy y_data: {:?}", y_data);
         let initial_guess = (1.0, 1.0);

@@ -44,6 +44,7 @@
 //! - Online derivative calculation for kinetic parameter estimation
 //! - Noise reduction in continuous monitoring systems
 
+use super::lstsq::*;
 use nalgebra::{DMatrix, DVector};
 use std::borrow::Borrow;
 /// Applies Savitzky-Golay filter to dynamic iterator input.
@@ -197,8 +198,25 @@ pub fn SG_coeffs_dyn(
     y[der] = (factorial(der) as f64) / del.powi(der as i32);
 
     // Solve the system for the Savitsky-Golay FIR coefficients
-    let solve = lstsq::lstsq(&A, &y, 1e-9f64).unwrap();
-    solve.solution.data.into()
+    let solve = lstsq(&A, &y, 1e-9f64).unwrap();
+    let mut coefficients: Vec<f64> = solve.solution.data.into();
+
+    // A centered design matrix implies mirror symmetry for even derivatives
+    // and antisymmetry for odd derivatives. Restore it after the SVD solve.
+    for i in 0..window_length / 2 {
+        let mirror = window_length - 1 - i;
+        if der % 2 == 0 {
+            let average = 0.5 * (coefficients[i] + coefficients[mirror]);
+            coefficients[i] = average;
+            coefficients[mirror] = average;
+        } else {
+            let average = 0.5 * (coefficients[i] - coefficients[mirror]);
+            coefficients[i] = average;
+            coefficients[mirror] = -average;
+        }
+    }
+
+    coefficients
 }
 
 /// Computes factorial using iterative product.

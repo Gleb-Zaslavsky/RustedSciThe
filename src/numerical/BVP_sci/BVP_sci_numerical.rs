@@ -18,11 +18,17 @@
 
 use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    faer_col, faer_dense_mat, faer_mat, solve_bvp, BCFunction, BCJacobian, BVPResult, ODEFunction,
-    ODEJacobian,
+    BCFunction, BCJacobian, BVPResult, ODEFunction, ODEJacobian, faer_col, faer_dense_mat,
+    faer_mat, solve_bvp,
 };
 use faer::sparse::Triplet;
 use std::sync::Arc;
+
+type NumericalRhsClosure = dyn Fn(f64, &[f64], &[f64], &mut [f64]) + Send + Sync;
+type NumericalBoundaryResidualClosure = dyn Fn(&[f64], &[f64], &[f64], &mut [f64]) + Send + Sync;
+type NumericalRhsJacobianClosure = dyn Fn(f64, &[f64], &[f64]) -> Option<faer_mat> + Send + Sync;
+type NumericalBoundaryJacobianClosure =
+    dyn Fn(&[f64], &[f64], &[f64]) -> Option<(faer_mat, faer_mat, Option<faer_mat>)> + Send + Sync;
 
 /// How the pure numerical branch obtains Jacobians.
 ///
@@ -36,6 +42,141 @@ pub enum NumericalJacobianMode {
     FiniteDifference,
     /// Use user-provided analytical pointwise Jacobians.
     AnalyticalPointwise,
+}
+
+/// Closure-based pure numerical BVP definition.
+///
+/// This is the ergonomic route for callers that do not want to implement a
+/// custom trait type. It mirrors the trait-based API but keeps the problem
+/// definition in plain closures and makes the Jacobian mode explicit.
+#[derive(Clone)]
+pub struct NumericalBvpClosureProblem {
+    dimension: usize,
+    parameter_dimension: usize,
+    rhs: Arc<NumericalRhsClosure>,
+    boundary_residual: Arc<NumericalBoundaryResidualClosure>,
+    rhs_jacobian: Option<Arc<NumericalRhsJacobianClosure>>,
+    rhs_param_jacobian: Option<Arc<NumericalRhsJacobianClosure>>,
+    boundary_jacobian: Option<Arc<NumericalBoundaryJacobianClosure>>,
+    jacobian_mode: NumericalJacobianMode,
+}
+
+/// User-facing alias for the closure-first pure numerical BVP route.
+///
+/// This name is intentionally short and stable for public examples and guides:
+/// users should be able to write `BvpSciNumericalProblem::new_fd(...)` without
+/// learning any symbolic API details.
+pub type BvpSciNumericalProblem = NumericalBvpClosureProblem;
+
+impl NumericalBvpClosureProblem {
+    /// Construct a low-friction numerical BVP problem that relies on finite
+    /// differences for all Jacobians.
+    pub fn new_fd<Rhs, Bc>(
+        dimension: usize,
+        parameter_dimension: usize,
+        rhs: Rhs,
+        boundary_residual: Bc,
+    ) -> Self
+    where
+        Rhs: Fn(f64, &[f64], &[f64], &mut [f64]) + Send + Sync + 'static,
+        Bc: Fn(&[f64], &[f64], &[f64], &mut [f64]) + Send + Sync + 'static,
+    {
+        Self {
+            dimension,
+            parameter_dimension,
+            rhs: Arc::new(rhs),
+            boundary_residual: Arc::new(boundary_residual),
+            rhs_jacobian: None,
+            rhs_param_jacobian: None,
+            boundary_jacobian: None,
+            jacobian_mode: NumericalJacobianMode::FiniteDifference,
+        }
+    }
+
+    /// Construct a high-performance numerical BVP problem with explicit
+    /// pointwise Jacobians.
+    pub fn new_with_jacobian<Rhs, Bc, RhsJ, BcJ>(
+        dimension: usize,
+        parameter_dimension: usize,
+        rhs: Rhs,
+        boundary_residual: Bc,
+        rhs_jacobian: RhsJ,
+        boundary_jacobian: BcJ,
+    ) -> Self
+    where
+        Rhs: Fn(f64, &[f64], &[f64], &mut [f64]) + Send + Sync + 'static,
+        Bc: Fn(&[f64], &[f64], &[f64], &mut [f64]) + Send + Sync + 'static,
+        RhsJ: Fn(f64, &[f64], &[f64]) -> Option<faer_mat> + Send + Sync + 'static,
+        BcJ: Fn(&[f64], &[f64], &[f64]) -> Option<(faer_mat, faer_mat, Option<faer_mat>)>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            dimension,
+            parameter_dimension,
+            rhs: Arc::new(rhs),
+            boundary_residual: Arc::new(boundary_residual),
+            rhs_jacobian: Some(Arc::new(rhs_jacobian)),
+            rhs_param_jacobian: None,
+            boundary_jacobian: Some(Arc::new(boundary_jacobian)),
+            jacobian_mode: NumericalJacobianMode::AnalyticalPointwise,
+        }
+    }
+
+    /// Attach a pointwise `df/dp` closure to a `new_with_jacobian` problem.
+    pub fn with_rhs_param_jacobian<RhsP>(mut self, rhs_param_jacobian: RhsP) -> Self
+    where
+        RhsP: Fn(f64, &[f64], &[f64]) -> Option<faer_mat> + Send + Sync + 'static,
+    {
+        self.rhs_param_jacobian = Some(Arc::new(rhs_param_jacobian));
+        self
+    }
+}
+
+impl NumericalBvpProblem for NumericalBvpClosureProblem {
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn parameter_dimension(&self) -> usize {
+        self.parameter_dimension
+    }
+
+    fn rhs(&self, x: f64, y: &[f64], p: &[f64], out: &mut [f64]) {
+        (self.rhs)(x, y, p, out)
+    }
+
+    fn boundary_residual(&self, ya: &[f64], yb: &[f64], p: &[f64], out: &mut [f64]) {
+        (self.boundary_residual)(ya, yb, p, out)
+    }
+
+    fn jacobian_mode(&self) -> NumericalJacobianMode {
+        self.jacobian_mode
+    }
+
+    fn rhs_jacobian(&self, x: f64, y: &[f64], p: &[f64]) -> Option<faer_mat> {
+        self.rhs_jacobian
+            .as_ref()
+            .and_then(|callback| callback(x, y, p))
+    }
+
+    fn rhs_param_jacobian(&self, x: f64, y: &[f64], p: &[f64]) -> Option<faer_mat> {
+        self.rhs_param_jacobian
+            .as_ref()
+            .and_then(|callback| callback(x, y, p))
+    }
+
+    fn boundary_jacobian(
+        &self,
+        ya: &[f64],
+        yb: &[f64],
+        p: &[f64],
+    ) -> Option<(faer_mat, faer_mat, Option<faer_mat>)> {
+        self.boundary_jacobian
+            .as_ref()
+            .and_then(|callback| callback(ya, yb, p))
+    }
 }
 
 /// Pointwise pure-numerical BVP definition.
@@ -108,6 +249,9 @@ pub struct NumericalBvpSolveOptions {
     pub custom_timer: Option<CustomTimer>,
 }
 
+/// User-facing alias for the pure numerical solve options.
+pub type BvpSciNumericalOptions = NumericalBvpSolveOptions;
+
 impl NumericalBvpSolveOptions {
     pub fn new(
         mesh: faer_col,
@@ -130,6 +274,25 @@ impl NumericalBvpSolveOptions {
 
     pub fn with_parameters(mut self, parameters: Option<faer_col>) -> Self {
         self.parameters = parameters;
+        self
+    }
+
+    /// Override the residual/Jacobian tolerance after construction.
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = tolerance;
+        self
+    }
+
+    /// Override the maximum allowed mesh nodes after construction.
+    pub fn with_max_nodes(mut self, max_nodes: usize) -> Self {
+        self.max_nodes = max_nodes;
+        self
+    }
+
+    /// Override both mesh-refinement controls in one place.
+    pub fn with_mesh_refinement(mut self, tolerance: f64, max_nodes: usize) -> Self {
+        self.tolerance = tolerance;
+        self.max_nodes = max_nodes;
         self
     }
 
@@ -335,5 +498,78 @@ pub fn solve_numerical_bvp<P: NumericalBvpProblem + 'static>(
         options.verbose,
         options.bc_tol,
         options.custom_timer,
+    )
+}
+
+#[derive(Clone)]
+struct ForcedJacobianModeProblem<P> {
+    inner: P,
+    mode: NumericalJacobianMode,
+}
+
+impl<P: NumericalBvpProblem> NumericalBvpProblem for ForcedJacobianModeProblem<P> {
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn parameter_dimension(&self) -> usize {
+        self.inner.parameter_dimension()
+    }
+
+    fn rhs(&self, x: f64, y: &[f64], p: &[f64], out: &mut [f64]) {
+        self.inner.rhs(x, y, p, out)
+    }
+
+    fn boundary_residual(&self, ya: &[f64], yb: &[f64], p: &[f64], out: &mut [f64]) {
+        self.inner.boundary_residual(ya, yb, p, out)
+    }
+
+    fn jacobian_mode(&self) -> NumericalJacobianMode {
+        self.mode
+    }
+
+    fn rhs_jacobian(&self, x: f64, y: &[f64], p: &[f64]) -> Option<faer_mat> {
+        self.inner.rhs_jacobian(x, y, p)
+    }
+
+    fn rhs_param_jacobian(&self, x: f64, y: &[f64], p: &[f64]) -> Option<faer_mat> {
+        self.inner.rhs_param_jacobian(x, y, p)
+    }
+
+    fn boundary_jacobian(
+        &self,
+        ya: &[f64],
+        yb: &[f64],
+        p: &[f64],
+    ) -> Option<(faer_mat, faer_mat, Option<faer_mat>)> {
+        self.inner.boundary_jacobian(ya, yb, p)
+    }
+}
+
+/// Explicit low-friction numerical route: force finite-difference Jacobians.
+pub fn solve_numerical_bvp_fd<P: NumericalBvpProblem + 'static>(
+    problem: P,
+    options: NumericalBvpSolveOptions,
+) -> Result<BVPResult, String> {
+    solve_numerical_bvp(
+        ForcedJacobianModeProblem {
+            inner: problem,
+            mode: NumericalJacobianMode::FiniteDifference,
+        },
+        options,
+    )
+}
+
+/// Explicit high-performance numerical route: force analytical pointwise Jacobians.
+pub fn solve_numerical_bvp_with_jacobian<P: NumericalBvpProblem + 'static>(
+    problem: P,
+    options: NumericalBvpSolveOptions,
+) -> Result<BVPResult, String> {
+    solve_numerical_bvp(
+        ForcedJacobianModeProblem {
+            inner: problem,
+            mode: NumericalJacobianMode::AnalyticalPointwise,
+        },
+        options,
     )
 }

@@ -1,10 +1,13 @@
 //! Pure numerical `BVP_sci` guide.
 //!
-//! This example is the user-facing entry point for the no-symbolic BVP story:
-//! - `FiniteDifference` is the easiest mode: implement only `rhs()` and
-//!   `boundary_residual()`.
-//! - `AnalyticalPointwise` is the performance-oriented mode: implement those
-//!   callbacks plus pointwise Jacobians.
+//! This example is the user-facing entry point for the no-symbolic BVP story.
+//! It follows the same closure-first pattern as the pure numerical BVP_Damp
+//! guide, but remains BVP-specific:
+//! - `NumericalBvpClosureProblem::new_fd(...)` is the easiest mode: provide
+//!   closures for `rhs()` and `boundary_residual()`.
+//! - `NumericalBvpClosureProblem::new_with_jacobian(...)` is the
+//!   performance-oriented mode: provide those closures plus pointwise
+//!   Jacobians.
 //!
 //! Practical rule of thumb from the current comparison suite:
 //! - start with `FiniteDifference` for small systems or quick prototyping;
@@ -16,83 +19,10 @@ use std::time::Instant;
 use RustedSciThe::numerical::BVP_Damp::BVP_utils::CustomTimer;
 use RustedSciThe::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
 use RustedSciThe::numerical::BVP_sci::BVP_sci_numerical::{
-    NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode, solve_numerical_bvp,
+    NumericalBvpClosureProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
+    solve_numerical_bvp, solve_numerical_bvp_fd, solve_numerical_bvp_with_jacobian,
 };
 use faer::sparse::Triplet;
-
-struct HarmonicProblemFd;
-
-impl NumericalBvpProblem for HarmonicProblemFd {
-    fn dimension(&self) -> usize {
-        2
-    }
-
-    fn rhs(&self, _x: f64, y: &[f64], _p: &[f64], out: &mut [f64]) {
-        out[0] = y[1];
-        out[1] = -y[0];
-    }
-
-    fn boundary_residual(&self, ya: &[f64], _yb: &[f64], _p: &[f64], out: &mut [f64]) {
-        out[0] = ya[0];
-        out[1] = ya[1] - 1.0;
-    }
-}
-
-struct HarmonicProblemAnalytical;
-
-impl NumericalBvpProblem for HarmonicProblemAnalytical {
-    fn dimension(&self) -> usize {
-        2
-    }
-
-    fn jacobian_mode(&self) -> NumericalJacobianMode {
-        NumericalJacobianMode::AnalyticalPointwise
-    }
-
-    fn rhs(&self, _x: f64, y: &[f64], _p: &[f64], out: &mut [f64]) {
-        out[0] = y[1];
-        out[1] = -y[0];
-    }
-
-    fn boundary_residual(&self, ya: &[f64], _yb: &[f64], _p: &[f64], out: &mut [f64]) {
-        out[0] = ya[0];
-        out[1] = ya[1] - 1.0;
-    }
-
-    fn rhs_jacobian(&self, _x: f64, _y: &[f64], _p: &[f64]) -> Option<faer_mat> {
-        Some(
-            faer_mat::try_new_from_triplets(
-                2,
-                2,
-                &[
-                    Triplet::new(0usize, 1usize, 1.0),
-                    Triplet::new(1usize, 0usize, -1.0),
-                ],
-            )
-            .expect("harmonic rhs Jacobian should be constructible"),
-        )
-    }
-
-    fn boundary_jacobian(
-        &self,
-        _ya: &[f64],
-        _yb: &[f64],
-        _p: &[f64],
-    ) -> Option<(faer_mat, faer_mat, Option<faer_mat>)> {
-        let dya = faer_mat::try_new_from_triplets(
-            2,
-            2,
-            &[
-                Triplet::new(0usize, 0usize, 1.0),
-                Triplet::new(1usize, 1usize, 1.0),
-            ],
-        )
-        .expect("harmonic left BC Jacobian should be constructible");
-        let dyb = faer_mat::try_new_from_triplets(2, 2, &[])
-            .expect("harmonic right BC Jacobian should be constructible");
-        Some((dya, dyb, None))
-    }
-}
 
 fn harmonic_mesh(n_steps: usize) -> faer_col {
     faer_col::from_fn(n_steps, |i| {
@@ -108,17 +38,83 @@ fn harmonic_initial_guess(mesh: &faer_col) -> faer_dense_mat {
     })
 }
 
-fn run_case<P: NumericalBvpProblem + 'static>(label: &str, problem: P, n_steps: usize) {
+fn harmonic_fd_problem() -> NumericalBvpClosureProblem {
+    NumericalBvpClosureProblem::new_fd(
+        2,
+        0,
+        |_x, y, _p, out| {
+            out[0] = y[1];
+            out[1] = -y[0];
+        },
+        |ya, _yb, _p, out| {
+            out[0] = ya[0];
+            out[1] = ya[1] - 1.0;
+        },
+    )
+}
+
+fn harmonic_analytical_problem() -> NumericalBvpClosureProblem {
+    NumericalBvpClosureProblem::new_with_jacobian(
+        2,
+        0,
+        |_x, y, _p, out| {
+            out[0] = y[1];
+            out[1] = -y[0];
+        },
+        |ya, _yb, _p, out| {
+            out[0] = ya[0];
+            out[1] = ya[1] - 1.0;
+        },
+        |_x, _y, _p| {
+            Some(
+                faer_mat::try_new_from_triplets(
+                    2,
+                    2,
+                    &[
+                        Triplet::new(0usize, 1usize, 1.0),
+                        Triplet::new(1usize, 0usize, -1.0),
+                    ],
+                )
+                .expect("harmonic rhs Jacobian should be constructible"),
+            )
+        },
+        |_ya, _yb, _p| {
+            let dya = faer_mat::try_new_from_triplets(
+                2,
+                2,
+                &[
+                    Triplet::new(0usize, 0usize, 1.0),
+                    Triplet::new(1usize, 1usize, 1.0),
+                ],
+            )
+            .expect("harmonic left BC Jacobian should be constructible");
+            let dyb = faer_mat::try_new_from_triplets(2, 2, &[])
+                .expect("harmonic right BC Jacobian should be constructible");
+            Some((dya, dyb, None))
+        },
+    )
+}
+
+fn run_case(label: &str, problem: NumericalBvpClosureProblem, n_steps: usize) {
     let mesh = harmonic_mesh(n_steps);
     let guess = harmonic_initial_guess(&mesh);
     let custom_timer = CustomTimer::new();
     let started = Instant::now();
-    let result = solve_numerical_bvp(
-        problem,
-        NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512)
-            .with_verbose(0)
-            .with_custom_timer(Some(custom_timer)),
-    )
+    let result = if label == "FiniteDifference" {
+        solve_numerical_bvp_fd(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512)
+                .with_verbose(0)
+                .with_custom_timer(Some(custom_timer)),
+        )
+    } else {
+        solve_numerical_bvp_with_jacobian(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512)
+                .with_verbose(0)
+                .with_custom_timer(Some(custom_timer)),
+        )
+    }
     .unwrap_or_else(|err| panic!("{label} failed: {err}"));
     let total_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let (nrows, ncols) = result.y.shape();
@@ -142,9 +138,13 @@ fn run_case<P: NumericalBvpProblem + 'static>(label: &str, problem: P, n_steps: 
 fn print_guide() {
     println!("BVP_sci pure numerical guide");
     println!("============================");
-    println!("Two public modes:");
-    println!("  - FiniteDifference: easiest API, only rhs() and boundary_residual()");
-    println!("  - AnalyticalPointwise: add rhs_jacobian() and boundary_jacobian()");
+    println!("Two public modes and two explicit helpers:");
+    println!("  - NumericalBvpClosureProblem::new_fd(...): easiest closure-first API");
+    println!(
+        "  - NumericalBvpClosureProblem::new_with_jacobian(...): closure-first analytical API"
+    );
+    println!("  - solve_numerical_bvp_fd(...): explicit FD route");
+    println!("  - solve_numerical_bvp_with_jacobian(...): explicit analytical route");
     println!();
     println!("When to choose which:");
     println!("  - Use FiniteDifference for quick prototypes and small systems.");
@@ -159,6 +159,10 @@ fn print_guide() {
 fn main() {
     let n_steps = 64;
     print_guide();
-    run_case("FiniteDifference", HarmonicProblemFd, n_steps);
-    run_case("AnalyticalPointwise", HarmonicProblemAnalytical, n_steps);
+    run_case("FiniteDifference", harmonic_fd_problem(), n_steps);
+    run_case(
+        "AnalyticalPointwise",
+        harmonic_analytical_problem(),
+        n_steps,
+    );
 }

@@ -290,12 +290,27 @@ where
 
         // Use provided domain or default to knot domain
         let (min_t, max_t) = evaluation_domain.unwrap_or_else(|| self.knot_domain());
+        let knot_domain = self.knot_domain();
+        assert!(
+            min_t <= max_t,
+            "Evaluation domain start must not exceed its end"
+        );
+        assert!(
+            min_t >= knot_domain.0 && max_t <= knot_domain.1,
+            "Evaluation domain [{min_t}, {max_t}] must lie within knot domain [{}, {}]",
+            knot_domain.0,
+            knot_domain.1
+        );
         let mut sum_squared_error = 0.0;
         let mut max_error = 0.0;
         let mut sum_error = 0.0;
 
         for i in 0..sample_count {
-            let t = min_t + (max_t - min_t) * (i as f64) / (sample_count - 1) as f64;
+            let t = if sample_count == 1 {
+                min_t
+            } else {
+                min_t + (max_t - min_t) * (i as f64) / (sample_count - 1) as f64
+            };
             let interpolated_value: f64 = self.interpolate(t).into();
             let true_value = reference_function(t);
             let error = (interpolated_value - true_value).abs();
@@ -364,6 +379,33 @@ pub fn generate_2d_control_points(count: usize) -> Vec<Point2D> {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    fn greville_abscissae(knots: &[f64], degree: usize, control_point_count: usize) -> Vec<f64> {
+        (0..control_point_count)
+            .map(|i| knots[i + 1..=i + degree].iter().sum::<f64>() / degree as f64)
+            .collect()
+    }
+
+    fn quadratic_bspline_coefficients(
+        knots: &[f64],
+        degree: usize,
+        control_point_count: usize,
+    ) -> Vec<f64> {
+        let pair_count = degree * (degree - 1) / 2;
+        (0..control_point_count)
+            .map(|i| {
+                let local_knots = &knots[i + 1..=i + degree];
+                let mut pair_sum = 0.0;
+                for left in 0..local_knots.len() {
+                    for right in left + 1..local_knots.len() {
+                        pair_sum += local_knots[left] * local_knots[right];
+                    }
+                }
+                pair_sum / pair_count as f64
+            })
+            .collect()
+    }
+
     #[test]
     fn main_test() {
         println!("B-spline Interpolation Tool");
@@ -658,14 +700,12 @@ mod tests {
 
     #[test]
     fn test_interpolation_quality() {
-        // Test interpolation quality for a simple linear function
-        // Create control points that match a linear function y = x over domain [0, 4]
-        let control_points = vec![0.0_f64, 1.0, 2.0, 3.0, 4.0];
-        let interpolator = BSplineInterpolator::with_uniform_knots(3, control_points);
-
-        // For a linear function, cubic interpolation should be very accurate
-        // Evaluate over the same domain as the control points
-        let quality = interpolator.evaluate_quality(|x| x, 1000, Some((0.0, 4.0)));
+        let degree = 3;
+        let control_point_count = 5;
+        let knots = BSplineInterpolator::<f64>::generate_uniform_knots(control_point_count, degree);
+        let control_points = greville_abscissae(&knots, degree, control_point_count);
+        let interpolator = BSplineInterpolator::new(degree, control_points, knots);
+        let quality = interpolator.evaluate_quality(|x| x, 1000, Some(interpolator.knot_domain()));
         println!("Linear function interpolation quality: {:?}", quality);
 
         // For a linear function interpolated with a cubic spline, error should be very small
@@ -684,20 +724,21 @@ mod tests {
 
     #[test]
     fn test_sine_interpolation_quality() {
-        // Test interpolation quality for sine function
-        // Create control points for sine function over domain [0, π]
-        let control_points: Vec<f64> = (0..10)
-            .map(|i| {
-                let x = (i as f64) * std::f64::consts::PI / 9.0;
-                x.sin()
-            })
+        let degree = 3;
+        let control_point_count = 10;
+        let scale = std::f64::consts::PI / (control_point_count - degree) as f64;
+        let knots: Vec<f64> =
+            BSplineInterpolator::<f64>::generate_uniform_knots(control_point_count, degree)
+                .into_iter()
+                .map(|knot| knot * scale)
+                .collect();
+        let control_points = greville_abscissae(&knots, degree, control_point_count)
+            .into_iter()
+            .map(f64::sin)
             .collect();
-
-        let interpolator = BSplineInterpolator::with_uniform_knots(3, control_points);
-
-        // Evaluate quality against the true sine function over the same domain
+        let interpolator = BSplineInterpolator::new(degree, control_points, knots);
         let quality =
-            interpolator.evaluate_quality(|x| x.sin(), 1000, Some((0.0, std::f64::consts::PI)));
+            interpolator.evaluate_quality(|x| x.sin(), 1000, Some(interpolator.knot_domain()));
         println!("Sine function interpolation quality: {:?}", quality);
 
         // For sine function with 10 control points, error should be reasonably small
@@ -716,19 +757,13 @@ mod tests {
 
     #[test]
     fn test_polynomial_interpolation_quality() {
-        // Test interpolation quality for a quadratic function
-        // Create control points for quadratic function y = x^2 over domain [0, 4.5]
-        let control_points: Vec<f64> = (0..10)
-            .map(|i| {
-                let x = (i as f64) * 0.5;
-                x * x // Quadratic function
-            })
-            .collect();
-
-        let interpolator = BSplineInterpolator::with_uniform_knots(3, control_points);
-
-        // Evaluate quality against the true quadratic function over the same domain
-        let quality = interpolator.evaluate_quality(|x| x * x, 1000, Some((0.0, 4.5)));
+        let degree = 3;
+        let control_point_count = 10;
+        let knots = BSplineInterpolator::<f64>::generate_uniform_knots(control_point_count, degree);
+        let control_points = quadratic_bspline_coefficients(&knots, degree, control_point_count);
+        let interpolator = BSplineInterpolator::new(degree, control_points, knots);
+        let quality =
+            interpolator.evaluate_quality(|x| x * x, 1000, Some(interpolator.knot_domain()));
         println!("Quadratic function interpolation quality: {:?}", quality);
 
         // For quadratic function with cubic spline, error should be reasonably small

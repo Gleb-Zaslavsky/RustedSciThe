@@ -354,8 +354,8 @@ mod nalgebra_gs_test {
         // This should print: |1.5| >= 2.0? false
 
         // Create a random RHS for a non-trivial problem
-        use rand::Rng;
-        let mut rng = rand::rng();
+        use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(42);
         let x_true = DVector::from_fn(n, |_i, _j| rng.random());
         let b = &a * &x_true;
 

@@ -7,6 +7,9 @@
 //! explicitly before any specialized factorization is attempted.
 
 use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
+use crate::somelinalg::banded::banded_assembly::BandedAssembly;
+use crate::somelinalg::banded::dense_block_kernels::idx;
+use crate::somelinalg::banded::{dense_lu_pivot_in_place, dense_lu_pivot_solve_in_place};
 use nalgebra::{DMatrix, DVector, Dyn, LU};
 
 #[derive(Clone, Debug)]
@@ -158,6 +161,25 @@ pub fn solve_bordered_banded_structured(
 
 #[derive(Clone, Debug)]
 pub struct BvpSciBorderedStructuredFactorization {
+    backend: BvpSciBorderedStructuredBackend,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BvpSciBorderedSolveWorkspace {
+    state_offsets: Vec<f64>,
+    next_offset: Vec<f64>,
+    endpoint_state: Vec<f64>,
+    reconstructed_state: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+enum BvpSciBorderedStructuredBackend {
+    NativeParameterFree(BvpSciNativeBorderedParameterFreeFactorization),
+    Nalgebra(BvpSciNalgebraBorderedStructuredFactorization),
+}
+
+#[derive(Clone, Debug)]
+struct BvpSciNalgebraBorderedStructuredFactorization {
     variable_count: usize,
     mesh_points: usize,
     parameter_count: usize,
@@ -169,19 +191,81 @@ pub struct BvpSciBorderedStructuredFactorization {
     border_lu: LU<f64, Dyn, Dyn>,
 }
 
+#[derive(Clone, Debug)]
+struct NativeDenseLu {
+    lu: Vec<f64>,
+    pivots: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct BvpSciNativeBorderedParameterFreeFactorization {
+    variable_count: usize,
+    mesh_points: usize,
+    offdiag_lus: Vec<NativeDenseLu>,
+    diagonal_blocks: Vec<Vec<f64>>,
+    state_from_y0: Vec<Vec<f64>>,
+    boundary_right: Vec<f64>,
+    border_lu: NativeDenseLu,
+}
+
 impl BvpSciBorderedStructuredFactorization {
     pub fn total_size(&self) -> usize {
-        self.variable_count * self.mesh_points + self.parameter_count
+        match &self.backend {
+            BvpSciBorderedStructuredBackend::NativeParameterFree(factorization) => {
+                factorization.variable_count * factorization.mesh_points
+            }
+            BvpSciBorderedStructuredBackend::Nalgebra(factorization) => {
+                factorization.variable_count * factorization.mesh_points
+                    + factorization.parameter_count
+            }
+        }
     }
 
     pub fn solve(&self, rhs: &faer_col) -> Result<faer_col, String> {
+        let mut workspace = self.new_workspace();
+        self.solve_with_workspace(rhs, &mut workspace)
+    }
+
+    pub fn new_workspace(&self) -> BvpSciBorderedSolveWorkspace {
+        match &self.backend {
+            BvpSciBorderedStructuredBackend::NativeParameterFree(factorization) => {
+                BvpSciBorderedSolveWorkspace {
+                    state_offsets: vec![
+                        0.0;
+                        factorization.variable_count * factorization.mesh_points
+                    ],
+                    next_offset: vec![0.0; factorization.variable_count],
+                    endpoint_state: vec![0.0; factorization.variable_count],
+                    reconstructed_state: vec![0.0; factorization.variable_count],
+                }
+            }
+            BvpSciBorderedStructuredBackend::Nalgebra(_) => BvpSciBorderedSolveWorkspace::default(),
+        }
+    }
+
+    pub fn solve_with_workspace(
+        &self,
+        rhs: &faer_col,
+        workspace: &mut BvpSciBorderedSolveWorkspace,
+    ) -> Result<faer_col, String> {
+        match &self.backend {
+            BvpSciBorderedStructuredBackend::NativeParameterFree(factorization) => {
+                factorization.solve_with_workspace(rhs, workspace)
+            }
+            BvpSciBorderedStructuredBackend::Nalgebra(factorization) => factorization.solve(rhs),
+        }
+    }
+}
+
+impl BvpSciNalgebraBorderedStructuredFactorization {
+    fn solve(&self, rhs: &faer_col) -> Result<faer_col, String> {
         let n = self.variable_count;
         let m = self.mesh_points;
         let k = self.parameter_count;
-        if rhs.nrows() != self.total_size() {
+        if rhs.nrows() != self.variable_count * self.mesh_points + self.parameter_count {
             return Err(format!(
                 "BVP_sci bordered-banded structured factorization expected rhs length {}, got {}",
-                self.total_size(),
+                self.variable_count * self.mesh_points + self.parameter_count,
                 rhs.nrows()
             ));
         }
@@ -218,7 +302,7 @@ impl BvpSciBorderedStructuredFactorization {
             endpoint_solution.rows(n, k).into_owned()
         };
 
-        let mut solution = faer_col::zeros(self.total_size());
+        let mut solution = faer_col::zeros(n * m + k);
         for node in 0..m {
             let state = &self.state_from_y0[node] * &y0
                 + &self.state_from_params[node] * &params
@@ -235,6 +319,100 @@ impl BvpSciBorderedStructuredFactorization {
     }
 }
 
+impl BvpSciNativeBorderedParameterFreeFactorization {
+    fn solve_with_workspace(
+        &self,
+        rhs: &faer_col,
+        workspace: &mut BvpSciBorderedSolveWorkspace,
+    ) -> Result<faer_col, String> {
+        let n = self.variable_count;
+        let m = self.mesh_points;
+        let total_size = n * m;
+        if rhs.nrows() != total_size {
+            return Err(format!(
+                "BVP_sci bordered-banded structured factorization expected rhs length {}, got {}",
+                total_size,
+                rhs.nrows()
+            ));
+        }
+
+        workspace.state_offsets.resize(total_size, 0.0);
+        workspace.state_offsets.fill(0.0);
+        workspace.next_offset.resize(n, 0.0);
+        workspace.endpoint_state.resize(n, 0.0);
+        workspace.reconstructed_state.resize(n, 0.0);
+
+        for interval in 0..m.saturating_sub(1) {
+            for row in 0..n {
+                workspace.next_offset[row] = rhs[interval * n + row];
+            }
+            matvec_sub_assign(
+                &mut workspace.next_offset,
+                &self.diagonal_blocks[interval],
+                &workspace.state_offsets[interval * n..(interval + 1) * n],
+                n,
+            );
+            self.offdiag_lus[interval]
+                .solve_in_place(&mut workspace.next_offset)
+                .map_err(|err| {
+                    format!(
+                        "BVP_sci bordered-banded structured solve failed: cached native offdiag solve failed at interval {interval}: {err:?}"
+                    )
+                })?;
+            workspace.state_offsets[(interval + 1) * n..(interval + 2) * n]
+                .copy_from_slice(&workspace.next_offset);
+        }
+
+        let last = m - 1;
+        for row in 0..n {
+            workspace.endpoint_state[row] = rhs[n * (m - 1) + row];
+        }
+        matvec_sub_assign(
+            &mut workspace.endpoint_state,
+            &self.boundary_right,
+            &workspace.state_offsets[last * n..(last + 1) * n],
+            n,
+        );
+        self.border_lu
+            .solve_in_place(&mut workspace.endpoint_state)
+            .map_err(|err| {
+            format!("BVP_sci bordered-banded structured solve failed: cached native border solve failed: {err:?}")
+        })?;
+
+        let mut solution = faer_col::zeros(total_size);
+        for node in 0..m {
+            matvec_into(
+                &mut workspace.reconstructed_state,
+                &self.state_from_y0[node],
+                &workspace.endpoint_state,
+                n,
+            );
+            for row in 0..n {
+                workspace.reconstructed_state[row] += workspace.state_offsets[node * n + row];
+                solution[node * n + row] = workspace.reconstructed_state[row];
+            }
+        }
+
+        Ok(solution)
+    }
+}
+
+impl NativeDenseLu {
+    fn factor(mut matrix: Vec<f64>, size: usize) -> Result<Self, String> {
+        let mut pivots = vec![0; size];
+        dense_lu_pivot_in_place(&mut matrix, size, &mut pivots)
+            .map_err(|err| format!("native dense block LU factorization failed: {err:?}"))?;
+        Ok(Self { lu: matrix, pivots })
+    }
+
+    fn solve_in_place(
+        &self,
+        rhs: &mut [f64],
+    ) -> Result<(), crate::somelinalg::banded::BandedError> {
+        dense_lu_pivot_solve_in_place(&self.lu, self.pivots.len(), &self.pivots, rhs)
+    }
+}
+
 pub fn factor_bordered_banded_structured(
     blocks: &BvpSciBorderedBandedBlocks,
 ) -> Result<BvpSciBorderedStructuredFactorization, String> {
@@ -242,6 +420,10 @@ pub fn factor_bordered_banded_structured(
     let n = blocks.variable_count;
     let m = blocks.mesh_points;
     let k = blocks.parameter_count;
+
+    if k == 0 {
+        return factor_bordered_banded_parameter_free_native(blocks);
+    }
 
     let mut state_from_y0 = Vec::with_capacity(m);
     let mut state_from_params = Vec::with_capacity(m);
@@ -311,15 +493,80 @@ pub fn factor_bordered_banded_structured(
     }
 
     Ok(BvpSciBorderedStructuredFactorization {
-        variable_count: n,
-        mesh_points: m,
-        parameter_count: k,
-        offdiag_lus,
-        diagonal_blocks,
-        state_from_y0,
-        state_from_params,
-        boundary_right,
-        border_lu,
+        backend: BvpSciBorderedStructuredBackend::Nalgebra(
+            BvpSciNalgebraBorderedStructuredFactorization {
+                variable_count: n,
+                mesh_points: m,
+                parameter_count: k,
+                offdiag_lus,
+                diagonal_blocks,
+                state_from_y0,
+                state_from_params,
+                boundary_right,
+                border_lu,
+            },
+        ),
+    })
+}
+
+fn factor_bordered_banded_parameter_free_native(
+    blocks: &BvpSciBorderedBandedBlocks,
+) -> Result<BvpSciBorderedStructuredFactorization, String> {
+    let n = blocks.variable_count;
+    let m = blocks.mesh_points;
+
+    let mut state_from_y0 = Vec::with_capacity(m);
+    let mut offdiag_lus = Vec::with_capacity(m.saturating_sub(1));
+    let mut diagonal_blocks = Vec::with_capacity(m.saturating_sub(1));
+    state_from_y0.push(identity_block(n));
+
+    for interval in 0..m.saturating_sub(1) {
+        let diag = dense_to_row_major(&blocks.diagonal_blocks[interval]);
+        let offdiag = dense_to_row_major(&blocks.offdiag_blocks[interval]);
+        let offdiag_lu = NativeDenseLu::factor(offdiag, n).map_err(|err| {
+            format!(
+                "BVP_sci bordered-banded structured solve failed: singular offdiag block at interval {interval}: native block LU error: {err}"
+            )
+        })?;
+
+        let mut next_from_y0 = matmul(&diag, &state_from_y0[interval], n);
+        for value in &mut next_from_y0 {
+            *value = -*value;
+        }
+        solve_block_rhs_in_place(&offdiag_lu, &mut next_from_y0, n).map_err(|err| {
+            format!(
+                "BVP_sci bordered-banded structured solve failed: native offdiag block solve failed at interval {interval}: {err:?}"
+            )
+        })?;
+
+        state_from_y0.push(next_from_y0);
+        diagonal_blocks.push(diag);
+        offdiag_lus.push(offdiag_lu);
+    }
+
+    let last = m - 1;
+    let boundary_left = dense_to_row_major(&blocks.boundary_left);
+    let boundary_right = dense_to_row_major(&blocks.boundary_right);
+    let mut border = boundary_left;
+    matmul_add_assign(&mut border, &boundary_right, &state_from_y0[last], n);
+    let border_lu = NativeDenseLu::factor(border, n).map_err(|err| {
+        format!(
+            "BVP_sci bordered-banded structured solve failed: singular border system: native block LU error: {err}"
+        )
+    })?;
+
+    Ok(BvpSciBorderedStructuredFactorization {
+        backend: BvpSciBorderedStructuredBackend::NativeParameterFree(
+            BvpSciNativeBorderedParameterFreeFactorization {
+                variable_count: n,
+                mesh_points: m,
+                offdiag_lus,
+                diagonal_blocks,
+                state_from_y0,
+                boundary_right,
+                border_lu,
+            },
+        ),
     })
 }
 
@@ -390,6 +637,192 @@ pub fn extract_bordered_banded_blocks(
     })
 }
 
+/// Builds the parameter-free bordered collocation matrix directly from native
+/// pointwise banded Jacobians.
+///
+/// This is the production assembly path for BVP_sci Banded AOT. It deliberately
+/// avoids materializing the full global sparse Jacobian only to extract the
+/// same dense state blocks again.
+pub fn assemble_bordered_banded_blocks_from_pointwise(
+    h: &faer_col,
+    df_dy: &[BandedAssembly],
+    df_dy_middle: &[BandedAssembly],
+    dbc_dya: &faer_mat,
+    dbc_dyb: &faer_mat,
+) -> Result<BvpSciBorderedBandedBlocks, String> {
+    let mesh_points = df_dy.len();
+    if mesh_points < 2 {
+        return Err("BVP_sci direct banded assembly requires at least 2 mesh points".to_string());
+    }
+    if df_dy_middle.len() != mesh_points - 1 || h.nrows() != mesh_points - 1 {
+        return Err(format!(
+            "BVP_sci direct banded assembly shape mismatch: points={}, middle={}, intervals={}",
+            mesh_points,
+            df_dy_middle.len(),
+            h.nrows()
+        ));
+    }
+
+    let variable_count = df_dy[0].n();
+    if variable_count == 0
+        || df_dy.iter().any(|jac| jac.n() != variable_count)
+        || df_dy_middle.iter().any(|jac| jac.n() != variable_count)
+    {
+        return Err(
+            "BVP_sci direct banded assembly requires equal non-empty pointwise Jacobians"
+                .to_string(),
+        );
+    }
+    if dbc_dya.shape() != (variable_count, variable_count)
+        || dbc_dyb.shape() != (variable_count, variable_count)
+    {
+        return Err(format!(
+            "BVP_sci direct banded assembly expected {}x{} boundary Jacobians",
+            variable_count, variable_count
+        ));
+    }
+
+    let mut diagonal_blocks = Vec::with_capacity(mesh_points - 1);
+    let mut offdiag_blocks = Vec::with_capacity(mesh_points - 1);
+    for interval in 0..mesh_points - 1 {
+        let h_i = h[interval];
+        let left = &df_dy[interval];
+        let right = &df_dy[interval + 1];
+        let middle = &df_dy_middle[interval];
+
+        let diagonal = faer_dense_mat::from_fn(variable_count, variable_count, |row, col| {
+            let identity = if row == col { -1.0 } else { 0.0 };
+            identity
+                - h_i / 6.0 * banded_value(left, row, col)
+                - h_i / 3.0 * banded_value(middle, row, col)
+        });
+        let offdiag = faer_dense_mat::from_fn(variable_count, variable_count, |row, col| {
+            let identity = if row == col { 1.0 } else { 0.0 };
+            identity
+                - h_i / 6.0 * banded_value(right, row, col)
+                - h_i / 3.0 * banded_value(middle, row, col)
+        });
+        diagonal_blocks.push(diagonal);
+        offdiag_blocks.push(offdiag);
+    }
+
+    Ok(BvpSciBorderedBandedBlocks {
+        variable_count,
+        mesh_points,
+        parameter_count: 0,
+        diagonal_blocks,
+        offdiag_blocks,
+        collocation_parameter_blocks: None,
+        boundary_left: sparse_to_dense(dbc_dya),
+        boundary_right: sparse_to_dense(dbc_dyb),
+        boundary_parameters: None,
+    })
+}
+
+#[inline]
+fn banded_value(matrix: &BandedAssembly, row: usize, col: usize) -> f64 {
+    matrix.get(row, col).unwrap_or(0.0)
+}
+
+fn sparse_to_dense(matrix: &faer_mat) -> faer_dense_mat {
+    faer_dense_mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
+        matrix.get(row, col).copied().unwrap_or(0.0)
+    })
+}
+
+#[cfg(test)]
+mod direct_banded_assembly_tests {
+    use super::{assemble_bordered_banded_blocks_from_pointwise, extract_bordered_banded_blocks};
+    use crate::numerical::BVP_sci::BVP_sci_faer::{construct_global_jac, faer_col, faer_mat};
+    use crate::somelinalg::banded::banded_assembly::BandedAssembly;
+    use faer::sparse::{SparseColMat, Triplet};
+
+    fn sparse(entries: &[(usize, usize, f64)], rows: usize, cols: usize) -> faer_mat {
+        let triplets = entries
+            .iter()
+            .map(|&(row, col, value)| Triplet::new(row, col, value))
+            .collect::<Vec<_>>();
+        SparseColMat::try_new_from_triplets(rows, cols, &triplets).unwrap()
+    }
+
+    fn banded(entries: &[(usize, usize, f64)], n: usize, kl: usize, ku: usize) -> BandedAssembly {
+        let mut matrix = BandedAssembly::zeros(n, kl, ku).unwrap();
+        for &(row, col, value) in entries {
+            matrix.set(row, col, value).unwrap();
+        }
+        matrix
+    }
+
+    #[test]
+    fn direct_pointwise_banded_assembly_matches_sparse_global_oracle() {
+        let n = 3;
+        let m = 4;
+        let h = faer_col::from_fn(m - 1, |i| [0.2, 0.3, 0.5][i]);
+        let point_entries = [
+            vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, -3.0), (2, 2, 4.0)],
+            vec![(0, 0, 1.5), (0, 1, 2.5), (1, 0, -2.0), (2, 2, 3.0)],
+            vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, -1.0), (2, 2, 2.0)],
+            vec![(0, 0, 2.5), (0, 1, 0.5), (1, 0, -0.5), (2, 2, 1.0)],
+        ];
+        let middle_entries = [
+            vec![(0, 0, 0.5), (0, 1, 1.0), (1, 0, -1.5), (2, 2, 2.0)],
+            vec![(0, 0, 0.7), (0, 1, 1.2), (1, 0, -1.0), (2, 2, 1.5)],
+            vec![(0, 0, 0.9), (0, 1, 0.8), (1, 0, -0.5), (2, 2, 1.0)],
+        ];
+        let sparse_points = point_entries
+            .iter()
+            .map(|entries| sparse(entries, n, n))
+            .collect::<Vec<_>>();
+        let sparse_middle = middle_entries
+            .iter()
+            .map(|entries| sparse(entries, n, n))
+            .collect::<Vec<_>>();
+        let banded_points = point_entries
+            .iter()
+            .map(|entries| banded(entries, n, 1, 1))
+            .collect::<Vec<_>>();
+        let banded_middle = middle_entries
+            .iter()
+            .map(|entries| banded(entries, n, 1, 1))
+            .collect::<Vec<_>>();
+        let dbc_dya = sparse(&[(0, 0, 1.0), (2, 2, 1.0)], n, n);
+        let dbc_dyb = sparse(&[(1, 1, 1.0)], n, n);
+
+        let global = construct_global_jac(
+            n,
+            m,
+            0,
+            &h,
+            &sparse_points,
+            &sparse_middle,
+            None,
+            None,
+            &dbc_dya,
+            &dbc_dyb,
+            None,
+        );
+        let oracle = extract_bordered_banded_blocks(&global, n, m, 0).unwrap();
+        let direct = assemble_bordered_banded_blocks_from_pointwise(
+            &h,
+            &banded_points,
+            &banded_middle,
+            &dbc_dya,
+            &dbc_dyb,
+        )
+        .unwrap();
+
+        let direct_dense = direct.reconstruct_dense();
+        let oracle_dense = oracle.reconstruct_dense();
+        let mut diff = 0.0_f64;
+        for row in 0..direct_dense.nrows() {
+            for col in 0..direct_dense.ncols() {
+                diff = diff.max((*direct_dense.get(row, col) - *oracle_dense.get(row, col)).abs());
+            }
+        }
+        assert!(diff <= 1e-14, "direct banded assembly diff={diff:e}");
+    }
+}
+
 fn copy_dense_block(
     mat: &faer_mat,
     row_start: usize,
@@ -419,6 +852,92 @@ fn dense_to_nalgebra(dense: &faer_dense_mat) -> DMatrix<f64> {
     DMatrix::from_fn(dense.nrows(), dense.ncols(), |row, col| {
         *dense.get(row, col)
     })
+}
+
+fn dense_to_row_major(dense: &faer_dense_mat) -> Vec<f64> {
+    let mut values = vec![0.0; dense.nrows() * dense.ncols()];
+    for row in 0..dense.nrows() {
+        for col in 0..dense.ncols() {
+            values[row * dense.ncols() + col] = *dense.get(row, col);
+        }
+    }
+    values
+}
+
+fn identity_block(size: usize) -> Vec<f64> {
+    let mut values = vec![0.0; size * size];
+    for row in 0..size {
+        values[idx(size, row, row)] = 1.0;
+    }
+    values
+}
+
+fn matmul(lhs: &[f64], rhs: &[f64], size: usize) -> Vec<f64> {
+    let mut out = vec![0.0; size * size];
+    for row in 0..size {
+        for mid in 0..size {
+            let lhs_value = lhs[idx(size, row, mid)];
+            if lhs_value == 0.0 {
+                continue;
+            }
+            for col in 0..size {
+                out[idx(size, row, col)] += lhs_value * rhs[idx(size, mid, col)];
+            }
+        }
+    }
+    out
+}
+
+fn matmul_add_assign(dst: &mut [f64], lhs: &[f64], rhs: &[f64], size: usize) {
+    for row in 0..size {
+        for mid in 0..size {
+            let lhs_value = lhs[idx(size, row, mid)];
+            if lhs_value == 0.0 {
+                continue;
+            }
+            for col in 0..size {
+                dst[idx(size, row, col)] += lhs_value * rhs[idx(size, mid, col)];
+            }
+        }
+    }
+}
+
+fn matvec_into(out: &mut [f64], lhs: &[f64], rhs: &[f64], size: usize) {
+    for row in 0..size {
+        let mut sum = 0.0;
+        for col in 0..size {
+            sum += lhs[idx(size, row, col)] * rhs[col];
+        }
+        out[row] = sum;
+    }
+}
+
+fn matvec_sub_assign(dst: &mut [f64], lhs: &[f64], rhs: &[f64], size: usize) {
+    for row in 0..size {
+        let mut sum = 0.0;
+        for col in 0..size {
+            sum += lhs[idx(size, row, col)] * rhs[col];
+        }
+        dst[row] -= sum;
+    }
+}
+
+fn solve_block_rhs_in_place(
+    lu: &NativeDenseLu,
+    block_rhs: &mut [f64],
+    size: usize,
+) -> Result<(), crate::somelinalg::banded::BandedError> {
+    let mut column = vec![0.0; size];
+    for col in 0..size {
+        for row in 0..size {
+            column[row] = block_rhs[idx(size, row, col)];
+        }
+        lu.solve_in_place(&mut column)?;
+        for row in 0..size {
+            block_rhs[idx(size, row, col)] = column[row];
+        }
+    }
+    Ok(())
 }
 
 fn validate_bordered_blocks(blocks: &BvpSciBorderedBandedBlocks) -> Result<(), String> {

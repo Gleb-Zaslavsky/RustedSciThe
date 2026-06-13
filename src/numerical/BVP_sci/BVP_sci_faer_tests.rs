@@ -2,10 +2,10 @@
 mod tests {
     use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
     use crate::numerical::BVP_sci::BVP_sci_faer::{
-        collocation_fun, compute_jac_indices, construct_global_jac, construct_global_jac_cached,
-        create_spline, estimate_bc_jac, estimate_fun_jac, estimate_rms_residuals,
-        inspect_global_jacobian, modify_mesh, solve_bvp, solve_bvp_with_strategy_and_linear_policy,
-        solve_newton, BvpSciLinearSolvePolicy, JacobianSparsityCache,
+        BvpSciLinearSolvePolicy, JacobianSparsityCache, collocation_fun, compute_jac_indices,
+        construct_global_jac, construct_global_jac_cached, create_spline, estimate_bc_jac,
+        estimate_fun_jac, estimate_rms_residuals, inspect_global_jacobian, modify_mesh, solve_bvp,
+        solve_bvp_with_strategy_and_linear_policy, solve_newton,
     };
     use core::panic;
     use faer::col::Col;
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_banded_linear_policy_falls_back_for_endpoint_bordered_matrix() {
+    fn auto_banded_linear_policy_uses_bordered_for_parameter_free_endpoint_matrix() {
         let fun = |_x: &faer_col, y: &faer_dense_mat, _p: &faer_col| {
             let mut f = faer_dense_mat::zeros(2, y.ncols());
             for j in 0..y.ncols() {
@@ -218,7 +218,7 @@ mod tests {
             None,
             BvpSciLinearSolvePolicy::AutoBanded,
         )
-        .expect("endpoint-BC BVP should solve through AutoBanded sparse fallback");
+        .expect("endpoint-BC BVP should solve through AutoBanded bordered route");
 
         assert!(result.success);
         assert!(
@@ -233,11 +233,82 @@ mod tests {
         assert!(
             result
                 .calc_statistics
+                .get("bvp sci linear backend bordered structured solves")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "AutoBanded should promote a parameter-free endpoint system to the bordered route"
+        );
+        assert_eq!(
+            result
+                .calc_statistics
+                .get("bvp sci linear backend sparse fallback solves")
+                .copied()
+                .unwrap_or(0),
+            0,
+            "successful AutoBanded bordered solve should not fall back to Sparse"
+        );
+    }
+
+    #[test]
+    fn auto_banded_linear_policy_falls_back_for_parameterized_endpoint_matrix() {
+        let fun = |_x: &faer_col, y: &faer_dense_mat, p: &faer_col| {
+            faer_dense_mat::from_fn(1, y.ncols(), |_, _| p[0])
+        };
+        let bc = |ya: &faer_col, yb: &faer_col, _p: &faer_col| {
+            faer_col::from_fn(2, |i| [ya[0], yb[0] - 1.0][i])
+        };
+
+        let x = faer_col::from_fn(20, |i| i as f64 / 19.0);
+        let y = faer_dense_mat::from_fn(1, 20, |_, j| j as f64 / 19.0);
+        let p = faer_col::from_fn(1, |_| 1.0);
+
+        let result = solve_bvp_with_strategy_and_linear_policy(
+            &fun,
+            &bc,
+            x,
+            y,
+            Some(p),
+            None,
+            None,
+            None,
+            1e-6,
+            100,
+            0,
+            None,
+            None,
+            None,
+            BvpSciLinearSolvePolicy::AutoBanded,
+        )
+        .expect("parameterized endpoint BVP should use the safe Sparse fallback");
+
+        assert!(result.success);
+        assert!(
+            result
+                .calc_statistics
+                .get("bvp sci auto bordered parameter fallback")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "AutoBanded must record why the parameterized bordered route was rejected"
+        );
+        assert_eq!(
+            result
+                .calc_statistics
+                .get("bvp sci linear backend bordered structured solves")
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the production bordered kernel is parameter-free only"
+        );
+        assert!(
+            result
+                .calc_statistics
                 .get("bvp sci linear backend sparse fallback solves")
                 .copied()
                 .unwrap_or(0)
                 > 0,
-            "AutoBanded should keep Sparse fallback until bordered solver is implemented"
+            "parameterized AutoBanded must fall back to Sparse"
         );
     }
 
@@ -728,6 +799,7 @@ mod tests {
             &bc,
             None,
             None,
+            None,
             y,
             p,
             &x,
@@ -791,6 +863,7 @@ mod tests {
             &h,
             &fun,
             &bc,
+            None,
             None,
             None,
             y,

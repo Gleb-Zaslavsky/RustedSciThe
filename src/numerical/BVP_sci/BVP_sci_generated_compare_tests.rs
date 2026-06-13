@@ -47,7 +47,7 @@ mod tests_generated_backend_compare {
     use crate::numerical::BVP_sci::BVP_sci_aot::BvpSciGeneratedBackendConfig;
     use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
     use crate::numerical::BVP_sci::BVP_sci_numerical::{
-        solve_numerical_bvp, NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
+        NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode, solve_numerical_bvp,
     };
     use crate::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciSolverOptions};
     use crate::numerical::Examples_and_utils::NonlinEquation;
@@ -58,7 +58,7 @@ mod tests_generated_backend_compare {
     use std::process::Command;
     use std::sync::OnceLock;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{Table, Tabled, settings::Style};
 
     const GENERATED_TEST_ARTIFACT_REV: &str = "r2";
     const DEFAULT_COMPARE_REPEATS: usize = 5;
@@ -1772,6 +1772,131 @@ mod tests_generated_backend_compare {
             println!(
                 "[BVP_sci production-like] finished scenario `{}`",
                 scenario.label
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "story compare for BVP_sci pure numerical Direct-num vs Lambdify"]
+    fn bvp_sci_pure_numerical_direct_num_story() {
+        let scenarios = compare_scenarios()
+            .into_iter()
+            .filter(|scenario| scenario.label == "linear-2" || scenario.label == "combustion-1000")
+            .collect::<Vec<_>>();
+        let repeats = compare_repeats();
+        let namespace = compare_run_namespace("direct-num-story");
+        println!("[BVP_sci direct-num story] artifact namespace={namespace}");
+
+        for scenario in scenarios {
+            let mut outcomes = Vec::new();
+            let baseline_outcome = run_compare_variant_repeated(
+                &scenario,
+                CompareVariant::Lambdify,
+                None,
+                None,
+                repeats,
+                &namespace,
+            );
+            let baseline_solution = baseline_outcome
+                .solution
+                .clone()
+                .expect("lambdify baseline should produce a solution");
+            let baseline_total_ms = baseline_outcome
+                .total_ms_value
+                .expect("lambdify baseline should produce total timing");
+            outcomes.push(baseline_outcome);
+            outcomes.push(run_compare_variant_repeated(
+                &scenario,
+                CompareVariant::DirectNumericFd,
+                Some(&baseline_solution),
+                Some(baseline_total_ms),
+                repeats,
+                &namespace,
+            ));
+            outcomes.push(run_compare_variant_repeated(
+                &scenario,
+                CompareVariant::DirectNumeric,
+                Some(&baseline_solution),
+                Some(baseline_total_ms),
+                repeats,
+                &namespace,
+            ));
+
+            let mut timing_table = Table::new(
+                outcomes
+                    .iter()
+                    .map(|outcome| outcome.timing.clone())
+                    .collect::<Vec<_>>(),
+            );
+            timing_table.with(Style::modern_rounded());
+            println!(
+                "[BVP_sci direct-num story] scenario={} timing table:\n{}",
+                scenario.label, timing_table
+            );
+
+            let mut breakdown_table = Table::new(
+                outcomes
+                    .iter()
+                    .map(|outcome| outcome.breakdown.clone())
+                    .collect::<Vec<_>>(),
+            );
+            breakdown_table.with(Style::modern_rounded());
+            println!(
+                "[BVP_sci direct-num story] scenario={} stage breakdown:\n{}",
+                scenario.label, breakdown_table
+            );
+
+            let mut work_table = Table::new(
+                outcomes
+                    .iter()
+                    .map(|outcome| outcome.work.clone())
+                    .collect::<Vec<_>>(),
+            );
+            work_table.with(Style::modern_rounded());
+            println!(
+                "[BVP_sci direct-num story] scenario={} solver work:\n{}",
+                scenario.label, work_table
+            );
+
+            println!(
+                "[BVP_sci direct-num story] scenario={} baseline_total_ms_med={:.3}",
+                scenario.label, baseline_total_ms
+            );
+
+            for outcome in &outcomes {
+                assert!(
+                    outcome.timing.status == "ok" || outcome.timing.status.starts_with("finished"),
+                    "pure numerical story should not fail: {}",
+                    outcome.timing.status
+                );
+            }
+
+            let direct_num = outcomes
+                .iter()
+                .find(|outcome| outcome.timing.variant == "Direct-num")
+                .expect("Direct-num row should exist");
+            let direct_num_fd = outcomes
+                .iter()
+                .find(|outcome| outcome.timing.variant == "Direct-num-FD")
+                .expect("Direct-num-FD row should exist");
+
+            assert!(
+                direct_num
+                    .breakdown
+                    .solution_diff_vs_lambdify
+                    .parse::<f64>()
+                    .unwrap_or(f64::INFINITY)
+                    < 1e-6,
+                "Direct-num should stay numerically close to Lambdify"
+            );
+            assert!(
+                direct_num_fd
+                    .breakdown
+                    .solution_diff_vs_lambdify
+                    .parse::<f64>()
+                    .unwrap_or(f64::INFINITY)
+                    < 1e-6,
+                "Direct-num-FD should stay numerically close to Lambdify"
             );
         }
     }

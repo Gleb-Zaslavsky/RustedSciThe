@@ -199,6 +199,31 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         self.iteration = 0;
         self.func_calls = 0;
 
+        if t.len() != y_dat.len() {
+            return Err("The length of t must equal the length of y_dat!".to_string());
+        }
+
+        let expected_parameters = self.objective_fn.parameter_count();
+        if p.len() != expected_parameters {
+            return Err(format!(
+                "Expected {expected_parameters} parameters, but got {}.",
+                p.len()
+            ));
+        }
+
+        if y_dat.len() < p.len() {
+            return Err(format!(
+                "At least {} data points are required to fit {} parameters, but got {}.",
+                p.len(),
+                p.len(),
+                y_dat.len()
+            ));
+        }
+
+        if y_dat.is_empty() {
+            return Err("At least one data point is required.".to_string());
+        }
+
         let eps = f64::EPSILON;
         let npar = p.len();
         let npnt = y_dat.len();
@@ -208,10 +233,6 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         let mut x2_old = 1e-3 / eps;
         let j = DMatrix::zeros(npnt, npar);
         let dof = (npnt - npar + 1) as f64;
-
-        if t.len() != y_dat.len() {
-            return Err("The length of t must equal the length of y_dat!".to_string());
-        }
 
         let y_dat_norm_sq = y_dat.dot(y_dat);
         let weight = DVector::from_element(npnt, 1.0 / y_dat_norm_sq);
@@ -769,7 +790,6 @@ mod additional_tests {
 
     // Test error handling for mismatched dimensions
     #[test]
-    #[should_panic]
     fn test_dimension_mismatch_error() {
         let model = ExponentialSinusoidalModel;
         let mut lm = LevenbergMarquardt::new(model);
@@ -778,12 +798,8 @@ mod additional_tests {
         let y_dat = DVector::from_vec(vec![1.0, 2.0]); // Different length
         let p_initial = dvector![1.0, 1.0, 1.0, 1.0];
 
-        match lm.lm(p_initial, &t, &y_dat) {
-            Ok(_) => panic!("Should have failed due to dimension mismatch"),
-            Err(e) => {
-                assert!(e.contains("length of t must equal the length of y_dat"));
-            }
-        }
+        let error = lm.lm(p_initial, &t, &y_dat).unwrap_err();
+        assert!(error.contains("length of t must equal the length of y_dat"));
     }
 
     // Test convergence behavior with poor initial guess

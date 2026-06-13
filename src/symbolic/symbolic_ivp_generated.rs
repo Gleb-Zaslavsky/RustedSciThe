@@ -44,7 +44,9 @@ use crate::symbolic::codegen::codegen_aot_runtime_link::{
 use crate::symbolic::codegen::codegen_provider_api::{
     BackendKind, MatrixBackend, PreparedProblem, PreparedSparseProblem,
 };
-use crate::symbolic::codegen::codegen_runtime_api::SparseJacobianStructure;
+use crate::symbolic::codegen::codegen_runtime_api::{
+    ResidualChunkingStrategy, SparseJacobianStructure,
+};
 use crate::symbolic::codegen::codegen_tasks::{
     IvpResidualTask, SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
 };
@@ -195,6 +197,8 @@ pub struct SymbolicIvpGeneratedBackendConfig {
     pub resolver: Option<AotResolver>,
     /// Dense IVP AOT runtime-plan chunking options.
     pub aot_options: SymbolicIvpAotOptions,
+    /// Residual chunking used by generated residual paths.
+    pub residual_chunking_strategy: ResidualChunkingStrategy,
     /// Sparse Jacobian chunking used by sparse/banded native-AOT Jacobian paths.
     pub sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
     /// Lifecycle build policy.
@@ -216,6 +220,7 @@ impl Default for SymbolicIvpGeneratedBackendConfig {
         Self {
             resolver: None,
             aot_options: SymbolicIvpAotOptions::default(),
+            residual_chunking_strategy: ResidualChunkingStrategy::Whole,
             sparse_jacobian_chunking_strategy: SparseChunkingStrategy::Whole,
             build_policy: SymbolicIvpAotBuildPolicy::default(),
             aot_codegen_backend: AotCodegenBackend::default(),
@@ -270,6 +275,14 @@ impl SymbolicIvpGeneratedBackendConfig {
 
     pub fn with_aot_options(mut self, aot_options: SymbolicIvpAotOptions) -> Self {
         self.aot_options = aot_options;
+        self
+    }
+
+    pub fn with_residual_chunking_strategy(
+        mut self,
+        residual_chunking_strategy: ResidualChunkingStrategy,
+    ) -> Self {
+        self.residual_chunking_strategy = residual_chunking_strategy;
         self
     }
 

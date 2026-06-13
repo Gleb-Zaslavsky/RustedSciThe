@@ -103,16 +103,18 @@
 
 use crate::numerical::BVP_Damp::BVP_utils::CustomTimer;
 //use crate::numerical::BVP_sci::BVP_sci_utils::{final_jacobian_diagnostics, size_of_matrix};
-use crate::numerical::optimization::PPoly::{Extrapolate, PPoly};
 use crate::numerical::BVP_sci::BVP_sci_banded::sparse_global_jac_to_banded;
 use crate::numerical::BVP_sci::BVP_sci_bordered_banded::{
-    profile_bordered_banded_global_jacobian, BvpSciBandedRoute, BvpSciBandedRoutePolicy,
+    BvpSciBandedRoute, BvpSciBandedRoutePolicy, profile_bordered_banded_global_jacobian,
 };
 use crate::numerical::BVP_sci::BVP_sci_bordered_solver::{
-    extract_bordered_banded_blocks, factor_bordered_banded_structured,
-    BvpSciBorderedStructuredFactorization,
+    BvpSciBorderedSolveWorkspace, BvpSciBorderedStructuredFactorization,
+    assemble_bordered_banded_blocks_from_pointwise, extract_bordered_banded_blocks,
+    factor_bordered_banded_structured,
 };
+use crate::numerical::optimization::PPoly::{Extrapolate, PPoly};
 use crate::somelinalg::banded::LapackStyleBandedLuFaithful;
+use crate::somelinalg::banded::banded_assembly::BandedAssembly;
 use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
@@ -124,23 +126,33 @@ pub type faer_mat = SparseColMat<usize, f64>;
 pub type faer_col = Col<f64>;
 pub type faer_dense_mat = Mat<f64>;
 
+/// Native pointwise banded Jacobian provider.
+///
+/// The first tuple item contains one state Jacobian per mesh point. Parameter
+/// derivatives remain sparse because the current direct bordered route is
+/// intentionally limited to parameter-free endpoint problems.
+pub type ODEBandedJacobian =
+    dyn Fn(&faer_col, &faer_dense_mat, &faer_col) -> (Vec<BandedAssembly>, Option<Vec<faer_mat>>);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BvpSciLinearSolvePolicy {
     /// Production default: preserve the existing faer sparse LU route.
     #[default]
     Sparse,
-    /// Use full scalar banded LU only when the whole global Jacobian is compact;
-    /// otherwise fall back to Sparse.  This is safe for production experiments.
+    /// Select the native linear route from the global Jacobian structure.
+    ///
+    /// Compact whole matrices use scalar banded LU. Parameter-free endpoint
+    /// systems with a compact collocation body use the bordered-banded solver.
+    /// Unsupported layouts and failed native factorizations fall back to Sparse.
     AutoBanded,
     /// Require the whole global Jacobian to be compact enough for scalar banded
     /// LU.  If the route planner rejects it, Newton reports a singular linear
     /// step instead of silently falling back.
     RequireFullBanded,
-    /// Explicit experimental route for endpoint-BC bordered-banded matrices.
+    /// Require the endpoint-BC bordered-banded route without Sparse fallback.
     ///
-    /// This is intentionally not used by `AutoBanded` yet.  It lets tests and
-    /// diagnostics exercise the native bordered solver while the production
-    /// default remains the established Sparse route.
+    /// This remains useful as a strict diagnostics and acceptance policy even
+    /// though `AutoBanded` can now select the same route safely.
     ExperimentalBorderedBanded,
 }
 
@@ -322,7 +334,7 @@ fn record_global_jacobian_diagnostics(
 pub fn test_faer_fn() {
     type faer_mat = SparseColMat<usize, f64>;
     type faer_col = Col<f64>; // Mat<f64>;
-                              // Example usage of faer types
+    // Example usage of faer types
     type faer_mat_sym = SymbolicSparseColMat<usize, f64>;
     // empty vector
     let mut vec1: faer_col = faer_col::zeros(2);
@@ -340,9 +352,9 @@ pub fn test_faer_fn() {
     let col_ptr = vec![0usize, 1, 1, 2, 2, 2]; // length = ncols + 1
     let row_idx = vec![0usize, 1]; // length = col_ptr[ncols]
     let values = vec![1.0, 2.0]; // same length as row_idx
-                                 // col_nnz in SymbolicSparseColMat (and related types) stands for column nonzero counts.
-                                 // It is an optional vector that, if present, specifies for
-                                 // each column the number of nonzero entries in that column.
+    // col_nnz in SymbolicSparseColMat (and related types) stands for column nonzero counts.
+    // It is an optional vector that, if present, specifies for
+    // each column the number of nonzero entries in that column.
     let symbolic = SymbolicSparseColMat::new_checked(nrows, ncols, col_ptr, None, row_idx);
     let matrix = SparseColMat::new(symbolic, values);
     // getting certain element from matrix
@@ -1510,6 +1522,7 @@ pub fn solve_newton(
     fun: &ODEFunction,
     bc: &BCFunction,
     fun_jac: Option<&ODEJacobian>,
+    banded_fun_jac: Option<&ODEBandedJacobian>,
     bc_jac: Option<&BCJacobian>,
     mut y: faer_dense_mat,
     mut p: faer_col,
@@ -1542,6 +1555,7 @@ pub fn solve_newton(
     let mut lu_solver: Option<faer::sparse::linalg::solvers::Lu<_, _>> = None;
     let mut banded_solver: Option<LapackStyleBandedLuFaithful> = None;
     let mut bordered_factorization: Option<BvpSciBorderedStructuredFactorization> = None;
+    let mut bordered_workspace: Option<BvpSciBorderedSolveWorkspace> = None;
     let mut cost = 0.0;
 
     info!("\n \n Starting Newton iterations for collocation system \n \n");
@@ -1578,170 +1592,111 @@ pub fn solve_newton(
             *calc_statistics
                 .entry("number of jacobians recalculations".to_string())
                 .or_insert(0) += 1;
-            // Compute Jacobians
-            let (df_dy, df_dp) = if let Some(jac_fn) = fun_jac {
-                jac_fn(x, &y, &p)
-            } else {
-                estimate_fun_jac(fun, x, &y, &p, Some(&f))
-            };
+            if let Some(banded_jac_fn) = banded_fun_jac {
+                if k != 0
+                    || !matches!(
+                        linear_solve_policy,
+                        BvpSciLinearSolvePolicy::AutoBanded
+                            | BvpSciLinearSolvePolicy::ExperimentalBorderedBanded
+                    )
+                {
+                    *calc_statistics
+                        .entry("bvp sci direct banded route rejected".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    break;
+                }
 
-            let mut x_middle = faer_col::zeros(m - 1);
-            for j in 0..(m - 1) {
-                x_middle[j] = x[j] + 0.5 * h[j];
-            }
+                let (df_dy, df_dp) = banded_jac_fn(x, &y, &p);
+                if df_dp.is_some() {
+                    *calc_statistics
+                        .entry("bvp sci direct banded parameter derivative rejected".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    break;
+                }
+                let mut x_middle = faer_col::zeros(m - 1);
+                for j in 0..(m - 1) {
+                    x_middle[j] = x[j] + 0.5 * h[j];
+                }
+                let (df_dy_middle, df_dp_middle) = banded_jac_fn(&x_middle, &y_middle, &p);
+                if df_dp_middle.is_some() {
+                    *calc_statistics
+                        .entry("bvp sci direct banded parameter derivative rejected".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    break;
+                }
+                let (dbc_dya, dbc_dyb, dbc_dp) = if let Some(bc_jac_fn) = bc_jac {
+                    bc_jac_fn(&ya, &yb, &p)
+                } else {
+                    estimate_bc_jac(bc, &ya, &yb, &p, Some(&bc_res))
+                };
+                if dbc_dp.is_some() {
+                    *calc_statistics
+                        .entry("bvp sci direct banded boundary parameter rejected".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    break;
+                }
 
-            let (df_dy_middle, df_dp_middle) = if let Some(jac_fn) = fun_jac {
-                jac_fn(&x_middle, &y_middle, &p)
-            } else {
-                estimate_fun_jac(fun, &x_middle, &y_middle, &p, Some(&f_middle))
-            };
-
-            let (dbc_dya, dbc_dyb, dbc_dp) = if let Some(bc_jac_fn) = bc_jac {
-                bc_jac_fn(&ya, &yb, &p)
-            } else {
-                estimate_bc_jac(bc, &ya, &yb, &p, Some(&bc_res))
-            };
-
-            // Construct global Jacobian (use cached path if available)
-            let jac_matrix: faer_mat = if let Some(cache) = sparsity_cache.as_mut() {
-                construct_global_jac_cached(
-                    n,
-                    m,
-                    k,
+                let assembly_started = Instant::now();
+                let blocks = match assemble_bordered_banded_blocks_from_pointwise(
                     h,
                     &df_dy,
                     &df_dy_middle,
-                    df_dp.as_ref().map(|v| v.as_slice()),
-                    df_dp_middle.as_ref().map(|v| v.as_slice()),
                     &dbc_dya,
                     &dbc_dyb,
-                    dbc_dp.as_ref(),
-                    cache,
-                );
-                // Clone the matrix from the cache after values have been written
-                let cached_mat = cache.matrix_clone();
-
-                cached_mat
-            } else {
-                construct_global_jac(
-                    n,
-                    m,
-                    k,
-                    h,
-                    &df_dy,
-                    &df_dy_middle,
-                    df_dp.as_ref().map(|v| v.as_slice()),
-                    df_dp_middle.as_ref().map(|v| v.as_slice()),
-                    &dbc_dya,
-                    &dbc_dyb,
-                    dbc_dp.as_ref(),
-                )
-            };
-            custom_timer.jac_tac();
-            custom_timer.linear_system_tic();
-            let jacobian_diagnostics = inspect_global_jacobian(&jac_matrix);
-            record_global_jacobian_diagnostics(calc_statistics, &jacobian_diagnostics);
-            if jacobian_diagnostics.is_definitely_singular() {
-                *calc_statistics
-                    .entry("global jacobian explicit singular precheck failures".to_string())
-                    .or_insert(0) += 1;
-                singular = true;
-                break;
-            }
-            lu_solver = None;
-            banded_solver = None;
-            bordered_factorization = None;
-
-            let route_profile = profile_bordered_banded_global_jacobian(
-                &jac_matrix,
-                n,
-                m,
-                k,
-                BvpSciBandedRoutePolicy::default(),
-            );
-            record_linear_backend_route(calc_statistics, &route_profile);
-            let should_try_bordered = match linear_solve_policy {
-                BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => {
-                    if route_profile.recommended_route != BvpSciBandedRoute::BorderedBanded {
+                ) {
+                    Ok(blocks) => blocks,
+                    Err(_) => {
                         *calc_statistics
-                            .entry("bvp sci bordered structured route rejected".to_string())
+                            .entry("bvp sci direct banded assembly failures".to_string())
                             .or_insert(0) += 1;
                         singular = true;
                         break;
                     }
-                    true
-                }
-                _ => false,
-            };
-            let should_try_banded = match linear_solve_policy {
-                BvpSciLinearSolvePolicy::Sparse => false,
-                BvpSciLinearSolvePolicy::AutoBanded => {
-                    route_profile.recommended_route == BvpSciBandedRoute::FullScalarBanded
-                }
-                BvpSciLinearSolvePolicy::RequireFullBanded => {
-                    if route_profile.recommended_route != BvpSciBandedRoute::FullScalarBanded {
-                        *calc_statistics
-                            .entry("bvp sci full banded route rejected".to_string())
-                            .or_insert(0) += 1;
-                        singular = true;
-                        break;
-                    }
-                    true
-                }
-                BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => false,
-            };
-            let auto_banded_sparse_fallback =
-                linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded && !should_try_banded;
-
-            if should_try_bordered {
-                let extract_started = Instant::now();
-                let extracted_blocks = extract_bordered_banded_blocks(&jac_matrix, n, m, k);
+                };
                 add_elapsed_micros_stat(
                     calc_statistics,
-                    "bvp sci bordered extraction us",
-                    extract_started,
+                    "bvp sci direct banded assembly us",
+                    assembly_started,
                 );
                 *calc_statistics
-                    .entry("bvp sci bordered extraction calls".to_string())
+                    .entry("bvp sci direct banded assembly calls".to_string())
                     .or_insert(0) += 1;
-                match extracted_blocks.and_then(|blocks| {
-                    let factor_started = Instant::now();
-                    let factorization = factor_bordered_banded_structured(&blocks);
-                    add_elapsed_micros_stat(
-                        calc_statistics,
-                        "bvp sci bordered factorization us",
-                        factor_started,
-                    );
-                    *calc_statistics
-                        .entry("bvp sci bordered factorization calls".to_string())
-                        .or_insert(0) += 1;
-                    let factorization = factorization?;
-                    let solve_started = Instant::now();
-                    let step_col = factorization.solve(&res);
-                    add_elapsed_micros_stat(
-                        calc_statistics,
-                        "bvp sci bordered structured solve us",
-                        solve_started,
-                    );
-                    *calc_statistics
-                        .entry("bvp sci bordered structured solve calls".to_string())
-                        .or_insert(0) += 1;
-                    let step_col = step_col?;
-                    Ok((factorization, step_col))
-                }) {
-                    Ok((factorization, step_col)) => {
-                        bordered_factorization = Some(factorization);
-                        cost = step_col.squared_norm_l2();
+                *calc_statistics
+                    .entry("bvp sci global sparse jacobian bypasses".to_string())
+                    .or_insert(0) += 1;
+                *calc_statistics
+                    .entry("bvp sci linear route bordered banded".to_string())
+                    .or_insert(0) += 1;
+
+                custom_timer.jac_tac();
+                custom_timer.linear_system_tic();
+                let factor_started = Instant::now();
+                let factorization = match factor_bordered_banded_structured(&blocks) {
+                    Ok(factorization) => factorization,
+                    Err(_) => {
                         *calc_statistics
-                            .entry("number of solving linear systems".to_string())
+                            .entry("bvp sci bordered factorization failures".to_string())
                             .or_insert(0) += 1;
-                        *calc_statistics
-                            .entry("bvp sci linear backend bordered structured solves".to_string())
-                            .or_insert(0) += 1;
-                        *calc_statistics
-                            .entry("bvp sci bordered initial solve calls".to_string())
-                            .or_insert(0) += 1;
+                        singular = true;
+                        break;
                     }
+                };
+                add_elapsed_micros_stat(
+                    calc_statistics,
+                    "bvp sci bordered factorization us",
+                    factor_started,
+                );
+                *calc_statistics
+                    .entry("bvp sci bordered factorization calls".to_string())
+                    .or_insert(0) += 1;
+                let mut workspace = factorization.new_workspace();
+                let solve_started = Instant::now();
+                let step_col = match factorization.solve_with_workspace(&res, &mut workspace) {
+                    Ok(step_col) => step_col,
                     Err(_) => {
                         *calc_statistics
                             .entry("bvp sci bordered structured solve failures".to_string())
@@ -1749,87 +1704,337 @@ pub fn solve_newton(
                         singular = true;
                         break;
                     }
-                }
-            } else if should_try_banded {
-                match factor_banded_and_solve(&jac_matrix, &res) {
-                    Ok((lu, step_col)) => {
-                        banded_solver = Some(lu);
-                        cost = step_col.squared_norm_l2();
-                        *calc_statistics
-                            .entry("number of solving linear systems".to_string())
-                            .or_insert(0) += 1;
-                        *calc_statistics
-                            .entry("bvp sci linear backend full banded solves".to_string())
-                            .or_insert(0) += 1;
-                    }
-                    Err(_) if linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded => {
-                        *calc_statistics
-                            .entry("bvp sci full banded factor fallback to sparse".to_string())
-                            .or_insert(0) += 1;
-                        match jac_matrix.sp_lu() {
-                            Ok(lu) => {
-                                let step = lu.solve(res.as_mat());
-                                let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+                };
+                add_elapsed_micros_stat(
+                    calc_statistics,
+                    "bvp sci bordered structured solve us",
+                    solve_started,
+                );
+                *calc_statistics
+                    .entry("number of solving linear systems".to_string())
+                    .or_insert(0) += 1;
+                *calc_statistics
+                    .entry("bvp sci linear backend bordered structured solves".to_string())
+                    .or_insert(0) += 1;
+                *calc_statistics
+                    .entry("bvp sci bordered initial solve calls".to_string())
+                    .or_insert(0) += 1;
+                cost = step_col.squared_norm_l2();
+                lu_solver = None;
+                banded_solver = None;
+                bordered_factorization = Some(factorization);
+                bordered_workspace = Some(workspace);
+            } else {
+                // Compute sparse Jacobians
+                let (df_dy, df_dp) = if let Some(jac_fn) = fun_jac {
+                    jac_fn(x, &y, &p)
+                } else {
+                    estimate_fun_jac(fun, x, &y, &p, Some(&f))
+                };
 
-                                lu_solver = Some(lu);
-                                cost = step_col.squared_norm_l2();
-                                *calc_statistics
-                                    .entry("number of solving linear systems".to_string())
-                                    .or_insert(0) += 1;
-                                *calc_statistics
-                                    .entry(
-                                        "bvp sci linear backend sparse fallback solves".to_string(),
-                                    )
-                                    .or_insert(0) += 1;
-                            }
-                            Err(_) => {
-                                *calc_statistics
-                                    .entry("global jacobian lu factorization failures".to_string())
-                                    .or_insert(0) += 1;
-                                singular = true;
-                                break;
+                let mut x_middle = faer_col::zeros(m - 1);
+                for j in 0..(m - 1) {
+                    x_middle[j] = x[j] + 0.5 * h[j];
+                }
+
+                let (df_dy_middle, df_dp_middle) = if let Some(jac_fn) = fun_jac {
+                    jac_fn(&x_middle, &y_middle, &p)
+                } else {
+                    estimate_fun_jac(fun, &x_middle, &y_middle, &p, Some(&f_middle))
+                };
+
+                let (dbc_dya, dbc_dyb, dbc_dp) = if let Some(bc_jac_fn) = bc_jac {
+                    bc_jac_fn(&ya, &yb, &p)
+                } else {
+                    estimate_bc_jac(bc, &ya, &yb, &p, Some(&bc_res))
+                };
+
+                // Construct global Jacobian (use cached path if available)
+                let jac_matrix: faer_mat = if let Some(cache) = sparsity_cache.as_mut() {
+                    construct_global_jac_cached(
+                        n,
+                        m,
+                        k,
+                        h,
+                        &df_dy,
+                        &df_dy_middle,
+                        df_dp.as_ref().map(|v| v.as_slice()),
+                        df_dp_middle.as_ref().map(|v| v.as_slice()),
+                        &dbc_dya,
+                        &dbc_dyb,
+                        dbc_dp.as_ref(),
+                        cache,
+                    );
+                    // Clone the matrix from the cache after values have been written
+                    let cached_mat = cache.matrix_clone();
+
+                    cached_mat
+                } else {
+                    construct_global_jac(
+                        n,
+                        m,
+                        k,
+                        h,
+                        &df_dy,
+                        &df_dy_middle,
+                        df_dp.as_ref().map(|v| v.as_slice()),
+                        df_dp_middle.as_ref().map(|v| v.as_slice()),
+                        &dbc_dya,
+                        &dbc_dyb,
+                        dbc_dp.as_ref(),
+                    )
+                };
+                custom_timer.jac_tac();
+                custom_timer.linear_system_tic();
+                let jacobian_diagnostics = inspect_global_jacobian(&jac_matrix);
+                record_global_jacobian_diagnostics(calc_statistics, &jacobian_diagnostics);
+                if jacobian_diagnostics.is_definitely_singular() {
+                    *calc_statistics
+                        .entry("global jacobian explicit singular precheck failures".to_string())
+                        .or_insert(0) += 1;
+                    singular = true;
+                    break;
+                }
+                lu_solver = None;
+                banded_solver = None;
+                bordered_factorization = None;
+                bordered_workspace = None;
+
+                let route_profile = profile_bordered_banded_global_jacobian(
+                    &jac_matrix,
+                    n,
+                    m,
+                    k,
+                    BvpSciBandedRoutePolicy::default(),
+                );
+                record_linear_backend_route(calc_statistics, &route_profile);
+                let should_try_bordered = match linear_solve_policy {
+                    BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => {
+                        if route_profile.recommended_route != BvpSciBandedRoute::BorderedBanded {
+                            *calc_statistics
+                                .entry("bvp sci bordered structured route rejected".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
+                        true
+                    }
+                    BvpSciLinearSolvePolicy::AutoBanded => {
+                        let eligible = k == 0
+                            && route_profile.recommended_route == BvpSciBandedRoute::BorderedBanded;
+                        if k > 0 {
+                            *calc_statistics
+                                .entry("bvp sci auto bordered parameter fallback".to_string())
+                                .or_insert(0) += 1;
+                        }
+                        eligible
+                    }
+                    _ => false,
+                };
+                let should_try_banded = match linear_solve_policy {
+                    BvpSciLinearSolvePolicy::Sparse => false,
+                    BvpSciLinearSolvePolicy::AutoBanded => {
+                        route_profile.recommended_route == BvpSciBandedRoute::FullScalarBanded
+                    }
+                    BvpSciLinearSolvePolicy::RequireFullBanded => {
+                        if route_profile.recommended_route != BvpSciBandedRoute::FullScalarBanded {
+                            *calc_statistics
+                                .entry("bvp sci full banded route rejected".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
+                        true
+                    }
+                    BvpSciLinearSolvePolicy::ExperimentalBorderedBanded => false,
+                };
+                let auto_banded_sparse_fallback = linear_solve_policy
+                    == BvpSciLinearSolvePolicy::AutoBanded
+                    && !should_try_banded
+                    && !should_try_bordered;
+
+                if should_try_bordered {
+                    let extract_started = Instant::now();
+                    let extracted_blocks = extract_bordered_banded_blocks(&jac_matrix, n, m, k);
+                    add_elapsed_micros_stat(
+                        calc_statistics,
+                        "bvp sci bordered extraction us",
+                        extract_started,
+                    );
+                    *calc_statistics
+                        .entry("bvp sci bordered extraction calls".to_string())
+                        .or_insert(0) += 1;
+                    match extracted_blocks.and_then(|blocks| {
+                        let factor_started = Instant::now();
+                        let factorization = factor_bordered_banded_structured(&blocks);
+                        add_elapsed_micros_stat(
+                            calc_statistics,
+                            "bvp sci bordered factorization us",
+                            factor_started,
+                        );
+                        *calc_statistics
+                            .entry("bvp sci bordered factorization calls".to_string())
+                            .or_insert(0) += 1;
+                        let factorization = factorization?;
+                        let mut workspace = factorization.new_workspace();
+                        let solve_started = Instant::now();
+                        let step_col = factorization.solve_with_workspace(&res, &mut workspace);
+                        add_elapsed_micros_stat(
+                            calc_statistics,
+                            "bvp sci bordered structured solve us",
+                            solve_started,
+                        );
+                        *calc_statistics
+                            .entry("bvp sci bordered structured solve calls".to_string())
+                            .or_insert(0) += 1;
+                        let step_col = step_col?;
+                        Ok((factorization, workspace, step_col))
+                    }) {
+                        Ok((factorization, workspace, step_col)) => {
+                            bordered_factorization = Some(factorization);
+                            bordered_workspace = Some(workspace);
+                            cost = step_col.squared_norm_l2();
+                            *calc_statistics
+                                .entry("number of solving linear systems".to_string())
+                                .or_insert(0) += 1;
+                            *calc_statistics
+                                .entry(
+                                    "bvp sci linear backend bordered structured solves".to_string(),
+                                )
+                                .or_insert(0) += 1;
+                            *calc_statistics
+                                .entry("bvp sci bordered initial solve calls".to_string())
+                                .or_insert(0) += 1;
+                        }
+                        Err(_) if linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded => {
+                            *calc_statistics
+                                .entry("bvp sci bordered structured solve failures".to_string())
+                                .or_insert(0) += 1;
+                            *calc_statistics
+                                .entry("bvp sci bordered factor fallback to sparse".to_string())
+                                .or_insert(0) += 1;
+                            match jac_matrix.sp_lu() {
+                                Ok(lu) => {
+                                    let step = lu.solve(res.as_mat());
+                                    let step_col =
+                                        faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+                                    lu_solver = Some(lu);
+                                    cost = step_col.squared_norm_l2();
+                                    *calc_statistics
+                                        .entry("number of solving linear systems".to_string())
+                                        .or_insert(0) += 1;
+                                    *calc_statistics
+                                        .entry(
+                                            "bvp sci linear backend sparse fallback solves"
+                                                .to_string(),
+                                        )
+                                        .or_insert(0) += 1;
+                                }
+                                Err(_) => {
+                                    *calc_statistics
+                                        .entry(
+                                            "global jacobian lu factorization failures".to_string(),
+                                        )
+                                        .or_insert(0) += 1;
+                                    singular = true;
+                                    break;
+                                }
                             }
                         }
+                        Err(_) => {
+                            *calc_statistics
+                                .entry("bvp sci bordered structured solve failures".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
                     }
-                    Err(_) => {
-                        *calc_statistics
-                            .entry("bvp sci full banded factorization failures".to_string())
-                            .or_insert(0) += 1;
-                        singular = true;
-                        break;
-                    }
-                }
-            } else {
-                // Attempt sparse LU decomposition
-                match jac_matrix.sp_lu() {
-                    Ok(lu) => {
-                        let step = lu.solve(res.as_mat());
-                        let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+                } else if should_try_banded {
+                    match factor_banded_and_solve(&jac_matrix, &res) {
+                        Ok((lu, step_col)) => {
+                            banded_solver = Some(lu);
+                            cost = step_col.squared_norm_l2();
+                            *calc_statistics
+                                .entry("number of solving linear systems".to_string())
+                                .or_insert(0) += 1;
+                            *calc_statistics
+                                .entry("bvp sci linear backend full banded solves".to_string())
+                                .or_insert(0) += 1;
+                        }
+                        Err(_) if linear_solve_policy == BvpSciLinearSolvePolicy::AutoBanded => {
+                            *calc_statistics
+                                .entry("bvp sci full banded factor fallback to sparse".to_string())
+                                .or_insert(0) += 1;
+                            match jac_matrix.sp_lu() {
+                                Ok(lu) => {
+                                    let step = lu.solve(res.as_mat());
+                                    let step_col =
+                                        faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
 
-                        lu_solver = Some(lu);
-                        cost = step_col.squared_norm_l2();
-                        *calc_statistics
-                            .entry("number of solving linear systems".to_string())
-                            .or_insert(0) += 1;
-                        let counter_key = if auto_banded_sparse_fallback {
-                            "bvp sci linear backend sparse fallback solves"
-                        } else {
-                            "bvp sci linear backend sparse solves"
-                        };
-                        *calc_statistics.entry(counter_key.to_string()).or_insert(0) += 1;
+                                    lu_solver = Some(lu);
+                                    cost = step_col.squared_norm_l2();
+                                    *calc_statistics
+                                        .entry("number of solving linear systems".to_string())
+                                        .or_insert(0) += 1;
+                                    *calc_statistics
+                                        .entry(
+                                            "bvp sci linear backend sparse fallback solves"
+                                                .to_string(),
+                                        )
+                                        .or_insert(0) += 1;
+                                }
+                                Err(_) => {
+                                    *calc_statistics
+                                        .entry(
+                                            "global jacobian lu factorization failures".to_string(),
+                                        )
+                                        .or_insert(0) += 1;
+                                    singular = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            *calc_statistics
+                                .entry("bvp sci full banded factorization failures".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
                     }
-                    Err(_) => {
-                        *calc_statistics
-                            .entry("global jacobian lu factorization failures".to_string())
-                            .or_insert(0) += 1;
-                        singular = true;
-                        break;
+                } else {
+                    // Attempt sparse LU decomposition
+                    match jac_matrix.sp_lu() {
+                        Ok(lu) => {
+                            let step = lu.solve(res.as_mat());
+                            let step_col = faer_col::from_fn(step.nrows(), |i| *step.get(i, 0));
+
+                            lu_solver = Some(lu);
+                            cost = step_col.squared_norm_l2();
+                            *calc_statistics
+                                .entry("number of solving linear systems".to_string())
+                                .or_insert(0) += 1;
+                            let counter_key = if auto_banded_sparse_fallback {
+                                "bvp sci linear backend sparse fallback solves"
+                            } else {
+                                "bvp sci linear backend sparse solves"
+                            };
+                            *calc_statistics.entry(counter_key.to_string()).or_insert(0) += 1;
+                        }
+                        Err(_) => {
+                            *calc_statistics
+                                .entry("global jacobian lu factorization failures".to_string())
+                                .or_insert(0) += 1;
+                            singular = true;
+                            break;
+                        }
                     }
                 }
             }
             njev += 1;
+            custom_timer.linear_system_tac();
         }
-        custom_timer.linear_system_tac();
+        custom_timer.linear_system_tic();
         let step_col = if let Some(ref lu) = lu_solver {
             let step: Mat<f64> = lu.solve(res.as_mat());
             Some(faer_col::from_fn(step.nrows(), |i| *step.get(i, 0)))
@@ -1844,9 +2049,11 @@ pub fn solve_newton(
                     None
                 }
             }
-        } else if let Some(ref factorization) = bordered_factorization {
+        } else if let (Some(factorization), Some(workspace)) =
+            (bordered_factorization.as_ref(), bordered_workspace.as_mut())
+        {
             let solve_started = Instant::now();
-            let step_result = factorization.solve(&res);
+            let step_result = factorization.solve_with_workspace(&res, workspace);
             add_elapsed_micros_stat(
                 calc_statistics,
                 "bvp sci bordered structured solve us",
@@ -1871,6 +2078,7 @@ pub fn solve_newton(
         } else {
             None
         };
+        custom_timer.linear_system_tac();
 
         if let Some(step_col) = step_col {
             // Extract step components
@@ -1946,9 +2154,11 @@ pub fn solve_newton(
                             break;
                         }
                     }
-                } else if let Some(ref factorization) = bordered_factorization {
+                } else if let (Some(factorization), Some(workspace)) =
+                    (bordered_factorization.as_ref(), bordered_workspace.as_mut())
+                {
                     let solve_started = Instant::now();
-                    let step_result = factorization.solve(&res_new);
+                    let step_result = factorization.solve_with_workspace(&res_new, workspace);
                     add_elapsed_micros_stat(
                         calc_statistics,
                         "bvp sci bordered structured solve us",
@@ -2328,6 +2538,49 @@ pub fn solve_bvp_with_strategy_and_linear_policy(
     strategy_params: Option<&HashMap<String, Vec<f64>>>,
     linear_solve_policy: BvpSciLinearSolvePolicy,
 ) -> Result<BVPResult, String> {
+    solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
+        fun,
+        bc,
+        x,
+        y,
+        p,
+        _s,
+        fun_jac,
+        None,
+        bc_jac,
+        tol,
+        max_nodes,
+        verbose,
+        bc_tol,
+        customtimer,
+        strategy_params,
+        linear_solve_policy,
+    )
+}
+
+/// BVP solver entry point with an optional native pointwise banded Jacobian.
+///
+/// Supplying `banded_fun_jac` selects the direct bordered-banded assembly route
+/// for parameter-free endpoint problems and bypasses global sparse Jacobian
+/// materialization.
+pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
+    fun: &ODEFunction,
+    bc: &BCFunction,
+    mut x: faer_col,
+    mut y: faer_dense_mat,
+    p: Option<faer_col>,
+    _s: Option<faer_dense_mat>,
+    fun_jac: Option<&ODEJacobian>,
+    banded_fun_jac: Option<&ODEBandedJacobian>,
+    bc_jac: Option<&BCJacobian>,
+    tol: f64,
+    max_nodes: usize,
+    verbose: u8,
+    bc_tol: Option<f64>,
+    customtimer: Option<CustomTimer>,
+    strategy_params: Option<&HashMap<String, Vec<f64>>>,
+    linear_solve_policy: BvpSciLinearSolvePolicy,
+) -> Result<BVPResult, String> {
     if fun_jac.is_none() {
         info!("\n \n No Jacobian provided, using numerical estimation \n \n");
     } else {
@@ -2419,6 +2672,7 @@ pub fn solve_bvp_with_strategy_and_linear_policy(
             fun,
             bc,
             fun_jac,
+            banded_fun_jac,
             bc_jac,
             y.clone(),
             p.clone(),

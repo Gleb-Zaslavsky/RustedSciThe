@@ -62,19 +62,22 @@
 //!    No symbolic machinery at all: users provide ordinary numerical closures directly to
 //!    the `faer` solver core in [`BVP_sci_faer`].
 //!
-use crate::numerical::BVP_Damp::BVP_utils::{elapsed_time, CustomTimer};
+use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
+use crate::Utils::plots::{plots, plots_gnulot};
+use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 use crate::numerical::BVP_sci::BVP_sci_aot::{
     BvpSciGeneratedBackendConfig, BvpSciGeneratedBackendMode,
 };
 use crate::numerical::BVP_sci::BVP_sci_faer::{
-    faer_col, faer_dense_mat, faer_mat, solve_bvp_with_strategy_and_linear_policy, BCFunction,
-    BCJacobian, BVPResult, BvpSciLinearSolvePolicy, ODEFunction, ODEJacobian,
+    BCFunction, BCJacobian, BVPResult, BvpSciLinearSolvePolicy, ODEBandedJacobian, ODEFunction,
+    ODEJacobian, faer_col, faer_dense_mat, faer_mat,
+    solve_bvp_with_strategy_linear_policy_and_banded_jacobian,
 };
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
 use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
+use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
-use crate::Utils::plots::{plots, plots_gnulot};
 use chrono::Local;
 use faer::mat::Mat;
 use log::{error, info};
@@ -117,6 +120,7 @@ pub struct BvpSciSolverOptions {
 pub enum BvpSciWorkflow {
     ExprLegacySmartSparseLambdify,
     AtomViewAotSparse,
+    AtomViewAotBanded,
     DirectNumericFaer,
 }
 
@@ -178,6 +182,26 @@ impl BvpSciSolverOptions {
         self
     }
 
+    pub fn with_sparse_jacobian_chunking_strategy(
+        mut self,
+        sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
+    ) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_sparse_jacobian_chunking_strategy(sparse_jacobian_chunking_strategy);
+        self
+    }
+
+    pub fn with_residual_chunking_strategy(
+        mut self,
+        residual_chunking_strategy: ResidualChunkingStrategy,
+    ) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_residual_chunking_strategy(residual_chunking_strategy);
+        self
+    }
+
     pub fn with_linear_solve_policy(mut self, policy: BvpSciLinearSolvePolicy) -> Self {
         self.linear_solve_policy = policy;
         self
@@ -223,6 +247,15 @@ impl BvpSciSolverOptions {
                 output_parent_dir,
             ),
         )
+    }
+
+    pub fn with_banded_atomview_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(
+                output_parent_dir,
+            ),
+        )
+        .with_auto_banded_linear_solver()
     }
 
     pub fn with_sparse_atomview_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
@@ -456,6 +489,7 @@ pub struct BVPwrap {
     /// initial guess for the solution
     /// Numerical Jacobian function closure
     pub jac_function: Option<Box<ODEJacobian>>,
+    pub banded_jac_function: Option<Arc<ODEBandedJacobian>>,
     /// Numerical residual function closure
     pub residual_function: Box<ODEFunction>,
     pub use_analytical_jacobian: bool,
@@ -465,6 +499,11 @@ pub struct BVPwrap {
     pub result: BVPResult,
     full_result: Option<DMatrix<f64>>,
     custom_timer: CustomTimer,
+    generated_backend_last_action: Option<String>,
+    generated_backend_last_problem_key: Option<String>,
+    generated_backend_last_policy: Option<String>,
+    generated_backend_last_toolchain: Option<String>,
+    generated_backend_runtime_diagnostics: HashMap<String, String>,
 }
 
 struct PreparedBvpSciProblem {
@@ -778,6 +817,7 @@ impl BVPwrap {
             max_nodes: max_nodes,
             initial_guess: initial_guess,
             jac_function: None,
+            banded_jac_function: None,
             residual_function: Box::new(|_, _, _| Mat::zeros(0, 0)),
             result: BVPResult::default(),
             full_result: None,
@@ -786,6 +826,11 @@ impl BVPwrap {
             generated_backend_config: BvpSciGeneratedBackendConfig::default(),
             linear_solve_policy: BvpSciLinearSolvePolicy::Sparse,
             custom_timer: CustomTimer::new(),
+            generated_backend_last_action: None,
+            generated_backend_last_problem_key: None,
+            generated_backend_last_policy: None,
+            generated_backend_last_toolchain: None,
+            generated_backend_runtime_diagnostics: HashMap::new(),
         }
     }
 
@@ -832,10 +877,36 @@ impl BVPwrap {
     pub fn set_generated_backend_config(&mut self, config: BvpSciGeneratedBackendConfig) {
         self.generated_backend_config = config;
         self.jac_function = None;
+        self.banded_jac_function = None;
+        self.generated_backend_last_action = None;
+        self.generated_backend_last_problem_key = None;
+        self.generated_backend_last_policy = None;
+        self.generated_backend_last_toolchain = None;
+        self.generated_backend_runtime_diagnostics.clear();
     }
 
     pub fn generated_backend_config(&self) -> &BvpSciGeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    pub(crate) fn record_generated_backend_lifecycle(
+        &mut self,
+        action: impl Into<String>,
+        problem_key: impl Into<String>,
+        policy: impl Into<String>,
+        toolchain: impl Into<String>,
+    ) {
+        self.generated_backend_last_action = Some(action.into());
+        self.generated_backend_last_problem_key = Some(problem_key.into());
+        self.generated_backend_last_policy = Some(policy.into());
+        self.generated_backend_last_toolchain = Some(toolchain.into());
+    }
+
+    pub(crate) fn record_generated_backend_runtime_diagnostics(
+        &mut self,
+        diagnostics: HashMap<String, String>,
+    ) {
+        self.generated_backend_runtime_diagnostics = diagnostics;
     }
 
     pub fn with_generated_backend_config(mut self, config: BvpSciGeneratedBackendConfig) -> Self {
@@ -851,6 +922,16 @@ impl BVPwrap {
 
     pub fn with_sparse_generated_backend_mode(mut self, mode: BvpSciGeneratedBackendMode) -> Self {
         self.set_sparse_generated_backend_mode(mode);
+        self
+    }
+
+    pub fn with_banded_atomview_c_tcc(mut self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.set_generated_backend_config(
+            BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(
+                output_parent_dir,
+            ),
+        );
+        self.set_linear_solve_policy(BvpSciLinearSolvePolicy::AutoBanded);
         self
     }
 
@@ -1014,6 +1095,7 @@ impl BVPwrap {
         p: Option<faer_col>,
         _s: Option<faer_dense_mat>, // Singular term not implemented
         fun_jac: Option<&ODEJacobian>,
+        banded_fun_jac: Option<&ODEBandedJacobian>,
         bc_jac: Option<&BCJacobian>,
         tol: f64,
         max_nodes: usize,
@@ -1025,7 +1107,7 @@ impl BVPwrap {
         let begin = Instant::now();
 
         info!("BVP solver started");
-        let bvpres = solve_bvp_with_strategy_and_linear_policy(
+        let bvpres = solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
             fun,
             bc,
             x,
@@ -1033,6 +1115,7 @@ impl BVPwrap {
             p,
             _s,
             fun_jac,
+            banded_fun_jac,
             bc_jac,
             tol,
             max_nodes,
@@ -1087,6 +1170,7 @@ impl BVPwrap {
             param_col,
             None, // Singular term not implemented
             jacobian.as_deref(),
+            None,
             None,
             tolerance,
             max_nodes,
@@ -1175,6 +1259,7 @@ impl BVPwrap {
         let tolerance = self.tolerance;
         let max_nodes = self.max_nodes;
         let custom_timer = self.custom_timer.clone();
+        let banded_jacobian = self.banded_jac_function.clone();
         self.solve_bvp_wrap(
             &residual_function,
             bc_func.as_ref().unwrap(),
@@ -1183,6 +1268,7 @@ impl BVPwrap {
             param_col,
             None,
             jacobian.as_deref(),
+            banded_jacobian.as_deref(),
             None,
             tolerance,
             max_nodes,
@@ -1196,9 +1282,11 @@ impl BVPwrap {
         let y = &self.result.y;
         let empty_p = faer_col::zeros(0);
         let p = self.result.p.as_ref().unwrap_or(&empty_p);
-        if let Some(jacobian_fn) = jacobian.as_deref() {
-            let jacfunc = jacobian_fn(x_mesh, y, p).0;
-            size_of_jacobian(jacfunc);
+        if banded_jacobian.is_none() {
+            if let Some(jacobian_fn) = jacobian.as_deref() {
+                let jacfunc = jacobian_fn(x_mesh, y, p).0;
+                size_of_jacobian(jacfunc);
+            }
         }
         elapsed_time(end);
         Ok(())
@@ -1243,18 +1331,11 @@ impl BVPwrap {
             BvpSciGeneratedBackendMode::LambdifyOnly
         ) {
             info!("BVP_sci generated backend closures installed");
-            let prepared = self
-                .prepare_generated_sparse_problem()
-                .unwrap_or_else(|err| {
-                    panic!("BVP_sci generated backend generation should succeed: {err}")
-                });
-            let (self_jac, self_residual, self_bc) =
-                self.wrap_prepared_sparse_problem(prepared.clone());
-            self.jac_function = self_jac;
-            self.residual_function = self_residual;
-            self.BC_function = self_bc;
+            let generated = self.eq_generate_generated().unwrap_or_else(|err| {
+                panic!("BVP_sci generated backend generation should succeed: {err}")
+            });
             self.is_all_created();
-            return self.wrap_prepared_sparse_problem(prepared);
+            return generated;
         }
         let prepared = PreparedBvpSciProblem {
             pointwise: self
@@ -1351,7 +1432,24 @@ impl BVPwrap {
     }
 
     pub fn get_statistics(&self) -> BvpSciStatistics {
-        BvpSciStatistics::from_result_and_mesh(&self.result, self.x_mesh_col.nrows())
+        let mut statistics =
+            BvpSciStatistics::from_result_and_mesh(&self.result, self.x_mesh_col.nrows());
+        if let Some(action) = &self.generated_backend_last_action {
+            statistics.set_diagnostic("generated_backend_action", action.clone());
+        }
+        if let Some(problem_key) = &self.generated_backend_last_problem_key {
+            statistics.set_diagnostic("generated_backend_problem_key", problem_key.clone());
+        }
+        if let Some(policy) = &self.generated_backend_last_policy {
+            statistics.set_diagnostic("generated_backend_policy", policy.clone());
+        }
+        if let Some(toolchain) = &self.generated_backend_last_toolchain {
+            statistics.set_diagnostic("generated_backend_toolchain", toolchain.clone());
+        }
+        for (key, value) in &self.generated_backend_runtime_diagnostics {
+            statistics.set_diagnostic(key.clone(), value.clone());
+        }
+        statistics
     }
 
     pub fn statistics_report(&self) -> String {
@@ -1396,10 +1494,21 @@ mod tests_phase1 {
         BvpSciSolverOptions, BvpSciWorkflow, Jacobian_sci_faer,
     };
     use crate::numerical::BVP_sci::BVP_sci_faer::faer_col;
-    use crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_sparse_backend;
+    use crate::symbolic::codegen::codegen_aot_runtime_link::{
+        resolve_linked_sparse_backend, unregister_linked_sparse_backend,
+    };
     use crate::symbolic::symbolic_engine::Expr;
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn generated_backend_registry_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GENERATED_BACKEND_REGISTRY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        GENERATED_BACKEND_REGISTRY_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("generated backend registry test lock should not be poisoned")
+    }
     use std::process::Command;
 
     fn tcc_is_available() -> bool {
@@ -1432,6 +1541,29 @@ mod tests_phase1 {
         let values = vec!["y".to_string(), "z".to_string()];
         let mut boundary_conditions = HashMap::new();
         boundary_conditions.insert("y".to_string(), vec![(0, 0.0), (1, 1.0)]);
+        BvpSciSolverOptions::new(
+            None,
+            Some(0.0),
+            Some(1.0),
+            Some(8),
+            eq_system,
+            values,
+            vec![],
+            None,
+            boundary_conditions,
+            "x".to_string(),
+            1e-4,
+            100,
+            DMatrix::zeros(2, 8),
+        )
+        .with_loglevel(Some("off".to_string()))
+    }
+
+    fn isolated_missing_backend_options() -> BvpSciSolverOptions {
+        let eq_system = vec![Expr::parse_expression("z"), Expr::parse_expression("1")];
+        let values = vec!["y".to_string(), "z".to_string()];
+        let mut boundary_conditions = HashMap::new();
+        boundary_conditions.insert("y".to_string(), vec![(0, 0.25), (1, 0.75)]);
         BvpSciSolverOptions::new(
             None,
             Some(0.0),
@@ -1541,6 +1673,28 @@ mod tests_phase1 {
     }
 
     #[test]
+    fn bvp_sci_generated_aot_modes_are_sparse_atomview_only() {
+        let aot_modes = [
+            BvpSciGeneratedBackendMode::RequirePrebuiltAot,
+            BvpSciGeneratedBackendMode::BuildIfMissingRelease,
+            BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseRust,
+            BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseGcc,
+            BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseTcc,
+            BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseZig,
+            BvpSciGeneratedBackendMode::AtomViewForRepeatedSolves,
+        ];
+
+        for mode in aot_modes {
+            let config = BvpSciGeneratedBackendConfig::from_mode(mode);
+            assert_eq!(
+                config.workflow(),
+                BvpSciWorkflow::AtomViewAotSparse,
+                "{mode:?} must stay an explicitly sparse AtomView AOT route"
+            );
+        }
+    }
+
+    #[test]
     fn bvp_sci_generated_backend_options_aliases_are_preserved() {
         let options = linear_problem_options()
             .with_sparse_atomview_for_repeated_solves("target/test-artifacts/bvp-sci");
@@ -1557,7 +1711,7 @@ mod tests_phase1 {
 
     #[test]
     fn bvp_sci_try_eq_generate_surfaces_unimplemented_generated_backend() {
-        let mut solver = BVPwrap::new_with_options(linear_problem_options())
+        let mut solver = BVPwrap::new_with_options(isolated_missing_backend_options())
             .with_sparse_generated_backend_mode(BvpSciGeneratedBackendMode::RequirePrebuiltAot);
 
         match solver.try_eq_generate() {
@@ -1573,7 +1727,7 @@ mod tests_phase1 {
 
     #[test]
     fn bvp_sci_try_solve_surfaces_missing_prebuilt_generated_backend() {
-        let mut solver = BVPwrap::new_with_options(linear_problem_options())
+        let mut solver = BVPwrap::new_with_options(isolated_missing_backend_options())
             .with_sparse_generated_backend_mode(BvpSciGeneratedBackendMode::RequirePrebuiltAot);
 
         match solver.try_solve() {
@@ -1589,6 +1743,7 @@ mod tests_phase1 {
 
     #[test]
     fn bvp_sci_generated_backend_ctcc_smoke_solve() {
+        let _registry_guard = generated_backend_registry_guard();
         if !tcc_is_available() {
             println!(
                 "[BVP_sci generated backend] skipping C-tcc smoke test: compiler not available"
@@ -1617,10 +1772,70 @@ mod tests_phase1 {
             solver.get_statistics().number_of_grid_points > 0,
             "generated BVP_sci solve should expose non-empty statistics"
         );
+        let stats = solver.get_statistics();
+        if let Some(problem_key) = stats.get_diagnostic_string("generated_backend_problem_key") {
+            let _ = unregister_linked_sparse_backend(problem_key);
+        }
+    }
+
+    #[test]
+    fn bvp_sci_generated_banded_ctcc_uses_native_bordered_route() {
+        let _registry_guard = generated_backend_registry_guard();
+        if !tcc_is_available() {
+            println!(
+                "[BVP_sci generated backend] skipping native banded C-tcc smoke test: compiler not available"
+            );
+            return;
+        }
+
+        let mut solver = BVPwrap::new_with_options(
+            linear_problem_options()
+                .with_banded_atomview_c_tcc(generated_test_artifact_dir("banded-ctcc-native")),
+        );
+
+        solver
+            .try_solve()
+            .expect("BVP_sci native banded C-tcc solve should succeed");
+
+        assert!(solver.result.success);
+        assert!(solver.get_result().is_some());
+        let stats = solver.get_statistics();
+        assert!(
+            stats
+                .get_counter("bvp sci direct banded assembly calls")
+                .unwrap_or(0)
+                > 0,
+            "true banded AOT must assemble bordered blocks directly"
+        );
+        assert!(
+            stats
+                .get_counter("bvp sci global sparse jacobian bypasses")
+                .unwrap_or(0)
+                > 0,
+            "true banded AOT must bypass global sparse Jacobian assembly"
+        );
+        assert!(
+            stats
+                .get_counter("bvp sci bordered factorization calls")
+                .unwrap_or(0)
+                > 0,
+            "true banded AOT must use the native bordered factorization"
+        );
+        assert_eq!(
+            stats
+                .get_counter("bvp sci sparse linear solves")
+                .unwrap_or(0),
+            0,
+            "native banded smoke route must not silently fall back to Sparse LU"
+        );
+        if let Some(problem_key) = stats.get_diagnostic_string("generated_backend_problem_key") {
+            let _ = unregister_linked_sparse_backend(problem_key);
+        }
     }
 
     #[test]
     fn bvp_sci_generated_backend_cgcc_smoke_solve() {
+        let _registry_guard = generated_backend_registry_guard();
         if !gcc_is_available() {
             println!(
                 "[BVP_sci generated backend] skipping C-gcc smoke test: compiler not available"
@@ -1649,10 +1864,15 @@ mod tests_phase1 {
             solver.get_statistics().number_of_grid_points > 0,
             "generated BVP_sci solve should expose non-empty statistics"
         );
+        let stats = solver.get_statistics();
+        if let Some(problem_key) = stats.get_diagnostic_string("generated_backend_problem_key") {
+            let _ = unregister_linked_sparse_backend(problem_key);
+        }
     }
 
     #[test]
     fn bvp_sci_generated_backend_ctcc_registers_sparse_runtime() {
+        let _registry_guard = generated_backend_registry_guard();
         if !tcc_is_available() {
             println!(
                 "[BVP_sci generated backend] skipping sparse runtime registration test: compiler not available"
@@ -1660,7 +1880,7 @@ mod tests_phase1 {
             return;
         }
 
-        let solver = BVPwrap::new_with_options(
+        let mut solver = BVPwrap::new_with_options(
             linear_problem_options()
                 .with_sparse_atomview_c_tcc(generated_test_artifact_dir("ctcc-registry")),
         );
@@ -1682,6 +1902,16 @@ mod tests_phase1 {
             linked.nnz > 0,
             "linked sparse backend should expose nonzero Jacobian entries"
         );
+        let stats = solver.get_statistics();
+        assert_eq!(
+            stats.get_diagnostic_string("generated_backend_action"),
+            Some("built_and_linked")
+        );
+        assert_eq!(
+            stats.get_diagnostic_string("generated_backend_policy"),
+            Some("BuildIfMissing")
+        );
+        let _ = unregister_linked_sparse_backend(problem_key.as_str());
     }
 
     #[test]
@@ -1872,6 +2102,7 @@ mod tests_phase1 {
 
     #[test]
     fn bvp_sci_generated_backend_ctcc_preserves_parameter_jacobian_callback() {
+        let _registry_guard = generated_backend_registry_guard();
         if !tcc_is_available() {
             println!(
                 "[BVP_sci generated backend] skipping parameter Jacobian callback test: C-tcc not available"

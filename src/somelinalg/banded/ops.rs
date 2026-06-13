@@ -158,7 +158,7 @@ pub fn dense_diff_linf(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
 //===================================================================================================
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 
     use super::{banded_matvec, residual_l2, residual_linf, vec_diff_linf};
     use crate::somelinalg::banded::{general_lu::GeneralBandedLuNoPivot, storage::Banded};
@@ -177,13 +177,13 @@ mod tests {
                 if i == j {
                     continue;
                 }
-                let v = rng.gen_range(-1.0..1.0);
+                let v = rng.random_range(-1.0..1.0);
                 a[(i, j)] = v;
                 col_abs_sum += v.abs();
             }
 
             // Make diagonal comfortably dominant.
-            a[(j, j)] = col_abs_sum + rng.gen_range(1.0..2.0);
+            a[(j, j)] = col_abs_sum + rng.random_range(1.0..2.0);
         }
 
         a
@@ -254,7 +254,7 @@ mod tests {
             let a = random_diag_dominant_banded(n, kl, ku, seed);
 
             let mut rng = StdRng::seed_from_u64(seed + 10_000);
-            let x_true: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let x_true: Vec<f64> = (0..n).map(|_| rng.random_range(-1.0..1.0)).collect();
             let b = banded_matvec(&a, &x_true).unwrap();
 
             let mut x = b.clone();

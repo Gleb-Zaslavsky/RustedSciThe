@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::numerical::BVP_sci::BVP_sci_bordered_banded::{
-        profile_bordered_banded_global_jacobian, BvpSciBandedRoute, BvpSciBandedRoutePolicy,
+        BvpSciBandedRoute, BvpSciBandedRoutePolicy, profile_bordered_banded_global_jacobian,
     };
     use crate::numerical::BVP_sci::BVP_sci_faer::{construct_global_jac, faer_col};
     use faer::sparse::{SparseColMat, Triplet};

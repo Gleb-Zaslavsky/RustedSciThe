@@ -2128,7 +2128,8 @@ mod solver_comparison_tests {
     use crate::somelinalg::banded::ops::banded_matvec;
     use faer::linalg::solvers::Solve;
     use faer::sparse::{SparseColMat, Triplet};
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+
     #[derive(Debug, Clone, Copy)]
     struct CompareMetrics {
         rr_band: f64,

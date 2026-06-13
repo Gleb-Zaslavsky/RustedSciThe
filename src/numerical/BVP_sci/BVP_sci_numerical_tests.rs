@@ -1,9 +1,13 @@
 #[cfg(test)]
 mod tests {
+    use crate::numerical::BVP_sci::BVP_sci_aot::BvpSciGeneratedBackendConfig;
     use crate::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
     use crate::numerical::BVP_sci::BVP_sci_numerical::{
-        solve_numerical_bvp, NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
+        BvpSciNumericalOptions, BvpSciNumericalProblem, NumericalBvpClosureProblem,
+        NumericalBvpProblem, NumericalBvpSolveOptions, NumericalJacobianMode, solve_numerical_bvp,
+        solve_numerical_bvp_fd, solve_numerical_bvp_with_jacobian,
     };
+    use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
     use faer::sparse::Triplet;
 
     struct HarmonicProblem;
@@ -160,5 +164,230 @@ mod tests {
             .as_ref()
             .expect("parameter vector should be returned");
         assert!((solved_parameter[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn numerical_bvp_fd_wrapper_succeeds() {
+        let mesh = harmonic_mesh(16);
+        let guess = harmonic_initial_guess(&mesh);
+        let result = solve_numerical_bvp_fd(
+            HarmonicProblem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512),
+        )
+        .expect("explicit finite-difference wrapper should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+    }
+
+    #[test]
+    fn numerical_bvp_analytical_wrapper_succeeds() {
+        let mesh = harmonic_mesh(16);
+        let guess = harmonic_initial_guess(&mesh);
+        let result = solve_numerical_bvp_with_jacobian(
+            HarmonicProblemWithJacobian,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512),
+        )
+        .expect("explicit analytical wrapper should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+        assert!(result.rms_residuals.nrows() > 0);
+    }
+
+    #[test]
+    fn numerical_bvp_sparse_chunking_strategy_can_be_configured() {
+        let config = BvpSciGeneratedBackendConfig::default()
+            .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::ByTargetChunkCount {
+                target_chunks: 4,
+            });
+        assert_eq!(
+            config.sparse_jacobian_chunking_strategy,
+            SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 4 }
+        );
+    }
+
+    #[test]
+    fn numerical_bvp_closure_fd_adapter_succeeds() {
+        let mesh = harmonic_mesh(16);
+        let guess = harmonic_initial_guess(&mesh);
+        let problem = NumericalBvpClosureProblem::new_fd(
+            2,
+            0,
+            |_, y, _, out| {
+                out[0] = y[1];
+                out[1] = -y[0];
+            },
+            |ya, _yb, _p, out| {
+                out[0] = ya[0];
+                out[1] = ya[1] - 1.0;
+            },
+        );
+
+        let result = solve_numerical_bvp(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512),
+        )
+        .expect("closure-based FD numerical BVP solve should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+    }
+
+    #[test]
+    fn numerical_bvp_closure_analytical_adapter_succeeds() {
+        let mesh = harmonic_mesh(16);
+        let guess = harmonic_initial_guess(&mesh);
+        let problem = NumericalBvpClosureProblem::new_with_jacobian(
+            2,
+            0,
+            |_, y, _, out| {
+                out[0] = y[1];
+                out[1] = -y[0];
+            },
+            |ya, _yb, _p, out| {
+                out[0] = ya[0];
+                out[1] = ya[1] - 1.0;
+            },
+            |_x, _y, _p| {
+                let triplets = vec![
+                    Triplet::new(0usize, 1usize, 1.0),
+                    Triplet::new(1usize, 0usize, -1.0),
+                ];
+                Some(faer_mat::try_new_from_triplets(2, 2, &triplets).unwrap())
+            },
+            |_ya, _yb, _p| {
+                let dya = vec![
+                    Triplet::new(0usize, 0usize, 1.0),
+                    Triplet::new(1usize, 1usize, 1.0),
+                ];
+                let dyb: Vec<Triplet<usize, usize, f64>> = Vec::new();
+                Some((
+                    faer_mat::try_new_from_triplets(2, 2, &dya).unwrap(),
+                    faer_mat::try_new_from_triplets(2, 2, &dyb).unwrap(),
+                    None,
+                ))
+            },
+        );
+
+        let result = solve_numerical_bvp(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-6, 512),
+        )
+        .expect("closure-based analytical numerical BVP solve should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+    }
+
+    #[test]
+    fn numerical_bvp_closure_parameterized_fd_adapter_succeeds() {
+        let mesh = faer_col::from_fn(12, |i| i as f64 / 11.0);
+        let guess = faer_dense_mat::from_fn(1, mesh.nrows(), |_, j| mesh[j]);
+        let parameters = faer_col::from_fn(1, |_| 1.0);
+
+        let problem = NumericalBvpClosureProblem::new_fd(
+            1,
+            1,
+            |_x, _y, p, out| {
+                out[0] = p[0];
+            },
+            |ya, _yb, p, out| {
+                out[0] = ya[0];
+                out[1] = p[0] - 1.0;
+            },
+        )
+        .with_rhs_param_jacobian(|_x, _y, _p| None);
+
+        let result = solve_numerical_bvp(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-7, 256).with_parameters(Some(parameters)),
+        )
+        .expect("closure-based parameterized FD numerical BVP solve should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+        let solved_parameter = result
+            .p
+            .as_ref()
+            .expect("parameter vector should be returned for closure-based parametric solve");
+        assert!((solved_parameter[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn numerical_bvp_closure_parameterized_analytical_adapter_succeeds() {
+        let mesh = faer_col::from_fn(12, |i| i as f64 / 11.0);
+        let guess = faer_dense_mat::from_fn(1, mesh.nrows(), |_, j| mesh[j]);
+        let parameters = faer_col::from_fn(1, |_| 1.0);
+
+        let problem = NumericalBvpClosureProblem::new_with_jacobian(
+            1,
+            1,
+            |_x, _y, p, out| {
+                out[0] = p[0];
+            },
+            |ya, _yb, p, out| {
+                out[0] = ya[0];
+                out[1] = p[0] - 1.0;
+            },
+            |_x, _y, _p| {
+                let triplets = vec![Triplet::new(0usize, 0usize, 0.0)];
+                Some(faer_mat::try_new_from_triplets(1, 1, &triplets).unwrap())
+            },
+            |_ya, _yb, _p| {
+                let dya = vec![Triplet::new(0usize, 0usize, 1.0)];
+                let dyb = vec![Triplet::new(0usize, 0usize, 0.0)];
+                let dp = vec![Triplet::new(1usize, 0usize, 1.0)];
+                Some((
+                    faer_mat::try_new_from_triplets(1, 1, &dya).unwrap(),
+                    faer_mat::try_new_from_triplets(1, 1, &dyb).unwrap(),
+                    Some(faer_mat::try_new_from_triplets(2, 1, &dp).unwrap()),
+                ))
+            },
+        );
+
+        let result = solve_numerical_bvp(
+            problem,
+            NumericalBvpSolveOptions::new(mesh, guess, 1e-7, 256).with_parameters(Some(parameters)),
+        )
+        .expect("closure-based analytical parametric numerical BVP solve should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
+        let solved_parameter = result.p.as_ref().expect(
+            "parameter vector should be returned for closure-based analytical parametric solve",
+        );
+        assert!((solved_parameter[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn numerical_bvp_public_alias_and_builder_style_succeeds() {
+        let mesh = harmonic_mesh(16);
+        let guess = harmonic_initial_guess(&mesh);
+        let problem = BvpSciNumericalProblem::new_fd(
+            2,
+            0,
+            |_, y, _, out| {
+                out[0] = y[1];
+                out[1] = -y[0];
+            },
+            |ya, _yb, _p, out| {
+                out[0] = ya[0];
+                out[1] = ya[1] - 1.0;
+            },
+        );
+
+        let options = BvpSciNumericalOptions::new(mesh, guess, 1e-6, 512)
+            .with_tolerance(1e-6)
+            .with_max_nodes(512)
+            .with_mesh_refinement(1e-6, 512)
+            .with_verbose(0)
+            .with_bc_tol(None);
+
+        let result =
+            solve_numerical_bvp(problem, options).expect("alias-based numerical solve should work");
+
+        assert!(result.success);
+        assert_eq!(result.status, 0);
     }
 }

@@ -666,7 +666,7 @@ mod tests {
 
         let arg = "x".to_owned();
         let initial_guess = DMatrix::zeros(2, n); // initial guess for y and z
-                                                  // Use new method to create solver instance
+        // Use new method to create solver instance
         let mut bvp_solver = quiet_exprlegacy_solver(BVPwrap::new(
             None,
             Some(start_and_end.0),

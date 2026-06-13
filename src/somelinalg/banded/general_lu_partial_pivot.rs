@@ -214,7 +214,7 @@ impl GeneralBandedLuPartialPivot {
 //========================================================================================
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 
     use crate::somelinalg::banded::error::BandedError;
     use crate::somelinalg::banded::{
@@ -235,12 +235,12 @@ mod tests {
                 if i == j {
                     continue;
                 }
-                let v = rng.gen_range(-1.0..1.0);
+                let v = rng.random_range(-1.0..1.0);
                 a[(i, j)] = v;
                 col_abs_sum += v.abs();
             }
 
-            a[(j, j)] = col_abs_sum + rng.gen_range(1.0..2.0);
+            a[(j, j)] = col_abs_sum + rng.random_range(1.0..2.0);
         }
 
         a
@@ -338,7 +338,7 @@ mod tests {
             let a = random_diag_dominant_banded(n, kl, ku, seed);
 
             let mut rng = StdRng::seed_from_u64(seed + 9999);
-            let x_true: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let x_true: Vec<f64> = (0..n).map(|_| rng.random_range(-1.0..1.0)).collect();
             let b = banded_matvec(&a, &x_true).unwrap();
 
             let mut x_np = b.clone();

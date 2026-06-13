@@ -1,7 +1,6 @@
 use crate::somelinalg::banded::{Banded, BlockTridiagonal};
 use faer::sparse::{SparseColMat, Triplet};
-use rand::{Rng, SeedableRng, rngs::StdRng};
-
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 pub fn generate_block_tridiagonal_dense(
     n_blocks: usize,
     block_size: usize,
@@ -19,14 +18,14 @@ pub fn generate_block_tridiagonal_dense(
                 if i == j {
                     continue;
                 }
-                let v = rng.gen_range(-0.2..0.2);
+                let v = rng.random_range(-0.2..0.2);
                 a.set_diag(blk, i, j, v).unwrap();
                 abs_sum += v.abs();
             }
 
             if blk > 0 {
                 for i in 0..block_size {
-                    let v = rng.gen_range(-0.05..0.05);
+                    let v = rng.random_range(-0.05..0.05);
                     a.set_lower(blk - 1, i, j, v).unwrap();
                     abs_sum += v.abs();
                 }
@@ -34,13 +33,13 @@ pub fn generate_block_tridiagonal_dense(
 
             if blk + 1 < n_blocks {
                 for i in 0..block_size {
-                    let v = rng.gen_range(-0.05..0.05);
+                    let v = rng.random_range(-0.05..0.05);
                     a.set_upper(blk, i, j, v).unwrap();
                     abs_sum += v.abs();
                 }
             }
 
-            a.set_diag(blk, j, j, abs_sum + rng.gen_range(1.0..2.0))
+            a.set_diag(blk, j, j, abs_sum + rng.random_range(1.0..2.0))
                 .unwrap();
         }
     }
@@ -69,7 +68,7 @@ pub fn generate_block_tridiagonal_narrow(
                 if i == j {
                     continue;
                 }
-                let v = rng.gen_range(-0.2..0.2);
+                let v = rng.random_range(-0.2..0.2);
                 a.set_diag(blk, i, j, v).unwrap();
                 abs_sum += v.abs();
             }
@@ -79,7 +78,7 @@ pub fn generate_block_tridiagonal_narrow(
                 let i1 = (j + coupling_half_bw + 1).min(block_size);
 
                 for i in i0..i1 {
-                    let v = rng.gen_range(-0.05..0.05);
+                    let v = rng.random_range(-0.05..0.05);
                     a.set_lower(blk - 1, i, j, v).unwrap();
                     abs_sum += v.abs();
                 }
@@ -90,13 +89,13 @@ pub fn generate_block_tridiagonal_narrow(
                 let i1 = (j + coupling_half_bw + 1).min(block_size);
 
                 for i in i0..i1 {
-                    let v = rng.gen_range(-0.05..0.05);
+                    let v = rng.random_range(-0.05..0.05);
                     a.set_upper(blk, i, j, v).unwrap();
                     abs_sum += v.abs();
                 }
             }
 
-            a.set_diag(blk, j, j, abs_sum + rng.gen_range(1.0..2.0))
+            a.set_diag(blk, j, j, abs_sum + rng.random_range(1.0..2.0))
                 .unwrap();
         }
     }
@@ -154,7 +153,7 @@ pub fn generate_rhs_from_known_solution_block(
     seed: u64,
 ) -> (Vec<f64>, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(seed);
-    let x_true: Vec<f64> = (0..a.n()).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let x_true: Vec<f64> = (0..a.n()).map(|_| rng.random_range(-1.0..1.0)).collect();
     let b = block_tridiagonal_matvec(a, &x_true);
     (x_true, b)
 }

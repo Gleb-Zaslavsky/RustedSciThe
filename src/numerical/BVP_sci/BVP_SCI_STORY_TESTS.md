@@ -7,11 +7,45 @@ what is missing, and how the test surface evolves across refactoring phases.
 
 The BVP_sci module is a Rust port of SciPy's `scipy.integrate._bvp` solver
 using 4th-order collocation with residual control and adaptive mesh refinement.
-It supports three workflows:
+It supports four workflows:
 
 - `ExprLegacySmartSparseLambdify` — symbolic differentiation + lambdify closures
 - `AtomViewAotSparse` — codegen/AOT pipeline (C/tcc, C/gcc, Rust, Zig)
-- `DirectNumericFaer` — pure numerical closures (no symbolics)
+- `AtomViewAotBanded` - generated pointwise banded Jacobian values assembled
+  directly into the native bordered-banded Newton system
+- `DirectNumericFaer` — pure numerical closures (no symbolics); now exposed
+  through a dedicated closure-based adapter with FD and analytical modes
+
+## Executive Summary
+
+These are the current high-level conclusions from the BVP_sci story suite.
+Each line points to the story test that supports it, so the claim can be
+rechecked when hardware, compiler versions or backend internals change.
+
+1. The pure numerical route is now a first-class user-facing API, not a hidden
+   internal escape hatch. It supports both `FD` and analytical Jacobian modes
+   without forcing symbolic placeholders. Evidence: `BVP_sci_numerical_tests.rs`
+   and `bvp_sci_pure_numerical_direct_num_story`.
+2. The Banded production track is now the main correctness/performance route.
+   The sparse/banded split stories and the production-style banded stories show
+   that `AutoBanded` can safely promote parameter-free endpoint systems to the
+   native bordered solver. Parameterized or unsupported layouts retain the
+   Sparse fallback, while `ExperimentalBorderedBanded` remains the strict
+   no-fallback diagnostic policy. Evidence:
+   `CG.4e`, `PS.8b`, `PS.8f1-PS.8f5`, and the historical/superseded legacy
+   entries.
+3. On the generated-backend side, the compare and production-like tables show
+   that `Direct-num` is usually the strongest pure numerical baseline, while
+   `Direct-num-FD` is the lower-friction fallback when only rhs closures are
+   available. Evidence: `PS.10`, `PS.11`, and the new pure numerical story.
+4. The story ledger now prefers repeated runs and stage breakdowns over one-off
+   timings. That makes the conclusions robust enough to survive machine or
+   compiler noise instead of overfitting to a single run.
+5. True Banded AOT is now a separate generated route, not merely a banded
+   linear solve fed by a globally materialized sparse Jacobian. The route gate
+   requires direct banded assembly, global sparse bypass, native bordered
+   factorization, and zero sparse fallback. Release performance evidence is
+   collected by `PS.8a3`.
 
 ## How To Read The Layers
 
@@ -67,17 +101,18 @@ also honors these environment variables when present: `RUSTEDSCITHE_TCC`,
 | `BVP_sci_symb.rs` (tests_phase1) | 18 | API surface, workflow selection, generated backend smoke, symbolic structure, exponential diagnostics | All three |
 | `BVP_sci_symb_tests.rs` | 8 | BC closure creator, eq_generate, solve_bvp_wrap, elementary solve | Lambdify |
 | `BVP_sci_symb_tests2.rs` | 11 | Exponential BVP, parachute, Clairaut, Lane-Emden — problem-specific | Lambdify |
-| `BVP_sci_faer_tests.rs` | 29 | Core solver: Jacobian estimation, collocation, Newton, mesh refinement, singular handling, Jacobian singular diagnostics, safe AutoBanded routing, explicit experimental bordered-banded Newton route | Direct numeric |
+| `BVP_sci_faer_tests.rs` | 30 | Core solver: Jacobian estimation, collocation, Newton, mesh refinement, singular handling, Jacobian singular diagnostics, promoted AutoBanded routing, parameterized Sparse fallback, strict bordered-banded Newton route | Direct numeric |
 | `BVP_sci_banded_tests.rs` | 5 | Banded adapter foundation: sparse global-Jacobian profile, sparse-to-banded conversion, banded solve parity, invalid-shape rejection, full-vs-collocation bandwidth diagnostics | Direct numeric / Banded foundation |
 | `BVP_sci_bordered_banded_tests.rs` | 4 | Boundary-aware banded route planner: full scalar banded vs bordered-banded vs sparse fallback decisions | Direct numeric / Banded foundation |
-| `BVP_sci_bordered_solver_tests.rs` | 11 | Bordered-banded solver foundation: extract block-bidiagonal collocation body, endpoint BC blocks, parameter blocks, solve the extracted layout through a dense correctness oracle, solve it through structured block recurrence matching Sparse LU, reuse cached factorization across multiple RHS, and reject malformed/singular layouts | Direct numeric / Bordered solver foundation |
+| `BVP_sci_bordered_solver_tests.rs` | 12 | Bordered-banded solver foundation: extract block-bidiagonal collocation body, endpoint BC blocks, parameter blocks, solve the extracted layout through a dense correctness oracle, solve it through structured block recurrence matching Sparse LU, reuse cached factorization across multiple RHS, reject malformed/singular layouts, and microbench bordered factor/solve against Sparse LU | Direct numeric / Bordered solver foundation |
 | `BVP_sci_nalgebra_tests.rs` | 20 | Dense nalgebra prototype: same tests as faer_tests but with nalgebra backend | Direct numeric (nalgebra) |
 | `BVP_sci_aot_tests.rs` | 4 | AtomView prepare, CTCC callbacks, CTCC solution match (linear + param) | AOT |
-| `BVP_sci_generated_compare_tests.rs` | 4 (3 ignored) | Generated backend compare table, production-like end-to-end compare, Rust AOT output-dir isolation gate | All three |
-| `BVP_sci_numerical_tests.rs` | 3 | Numerical solve without symbolics, with pointwise Jacobians, with parameters | Direct numeric |
-| `BVP_sci_story_tests.rs` | 10 | Combustion problem story tests: lambdify baseline, AOT correctness, full release matrix, ExprLegacy stability, tcc lifecycle, AutoBanded route diagnostics, linear-policy release-candidate stress, large-mesh bordered confirmation, non-combustion endpoint confirmation, isolated cold stress | Lambdify + AOT + linear-policy diagnostics |
+| `BVP_sci_generated_compare_tests.rs` | 5 (4 ignored) | Generated backend compare table, production-like end-to-end compare, Rust AOT output-dir isolation gate, pure numerical Direct-num vs Lambdify story | All three + Direct numeric |
+| `BVP_sci_numerical_tests.rs` | 4 | Numerical solve without symbolics, closure-based FD / analytical / parameterized coverage | Direct numeric |
+| `BVP_sci_story_tests.rs` | 10 | Core combustion story tests: lambdify baseline, AOT correctness, full release matrix, ExprLegacy stability, tcc lifecycle, AutoBanded route diagnostics, linear-policy release-candidate stress, large-mesh bordered confirmation, non-combustion endpoint confirmation, isolated cold stress | Lambdify + AOT + linear-policy diagnostics |
+| `BVP_sci_banded_story_tests.rs` | 3 | Canonical banded production-track story tests: combustion 1000, 3000, and 10000 Sparse vs promoted AutoBanded vs strict bordered correctness/timing/route/memory | Sparse vs banded route evidence |
 
-**Total: ~127 active/ignored test functions** (about 8 ignored, the rest run in `cargo test --lib`).
+**Total: ~130 active/ignored test functions** (about 11 ignored, the rest run in `cargo test --lib`).
 
 ## Correctness Gates
 
@@ -300,43 +335,49 @@ Command:
 cargo test --lib BVP_sci_bordered_solver_tests -- --nocapture
 ```
 
-This gate verifies the first non-fallback brick for the future bordered-banded
-solver.  It extracts the sparse global Jacobian into dense interval diagonal
-blocks, interval off-diagonal blocks, optional collocation parameter blocks,
-endpoint boundary blocks, and optional boundary-parameter blocks.  The extracted
-layout must reconstruct the original sparse matrix exactly on small test
-systems, its correctness-only dense reference solve must match Sparse LU, and
-the structured block-recurrence solver must also match Sparse LU.
+This gate verifies the non-fallback brick for the bordered-banded solver.  It
+extracts the sparse global Jacobian into dense interval diagonal blocks,
+interval off-diagonal blocks, optional collocation parameter blocks, endpoint
+boundary blocks, and optional boundary-parameter blocks.  The extracted layout
+must reconstruct the original sparse matrix exactly on small test systems, its
+correctness-only dense reference solve must match Sparse LU, and the structured
+block-recurrence solver must also match Sparse LU.  Parameter-free endpoint
+systems now use a native dense-block LU backend instead of the old nalgebra
+factorization path; parameterized systems still fall back to the nalgebra
+structured backend until that branch is specialized too.
 
 Current result:
 ```text
-running 10 tests
+running 12 tests
+test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_factor_solve_microbench_vs_sparse_lu ... ignored
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_extraction_reconstructs_parameter_free_global_jacobian ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_extraction_preserves_parameter_blocks ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_reference_solve_matches_sparse_lu_parameter_free ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_reference_solve_matches_sparse_lu_with_parameter ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_matches_sparse_lu_parameter_free ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_matches_sparse_lu_with_parameter ... ok
+test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_factorization_reuses_multiple_rhs ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_rejects_wrong_rhs_length ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_rejects_malformed_block_layout ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_reports_singular_offdiag_block ... ok
 test numerical::BVP_sci::BVP_sci_bordered_solver_tests::tests::bordered_banded_structured_solve_reports_singular_border_system ... ok
 
-test result: ok. 10 passed; 0 failed
+test result: ok. 11 passed; 0 failed; 1 ignored
 ```
 
 Conclusion:
 ```text
-The BorderedBanded solver is now built on an explicit, tested block layout
-instead of ad-hoc sparse indexing.  The dense reference solve remains the oracle;
-the structured solve is the first native bordered algorithm and has basic
-hardening for wrong RHS length, malformed layout, singular off-diagonal blocks,
-and singular border systems.  It is now wired into Newton only behind the
-explicit `ExperimentalBorderedBanded` policy; Sparse remains the default and
-AutoBanded still falls back safely for endpoint-BC matrices.
+The BorderedBanded solver is built on an explicit, tested block layout instead
+of ad-hoc sparse indexing.  The dense reference solve remains the oracle; the
+structured solve is the production-candidate algorithm.  For parameter-free
+endpoint systems it now avoids nalgebra in the hot factor/solve path and uses
+the native dense-block kernels shared with the banded work.  It remains wired
+into Newton only behind the explicit `ExperimentalBorderedBanded` policy;
+Sparse remains the default and AutoBanded still falls back safely for
+endpoint-BC matrices until release stories prove a stable win.
 ```
 
-Current result:
+Historical result:
 ```text
 2026-06-06, debug: passed.
 bordered_banded_extraction_reconstructs_parameter_free_global_jacobian ... ok
@@ -346,6 +387,73 @@ bordered_banded_reference_solve_matches_sparse_lu_with_parameter ... ok
 bordered_banded_structured_solve_matches_sparse_lu_parameter_free ... ok
 bordered_banded_structured_solve_matches_sparse_lu_with_parameter ... ok
 test result: ok. 6 passed; 0 failed
+```
+
+### CG.4e: Bordered factor/solve microbench vs Sparse LU
+
+File: `src/numerical/BVP_sci/BVP_sci_bordered_solver_tests.rs`
+
+Command:
+```powershell
+cargo test --release bordered_banded_factor_solve_microbench_vs_sparse_lu -- --ignored --nocapture --test-threads=1
+```
+
+Optional scale controls:
+```powershell
+$env:BVP_SCI_BORDERED_MICRO_M="1500"
+$env:BVP_SCI_BORDERED_MICRO_RUNS="5"
+$env:BVP_SCI_BORDERED_MICRO_RHS="12"
+```
+
+This is the narrow performance diagnostic for the native bordered route.  It
+does not run Newton, symbolic differentiation, AOT, mesh refinement, or
+residual/Jacobian callbacks.  It builds synthetic endpoint-BC block-bidiagonal
+systems, compares native structured bordered factor/solve against Sparse LU on
+the same matrix and RHS set, and asserts numerical agreement.
+
+Hypothesis:
+```text
+If ExperimentalBorderedBanded is going to become a production candidate, the
+raw bordered factor/solve kernel must be numerically equivalent to Sparse LU
+and should win at least in the Newton-like `factor + one RHS` regime.  Batch
+RHS timing is reported separately because it answers a different question and
+can expose solve-side overhead that is hidden by factorization wins.
+```
+
+Current 12 Core release result after solve-workspace reuse:
+```text
+[BVP_sci bordered microbench] m=1500, runs=5, rhs_count=12
+scenario       | n | matrix | factor_ms mean+/-std | solve_all_ms mean+/-std | solve_rhs_ms | total_1rhs_ms | total_batch_ms | max_diff_vs_sparse | verdict_1rhs | verdict_batch
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+left-fixed     | 4 | Bordered |    0.452 +/- 0.095    |      0.991 +/- 0.019    |        0.083 |         0.534 |          1.443 |          4.974e-13 |     bordered |      bordered
+left-fixed     | 4 | Sparse   |    1.368 +/- 0.169    |      0.527 +/- 0.006    |        0.044 |         1.412 |          1.894 |                  - |     baseline |      baseline
+left-fixed     | 4 | delta    |   -0.916            |      0.465            |        0.039 |        -0.878 |         -0.452 |                  - |          win |           win
+[BVP_sci bordered microbench] left-fixed: bordered wins for the full RHS batch
+split-endpoint | 6 | Bordered |    1.059 +/- 0.123    |      1.619 +/- 0.109    |        0.135 |         1.194 |          2.678 |          4.228e-13 |     bordered |      bordered
+split-endpoint | 6 | Sparse   |    3.337 +/- 0.290    |      0.999 +/- 0.010    |        0.083 |         3.421 |          4.337 |                  - |     baseline |      baseline
+split-endpoint | 6 | delta    |   -2.278            |      0.620            |        0.052 |        -2.227 |         -1.659 |                  - |          win |           win
+[BVP_sci bordered microbench] split-endpoint: bordered wins for the full RHS batch
+mixed-endpoint | 8 | Bordered |    1.907 +/- 0.036    |      2.316 +/- 0.038    |        0.193 |         2.100 |          4.223 |          3.268e-13 |     bordered |      bordered
+mixed-endpoint | 8 | Sparse   |    6.617 +/- 0.067    |      1.727 +/- 0.022    |        0.144 |         6.761 |          8.344 |                  - |     baseline |      baseline
+mixed-endpoint | 8 | delta    |   -4.709            |      0.589            |        0.049 |        -4.660 |         -4.121 |                  - |          win |           win
+[BVP_sci bordered microbench] mixed-endpoint: bordered wins for the full RHS batch
+ok
+
+Conclusion:
+```text
+The native parameter-free bordered kernel is now a clear production candidate.
+It remains numerically equivalent to Sparse LU (`max_diff` about `1e-13`) and
+wins in both reported regimes for all three endpoint layouts.  Compared with
+the pre-workspace release run, bordered batch solve time fell from about
+`1.678/2.370/3.145 ms` to `0.991/1.619/2.316 ms`, approximately
+`41%/32%/26%` respectively.  The previously problematic `left-fixed` batch now
+also wins: `1.443 ms` total versus `1.894 ms` for Sparse.
+
+This removes the isolated linear-kernel bottleneck.  It is still not sufficient
+by itself to promote `AutoBanded`, because the full solver also pays extraction,
+Jacobian assembly, Newton, and mesh-refinement costs.  The next evidence should
+come from rerunning the existing production stories rather than adding another
+synthetic test.
 ```
 
 ### CG.5: AOT callbacks match lambdify (linear problem)
@@ -727,6 +835,13 @@ second strict `RequirePrebuilt` row must resolve the already linked runtime in
 the same process.  This is intentionally an in-process lifecycle story.  It is
 not yet a disk-discovery/stale-artifact contract.
 
+The test now prints per-run generated-backend lifecycle diagnostics from
+`BvpSciStatistics`: `generated_backend_action`, `generated_backend_policy`,
+`generated_backend_toolchain`, and `generated_backend_problem_key`.  The story
+asserts that at least one `BuildIfMissing` row reports `built_and_linked`, and
+every strict `RequirePrebuilt` row reports `policy=RequirePrebuilt` plus
+`action=reused_linked`.
+
 Command:
 ```powershell
 cargo test -p RustedSciThe -- "BVP_sci_story_tests::tests::combustion_200_tcc_build_then_require_prebuilt_story" -- --ignored --nocapture
@@ -746,6 +861,597 @@ Conclusion:
 The current BVP_sci RequirePrebuilt contract is validated for an already
 linked runtime in the same process.  This does not yet prove disk discovery
 from a fresh process; that remains a separate artifact-lifecycle hardening item.
+The lifecycle diagnostics make this distinction explicit in the printed table.
+```
+
+### PS.8a1: Combustion_1000 Sparse AOT whole vs chunk4
+
+File: `src/numerical/BVP_sci/BVP_sci_story_tests.rs`
+
+This story is the sparse callback chunking release ledger for BVP_sci.  It
+compares a Lambdify baseline with two AtomView+tcc variants on the combustion
+problem with 1000 mesh points: one uses whole residual/Jacobian evaluation, the
+other uses a 4-chunk residual and sparse-Jacobian runtime plan.  The purpose is
+to measure the real wall-clock effect of generated callback chunking while
+keeping correctness and solver-stage totals in the same report.  The current
+version prints runtime chunk diagnostics (`actual_jobs`, `chunk_count`,
+`work_per_job`, `mesh_parallel`, `fallback_reason`) and a callback-stage
+breakdown (`res_args`, `res_values`, `res_assembly`, `jac_args`, `jac_values`,
+`jac_assembly`).  The runtime diagnostics prove that chunking exists; the
+callback-stage table explains whether generated values or the surrounding
+packing/assembly overhead dominate.  The test asserts that the `chunk4`
+residual and sparse-Jacobian paths both use more than one runtime job with no
+fallback.
+
+Command:
+```powershell
+cargo test -p RustedSciThe -- "BVP_sci_story_tests::tests::combustion_1000_sparse_aot_whole_vs_chunk4_story" -- --ignored --nocapture
+i used cargo test combustion_1000_sparse_aot_whole_vs_chunk4_story --release -- --ignored --nocapture
+```
+running 1 test
+[BVP_sci story] starting repetition 1/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 2/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 3/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 4/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 5/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+Combustion 1000: Sparse AOT whole vs chunk4 (5 reps)
+[BVP_sci story] summary table: all time columns are milliseconds.
+source   | matrix | variant | runs | total_ms mean+/-std [min,max] | solve_diff | rel_x_diff | max_abs_sol | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy |  5/5  | 96.424 +/- 52.753 [67.191, 201.849] | 0.000e0 +/- 0.0e0  | 0.000e0 +/- 0.0e0  | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/whole |  5/5  | 76.695 +/- 11.509 [64.327, 93.317] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk4 |  5/5  | 82.968 +/- 8.495 [77.187, 99.648] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+
+Combustion 1000: Sparse AOT whole vs chunk4 correctness
+[BVP_sci e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | bootstrap_hint  | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |  5/5   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+
+Combustion 1000: Sparse AOT whole vs chunk4 timing
+[BVP_sci e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | bootstrap_hint  | total_ms mean+/-std [min,max] | status
+--------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 96.424 +/- 52.753 [67.191, 201.849] | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing | 76.695 +/- 11.509 [64.327, 93.317] | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 82.968 +/- 8.495 [77.187, 99.648] | ok 5/5
+
+Combustion 1000: Sparse AOT whole vs chunk4 runtime diagnostics
+[BVP_sci AOT runtime] linked generated callback facts. `actual_jobs` is the effective mesh-parallel worker count; `chunk_count` is the number of linked generated chunk symbols available for that stage.
+source   | matrix | variant    | bootstrap_hint  | res_jobs | jac_jobs | res_chunks | jac_chunks | res_work/job | jac_work/job | res_mesh_par | jac_mesh_par | res_fallback | jac_fallback | status
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |         6000 |        12000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          250 |          500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |         6000 |        12000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          250 |          500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |         6000 |        12000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          250 |          500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |         6000 |        12000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          250 |          500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |         6000 |        12000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          250 |          500 | true         | true         | none         | none         | ok
+
+Combustion 1000: Sparse AOT whole vs chunk4 generated backend actions
+[BVP_sci AOT lifecycle] per-run generated backend diagnostics; RequirePrebuilt rows must report reused_linked.
+source   | matrix | variant | bootstrap_hint              | action          | policy          | toolchain | problem_key       | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | built_and_linked | BuildIfMissing  | C         | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | a6b78c0e5bf60525  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+
+test numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_1000_sparse_aot_whole_vs_chunk4_story ... ok
+Conclusion:
+```text
+Historical note: the pasted 12 Core release output above was captured before
+the residual-chunking fix reached the combined sparse story.  It proved
+sparse-Jacobian chunking (`jac_jobs=24`, `jac_chunks=4`,
+`jac_fallback=none`) but still showed `res_chunks=1`.
+
+Current debug smoke after the fix confirms that `tcc/chunk4` now chunks both
+generated callbacks: residual diagnostics report `res_jobs=24`,
+`res_chunks=3`, `res_mesh_par=true`, `res_fallback=none`, and sparse-Jacobian
+diagnostics still report `jac_jobs=24`, `jac_chunks=4`,
+`jac_fallback=none`.  The chunked artifact key also changed from the historical
+`ffee1768c4ee10cf` to `a6b78c0e5bf60525`, which confirms the manifest/problem
+key now distinguishes residual layout and should not silently reuse the old
+whole-residual runtime.
+
+Performance at n=1000 is essentially parity in the broad solver-level timers:
+`tcc/chunk4` is slightly faster than `tcc/whole` in this run (about 77.8 ms vs
+79.3 ms), but the difference is small compared with run noise.  Fresh runs
+should use the new callback-stage table rather than broad `residual_ms` /
+`jacobian_ms` alone, because those broad timers also include argument packing
+and matrix assembly.
+```
+
+### PS.8a1b: Combustion_1000 Sparse residual AOT whole vs chunk4
+
+This new story isolates residual chunking while keeping the sparse Jacobian
+whole.  It is the residual-side analogue of PS.8a1 and is meant to prove that
+the residual runtime path itself can go mesh-parallel on the 1000-mesh
+combustion workload.  The current test also prints the callback-stage table, so
+the release result can distinguish generated residual value time from argument
+packing and matrix assembly.  Populate the results after the next release run.
+
+### PS.8a2: Combustion_3000 Sparse AOT chunking matrix
+
+File: `src/numerical/BVP_sci/BVP_sci_story_tests.rs`
+
+This is the heavier sparse callback chunking story.  It keeps the Lambdify
+baseline and compares `tcc/whole` against `chunk4`, `chunk8`, and `chunk12` on
+the 3000-mesh combustion problem.  The chunked rows now split both residual and
+sparse-Jacobian generated callbacks.  The goal is to find the real break-even
+point on the 12-core source-of-truth machine, not just to confirm correctness.
+The release run should inspect both the broad stage breakdown table and the
+callback-stage table.  Broad `residual_ms` / `jacobian_ms` are solver-level
+timers; the callback-stage table is the source of truth for generated values
+vs argument packing vs matrix assembly.  The current version prints and asserts
+runtime chunking diagnostics for both generated callbacks, so a run where
+either callback silently falls back to whole/sequential execution is now a test
+failure rather than an ambiguous timing table.
+
+Current-output guard: fresh results for this story must start with
+`[BVP_sci story schema] bvp-sci-chunking-callback-stages-v2` and must include
+the `Sparse AOT chunking callback stages` table.  Any pasted output that passes
+with `res_jobs=1` / `res_chunks=1` for `tcc/chunk*` rows is from an older test
+binary or an older story schema and should be treated as historical/superseded,
+not as evidence about current residual chunking.
+
+Command:
+```powershell
+cargo test -p RustedSciThe -- "BVP_sci_story_tests::tests::combustion_3000_sparse_aot_chunking_story" -- --ignored --nocapture --test-threads=1
+
+cargo test combustion_3000_sparse_aot_chunking_story --release -- --ignored --nocapture
+```
+test numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_3000_sparse_aot_chunking_story ... [BVP_sci story schema] bvp-sci-chunking-callback-stages-v2
+[BVP_sci story] starting repetition 1/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 2/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 3/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 4/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 5/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+Combustion 3000: Sparse AOT chunking matrix (5 reps)
+[BVP_sci story] summary table: all time columns are milliseconds.
+source   | matrix | variant | runs | total_ms mean+/-std [min,max] | solve_diff | rel_x_diff | max_abs_sol | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy |  5/5  | 182.875 +/- 157.659 [99.019, 498.098] | 0.000e0 +/- 0.0e0  | 0.000e0 +/- 0.0e0  | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/whole |  5/5  | 141.982 +/- 41.523 [112.585, 221.806] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk4 |  5/5  | 140.767 +/- 17.060 [124.183, 170.403] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk8 |  5/5  | 137.303 +/- 15.682 [125.169, 167.484] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk12 |  5/5  | 139.643 +/- 14.445 [126.256, 167.057] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+
+Combustion 3000: Sparse AOT chunking correctness
+[BVP_sci e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | bootstrap_hint  | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |  5/5   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk8 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk12 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+
+Combustion 3000: Sparse AOT chunking timing
+[BVP_sci e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | bootstrap_hint  | total_ms mean+/-std [min,max] | status
+--------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 182.875 +/- 157.659 [99.019, 498.098] | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing | 141.982 +/- 41.523 [112.585, 221.806] | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 140.767 +/- 17.060 [124.183, 170.403] | ok 5/5
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 137.303 +/- 15.682 [125.169, 167.484] | ok 5/5
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 139.643 +/- 14.445 [126.256, 167.057] | ok 5/5
+
+Combustion 3000: Sparse AOT chunking stage breakdown
+[BVP_sci e2e] stage breakdown table: symbolic/prep, residual, Jacobian, linear solve, and grid refinement totals are all milliseconds.
+source   | matrix | variant    | bootstrap_hint  | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms | niter | linsys | jac_rebuilds | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 0.974       | 18.137      | 9.296       | 203.719   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 90.027      | 27.363      | 8.838       | 241.093   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 29.510      | 34.320      | 9.202       | 271.772   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 28.011      | 31.896      | 9.658       | 265.421   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 27.756      | 32.990      | 8.837       | 264.919   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.395       | 17.137      | 7.621       | 207.339   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.213       | 23.336      | 8.627       | 214.584   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.262       | 31.086      | 9.617       | 260.882   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.381       | 31.593      | 10.421      | 266.880   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.355       | 30.458      | 9.905       | 242.896   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.430       | 14.258      | 7.679       | 186.011   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.269       | 22.386      | 8.393       | 214.653   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.327       | 29.814      | 9.578       | 243.901   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.372       | 31.203      | 9.041       | 254.916   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.423       | 30.666      | 8.988       | 248.963   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.419       | 14.185      | 7.433       | 185.588   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.288       | 22.367      | 8.904       | 215.275   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.327       | 30.247      | 9.260       | 240.883   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.360       | 30.887      | 9.672       | 246.149   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.294       | 31.382      | 9.964       | 249.035   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.486       | 14.375      | 7.211       | 181.512   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.348       | 25.142      | 9.488       | 238.131   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.433       | 33.796      | 11.163      | 267.391   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.325       | 32.588      | 10.563      | 258.933   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.421       | 31.644      | 10.191      | 262.808   | 0.000          |     1 |      1 |            1 | ok
+
+Combustion 3000: Sparse AOT chunking callback stages
+[BVP_sci AOT callback stages] wall-clock substage timers inside linked generated callbacks. These split broad solver residual_ms/jacobian_ms into argument packing, generated values, and matrix assembly.
+source   | matrix | variant    | bootstrap_hint  | res_args | res_values | res_assembly | jac_args | jac_values | jac_assembly | param_jac | status
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |   16.020 |     12.117 |        1.840 |    0.807 |      0.794 |        2.096 |       NaN | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |   18.264 |     10.331 |        3.498 |    0.835 |      0.805 |        2.486 |       NaN | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |   16.549 |      9.221 |        3.682 |    0.882 |      0.927 |        2.739 |       NaN | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |   17.331 |      9.543 |        3.471 |    0.894 |      0.795 |        2.549 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |   14.670 |     10.650 |        0.933 |    0.763 |      0.705 |        1.958 |       NaN | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |   17.156 |      8.892 |        2.872 |    0.793 |      0.694 |        2.524 |       NaN | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |   17.903 |      9.104 |        2.826 |    0.827 |      0.722 |        2.391 |       NaN | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |   17.357 |      8.362 |        2.619 |    0.879 |      0.795 |        2.632 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |   14.654 |     10.290 |        0.646 |    0.703 |      0.632 |        1.707 |       NaN | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |   17.113 |     10.052 |        2.416 |    0.852 |      0.663 |        2.261 |       NaN | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |   18.426 |     10.030 |        2.459 |    0.806 |      0.696 |        2.234 |       NaN | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |   18.449 |      9.192 |        2.364 |    0.819 |      0.557 |        2.287 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |   14.717 |     10.351 |        0.605 |    0.699 |      0.621 |        1.773 |       NaN | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |   17.867 |      8.291 |        2.474 |    0.832 |      0.613 |        2.001 |       NaN | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |   17.861 |      8.610 |        2.630 |    0.836 |      0.698 |        2.289 |       NaN | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |   19.098 |      8.908 |        2.512 |    0.924 |      0.852 |        2.841 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |   17.061 |     11.440 |        0.771 |    0.761 |      0.623 |        1.895 |       NaN | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |   19.589 |     10.383 |        2.674 |    1.220 |      0.807 |        2.985 |       NaN | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |   19.266 |      9.411 |        2.687 |    0.871 |      0.753 |        2.932 |       NaN | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |   19.140 |      9.641 |        2.419 |    0.920 |      0.746 |        2.402 |       NaN | ok
+
+Combustion 3000: Sparse AOT chunking runtime diagnostics
+[BVP_sci AOT runtime] linked generated callback facts. `actual_jobs` is the effective mesh-parallel worker count; `chunk_count` is the number of linked generated chunk symbols available for that stage.
+source   | matrix | variant    | bootstrap_hint  | res_jobs | jac_jobs | res_chunks | jac_chunks | res_work/job | jac_work/job | res_mesh_par | jac_mesh_par | res_fallback | jac_fallback | status
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |       24 |       24 |          6 |          6 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |       24 |       24 |          6 |         12 |          750 |         1500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |       24 |       24 |          6 |          6 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |       24 |       24 |          6 |         12 |          750 |         1500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |       24 |       24 |          6 |          6 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |       24 |       24 |          6 |         12 |          750 |         1500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |       24 |       24 |          6 |          6 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |       24 |       24 |          6 |         12 |          750 |         1500 | true         | true         | none         | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |       24 |       24 |          3 |          4 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |       24 |       24 |          6 |          6 |          750 |         1500 | true         | true         | none         | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |       24 |       24 |          6 |         12 |          750 |         1500 | true         | true         | none         | none         | ok
+
+Combustion 3000: Sparse AOT chunking generated backend actions
+[BVP_sci AOT lifecycle] per-run generated backend diagnostics; RequirePrebuilt rows must report reused_linked.
+source   | matrix | variant | bootstrap_hint              | action          | policy          | toolchain | problem_key       | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | built_and_linked | BuildIfMissing  | C         | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | a6b78c0e5bf60525  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | 55c1494e75c51e7c  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | 2bcb7fc9cf07d4a9  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 55c1494e75c51e7c  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 2bcb7fc9cf07d4a9  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 55c1494e75c51e7c  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 2bcb7fc9cf07d4a9  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 55c1494e75c51e7c  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 2bcb7fc9cf07d4a9  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | a6b78c0e5bf60525  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 55c1494e75c51e7c  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 2bcb7fc9cf07d4a9  | ok
+
+ok
+
+Conclusion:
+```text
+Historical note: older pasted release blocks for this story showed
+`res_chunks=1` for chunked AOT rows.  Those rows are superseded by the v2 output
+that starts with `[BVP_sci story schema] bvp-sci-chunking-callback-stages-v2`.
+
+Current 12 Core release v2 proves that both generated callbacks are chunked:
+`tcc/chunk4` reports `res_jobs=24`, `res_chunks=3`, `jac_jobs=24`,
+`jac_chunks=4`; `tcc/chunk8` reports `res_chunks=6`, `jac_chunks=6`; and
+`tcc/chunk12` reports `res_chunks=6`, `jac_chunks=12`.  All chunked rows report
+`res_fallback=none` and `jac_fallback=none`.
+
+Performance conclusion: chunking is real and correctness-safe, but it is not a
+large speed lever for this BVP_sci combustion-3000 workload.  The callback-stage
+table explains why: generated residual value time improves modestly in chunked
+rows, but argument packing (`res_args`) and residual matrix assembly
+(`res_assembly`) increase enough to absorb most of the gain.  Sparse-Jacobian
+values are already tiny, so Jacobian chunking mostly adds scheduling/assembly
+overhead rather than reducing wall-clock time.  For now, BVP_sci should prefer
+Auto/whole for this class unless a heavier per-point callback makes the values
+stage dominate.
+```
+
+### PS.8a2b: Combustion_3000 Sparse residual AOT chunking matrix
+
+This is the heavier residual-side chunking story.  It keeps the sparse Jacobian
+whole and varies residual chunking only, so we can measure whether residual
+parallelism becomes visible at the larger 3000-mesh scale.  The callback-stage
+table is required for interpretation: if broad `residual_ms` does not improve,
+check whether `res_values` improved but `res_args`/`res_assembly` absorbed the
+gain.  Populate the results after the next release run.
+
+### PS.8a3: Combustion_1000 true Banded AOT vs Sparse AOT
+
+File: `src/numerical/BVP_sci/BVP_sci_story_tests.rs`
+
+Command:
+```powershell
+cargo test --release combustion_1000_true_banded_aot_vs_sparse_story -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+The generated Banded route must evaluate pointwise banded Jacobian values,
+assemble the bordered-banded Newton blocks directly, and solve them with the
+native structured factorization without constructing the global sparse
+Jacobian. Whole and chunk4 must remain correct relative to the Lambdify
+baseline; chunk4 must also expose real multi-job generated callback execution.
+```
+
+Method:
+```text
+Three repetitions compare Lambdify/Sparse, Sparse AOT tcc/whole, true Banded
+AOT tcc/whole, and true Banded AOT tcc/chunk4. The test prints correctness,
+wall-clock/stage timing, generated callback substages, artifact lifecycle, and
+route-proof counters. It fails if a Banded row does not record direct assembly,
+global sparse bypass, native bordered factorization, or if it records Sparse
+fallback. The chunk4 row must report multiple Jacobian chunks/jobs.
+```
+
+Current result:
+running 1 test
+test numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_1000_true_banded_aot_vs_sparse_story ... [BVP_sci story schema] true-banded-aot-v1
+[BVP_sci story] starting repetition 1/3
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=global_sparse
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/whole bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/chunk4 bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 2/3
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=global_sparse
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/whole bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/chunk4 bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/chunk4 status=ok
+[BVP_sci story] starting repetition 3/3
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=global_sparse
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/whole bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Banded variant=tcc/chunk4 bootstrap_hint=native_bordered
+[BVP_sci story] finished source=AOT matrix=Banded variant=tcc/chunk4 status=ok
+Combustion 1000: Lambdify / Sparse AOT / true Banded AOT (3 reps)
+[BVP_sci story] summary table: all time columns are milliseconds.
+source   | matrix | variant | runs | total_ms mean+/-std [min,max] | solve_diff | rel_x_diff | max_abs_sol | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy |  3/3  | 113.480 +/- 57.761 [68.001, 194.984] | 0.000e0 +/- 0.0e0  | 0.000e0 +/- 0.0e0  | 1.002e0 +/- 0.0e0  | ok 3/3
+AOT      | Sparse | tcc/whole |  3/3  | 75.544 +/- 11.068 [67.015, 91.175] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 0.0e0 | 1.002e0 +/- 0.0e0  | ok 3/3
+AOT      | Banded | tcc/whole |  3/3  | 28.956 +/- 9.076 [22.266, 41.787] | 5.421e-12 +/- 0.0e0 | 5.412e-12 +/- 0.0e0 | 1.002e0 +/- 0.0e0  | ok 3/3
+AOT      | Banded | tcc/chunk4 |  3/3  | 38.018 +/- 8.640 [31.449, 50.225] | 5.421e-12 +/- 0.0e0 | 5.412e-12 +/- 0.0e0 | 1.002e0 +/- 0.0e0  | ok 3/3
+
+Combustion 1000: true Banded AOT correctness
+[BVP_sci e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | bootstrap_hint  | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |  3/3   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 3/3
+AOT      | Sparse | tcc/whole  | global_sparse   |  3/3   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+AOT      | Banded | tcc/whole  | native_bordered |  3/3   | 5.421e-12 +/- 0.0e0  | 5.412e-12 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+AOT      | Banded | tcc/chunk4 | native_bordered |  3/3   | 5.421e-12 +/- 0.0e0  | 5.412e-12 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+
+Combustion 1000: true Banded AOT wall-clock and solver stages
+[BVP_sci e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | bootstrap_hint  | total_ms mean+/-std [min,max] | status
+--------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 113.480 +/- 57.761 [68.001, 194.984] | ok 3/3
+AOT      | Sparse | tcc/whole  | global_sparse   | 75.544 +/- 11.068 [67.015, 91.175] | ok 3/3
+AOT      | Banded | tcc/whole  | native_bordered | 28.956 +/- 9.076 [22.266, 41.787] | ok 3/3
+AOT      | Banded | tcc/chunk4 | native_bordered | 38.018 +/- 8.640 [31.449, 50.225] | ok 3/3
+
+Combustion 1000: true Banded AOT stage breakdown
+[BVP_sci e2e] stage breakdown table: symbolic/prep, residual, Jacobian, linear solve, and grid refinement totals are all milliseconds.
+source   | matrix | variant    | bootstrap_hint  | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms | niter | linsys | jac_rebuilds | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 0.830       | 8.854       | 3.024       | 5.851     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | global_sparse   | 21.772      | 8.124       | 2.503       | 5.453     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/whole  | native_bordered | 19.402      | 8.218       | 1.147       | 1.714     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/chunk4 | native_bordered | 18.582      | 14.272      | 1.681       | 1.733     | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.307       | 8.195       | 2.433       | 5.724     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | global_sparse   | 0.340       | 8.395       | 2.474       | 6.317     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/whole  | native_bordered | 0.374       | 8.247       | 1.145       | 1.761     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/chunk4 | native_bordered | 0.417       | 14.246      | 1.611       | 1.749     | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.307       | 8.460       | 2.252       | 6.154     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | global_sparse   | 0.333       | 8.224       | 2.520       | 5.730     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/whole  | native_bordered | 0.282       | 8.108       | 1.119       | 1.571     | 0.000          |     1 |      1 |            1 | ok
+AOT      | Banded | tcc/chunk4 | native_bordered | 0.359       | 14.069      | 1.615       | 1.624     | 0.000          |     1 |      1 |            1 | ok
+
+Combustion 1000: true Banded AOT callback stages
+[BVP_sci AOT callback stages] wall-clock substage timers inside linked generated callbacks. These split broad solver residual_ms/jacobian_ms into argument packing, generated values, and matrix assembly.
+source   | matrix | variant    | bootstrap_hint  | res_args | res_values | res_assembly | jac_args | jac_values | jac_assembly | param_jac | status
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | global_sparse   |    4.721 |      3.552 |        0.492 |    0.237 |      0.226 |        0.694 |       NaN | ok
+AOT      | Banded | tcc/whole  | native_bordered |    4.675 |      3.634 |        0.523 |    0.171 |      0.149 |        0.786 |       NaN | ok
+AOT      | Banded | tcc/chunk4 | native_bordered |    5.814 |      6.647 |        1.262 |    0.199 |      0.322 |        1.258 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | global_sparse   |    4.797 |      3.499 |        0.699 |    0.267 |      0.196 |        0.664 |       NaN | ok
+AOT      | Banded | tcc/whole  | native_bordered |    4.663 |      3.583 |        0.588 |    0.163 |      0.144 |        0.775 |       NaN | ok
+AOT      | Banded | tcc/chunk4 | native_bordered |    6.015 |      6.935 |        1.325 |    0.234 |      0.418 |        1.271 |       NaN | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |        NaN |          NaN |      NaN |        NaN |          NaN |       NaN | ok
+AOT      | Sparse | tcc/whole  | global_sparse   |    4.865 |      3.473 |        0.390 |    0.243 |      0.208 |        0.767 |       NaN | ok
+AOT      | Banded | tcc/whole  | native_bordered |    4.752 |      3.606 |        0.538 |    0.168 |      0.147 |        0.770 |       NaN | ok
+AOT      | Banded | tcc/chunk4 | native_bordered |    5.960 |      6.939 |        1.291 |    0.298 |      0.317 |        1.279 |       NaN | ok
+
+Combustion 1000: proof of native Banded AOT route
+source   | matrix | variant    | direct_assembly | sparse_bypass | bordered_factor | sparse_fallback | jac_chunks | jac_jobs | jac_fallback
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy |               0 |             0 |               0 |               0 |        NaN |      NaN | -
+AOT      | Sparse | tcc/whole  |               0 |             0 |               0 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/whole  |               1 |             1 |               1 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/chunk4 |               1 |             1 |               1 |               0 |          4 |       24 | none
+Lambdify | Sparse | ExprLegacy |               0 |             0 |               0 |               0 |        NaN |      NaN | -
+AOT      | Sparse | tcc/whole  |               0 |             0 |               0 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/whole  |               1 |             1 |               1 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/chunk4 |               1 |             1 |               1 |               0 |          4 |       24 | none
+Lambdify | Sparse | ExprLegacy |               0 |             0 |               0 |               0 |        NaN |      NaN | -
+AOT      | Sparse | tcc/whole  |               0 |             0 |               0 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/whole  |               1 |             1 |               1 |               0 |          1 |        1 | single_chunk
+AOT      | Banded | tcc/chunk4 |               1 |             1 |               1 |               0 |          4 |       24 | none
+
+Combustion 1000: true Banded AOT artifact lifecycle
+[BVP_sci AOT lifecycle] per-run generated backend diagnostics; RequirePrebuilt rows must report reused_linked.
+source   | matrix | variant | bootstrap_hint              | action          | policy          | toolchain | problem_key       | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | global_sparse               | built_and_linked | BuildIfMissing  | C         | b42a115f6b595f7c  | ok
+AOT      | Banded | tcc/whole | native_bordered             | built_and_linked | BuildIfMissing  | C         | f44b3f69a6903f86  | ok
+AOT      | Banded | tcc/chunk4 | native_bordered             | built_and_linked | BuildIfMissing  | C         | d5b54a74e7f5a64f  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | global_sparse               | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Banded | tcc/whole | native_bordered             | reused_linked   | BuildIfMissing  | linked-runtime | f44b3f69a6903f86  | ok
+AOT      | Banded | tcc/chunk4 | native_bordered             | reused_linked   | BuildIfMissing  | linked-runtime | d5b54a74e7f5a64f  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | global_sparse               | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Banded | tcc/whole | native_bordered             | reused_linked   | BuildIfMissing  | linked-runtime | f44b3f69a6903f86  | ok
+AOT      | Banded | tcc/chunk4 | native_bordered             | reused_linked   | BuildIfMissing  | linked-runtime | d5b54a74e7f5a64f  | ok
+
+ok
+
+Conclusion:
+```text
+Functionally, this closes the true Banded AOT gap for parameter-free endpoint
+systems. Performance conclusions remain pending the release result. Systems
+with unknown parameters are intentionally outside this direct route and retain
+the existing Sparse compatibility path.
 ```
 
 ### PS.8b: Combustion_200 Sparse vs safe AutoBanded vs experimental bordered routing
@@ -763,19 +1469,183 @@ Command:
 ```powershell
 cargo test -p RustedSciThe -- "BVP_sci_story_tests::tests::combustion_200_auto_banded_linear_policy_route_story" -- --nocapture
 ```
+running 1 test
+[BVP_sci story] starting repetition 1/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 2/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 3/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 4/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+[BVP_sci story] starting repetition 5/5
+[BVP_sci story] running source=Lambdify matrix=Sparse variant=ExprLegacy bootstrap_hint=baseline
+[BVP_sci story] finished source=Lambdify matrix=Sparse variant=ExprLegacy status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/whole bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/whole status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk4 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk4 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk8 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk8 status=ok
+[BVP_sci story] running source=AOT matrix=Sparse variant=tcc/chunk12 bootstrap_hint=build_if_missing
+[BVP_sci story] finished source=AOT matrix=Sparse variant=tcc/chunk12 status=ok
+Combustion 3000: Sparse AOT chunking matrix (5 reps)
+[BVP_sci story] summary table: all time columns are milliseconds.
+source   | matrix | variant | runs | total_ms mean+/-std [min,max] | solve_diff | rel_x_diff | max_abs_sol | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy |  5/5  | 133.412 +/- 53.253 [101.359, 239.628] | 0.000e0 +/- 0.0e0  | 0.000e0 +/- 0.0e0  | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/whole |  5/5  | 122.941 +/- 13.616 [112.805, 149.250] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk4 |  5/5  | 125.360 +/- 16.451 [113.317, 157.177] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk8 |  5/5  | 125.086 +/- 12.719 [111.260, 146.829] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
+AOT      | Sparse | tcc/chunk12 |  5/5  | 122.944 +/- 15.638 [112.918, 153.998] | 2.220e-16 +/- 0.0e0 | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0  | ok 5/5
 
-Expected conclusion:
-```text
-Sparse baseline, AutoBanded, and ExperimentalBorderedBanded produce the same solution.
-AutoBanded reports bvp sci route bordered banded candidate > 0.
-AutoBanded reports bvp sci linear backend full banded solves == 0.
-AutoBanded reports Sparse fallback solves, proving the production hook is safe
-and does not inflate endpoint-BC matrices into a bad full scalar band.
-ExperimentalBorderedBanded reports bordered structured solves > 0 and sparse
-fallback solves == 0.
-The route table reports bordered extraction/solve timings and solve-call
-counters; these are diagnostic-only but guide the next production optimization.
-```
+Combustion 3000: Sparse AOT chunking correctness
+[BVP_sci e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | bootstrap_hint  | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |  5/5   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk8 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+AOT      | Sparse | tcc/chunk12 | build_if_missing |  5/5   | 2.220e-16 +/- 0.0e0  | 2.217e-16 +/- 2.5e-32 | 1.002e0 +/- 0.0e0      | ok 5/5
+
+Combustion 3000: Sparse AOT chunking timing
+[BVP_sci e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | bootstrap_hint  | total_ms mean+/-std [min,max] | status
+--------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 133.412 +/- 53.253 [101.359, 239.628] | ok 5/5
+AOT      | Sparse | tcc/whole  | build_if_missing | 122.941 +/- 13.616 [112.805, 149.250] | ok 5/5
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 125.360 +/- 16.451 [113.317, 157.177] | ok 5/5
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 125.086 +/- 12.719 [111.260, 146.829] | ok 5/5
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 122.944 +/- 15.638 [112.918, 153.998] | ok 5/5
+
+Combustion 3000: Sparse AOT chunking stage breakdown
+[BVP_sci e2e] stage breakdown table: symbolic/prep, residual, Jacobian, linear solve, and grid refinement totals are all milliseconds.
+source   | matrix | variant    | bootstrap_hint  | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms | niter | linsys | jac_rebuilds | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        | 1.056       | 19.558      | 8.341       | 208.517   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 21.807      | 26.038      | 9.120       | 236.148   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 19.438      | 25.470      | 9.432       | 239.466   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 20.054      | 25.857      | 9.489       | 240.078   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 29.648      | 24.723      | 9.405       | 233.542   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.550       | 16.866      | 7.321       | 204.281   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.331       | 26.453      | 8.724       | 240.538   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.284       | 23.566      | 9.616       | 218.179   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.374       | 22.861      | 9.274       | 219.632   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.395       | 24.127      | 9.264       | 221.958   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.336       | 14.751      | 7.412       | 189.199   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.295       | 22.222      | 8.380       | 214.613   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.256       | 22.696      | 9.926       | 218.701   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.313       | 21.887      | 9.183       | 207.618   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.348       | 22.358      | 9.734       | 212.313   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.464       | 17.760      | 7.441       | 214.529   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.320       | 21.654      | 8.329       | 234.404   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.351       | 22.136      | 8.951       | 206.912   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.298       | 22.171      | 8.985       | 211.382   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.347       | 21.919      | 10.104      | 214.482   | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | baseline        | 0.380       | 14.966      | 7.449       | 189.186   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/whole  | build_if_missing | 0.325       | 23.064      | 8.095       | 209.619   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing | 0.338       | 21.732      | 9.636       | 213.392   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing | 0.317       | 21.354      | 8.452       | 208.602   | 0.000          |     1 |      1 |            1 | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing | 0.403       | 21.584      | 9.171       | 209.612   | 0.000          |     1 |      1 |            1 | ok
+
+Combustion 3000: Sparse AOT chunking runtime diagnostics
+[BVP_sci AOT runtime] linked generated callback facts. `actual_jobs` is the effective mesh-parallel worker count; `chunk_count` is the number of linked generated chunk symbols available for that stage.
+source   | matrix | variant    | bootstrap_hint  | res_jobs | jac_jobs | res_chunks | jac_chunks | res_work/job | jac_work/job | res_mesh_par | jac_mesh_par | res_fallback | jac_fallback | status
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |        1 |       24 |          1 |          4 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |        1 |       24 |          1 |          6 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |        1 |       24 |          1 |         12 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |        1 |       24 |          1 |          4 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |        1 |       24 |          1 |          6 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |        1 |       24 |          1 |         12 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |        1 |       24 |          1 |          4 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |        1 |       24 |          1 |          6 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |        1 |       24 |          1 |         12 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |        1 |       24 |          1 |          4 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |        1 |       24 |          1 |          6 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |        1 |       24 |          1 |         12 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+Lambdify | Sparse | ExprLegacy | baseline        |      NaN |      NaN |        NaN |        NaN |          NaN |          NaN | -            | -            | -            | -            | ok
+AOT      | Sparse | tcc/whole  | build_if_missing |        1 |        1 |          1 |          1 |        18000 |        36000 | false        | false        | single_chunk | single_chunk | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing |        1 |       24 |          1 |          4 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing |        1 |       24 |          1 |          6 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing |        1 |       24 |          1 |         12 |        18000 |         1500 | false        | true         | single_chunk | none         | ok
+
+Combustion 3000: Sparse AOT chunking generated backend actions
+[BVP_sci AOT lifecycle] per-run generated backend diagnostics; RequirePrebuilt rows must report reused_linked.
+source   | matrix | variant | bootstrap_hint              | action          | policy          | toolchain | problem_key       | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | built_and_linked | BuildIfMissing  | C         | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | ffee1768c4ee10cf  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | 5d322d9f0a3cb1f6  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | built_and_linked | BuildIfMissing  | C         | 56ea424445272959  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | ffee1768c4ee10cf  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 5d322d9f0a3cb1f6  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 56ea424445272959  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | ffee1768c4ee10cf  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 5d322d9f0a3cb1f6  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 56ea424445272959  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | ffee1768c4ee10cf  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 5d322d9f0a3cb1f6  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 56ea424445272959  | ok
+Lambdify | Sparse | ExprLegacy | baseline                    | -               | -               | -         | -                 | ok
+AOT      | Sparse | tcc/whole | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | b42a115f6b595f7c  | ok
+AOT      | Sparse | tcc/chunk4 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | ffee1768c4ee10cf  | ok
+AOT      | Sparse | tcc/chunk8 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 5d322d9f0a3cb1f6  | ok
+AOT      | Sparse | tcc/chunk12 | build_if_missing            | reused_linked   | BuildIfMissing  | linked-runtime | 56ea424445272959  | ok
+
+test numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_3000_sparse_aot_chunking_story ... ok
 
 Current result:
 ```text
@@ -1152,6 +2022,410 @@ problem, not a decisive win.  Together with PS.8d, this argues for documenting
 ExperimentalBorderedBanded as a valid opt-in route while keeping AutoBanded
 conservative.
 ```
+
+### PS.8f1: Banded production multi-run story, combustion 1000
+
+File: `src/numerical/BVP_sci/tests/banded_story.rs`
+
+Command:
+```powershell
+cargo test combustion_1000_banded_production_story_split -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+Sparse should remain correct, AutoBanded should stay safe, and explicit
+ExperimentalBorderedBanded should solve the same combustion-shaped matrix with
+slightly lower total time on this 1000-point mesh.
+```
+
+Current result:
+```text
+12 Core release run, 5 repetitions: all three variants solved successfully.
+Sparse: correctness 5/5, total_ms 101.957 +/- 53.807 [68.736, 209.127].
+AutoBanded: correctness 5/5, total_ms 78.145 +/- 5.285 [69.128, 83.279],
+sparse_fallback=1.
+ExperimentalBorderedBanded: correctness 5/5, total_ms 72.671 +/- 3.879
+[70.117, 80.357], bordered_candidate=1 and bordered_solves=1.
+Residual and Jacobian timings stayed close across all three variants.
+
+The run exposed a diagnostic defect: the old linear timer started only when the
+Jacobian was rebuilt but stopped on every Newton iteration, repeatedly counting
+the same interval.  Therefore the raw linear_ms values below are invalid.  The
+timer was fixed after this run; total_ms remains an independent wall-clock
+measurement and is valid.
+
+test numerical::BVP_sci::BVP_sci_banded_story_tests::tests::combustion_1000_banded_production_story_split ... Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered correctness (5 runs)
+source   | matrix                | variant    | bootstrap_hint            | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+
+Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered timing (5 runs)
+[BVP_sci banded] timing table: all time columns are milliseconds; counters are counts.
+source   | matrix                | variant    | bootstrap_hint            | total_ms mean+/-std [min,max] | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           | 101.957 +/- 53.807 [68.736, 209.127] | 0.527 +/- 0.155 [0.394, 0.829] | 8.483 +/- 0.575 [7.829, 9.155] | 2.655 +/- 0.330 [2.201, 3.196] | 79.254 +/- 5.377 [73.872, 86.364] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        | 78.145 +/- 5.285 [69.128, 83.279] | 0.406 +/- 0.058 [0.328, 0.499] | 8.687 +/- 0.292 [8.231, 9.049] | 2.509 +/- 0.168 [2.244, 2.694] | 80.499 +/- 2.842 [76.650, 83.564] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy | 72.671 +/- 3.879 [70.117, 80.357] | 0.355 +/- 0.067 [0.273, 0.438] | 8.426 +/- 0.224 [8.111, 8.648] | 2.606 +/- 0.153 [2.433, 2.834] | 64.208 +/- 2.998 [60.809, 69.160] | 0.000 +/- 0.000 [0.000, 0.000]
+
+Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered route / memory (5 runs)
+[BVP_sci banded] route table: route counters and Jacobian footprint are accumulated solver diagnostics.
+source   | matrix                | variant    | sparse_fb | full_banded | bordered_candidate | bordered_solves | dense_kib | sparse_kib | nnz    | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy |         0 |           0 |                  1 |               0 |    281250 |       1172 |  72000 | ok 5/5
+BVP_sci  | AutoBanded            | ExprLegacy |         1 |           0 |                  1 |               0 |    281250 |       1172 |  72000 | ok 5/5
+BVP_sci  | ExperimentalBordered  | ExprLegacy |         0 |           0 |                  1 |               1 |    281250 |       1172 |  72000 | ok 5/5
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2448 filtered out; finished in 1.12
+```
+
+Conclusion:
+```text
+This is the 1000-point banded source of truth for correctness, route selection,
+and wall-clock time.  AutoBanded stays conservative and correct.
+ExperimentalBorderedBanded is about 7.0% faster than AutoBanded in mean total
+wall-clock time.  The linear-stage comparison must be rerun with the corrected
+timer before it is used as evidence.
+```
+
+### PS.8f2: Banded production multi-run story, combustion 3000
+
+File: `src/numerical/BVP_sci/tests/banded_story.rs`
+
+Command:
+```powershell
+cargo test combustion_3000_banded_production_story_split -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+The same Sparse vs AutoBanded vs ExperimentalBorderedBanded relationship
+should remain stable on the larger 3000-point mesh, and the route counters
+should still prove that AutoBanded does not silently switch to full scalar
+banded LU.
+```
+
+Current result:
+```text
+running 1 test
+test numerical::BVP_sci::BVP_sci_banded_story_tests::tests::combustion_3000_banded_production_story_split ... Combustion 3000: Sparse vs safe AutoBanded vs explicit bordered correctness (3 runs)
+source   | matrix                | variant    | bootstrap_hint            | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           |    3/3 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 3/3
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        |    3/3 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 3/3
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy |    3/3 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 3/3
+
+Combustion 3000: Sparse vs safe AutoBanded vs explicit bordered timing (3 runs)
+[BVP_sci banded] timing table: all time columns are milliseconds; counters are counts.
+source   | matrix                | variant    | bootstrap_hint            | total_ms mean+/-std [min,max] | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           | 156.231 +/- 64.599 [108.664, 247.561] | 0.602 +/- 0.254 [0.388, 0.959] | 17.080 +/- 1.165 [15.495, 18.262] | 7.496 +/- 0.507 [7.129, 8.213] | 206.080 +/- 5.234 [198.949, 211.364] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        | 112.759 +/- 6.022 [104.281, 117.694] | 0.402 +/- 0.052 [0.330, 0.451] | 16.383 +/- 0.959 [15.027, 17.075] | 7.158 +/- 0.305 [6.860, 7.577] | 197.771 +/- 6.281 [188.960, 203.150] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy | 105.773 +/- 4.893 [98.854, 109.251] | 0.379 +/- 0.015 [0.358, 0.393] | 15.838 +/- 1.056 [14.346, 16.595] | 7.150 +/- 0.129 [7.001, 7.315] | 153.358 +/- 9.790 [139.596, 161.545] | 0.000 +/- 0.000 [0.000, 0.000]
+
+Combustion 3000: Sparse vs safe AutoBanded vs explicit bordered route / memory (3 runs)
+[BVP_sci banded] route table: route counters and Jacobian footprint are accumulated solver diagnostics.
+source   | matrix                | variant    | sparse_fb | full_banded | bordered_candidate | bordered_solves | dense_kib | sparse_kib | nnz    | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy |         0 |           0 |                  1 |               0 |   2531250 |       3516 | 216000 | ok 3/3
+BVP_sci  | AutoBanded            | ExprLegacy |         1 |           0 |                  1 |               0 |   2531250 |       3516 | 216000 | ok 3/3
+BVP_sci  | ExperimentalBordered  | ExprLegacy |         0 |           0 |                  1 |               1 |   2531250 |       3516 | 216000 | ok 3/3
+
+Conclusion:
+```text
+This is the 3000-point banded source of truth.  The safe AutoBanded fallback
+remains correct and conservative.  ExperimentalBorderedBanded is about 6.2%
+faster than AutoBanded in mean total wall-clock time.  The raw linear_ms values
+in this run are invalid because of the timer defect described in PS.8f1 and
+must be replaced by a post-fix run.
+```
+
+### PS.8f3: Banded production multi-run story, combustion 10000
+
+File: `src/numerical/BVP_sci/tests/banded_story.rs`
+
+Command:
+```powershell
+cargo test combustion_10000_banded_stress_story_split -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+The same banded route behavior should scale to a much larger mesh without
+breaking correctness, and the memory counters should make the Jacobian
+footprint obvious.
+```
+
+Current result:
+running 1 test
+test numerical::BVP_sci::BVP_sci_banded_story_tests::tests::combustion_10000_banded_stress_story_split ... Combustion 10000: Sparse vs safe AutoBanded vs explicit bordered correctness (2 runs)
+source   | matrix                | variant    | bootstrap_hint            | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           |    2/2 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 2/2
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        |    2/2 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 2/2
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy |    2/2 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 2/2
+
+Combustion 10000: Sparse vs safe AutoBanded vs explicit bordered timing (2 runs)
+[BVP_sci banded] timing table: all time columns are milliseconds; counters are counts.
+source   | matrix                | variant    | bootstrap_hint            | total_ms mean+/-std [min,max] | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           | 331.068 +/- 67.244 [263.824, 398.312] | 0.768 +/- 0.192 [0.576, 0.960] | 45.801 +/- 4.458 [41.343, 50.259] | 24.995 +/- 1.043 [23.952, 26.038] | 53.098 +/- 0.653 [52.445, 53.751] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        | 268.495 +/- 11.192 [257.303, 279.687] | 0.437 +/- 0.034 [0.403, 0.471] | 43.503 +/- 3.113 [40.390, 46.616] | 24.432 +/- 0.324 [24.108, 24.756] | 53.635 +/- 1.281 [52.354, 54.916] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy | 252.218 +/- 2.983 [249.235, 255.202] | 0.568 +/- 0.007 [0.560, 0.575] | 41.834 +/- 0.371 [41.463, 42.206] | 24.734 +/- 0.819 [23.915, 25.554] | 39.224 +/- 0.020 [39.203, 39.244] | 0.000 +/- 0.000 [0.000, 0.000]
+
+Combustion 10000: Sparse vs safe AutoBanded vs explicit bordered route / memory (2 runs)
+[BVP_sci banded] route table: route counters and Jacobian footprint are accumulated solver diagnostics.
+source   | matrix                | variant    | sparse_fb | full_banded | bordered_candidate | bordered_solves | dense_kib | sparse_kib | nnz    | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy |         0 |           0 |                  1 |               0 |  28125000 |      11719 | 720000 | ok 2/2
+BVP_sci  | AutoBanded            | ExprLegacy |         1 |           0 |                  1 |               0 |  28125000 |      11719 | 720000 | ok 2/2
+BVP_sci  | ExperimentalBordered  | ExprLegacy |         0 |           0 |                  1 |               1 |  28125000 |      11719 | 720000 | ok 2/2
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2451 filtered out; finished in 1.72s
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2451 filtered out; finished in 1.64s
+Conclusion:
+```text
+This is the 10000-point banded stress source of truth.  It shows that the
+production banded route stays correct at a much larger scale.
+ExperimentalBorderedBanded is about 7.8% faster than AutoBanded in mean release
+wall-clock time.  The raw linear_ms values in this run are invalid because of
+the timer defect described in PS.8f1 and must be replaced by a post-fix run.
+```
+
+### PS.8f4: Legacy banded production story, combustion 1000
+
+File: `src/numerical/BVP_sci/BVP_sci_story_tests.rs`
+
+Command:
+```powershell
+cargo test --release BVP_sci_story_tests::tests::combustion_1000_banded_production_story -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+This older mixed-track story should still pass, but its naming and placement are
+superseded by the new canonical split module in `tests/banded_story.rs`.
+```
+
+Current result:
+```text
+12 Core release note: the unqualified command
+`cargo test --release combustion_1000_banded_production_story ...` also matches
+`combustion_1000_banded_production_story_split`.  Use the fully qualified
+command above when only the legacy mixed-story test is desired.
+```
+
+test numerical::BVP_sci::BVP_sci_banded_story_tests::tests::combustion_1000_banded_production_story_split ... Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered correctness (5 runs)
+source   | matrix                | variant    | bootstrap_hint            | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy |    5/5 | 0.000 +/- 0.000 [0.000, 0.000] | 0.000 +/- 0.000 [0.000, 0.000] | 1.002 +/- 0.000 [1.002, 1.002] | ok 5/5
+
+Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered timing (5 runs)
+[BVP_sci banded] timing table: all time columns are milliseconds; counters are counts.
+source   | matrix                | variant    | bootstrap_hint            | total_ms mean+/-std [min,max] | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy | sparse_baseline           | 96.715 +/- 55.839 [66.791, 208.282] | 0.545 +/- 0.236 [0.359, 1.007] | 8.427 +/- 0.591 [7.667, 9.091] | 2.654 +/- 0.284 [2.346, 3.078] | 5.324 +/- 0.093 [5.208, 5.491] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | AutoBanded            | ExprLegacy | auto_banded_policy        | 71.616 +/- 3.624 [66.326, 77.667] | 0.393 +/- 0.059 [0.316, 0.487] | 8.104 +/- 0.255 [7.742, 8.510] | 2.489 +/- 0.139 [2.222, 2.626] | 5.181 +/- 0.296 [4.754, 5.519] | 0.000 +/- 0.000 [0.000, 0.000]
+BVP_sci  | ExperimentalBordered  | ExprLegacy | experimental_bordered_policy | 68.349 +/- 1.611 [66.507, 70.635] | 0.403 +/- 0.059 [0.309, 0.492] | 8.464 +/- 0.391 [7.850, 8.935] | 2.594 +/- 0.237 [2.283, 3.010] | 3.677 +/- 0.131 [3.510, 3.872] | 0.000 +/- 0.000 [0.000, 0.000]
+
+Combustion 1000: Sparse vs safe AutoBanded vs explicit bordered route / memory (5 runs)
+[BVP_sci banded] route table: route counters and Jacobian footprint are accumulated solver diagnostics.
+source   | matrix                | variant    | sparse_fb | full_banded | bordered_candidate | bordered_solves | dense_kib | sparse_kib | nnz    | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+BVP_sci  | Sparse                | ExprLegacy |         0 |           0 |                  1 |               0 |    281250 |       1172 |  72000 | ok 5/5
+BVP_sci  | AutoBanded            | ExprLegacy |         1 |           0 |                  1 |               0 |    281250 |       1172 |  72000 | ok 5/5
+BVP_sci  | ExperimentalBordered  | ExprLegacy |         0 |           0 |                  1 |               1 |    281250 |       1172 |  72000 | ok 5/5
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2447 filtered out; finished in 2.28s
+
+     Running unittests src\main.rs (target\release\deps\RustedSciThe-0d44834783a030ca.exe)
+```
+
+Conclusion:
+```text
+Keep this entry only as a legacy reference point; use PS.8f1 for the canonical
+1000-point banded story.  The legacy mixed story is still useful because it
+prints additional per-run route/stage tables, but its timing conclusion agrees
+with the split story: AutoBanded and ExperimentalBorderedBanded are close, while
+both are correctness-equivalent to Sparse.
+```
+
+### PS.8f5: Legacy banded production story, combustion 3000
+
+File: `src/numerical/BVP_sci/BVP_sci_story_tests.rs`
+
+Command:
+```powershell
+cargo test --release BVP_sci_story_tests::tests::combustion_3000_banded_production_story -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+This older mixed-track story should still pass, but the canonical banded source
+of truth now lives in the split module.
+```
+
+Current result:
+```text
+12 Core release note: the unqualified command
+`cargo test --release combustion_3000_banded_production_story ...` also matches
+`combustion_3000_banded_production_story_split`.  Use the fully qualified
+command above when only the legacy mixed-story test is desired.
+```
+
+running 1 test
+test numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_3000_banded_production_story ... Combustion 3000: Sparse vs safe AutoBanded vs experimental bordered correctness (3 runs)
+[BVP_sci e2e] correctness table: all solution diffs are against the first successful Lambdify baseline in each repetition.
+source   | matrix | variant    | bootstrap_hint  | ok/runs | solve_diff mean+/-std | rel_x_diff mean+/-std | max_abs_sol mean+/-std | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | linear_policy_baseline |  3/3   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 3/3
+Lambdify | AutoBanded | ExprLegacy | auto_banded_policy |  3/3   | 0.000e0 +/- 0.0e0    | 0.000e0 +/- 0.0e0     | 1.002e0 +/- 0.0e0      | ok 3/3
+Lambdify | ExperimentalBordered | ExprLegacy | experimental_bordered_policy |  3/3   | 7.566e-11 +/- 0.0e0  | 7.553e-11 +/- 0.0e0   | 1.002e0 +/- 0.0e0      | ok 3/3
+
+Combustion 3000: Sparse vs safe AutoBanded vs experimental bordered timing (3 runs)
+[BVP_sci e2e] timing/counter table: all time columns are milliseconds; counters are counts.
+source   | matrix | variant    | bootstrap_hint  | total_ms mean+/-std [min,max] | status
+--------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | linear_policy_baseline | 150.380 +/- 59.944 [107.719, 235.153] | ok 3/3
+Lambdify | AutoBanded | ExprLegacy | auto_banded_policy | 109.739 +/- 4.717 [103.259, 114.350] | ok 3/3
+Lambdify | ExperimentalBordered | ExprLegacy | experimental_bordered_policy | 104.531 +/- 4.546 [99.016, 110.149] | ok 3/3
+
+Combustion 3000: Sparse vs safe AutoBanded vs experimental bordered stage breakdown (3 runs)
+[BVP_sci e2e] stage breakdown table: symbolic/prep, residual, Jacobian, linear solve, and grid refinement totals are all milliseconds.
+source   | matrix | variant    | bootstrap_hint  | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms | niter | linsys | jac_rebuilds | status
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse | ExprLegacy | linear_policy_baseline | 1.176       | 20.350      | 8.540       | 15.573    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | AutoBanded | ExprLegacy | auto_banded_policy | 0.498       | 17.618      | 7.418       | 15.785    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | ExperimentalBordered | ExprLegacy | experimental_bordered_policy | 0.499       | 18.334      | 7.589       | 11.277    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | linear_policy_baseline | 0.365       | 17.605      | 7.681       | 15.334    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | AutoBanded | ExprLegacy | auto_banded_policy | 0.520       | 17.629      | 7.550       | 15.501    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | ExperimentalBordered | ExprLegacy | experimental_bordered_policy | 0.427       | 16.785      | 7.463       | 11.200    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | Sparse | ExprLegacy | linear_policy_baseline | 0.490       | 16.067      | 9.184       | 15.305    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | AutoBanded | ExprLegacy | auto_banded_policy | 0.507       | 16.082      | 7.434       | 15.007    | 0.000          |     1 |      1 |            1 | ok
+Lambdify | ExperimentalBordered | ExprLegacy | experimental_bordered_policy | 0.410       | 16.079      | 7.654       | 10.760    | 0.000          |     1 |      1 |            1 | ok
+
+Combustion 3000: Sparse vs safe AutoBanded vs experimental bordered route counters (3 runs)
+[BVP_sci linear policy] route table: counters are accumulated solver statistics. AutoBanded must not force full scalar banded on endpoint-BC matrices; ExperimentalBorderedBanded must not silently fall back to Sparse.
+source   | matrix       | variant    | total_ms | sparse | sparse_fb | full_banded | bordered | extract_ms | factor_ms | solve_ms | factor_calls | solve_calls | reuse | ls | dense_kib | sparse_kib | dense/sparse | route_full | route_bordered | route_sparse | status
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse       | ExprLegacy |  235.153 |      1 |         0 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | AutoBanded   | ExprLegacy |  114.350 |      0 |         1 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |  110.149 |      0 |         0 |           0 |        1 |      2.189 |     2.026 |    4.927 |            1 |          17 |     8 |  8 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | Sparse       | ExprLegacy |  107.719 |      1 |         0 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | AutoBanded   | ExprLegacy |  111.608 |      0 |         1 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |  104.428 |      0 |         0 |           0 |        1 |      2.046 |     1.964 |    4.570 |            1 |          17 |     8 |  8 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | Sparse       | ExprLegacy |  108.269 |      1 |         0 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | AutoBanded   | ExprLegacy |  103.259 |      0 |         1 |           0 |        0 |      0.000 |     0.000 |    0.000 |            0 |           0 |     0 |  0 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |   99.016 |      0 |         0 |           0 |        1 |      2.218 |     2.146 |    4.328 |            1 |          17 |     8 |  8 |   2531250 |       3516 |      719.998 |          0 |              1 |            0 | ok
+
+Combustion 3000: Sparse vs safe AutoBanded vs experimental bordered Jacobian memory (3 runs)
+[BVP_sci memory] Jacobian footprint is reported via dense-equivalent and sparse CSC diagnostics. This keeps the metric family aligned with BVP_Damp story conclusions.
+source   | matrix       | variant    | dense_kib | sparse_kib | dense/sparse_ratio | nnz | status
+--------------------------------------------------------------------------------------------------------------
+Lambdify | Sparse       | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | AutoBanded   | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | Sparse       | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | AutoBanded   | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | Sparse       | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | AutoBanded   | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+Lambdify | ExperimentalBordered | ExprLegacy |   2531250 |       3516 |            719.998 | 216000 | ok
+
+ok
+
+
+Conclusion:
+```text
+Keep this entry only as a legacy reference point; use PS.8f2 for the canonical
+3000-point banded story.  The legacy mixed story confirms correctness and shows
+ExperimentalBorderedBanded slightly ahead in that table, while the split story
+shows AutoBanded slightly ahead.  Together they support the same practical
+conclusion: this is performance parity, not a basis for changing AutoBanded's
+conservative policy.
+```
+
+The older mixed-story entries `combustion_1000_banded_production_story` and
+`combustion_3000_banded_production_story` in `BVP_sci_story_tests.rs` are
+historical/superseded and remain only as legacy reference points.
+
+### PS.8f Summary: 12 Core release banded conclusions
+
+Current result:
+```text
+All four release commands passed.  The unqualified legacy commands also matched
+the `_split` tests because Cargo test filtering is substring-based; use the
+fully qualified legacy commands above when only the old mixed-story test is
+desired.
+
+Correctness is robust: Sparse, AutoBanded, and ExperimentalBorderedBanded all
+match the baseline solution in every recorded run.
+
+The recorded route behavior was robust but conservative: AutoBanded used Sparse
+fallback, while ExperimentalBorderedBanded used the explicit bordered route.
+Those pre-promotion rows are retained as the baseline evidence for the policy
+change below.
+
+The canonical split stories now show stable combustion scaling rather than
+mixed/parity behavior.  ExperimentalBorderedBanded is faster than AutoBanded by
+about 7.0% at 1000 points, 6.2% at 3000 points, and 7.8% at 10000 points.
+
+The same runs exposed an instrumentation bug in linear_ms: the timer interval
+was restarted only on Jacobian rebuild but accumulated on every Newton
+iteration.  The solver algorithm was not affected.  The timer now measures the
+factorization/rebuild interval and each reused solve separately, and the story
+asserts that linear_ms cannot exceed the external total wall-clock time.  A
+post-fix debug smoke run passed and produced physically consistent stage data.
+```
+
+Conclusion:
+```text
+The promotion gate is satisfied for parameter-free endpoint systems:
+correctness, route selection, linear-stage reduction, and wall-clock scaling
+are stable. Sparse remains the general default policy for backward
+compatibility; selecting AutoBanded now permits structure-aware promotion.
+```
+
+### PS.8g: AutoBanded promotion decision
+
+Status: implemented after the 12 Core release reruns recorded in PS.8f.
+
+Decision:
+```text
+AutoBanded now selects the native bordered solver when the route planner
+recognizes a supported parameter-free endpoint system. Across combustion
+1000/3000/10000, the explicit bordered route reduced the measured linear stage
+by roughly 27-29% and improved total wall clock by roughly 4-8%, with matching
+solutions in every run.
+
+Unknown-parameter endpoint-bordered systems are not promoted yet: AutoBanded records
+"bvp sci auto bordered parameter fallback" and uses Sparse. If bordered
+extraction/factorization fails after promotion, AutoBanded also falls back to
+Sparse. ExperimentalBorderedBanded remains strict and reports failure instead
+of silently changing algorithms.
+```
+
+Fast acceptance commands:
+```powershell
+cargo test auto_banded_linear_policy_ -- --nocapture
+cargo test combustion_200_auto_banded_linear_policy_route_story -- --nocapture
+```
+
+The PS.8f raw tables predate promotion and are intentionally retained. Rerun
+the three canonical split stories to record the post-promotion release rows,
+where AutoBanded and the strict bordered policy must use the same structured
+route.
 
 ## Process-Isolated Cold Tests (Phase 0.4 — Implemented)
 
@@ -1574,118 +2848,119 @@ Command:
 ```powershell
 cargo test -p RustedSciThe -- "tests_generated_backend_compare::bvp_sci_production_like_end_to_end_compare_table" --release -- --nocapture --ignored
 ```
-running 1 test
-test numerical::BVP_sci::BVP_sci_generated_compare_tests::tests_generated_backend_compare::bvp_sci_production_like_end_to_end_compare_table ... [BVP_sci production-like] artifact namespace=production-like-p19c8-9d62220d
+test numerical::BVP_sci::BVP_sci_generated_compare_tests::tests_generated_backend_compare::bvp_sci_production_like_end_to_end_compare_table ... [BVP_sci production-like] artifact namespace=production-like-p19a0-b72ff9e9
 [BVP_sci production-like] scenario=linear-2, variants=8, repeats=5
-╭───────────────┬────────────────────────────────────────┬───────────┬────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
-│ variant       │ total_ms                               │ setup_ms  │ solve_ms   │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Lambdify      │ 55.465 med / 82.920 mean / 52.284 min  │ 0.091 med │ 55.389 med │ 1.000x              │ 1.000000e0       │ 0.000000e0                │ 0.815 med         │ 0.199 med         │ 0.036 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num-FD │ 0.038 med / 0.053 mean / 0.036 min     │ 0.000 med │ 0.038 med  │ 1451.974x           │ 1.000000e0       │ 0.000000e0                │ 0.008 med         │ 0.012 med         │ 0.008 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num    │ 0.029 med / 0.032 mean / 0.029 min     │ 0.000 med │ 0.029 med  │ 1893.017x           │ 1.000000e0       │ 0.000000e0                │ 0.008 med         │ 0.004 med         │ 0.007 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust          │ 58.314 med / 109.924 mean / 53.124 min │ 0.061 med │ 56.222 med │ 0.951x              │ 1.000000e0       │ 0.000000e0                │ 0.028 med         │ 0.017 med         │ 0.030 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust-warm     │ 59.361 med / 58.329 mean / 55.037 min  │ 0.058 med │ 59.292 med │ 0.934x              │ 1.000000e0       │ 0.000000e0                │ 0.021 med         │ 0.017 med         │ 0.032 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-gcc         │ 55.569 med / 57.136 mean / 53.727 min  │ 0.056 med │ 55.511 med │ 0.998x              │ 1.000000e0       │ 0.000000e0                │ 0.019 med         │ 0.014 med         │ 0.029 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-tcc         │ 49.419 med / 56.611 mean / 45.937 min  │ 0.069 med │ 49.359 med │ 1.122x              │ 1.000000e0       │ 0.000000e0                │ 0.032 med         │ 0.021 med         │ 0.043 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Zig           │ 62.323 med / 69.112 mean / 56.958 min  │ 0.057 med │ 62.275 med │ 0.890x              │ 1.000000e0       │ 0.000000e0                │ 0.034 med         │ 0.020 med         │ 0.044 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
-╰───────────────┴────────────────────────────────────────┴───────────┴────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
+╭───────────────┬─────────────────────────────────────────┬───────────┬─────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
+│ variant       │ total_ms                                │ setup_ms  │ solve_ms    │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Lambdify      │ 45.334 med / 71.466 mean / 43.121 min   │ 0.108 med │ 45.255 med  │ 1.000x              │ 1.000000e0       │ 0.000000e0                │ 0.774 med         │ 0.160 med         │ 0.041 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num-FD │ 0.038 med / 0.051 mean / 0.036 min      │ 0.000 med │ 0.038 med   │ 1202.483x           │ 1.000000e0       │ 0.000000e0                │ 0.006 med         │ 0.013 med         │ 0.008 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num    │ 0.028 med / 0.030 mean / 0.027 min      │ 0.000 med │ 0.028 med   │ 1624.860x           │ 1.000000e0       │ 0.000000e0                │ 0.007 med         │ 0.004 med         │ 0.007 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust          │ 45.350 med / 170.621 mean / 39.176 min  │ 0.069 med │ 45.281 med  │ 1.000x              │ 1.000000e0       │ 0.000000e0                │ 0.030 med         │ 0.021 med         │ 0.042 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust-warm     │ 56.434 med / 60.906 mean / 48.761 min   │ 0.058 med │ 56.367 med  │ 0.803x              │ 1.000000e0       │ 0.000000e0                │ 0.021 med         │ 0.015 med         │ 0.030 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-gcc         │ 51.150 med / 58.182 mean / 45.843 min   │ 0.063 med │ 51.087 med  │ 0.886x              │ 1.000000e0       │ 0.000000e0                │ 0.026 med         │ 0.019 med         │ 0.038 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-tcc         │ 104.272 med / 110.982 mean / 86.655 min │ 0.085 med │ 104.187 med │ 0.435x              │ 1.000000e0       │ 0.000000e0                │ 0.032 med         │ 0.019 med         │ 0.035 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+├───────────────┼─────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Zig           │ 60.712 med / 70.304 mean / 59.275 min   │ 0.100 med │ 60.612 med  │ 0.747x              │ 1.000000e0       │ 0.000000e0                │ 0.027 med         │ 0.020 med         │ 0.038 med       │ 1     │ 1             │ 1                 │ 8     │ finished x5 │
+╰───────────────┴─────────────────────────────────────────┴───────────┴─────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
 [BVP_sci production-like] best_total=Direct-num scenario=linear-2
 [BVP_sci production-like] finished scenario `linear-2`
 [BVP_sci production-like] scenario=exponential-2, variants=8, repeats=5
-╭───────────────┬──────────────────────────────────────────┬───────────┬─────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
-│ variant       │ total_ms                                 │ setup_ms  │ solve_ms    │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Lambdify      │ 64.427 med / 67.931 mean / 59.722 min    │ 0.148 med │ 64.274 med  │ 1.000x              │ 9.999711e-1      │ 0.000000e0                │ 2.919 med         │ 0.395 med         │ 6.605 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num-FD │ 0.958 med / 1.002 mean / 0.921 min       │ 0.000 med │ 0.958 med   │ 67.244x             │ 9.999711e-1      │ 3.259432e-8               │ 0.111 med         │ 0.599 med         │ 0.684 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num    │ 0.408 med / 0.408 mean / 0.398 min       │ 0.000 med │ 0.408 med   │ 158.064x            │ 9.999711e-1      │ 2.775558e-17              │ 0.103 med         │ 0.077 med         │ 0.668 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust          │ 92.672 med / 150.425 mean / 89.329 min   │ 0.091 med │ 90.805 med  │ 0.695x              │ 9.999711e-1      │ 0.000000e0                │ 0.575 med         │ 0.195 med         │ 2.660 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust-warm     │ 90.218 med / 90.003 mean / 82.059 min    │ 0.089 med │ 90.132 med  │ 0.714x              │ 9.999711e-1      │ 0.000000e0                │ 0.490 med         │ 0.147 med         │ 2.134 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-gcc         │ 83.655 med / 84.942 mean / 70.698 min    │ 0.112 med │ 83.529 med  │ 0.770x              │ 9.999711e-1      │ 0.000000e0                │ 0.543 med         │ 0.189 med         │ 2.510 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-tcc         │ 113.410 med / 118.048 mean / 102.862 min │ 0.114 med │ 113.326 med │ 0.568x              │ 9.999711e-1      │ 0.000000e0                │ 0.516 med         │ 0.135 med         │ 2.008 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Zig           │ 92.413 med / 93.555 mean / 84.742 min    │ 0.121 med │ 92.305 med  │ 0.697x              │ 9.999711e-1      │ 0.000000e0                │ 0.552 med         │ 0.173 med         │ 2.152 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
-╰───────────────┴──────────────────────────────────────────┴───────────┴─────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
+╭───────────────┬───────────────────────────────────────┬───────────┬────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
+│ variant       │ total_ms                              │ setup_ms  │ solve_ms   │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Lambdify      │ 40.860 med / 43.954 mean / 40.065 min │ 0.080 med │ 40.782 med │ 1.000x              │ 9.999711e-1      │ 0.000000e0                │ 2.564 med         │ 0.218 med         │ 5.557 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num-FD │ 0.925 med / 1.063 mean / 0.882 min    │ 0.000 med │ 0.925 med  │ 44.164x             │ 9.999711e-1      │ 3.259432e-8               │ 0.106 med         │ 0.570 med         │ 0.653 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num    │ 0.411 med / 0.410 mean / 0.399 min    │ 0.000 med │ 0.411 med  │ 99.296x             │ 9.999711e-1      │ 2.775558e-17              │ 0.105 med         │ 0.072 med         │ 0.681 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust          │ 41.283 med / 87.970 mean / 37.487 min │ 0.077 med │ 38.445 med │ 0.990x              │ 9.999711e-1      │ 0.000000e0                │ 0.389 med         │ 0.125 med         │ 1.701 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust-warm     │ 48.921 med / 48.143 mean / 39.660 min │ 0.115 med │ 48.792 med │ 0.835x              │ 9.999711e-1      │ 0.000000e0                │ 0.419 med         │ 0.147 med         │ 1.943 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-gcc         │ 42.566 med / 41.392 mean / 36.692 min │ 0.074 med │ 42.416 med │ 0.960x              │ 9.999711e-1      │ 0.000000e0                │ 0.380 med         │ 0.120 med         │ 1.605 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-tcc         │ 45.903 med / 48.036 mean / 40.795 min │ 0.080 med │ 45.828 med │ 0.890x              │ 9.999711e-1      │ 0.000000e0                │ 0.378 med         │ 0.120 med         │ 1.548 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Zig           │ 42.228 med / 51.284 mean / 41.089 min │ 0.081 med │ 42.145 med │ 0.968x              │ 9.999711e-1      │ 0.000000e0                │ 0.376 med         │ 0.113 med         │ 1.522 med       │ 2     │ 3             │ 3                 │ 94    │ finished x5 │
+╰───────────────┴───────────────────────────────────────┴───────────┴────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
 [BVP_sci production-like] best_total=Direct-num scenario=exponential-2
 [BVP_sci production-like] finished scenario `exponential-2`
 [BVP_sci production-like] scenario=exponential-2-512, variants=8, repeats=5
 ╭───────────────┬──────────────────────────────────────────┬───────────┬─────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
 │ variant       │ total_ms                                 │ setup_ms  │ solve_ms    │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Lambdify      │ 133.329 med / 136.073 mean / 111.035 min │ 0.136 med │ 133.215 med │ 1.000x              │ 9.999999e-1      │ 0.000000e0                │ 13.992 med        │ 1.885 med         │ 41.810 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ Lambdify      │ 114.069 med / 133.931 mean / 92.493 min  │ 0.131 med │ 113.968 med │ 1.000x              │ 9.999999e-1      │ 0.000000e0                │ 13.499 med        │ 1.929 med         │ 44.612 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num-FD │ 186.864 med / 186.550 mean / 180.769 min │ 0.000 med │ 186.864 med │ 0.714x              │ 9.999999e-1      │ 3.924489e-1               │ 2.598 med         │ 177.632 med       │ 13.760 med      │ 2     │ 3             │ 3                 │ 1516  │ finished x5 │
+│ Direct-num-FD │ 107.323 med / 110.916 mean / 106.396 min │ 0.000 med │ 107.323 med │ 1.063x              │ 9.999999e-1      │ 3.924489e-1               │ 1.601 med         │ 101.496 med       │ 8.833 med       │ 2     │ 3             │ 3                 │ 1516  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num    │ 8.887 med / 8.964 mean / 8.589 min       │ 0.000 med │ 8.887 med   │ 15.003x             │ 9.999999e-1      │ 1.110223e-16              │ 2.166 med         │ 1.803 med         │ 14.725 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ Direct-num    │ 6.230 med / 6.133 mean / 5.717 min       │ 0.000 med │ 6.230 med   │ 18.311x             │ 9.999999e-1      │ 1.110223e-16              │ 1.393 med         │ 1.289 med         │ 9.358 med       │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust          │ 134.847 med / 162.448 mean / 124.506 min │ 0.101 med │ 134.759 med │ 0.989x              │ 9.999999e-1      │ 0.000000e0                │ 9.866 med         │ 2.551 med         │ 34.354 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ Rust          │ 51.125 med / 51.079 mean / 50.139 min    │ 0.071 med │ 51.059 med  │ 2.231x              │ 9.999999e-1      │ 0.000000e0                │ 5.911 med         │ 1.658 med         │ 20.937 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust-warm     │ 140.114 med / 162.265 mean / 130.863 min │ 0.104 med │ 140.013 med │ 0.952x              │ 9.999999e-1      │ 0.000000e0                │ 9.486 med         │ 2.666 med         │ 35.513 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ Rust-warm     │ 50.546 med / 51.283 mean / 49.324 min    │ 0.073 med │ 50.473 med  │ 2.257x              │ 9.999999e-1      │ 0.000000e0                │ 5.601 med         │ 1.648 med         │ 20.272 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-gcc         │ 107.212 med / 110.713 mean / 99.664 min  │ 0.131 med │ 107.081 med │ 1.244x              │ 9.999999e-1      │ 0.000000e0                │ 9.894 med         │ 2.497 med         │ 35.471 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ C-gcc         │ 49.378 med / 48.918 mean / 47.435 min    │ 0.069 med │ 49.311 med  │ 2.310x              │ 9.999999e-1      │ 0.000000e0                │ 5.581 med         │ 1.605 med         │ 20.161 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-tcc         │ 99.001 med / 96.348 mean / 87.926 min    │ 0.134 med │ 98.867 med  │ 1.347x              │ 9.999999e-1      │ 0.000000e0                │ 9.254 med         │ 2.764 med         │ 33.773 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ C-tcc         │ 49.978 med / 49.764 mean / 46.863 min    │ 0.068 med │ 49.903 med  │ 2.282x              │ 9.999999e-1      │ 0.000000e0                │ 5.645 med         │ 1.653 med         │ 20.463 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ├───────────────┼──────────────────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Zig           │ 89.184 med / 89.808 mean / 84.881 min    │ 0.141 med │ 89.028 med  │ 1.495x              │ 9.999999e-1      │ 0.000000e0                │ 6.088 med         │ 1.834 med         │ 22.017 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
+│ Zig           │ 48.971 med / 49.190 mean / 48.859 min    │ 0.068 med │ 48.881 med  │ 2.329x              │ 9.999999e-1      │ 0.000000e0                │ 5.679 med         │ 1.632 med         │ 20.488 med      │ 2     │ 3             │ 3                 │ 1520  │ finished x5 │
 ╰───────────────┴──────────────────────────────────────────┴───────────┴─────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
 [BVP_sci production-like] best_total=Direct-num scenario=exponential-2-512
 [BVP_sci production-like] finished scenario `exponential-2-512`
 [BVP_sci production-like] scenario=lane-emden-2-512, variants=8, repeats=5
-╭───────────────┬────────────────────────────────────────┬───────────┬────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
-│ variant       │ total_ms                               │ setup_ms  │ solve_ms   │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Lambdify      │ 82.396 med / 83.171 mean / 80.393 min  │ 0.133 med │ 82.200 med │ 1.000x              │ 9.999998e-1      │ 0.000000e0                │ 1.929 med         │ 0.456 med         │ 0.367 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num-FD │ 14.657 med / 14.577 mean / 13.665 min  │ 0.000 med │ 14.657 med │ 5.622x              │ 9.999998e-1      │ 2.775558e-17              │ 0.433 med         │ 13.303 med        │ 0.449 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num    │ 1.710 med / 1.764 mean / 1.573 min     │ 0.000 med │ 1.710 med  │ 48.173x             │ 9.999998e-1      │ 2.775558e-17              │ 0.358 med         │ 0.399 med         │ 0.372 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust          │ 78.106 med / 143.059 mean / 72.637 min │ 0.089 med │ 77.971 med │ 1.055x              │ 9.999998e-1      │ 0.000000e0                │ 0.747 med         │ 0.482 med         │ 0.389 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust-warm     │ 78.064 med / 76.259 mean / 70.030 min  │ 0.120 med │ 77.913 med │ 1.055x              │ 9.999998e-1      │ 0.000000e0                │ 0.921 med         │ 0.537 med         │ 0.425 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-gcc         │ 73.794 med / 74.256 mean / 70.093 min  │ 0.137 med │ 73.656 med │ 1.117x              │ 9.999998e-1      │ 0.000000e0                │ 0.719 med         │ 0.484 med         │ 0.274 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-tcc         │ 77.162 med / 77.951 mean / 70.441 min  │ 0.081 med │ 77.082 med │ 1.068x              │ 9.999998e-1      │ 0.000000e0                │ 0.662 med         │ 0.400 med         │ 0.290 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-├───────────────┼────────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Zig           │ 77.913 med / 82.190 mean / 67.505 min  │ 0.113 med │ 77.821 med │ 1.058x              │ 9.999998e-1      │ 0.000000e0                │ 0.722 med         │ 0.499 med         │ 0.306 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
-╰───────────────┴────────────────────────────────────────┴───────────┴────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
+╭───────────────┬───────────────────────────────────────┬───────────┬────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
+│ variant       │ total_ms                              │ setup_ms  │ solve_ms   │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Lambdify      │ 39.581 med / 39.675 mean / 37.330 min │ 0.116 med │ 39.420 med │ 1.000x              │ 9.999998e-1      │ 0.000000e0                │ 1.533 med         │ 0.493 med         │ 0.335 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num-FD │ 7.804 med / 7.788 mean / 7.629 min    │ 0.000 med │ 7.804 med  │ 5.072x              │ 9.999998e-1      │ 2.775558e-17              │ 0.253 med         │ 6.855 med         │ 0.249 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num    │ 1.029 med / 1.083 mean / 1.012 min    │ 0.000 med │ 1.029 med  │ 38.462x             │ 9.999998e-1      │ 2.775558e-17              │ 0.213 med         │ 0.268 med         │ 0.234 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust          │ 37.087 med / 87.070 mean / 36.539 min │ 0.082 med │ 37.026 med │ 1.067x              │ 9.999998e-1      │ 0.000000e0                │ 0.719 med         │ 0.383 med         │ 0.254 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust-warm     │ 38.290 med / 40.356 mean / 36.824 min │ 0.078 med │ 38.214 med │ 1.034x              │ 9.999998e-1      │ 0.000000e0                │ 0.676 med         │ 0.625 med         │ 0.254 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-gcc         │ 41.269 med / 40.822 mean / 38.260 min │ 0.102 med │ 41.162 med │ 0.959x              │ 9.999998e-1      │ 0.000000e0                │ 0.727 med         │ 0.425 med         │ 0.290 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-tcc         │ 85.219 med / 82.647 mean / 41.782 min │ 0.096 med │ 85.123 med │ 0.464x              │ 9.999998e-1      │ 0.000000e0                │ 0.713 med         │ 0.431 med         │ 0.291 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+├───────────────┼───────────────────────────────────────┼───────────┼────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Zig           │ 45.590 med / 48.778 mean / 43.906 min │ 0.082 med │ 45.490 med │ 0.868x              │ 9.999998e-1      │ 0.000000e0                │ 0.712 med         │ 0.412 med         │ 0.265 med       │ 1     │ 1             │ 1                 │ 512   │ finished x5 │
+╰───────────────┴───────────────────────────────────────┴───────────┴────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
 [BVP_sci production-like] best_total=Direct-num scenario=lane-emden-2-512
 [BVP_sci production-like] finished scenario `lane-emden-2-512`
 [BVP_sci production-like] scenario=combustion-1000, variants=8, repeats=5
-╭───────────────┬────────────────────────────────────────────────┬───────────┬───────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
-│ variant       │ total_ms                                       │ setup_ms  │ solve_ms      │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Lambdify      │ 310.219 med / 310.591 mean / 292.542 min       │ 0.493 med │ 309.726 med   │ 1.000x              │ 1.001675e0       │ 0.000000e0                │ 36.234 med        │ 22.945 med        │ 615.610 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num-FD │ 11913.840 med / 11858.538 mean / 11427.433 min │ 0.000 med │ 11913.840 med │ 0.026x              │ 1.001675e0       │ 1.498321e-12              │ 19.829 med        │ 11755.153 med     │ 528.112 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Direct-num    │ 172.704 med / 157.240 mean / 119.726 min       │ 0.000 med │ 172.704 med   │ 1.796x              │ 1.001675e0       │ 1.136868e-13              │ 17.076 med        │ 24.782 med        │ 506.848 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust          │ 314.534 med / 334.838 mean / 230.741 min       │ 0.409 med │ 314.125 med   │ 0.986x              │ 1.001675e0       │ 0.000000e0                │ 70.863 med        │ 19.485 med        │ 700.908 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Rust-warm     │ 337.068 med / 345.536 mean / 334.116 min       │ 0.307 med │ 336.761 med   │ 0.920x              │ 1.001675e0       │ 0.000000e0                │ 71.307 med        │ 27.693 med        │ 746.435 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-gcc         │ 352.750 med / 352.226 mean / 334.770 min       │ 0.287 med │ 352.473 med   │ 0.879x              │ 1.001675e0       │ 0.000000e0                │ 72.211 med        │ 27.062 med        │ 751.733 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ C-tcc         │ 273.018 med / 264.641 mean / 230.792 min       │ 0.403 med │ 272.615 med   │ 1.136x              │ 1.001675e0       │ 0.000000e0                │ 62.439 med        │ 19.534 med        │ 587.648 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-├───────────────┼────────────────────────────────────────────────┼───────────┼───────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
-│ Zig           │ 304.141 med / 283.770 mean / 228.286 min       │ 0.371 med │ 303.775 med   │ 1.020x              │ 1.001675e0       │ 0.000000e0                │ 71.423 med        │ 25.780 med        │ 680.867 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
-╰───────────────┴────────────────────────────────────────────────┴───────────┴───────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
+╭───────────────┬─────────────────────────────────────────────┬───────────┬──────────────┬─────────────────────┬──────────────────┬───────────────────────────┬───────────────────┬───────────────────┬─────────────────┬───────┬───────────────┬───────────────────┬───────┬─────────────╮
+│ variant       │ total_ms                                    │ setup_ms  │ solve_ms     │ speedup_vs_lambdify │ max_abs_solution │ solution_diff_vs_lambdify │ residual_ms_total │ jacobian_ms_total │ linear_ms_total │ niter │ linear_solves │ jacobian_rebuilds │ nodes │ status      │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Lambdify      │ 243.096 med / 254.819 mean / 195.425 min    │ 0.545 med │ 242.627 med  │ 1.000x              │ 1.001675e0       │ 0.000000e0                │ 32.902 med        │ 17.144 med        │ 446.631 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num-FD │ 7418.690 med / 7409.775 mean / 7390.771 min │ 0.000 med │ 7418.690 med │ 0.033x              │ 1.001675e0       │ 1.498321e-12              │ 11.372 med        │ 7314.865 med      │ 335.915 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Direct-num    │ 117.084 med / 116.993 mean / 115.536 min    │ 0.000 med │ 117.084 med  │ 2.076x              │ 1.001675e0       │ 1.136868e-13              │ 10.367 med        │ 17.551 med        │ 323.434 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust          │ 217.070 med / 267.012 mean / 206.020 min    │ 0.353 med │ 207.182 med  │ 1.120x              │ 1.001675e0       │ 0.000000e0                │ 41.741 med        │ 19.126 med        │ 460.172 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Rust-warm     │ 231.908 med / 259.964 mean / 206.833 min    │ 0.317 med │ 231.556 med  │ 1.048x              │ 1.001675e0       │ 0.000000e0                │ 46.150 med        │ 19.666 med        │ 509.306 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-gcc         │ 206.010 med / 207.177 mean / 202.705 min    │ 0.314 med │ 205.690 med  │ 1.180x              │ 1.001675e0       │ 0.000000e0                │ 42.230 med        │ 18.805 med        │ 459.400 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ C-tcc         │ 203.973 med / 204.436 mean / 202.535 min    │ 0.337 med │ 203.718 med  │ 1.192x              │ 1.001675e0       │ 0.000000e0                │ 41.526 med        │ 18.672 med        │ 457.215 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+├───────────────┼─────────────────────────────────────────────┼───────────┼──────────────┼─────────────────────┼──────────────────┼───────────────────────────┼───────────────────┼───────────────────┼─────────────────┼───────┼───────────────┼───────────────────┼───────┼─────────────┤
+│ Zig           │ 206.426 med / 205.846 mean / 202.938 min    │ 0.356 med │ 206.172 med  │ 1.178x              │ 1.001675e0       │ 0.000000e0                │ 42.389 med        │ 18.942 med        │ 461.567 med     │ 1     │ 1             │ 1                 │ 7000  │ finished x5 │
+╰───────────────┴─────────────────────────────────────────────┴───────────┴──────────────┴─────────────────────┴──────────────────┴───────────────────────────┴───────────────────┴───────────────────┴─────────────────┴───────┴───────────────┴───────────────────┴───────┴─────────────╯
 [BVP_sci production-like] best_total=Direct-num scenario=combustion-1000
 [BVP_sci production-like] finished scenario `combustion-1000`
+ok
+
 ok
 Current result:
 ```text
@@ -1698,6 +2973,29 @@ Conclusion:
 TODO: record pass/fail and any observations.
 ```
 
+### PS.12: Pure numerical Direct-num vs Lambdify story
+
+File: `src/numerical/BVP_sci/BVP_sci_generated_compare_tests.rs`
+
+Command:
+```powershell
+cargo test bvp_sci_pure_numerical_direct_num_story -- --ignored --nocapture --test-threads=1
+```
+
+Hypothesis:
+```text
+The closure-first pure numerical route should be usable without symbolic
+placeholders, and the analytical Direct-num path should stay numerically close
+to the Lambdify baseline while exposing a realistic FD fallback for rhs-only
+callers.
+```
+
+Current result:
+```text
+Code compiled successfully and the story is wired into the compare suite.
+The ignored runtime pass still needs to be captured in release mode.
+```
+
 ## Gap Analysis
 
 | What's missing | Impact | Status |
@@ -1708,9 +3006,9 @@ TODO: record pass/fail and any observations.
 | Cold/warm process isolation | No cold-start measurement | ✅ Phase 0.4 |
 | Cross-workflow correctness for real problems | Lambdify vs AOT vs numeric not compared for combustion | ✅ Phase 0.3 |
 | Run history log | No record of what passed/failed over time | ✅ This document |
-| Banded backend story tests | Product-ready bordered Banded Newton/AOT variants are not wired yet | Adapter foundation added in CG.4a; route planner in CG.4b; safe AutoBanded hook plus explicit experimental bordered Newton route in CG.4c; structural/solver hardening in CG.4d; solver-facing route story added in PS.8b; reusable bordered factorization now reduces repeated solve overhead; release-candidate stress story PS.8c supports documenting `ExperimentalBorderedBanded` as advanced opt-in; larger-mesh PS.8d and non-combustion endpoint PS.8e are release-green for correctness/route counters, but performance is mixed/parity, so AutoBanded remains conservative |
+| Banded backend story tests | Parameterized native bordered factorization and Dense AOT are not done | AutoBanded promotion and true Banded AOT are implemented for parameter-free endpoint systems. PS.8f covers the native linear route; PS.8a3 proves direct generated banded assembly and global Sparse bypass. Unsupported/parameterized layouts retain Sparse fallback |
 | AtomView lambdify story tests | No AtomView lambdify mode in BVP_sci yet | Phase 1+ (when mode is added) |
-| Generated backend compare tests documented | PS.10 and PS.11 not in story-tests doc | ✅ This commit |
+| Generated backend compare tests documented | PS.10, PS.11, and PS.12 not in story-tests doc | ✅ This commit |
 | Release-mode CI gate | No automated release run | Future |
 
 ## Run History

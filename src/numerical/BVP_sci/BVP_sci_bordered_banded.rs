@@ -3,13 +3,12 @@
 //! BVP_sci's Newton matrix has a narrow collocation body and a small set of
 //! endpoint boundary-condition rows.  A scalar banded factorization of the whole
 //! matrix can be very inefficient because the BC rows couple the first and last
-//! mesh nodes, widening the lower scalar band.  This module does not solve the
-//! system yet; it classifies the structure so the production backend can choose
-//! between full scalar banded, bordered/boundary-aware banded, or sparse
-//! fallback deliberately.
+//! mesh nodes, widening the lower scalar band.  This module classifies that
+//! structure so the Newton backend can deliberately choose between full scalar
+//! banded, explicit bordered/boundary-aware banded, or sparse fallback routes.
 
 use crate::numerical::BVP_sci::BVP_sci_banded::{
-    infer_banded_profile, infer_banded_profile_for_row_range, BvpSciBandedProfile,
+    BvpSciBandedProfile, infer_banded_profile, infer_banded_profile_for_row_range,
 };
 use crate::numerical::BVP_sci::BVP_sci_faer::faer_mat;
 
@@ -46,8 +45,8 @@ pub struct BvpSciBandedRoutePolicy {
     /// Scalar banded storage amplification considered acceptable for the whole
     /// matrix.
     pub max_full_scalar_amplification: f64,
-    /// Collocation-only amplification considered compact enough to justify a
-    /// future bordered/boundary-aware backend.
+    /// Collocation-only amplification considered compact enough to justify the
+    /// explicit bordered/boundary-aware backend.
     pub max_collocation_amplification: f64,
     /// If boundary rows widen scalar storage by at least this ratio, prefer
     /// bordered/boundary-aware design over full scalar banded.

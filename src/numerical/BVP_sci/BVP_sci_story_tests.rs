@@ -33,20 +33,37 @@
 //! - `combustion_200_lambdify_baseline_story` — ExprLegacy lambdify baseline, 3 reps
 //! - `combustion_200_aot_correctness_story` — All 4 AOT toolchains (gcc/tcc/zig/rust), 3 reps
 //! - `combustion_1000_release_matrix_story` — Full matrix (all variants), 5 reps
+//! - `combustion_1000_sparse_aot_whole_vs_chunk4_story` — Sparse AOT whole vs chunk4, 5 reps
+//! - `combustion_1000_sparse_residual_aot_whole_vs_chunk4_story` — Sparse residual whole vs chunk4, 5 reps
+//! - `combustion_3000_sparse_aot_chunking_story` — Heavy sparse AOT chunking matrix, 5 reps
+//! - `combustion_3000_sparse_residual_aot_chunking_story` — Heavy sparse residual chunking matrix, 5 reps
 //! - `combustion_200_exprlegacy_stability_story` — ExprLegacy stability, 5 reps
 //! - `combustion_3000_sparse_isolated_stress_story` — Process-isolated cold stress, 3000 mesh, 2 reps
 
 #[cfg(test)]
 mod tests {
-    use crate::numerical::BVP_sci::BVP_sci_aot::BvpSciGeneratedBackendConfig;
+    use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
+        DampedBvpStatistics, DampedSolverOptions, NRBVP as DampNRBVP, SolverParams,
+    };
+    use crate::numerical::BVP_Damp::generated_solver_handoff::{
+        AotBuildPolicy as DampAotBuildPolicy, AotExecutionPolicy as DampAotExecutionPolicy,
+        GeneratedBackendConfig as DampGeneratedBackendConfig,
+    };
+    use crate::numerical::BVP_sci::BVP_sci_aot::{
+        BvpSciGeneratedBackendConfig, BvpSciGeneratedMatrixBackend,
+    };
     use crate::numerical::BVP_sci::BVP_sci_faer::BvpSciLinearSolvePolicy;
     use crate::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciSolverOptions, BvpSciStatistics};
+    use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+    use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+    use crate::symbolic::codegen::codegen_tasks::{BandedChunkingStrategy, SparseChunkingStrategy};
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
     use nalgebra::DMatrix;
     use std::collections::HashMap;
     use std::fs;
     use std::io::{self, Write};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
     use std::process::Command;
     use std::thread;
@@ -55,6 +72,8 @@ mod tests {
     // ============================================================
     // Section A: Data structures (extensible via BvpSciStatistics)
     // ============================================================
+
+    const CHUNKING_STORY_SCHEMA: &str = "bvp-sci-chunking-callback-stages-v2";
 
     #[derive(Clone)]
     struct RaceVariant {
@@ -111,6 +130,15 @@ mod tests {
         status: String,
     }
 
+    #[derive(Clone, Debug)]
+    struct CrossSolverMemoryRow {
+        solver: &'static str,
+        dense_kib: f64,
+        sparse_kib: Option<f64>,
+        nnz: usize,
+        status: &'static str,
+    }
+
     // ============================================================
     // Section B: Statistics helpers (mirror BVP_Damp_tests4.rs)
     // ============================================================
@@ -158,6 +186,23 @@ mod tests {
             .unwrap_or_else(|| "-".to_string())
     }
 
+    fn damp_dense_memory_kib(stats: &DampedBvpStatistics) -> f64 {
+        stats
+            .counters
+            .get("jacobian memory, MB")
+            .copied()
+            .unwrap_or(0) as f64
+            * 1024.0
+    }
+
+    fn damp_jacobian_elements(stats: &DampedBvpStatistics) -> usize {
+        stats
+            .counters
+            .get("number of jacobian elements")
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn timer_value_to_ms(key: &str, value: &str) -> Option<f64> {
         let duration = value
             .split(',')
@@ -196,6 +241,13 @@ mod tests {
 
     fn solution_rel_diff(lhs: &DMatrix<f64>, rhs: &DMatrix<f64>) -> f64 {
         solution_linf_diff(lhs, rhs) / solution_max_abs(rhs).max(1.0)
+    }
+
+    fn mean(values: &[f64]) -> f64 {
+        if values.is_empty() {
+            return f64::NAN;
+        }
+        values.iter().copied().sum::<f64>() / values.len() as f64
     }
 
     fn uniform_initial_guess(variable_count: usize, n_steps: usize, value: f64) -> DMatrix<f64> {
@@ -332,7 +384,11 @@ mod tests {
     }
 
     fn make_combustion_solver(n_steps: usize, config: BvpSciGeneratedBackendConfig) -> BVPwrap {
-        let options = combustion_problem_options(n_steps).with_generated_backend_config(config);
+        let use_native_banded = config.matrix_backend == BvpSciGeneratedMatrixBackend::Banded;
+        let mut options = combustion_problem_options(n_steps).with_generated_backend_config(config);
+        if use_native_banded {
+            options = options.with_linear_solve_policy(BvpSciLinearSolvePolicy::AutoBanded);
+        }
         BVPwrap::new_with_options(options)
     }
 
@@ -345,6 +401,129 @@ mod tests {
             options
                 .with_generated_backend_config(config)
                 .with_linear_solve_policy(policy),
+        )
+    }
+
+    fn damp_combustion_problem_options(n_steps: usize) -> DampedSolverOptions {
+        let bounds = HashMap::from([
+            ("Teta".to_string(), (0.0, 10.0)),
+            ("q".to_string(), (-1e20, 1e20)),
+            ("C0".to_string(), (0.0, 1.5)),
+            ("J0".to_string(), (-1e2, 1e2)),
+            ("C1".to_string(), (0.0, 1.5)),
+            ("J1".to_string(), (-1e2, 1e2)),
+        ]);
+        let rel_tolerance = HashMap::from([
+            ("Teta".to_string(), 1e-5),
+            ("q".to_string(), 1e-5),
+            ("C0".to_string(), 1e-5),
+            ("J0".to_string(), 1e-5),
+            ("C1".to_string(), 1e-5),
+            ("J1".to_string(), 1e-5),
+        ]);
+        let strategy_params = SolverParams {
+            max_jac: Some(6),
+            max_damp_iter: Some(6),
+            damp_factor: Some(0.5),
+            adaptive: None,
+        };
+
+        DampedSolverOptions::sparse_damped()
+            .with_strategy_params(Some(strategy_params))
+            .with_abs_tolerance(1e-6)
+            .with_rel_tolerance(rel_tolerance)
+            .with_max_iterations(n_steps * 2)
+            .with_bounds(bounds)
+            .with_loglevel(Some("off".to_string()))
+    }
+
+    fn damp_combustion_lambdify_config() -> DampGeneratedBackendConfig {
+        DampGeneratedBackendConfig::default()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::ExprLegacy)
+            .with_aot_execution_policy(DampAotExecutionPolicy::SequentialOnly)
+            .with_aot_build_policy(DampAotBuildPolicy::RebuildAlways {
+                profile:
+                    crate::numerical::BVP_Damp::generated_solver_handoff::AotBuildProfile::Release,
+            })
+    }
+
+    fn make_damp_combustion_solver(
+        n_steps: usize,
+        config: DampGeneratedBackendConfig,
+    ) -> DampNRBVP {
+        let unknowns_str: Vec<&str> = vec!["Teta", "q", "C0", "J0", "C1", "J1"];
+        let unknowns: Vec<Expr> = Expr::parse_vector_expression(unknowns_str.clone());
+        let teta = unknowns[0].clone();
+        let q = unknowns[1].clone();
+        let c0 = unknowns[2].clone();
+        let j0 = unknowns[3].clone();
+        let j1 = unknowns[5].clone();
+
+        let q_heat = 3000.0 * 1e3 * 0.034;
+        let dt = 600.0;
+        let t_scale = 600.0;
+        let l: f64 = 3e-4;
+        let m0 = 34.2 / 1000.0;
+        let lambda = 0.07;
+        let p = 2e6;
+        let tm = 1500.0;
+        let c1_0 = 1.0;
+        let t_initial = 1000.0;
+        let pe_q = 0.0090168;
+        let d_ro = 2.88e-4;
+        let pe_d = 1.50e-3;
+        let ro_m_ = m0 * p / (8.314 * tm);
+
+        let dt_sym = Expr::Const(dt);
+        let t_scale_sym = Expr::Const(t_scale);
+        let lambda_sym = Expr::Const(lambda);
+        let q_heat = Expr::Const(q_heat);
+        let a = Expr::Const(1.3e5);
+        let e = Expr::Const(5000.0 * 4.184);
+        let m = Expr::Const(m0);
+        let r_g = Expr::Const(8.314);
+        let ro_m = Expr::Const(ro_m_);
+        let qm = Expr::Const(l.powf(2.0) / t_scale);
+        let qs = Expr::Const(l.powf(2.0));
+        let pe_q_sym = Expr::Const(pe_q);
+        let ro_d = vec![Expr::Const(d_ro), Expr::Const(d_ro)];
+        let pe_d = vec![Expr::Const(pe_d), Expr::Const(pe_d)];
+        let minus = Expr::Const(-1.0);
+        let m_reag = Expr::Const(0.342);
+
+        let rate = a
+            * Expr::exp(-e / (r_g * (teta.clone() * t_scale_sym + dt_sym)))
+            * c0.clone()
+            * (ro_m.clone() / m_reag.clone());
+        let eq_system = vec![
+            q.clone() / lambda_sym,
+            q * pe_q_sym - q_heat * rate.clone() * qm,
+            j0.clone() / ro_d[0].clone(),
+            j0 * pe_d[0].clone()
+                - (m.clone() * minus * rate.clone() * ro_m.clone() / m.clone()) * qs.clone(),
+            j1.clone() / ro_d[1].clone(),
+            j1 * pe_d[1].clone() - (m.clone() * rate * ro_m / m) * qs,
+        ];
+
+        let boundary_conditions = HashMap::from([
+            ("Teta".to_string(), vec![(0, (t_initial - dt) / t_scale)]),
+            ("q".to_string(), vec![(1, 1e-10)]),
+            ("C0".to_string(), vec![(0, c1_0)]),
+            ("J0".to_string(), vec![(1, 1e-7)]),
+            ("C1".to_string(), vec![(0, 1e-3)]),
+            ("J1".to_string(), vec![(1, 1e-7)]),
+        ]);
+        DampNRBVP::new_with_options(
+            eq_system,
+            DMatrix::from_element(6, n_steps, 0.99),
+            unknowns_str.iter().map(|value| value.to_string()).collect(),
+            "x".to_string(),
+            boundary_conditions,
+            0.0,
+            1.0,
+            n_steps,
+            damp_combustion_problem_options(n_steps).with_generated_backend_config(config),
         )
     }
 
@@ -767,6 +946,165 @@ mod tests {
         println!();
     }
 
+    fn print_e2e_stage_breakdown_table(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci e2e] stage breakdown table: symbolic/prep, residual, Jacobian, linear solve, and grid refinement totals are all milliseconds."
+        );
+        println!(
+            "source   | matrix | variant    | bootstrap_hint  | symbolic_ms | residual_ms | jacobian_ms | linear_ms | grid_refine_ms | niter | linsys | jac_rebuilds | status"
+        );
+        println!("{}", "-".repeat(190));
+        for sample in samples {
+            println!(
+                "{:<8} | {:<6} | {:<10} | {:<15} | {:<11.3} | {:<11.3} | {:<11.3} | {:<9.3} | {:<14.3} | {:>5} | {:>6} | {:>12} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                sample.row.bootstrap_hint,
+                sample.statistics.symbolic_prepare_ms_total,
+                sample.statistics.residual_ms_total,
+                sample.statistics.jacobian_ms_total,
+                sample.statistics.linear_system_ms_total,
+                sample.statistics.grid_refinement_ms_total,
+                sample.statistics.number_of_iterations,
+                sample.statistics.number_of_linear_solves,
+                sample.statistics.number_of_jacobian_recalculations,
+                sample.row.status
+            );
+        }
+        println!();
+    }
+
+    fn print_generated_callback_stage_table(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci AOT callback stages] wall-clock substage timers inside linked generated callbacks. These split broad solver residual_ms/jacobian_ms into argument packing, generated values, and matrix assembly."
+        );
+        println!(
+            "source   | matrix | variant    | bootstrap_hint  | res_args | res_values | res_assembly | jac_args | jac_values | jac_assembly | param_jac | status"
+        );
+        println!("{}", "-".repeat(205));
+        for sample in samples {
+            let sparse_assembly =
+                stats_timer_ms(&sample.statistics, "Callback Jacobian Matrix Assembly");
+            let banded_assembly =
+                stats_timer_ms(&sample.statistics, "Callback Jacobian Banded Assembly");
+            let jacobian_assembly = if sparse_assembly.is_finite() {
+                sparse_assembly
+            } else {
+                banded_assembly
+            };
+            println!(
+                "{:<8} | {:<6} | {:<10} | {:<15} | {:>8.3} | {:>10.3} | {:>12.3} | {:>8.3} | {:>10.3} | {:>12.3} | {:>9.3} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                sample.row.bootstrap_hint,
+                stats_timer_ms(&sample.statistics, "Callback Residual Args"),
+                stats_timer_ms(&sample.statistics, "Callback Residual Values"),
+                stats_timer_ms(&sample.statistics, "Callback Residual Matrix Assembly"),
+                stats_timer_ms(&sample.statistics, "Callback Jacobian Args"),
+                stats_timer_ms(&sample.statistics, "Callback Jacobian Values"),
+                jacobian_assembly,
+                stats_timer_ms(&sample.statistics, "Callback Parameter Jacobian Values"),
+                sample.row.status
+            );
+        }
+        println!();
+    }
+
+    fn print_generated_runtime_diagnostics_table(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci AOT runtime] linked generated callback facts. `actual_jobs` is the effective mesh-parallel worker count; `chunk_count` is the number of linked generated chunk symbols available for that stage."
+        );
+        println!(
+            "source   | matrix | variant    | bootstrap_hint  | res_jobs | jac_jobs | res_chunks | jac_chunks | res_work/job | jac_work/job | res_mesh_par | jac_mesh_par | res_fallback | jac_fallback | status"
+        );
+        println!("{}", "-".repeat(245));
+        for sample in samples {
+            println!(
+                "{:<8} | {:<6} | {:<10} | {:<15} | {:>8.0} | {:>8.0} | {:>10.0} | {:>10.0} | {:>12.0} | {:>12.0} | {:<12} | {:<12} | {:<12} | {:<12} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                sample.row.bootstrap_hint,
+                stats_diagnostic_usize(&sample.statistics, "aot.runtime.residual.actual_jobs"),
+                stats_diagnostic_usize(
+                    &sample.statistics,
+                    "aot.runtime.sparse_jacobian.actual_jobs"
+                ),
+                stats_diagnostic_usize(&sample.statistics, "aot.runtime.residual.chunk_count"),
+                stats_diagnostic_usize(
+                    &sample.statistics,
+                    "aot.runtime.sparse_jacobian.chunk_count"
+                ),
+                stats_diagnostic_usize(&sample.statistics, "aot.runtime.residual.work_per_job"),
+                stats_diagnostic_usize(
+                    &sample.statistics,
+                    "aot.runtime.sparse_jacobian.work_per_job"
+                ),
+                stats_diagnostic_string(&sample.statistics, "aot.runtime.residual.mesh_parallel"),
+                stats_diagnostic_string(
+                    &sample.statistics,
+                    "aot.runtime.sparse_jacobian.mesh_parallel"
+                ),
+                stats_diagnostic_string(&sample.statistics, "aot.runtime.residual.fallback_reason"),
+                stats_diagnostic_string(
+                    &sample.statistics,
+                    "aot.runtime.sparse_jacobian.fallback_reason"
+                ),
+                sample.row.status
+            );
+        }
+        println!();
+    }
+
+    fn print_true_banded_route_table(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "source   | matrix | variant    | direct_assembly | sparse_bypass | bordered_factor | sparse_fallback | jac_chunks | jac_jobs | jac_fallback"
+        );
+        println!("{}", "-".repeat(155));
+        for sample in samples {
+            let jacobian_prefix = if sample.row.matrix == "Banded" {
+                "aot.runtime.banded_jacobian"
+            } else {
+                "aot.runtime.sparse_jacobian"
+            };
+            println!(
+                "{:<8} | {:<6} | {:<10} | {:>15} | {:>13} | {:>15} | {:>15} | {:>10} | {:>8} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                stats_count(&sample.statistics, "bvp sci direct banded assembly calls"),
+                stats_count(
+                    &sample.statistics,
+                    "bvp sci global sparse jacobian bypasses"
+                ),
+                stats_count(&sample.statistics, "bvp sci bordered factorization calls"),
+                stats_count(
+                    &sample.statistics,
+                    "bvp sci linear backend sparse fallback solves"
+                ),
+                stats_diagnostic_usize(
+                    &sample.statistics,
+                    &format!("{jacobian_prefix}.chunk_count")
+                ),
+                stats_diagnostic_usize(
+                    &sample.statistics,
+                    &format!("{jacobian_prefix}.actual_jobs")
+                ),
+                stats_diagnostic_string(
+                    &sample.statistics,
+                    &format!("{jacobian_prefix}.fallback_reason")
+                ),
+            );
+        }
+        println!();
+    }
+
     fn print_e2e_lifecycle_table(title: &str, rows: &[RaceSummaryRow]) {
         println!("{title}");
         println!(
@@ -782,10 +1120,36 @@ mod tests {
         println!();
     }
 
+    fn print_generated_backend_lifecycle_samples(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci AOT lifecycle] per-run generated backend diagnostics; RequirePrebuilt rows must report reused_linked."
+        );
+        println!(
+            "source   | matrix | variant | bootstrap_hint              | action          | policy          | toolchain | problem_key       | status"
+        );
+        println!("{}", "-".repeat(165));
+        for sample in samples {
+            println!(
+                "{:<8} | {:<6} | {:<7} | {:<27} | {:<15} | {:<15} | {:<9} | {:<17} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                sample.row.bootstrap_hint,
+                stats_diagnostic_string(&sample.statistics, "generated_backend_action"),
+                stats_diagnostic_string(&sample.statistics, "generated_backend_policy"),
+                stats_diagnostic_string(&sample.statistics, "generated_backend_toolchain"),
+                stats_diagnostic_string(&sample.statistics, "generated_backend_problem_key"),
+                sample.row.status
+            );
+        }
+        println!();
+    }
+
     fn print_linear_policy_route_table(title: &str, samples: &[RaceSample]) {
         println!("{title}");
         println!(
-            "[BVP_sci linear policy] route table: counters are accumulated solver statistics. AutoBanded must not force full scalar banded on endpoint-BC matrices; ExperimentalBorderedBanded must not silently fall back to Sparse."
+            "[BVP_sci linear policy] route table: counters are accumulated solver statistics. AutoBanded promotes supported parameter-free endpoint-BC matrices to the bordered solver; ExperimentalBorderedBanded is the strict no-fallback diagnostic policy."
         );
         println!(
             "source   | matrix       | variant    | total_ms | sparse | sparse_fb | full_banded | bordered | extract_ms | factor_ms | solve_ms | factor_calls | solve_calls | reuse | ls | dense_kib | sparse_kib | dense/sparse | route_full | route_bordered | route_sparse | status"
@@ -821,14 +1185,8 @@ mod tests {
                 ),
                 stats_counter_us_as_ms(&sample.statistics, "bvp sci bordered extraction us"),
                 stats_counter_us_as_ms(&sample.statistics, "bvp sci bordered factorization us"),
-                stats_counter_us_as_ms(
-                    &sample.statistics,
-                    "bvp sci bordered structured solve us"
-                ),
-                stats_count(
-                    &sample.statistics,
-                    "bvp sci bordered factorization calls"
-                ),
+                stats_counter_us_as_ms(&sample.statistics, "bvp sci bordered structured solve us"),
+                stats_count(&sample.statistics, "bvp sci bordered factorization calls"),
                 stats_count(
                     &sample.statistics,
                     "bvp sci bordered structured solve calls"
@@ -848,6 +1206,55 @@ mod tests {
                 ),
                 stats_count(&sample.statistics, "bvp sci route sparse fallback"),
                 sample.row.status
+            );
+        }
+        println!();
+    }
+
+    fn print_jacobian_memory_table(title: &str, samples: &[RaceSample]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci memory] Jacobian footprint is reported via dense-equivalent and sparse CSC diagnostics. This keeps the metric family aligned with BVP_Damp story conclusions."
+        );
+        println!(
+            "source   | matrix       | variant    | dense_kib | sparse_kib | dense/sparse_ratio | nnz | status"
+        );
+        println!("{}", "-".repeat(110));
+        for sample in samples {
+            let dense_to_sparse = stats_diagnostic_usize(
+                &sample.statistics,
+                "global jacobian dense to sparse permille",
+            ) / 1000.0;
+            println!(
+                "{:<8} | {:<12} | {:<10} | {:>9} | {:>10} | {:>18.3} | {:>3} | {}",
+                sample.row.source,
+                sample.row.matrix,
+                sample.row.variant,
+                stats_diagnostic_usize(&sample.statistics, "global jacobian dense equivalent kib"),
+                stats_diagnostic_usize(&sample.statistics, "global jacobian sparse storage kib"),
+                dense_to_sparse,
+                stats_diagnostic_usize(&sample.statistics, "global jacobian nnz"),
+                sample.row.status
+            );
+        }
+        println!();
+    }
+
+    fn print_cross_solver_memory_comparison(title: &str, rows: &[CrossSolverMemoryRow]) {
+        println!("{title}");
+        println!(
+            "[BVP_sci vs BVP_Damp memory] compare dense-equivalent Jacobian footprint on the same combustion setup; BVP_sci also reports sparse CSC storage."
+        );
+        println!("solver   | dense_kib | sparse_kib | nnz     | status");
+        println!("{}", "-".repeat(80));
+        for row in rows {
+            let sparse_kib = row
+                .sparse_kib
+                .map(|value| format!("{value:>10.0}"))
+                .unwrap_or_else(|| format!("{:>10}", "-"));
+            println!(
+                "{:<8} | {:>9.0} | {} | {:>7} | {}",
+                row.solver, row.dense_kib, sparse_kib, row.nnz, row.status
             );
         }
         println!();
@@ -902,6 +1309,247 @@ mod tests {
                 bootstrap_hint: "build_if_missing",
                 config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_rust(
                     "output_bvp_sci",
+                ),
+            },
+        ]
+    }
+
+    fn combustion_sparse_whole_vs_chunk4_variants() -> Vec<RaceVariant> {
+        vec![
+            RaceVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "ExprLegacy",
+                bootstrap_hint: "baseline",
+                config: BvpSciGeneratedBackendConfig::default_lambdify(),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/whole",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole)
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/chunk4",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 4,
+                })
+                .with_sparse_jacobian_chunking_strategy(
+                    SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 4 },
+                ),
+            },
+        ]
+    }
+
+    fn combustion_sparse_heavy_chunking_variants() -> Vec<RaceVariant> {
+        vec![
+            RaceVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "ExprLegacy",
+                bootstrap_hint: "baseline",
+                config: BvpSciGeneratedBackendConfig::default_lambdify(),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/whole",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking_heavy",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole)
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/chunk4",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking_heavy",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 4,
+                })
+                .with_sparse_jacobian_chunking_strategy(
+                    SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 4 },
+                ),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/chunk8",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking_heavy",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 8,
+                })
+                .with_sparse_jacobian_chunking_strategy(
+                    SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 8 },
+                ),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/chunk12",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_chunking_heavy",
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 12,
+                })
+                .with_sparse_jacobian_chunking_strategy(
+                    SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 12 },
+                ),
+            },
+        ]
+    }
+
+    fn combustion_true_banded_aot_variants() -> Vec<RaceVariant> {
+        let output_dir = "output_bvp_sci_true_banded_aot";
+        vec![
+            RaceVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "ExprLegacy",
+                bootstrap_hint: "baseline",
+                config: BvpSciGeneratedBackendConfig::default_lambdify(),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/whole",
+                bootstrap_hint: "global_sparse",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    output_dir,
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole)
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Banded",
+                variant: "tcc/whole",
+                bootstrap_hint: "native_bordered",
+                config: BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(
+                    output_dir,
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole)
+                .with_banded_jacobian_chunking_strategy(BandedChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Banded",
+                variant: "tcc/chunk4",
+                bootstrap_hint: "native_bordered",
+                config: BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(
+                    output_dir,
+                )
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 4,
+                })
+                .with_banded_jacobian_chunking_strategy(
+                    BandedChunkingStrategy::ByTargetChunkCount { target_chunks: 4 },
+                ),
+            },
+        ]
+    }
+
+    fn combustion_sparse_residual_whole_vs_chunk4_variants() -> Vec<RaceVariant> {
+        vec![
+            RaceVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "ExprLegacy",
+                bootstrap_hint: "baseline",
+                config: BvpSciGeneratedBackendConfig::default_lambdify(),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/residual_whole",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_residual_chunking",
+                )
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole)
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/residual_chunk4",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_residual_chunking",
+                )
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole)
+                .with_residual_chunking_strategy(
+                    ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 4 },
+                ),
+            },
+        ]
+    }
+
+    fn combustion_sparse_residual_heavy_chunking_variants() -> Vec<RaceVariant> {
+        vec![
+            RaceVariant {
+                source: "Lambdify",
+                matrix: "Sparse",
+                variant: "ExprLegacy",
+                bootstrap_hint: "baseline",
+                config: BvpSciGeneratedBackendConfig::default_lambdify(),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/residual_whole",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_residual_chunking_heavy",
+                )
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole)
+                .with_residual_chunking_strategy(ResidualChunkingStrategy::Whole),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/residual_chunk4",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_residual_chunking_heavy",
+                )
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole)
+                .with_residual_chunking_strategy(
+                    ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 4 },
+                ),
+            },
+            RaceVariant {
+                source: "AOT",
+                matrix: "Sparse",
+                variant: "tcc/residual_chunk8",
+                bootstrap_hint: "build_if_missing",
+                config: BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc(
+                    "output_bvp_sci_sparse_residual_chunking_heavy",
+                )
+                .with_sparse_jacobian_chunking_strategy(SparseChunkingStrategy::Whole)
+                .with_residual_chunking_strategy(
+                    ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 8 },
                 ),
             },
         ]
@@ -1062,9 +1710,16 @@ mod tests {
         assert!(
             auto_samples.iter().all(|sample| stats_count(
                 &sample.statistics,
-                "bvp sci linear backend sparse fallback solves"
+                "bvp sci linear backend bordered structured solves"
             ) > 0),
-            "AutoBanded should remain a safe Sparse fallback on endpoint-BC matrices"
+            "AutoBanded should promote parameter-free endpoint-BC systems to bordered solves"
+        );
+        assert!(
+            auto_samples.iter().all(|sample| stats_count(
+                &sample.statistics,
+                "bvp sci linear backend sparse fallback solves"
+            ) == 0),
+            "successful AutoBanded bordered solves should not fall back to Sparse"
         );
 
         let experimental_samples: Vec<&RaceSample> = samples
@@ -1216,7 +1871,493 @@ mod tests {
         }
     }
 
-    /// I.4: Combustion_200 — ExprLegacy stability (5 reps)
+    /// I.3b: Combustion_1000 — Sparse AOT whole vs chunk4 release comparison
+    ///
+    /// Compares a Lambdify baseline with two sparse AOT variants using the same
+    /// toolchain but different sparse Jacobian chunking strategies. This is the
+    /// first release story for sparse chunking on BVP_sci.
+    #[test]
+    #[ignore]
+    fn combustion_1000_sparse_aot_whole_vs_chunk4_story() {
+        let variants = combustion_sparse_whole_vs_chunk4_variants();
+        let samples = run_race_samples(&variants, 1000, 5);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 1000: Sparse AOT whole vs chunk4 (5 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table(
+            "Combustion 1000: Sparse AOT whole vs chunk4 correctness",
+            &summary,
+        );
+        print_e2e_performance_table(
+            "Combustion 1000: Sparse AOT whole vs chunk4 timing",
+            &summary,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 1000: Sparse AOT whole vs chunk4 callback stages",
+            &samples,
+        );
+        print_generated_runtime_diagnostics_table(
+            "Combustion 1000: Sparse AOT whole vs chunk4 runtime diagnostics",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 1000: Sparse AOT whole vs chunk4 generated backend actions",
+            &samples,
+        );
+
+        for row in &summary {
+            assert!(
+                row.ok_runs > 0,
+                "{} {} {}: all runs failed",
+                row.source,
+                row.matrix,
+                row.variant
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.source == "AOT"
+                    && sample.row.variant.contains("chunk4")
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.residual.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.residual.fallback_reason",
+                    ) == "none"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.fallback_reason",
+                    ) == "none"
+            }),
+            "chunk4 BVP_sci AOT story must prove real residual and sparse-Jacobian runtime parallelism"
+        );
+    }
+
+    /// I.3b1: Combustion_1000 — Sparse residual AOT whole vs chunk4 release comparison
+    ///
+    /// Mirrors the sparse-Jacobian story, but isolates residual chunking so we
+    /// can prove the residual runtime path itself is mesh-parallel.
+    #[test]
+    #[ignore]
+    fn combustion_1000_sparse_residual_aot_whole_vs_chunk4_story() {
+        let variants = combustion_sparse_residual_whole_vs_chunk4_variants();
+        let samples = run_race_samples(&variants, 1000, 5);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 (5 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 correctness",
+            &summary,
+        );
+        print_e2e_performance_table(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 timing",
+            &summary,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 callback stages",
+            &samples,
+        );
+        print_generated_runtime_diagnostics_table(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 runtime diagnostics",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 1000: Sparse residual AOT whole vs chunk4 generated backend actions",
+            &samples,
+        );
+
+        for row in &summary {
+            assert!(
+                row.ok_runs > 0,
+                "{} {} {}: all runs failed",
+                row.source,
+                row.matrix,
+                row.variant
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.source == "AOT"
+                    && sample.row.variant.contains("chunk4")
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.residual.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.residual.fallback_reason",
+                    ) == "none"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.actual_jobs",
+                    ) == 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.fallback_reason",
+                    ) == "single_chunk"
+            }),
+            "chunk4 BVP_sci AOT story must prove real residual runtime parallelism"
+        );
+    }
+
+    /// I.3c: Combustion_3000 — Sparse AOT chunking matrix on the 12-core source of truth
+    ///
+    /// This is the heavier sparse chunking story.  It keeps the Lambdify
+    /// baseline, then compares `tcc/whole` against several chunk counts that are
+    /// plausible on a 12-core machine.  The intent is to see whether the larger
+    /// combustion solve reaches a real break-even point for more aggressive
+    /// chunking.
+    #[test]
+    #[ignore]
+    fn combustion_3000_sparse_aot_chunking_story() {
+        println!("[BVP_sci story schema] {CHUNKING_STORY_SCHEMA}");
+        let variants = combustion_sparse_heavy_chunking_variants();
+        let samples = run_race_samples(&variants, 3000, 5);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 3000: Sparse AOT chunking matrix (5 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table("Combustion 3000: Sparse AOT chunking correctness", &summary);
+        print_e2e_performance_table("Combustion 3000: Sparse AOT chunking timing", &summary);
+        print_e2e_stage_breakdown_table(
+            "Combustion 3000: Sparse AOT chunking stage breakdown",
+            &samples,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 3000: Sparse AOT chunking callback stages",
+            &samples,
+        );
+        print_generated_runtime_diagnostics_table(
+            "Combustion 3000: Sparse AOT chunking runtime diagnostics",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 3000: Sparse AOT chunking generated backend actions",
+            &samples,
+        );
+
+        for row in &summary {
+            assert!(
+                row.ok_runs > 0,
+                "{} {} {}: all runs failed",
+                row.source,
+                row.matrix,
+                row.variant
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.source == "AOT"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.residual.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.residual.fallback_reason",
+                    ) == "none"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.fallback_reason",
+                    ) == "none"
+            }),
+            "chunked BVP_sci AOT story must prove real residual and sparse-Jacobian runtime parallelism"
+        );
+    }
+
+    /// I.3c2: Combustion_1000 — true Banded AOT versus the global Sparse route.
+    ///
+    /// Unlike the older AutoBanded stories, the Banded rows compile a native
+    /// diagonal-major pointwise Jacobian and assemble bordered blocks directly.
+    /// The route table is a hard proof: Banded rows must report direct assembly,
+    /// global sparse bypasses and bordered factorization without Sparse fallback.
+    #[test]
+    #[ignore]
+    fn combustion_1000_true_banded_aot_vs_sparse_story() {
+        println!("[BVP_sci story schema] true-banded-aot-v1");
+        let variants = combustion_true_banded_aot_variants();
+        let samples = run_race_samples(&variants, 1_000, 3);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 1000: Lambdify / Sparse AOT / true Banded AOT (3 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table("Combustion 1000: true Banded AOT correctness", &summary);
+        print_e2e_performance_table(
+            "Combustion 1000: true Banded AOT wall-clock and solver stages",
+            &summary,
+        );
+        print_e2e_stage_breakdown_table(
+            "Combustion 1000: true Banded AOT stage breakdown",
+            &samples,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 1000: true Banded AOT callback stages",
+            &samples,
+        );
+        print_true_banded_route_table(
+            "Combustion 1000: proof of native Banded AOT route",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 1000: true Banded AOT artifact lifecycle",
+            &samples,
+        );
+
+        for row in &summary {
+            assert_eq!(
+                row.ok_runs, row.runs,
+                "{} {} {}: every story repetition must solve",
+                row.source, row.matrix, row.variant
+            );
+            assert!(
+                row.solve_diff.mean <= 1e-7,
+                "{} {} {}: solution diff is too large: {:.3e}",
+                row.source,
+                row.matrix,
+                row.variant,
+                row.solve_diff.mean
+            );
+        }
+
+        let banded_samples = samples
+            .iter()
+            .filter(|sample| sample.row.matrix == "Banded")
+            .collect::<Vec<_>>();
+        assert!(!banded_samples.is_empty());
+        for sample in banded_samples {
+            assert!(
+                stats_count(&sample.statistics, "bvp sci direct banded assembly calls") > 0,
+                "{} must assemble bordered blocks directly",
+                sample.row.variant
+            );
+            assert!(
+                stats_count(
+                    &sample.statistics,
+                    "bvp sci global sparse jacobian bypasses"
+                ) > 0,
+                "{} must bypass the global Sparse Jacobian",
+                sample.row.variant
+            );
+            assert!(
+                stats_count(&sample.statistics, "bvp sci bordered factorization calls") > 0,
+                "{} must use native bordered factorization",
+                sample.row.variant
+            );
+            assert_eq!(
+                stats_count(
+                    &sample.statistics,
+                    "bvp sci linear backend sparse fallback solves"
+                ),
+                0,
+                "{} must not silently fall back to Sparse LU",
+                sample.row.variant
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.matrix == "Banded"
+                    && sample.row.variant == "tcc/chunk4"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.banded_jacobian.chunk_count",
+                    ) > 1.0
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.banded_jacobian.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.banded_jacobian.fallback_reason",
+                    ) == "none"
+            }),
+            "chunk4 row must prove real native Banded Jacobian parallelism"
+        );
+    }
+
+    /// I.3c1: Combustion_3000 — Sparse residual AOT chunking matrix on the 12-core source of truth
+    ///
+    /// This mirrors the sparse-Jacobian heavy story, but keeps the Jacobian
+    /// whole and varies residual chunking only.  It proves that the residual
+    /// runtime path itself can go mesh-parallel on the larger combustion case.
+    #[test]
+    #[ignore]
+    fn combustion_3000_sparse_residual_aot_chunking_story() {
+        println!("[BVP_sci story schema] {CHUNKING_STORY_SCHEMA}");
+        let variants = combustion_sparse_residual_heavy_chunking_variants();
+        let samples = run_race_samples(&variants, 3000, 5);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 3000: Sparse residual AOT chunking matrix (5 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table(
+            "Combustion 3000: Sparse residual AOT chunking correctness",
+            &summary,
+        );
+        print_e2e_performance_table(
+            "Combustion 3000: Sparse residual AOT chunking timing",
+            &summary,
+        );
+        print_e2e_stage_breakdown_table(
+            "Combustion 3000: Sparse residual AOT chunking stage breakdown",
+            &samples,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 3000: Sparse residual AOT chunking callback stages",
+            &samples,
+        );
+        print_generated_runtime_diagnostics_table(
+            "Combustion 3000: Sparse residual AOT chunking runtime diagnostics",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 3000: Sparse residual AOT chunking generated backend actions",
+            &samples,
+        );
+
+        for row in &summary {
+            assert!(
+                row.ok_runs > 0,
+                "{} {} {}: all runs failed",
+                row.source,
+                row.matrix,
+                row.variant
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.source == "AOT"
+                    && sample.row.variant.contains("chunk")
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.residual.actual_jobs",
+                    ) > 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.residual.fallback_reason",
+                    ) == "none"
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.actual_jobs",
+                    ) == 1.0
+                    && stats_diagnostic_string(
+                        &sample.statistics,
+                        "aot.runtime.sparse_jacobian.fallback_reason",
+                    ) == "single_chunk"
+            }),
+            "heavy residual chunking BVP_sci AOT story must prove real residual runtime parallelism"
+        );
+    }
+
+    /// I.3d: Cross-solver Jacobian memory story for combustion-200.
+    ///
+    /// Compares the BVP_sci sparse/global-Jacobian footprint against the BVP_Damp
+    /// dense-equivalent Jacobian memory telemetry on the same combustion setup.
+    /// The intent is to keep the two solver families aligned on the same
+    /// production-sized problem while preserving their distinct memory models.
+    #[test]
+    #[ignore]
+    fn combustion_200_bvp_sci_vs_bvp_damp_jacobian_memory_story() {
+        let n_steps = 200usize;
+        let repetitions = 3usize;
+
+        let mut sci_dense_kib = Vec::new();
+        let mut sci_sparse_kib = Vec::new();
+        let mut sci_nnz = Vec::new();
+        let mut damp_dense_kib = Vec::new();
+        let mut damp_nnz = Vec::new();
+
+        for rep in 0..repetitions {
+            println!(
+                "[BVP_sci vs BVP_Damp memory] repetition {}/{} for combustion-{}",
+                rep + 1,
+                repetitions,
+                n_steps
+            );
+
+            let mut sci_solver =
+                make_combustion_solver(n_steps, BvpSciGeneratedBackendConfig::default_lambdify());
+            sci_solver
+                .try_solve()
+                .expect("BVP_sci combustion memory story should solve");
+            let sci_stats = sci_solver.get_statistics();
+            sci_dense_kib.push(stats_diagnostic_usize(
+                &sci_stats,
+                "global jacobian dense equivalent kib",
+            ));
+            sci_sparse_kib.push(stats_diagnostic_usize(
+                &sci_stats,
+                "global jacobian sparse storage kib",
+            ));
+            sci_nnz.push(stats_diagnostic_usize(&sci_stats, "global jacobian nnz"));
+
+            let mut damp_solver =
+                make_damp_combustion_solver(n_steps, damp_combustion_lambdify_config());
+            damp_solver
+                .try_solve()
+                .expect("BVP_Damp combustion memory story should solve");
+            let damp_stats = damp_solver.get_statistics();
+            damp_dense_kib.push(damp_dense_memory_kib(&damp_stats));
+            damp_nnz.push(damp_jacobian_elements(&damp_stats) as f64);
+        }
+
+        let rows = vec![
+            CrossSolverMemoryRow {
+                solver: "BVP_sci",
+                dense_kib: mean(&sci_dense_kib),
+                sparse_kib: Some(mean(&sci_sparse_kib)),
+                nnz: mean(&sci_nnz).round() as usize,
+                status: "ok",
+            },
+            CrossSolverMemoryRow {
+                solver: "BVP_Damp",
+                dense_kib: mean(&damp_dense_kib),
+                sparse_kib: None,
+                nnz: mean(&damp_nnz).round() as usize,
+                status: "ok",
+            },
+        ];
+
+        print_cross_solver_memory_comparison(
+            &format!(
+                "Combustion {n_steps}: BVP_sci vs BVP_Damp Jacobian memory ({repetitions} runs)"
+            ),
+            &rows,
+        );
+
+        let sci_sparse_vs_damp_dense = mean(&sci_sparse_kib) / mean(&damp_dense_kib).max(1.0);
+        let sci_dense_vs_damp_dense = mean(&sci_dense_kib) / mean(&damp_dense_kib).max(1.0);
+        println!(
+            "[BVP_sci vs BVP_Damp memory] sparse_vs_damp_dense_ratio={:.3}, sci_dense_vs_damp_dense_ratio={:.3}",
+            sci_sparse_vs_damp_dense, sci_dense_vs_damp_dense
+        );
+
+        assert!(sci_dense_kib.iter().all(|value| *value > 0.0));
+        assert!(damp_dense_kib.iter().all(|value| *value > 0.0));
+    }
+
+    /// I.4: Combustion_200 - ExprLegacy stability (5 reps)
     ///
     /// Focused stability check for the ExprLegacy lambdify workflow with
     /// 5 repetitions. Verifies consistent convergence and solution quality.
@@ -1270,6 +2411,10 @@ mod tests {
             "Combustion 200: tcc BuildIfMissing -> RequirePrebuilt lifecycle",
             &summary,
         );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 200: tcc BuildIfMissing -> RequirePrebuilt generated backend actions",
+            &samples,
+        );
 
         for row in &summary {
             assert!(
@@ -1293,31 +2438,60 @@ mod tests {
                 );
             }
         }
+
+        let aot_samples = samples
+            .iter()
+            .filter(|sample| sample.row.source == "AOT")
+            .collect::<Vec<_>>();
+        assert!(
+            aot_samples.iter().any(|sample| stats_diagnostic_string(
+                &sample.statistics,
+                "generated_backend_action"
+            ) == "built_and_linked"),
+            "BuildIfMissing lifecycle story must include at least one actual build/link event"
+        );
+        let strict_samples = aot_samples
+            .iter()
+            .filter(|sample| sample.row.bootstrap_hint == "require_prebuilt_in_process")
+            .collect::<Vec<_>>();
+        assert!(
+            strict_samples.iter().all(|sample| stats_diagnostic_string(
+                &sample.statistics,
+                "generated_backend_policy"
+            ) == "RequirePrebuilt"),
+            "RequirePrebuilt lifecycle rows must report the strict policy"
+        );
+        assert!(
+            strict_samples.iter().all(|sample| stats_diagnostic_string(
+                &sample.statistics,
+                "generated_backend_action"
+            ) == "reused_linked"),
+            "RequirePrebuilt lifecycle rows must reuse an already linked compiled backend"
+        );
     }
 
-    /// I.6: Combustion_200 - Sparse vs safe AutoBanded vs experimental bordered routing
+    /// I.6: Combustion_200 - Sparse vs promoted AutoBanded vs strict bordered routing
     ///
     /// This is a correctness/diagnostic story, not a performance claim. The
     /// standard endpoint-BC BVP_sci Newton matrix has a compact collocation
-    /// body plus boundary rows. AutoBanded must therefore recognize a
-    /// bordered-banded candidate and use the Sparse fallback. The explicit
-    /// ExperimentalBorderedBanded policy must use the native structured bordered
-    /// route and match the Sparse baseline.
+    /// body plus boundary rows. AutoBanded must recognize the bordered-banded
+    /// candidate and promote this parameter-free endpoint system. The explicit
+    /// policy verifies the same native route without fallback.
     #[test]
     fn combustion_200_auto_banded_linear_policy_route_story() {
         let (variants, samples) = run_combustion_linear_policy_samples(200, 1);
         let summary = summarize_samples(&variants, &samples);
 
         print_e2e_correctness_table(
-            "Combustion 200: Sparse vs safe AutoBanded vs experimental bordered correctness",
+            "Combustion 200: Sparse vs promoted AutoBanded vs strict bordered correctness",
             &summary,
         );
         print_e2e_performance_table(
-            "Combustion 200: Sparse vs safe AutoBanded vs experimental bordered timing",
+            "Combustion 200: Sparse vs promoted AutoBanded vs strict bordered timing",
             &summary,
         );
         print_linear_policy_route_table(
-            "Combustion 200: Sparse vs safe AutoBanded vs experimental bordered route counters",
+            "Combustion 200: Sparse vs promoted AutoBanded vs strict bordered route counters",
             &samples,
         );
 
@@ -1327,9 +2501,9 @@ mod tests {
     /// I.7: Combustion linear-policy release candidate stress.
     ///
     /// This is the performance/correctness companion to the fast combustion-200
-    /// route gate.  It keeps Sparse as the baseline, verifies that AutoBanded is
-    /// still a safe fallback for endpoint-BC matrices, and measures the explicit
-    /// ExperimentalBorderedBanded route with multi-run statistics.  Defaults are
+    /// route gate. It keeps Sparse as the baseline, verifies AutoBanded
+    /// promotion, and measures the strict bordered policy with multi-run
+    /// statistics. Defaults are
     /// intentionally moderate; release runs can scale with:
     ///
     /// - `BVP_SCI_LINEAR_POLICY_N_STEPS`
@@ -1348,19 +2522,19 @@ mod tests {
 
         print_e2e_correctness_table(
             &format!(
-                "Combustion {n_steps}: Sparse vs safe AutoBanded vs experimental bordered correctness ({repetitions} runs)"
+                "Combustion {n_steps}: Sparse vs promoted AutoBanded vs strict bordered correctness ({repetitions} runs)"
             ),
             &summary,
         );
         print_e2e_performance_table(
             &format!(
-                "Combustion {n_steps}: Sparse vs safe AutoBanded vs experimental bordered timing ({repetitions} runs)"
+                "Combustion {n_steps}: Sparse vs promoted AutoBanded vs strict bordered timing ({repetitions} runs)"
             ),
             &summary,
         );
         print_linear_policy_route_table(
             &format!(
-                "Combustion {n_steps}: Sparse vs safe AutoBanded vs experimental bordered route counters ({repetitions} runs)"
+                "Combustion {n_steps}: Sparse vs promoted AutoBanded vs strict bordered route counters ({repetitions} runs)"
             ),
             &samples,
         );
@@ -1390,19 +2564,25 @@ mod tests {
 
         print_e2e_correctness_table(
             &format!(
-                "Combustion {n_steps}: large Sparse vs safe AutoBanded vs experimental bordered correctness ({repetitions} runs)"
+                "Combustion {n_steps}: large Sparse vs promoted AutoBanded vs strict bordered correctness ({repetitions} runs)"
             ),
             &summary,
         );
         print_e2e_performance_table(
             &format!(
-                "Combustion {n_steps}: large Sparse vs safe AutoBanded vs experimental bordered timing ({repetitions} runs)"
+                "Combustion {n_steps}: large Sparse vs promoted AutoBanded vs strict bordered timing ({repetitions} runs)"
             ),
             &summary,
         );
+        print_jacobian_memory_table(
+            &format!(
+                "Combustion {n_steps}: large Sparse vs promoted AutoBanded vs strict bordered Jacobian memory ({repetitions} runs)"
+            ),
+            &samples,
+        );
         print_linear_policy_route_table(
             &format!(
-                "Combustion {n_steps}: large Sparse vs safe AutoBanded vs experimental bordered route counters ({repetitions} runs)"
+                "Combustion {n_steps}: large Sparse vs promoted AutoBanded vs strict bordered route counters ({repetitions} runs)"
             ),
             &samples,
         );
@@ -1435,19 +2615,19 @@ mod tests {
 
         print_e2e_correctness_table(
             &format!(
-                "Exponential endpoint {n_steps}: Sparse vs safe AutoBanded vs experimental bordered correctness ({repetitions} runs)"
+                "Exponential endpoint {n_steps}: Sparse vs promoted AutoBanded vs strict bordered correctness ({repetitions} runs)"
             ),
             &summary,
         );
         print_e2e_performance_table(
             &format!(
-                "Exponential endpoint {n_steps}: Sparse vs safe AutoBanded vs experimental bordered timing ({repetitions} runs)"
+                "Exponential endpoint {n_steps}: Sparse vs promoted AutoBanded vs strict bordered timing ({repetitions} runs)"
             ),
             &summary,
         );
         print_linear_policy_route_table(
             &format!(
-                "Exponential endpoint {n_steps}: Sparse vs safe AutoBanded vs experimental bordered route counters ({repetitions} runs)"
+                "Exponential endpoint {n_steps}: Sparse vs promoted AutoBanded vs strict bordered route counters ({repetitions} runs)"
             ),
             &samples,
         );
@@ -1730,6 +2910,83 @@ mod tests {
                 println!("--- repetition {} ---", rep);
             }
         }
+    }
+
+    /// I.7: Combustion_1000 - banded production-ready route story
+    ///
+    /// This is the first canonical banded story for `BVP_sci`.  It keeps the
+    /// already-safe `AutoBanded` policy, the explicit experimental bordered
+    /// route, and the Sparse baseline in one multi-run matrix so we can track:
+    /// - correctness
+    /// - total wall-clock timing
+    /// - stage timing breakdown
+    /// - route counters and memory footprint
+    ///
+    /// The goal is to make banded a first-class production candidate instead of
+    /// a hidden internal branch.
+    #[test]
+    #[ignore]
+    fn combustion_1000_banded_production_story() {
+        let (variants, samples) = run_combustion_linear_policy_samples(1_000, 5);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_e2e_correctness_table(
+            "Combustion 1000: Sparse vs promoted AutoBanded vs strict bordered correctness (5 runs)",
+            &summary,
+        );
+        print_e2e_performance_table(
+            "Combustion 1000: Sparse vs promoted AutoBanded vs strict bordered timing (5 runs)",
+            &summary,
+        );
+        print_e2e_stage_breakdown_table(
+            "Combustion 1000: Sparse vs promoted AutoBanded vs strict bordered stage breakdown (5 runs)",
+            &samples,
+        );
+        print_linear_policy_route_table(
+            "Combustion 1000: Sparse vs promoted AutoBanded vs strict bordered route counters (5 runs)",
+            &samples,
+        );
+        print_jacobian_memory_table(
+            "Combustion 1000: Sparse vs promoted AutoBanded vs strict bordered Jacobian memory (5 runs)",
+            &samples,
+        );
+
+        assert_linear_policy_contract(&summary, &samples);
+    }
+
+    /// I.8: Combustion_3000 - larger-mesh banded stress story
+    ///
+    /// This is the same banded-vs-sparse contract, but on the larger combustion
+    /// grid so we can see whether the banded route still behaves sanely at a
+    /// heavier scale.
+    #[test]
+    #[ignore]
+    fn combustion_3000_banded_production_story() {
+        let (variants, samples) = run_combustion_linear_policy_samples(3_000, 3);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_e2e_correctness_table(
+            "Combustion 3000: Sparse vs promoted AutoBanded vs strict bordered correctness (3 runs)",
+            &summary,
+        );
+        print_e2e_performance_table(
+            "Combustion 3000: Sparse vs promoted AutoBanded vs strict bordered timing (3 runs)",
+            &summary,
+        );
+        print_e2e_stage_breakdown_table(
+            "Combustion 3000: Sparse vs promoted AutoBanded vs strict bordered stage breakdown (3 runs)",
+            &samples,
+        );
+        print_linear_policy_route_table(
+            "Combustion 3000: Sparse vs promoted AutoBanded vs strict bordered route counters (3 runs)",
+            &samples,
+        );
+        print_jacobian_memory_table(
+            "Combustion 3000: Sparse vs promoted AutoBanded vs strict bordered Jacobian memory (3 runs)",
+            &samples,
+        );
+
+        assert_linear_policy_contract(&summary, &samples);
     }
 
     // ============================================================

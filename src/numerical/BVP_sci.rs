@@ -40,6 +40,9 @@
 pub mod BVP_sci_aot;
 mod BVP_sci_aot_tests;
 pub mod BVP_sci_banded;
+#[cfg(test)]
+#[path = "BVP_sci/tests/banded_story.rs"]
+mod BVP_sci_banded_story_tests;
 mod BVP_sci_banded_tests;
 pub mod BVP_sci_bordered_banded;
 mod BVP_sci_bordered_banded_tests;
@@ -60,3 +63,6 @@ mod BVP_sci_symb_tests;
 mod BVP_sci_symb_tests2;
 pub mod BVP_sci_symbolic_functions;
 mod BVP_sci_utils;
+#[cfg(test)]
+#[path = "BVP_sci/tests/common.rs"]
+mod test_common;
