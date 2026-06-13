@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zasllavsky"
