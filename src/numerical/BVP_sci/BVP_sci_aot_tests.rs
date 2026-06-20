@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::numerical::BVP_sci::BVP_sci_aot::generated_test_artifact_dir;
     use crate::numerical::BVP_sci::BVP_sci_faer::faer_col;
     use crate::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciSolverOptions};
     use crate::symbolic::symbolic_engine::Expr;
@@ -11,10 +12,6 @@ mod tests {
             return std::path::Path::new(&explicit).is_file();
         }
         Command::new("tcc").arg("-v").output().is_ok()
-    }
-
-    fn generated_test_artifact_dir(label: &str) -> String {
-        format!("target/test-artifacts/bvp-sci-aot/{label}")
     }
 
     fn linear_problem_options() -> BvpSciSolverOptions {

@@ -3,6 +3,10 @@
 //! Why:
 //! LSODE-style workflows often need explicit method control.
 //! This guide shows how to force BDF family explicitly.
+//! 
+//! 
+//! run cargo run --example lsode2_manual_bdf_guide
+//!
 
 use RustedSciThe::numerical::LSODE2::{
     Lsode2ControllerConfig, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,

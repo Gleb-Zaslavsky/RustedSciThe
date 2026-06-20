@@ -27,6 +27,7 @@ use crate::symbolic::codegen::codegen_aot_driver::{
     generated_aot_build_request_from_artifact,
 };
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedResidualChunk, LinkedSparseJacobianChunk, register_generated_banded_cdylib_backend,
     register_generated_sparse_cdylib_backend, resolve_linked_sparse_backend,
@@ -118,10 +119,17 @@ pub enum BvpSciGeneratedMatrixBackend {
     Banded,
 }
 
+pub(crate) const BVP_SCI_TEST_ARTIFACT_REV: &str = "rev2-bounds";
+
+pub(crate) fn generated_test_artifact_dir(label: &str) -> String {
+    format!("target/generated-bvp-sci-tests/{BVP_SCI_TEST_ARTIFACT_REV}/{label}")
+}
+
 #[derive(Clone, Debug)]
 pub struct BvpSciGeneratedBackendConfig {
     pub mode: BvpSciGeneratedBackendMode,
     pub matrix_backend: BvpSciGeneratedMatrixBackend,
+    pub resolver: Option<AotResolver>,
     pub output_parent_dir: Option<PathBuf>,
     pub residual_chunking_strategy: ResidualChunkingStrategy,
     pub sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
@@ -159,6 +167,7 @@ impl BvpSciGeneratedBackendConfig {
         Self {
             mode,
             matrix_backend: BvpSciGeneratedMatrixBackend::Sparse,
+            resolver: None,
             output_parent_dir: None,
             residual_chunking_strategy: ResidualChunkingStrategy::Whole,
             sparse_jacobian_chunking_strategy: SparseChunkingStrategy::Whole,
@@ -168,6 +177,11 @@ impl BvpSciGeneratedBackendConfig {
 
     pub fn with_matrix_backend(mut self, matrix_backend: BvpSciGeneratedMatrixBackend) -> Self {
         self.matrix_backend = matrix_backend;
+        self
+    }
+
+    pub fn with_resolver(mut self, resolver: Option<AotResolver>) -> Self {
+        self.resolver = resolver;
         self
     }
 
@@ -268,6 +282,26 @@ impl BvpSciGeneratedBackendConfig {
     pub fn with_output_parent_dir(mut self, output_parent_dir: impl Into<PathBuf>) -> Self {
         self.output_parent_dir = Some(output_parent_dir.into());
         self
+    }
+
+    /// Explicitly removes every registered generated artifact owned by the current resolver
+    /// snapshot.
+    ///
+    /// This is a conservative lifecycle operation for story/debug/cold-build workflows.
+    /// It does not unload dynamic libraries or unregister live callbacks.
+    pub fn cleanup_registered_aot_artifacts(&mut self) -> std::io::Result<usize> {
+        let Some(resolver) = self.resolver.as_mut() else {
+            return Ok(0);
+        };
+
+        let problem_keys = resolver.registry().problem_keys();
+        let mut removed = 0;
+        for problem_key in problem_keys {
+            if resolver.cleanup_artifact_by_problem_key(&problem_key)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -1797,6 +1831,7 @@ impl BVPwrap {
         };
         Ok(Some(match output_parent_dir {
             Some(output_parent_dir) => config
+                .with_resolver(self.generated_backend_config.resolver.clone())
                 .with_output_parent_dir(Some(output_parent_dir))
                 .with_residual_chunking_strategy(
                     self.generated_backend_config.residual_chunking_strategy,
@@ -1806,6 +1841,7 @@ impl BVPwrap {
                         .sparse_jacobian_chunking_strategy,
                 ),
             None => config
+                .with_resolver(self.generated_backend_config.resolver.clone())
                 .with_residual_chunking_strategy(
                     self.generated_backend_config.residual_chunking_strategy,
                 )
@@ -1935,5 +1971,18 @@ mod tests {
             config.mode,
             BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseTcc
         );
+    }
+
+    #[test]
+    fn cleanup_registered_aot_artifacts_is_safe_without_registered_artifacts() {
+        let mut config = BvpSciGeneratedBackendConfig::default();
+        assert_eq!(config.cleanup_registered_aot_artifacts().unwrap(), 0);
+
+        config = config.with_resolver(Some(
+            crate::symbolic::codegen::codegen_aot_resolution::AotResolver::new(
+                crate::symbolic::codegen::codegen_aot_registry::AotRegistry::new(),
+            ),
+        ));
+        assert_eq!(config.cleanup_registered_aot_artifacts().unwrap(), 0);
     }
 }

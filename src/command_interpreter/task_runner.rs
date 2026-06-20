@@ -179,6 +179,13 @@ pub fn render_task_preview(spec: &ParsedTaskSpec) -> String {
     }
 }
 
+pub fn render_task_check(spec: &ParsedTaskSpec) -> String {
+    match spec {
+        ParsedTaskSpec::Ivp(ivp) => render_ivp_check(ivp),
+        ParsedTaskSpec::Bvp(bvp) => render_bvp_check(bvp),
+    }
+}
+
 fn render_ivp_preview(spec: &IvpTaskSpec) -> String {
     let method = ivp_method_name(&spec.solver.method);
     let mut out = String::new();
@@ -215,6 +222,58 @@ fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
         spec.mesh.n_steps
     ));
     out.push_str("equations:\n");
+    out.push_str("idx | unknown | rhs\n");
+    out.push_str("-------------------\n");
+    for (idx, (name, rhs)) in spec
+        .equations
+        .unknowns
+        .iter()
+        .zip(spec.equations.rhs.iter())
+        .enumerate()
+    {
+        out.push_str(&format!("{idx:>3} | {name} | {rhs}\n"));
+    }
+    out
+}
+
+fn render_ivp_check(spec: &IvpTaskSpec) -> String {
+    let mut out = String::new();
+    out.push_str("[Task check] IVP\n");
+    out.push_str(&format!(
+        "solver=IVP, method={}, arg={}, t0={}, t_end={}\n",
+        ivp_method_name(&spec.solver.method),
+        spec.equations.arg,
+        spec.initial_conditions.t0,
+        spec.initial_conditions.t_end
+    ));
+    out.push_str("fully substituted equations:\n");
+    out.push_str("idx | unknown | rhs\n");
+    out.push_str("-------------------\n");
+    for (idx, (name, rhs)) in spec
+        .equations
+        .unknowns
+        .iter()
+        .zip(spec.equations.rhs.iter())
+        .enumerate()
+    {
+        out.push_str(&format!("{idx:>3} | {name} | {rhs}\n"));
+    }
+    out
+}
+
+fn render_bvp_check(spec: &BvpTaskSpec) -> String {
+    let mut out = String::new();
+    out.push_str("[Task check] BVP\n");
+    out.push_str(&format!(
+        "solver=BVP, strategy={:?}, backend={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
+        spec.solver.strategy,
+        spec.solver.backend,
+        spec.equations.arg,
+        spec.mesh.t0,
+        spec.mesh.t_end,
+        spec.mesh.n_steps
+    ));
+    out.push_str("fully substituted equations:\n");
     out.push_str("idx | unknown | rhs\n");
     out.push_str("-------------------\n");
     for (idx, (name, rhs)) in spec
@@ -307,6 +366,45 @@ max_step: 1e-2
         assert!(preview.contains("method=LSODE2"));
         assert!(preview.contains("y |"));
         assert!(preview.contains("2"));
+    }
+
+    #[test]
+    fn render_task_check_shows_fully_substituted_equations() {
+        let bvp_doc = r#"
+task
+solver: BVP
+strategy: Damped
+backend: Sparse
+
+equations
+arg: x
+parameters: a
+parameter_values: 4.0
+unknowns: y
+rhs: gain * y
+
+where
+base: 2 * x
+gain: base + a
+
+boundary_conditions
+y_left: 1.0
+y_right: 0.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 10
+
+initial_guess
+y: 0.0
+"#;
+        let spec = parse_task_spec_from_str(bvp_doc).expect("BVP document should parse");
+        let check = render_task_check(&spec);
+        assert!(check.contains("[Task check] BVP"));
+        assert!(check.contains("fully substituted equations"));
+        assert!(check.contains('4'));
+        assert!(!check.contains("gain:"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use RustedSciThe::command_interpreter::task_parser_bvp::{
     parse_bvp_task_from_str, run_bvp_task_from_str,
 };
+// run cargo run --example bvp_task_shell_guide
 
 fn main() {
     // This is the smallest BVP document that still exercises the full shell:

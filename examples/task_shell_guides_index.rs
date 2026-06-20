@@ -28,6 +28,14 @@ fn main() {
     println!("    Minimal text-driven symbolic BVP example.");
     println!();
     println!("Related direct API guides:");
+    println!("  - examples/symbolic/symbolic_construction_guide.rs");
+    println!("    Basic symbolic expression construction, rename, substitute and pretty-print.");
+    println!("  - examples/symbolic/symbolic_indexed_guide.rs");
+    println!("    Indexed variables and small matrix/vector symbolic formulas.");
+    println!("  - examples/symbolic/symbolic_lambdify_and_simplify_guide.rs");
+    println!("    Simplify then evaluate with lambdify.");
+    println!("  - examples/symbolic/symbolic_derivatives_guide.rs");
+    println!("    Differentiate, simplify, and compare analytic vs numeric evaluation.");
     println!("  - examples/ode_api2_guide.rs");
     println!("    Direct IVP API without the text shell.");
     println!("  - examples/ivp_backends_guide.rs");

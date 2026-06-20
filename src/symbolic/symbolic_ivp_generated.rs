@@ -273,6 +273,25 @@ impl SymbolicIvpGeneratedBackendConfig {
         self
     }
 
+    /// Removes every registered generated artifact from the current resolver snapshot.
+    ///
+    /// This is a conservative explicit cleanup path for story/debug/cold-build workflows.
+    /// It does not unload dynamic libraries or touch live callbacks.
+    pub fn cleanup_registered_aot_artifacts(&mut self) -> std::io::Result<usize> {
+        let Some(resolver) = self.resolver.as_mut() else {
+            return Ok(0);
+        };
+
+        let problem_keys = resolver.registry().problem_keys();
+        let mut removed = 0;
+        for problem_key in problem_keys {
+            if resolver.cleanup_artifact_by_problem_key(&problem_key)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub fn with_aot_options(mut self, aot_options: SymbolicIvpAotOptions) -> Self {
         self.aot_options = aot_options;
         self
@@ -1492,6 +1511,7 @@ pub fn prepare_generated_symbolic_ivp_residual_problem(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
         register_linked_dense_backend, unregister_linked_dense_backend, LinkedDenseAotBackend,
     };
@@ -1780,6 +1800,15 @@ mod tests {
         );
         assert_eq!(second.problem.backend_kind, IvpBackendKind::Aot);
         unregister_linked_dense_backend(problem_key.as_str());
+    }
+
+    #[test]
+    fn generated_ivp_cleanup_registered_aot_artifacts_is_safe_without_registered_artifacts() {
+        let mut config = SymbolicIvpGeneratedBackendConfig::defaults();
+        assert_eq!(config.cleanup_registered_aot_artifacts().unwrap(), 0);
+
+        config = config.with_resolver(Some(AotResolver::new(AotRegistry::new())));
+        assert_eq!(config.cleanup_registered_aot_artifacts().unwrap(), 0);
     }
 
     #[test]

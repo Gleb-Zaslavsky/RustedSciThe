@@ -12,6 +12,8 @@
 //!
 //! The guide uses the C/tcc AOT route; `tcc` must be installed and visible on
 //! `PATH`.
+//! 
+//! run cargo run --example bvp_frozen_aot_guide
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -109,7 +111,11 @@ fn main() {
     report("Frozen AOT cold/build-if-missing solve", &build_or_reuse);
 
     // Step 2: demonstrate the deployment/repeated-solve contract.
-    let strict_config = config.with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+    // Seed the second solver with the resolver snapshot returned by the
+    // initial build-if-missing pass.
+    let strict_config = config
+        .with_resolver(build_or_reuse.aot_resolver().cloned())
+        .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
     let mut prebuilt = solver_with(strict_config);
     prebuilt.dont_save_log(true);
     prebuilt

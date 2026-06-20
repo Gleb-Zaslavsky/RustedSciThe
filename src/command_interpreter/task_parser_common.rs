@@ -136,6 +136,7 @@ pub fn parse_symbolic_equation_system(
             message,
         }
     })?;
+    let substitutions = apply_parameter_values_to_substitutions(substitutions, &parameter_values);
     let rhs = rhs_raw
         .iter()
         .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
@@ -184,6 +185,16 @@ pub fn apply_symbolic_substitutions_to_vec(
     exprs
         .into_iter()
         .map(|expr| apply_symbolic_substitutions(expr, substitutions))
+        .collect()
+}
+
+pub fn apply_parameter_values_to_substitutions(
+    substitutions: HashMap<String, Expr>,
+    parameter_values: &HashMap<String, f64>,
+) -> HashMap<String, Expr> {
+    substitutions
+        .into_iter()
+        .map(|(name, expr)| (name, expr.set_variable_from_map(parameter_values)))
         .collect()
 }
 
@@ -530,5 +541,30 @@ bad_alias: sin(
             .expect_err("bad symbolic alias should return a parser error");
         assert!(error.contains("failed to parse symbolic expression"));
         assert!(error.contains("bad_alias"));
+    }
+
+    #[test]
+    fn symbolic_substitutions_receive_numeric_parameters_before_rhs_expansion() {
+        let doc = r#"
+equations
+arg: t
+parameters: a
+parameter_values: 3.0
+unknowns: y
+rhs: gain * y
+
+where
+base: 2 * t
+gain: base + a
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equations section");
+        let map = parser.get_result().expect("document map should exist");
+        let parsed =
+            parse_symbolic_equation_system(map, "t").expect("equation parsing should succeed");
+        let rendered = parsed.rhs[0].to_string();
+        assert!(rendered.contains('3'));
+        assert!(rendered.contains('2'));
+        assert!(!rendered.contains('a'));
     }
 }

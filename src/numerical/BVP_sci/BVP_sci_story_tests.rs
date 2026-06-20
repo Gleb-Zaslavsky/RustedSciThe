@@ -134,7 +134,9 @@ mod tests {
     struct CrossSolverMemoryRow {
         solver: &'static str,
         dense_kib: f64,
+        dense_mib: f64,
         sparse_kib: Option<f64>,
+        sparse_mib: Option<f64>,
         nnz: usize,
         status: &'static str,
     }
@@ -1245,16 +1247,26 @@ mod tests {
         println!(
             "[BVP_sci vs BVP_Damp memory] compare dense-equivalent Jacobian footprint on the same combustion setup; BVP_sci also reports sparse CSC storage."
         );
-        println!("solver   | dense_kib | sparse_kib | nnz     | status");
-        println!("{}", "-".repeat(80));
+        println!("solver   | dense_kib | dense_mib | sparse_kib | sparse_mib | nnz     | status");
+        println!("{}", "-".repeat(98));
         for row in rows {
             let sparse_kib = row
                 .sparse_kib
                 .map(|value| format!("{value:>10.0}"))
                 .unwrap_or_else(|| format!("{:>10}", "-"));
+            let sparse_mib = row
+                .sparse_mib
+                .map(|value| format!("{value:>10.0}"))
+                .unwrap_or_else(|| format!("{:>10}", "-"));
             println!(
-                "{:<8} | {:>9.0} | {} | {:>7} | {}",
-                row.solver, row.dense_kib, sparse_kib, row.nnz, row.status
+                "{:<8} | {:>9.0} | {:>9.0} | {} | {} | {:>7} | {}",
+                row.solver,
+                row.dense_kib,
+                row.dense_mib,
+                sparse_kib,
+                sparse_mib,
+                row.nnz,
+                row.status
             );
         }
         println!();
@@ -2194,6 +2206,83 @@ mod tests {
         );
     }
 
+    /// I.3c3: Combustion_3000 — true Banded AOT versus the global Sparse route.
+    ///
+    /// This is the heavy release-oriented follow-up to PS.8a3.  It uses the same
+    /// true banded route proof, but on a much larger mesh so we can see whether
+    /// the native bordered assembly keeps its advantage when the problem size is
+    /// large enough for Jacobian work to matter more.
+    #[test]
+    #[ignore]
+    fn combustion_3000_true_banded_aot_vs_sparse_story() {
+        println!("[BVP_sci story schema] true-banded-aot-v1");
+        let variants = combustion_true_banded_aot_variants();
+        let samples = run_race_samples(&variants, 3_000, 3);
+        let summary = summarize_samples(&variants, &samples);
+
+        print_race_summary_table(
+            "Combustion 3000: Lambdify / Sparse AOT / true Banded AOT (3 reps)",
+            &summary,
+        );
+        print_e2e_correctness_table("Combustion 3000: true Banded AOT correctness", &summary);
+        print_e2e_performance_table(
+            "Combustion 3000: true Banded AOT wall-clock and solver stages",
+            &summary,
+        );
+        print_e2e_stage_breakdown_table(
+            "Combustion 3000: true Banded AOT stage breakdown",
+            &samples,
+        );
+        print_generated_callback_stage_table(
+            "Combustion 3000: true Banded AOT callback stages",
+            &samples,
+        );
+        print_true_banded_route_table(
+            "Combustion 3000: proof of native Banded AOT route",
+            &samples,
+        );
+        print_generated_backend_lifecycle_samples(
+            "Combustion 3000: true Banded AOT artifact lifecycle",
+            &samples,
+        );
+
+        for row in &summary {
+            assert_eq!(
+                row.ok_runs, row.runs,
+                "{} {} {}: every story repetition must solve",
+                row.source, row.matrix, row.variant
+            );
+            assert!(
+                row.solve_diff.mean <= 1e-7,
+                "{} {} {}: solution diff is too large: {:.3e}",
+                row.source,
+                row.matrix,
+                row.variant,
+                row.solve_diff.mean
+            );
+        }
+        assert!(
+            samples.iter().any(|sample| {
+                sample.row.source == "AOT"
+                    && sample.row.matrix == "Banded"
+                    && sample.row.variant.contains("chunk4")
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "bvp sci direct banded assembly calls",
+                    ) > 0.0
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "bvp sci global sparse jacobian bypasses",
+                    ) > 0.0
+                    && stats_diagnostic_usize(
+                        &sample.statistics,
+                        "bvp sci bordered factorization calls",
+                    ) > 0.0
+            }),
+            "true Banded AOT chunk4 must report direct assembly, sparse bypass, and bordered factorization"
+        );
+    }
+
     /// I.3c1: Combustion_3000 — Sparse residual AOT chunking matrix on the 12-core source of truth
     ///
     /// This mirrors the sparse-Jacobian heavy story, but keeps the Jacobian
@@ -2283,9 +2372,12 @@ mod tests {
         let repetitions = 3usize;
 
         let mut sci_dense_kib = Vec::new();
+        let mut sci_dense_mib = Vec::new();
         let mut sci_sparse_kib = Vec::new();
+        let mut sci_sparse_mib = Vec::new();
         let mut sci_nnz = Vec::new();
         let mut damp_dense_kib = Vec::new();
+        let mut damp_dense_mib = Vec::new();
         let mut damp_nnz = Vec::new();
 
         for rep in 0..repetitions {
@@ -2306,9 +2398,17 @@ mod tests {
                 &sci_stats,
                 "global jacobian dense equivalent kib",
             ));
+            sci_dense_mib.push(stats_diagnostic_usize(
+                &sci_stats,
+                "global jacobian dense equivalent mib",
+            ));
             sci_sparse_kib.push(stats_diagnostic_usize(
                 &sci_stats,
                 "global jacobian sparse storage kib",
+            ));
+            sci_sparse_mib.push(stats_diagnostic_usize(
+                &sci_stats,
+                "global jacobian sparse storage mib",
             ));
             sci_nnz.push(stats_diagnostic_usize(&sci_stats, "global jacobian nnz"));
 
@@ -2319,6 +2419,7 @@ mod tests {
                 .expect("BVP_Damp combustion memory story should solve");
             let damp_stats = damp_solver.get_statistics();
             damp_dense_kib.push(damp_dense_memory_kib(&damp_stats));
+            damp_dense_mib.push(damp_dense_memory_kib(&damp_stats) / 1024.0);
             damp_nnz.push(damp_jacobian_elements(&damp_stats) as f64);
         }
 
@@ -2326,14 +2427,18 @@ mod tests {
             CrossSolverMemoryRow {
                 solver: "BVP_sci",
                 dense_kib: mean(&sci_dense_kib),
+                dense_mib: mean(&sci_dense_mib),
                 sparse_kib: Some(mean(&sci_sparse_kib)),
+                sparse_mib: Some(mean(&sci_sparse_mib)),
                 nnz: mean(&sci_nnz).round() as usize,
                 status: "ok",
             },
             CrossSolverMemoryRow {
                 solver: "BVP_Damp",
                 dense_kib: mean(&damp_dense_kib),
+                dense_mib: mean(&damp_dense_mib),
                 sparse_kib: None,
+                sparse_mib: None,
                 nnz: mean(&damp_nnz).round() as usize,
                 status: "ok",
             },

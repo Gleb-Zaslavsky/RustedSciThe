@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zasllavsky"
@@ -131,3 +131,99 @@ path = "examples/plotting/lorenz_2d_animation.rs"
 [[example]]
 name = "lorenz_3d_animation"
 path = "examples/plotting/lorenz_3d_animation.rs"
+[[example]]
+name = "symbolic_construction_guide"
+path = "examples/symbolic/symbolic_construction_guide.rs"
+[[example]]
+name = "symbolic_indexed_guide"
+path = "examples/symbolic/symbolic_indexed_guide.rs"
+[[example]]
+name = "symbolic_lambdify_and_simplify_guide"
+path = "examples/symbolic/symbolic_lambdify_and_simplify_guide.rs"
+[[example]]
+name = "symbolic_derivatives_guide"
+path = "examples/symbolic/symbolic_derivatives_guide.rs"
+[[example]]
+name = "rus_symbolic_construction_guide"
+path = "examples/rus/symbolic_construction_guide.rs"
+[[example]]
+name = "rus_symbolic_indexed_guide"
+path = "examples/rus/symbolic_indexed_guide.rs"
+[[example]]
+name = "rus_symbolic_lambdify_and_simplify_guide"
+path = "examples/rus/symbolic_lambdify_and_simplify_guide.rs"
+[[example]]
+name = "rus_symbolic_derivatives_guide"
+path = "examples/rus/symbolic_derivatives_guide.rs"
+[[example]]
+name = "rus_bvp_backends_guide"
+path = "examples/rus/bvp_backends_guide.rs"
+[[example]]
+name = "rus_bvp_damped_aot_guide"
+path = "examples/rus/bvp_damped_aot_guide.rs"
+[[example]]
+name = "rus_bvp_damped_lambdify_guide"
+path = "examples/rus/bvp_damped_lambdify_guide.rs"
+[[example]]
+name = "rus_bvp_damped_numerical_guide"
+path = "examples/rus/bvp_damped_numerical_guide.rs"
+[[example]]
+name = "bvp_sci_backends_guide"
+path = "examples/bvp_sci_backends_guide.rs"
+[[example]]
+name = "bvp_sci_lambdify_guide"
+path = "examples/bvp_sci_lambdify_guide.rs"
+[[example]]
+name = "bvp_sci_aot_guide"
+path = "examples/bvp_sci_aot_guide.rs"
+[[example]]
+name = "rus_bvp_sci_numerical_guide"
+path = "examples/rus/bvp_sci_numerical_guide.rs"
+[[example]]
+name = "rus_bvp_sci_numerical_parameters_guide"
+path = "examples/rus/bvp_sci_numerical_parameters_guide.rs"
+[[example]]
+name = "rus_bvp_sci_backends_guide"
+path = "examples/rus/bvp_sci_backends_guide.rs"
+[[example]]
+name = "rus_bvp_sci_lambdify_guide"
+path = "examples/rus/bvp_sci_lambdify_guide.rs"
+[[example]]
+name = "rus_bvp_sci_aot_guide"
+path = "examples/rus/bvp_sci_aot_guide.rs"
+[[example]]
+name = "rus_bvp_task_shell_guide"
+path = "examples/rus/bvp_task_shell_guide.rs"
+[[example]]
+name = "rus_ivp_task_shell_guide"
+path = "examples/rus/ivp_task_shell_guide.rs"
+[[example]]
+name = "rus_lsode2_aot_guide"
+path = "examples/rus/lsode2_aot_guide.rs"
+[[example]]
+name = "rus_lsode2_lambdify_guide"
+path = "examples/rus/lsode2_lambdify_guide.rs"
+[[example]]
+name = "rus_lsode2_lorenz_2d_animation"
+path = "examples/rus/lsode2_lorenz_2d_animation.rs"
+[[example]]
+name = "rus_lsode2_lorenz_3d_animation"
+path = "examples/rus/lsode2_lorenz_3d_animation.rs"
+[[example]]
+name = "rus_lsode2_manual_adams_guide"
+path = "examples/rus/lsode2_manual_adams_guide.rs"
+[[example]]
+name = "rus_lsode2_manual_bdf_guide"
+path = "examples/rus/lsode2_manual_bdf_guide.rs"
+[[example]]
+name = "rus_lsode2_numerical_guide"
+path = "examples/rus/lsode2_numerical_guide.rs"
+[[example]]
+name = "rus_lsode2_task_shell_guide"
+path = "examples/rus/lsode2_task_shell_guide.rs"
+[[example]]
+name = "rus_lsode2_three_body_problem"
+path = "examples/rus/lsode2_three_body_problem.rs"
+[[example]]
+name = "rus_universal_ode_example"
+path = "examples/rus/universal_ode_example.rs"

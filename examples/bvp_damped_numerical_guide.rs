@@ -20,6 +20,7 @@
 //! - this route is appropriate when the model already exists as Rust code;
 //! - the numerical constructors avoid meaningless symbolic placeholders;
 //! - Banded linear algebra is still available for the discretized BVP matrix.
+//! run cargo run --example bvp_damped_numerical_guide
 
 use std::collections::HashMap;
 

@@ -23,6 +23,8 @@ use std::thread;
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod three_body_story_tests;
+
 fn exponential_decay_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
         vec![Expr::parse_expression("-y")],

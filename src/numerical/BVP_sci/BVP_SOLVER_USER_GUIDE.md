@@ -341,6 +341,30 @@ fn solve_parametric_bvp() {
 
 ## Advanced Features
 
+### Singular Term `S`
+
+The solver now supports a SciPy-style singular-term matrix `S` on the
+builder-based numerical route:
+
+```rust
+let options = NumericalBvpSolveOptions::new(mesh, guess, tol, max_nodes)
+    .with_singular_term(Some(singular_term));
+```
+
+This enables problems written in the form:
+
+```text
+dy/dx = f(x, y, p) + S * y / (x - a)
+```
+
+where `a` is the left endpoint of the mesh.
+
+Practical notes:
+- `S` must be square and match the state dimension.
+- the current plumbing is wired into the numerical solve path first;
+- if you are writing a closure-first workflow, `with_singular_term(...)`
+  belongs with the other solver options, not with symbolic setup.
+
 ### Custom Jacobians
 
 For better performance and convergence, provide analytical Jacobians:

@@ -1937,6 +1937,7 @@ mod tests {
         ParallelFallbackPolicy, ParallelResidualExecutor, ParallelSparseJacobianExecutor,
         ResidualChunkBinding, SequentialBandedJacobianExecutor, SequentialDenseJacobianExecutor,
         SequentialResidualExecutor, SequentialSparseJacobianExecutor, SparseJacobianChunkBinding,
+        auto_parallel_executor_config,
         auto_parallel_fallback_for_workload, borrowed_sparse_entries,
         min_work_per_job_from_baseline, rayon_overhead_baseline,
         recommended_sparse_auto_parallel_plan, work_per_group,
@@ -2637,6 +2638,22 @@ mod tests {
         assert!(plan.executor_config.is_none());
         assert!(plan.min_work_per_job >= 1);
         assert!(plan.workers >= 1);
+    }
+
+    #[test]
+    fn auto_parallel_executor_config_refuses_tiny_workloads() {
+        let min_work = min_work_per_job_from_baseline(rayon_overhead_baseline());
+        let tiny_work = min_work.saturating_sub(1).max(1);
+        let chunk_count = 4;
+
+        assert!(
+            auto_parallel_fallback_for_workload(tiny_work, chunk_count, chunk_count),
+            "tiny workloads should stay sequential"
+        );
+        assert!(
+            auto_parallel_executor_config(tiny_work, chunk_count, tiny_work, chunk_count).is_none(),
+            "Auto executor config should be absent for workloads too small to amortize parallel scheduling"
+        );
     }
 
     #[test]

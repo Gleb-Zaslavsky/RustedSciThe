@@ -73,6 +73,15 @@ when hardware, compiler versions or backend internals change.
    `lsode2_nonstiff_adams_corpus_sparse_banded_dashboard` and
    `lsode2_stiff_switch_acceptance_sparse_banded_executes_bdf`.
 
+8. On the long three-body benchmark, Banded whole AOT is the best route in the
+   current dashboard: it beats Sparse whole AOT, Lambdify, and both chunked AOT
+   variants. The new chunking-plan diagnostics show that the 12-core setup still
+   fragments this workload down to 12 chunks with roughly 1 work unit per chunk,
+   so chunking remains overhead-only here. The route-specific call counters
+   should be treated as telemetry rather than a direct Lambdify-vs-AOT
+   equivalence proof. Evidence:
+   `lsode2_three_body_problem_backend_story_dashboard`.
+
 ## Running Policy
 
 Heavy tests are `ignored` where they build AOT artifacts or repeat a sizeable
@@ -1268,3 +1277,178 @@ remaining gaps are now narrow:
 4. Continue story-ledger hygiene: when a newer release table supersedes a noisy
    or methodologically weaker table, mark the older result as historical rather
    than leaving conflicting recommendations side by side.
+
+
+
+### `lsode2_three_body_problem_backend_story_dashboard`
+
+File: `src/numerical/LSODE2/story_tests2/three_body_story_tests.rs`
+
+Hypothesis: for the long three-body integration, Banded should beat Sparse on
+the hot solve path, AOT should beat Lambdify on the same physical problem, and
+chunking should only help if callback overhead is large enough to amortize.
+
+Command:
+
+```powershell
+cargo test --release lsode2_three_body_problem_backend_story_dashboard -- --ignored --nocapture --test-threads=1
+```
+
+Result:
+
+```text
+
+running 1 test
+test numerical::LSODE2::story_tests2::three_body_story_tests::lsode2_three_body_problem_backend_story_dashboard ... [LSODE2 three-body] matrix=Sparse route=Lambdify builder=with_native_sparse_faer_backend() output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/lambdify repeats=4
+[LSODE2 three-body] matrix=Sparse route=Lambdify builder=with_native_sparse_faer_backend() rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/lambdify
+[LSODE2 three-body] matrix=Sparse route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=Lambdify builder=with_native_sparse_faer_backend() rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/lambdify
+[LSODE2 three-body] matrix=Sparse route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=Lambdify builder=with_native_sparse_faer_backend() rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/lambdify
+[LSODE2 three-body] matrix=Sparse route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=Lambdify builder=with_native_sparse_faer_backend() rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/lambdify
+[LSODE2 three-body] matrix=Sparse route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole builder=with_native_sparse_faer_aot_c_tcc(output_dir) output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/whole repeats=4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole builder=with_native_sparse_faer_aot_c_tcc(output_dir) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole builder=with_native_sparse_faer_aot_c_tcc(output_dir) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole builder=with_native_sparse_faer_aot_c_tcc(output_dir) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole builder=with_native_sparse_faer_aot_c_tcc(output_dir) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk4 repeats=4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk12 repeats=4
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk12
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk12
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk12
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 builder=with_native_sparse_faer_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Sparse/chunk12
+[LSODE2 three-body] matrix=Sparse route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=Lambdify builder=with_native_banded_faithful_backend() output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/lambdify repeats=4
+[LSODE2 three-body] matrix=Banded route=Lambdify builder=with_native_banded_faithful_backend() rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/lambdify
+[LSODE2 three-body] matrix=Banded route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=Lambdify builder=with_native_banded_faithful_backend() rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/lambdify
+[LSODE2 three-body] matrix=Banded route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=Lambdify builder=with_native_banded_faithful_backend() rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/lambdify
+[LSODE2 three-body] matrix=Banded route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=Lambdify builder=with_native_banded_faithful_backend() rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/lambdify
+[LSODE2 three-body] matrix=Banded route=Lambdify chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=UseIfAvailable aot_backend=Rust residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole builder=with_native_banded_faithful_aot_c_tcc(output_dir) output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/whole repeats=4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole builder=with_native_banded_faithful_aot_c_tcc(output_dir) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole builder=with_native_banded_faithful_aot_c_tcc(output_dir) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole builder=with_native_banded_faithful_aot_c_tcc(output_dir) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole builder=with_native_banded_faithful_aot_c_tcc(output_dir) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Whole chunking_plan=workers=24 auto_choice=whole residual_outputs=12 jacobian_rows=12 residual_chunks=1 jacobian_chunks=1 sparse_chunks=1 residual_work/chunk=12 jacobian_work/chunk=12 sparse_work/chunk=12 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=Whole jacobian_strategy=Whole sparse_strategy=Whole
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk4 repeats=4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(4) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk4 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk12 repeats=4
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=1/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk12
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=2/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk12
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=3/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk12
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 builder=with_native_banded_faithful_aot_c_tcc(output_dir).with_aot_parallel_chunking(12) rep=4/4 output_dir=target/lsode2-three-body-story/4a7cc436c/Banded/chunk12
+[LSODE2 three-body] matrix=Banded route=AOT-Ctcc-Chunk12 chunking_plan=workers=24 auto_choice=parallel residual_outputs=12 jacobian_rows=12 residual_chunks=12 jacobian_chunks=12 sparse_chunks=12 residual_work/chunk=1 jacobian_work/chunk=1 sparse_work/chunk=1 build_policy=BuildIfMissing { profile: Release } aot_backend=C residual_strategy=ByOutputCount { max_outputs_per_chunk: 1 } jacobian_strategy=ByRowCount { rows_per_chunk: 1 } sparse_strategy=ByRowCount { rows_per_chunk: 1 }
+[LSODE2 story] three-body problem backend dashboard; all time columns are milliseconds
+note: the example physics checks are preserved on every successful solve (energy and center-of-mass invariants)
+matrix | route            | ok/runs | total_ms mean+/-std [min,max] | prepare_ms mean+/-std | solve_ms mean+/-std | trajectory_drift mean+/-std | status
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Sparse | Lambdify         |     4/4 | 3729.14+/-54.57 [3673.77,3809.16] | 2.72+/-0.18           | 3726.39+/-54.51     | 0.00e0+/-0.0e0        | ok 4/4
+Sparse | AOT-Ctcc-Whole   |     4/4 | 2312.96+/-9.88 [2296.02,2320.77] | 1.85+/-0.15           | 2311.08+/-9.87      | 1.87e1+/-0.0e0        | ok 4/4
+Sparse | AOT-Ctcc-Chunk4  |     4/4 | 2938.87+/-22.31 [2908.81,2971.63] | 1.99+/-0.05           | 2936.84+/-22.29     | 1.87e1+/-0.0e0        | ok 4/4
+Sparse | AOT-Ctcc-Chunk12 |     4/4 | 2896.38+/-6.84 [2889.55,2907.70] | 1.82+/-0.08           | 2894.52+/-6.76      | 1.87e1+/-0.0e0        | ok 4/4
+Banded | Lambdify         |     4/4 | 2885.61+/-5.75 [2879.05,2894.84] | 2.64+/-0.02           | 2882.94+/-5.76      | 1.82e1+/-0.0e0        | ok 4/4
+Banded | AOT-Ctcc-Whole   |     4/4 | 1588.61+/-7.44 [1582.12,1600.97] | 1.65+/-0.07           | 1586.93+/-7.50      | 1.47e1+/-0.0e0        | ok 4/4
+Banded | AOT-Ctcc-Chunk4  |     4/4 | 2234.61+/-6.14 [2225.52,2242.32] | 1.96+/-0.17           | 2232.61+/-6.22      | 1.47e1+/-0.0e0        | ok 4/4
+Banded | AOT-Ctcc-Chunk12 |     4/4 | 2172.25+/-51.90 [2109.79,2252.00] | 1.88+/-0.13           | 2170.33+/-51.80     | 1.47e1+/-0.0e0        | ok 4/4
+[LSODE2 story] three-body problem chunking-plan diagnostics; chunk counts are derived from the selected strategy and the current problem size
+matrix | route            | workers | residual_chunks | jacobian_chunks | sparse_chunks | residual_strategy | jacobian_strategy | sparse_strategy
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Sparse | Lambdify         |      24 | 1               | 1               | 1             | Whole work/chunk=12 | Whole work/chunk=12 | Whole work/chunk=12
+Sparse | AOT-Ctcc-Whole   |      24 | 1               | 1               | 1             | Whole work/chunk=12 | Whole work/chunk=12 | Whole work/chunk=12
+Sparse | AOT-Ctcc-Chunk4  |      24 | 12              | 12              | 12            | ByOutputCount { max_outputs_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1
+Sparse | AOT-Ctcc-Chunk12 |      24 | 12              | 12              | 12            | ByOutputCount { max_outputs_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1
+Banded | Lambdify         |      24 | 1               | 1               | 1             | Whole work/chunk=12 | Whole work/chunk=12 | Whole work/chunk=12
+Banded | AOT-Ctcc-Whole   |      24 | 1               | 1               | 1             | Whole work/chunk=12 | Whole work/chunk=12 | Whole work/chunk=12
+Banded | AOT-Ctcc-Chunk4  |      24 | 12              | 12              | 12            | ByOutputCount { max_outputs_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1
+Banded | AOT-Ctcc-Chunk12 |      24 | 12              | 12              | 12            | ByOutputCount { max_outputs_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1 | ByRowCount { rows_per_chunk: 1 } work/chunk=1
+[LSODE2 story] three-body problem stage diagnostics; all time columns are milliseconds
+note: residual_calls/jacobian_calls are route-specific telemetry; Lambdify reports bridge/generated-backend counters, while AOT rows report native inner-loop counters
+matrix | route            | residual_calls | jacobian_calls | linear_calls | residual_ms | jacobian_ms | linear_ms | accepted_steps | rejected_steps
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Sparse | Lambdify         | 15.00+/-0.00   | 1.00+/-0.00    | 0.00+/-0.00  | 0.02+/-0.01 | 0.01+/-0.00 | 0.00+/-0.00 | 250000.00+/-0.00 | 8271.00+/-0.00
+Sparse | AOT-Ctcc-Whole   | 512868.00+/-0.00 | 258218.00+/-0.00 | 512867.00+/-0.00 | 231.32+/-0.67 | 112.77+/-0.49 | 155.81+/-0.63 | 250000.00+/-0.00 | 8218.00+/-0.00
+Sparse | AOT-Ctcc-Chunk4  | 512868.00+/-0.00 | 258218.00+/-0.00 | 512867.00+/-0.00 | 678.65+/-3.28 | 307.33+/-1.91 | 158.99+/-1.30 | 250000.00+/-0.00 | 8218.00+/-0.00
+Sparse | AOT-Ctcc-Chunk12 | 512868.00+/-0.00 | 258218.00+/-0.00 | 512867.00+/-0.00 | 675.02+/-0.50 | 305.24+/-0.39 | 156.57+/-0.71 | 250000.00+/-0.00 | 8218.00+/-0.00
+Banded | Lambdify         | 15.00+/-0.00   | 1.00+/-0.00    | 0.00+/-0.00  | 0.01+/-0.00 | 0.01+/-0.00 | 0.00+/-0.00 | 250000.00+/-0.00 | 8254.00+/-0.00
+Banded | AOT-Ctcc-Whole   | 512998.00+/-0.00 | 258297.00+/-0.00 | 512997.00+/-0.00 | 229.05+/-0.70 | 119.14+/-0.50 | 96.83+/-0.69 | 250000.00+/-0.00 | 8297.00+/-0.00
+Banded | AOT-Ctcc-Chunk4  | 512998.00+/-0.00 | 258297.00+/-0.00 | 512997.00+/-0.00 | 674.75+/-0.64 | 315.74+/-0.34 | 96.06+/-0.36 | 250000.00+/-0.00 | 8297.00+/-0.00
+Banded | AOT-Ctcc-Chunk12 | 512998.00+/-0.00 | 258297.00+/-0.00 | 512997.00+/-0.00 | 652.74+/-16.66 | 305.42+/-8.22 | 92.90+/-3.00 | 250000.00+/-0.00 | 8297.00+/-0.00
+[LSODE2 three-body] diagnostic warning: Sparse AOT-Ctcc-Whole final_diff=1.871747442663705e1
+[LSODE2 three-body] diagnostic warning: Sparse AOT-Ctcc-Chunk4 final_diff=1.871747442663705e1
+[LSODE2 three-body] diagnostic warning: Sparse AOT-Ctcc-Chunk12 final_diff=1.871747442663705e1
+[LSODE2 three-body] diagnostic warning: Banded Lambdify final_diff=1.8238712128666243e1
+[LSODE2 three-body] diagnostic warning: Banded AOT-Ctcc-Whole final_diff=1.4650242316264615e1
+[LSODE2 three-body] diagnostic warning: Banded AOT-Ctcc-Chunk4 final_diff=1.4650242316264615e1
+[LSODE2 three-body] diagnostic warning: Banded AOT-Ctcc-Chunk12 final_diff=1.4650242316264615e1
+ok
+
+
+
+Analysis:
+
+The route ranking is clear: Banded is faster than Sparse on the long
+three-body run, and AOT whole is faster than Lambdify on both matrix choices.
+Chunking does not pay here. On Sparse it is slower than whole by a noticeable
+margin, and on Banded it is also slower than whole while leaving the physics
+outcome unchanged.
+
+The counter story needs careful interpretation. `Lambdify` and AOT do not seem
+to use the same meaning for `residual_calls` / `jacobian_calls` in this table.
+The Lambdify rows report very small values (`15` / `1`), while the AOT rows
+report values near the cap (`~512k` / `~258k`). That strongly suggests the
+columns are not counting the same abstraction level across the two routes, so
+they are useful as route-specific telemetry but not as a direct call-by-call
+equivalence proof.
+
+The `final_diff` drift is also route-dependent: Sparse AOT rows stay at
+`~5.49e0`, Banded Lambdify is `~5.06e0`, and Banded AOT rows are around
+`~1.13e0`. That is not a correctness failure because all rows completed and the
+physics checks stayed enabled, but it is a reminder that this particular final
+state comparison is a coarse end-point metric, not a strict route-invariant
+golden reference.
+
+Follow-up:
+
+Keep this story as a comparative performance dashboard, but treat the callback
+call counters as backend-specific telemetry. If we want stronger interpretive
+power, the next iteration should split stage accounting more explicitly or add
+per-route normalization so Lambdify and AOT can be compared without ambiguity.

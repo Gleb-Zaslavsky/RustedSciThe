@@ -1,6 +1,7 @@
 use RustedSciThe::command_interpreter::task_parser_ivp::{
     parse_ivp_task_from_str, run_ivp_task_from_str,
 };
+// run cargo run --example ivp_task_shell_backward_euler_guide
 
 fn main() {
     // This guide focuses on a stiff-capable method while keeping the textual

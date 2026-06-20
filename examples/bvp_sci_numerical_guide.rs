@@ -8,11 +8,15 @@
 //! - `NumericalBvpClosureProblem::new_with_jacobian(...)` is the
 //!   performance-oriented mode: provide those closures plus pointwise
 //!   Jacobians.
+//! - `NumericalBvpSolveOptions::with_singular_term(Some(S))` enables the
+//!   SciPy-style singular-term branch `dy/dx = f(x, y, p) + S * y / (x - a)`.
 //!
 //! Practical rule of thumb from the current comparison suite:
 //! - start with `FiniteDifference` for small systems or quick prototyping;
 //! - move to `AnalyticalPointwise` once the problem becomes medium/large or the
 //!   same model needs to be solved repeatedly with good throughput.
+//! 
+//! run cargo run --example bvp_sci_numerical_guide
 
 use std::time::Instant;
 
@@ -142,6 +146,9 @@ fn print_guide() {
     println!("  - NumericalBvpClosureProblem::new_fd(...): easiest closure-first API");
     println!(
         "  - NumericalBvpClosureProblem::new_with_jacobian(...): closure-first analytical API"
+    );
+    println!(
+        "  - NumericalBvpSolveOptions::with_singular_term(Some(S)): SciPy-style singular-term plumbing"
     );
     println!("  - solve_numerical_bvp_fd(...): explicit FD route");
     println!("  - solve_numerical_bvp_with_jacobian(...): explicit analytical route");

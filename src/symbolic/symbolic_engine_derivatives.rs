@@ -58,6 +58,8 @@
 //! 7. **IVP Specialization**: Special lambdification for Initial Value Problems where
 //!    one argument (time) is treated differently from state variables
 
+use faer::linalg::solvers::SelfAdjointEigen;
+
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_metadata::TraversalCache;
@@ -571,7 +573,15 @@ impl Expr {
             _ => Expr::Pow(Box::new(base), Box::new(exp)),
         }
     }
-
+    /// Computes the derivative of a single-variable expression.
+    /// If the expression has multiple variables, returns an error.
+    pub fn diff1D(&self)->Result<Expr, String>{
+        let vars = self.all_arguments_are_variables();
+        if vars.len() != 1 {
+            return Err(format!("diff1D is only applicable to single-variable expressions. Found variables: {:?}", vars));
+        }
+        Ok(self.diff(&vars[0]))
+    }
     /// Builds a raw derivative tree without the final normalization pass.
     ///
     /// This legacy helper now delegates to the shared raw derivative builder
@@ -1717,5 +1727,126 @@ mod diff_performance_tests {
         measure_diff_finalize_case("simple polynomial", simple_poly, "x", 2.0);
         measure_diff_finalize_case("mixed symbolic", mixed_symbolic, "x", 1.5);
         measure_diff_finalize_case("zero-heavy expression", zero_heavy, "x", 3.0);
+    }
+}
+
+#[cfg(test)]
+mod diff1d_tests {
+    use super::*;
+
+    // ── Happy path: single-variable expressions ──
+
+    #[test]
+    fn test_diff1d_simple_polynomial() {
+        // f(x) = x^2 + 3x + 5  →  f'(x) = 2x + 3
+        let x = Expr::Var("x".to_string());
+        let f = x.clone().pow(Expr::Const(2.0))
+            + Expr::Const(3.0) * x.clone()
+            + Expr::Const(5.0);
+
+        let df = f.diff1D().expect("diff1D should succeed for single-variable expr");
+        let df_fn = df.lambdify1D();
+
+        // At x = 2: f'(2) = 2*2 + 3 = 7
+        let val = df_fn(2.0);
+        assert!((val - 7.0).abs() < 1e-10,
+            "diff1D(x^2+3x+5) at x=2: expected 7, got {}", val);
+    }
+
+    #[test]
+    fn test_diff1d_trigonometric() {
+        // f(x) = sin(x)  →  f'(x) = cos(x)
+        let x = Expr::Var("x".to_string());
+        let f = Expr::sin(Box::new(x.clone()));
+
+        let df = f.diff1D().expect("diff1D should succeed");
+        let df_fn = df.lambdify1D();
+
+        // At x = π/4: cos(π/4) ≈ 0.7071067811865476
+        let expected = std::f64::consts::FRAC_PI_4.cos();
+        let val = df_fn(std::f64::consts::FRAC_PI_4);
+        assert!((val - expected).abs() < 1e-10,
+            "diff1D(sin(x)) at π/4: expected {}, got {}", expected, val);
+    }
+
+    #[test]
+    fn test_diff1d_exponential() {
+        // f(x) = exp(2x)  →  f'(x) = 2*exp(2x)
+        let x = Expr::Var("x".to_string());
+        let f = Expr::exp(Expr::Const(2.0) * x.clone());
+
+        let df = f.diff1D().expect("diff1D should succeed");
+        let df_fn = df.lambdify1D();
+
+        // At x = 0.5: 2*exp(1) ≈ 5.43656365691809
+        let expected = 2.0 * (1.0_f64).exp();
+        let val = df_fn(0.5);
+        assert!((val - expected).abs() < 1e-10,
+            "diff1D(exp(2x)) at x=0.5: expected {}, got {}", expected, val);
+    }
+
+    #[test]
+    fn test_diff1d_chain_rule() {
+        // f(x) = ln(x^2 + 1)  →  f'(x) = 2x/(x^2 + 1)
+        let x = Expr::Var("x".to_string());
+        let f = Expr::ln(x.clone().pow(Expr::Const(2.0)) + Expr::Const(1.0));
+
+        let df = f.diff1D().expect("diff1D should succeed");
+        let df_fn = df.lambdify1D();
+
+        // At x = 2: 2*2/(4+1) = 4/5 = 0.8
+        let val = df_fn(2.0);
+        assert!((val - 0.8).abs() < 1e-10,
+            "diff1D(ln(x^2+1)) at x=2: expected 0.8, got {}", val);
+    }
+
+    #[test]
+    fn test_diff1d_via_parse_expression() {
+        // parse_expression("x^3 + 2*x")  →  f'(x) = 3x^2 + 2
+        let f = Expr::parse_expression("x^3 + 2*x");
+        let df = f.diff1D().expect("diff1D should succeed");
+        let df_fn = df.lambdify1D();
+
+        // At x = 3: 3*9 + 2 = 29
+        let val = df_fn(3.0);
+        assert!((val - 29.0).abs() < 1e-10,
+            "diff1D(x^3+2x) at x=3: expected 29, got {}", val);
+    }
+
+    // ── Error paths ──
+
+    #[test]
+    fn test_diff1d_multi_variable_returns_error() {
+        // Expression with two variables should return Err
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let f = x.clone() * y.clone();
+
+        let result = f.diff1D();
+        assert!(result.is_err(), "diff1D should return Err for multi-variable expression");
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("x"), "Error should mention variable x");
+        assert!(err_msg.contains("y"), "Error should mention variable y");
+    }
+
+    #[test]
+    fn test_diff1d_no_variable_returns_error() {
+        // Pure constant expression should return Err
+        let f = Expr::Const(42.0);
+
+        let result = f.diff1D();
+        assert!(result.is_err(), "diff1D should return Err for constant expression");
+    }
+
+    #[test]
+    fn test_diff1d_three_variables_returns_error() {
+        // Expression with three variables should return Err
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let z = Expr::Var("z".to_string());
+        let f = x.clone() + y.clone() * z.clone();
+
+        let result = f.diff1D();
+        assert!(result.is_err(), "diff1D should return Err for 3-variable expression");
     }
 }

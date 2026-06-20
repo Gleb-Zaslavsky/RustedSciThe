@@ -6,6 +6,9 @@
 //!
 //! The solver automatically generates analytical Jacobians from symbolic
 //! expressions, providing efficient and accurate solutions.
+//! 
+//! run cargo run --example nonlinear_systems_guide
+//!
 
 use RustedSciThe::numerical::optimization::sym_wrapper::LM;
 use RustedSciThe::symbolic::symbolic_engine::Expr;

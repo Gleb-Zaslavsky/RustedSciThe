@@ -1,7 +1,7 @@
 use RustedSciThe::command_interpreter::task_parser_ivp::{
     parse_ivp_task_from_str, run_ivp_task_from_str,
 };
-
+// run cargo run --example ivp_task_shell_bdf_guide
 fn main() {
     // BDF is often the first stiff method users reach for, so it deserves its
     // own minimal guide in the text-shell examples.

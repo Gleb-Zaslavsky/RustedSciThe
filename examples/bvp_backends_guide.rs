@@ -53,6 +53,9 @@
 |		       |  AtomView AOT                |				     |		 |
 |		       |______________________________|______________________________|___________|
 
+run: cargo run --example bvp_backends_guide
+
+
 */
 use std::collections::HashMap;
 use std::process::Command;

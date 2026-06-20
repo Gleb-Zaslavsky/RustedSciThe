@@ -390,4 +390,49 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.status, 0);
     }
+
+    #[test]
+    fn singular_term_numerical_route_solves_linear_profile() {
+        let mesh = faer_col::from_fn(5, |i| i as f64 / 4.0);
+        let guess = faer_dense_mat::zeros(1, mesh.nrows());
+        let singular_term = faer_dense_mat::from_fn(1, 1, |_, _| 1.0);
+
+        let problem = BvpSciNumericalProblem::new_fd(
+            1,
+            0,
+            |_x, _y, _p, out| {
+                out[0] = 0.0;
+            },
+            |_ya, yb, _p, out| {
+                out[0] = yb[0];
+            },
+        );
+
+        let result = solve_numerical_bvp(
+            problem,
+            NumericalBvpSolveOptions::new(mesh.clone(), guess, 1e-8, 64)
+                .with_singular_term(Some(singular_term))
+                .with_verbose(0),
+        )
+        .expect("singular-term numerical route should converge");
+
+        assert!(
+            result.success,
+            "solver reported failure: {}",
+            result.message
+        );
+        assert_eq!(
+            result.calc_statistics.get("bvp sci singular term enabled"),
+            Some(&1usize)
+        );
+        for i in 0..result.x.nrows() {
+            let actual = result.y[(0, i)];
+            assert!(
+                actual.abs() < 1e-6,
+                "solution mismatch at node {}: expected 0, got {}",
+                i,
+                actual
+            );
+        }
+    }
 }

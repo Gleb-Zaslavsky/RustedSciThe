@@ -3,24 +3,30 @@
 
 use RustedSciThe::command_interpreter::ivp_dialogue::run_ivp_template_dialogue;
 
-use RustedSciThe::command_interpreter::bvp_dialogue::run_bvp_template_dialogue;
-use RustedSciThe::command_interpreter::task_runner::{
-    TaskDocumentKind, TaskRunResult, parse_task_spec_from_file, render_task_preview,
-    run_task_from_spec,
-};
 use std::path::PathBuf;
+use RustedSciThe::command_interpreter::bvp_dialogue::run_bvp_template_dialogue;
+use RustedSciThe::command_interpreter::docx_parser::{process_docx, process_docx_check};
+use RustedSciThe::command_interpreter::task_runner::{
+    parse_task_spec_from_file, render_task_check, render_task_preview, run_task_from_spec,
+    TaskDocumentKind, TaskRunResult,
+};
 
 fn print_usage() {
     println!("RustedSciThe task-shell CLI");
     println!();
     println!("Usage:");
     println!("  rustedscithe <task-file>");
+    println!("  rustedscithe --check <task-file>");
+    println!("  rustedscithe convert <docx-file>");
+    println!("  rustedscithe convert_check <docx-file>");
     println!("  rustedscithe --template ivp [output-path]");
     println!("  rustedscithe --template bvp [output-path]");
     println!("  rustedscithe --showcase");
     println!();
     println!("Examples:");
     println!("  rustedscithe examples/task_docs/ivp_decay_task.txt");
+    println!("  rustedscithe convert examples/input/problem.docx");
+    println!("  rustedscithe convert_check examples/input/problem.docx");
     println!("  rustedscithe --template ivp");
     println!("  rustedscithe --showcase");
 }
@@ -103,33 +109,75 @@ fn main() {
         std::process::exit(1);
     }
 
-    if args[1] == "--help" || args[1] == "-h" {
-        print_usage();
-        return;
-    }
-    if args[1] == "--showcase" {
-        print_showcase();
-        return;
-    }
-
-    if args[1] == "--template" {
+    if args[1] == "convert" || args[1] == "convert_check" {
         if args.len() < 3 {
-            eprintln!("`--template` expects `ivp` or `bvp`.");
+            eprintln!("`{}` expects a DOCX file path.", args[1]);
             print_usage();
             std::process::exit(2);
         }
-        let output = if args.len() >= 4 {
-            Some(PathBuf::from(&args[3]))
+        let input_path = &args[2];
+        let result = if args[1] == "convert" {
+            process_docx(input_path)
         } else {
-            None
+            process_docx_check(input_path)
         };
-        match args[2].to_ascii_lowercase().as_str() {
-            "ivp" => {
-                run_ivp_template_dialogue(output);
+        match result {
+            Ok(text) => {
+                println!("{text}");
             }
-            "bvp" => {
-                run_bvp_template_dialogue(output);
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(3);
             }
+        }
+        return;
+    }
+
+    let mut check_mode = false;
+    let mut template_kind: Option<String> = None;
+    let mut template_output: Option<PathBuf> = None;
+    let mut positional: Vec<String> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            "--showcase" => {
+                print_showcase();
+                return;
+            }
+            "--check" => {
+                check_mode = true;
+                i += 1;
+            }
+            "--template" => {
+                if i + 1 >= args.len() {
+                    eprintln!("`--template` expects `ivp` or `bvp`.");
+                    print_usage();
+                    std::process::exit(2);
+                }
+                template_kind = Some(args[i + 1].clone());
+                if i + 2 < args.len() && !args[i + 2].starts_with("--") {
+                    template_output = Some(PathBuf::from(&args[i + 2]));
+                    i += 3;
+                } else {
+                    i += 2;
+                }
+            }
+            other => {
+                positional.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    if let Some(kind) = template_kind {
+        match kind.to_ascii_lowercase().as_str() {
+            "ivp" => run_ivp_template_dialogue(template_output),
+            "bvp" => run_bvp_template_dialogue(template_output),
             other => {
                 eprintln!("Unknown template kind `{other}` (expected `ivp` or `bvp`).");
                 std::process::exit(2);
@@ -138,7 +186,12 @@ fn main() {
         return;
     }
 
-    let input_path = PathBuf::from(&args[1]);
+    if positional.len() != 1 {
+        print_usage();
+        std::process::exit(1);
+    }
+
+    let input_path = PathBuf::from(&positional[0]);
     match parse_task_spec_from_file(&input_path) {
         Ok(spec) => {
             let kind = match spec.kind() {
@@ -148,6 +201,10 @@ fn main() {
             println!("Task file : {}", input_path.display());
             println!("Detected  : {kind}");
             println!();
+            if check_mode {
+                println!("{}", render_task_check(&spec));
+                return;
+            }
             println!("{}", render_task_preview(&spec));
             match run_task_from_spec(spec) {
                 Ok(result) => {

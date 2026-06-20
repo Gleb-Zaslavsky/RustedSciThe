@@ -120,6 +120,7 @@ use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
 use log::info;
+use nalgebra::{DMatrix, linalg::SVD};
 
 use std::{collections::HashMap, mem::size_of, time::Instant};
 pub type faer_mat = SparseColMat<usize, f64>;
@@ -168,6 +169,8 @@ pub struct GlobalJacobianDiagnostics {
     pub sparse_storage_bytes: usize,
     pub dense_equivalent_kib: usize,
     pub sparse_storage_kib: usize,
+    pub dense_equivalent_mib: usize,
+    pub sparse_storage_mib: usize,
     pub dense_to_sparse_permille: usize,
     pub nonfinite_values: usize,
     pub structurally_empty_rows: usize,
@@ -225,6 +228,8 @@ pub fn inspect_global_jacobian(mat: &faer_mat) -> GlobalJacobianDiagnostics {
         .saturating_add(sparse_col_ptr_bytes);
     let dense_equivalent_kib = bytes_to_kib_ceil(dense_equivalent_bytes);
     let sparse_storage_kib = bytes_to_kib_ceil(sparse_storage_bytes);
+    let dense_equivalent_mib = bytes_to_mib_ceil(dense_equivalent_bytes);
+    let sparse_storage_mib = bytes_to_mib_ceil(sparse_storage_bytes);
     let dense_to_sparse_permille = if sparse_storage_bytes > 0 {
         dense_equivalent_bytes
             .saturating_mul(1000)
@@ -244,6 +249,8 @@ pub fn inspect_global_jacobian(mat: &faer_mat) -> GlobalJacobianDiagnostics {
         sparse_storage_bytes,
         dense_equivalent_kib,
         sparse_storage_kib,
+        dense_equivalent_mib,
+        sparse_storage_mib,
         dense_to_sparse_permille,
         nonfinite_values,
         structurally_empty_rows: row_has_structure
@@ -267,6 +274,161 @@ pub fn inspect_global_jacobian(mat: &faer_mat) -> GlobalJacobianDiagnostics {
 
 fn bytes_to_kib_ceil(bytes: usize) -> usize {
     bytes.saturating_add(1023) / 1024
+}
+
+fn bytes_to_mib_ceil(bytes: usize) -> usize {
+    bytes.saturating_add(1024 * 1024 - 1) / (1024 * 1024)
+}
+
+fn faer_dense_to_dmatrix(mat: &faer_dense_mat) -> DMatrix<f64> {
+    DMatrix::from_fn(mat.nrows(), mat.ncols(), |row, col| *mat.get(row, col))
+}
+
+fn dmatrix_to_faer_dense(mat: &DMatrix<f64>) -> faer_dense_mat {
+    faer_dense_mat::from_fn(mat.nrows(), mat.ncols(), |row, col| mat[(row, col)])
+}
+
+fn sparse_to_dmatrix(mat: &faer_mat) -> DMatrix<f64> {
+    let (nrows, ncols) = mat.shape();
+    let mut dense = DMatrix::zeros(nrows, ncols);
+    for col in 0..ncols {
+        for row in mat.as_dyn().row_idx_of_col(col) {
+            dense[(row, col)] = mat[(row, col)];
+        }
+    }
+    dense
+}
+
+fn dmatrix_to_sparse(mat: &DMatrix<f64>) -> faer_mat {
+    let mut triplets = Vec::new();
+    for col in 0..mat.ncols() {
+        for row in 0..mat.nrows() {
+            let value = mat[(row, col)];
+            if value != 0.0 {
+                triplets.push(Triplet::new(row, col, value));
+            }
+        }
+    }
+    faer_mat::try_new_from_triplets(mat.nrows(), mat.ncols(), &triplets).unwrap()
+}
+
+fn pseudoinverse(mat: &DMatrix<f64>) -> Result<DMatrix<f64>, String> {
+    let svd = SVD::new(mat.clone(), true, true);
+    let u = svd
+        .u
+        .ok_or_else(|| "SVD failed to compute left singular vectors".to_string())?;
+    let vt = svd
+        .v_t
+        .ok_or_else(|| "SVD failed to compute right singular vectors".to_string())?;
+    let singular_values = svd.singular_values;
+    let sigma_max = singular_values
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(*value));
+    let tol = (mat.nrows().max(mat.ncols()) as f64) * f64::EPSILON * sigma_max.max(1.0);
+    let mut sigma_inv = DMatrix::zeros(vt.nrows(), u.ncols());
+    for (idx, sigma) in singular_values.iter().enumerate() {
+        if *sigma > tol {
+            sigma_inv[(idx, idx)] = 1.0 / sigma;
+        }
+    }
+    Ok(vt.transpose() * sigma_inv * u.transpose())
+}
+
+#[derive(Clone)]
+struct SingularTermPlumbing {
+    a: f64,
+    s: DMatrix<f64>,
+    d: DMatrix<f64>,
+    b: DMatrix<f64>,
+}
+
+impl SingularTermPlumbing {
+    fn new(singular_term: &faer_dense_mat, a: f64) -> Result<Self, String> {
+        if singular_term.nrows() != singular_term.ncols() {
+            return Err(format!(
+                "singular term matrix must be square, got {}x{}",
+                singular_term.nrows(),
+                singular_term.ncols()
+            ));
+        }
+        let s = faer_dense_to_dmatrix(singular_term);
+        let pinv_s = pseudoinverse(&s)?;
+        let identity = DMatrix::<f64>::identity(s.nrows(), s.ncols());
+        let b = &identity - &(pinv_s * &s);
+        let d = pseudoinverse(&(identity - &s))?;
+        Ok(Self { a, s, d, b })
+    }
+
+    fn project_initial_guess(&self, y: &mut faer_dense_mat) {
+        if y.ncols() == 0 {
+            return;
+        }
+        let y_dense = faer_dense_to_dmatrix(y);
+        let projected = &self.b * y_dense.column(0).clone_owned();
+        for row in 0..y.nrows() {
+            *y.get_mut(row, 0) = projected[row];
+        }
+    }
+
+    fn wrap_rhs_output(
+        &self,
+        x: &faer_col,
+        base: &faer_dense_mat,
+        y: &faer_dense_mat,
+    ) -> faer_dense_mat {
+        let mut out = faer_dense_to_dmatrix(base);
+        let y_dense = faer_dense_to_dmatrix(y);
+        if x.nrows() == 0 {
+            return dmatrix_to_faer_dense(&out);
+        }
+
+        if x[0] == self.a {
+            let first = out.column(0).clone_owned();
+            let transformed = &self.d * first;
+            out.column_mut(0).copy_from(&transformed);
+
+            for col in 1..x.nrows() {
+                let denom = x[col] - self.a;
+                if denom == 0.0 {
+                    continue;
+                }
+                let correction = &self.s * y_dense.column(col).clone_owned();
+                for row in 0..out.nrows() {
+                    out[(row, col)] += correction[row] / denom;
+                }
+            }
+        } else {
+            for col in 0..x.nrows() {
+                let denom = x[col] - self.a;
+                if denom == 0.0 {
+                    continue;
+                }
+                let correction = &self.s * y_dense.column(col).clone_owned();
+                for row in 0..out.nrows() {
+                    out[(row, col)] += correction[row] / denom;
+                }
+            }
+        }
+
+        dmatrix_to_faer_dense(&out)
+    }
+
+    fn wrap_pointwise_jacobians(&self, x: &faer_col, jacobians: Vec<faer_mat>) -> Vec<faer_mat> {
+        let mut wrapped = Vec::with_capacity(jacobians.len());
+        for (idx, jacobian) in jacobians.into_iter().enumerate() {
+            let mut dense = sparse_to_dmatrix(&jacobian);
+            if x.nrows() > 0 && x[0] == self.a && idx == 0 {
+                dense = &self.d * dense;
+            } else {
+                let denom = x[idx] - self.a;
+                if denom != 0.0 {
+                    dense += &self.s / denom;
+                }
+            }
+            wrapped.push(dmatrix_to_sparse(&dense));
+        }
+        wrapped
+    }
 }
 
 fn record_global_jacobian_diagnostics(
@@ -301,8 +463,16 @@ fn record_global_jacobian_diagnostics(
         diagnostics.dense_equivalent_kib,
     );
     calc_statistics.insert(
+        "global jacobian dense equivalent mib".to_string(),
+        diagnostics.dense_equivalent_mib,
+    );
+    calc_statistics.insert(
         "global jacobian sparse storage kib".to_string(),
         diagnostics.sparse_storage_kib,
+    );
+    calc_statistics.insert(
+        "global jacobian sparse storage mib".to_string(),
+        diagnostics.sparse_storage_mib,
     );
     calc_statistics.insert(
         "global jacobian dense to sparse permille".to_string(),
@@ -2457,7 +2627,7 @@ pub fn solve_bvp(
     x: faer_col,
     y: faer_dense_mat,
     p: Option<faer_col>,
-    _s: Option<faer_dense_mat>, // Singular term not implemented
+    _s: Option<faer_dense_mat>,
     fun_jac: Option<&ODEJacobian>,
     bc_jac: Option<&BCJacobian>,
     tol: f64,
@@ -2491,7 +2661,7 @@ pub fn solve_bvp_with_strategy_params(
     x: faer_col,
     y: faer_dense_mat,
     p: Option<faer_col>,
-    _s: Option<faer_dense_mat>, // Singular term not implemented
+    _s: Option<faer_dense_mat>,
     fun_jac: Option<&ODEJacobian>,
     bc_jac: Option<&BCJacobian>,
     tol: f64,
@@ -2527,7 +2697,7 @@ pub fn solve_bvp_with_strategy_and_linear_policy(
     mut x: faer_col,
     mut y: faer_dense_mat,
     p: Option<faer_col>,
-    _s: Option<faer_dense_mat>, // Singular term not implemented
+    _s: Option<faer_dense_mat>,
     fun_jac: Option<&ODEJacobian>,
     bc_jac: Option<&BCJacobian>,
     tol: f64,
@@ -2599,6 +2769,10 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
 
     let n = y.nrows();
     let mut m = x.nrows();
+    let singular_plumbing = match _s.as_ref() {
+        Some(singular_term) => Some(SingularTermPlumbing::new(singular_term, x[0])?),
+        None => None,
+    };
 
     if y.ncols() != m {
         return Err("y must have same number of columns as x has elements".to_string());
@@ -2607,9 +2781,39 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
     let mut p = p.unwrap_or_else(|| faer_col::zeros(0));
     let bc_tol = bc_tol.unwrap_or(tol);
     let max_iteration = 10;
+
+    if let Some(plumbing) = singular_plumbing.as_ref() {
+        plumbing.project_initial_guess(&mut y);
+        *calc_statistics
+            .entry("bvp sci singular term enabled".to_string())
+            .or_insert(0) += 1;
+    }
+
+    let singular_enabled = singular_plumbing.is_some();
+    let fun_wrapped: Option<Box<ODEFunction>> = singular_plumbing.as_ref().map(|plumbing| {
+        let plumbing = plumbing.clone();
+        let fun_ptr = fun as *const ODEFunction;
+        Box::new(
+            move |x: &faer_col, y: &faer_dense_mat, p: &faer_col| -> faer_dense_mat {
+                let base = unsafe { (&*fun_ptr)(x, y, p) };
+                plumbing.wrap_rhs_output(x, &base, y)
+            },
+        ) as Box<ODEFunction>
+    });
+    let fun_ref: &ODEFunction = fun_wrapped
+        .as_ref()
+        .map(|wrapped| wrapped.as_ref())
+        .unwrap_or(fun);
+    let fun_jac_ref = if singular_enabled { None } else { fun_jac };
+    let banded_fun_jac_ref: Option<&ODEBandedJacobian> = if singular_plumbing.is_some() {
+        None
+    } else {
+        banded_fun_jac
+    };
+
     custom_timer.fun_tic();
     // Initial validation
-    let f_test = fun(&x, &y, &p);
+    let f_test = fun_ref(&x, &y, &p);
     if (f_test.nrows(), f_test.ncols()) != (y.nrows(), y.ncols()) {
         return Err(format!(
             "Function return shape ({}, {}) doesn't match y shape ({}, {})",
@@ -2669,10 +2873,10 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
             n,
             m,
             &h,
-            fun,
+            fun_ref,
             bc,
-            fun_jac,
-            banded_fun_jac,
+            fun_jac_ref,
+            banded_fun_jac_ref,
             bc_jac,
             y.clone(),
             p.clone(),
@@ -2694,7 +2898,7 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
         iteration += 1;
 
         // Compute collocation residuals and boundary condition residuals
-        let (col_res, _y_middle, f, f_middle) = collocation_fun(fun, &y, &p, &x, &h);
+        let (col_res, _y_middle, f, f_middle) = collocation_fun(fun_ref, &y, &p, &x, &h);
         let ya_curr = faer_col::from_fn(n, |i| *y.get(i, 0));
         let yb_curr = faer_col::from_fn(n, |i| *y.get(i, m - 1));
         let bc_res = bc(&ya_curr, &yb_curr, &p);
@@ -2766,6 +2970,9 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
             y = faer_dense_mat::from_fn(y_new_vals.ncols(), y_new_vals.nrows(), |i, j| {
                 y_new_vals[(j, i)]
             });
+            if let Some(plumbing) = singular_plumbing.as_ref() {
+                plumbing.project_initial_guess(&mut y);
+            }
             custom_timer.grid_refinement_tac();
             *calc_statistics
                 .entry("number of grid refinements".to_string())
@@ -2796,10 +3003,10 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
         }
     }
     custom_timer.fun_tic();
-    let final_f = fun(&x, &y, &p);
+    let final_f = fun_ref(&x, &y, &p);
     let final_h = faer_col::from_fn(x.nrows() - 1, |i| x[i + 1] - x[i]);
     let (col_res_final, _y_middle_final, _, f_middle_final) =
-        collocation_fun(fun, &y, &p, &x, &final_h);
+        collocation_fun(fun_ref, &y, &p, &x, &final_h);
     custom_timer.fun_tac();
     let mut r_middle_final = faer_dense_mat::zeros(n, x.nrows() - 1);
     for j in 0..(x.nrows() - 1) {

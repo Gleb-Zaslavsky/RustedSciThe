@@ -183,11 +183,11 @@ fn main() {
     ];
     let y0 = DVector::from_vec(vect.clone());
 
-    let t_bound = 5.0;
+    let t_bound = 500.0;
     let max_step = 0.001;
     let rtol = 1e-7;
     let atol = 1e-8;
-    let solver_name = "Radau".to_string();
+    let solver_name = "BDF".to_string();
     let now = Instant::now();
     let mut solver = match solver_name.as_str() {
         "BDF" => {
@@ -212,7 +212,7 @@ fn main() {
             solver
         }
         "RK45" => UniversalODESolver::rk45(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
-        "AB4" => UniversalODESolver::rk45(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
+        "AB4" => UniversalODESolver::ab4(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
         "BE" => {
             let solver = UniversalODESolver::backward_euler(
                 eq_sys,
@@ -355,3 +355,4 @@ fn main() {
         Some(100.0),
     );
 }
+

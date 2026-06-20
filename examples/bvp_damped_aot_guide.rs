@@ -9,11 +9,13 @@
 //! reuse can pay off for large or repeatedly solved BVPs. This example uses
 //! the practical AtomView + Banded + C/tcc route.
 //!
-//! `BuildIfMissing` creates or locates the artifact on the first solve.
+//! `BuildIfMissing` creates or locates the artifact on the first solve and
+//! returns an updated resolver snapshot.
 //! `RequirePrebuilt` on the second solve documents the production deployment
-//! contract: do not silently compile when a prepared artifact is expected.
+//! contract: do not silently compile when a prepared artifact is expected,
+//! but do keep using the snapshot returned by the build phase.
 //! The executable example needs `tcc` available on `PATH`.
-
+//! run cargo run --example bvp_damped_aot_guide 
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -122,9 +124,11 @@ fn main() {
         .expect("AOT build-if-missing solve must succeed");
     report("Damped AOT cold/build-if-missing solve", &build_or_reuse);
 
-    // Step 2: require reuse. A missing artifact is now an error instead of
-    // an unexpected compiler invocation inside a measured/production solve.
-    let strict_config = config.with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
+    // Step 2: require reuse. The second solver must be seeded with the
+    // resolver snapshot returned by the first build-if-missing run.
+    let strict_config = config
+        .with_resolver(build_or_reuse.aot_resolver().cloned())
+        .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
     let mut prebuilt = solver_with(strict_config);
     prebuilt.dont_save_log(true);
     prebuilt

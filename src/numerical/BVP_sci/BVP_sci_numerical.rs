@@ -277,6 +277,16 @@ impl NumericalBvpSolveOptions {
         self
     }
 
+    /// Attach a singular-term matrix `S` in the SciPy-style form
+    /// `dy/dx = f(x, y, p) + S * y / (x - a)`.
+    ///
+    /// This matrix is threaded through the solver core and is expected to be
+    /// square with the same dimension as the state vector.
+    pub fn with_singular_term(mut self, singular_term: Option<faer_dense_mat>) -> Self {
+        self.singular_term = singular_term;
+        self
+    }
+
     /// Override the residual/Jacobian tolerance after construction.
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
         self.tolerance = tolerance;

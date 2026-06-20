@@ -260,7 +260,8 @@ pub fn expr_to_atom(expr: &Expr) -> Atom {
 mod tests {
     use super::*;
     use crate::{parse, symbol};
-
+    use std::thread::sleep;
+    use std::time;
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Round-trip Expr → Atom → Expr and assert the final Expr matches `expected`.
@@ -303,6 +304,7 @@ mod tests {
 
     #[test]
     fn add_two_vars() {
+        sleep(time::Duration::from_secs(1));
         let atom = parse!("x+y").unwrap();
         assert_eq!(
             atom_to_expr(&atom),
@@ -311,10 +313,12 @@ mod tests {
                 Box::new(Expr::Var("y".into()))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     #[test]
     fn mul_two_vars() {
+        sleep(time::Duration::from_secs(2));
         let atom = parse!("x*y").unwrap();
         assert_eq!(
             atom_to_expr(&atom),
@@ -323,11 +327,13 @@ mod tests {
                 Box::new(Expr::Var("y".into()))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     /// x - y normalizes to x + y*-1 in the packed form.
     #[test]
     fn sub_becomes_add_neg() {
+        sleep(time::Duration::from_secs(2));
         let x = symbol!("x");
         let y = symbol!("y");
         let atom = Atom::new_var(x) - Atom::new_var(y);
@@ -341,11 +347,13 @@ mod tests {
                 ))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     /// x / y normalizes to x * y^-1 in the packed form.
     #[test]
     fn div_becomes_mul_pow_neg1() {
+        sleep(time::Duration::from_secs(2));
         let x = symbol!("x");
         let y = symbol!("y");
         let atom = Atom::new_var(x) / Atom::new_var(y);
@@ -359,6 +367,7 @@ mod tests {
                 ))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     #[test]
@@ -372,6 +381,7 @@ mod tests {
 
     #[test]
     fn scaled_sum_2x_plus_3y() {
+        sleep(time::Duration::from_secs(2));
         // normalizes to x*2 + y*3
         let atom = parse!("2*x+3*y").unwrap();
         assert_eq!(
@@ -387,6 +397,7 @@ mod tests {
                 ))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     #[test]
@@ -541,6 +552,7 @@ mod tests {
 
     #[test]
     fn roundtrip_expr_to_atom_add() {
+        sleep(time::Duration::from_secs(2));
         rt_expr(
             Expr::Add(
                 Box::new(Expr::Var("x".into())),
@@ -551,6 +563,7 @@ mod tests {
                 Box::new(Expr::Var("y".into())),
             ),
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).
@@ -575,6 +588,7 @@ mod tests {
     /// Div normalizes away: the round-trip produces Mul(x, Pow(y, -1)).
     #[test]
     fn roundtrip_expr_div_normalizes() {
+        sleep(time::Duration::from_secs(2));
         let atom = expr_to_atom(&Expr::Div(
             Box::new(Expr::Var("x".into())),
             Box::new(Expr::Var("y".into())),
@@ -589,6 +603,7 @@ mod tests {
                 ))
             )
         );
+        sleep(time::Duration::from_secs(2));
     }
 
     #[test]

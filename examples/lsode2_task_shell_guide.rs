@@ -14,6 +14,9 @@
 //! parser also accepts `method: LSODE` and `method: LSODA` aliases.
 //! `LSODE` is useful when you want manual family policy (`adams_only`/`bdf_only`);
 //! `LSODA` maps to auto-switch family policy.
+//! 
+//! cargo run --example lsode2_task_shell_guide
+//!
 
 use RustedSciThe::command_interpreter::task_parser_ivp::{
     parse_ivp_task_from_str, run_ivp_task_from_str,

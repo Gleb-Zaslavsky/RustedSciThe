@@ -1,7 +1,7 @@
 use RustedSciThe::command_interpreter::task_parser_ivp::{
     parse_ivp_task_from_str, run_ivp_task_from_str,
 };
-
+// run cargo run --example ivp_task_shell_guide
 fn main() {
     // The guide intentionally uses the text-facing shell instead of constructing
     // `UniversalODESolver` by hand. This is the workflow we want external users

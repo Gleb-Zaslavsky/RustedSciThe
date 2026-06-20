@@ -233,6 +233,11 @@ impl BvpSciSolverOptions {
         )
     }
 
+    /// Short alias for the same Sparse + AtomView + `gcc` AOT preset.
+    pub fn with_sparse_atomview_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_sparse_atomview_c_gcc(output_parent_dir)
+    }
+
     pub fn with_sparse_atomview_rust(self, output_parent_dir: impl Into<PathBuf>) -> Self {
         self.with_generated_backend_config(
             BvpSciGeneratedBackendConfig::sparse_atomview_build_if_missing_release_rust(
@@ -249,9 +254,49 @@ impl BvpSciSolverOptions {
         )
     }
 
+    /// Short alias for the same Sparse + AtomView + `tcc` AOT preset.
+    pub fn with_sparse_atomview_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_sparse_atomview_c_tcc(output_parent_dir)
+    }
+
     pub fn with_banded_atomview_c_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
         self.with_generated_backend_config(
             BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc(
+                output_parent_dir,
+            ),
+        )
+        .with_auto_banded_linear_solver()
+    }
+
+    /// Short alias for the same Banded + AtomView + `tcc` AOT preset.
+    pub fn with_banded_atomview_tcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_banded_atomview_c_tcc(output_parent_dir)
+    }
+
+    /// Short alias for the same Banded + AtomView + `gcc` AOT preset.
+    pub fn with_banded_atomview_gcc(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_gcc(
+                output_parent_dir,
+            ),
+        )
+        .with_auto_banded_linear_solver()
+    }
+
+    /// Short alias for the same Banded + AtomView + `rust` AOT preset.
+    pub fn with_banded_atomview_rust(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_rust(
+                output_parent_dir,
+            ),
+        )
+        .with_auto_banded_linear_solver()
+    }
+
+    /// Short alias for the same Banded + AtomView + `zig` AOT preset.
+    pub fn with_banded_atomview_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_generated_backend_config(
+            BvpSciGeneratedBackendConfig::banded_atomview_build_if_missing_release_zig(
                 output_parent_dir,
             ),
         )
@@ -264,6 +309,11 @@ impl BvpSciSolverOptions {
                 output_parent_dir,
             ),
         )
+    }
+
+    /// Short alias for the same Sparse + AtomView + `zig` AOT preset.
+    pub fn with_sparse_atomview_c_zig(self, output_parent_dir: impl Into<PathBuf>) -> Self {
+        self.with_sparse_atomview_zig(output_parent_dir)
     }
 
     pub fn with_sparse_atomview_for_repeated_solves(
@@ -889,6 +939,15 @@ impl BVPwrap {
         &self.generated_backend_config
     }
 
+    /// Explicitly removes registered generated artifacts owned by the current resolver snapshot.
+    ///
+    /// This is a conservative lifecycle operation for story/debug/cold-build workflows.
+    /// It does not unload dynamic libraries or unregister live callbacks.
+    pub fn cleanup_registered_aot_artifacts(&mut self) -> std::io::Result<usize> {
+        self.generated_backend_config
+            .cleanup_registered_aot_artifacts()
+    }
+
     pub(crate) fn record_generated_backend_lifecycle(
         &mut self,
         action: impl Into<String>,
@@ -1493,6 +1552,9 @@ mod tests_phase1 {
         BVPwrap, BvpSciBackendError, BvpSciGeneratedBackendConfig, BvpSciGeneratedBackendMode,
         BvpSciSolverOptions, BvpSciWorkflow, Jacobian_sci_faer,
     };
+    use crate::numerical::BVP_sci::BVP_sci_aot::{
+        BvpSciGeneratedMatrixBackend, generated_test_artifact_dir,
+    };
     use crate::numerical::BVP_sci::BVP_sci_faer::faer_col;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
         resolve_linked_sparse_backend, unregister_linked_sparse_backend,
@@ -1528,12 +1590,6 @@ mod tests_phase1 {
             }
         }
         Command::new("gcc").arg("-v").output().is_ok()
-    }
-
-    const GENERATED_TEST_ARTIFACT_REV: &str = "rev2-bounds";
-
-    fn generated_test_artifact_dir(name: &str) -> String {
-        format!("target/generated-bvp-sci-tests/{GENERATED_TEST_ARTIFACT_REV}/{name}")
     }
 
     fn linear_problem_options() -> BvpSciSolverOptions {
@@ -1706,6 +1762,37 @@ mod tests_phase1 {
         assert_eq!(
             solver.generated_backend_config().output_parent_dir,
             options.generated_backend_config.output_parent_dir
+        );
+    }
+
+    #[test]
+    fn bvp_sci_generated_backend_short_aliases_keep_the_same_backend_contract() {
+        let sparse_alias = linear_problem_options()
+            .with_sparse_atomview_tcc(generated_test_artifact_dir("alias-sparse-tcc"));
+        let sparse_canonical = linear_problem_options()
+            .with_sparse_atomview_c_tcc(generated_test_artifact_dir("alias-sparse-ctcc"));
+        assert_eq!(
+            sparse_alias.generated_backend_config.mode,
+            sparse_canonical.generated_backend_config.mode
+        );
+        assert_eq!(
+            sparse_alias.generated_backend_config.workflow(),
+            sparse_canonical.generated_backend_config.workflow()
+        );
+
+        let banded_zig = linear_problem_options()
+            .with_banded_atomview_zig(generated_test_artifact_dir("alias-banded-zig"));
+        assert_eq!(
+            banded_zig.generated_backend_config.matrix_backend,
+            BvpSciGeneratedMatrixBackend::Banded
+        );
+        assert_eq!(
+            banded_zig.generated_backend_config.mode,
+            BvpSciGeneratedBackendMode::AtomViewBuildIfMissingReleaseZig
+        );
+        assert_eq!(
+            banded_zig.generated_backend_config.workflow(),
+            BvpSciWorkflow::AtomViewAotBanded
         );
     }
 
