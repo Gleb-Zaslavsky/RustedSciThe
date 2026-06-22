@@ -10,7 +10,7 @@
 //!
 //! This first example uses Banded + AtomView + Lambdify and therefore has no
 //! external compiler requirement.
-//! 
+//!
 //! run cargo run --example bvp_frozen_lambdify_guide
 
 use std::collections::HashMap;

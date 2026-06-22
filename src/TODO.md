@@ -1614,3 +1614,181 @@ failures:
     src\symbolic\symbolic_functions_BVP.rs - symbolic::symbolic_functions_BVP::Jacobian::remove_numeric_suffix (line 5184)
     src\symbolic\symbolic_lambdify.rs - symbolic::symbolic_lambdify::Expr::lambdify1D (line 23)
     src\symbolic\symbolic_lambdify.rs - symbolic::symbolic_lambdify::Expr::lambdify_IVP (line 357)
+
+## 2026-06-22: VarPro migration to internal f64 Levenberg-Marquardt
+
+Goal: make `src/numerical/optimization/varpro/` a native part of this crate, backed by
+`LM_optimization.rs` and `problem_LM.rs`, with no dependency on the external
+`levenberg-marquardt` API shape, no scalar generics, no `nalgebra-lapack` path, and no
+external `test_assets` fixtures. Do not add symbolic Jacobian generation until the basic
+numeric VarPro pipeline is compiling and covered by focused tests.
+
+Current diagnosis:
+
+- `varpro::solvers::levmar` is already partially rewired to local imports, but it still uses the old generic shape: `LevenbergMarquardt<Model::ScalarType>`, `MinimizationReport<Model::ScalarType>`, and `LeastSquaresProblem<Model::ScalarType, Dyn, Dyn>`.
+- The local LM backend is intentionally f64-only: `LevenbergMarquardt`, `MinimizationReport`, and `LeastSquaresProblem` are non-generic and operate on `DVector<f64>` / `DMatrix<f64>`.
+- The main VarPro math path is SVD-based and should survive: `LevMarProblem<..., SvdLinearSolver<...>>` computes weighted basis matrix `Phi_w`, solves the linear coefficients by SVD, caches residuals, and builds the Kaufman-approximation Jacobian.
+- LAPACK QR/CPQR is not wanted. The whole `colpiv_qr` path, `GeneralQrLinearSolver`, `solve_with_qr`, `solve_with_cpqr`, feature gates, docs, and exports should be removed rather than kept as dead conditional code.
+- `test_assets` and `shared_test_code` are portability baggage from the upstream crate and should be replaced by small deterministic in-repo synthetic tests.
+
+Migration plan:
+
+1. Establish a compile baseline and failure map.
+   Run targeted compile checks for `varpro` tests first, not the whole noisy crate. Capture the first compile errors around `LeastSquaresProblem`, `LevenbergMarquardt`, and `MinimizationReport`. Expected initial command: `cargo test varpro --lib --no-run`.
+
+2. Collapse public numeric API to f64.
+   Remove `ScalarType` from the user-facing VarPro model where feasible:
+   `SeparableModel<ScalarType>` -> `SeparableModel`,
+   `SeparableNonlinearModel::ScalarType` -> fixed `f64`,
+   function closures -> `Fn(&DVector<f64>, &[f64]) -> DVector<f64>`,
+   model parameters -> `DVector<f64>`,
+   basis/eval/derivative matrices -> `DMatrix<f64>`.
+   Keep `SingleRhs` / `MultiRhs` type markers because they encode result shape, not numeric type.
+
+3. Simplify problem and weights.
+   Convert `SeparableProblem<Model, Rhs>` to store `DMatrix<f64>` and `Weights<Dyn>` or a simple f64-only `Weights`.
+   Remove `ComplexField`, `RealField`, `Float`, `FromPrimitive`, `TotalOrder`, and allocator-heavy bounds wherever they only existed for generic scalar support.
+   Keep diagonal/unit weighting behavior and tests because it is part of the core VarPro API.
+
+4. Adapt `LevMarProblem` to the local LM trait.
+   Implement `crate::numerical::optimization::problem_LM::LeastSquaresProblem` for the SVD VarPro problem with exact signatures:
+   `set_params(&mut self, &DVector<f64>)`,
+   `params(&self) -> DVector<f64>`,
+   `residuals(&self) -> Option<DVector<f64>>`,
+   `jacobian(&self) -> Option<DMatrix<f64>>`.
+   The implementation should preserve the current cache semantics: failed model eval, failed SVD solve, or failed derivative eval means `cached = None` and LM receives `None`.
+
+5. Simplify `LevMarSolver`.
+   Store `solver: LevenbergMarquardt` without generic arguments.
+   `with_solver` accepts the local f64 solver.
+   `solve_generic` should no longer have scalar/storage generic bounds.
+   Keep only `solve_with_svd` and `solve`; make `solve` the primary path.
+   Remove deprecated `fit` unless there is an explicit compatibility reason to keep it.
+
+6. Delete LAPACK-only implementation surface.
+   Remove `solvers/levmar/levmar_problem/colpiv_qr.rs`, QR/CPQR type aliases, feature-gated exports, `nalgebra_lapack` imports, and docs that advertise LAPACK backends.
+   Verify no `__lapack`, `nalgebra_lapack`, `QrReal`, `QrScalar`, `GeneralQrLinearSolver`, `LevMarProblemQr`, or `LevMarProblemCpQr` remains under `varpro`.
+
+7. Convert fit results and statistics.
+   `FitResult` should use `DMatrix<f64>`, `DMatrixView<f64>`, `DVectorView<f64>`, `DVector<f64>`, and non-generic `MinimizationReport`.
+   `FitStatistics` should be f64-only; remove `numeric_traits::CastF64` or shrink it away if no longer needed.
+   Preserve covariance, correlation, reduced chi2, regression standard error, confidence band, and variance helpers for `SingleRhs` first. Treat `MultiRhs` statistics as a follow-up unless already supported cleanly.
+
+8. Replace upstream fixture dependencies.
+   Delete `test_assets` and `shared_test_code` usage from tests.
+   Replace raw-file integration tests with deterministic synthetic data:
+   double exponential with constant offset,
+   weighted mixed exponential/trigonometric example,
+   rank-deficient or near-collinear basis smoke test,
+   MRHS/global fitting smoke test if it still compiles cleanly.
+
+9. Keep the first test set small and mathematical.
+   Required focused tests after migration:
+   weights unit/diagonal multiplication,
+   model builder parameter validation,
+   SVD linear coefficient solve for fixed nonlinear parameters,
+   `LevMarProblem` residual/Jacobian dimensions,
+   end-to-end `LevMarSolver::solve` on single-RHS double exponential,
+   failed model/derivative path returns unsuccessful LM report instead of panic.
+
+10. Update docs and prelude last.
+    Rewrite module docs to say this is RustedSciThe's f64 VarPro implementation using the internal LM backend.
+    Remove external crate links that imply dependency on `levenberg-marquardt`.
+    Keep public examples compact and f64-only.
+
+Implementation order:
+
+1. Make only the SVD path compile against local `LeastSquaresProblem`.
+2. Remove LAPACK and generic solver API.
+3. Collapse model/problem/weights generics to f64.
+4. Repair tests with synthetic data.
+5. Repair statistics and docs.
+6. Only after green basic numeric VarPro, start symbolic Jacobian closure generation inspired by `sym_fitting.rs`.
+
+Acceptance gates:
+
+- `rg -n "nalgebra_lapack|__lapack|GeneralQrLinearSolver|LevMarProblemQr|LevMarProblemCpQr|test_assets|shared_test_code" src/numerical/optimization/varpro` returns no production references.
+- `rg -n "LevenbergMarquardt<|MinimizationReport<|LeastSquaresProblem<" src/numerical/optimization/varpro` returns no references.
+- Focused VarPro tests pass.
+- `git diff --check` is clean.
+- No broad tolerance loosening: if a fit fails, first inspect residual/Jacobian math and test setup.
+
+Progress update 2026-06-22:
+
+- [x] Rewired `varpro::solvers::levmar` to the local f64-only `LevenbergMarquardt`,
+  `MinimizationReport`, and non-generic `LeastSquaresProblem` API.
+- [x] Kept the SVD backend as the only supported VarPro linear subproblem backend.
+- [x] Removed the LAPACK QR/CPQR implementation surface, including `colpiv_qr.rs`,
+  feature-gated QR solver aliases, and stale generic solver bounds.
+- [x] Converted `FitResult` and the currently compiled statistics path to the local
+  non-generic f64 LM report shape.
+- [x] Fixed the SVD VarPro Jacobian math for the local pipeline:
+  `nalgebra` provides a full `U`, so the projector must use only the numerical rank
+  subspace; the final reduced Jacobian sign is matched to the local
+  `residual = model - data` convention.
+- [x] Removed upstream fixture baggage: `test_assets`, `shared_test_code`, and the
+  external integration harness are no longer part of the in-tree VarPro code.
+  This is safe because there are no remaining references under `varpro`, and the
+  solver path now has an in-repo synthetic regression test instead of raw-file fixtures.
+- [x] Added an end-to-end solver test for the public builder API:
+  exponential plus constant offset data goes through `SeparableModelBuilder`,
+  `SeparableProblemBuilder`, and `LevMarSolver::solve`.
+- [x] Verified `cargo test varpro --lib`: 56 passed.
+- [x] Verified the acceptance searches for stale LAPACK/test-assets/shared-test-code
+  references and old generic LM signatures return no matches.
+- [x] Verified `git diff --check` is clean.
+
+Next VarPro front:
+
+1. Add more synthetic numerical tests before adding symbolic code:
+   double exponential with matched/permutation-aware coefficients, weighted fitting,
+   rank-deficient or nearly collinear bases, and at least one MRHS/global fitting smoke test.
+2. Audit `statistics` more carefully. The temporary normal-quantile approximation used during
+   the f64 migration should either become an explicit documented approximation or be replaced by
+   a proper Student-t quantile dependency/helper.
+3. Build a symbolic Jacobian backend for VarPro after the numeric path is stable.
+   Use the API style from `src/numerical/optimization/sym_wrapper.rs` and
+   `src/numerical/optimization/sym_fitting.rs`: user supplies symbolic expressions and variable
+   names, the wrapper builds native closures for basis functions and their parameter derivatives,
+   and the resulting model still feeds the same `SeparableProblemBuilder` / `LevMarSolver` path.
+4. Keep the symbolic layer as a convenience frontend, not a second solver: it should generate
+   closures and derivative closures for the existing VarPro model API, with numerical tests that
+   compare symbolic derivatives against finite differences on small deterministic examples.
+
+Progress update 2026-06-22, second pass:
+
+- [x] Added solver-level synthetic regressions for weighted fitting, double-exponential fitting,
+  and MRHS/global fitting through the local SVD-backed VarPro solver.
+- [x] Added the first symbolic VarPro frontend in `varpro::symbolic`: symbolic expressions now
+  generate native one-parameter basis closures, symbolic parameter-derivative closures, and
+  invariant basis closures.
+- [x] Added tests that verify the symbolic derivative for `exp(-x/tau)` and run an end-to-end
+  symbolic exponential-plus-offset fit through `SeparableModelBuilder`, `SeparableProblemBuilder`,
+  and `LevMarSolver`.
+- [x] Exported the symbolic helper functions from `varpro::prelude`.
+
+Remaining VarPro symbolic work:
+
+1. Add explicit two-parameter and three-parameter symbolic basis helpers. This should be
+   arity-specific, not variadic, because the VarPro builder uses Rust closure arity as part of
+   model validation.
+2. Add symbolic tests for multi-basis models and compare symbolic derivatives against finite
+   differences for more than one nonlinear parameter.
+3. Clean stale module-level VarPro docs that still describe upstream LAPACK backend choices.
+
+Progress update 2026-06-22, third pass:
+
+- [x] Added `SymbolicVarProBuilder`, a high-level builder-style API that accepts symbolic
+  basis expressions, data, parameter names and initial guesses, then builds the native
+  VarPro model/problem and runs `LevMarSolver` internally.
+- [x] Kept the low-level symbolic closure helpers and their tests. They remain useful for
+  advanced users and as direct derivative-contract tests.
+- [x] Added builder-style tests for a symbolic exponential-plus-offset model and a symbolic
+  double-exponential-plus-offset model.
+
+Remaining VarPro symbolic work after builder API:
+
+1. Add explicit two-parameter and three-parameter symbolic basis helpers for basis functions
+   such as `sin(omega*x + phi)`.
+2. Add symbolic derivative-vs-finite-difference tests for multi-parameter basis functions.
+3. Clean stale module-level VarPro docs that still describe upstream LAPACK backend choices.

@@ -17,7 +17,7 @@
 //! Why sparse here:
 //! this small system can be dense too, but sparse setup demonstrates the
 //! production-oriented route used on larger Jacobians.
-//! 
+//!
 //! run cargo run --example lsode2_lambdify_guide
 
 use RustedSciThe::numerical::LSODE2::{

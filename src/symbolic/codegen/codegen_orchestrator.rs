@@ -1937,9 +1937,8 @@ mod tests {
         ParallelFallbackPolicy, ParallelResidualExecutor, ParallelSparseJacobianExecutor,
         ResidualChunkBinding, SequentialBandedJacobianExecutor, SequentialDenseJacobianExecutor,
         SequentialResidualExecutor, SequentialSparseJacobianExecutor, SparseJacobianChunkBinding,
-        auto_parallel_executor_config,
-        auto_parallel_fallback_for_workload, borrowed_sparse_entries,
-        min_work_per_job_from_baseline, rayon_overhead_baseline,
+        auto_parallel_executor_config, auto_parallel_fallback_for_workload,
+        borrowed_sparse_entries, min_work_per_job_from_baseline, rayon_overhead_baseline,
         recommended_sparse_auto_parallel_plan, work_per_group,
     };
     use crate::somelinalg::banded::banded_assembly::BandedAssembly;

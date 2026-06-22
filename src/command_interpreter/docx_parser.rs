@@ -330,7 +330,6 @@ y0: 1.0
             .expect("converted document should still parse as a task document");
         let check = crate::command_interpreter::task_runner::render_task_check(&spec);
         assert!(check.contains("[Task check] IVP"));
-
     }
 
     #[test]
@@ -348,7 +347,3 @@ y0: 1.0
         assert_eq!(transform_document("$a=b$"), "a:b\n");
     }
 }
-
-
-
-

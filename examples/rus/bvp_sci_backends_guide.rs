@@ -82,7 +82,10 @@ fn run_case(label: &str, mut solver: BVPwrap) {
     println!("  residual_ms       = {:.3}", stats.residual_ms_total);
     println!("  jacobian_ms       = {:.3}", stats.jacobian_ms_total);
     println!("  linear_system_ms  = {:.3}", stats.linear_system_ms_total);
-    println!("  symbolic_ms       = {:.3}", stats.symbolic_prepare_ms_total);
+    println!(
+        "  symbolic_ms       = {:.3}",
+        stats.symbolic_prepare_ms_total
+    );
     println!();
 }
 

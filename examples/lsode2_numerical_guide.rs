@@ -17,7 +17,7 @@
 //! - the public API does not ask for symbolic `Expr` placeholders on this route;
 //! - it highlights what each LSODE2 config knob does;
 //! - it gives a baseline before moving to symbolic Lambdify/AOT routes.
-//! 
+//!
 //! run cargo run --example lsode2_numerical_guide
 //!
 

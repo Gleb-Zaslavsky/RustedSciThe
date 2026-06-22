@@ -9,6 +9,7 @@
 //!
 //! запуск: cargo run --example lsode2_lorenz_2d_animation
 
+use RustedSciThe::Utils::animation_2d::create_2d_animation;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2BackendConfig, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
@@ -16,7 +17,6 @@ use RustedSciThe::numerical::LSODE2::{
 };
 use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::Utils::animation_2d::create_2d_animation;
 use nalgebra::{DMatrix, DVector};
 
 fn solve_lorenz_xy(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
@@ -46,8 +46,10 @@ fn solve_lorenz_xy(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
 
     let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
     solver.solve();
-    assert_eq!(solver.get_status().as_deref(), Some("finished_native_faithful"));
-
+    assert_eq!(
+        solver.get_status().as_deref(),
+        Some("finished_native_faithful")
+    );
 
     let (t, y) = solver.get_result();
     let t = t.expect("LSODE2 should produce a time mesh");

@@ -15,7 +15,7 @@
 //! парсер также принимает алиасы `method: LSODE` и `method: LSODA`.
 //! `LSODE` полезен, когда нужен ручной выбор семейства (`adams_only`/`bdf_only`);
 //! `LSODA` соответствует авто-переключению семейств.
-//! 
+//!
 //! cargo run --example lsode2_task_shell_guide
 //!
 

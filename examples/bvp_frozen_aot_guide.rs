@@ -12,7 +12,7 @@
 //!
 //! The guide uses the C/tcc AOT route; `tcc` must be installed and visible on
 //! `PATH`.
-//! 
+//!
 //! run cargo run --example bvp_frozen_aot_guide
 
 use std::collections::HashMap;

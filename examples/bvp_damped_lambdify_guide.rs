@@ -15,7 +15,7 @@
 //! - Lambdify is a natural first route for symbolic models;
 //! - `AtomView` is the optimized symbolic frontend;
 //! - `Banded` matches the narrow coupling created by a local BVP stencil.
-//! 
+//!
 //! run cargo run --example bvp_damped_lambdify_guide
 
 use std::collections::HashMap;

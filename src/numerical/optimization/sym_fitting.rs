@@ -10,10 +10,10 @@ use std::collections::HashMap;
 /// This is a wrapper around the Levenberg-Marquardt algorithm.
 /// It takes a symbolic expression and a set of data points and fits the expression to the data points.
 pub struct Fitting {
-    pub x_data: Vec<f64>,   // x data
-    pub y_data: Vec<f64>,   // y data
+    pub x_data: Vec<f64>,     // x data
+    pub y_data: Vec<f64>,     // y data
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
-    pub eq: Expr,           //equation  to fit
+    pub equations: Vec<Expr>, // equations to fit, flattened row-major when there are many
     pub arg: String,
     pub unknown_coeffs: Vec<String>,   // vector of variables
     pub initial_guess: Vec<f64>,       // initial guess
@@ -33,7 +33,7 @@ impl Fitting {
             x_data: Vec::new(),
             y_data: Vec::new(),
             jacobian: Jacobian::new(),
-            eq: Expr::parse_expression("0"),
+            equations: vec![Expr::parse_expression("0")],
             unknown_coeffs: Vec::new(),
             arg: String::new(),
             initial_guess: Vec::new(),
@@ -69,20 +69,38 @@ impl Fitting {
 
     /// Builder pattern: Set equation from Expr
     pub fn with_equation(mut self, eq: Expr) -> Self {
-        self.eq = eq;
+        self.equations = vec![eq];
+        self
+    }
+
+    /// Builder pattern: Set target equations from a vector of Expr values.
+    ///
+    /// The equations are flattened in row-major order when residuals and
+    /// predictions are generated.
+    pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
+        self.equations = eq_system;
         self
     }
 
     /// Builder pattern: Set equation from string
     pub fn with_equation_str(mut self, eq_string: String) -> Self {
-        self.eq = Expr::parse_expression(&eq_string);
+        self.equations = vec![Expr::parse_expression(&eq_string)];
+        self
+    }
+
+    /// Builder pattern: Set target equations from a vector of strings.
+    pub fn with_equations_str(mut self, eq_system_string: Vec<String>) -> Self {
+        self.equations = eq_system_string
+            .iter()
+            .map(|x| Expr::parse_expression(x))
+            .collect::<Vec<_>>();
         self
     }
 
     /// Builder pattern: Set polynomial equation of given degree
     pub fn with_polynomial(mut self, degree: usize, arg: String) -> Self {
         let (eq, unknowns) = Expr::polyval(degree, &arg);
-        self.eq = eq;
+        self.equations = vec![eq];
         self.unknown_coeffs = unknowns;
         self.arg = arg;
         self
@@ -148,19 +166,25 @@ impl Fitting {
     fn validate_and_infer(&mut self) {
         assert!(!self.x_data.is_empty(), "X data cannot be empty.");
         assert!(!self.y_data.is_empty(), "Y data cannot be empty.");
-        assert_eq!(
-            self.x_data.len(),
-            self.y_data.len(),
-            "X and Y data must have the same length."
-        );
         assert!(
             !self.initial_guess.is_empty(),
             "Initial guess cannot be empty."
         );
         assert!(!self.arg.is_empty(), "Argument variable cannot be empty.");
 
+        let equations = self.active_equations();
+        let expected_y_len = self.x_data.len() * equations.len();
+        assert_eq!(
+            self.y_data.len(),
+            expected_y_len,
+            "Y data must have length x_data.len() * equation_count."
+        );
+
         if self.unknown_coeffs.is_empty() {
-            let mut args: Vec<String> = self.eq.all_arguments_are_variables();
+            let mut args: Vec<String> = equations
+                .iter()
+                .flat_map(|eq| eq.all_arguments_are_variables())
+                .collect();
             args.sort();
             args.dedup();
             // Remove the independent variable from unknowns
@@ -194,7 +218,7 @@ impl Fitting {
     ) {
         self.x_data = x_data;
         self.y_data = y_data;
-        self.eq = eq.clone();
+        self.equations = vec![eq.clone()];
         self.arg = arg;
         self.initial_guess = initial_guess;
         self.tolerance = tolerance;
@@ -209,6 +233,72 @@ impl Fitting {
             args.sort();
             args.dedup();
 
+            args
+        };
+        self.unknown_coeffs = values.clone();
+        assert!(
+            !self.initial_guess.is_empty(),
+            "Initial guess should not be empty."
+        );
+        if let Some(tolerance) = tolerance {
+            assert!(
+                tolerance >= 0.0,
+                "Tolerance should be a non-negative number."
+            );
+        }
+        if let Some(max_iterations) = max_iterations {
+            assert!(
+                max_iterations > 0,
+                "Max iterations should be a positive number."
+            );
+        }
+        if let Some(g_tolerance) = g_tolerance {
+            assert!(
+                g_tolerance >= 0.0,
+                "Gradient tolerance should be a non-negative number."
+            );
+        }
+        if let Some(f_tolerance) = f_tolerance {
+            assert!(
+                f_tolerance >= 0.0,
+                "Function tolerance should be a non-negative number."
+            );
+        }
+    }
+    /// set fitting function as a vector of expressions
+    pub fn set_fitting_system(
+        &mut self,
+        x_data: Vec<f64>,
+        y_data: Vec<f64>,
+        eq_system: Vec<Expr>,
+        unknowns: Option<Vec<String>>,
+        arg: String,
+        initial_guess: Vec<f64>,
+        tolerance: Option<f64>,
+        f_tolerance: Option<f64>,
+        g_tolerance: Option<f64>,
+        scale_diag: Option<bool>,
+        max_iterations: Option<usize>,
+    ) {
+        self.x_data = x_data;
+        self.y_data = y_data;
+        self.equations = eq_system.clone();
+        self.arg = arg;
+        self.initial_guess = initial_guess;
+        self.tolerance = tolerance;
+        self.g_tolerance = g_tolerance;
+        self.max_iterations = max_iterations;
+        self.f_tolerance = f_tolerance;
+        self.scale_diag = scale_diag;
+        let values = if let Some(values) = unknowns {
+            values
+        } else {
+            let mut args: Vec<String> = eq_system
+                .iter()
+                .flat_map(|x| x.all_arguments_are_variables())
+                .collect();
+            args.sort();
+            args.dedup();
             args
         };
         self.unknown_coeffs = values.clone();
@@ -272,6 +362,35 @@ impl Fitting {
             max_iterations,
         );
     }
+    /// set fitting function as a vector of expressions
+    pub fn fitting_generate_from_vec(
+        &mut self,
+        x_data: Vec<f64>,
+        y_data: Vec<f64>,
+        eq_system: Vec<Expr>,
+        unknowns: Option<Vec<String>>,
+        arg: String,
+        initial_guess: Vec<f64>,
+        tolerance: Option<f64>,
+        f_tolerance: Option<f64>,
+        g_tolerance: Option<f64>,
+        scale_diag: Option<bool>,
+        max_iterations: Option<usize>,
+    ) {
+        self.set_fitting_system(
+            x_data,
+            y_data,
+            eq_system,
+            unknowns,
+            arg,
+            initial_guess,
+            tolerance,
+            f_tolerance,
+            g_tolerance,
+            scale_diag,
+            max_iterations,
+        );
+    }
     /// fit with polynomial of certain degree
     pub fn poly_fitting(
         &mut self,
@@ -319,7 +438,7 @@ impl Fitting {
         );
     }
     pub fn eq_generate(&mut self) {
-        let eq = self.eq.clone();
+        let eq = self.active_equations();
         let arg = self.arg.clone();
         let x_data = self.x_data.clone();
         let y_data = self.y_data.clone();
@@ -436,14 +555,9 @@ impl Fitting {
     fn compare_with_data(&mut self) {
         let x_data = self.x_data.clone();
         let y_data = self.y_data.clone();
-        let eq = self.eq.clone();
+        let eq = self.active_equations();
         let map_of_solutions = self.map_of_solutions.clone().unwrap();
-        // set numerical values of fittedd parameters
-        let eq = eq.set_variable_from_map(&map_of_solutions);
-        // turn symbolic equation into function
-        let eq_fun = eq.lambdify1D();
-        // calculate predicted y values
-        let y_pred = x_data.iter().map(|x| eq_fun(*x)).collect::<Vec<f64>>();
+        let y_pred = evaluate_equations(&eq, &x_data, &map_of_solutions);
         // calculate r squared
         let r_squared = r_squared(&y_data, &y_pred);
         self.r_ssquared = Some(r_squared);
@@ -451,34 +565,79 @@ impl Fitting {
     }
     /// extrapolate or interpolate function for arbitrary x values
     pub fn extra_interpolate(&self, x_values: Vec<f64>) -> Vec<f64> {
-        let eq = self.eq.clone();
+        let eq = self.active_equations();
         let map_of_solutions = self.map_of_solutions.clone().unwrap();
-        // set numerical values of fittedd parameters
-        let eq = eq.set_variable_from_map(&map_of_solutions);
-        // turn symbolic equation into function
-        let eq_fun = eq.lambdify1D();
-        // calculate predicted y values
-        let y_pred = x_values.iter().map(|x| eq_fun(*x)).collect::<Vec<f64>>();
-        y_pred
+        evaluate_equations(&eq, &x_values, &map_of_solutions)
     }
     pub fn get_r_squared(&self) -> Option<f64> {
         self.r_ssquared
     }
 
+    /// Return the coefficient of determination for the last successful fit.
+    pub fn r_squared(&self) -> Option<f64> {
+        self.get_r_squared()
+    }
+
+    /// Short alias for [`r_squared`](Self::r_squared).
+    pub fn r2(&self) -> Option<f64> {
+        self.r_squared()
+    }
+
     pub fn get_map_of_solutions(&self) -> Option<HashMap<String, f64>> {
         self.map_of_solutions.clone()
     }
+
+    /// Return the fitted parameter map in a backend-friendly form.
+    ///
+    /// This is the preferred accessor for new code because it reads the same
+    /// way on the classic LM path and on the higher-level wrappers.
+    pub fn solution_map(&self) -> Option<HashMap<String, f64>> {
+        self.get_map_of_solutions()
+    }
+
+    fn active_equations(&self) -> Vec<Expr> {
+        self.equations.clone()
+    }
 }
 
-fn create_residiual_vec(eq: &Expr, arg: String, x_data: Vec<f64>, y_data: Vec<f64>) -> Vec<Expr> {
-    // let y_i = Expr::IndexedVars(x_data.len(), "y").0;
+fn create_residiual_vec(
+    eq_system: &[Expr],
+    arg: String,
+    x_data: Vec<f64>,
+    y_data: Vec<f64>,
+) -> Vec<Expr> {
     let mut residual_vec = Vec::new();
-    for i in 0..x_data.len() {
-        let eq_i = eq.clone().set_variable(&arg, x_data[i]);
-        let residual = eq_i.clone() - Expr::Const(y_data[i]);
-        residual_vec.push(residual);
+    let x_len = x_data.len();
+    assert_eq!(
+        y_data.len(),
+        eq_system.len() * x_len,
+        "Flattened target data must match equation count times x data length."
+    );
+    for (eq_idx, eq) in eq_system.iter().enumerate() {
+        let y_offset = eq_idx * x_len;
+        for i in 0..x_len {
+            let eq_i = eq.clone().set_variable(&arg, x_data[i]);
+            let residual = eq_i.clone() - Expr::Const(y_data[y_offset + i]);
+            residual_vec.push(residual);
+        }
     }
     residual_vec
+}
+
+fn evaluate_equations(
+    eq_system: &[Expr],
+    x_values: &[f64],
+    map_of_solutions: &HashMap<String, f64>,
+) -> Vec<f64> {
+    let mut y_pred = Vec::with_capacity(eq_system.len() * x_values.len());
+    for eq in eq_system {
+        let eq = eq.clone().set_variable_from_map(map_of_solutions);
+        let eq_fun = eq.lambdify1D();
+        for x in x_values {
+            y_pred.push(eq_fun(*x));
+        }
+    }
+    y_pred
 }
 
 pub fn r_squared(y_data: &Vec<f64>, y_pred: &Vec<f64>) -> f64 {
@@ -745,6 +904,91 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_vector_equations_native_expr() {
+        let x_data = vec![1.0, 2.0, 3.0, 4.0];
+        let mut y_data = x_data.iter().map(|&x| 2.0 * x + 1.0).collect::<Vec<f64>>();
+        y_data.extend(x_data.iter().map(|&x| 3.0 * x * x + 4.0));
+
+        let vars = Expr::Symbols("a, b, c, d, x");
+        let a = vars[0].clone();
+        let b = vars[1].clone();
+        let c = vars[2].clone();
+        let d = vars[3].clone();
+        let x = vars[4].clone();
+
+        let eq_system = vec![
+            a.clone() * x.clone() + b.clone(),
+            c * x.clone().pow(Expr::Const(2.0)) + d,
+        ];
+
+        let fitting = Fitting::new()
+            .with_data(x_data, y_data)
+            .with_equations(eq_system)
+            .with_arg("x".to_string())
+            .with_unknowns(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ])
+            .with_initial_guess(vec![1.0, 1.0, 1.0, 1.0])
+            .build();
+
+        let map = fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map["a"], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(map["b"], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(map["c"], 3.0, epsilon = 1e-6);
+        assert_relative_eq!(map["d"], 4.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_vector_equations_imperative_api() {
+        let x_data = vec![1.0, 2.0, 3.0];
+        let mut y_data = x_data.iter().map(|&x| 1.5 * x + 0.5).collect::<Vec<f64>>();
+        y_data.extend(x_data.iter().map(|&x| 2.0 * x * x + 3.0));
+
+        let vars = Expr::Symbols("a, b, c, d, x");
+        let a = vars[0].clone();
+        let b = vars[1].clone();
+        let c = vars[2].clone();
+        let d = vars[3].clone();
+        let x = vars[4].clone();
+
+        let eq_system = vec![
+            a.clone() * x.clone() + b.clone(),
+            c * x.clone().pow(Expr::Const(2.0)) + d,
+        ];
+
+        let mut fitting = Fitting::new();
+        fitting.fitting_generate_from_vec(
+            x_data,
+            y_data,
+            eq_system,
+            Some(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ]),
+            "x".to_string(),
+            vec![1.0, 1.0, 1.0, 1.0],
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        fitting.eq_generate();
+        fitting.solve();
+
+        let map = fitting.map_of_solutions.unwrap();
+        assert_relative_eq!(map["a"], 1.5, epsilon = 1e-6);
+        assert_relative_eq!(map["b"], 0.5, epsilon = 1e-6);
+        assert_relative_eq!(map["c"], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(map["d"], 3.0, epsilon = 1e-6);
+    }
+
+    #[test]
     fn test_builder_quadratic_native_expr() {
         let x_data = (0..50).map(|x| x as f64).collect::<Vec<f64>>();
         let y_data = x_data
@@ -928,7 +1172,7 @@ mod tests {
         assert_relative_eq!(map["d"], 1.0, epsilon = 1e-3);
     }
 
-    // #[test]
+    #[test]
     fn test_builder_power_law_native_expr() {
         // Use smaller range and simpler power for more stable fitting
         let x_data = (1..50).map(|x| x as f64).collect::<Vec<f64>>();
@@ -962,7 +1206,7 @@ mod tests {
         assert_relative_eq!(map["c"], 1.0, epsilon = 1e-4);
     }
 
-    // #[test]
+    #[test]
     fn test_builder_power_law() {
         // Use smaller range and simpler power for more stable fitting
         let x_data = (1..50).map(|x| x as f64).collect::<Vec<f64>>();
@@ -978,7 +1222,7 @@ mod tests {
             .with_unknowns(vec!["a".to_string(), "b".to_string(), "c".to_string()])
             .with_initial_guess(vec![1.5, 0.4, 0.5])
             .with_tolerance(1e-6)
-            .with_max_iterations(300)
+            .with_max_iterations(3000)
             .build();
 
         let map = fitting.map_of_solutions.unwrap();

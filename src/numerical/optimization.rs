@@ -199,3 +199,7 @@ pub mod lm_gavin2;
 ///    
 ///  ```
 pub mod minimize_scalar;
+pub mod universal_fitting;
+pub mod varpro;
+pub mod kinetic_fitting;
+pub use universal_fitting::{Method, UniversalFitting, UniversalFittingResult};

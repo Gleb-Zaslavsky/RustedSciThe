@@ -15,7 +15,7 @@
 //! contract: do not silently compile when a prepared artifact is expected,
 //! but do keep using the snapshot returned by the build phase.
 //! The executable example needs `tcc` available on `PATH`.
-//! run cargo run --example bvp_damped_aot_guide 
+//! run cargo run --example bvp_damped_aot_guide
 use std::collections::HashMap;
 use std::process::Command;
 

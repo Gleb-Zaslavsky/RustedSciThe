@@ -15,7 +15,7 @@
 //! - start with `FiniteDifference` for small systems or quick prototyping;
 //! - move to `AnalyticalPointwise` once the problem becomes medium/large or the
 //!   same model needs to be solved repeatedly with good throughput.
-//! 
+//!
 //! run cargo run --example bvp_sci_numerical_guide
 
 use std::time::Instant;

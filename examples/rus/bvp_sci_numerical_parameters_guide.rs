@@ -11,7 +11,7 @@
 //! Точное решение:
 //! - p = 1
 //! - y(x) = x
-//! 
+//!
 //! запуск: cargo run --example bvp_sci_numerical_parameters_guide
 
 use std::time::Instant;

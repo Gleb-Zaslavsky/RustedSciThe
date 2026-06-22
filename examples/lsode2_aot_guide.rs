@@ -15,7 +15,7 @@
 //!
 //! Note:
 //! this example intentionally checks that `tcc` exists before trying to build.
-//! 
+//!
 //! run cargo run --example lsode2_aot_guide
 
 use RustedSciThe::numerical::LSODE2::{

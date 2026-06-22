@@ -108,7 +108,11 @@ fn three_body_story_base_config() -> Lsode2ProblemConfig {
 
 fn three_body_story_physics_checks(solution: &DMatrix<f64>, times: &DVector<f64>) {
     assert_eq!(solution.nrows(), 12, "three-body state should have 12 rows");
-    assert_eq!(solution.ncols(), times.len(), "solution columns must match time samples");
+    assert_eq!(
+        solution.ncols(),
+        times.len(),
+        "solution columns must match time samples"
+    );
 
     let k = 39.47841760435743;
     let m0 = 1.0;
@@ -163,16 +167,14 @@ fn three_body_story_physics_checks(solution: &DMatrix<f64>, times: &DVector<f64>
         }
 
         max_energy_drift = max_energy_drift.max((energy - initial_energy).abs());
-        max_cm_velocity_drift = max_cm_velocity_drift.max(
-            ((cm_vx - initial_cm_vx).powi(2) + (cm_vy - initial_cm_vy).powi(2)).sqrt(),
-        );
+        max_cm_velocity_drift = max_cm_velocity_drift
+            .max(((cm_vx - initial_cm_vx).powi(2) + (cm_vy - initial_cm_vy).powi(2)).sqrt());
 
         let time = times[i];
         let expected_cm_x = initial_cm_x + initial_cm_vx * time;
         let expected_cm_y = initial_cm_y + initial_cm_vy * time;
-        max_cm_position_drift = max_cm_position_drift.max(
-            ((cm_x - expected_cm_x).powi(2) + (cm_y - expected_cm_y).powi(2)).sqrt(),
-        );
+        max_cm_position_drift = max_cm_position_drift
+            .max(((cm_x - expected_cm_x).powi(2) + (cm_y - expected_cm_y).powi(2)).sqrt());
     }
 
     assert!(max_energy_drift.is_finite());
@@ -180,10 +182,7 @@ fn three_body_story_physics_checks(solution: &DMatrix<f64>, times: &DVector<f64>
     assert!(max_cm_position_drift.is_finite());
 }
 
-fn three_body_story_trajectory_drift(
-    solution: &DMatrix<f64>,
-    baseline: &DMatrix<f64>,
-) -> f64 {
+fn three_body_story_trajectory_drift(solution: &DMatrix<f64>, baseline: &DMatrix<f64>) -> f64 {
     let cols = solution.ncols().min(baseline.ncols());
     let rows = solution.nrows().min(baseline.nrows());
     if cols == 0 || rows == 0 {
@@ -213,14 +212,15 @@ fn three_body_story_config(
             assembly: Lsode2SymbolicAssemblyBackend::AtomView,
             execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
         },
-        "AOT-Ctcc-Whole" | "AOT-Ctcc-Chunk4" | "AOT-Ctcc-Chunk12" =>
+        "AOT-Ctcc-Whole" | "AOT-Ctcc-Chunk4" | "AOT-Ctcc-Chunk12" => {
             Lsode2ResidualJacobianSource::Symbolic {
                 assembly: Lsode2SymbolicAssemblyBackend::AtomView,
                 execution: Lsode2SymbolicExecutionMode::Aot {
                     toolchain: Lsode2AotToolchain::CTcc,
                     profile: Lsode2AotProfile::Release,
                 },
-            },
+            }
+        }
         _ => return None,
     };
 
@@ -234,9 +234,7 @@ fn three_body_story_config(
             .with_native_sparse_faer_aot_c_tcc(output_dir)
             .with_aot_parallel_chunking(12),
         ("Banded", "Lambdify") => base.with_native_banded_faithful_backend(),
-        ("Banded", "AOT-Ctcc-Whole") => {
-            base.with_native_banded_faithful_aot_c_tcc(output_dir)
-        }
+        ("Banded", "AOT-Ctcc-Whole") => base.with_native_banded_faithful_aot_c_tcc(output_dir),
         ("Banded", "AOT-Ctcc-Chunk4") => base
             .with_native_banded_faithful_aot_c_tcc(output_dir)
             .with_aot_parallel_chunking(4),
@@ -263,10 +261,8 @@ fn three_body_story_chunking_summary(config: &Lsode2ProblemConfig) -> String {
     let jacobian_rows = residual_outputs;
     let residual_chunks =
         story_residual_chunk_count(residual_outputs, generated.aot_options.residual_strategy);
-    let jacobian_chunks = story_dense_jacobian_chunk_count(
-        jacobian_rows,
-        generated.aot_options.jacobian_strategy,
-    );
+    let jacobian_chunks =
+        story_dense_jacobian_chunk_count(jacobian_rows, generated.aot_options.jacobian_strategy);
     let sparse_chunks =
         story_sparse_chunk_count(jacobian_rows, generated.sparse_jacobian_chunking_strategy);
     let residual_work_per_chunk = residual_outputs.div_ceil(residual_chunks.max(1)).max(1);
@@ -289,12 +285,18 @@ fn three_body_story_chunking_summary(config: &Lsode2ProblemConfig) -> String {
 
 fn assert_three_body_whole_route_is_unchunked(config: &Lsode2ProblemConfig) {
     let generated = &config.backend.generated_backend;
-    let residual_is_whole =
-        matches!(generated.aot_options.residual_strategy, ResidualChunkingStrategy::Whole);
-    let jacobian_is_whole =
-        matches!(generated.aot_options.jacobian_strategy, DenseJacobianChunkingStrategy::Whole);
-    let sparse_is_whole =
-        matches!(generated.sparse_jacobian_chunking_strategy, SparseChunkingStrategy::Whole);
+    let residual_is_whole = matches!(
+        generated.aot_options.residual_strategy,
+        ResidualChunkingStrategy::Whole
+    );
+    let jacobian_is_whole = matches!(
+        generated.aot_options.jacobian_strategy,
+        DenseJacobianChunkingStrategy::Whole
+    );
+    let sparse_is_whole = matches!(
+        generated.sparse_jacobian_chunking_strategy,
+        SparseChunkingStrategy::Whole
+    );
     assert!(
         residual_is_whole && jacobian_is_whole && sparse_is_whole,
         "three-body whole route must stay unchunked, got residual={:?}, jacobian={:?}, sparse={:?}",
@@ -313,14 +315,14 @@ fn story_residual_chunk_count(total_outputs: usize, strategy: ResidualChunkingSt
         }
         ResidualChunkingStrategy::ByOutputCount {
             max_outputs_per_chunk,
-        } => total_outputs.max(1).div_ceil(max_outputs_per_chunk.max(1)).max(1),
+        } => total_outputs
+            .max(1)
+            .div_ceil(max_outputs_per_chunk.max(1))
+            .max(1),
     }
 }
 
-fn story_dense_jacobian_chunk_count(
-    rows: usize,
-    strategy: DenseJacobianChunkingStrategy,
-) -> usize {
+fn story_dense_jacobian_chunk_count(rows: usize, strategy: DenseJacobianChunkingStrategy) -> usize {
     match strategy {
         DenseJacobianChunkingStrategy::Whole => 1,
         DenseJacobianChunkingStrategy::ByTargetChunkCount { target_chunks } => {
@@ -355,7 +357,9 @@ fn run_three_body_story_sample_result(
     let started_total = Instant::now();
     let mut solver = Lsode2Solver::new(config).map_err(|err| short_error(&err.to_string()))?;
     let started_prepare = Instant::now();
-    solver.prepare().map_err(|err| short_error(&err.to_string()))?;
+    solver
+        .prepare()
+        .map_err(|err| short_error(&err.to_string()))?;
     let prepare_ms = started_prepare.elapsed().as_secs_f64() * 1_000.0;
     let started_solve = Instant::now();
     let summary = solver
@@ -491,8 +495,11 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
         "target/lsode2-three-body-story/lambdify",
     )
     .expect("lambdify baseline config should build");
-    let mut baseline_solver = Lsode2Solver::new(baseline_cfg).expect("baseline solver should build");
-    baseline_solver.prepare().expect("baseline prepare should succeed");
+    let mut baseline_solver =
+        Lsode2Solver::new(baseline_cfg).expect("baseline solver should build");
+    baseline_solver
+        .prepare()
+        .expect("baseline prepare should succeed");
     let baseline_summary = baseline_solver
         .solve_with_summary()
         .expect("baseline three-body solve should finish");
@@ -646,10 +653,8 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
             .unwrap_or(1);
         let residual_outputs = cfg.eq_system.len().max(1);
         let jacobian_rows = residual_outputs;
-        let residual_chunks = story_residual_chunk_count(
-            residual_outputs,
-            generated.aot_options.residual_strategy,
-        );
+        let residual_chunks =
+            story_residual_chunk_count(residual_outputs, generated.aot_options.residual_strategy);
         let jacobian_chunks = story_dense_jacobian_chunk_count(
             jacobian_rows,
             generated.aot_options.jacobian_strategy,
@@ -732,12 +737,9 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
             if mean_diff > 1.0e-4 {
                 eprintln!(
                     "[LSODE2 three-body] diagnostic warning: {} {} final_diff={:e}",
-                    row.matrix,
-                    row.route,
-                    mean_diff
+                    row.matrix, row.route, mean_diff
                 );
             }
         }
     }
 }
-

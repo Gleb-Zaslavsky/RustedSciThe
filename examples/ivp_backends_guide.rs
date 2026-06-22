@@ -15,9 +15,8 @@
 //! 2. How do I switch that IVP to `C + tcc` or `C + gcc`?
 //! 3. Which backend is a reasonable default for `BE` and `BDF`?
 //! 4. Where do I get statistics instead of reading test code?
-//! 
+//!
 //! run cargo run --example ivp_backends_guide
-
 
 use std::process::Command;
 use std::time::Instant;

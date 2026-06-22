@@ -183,15 +183,17 @@ impl Expr {
                 }
             }
             Expr::Pow(base, exp) => {
+                let base_diff = base.differentiate_single_pass(var);
+                let exp_diff = exp.differentiate_single_pass(var);
+
                 if let Expr::Const(n) = **exp {
                     if n == 0.0 {
                         return Expr::Const(0.0);
                     }
                     if n == 1.0 {
-                        return base.differentiate_single_pass(var);
+                        return base_diff;
                     }
 
-                    let base_diff = base.differentiate_single_pass(var);
                     if let Expr::Const(0.0) = base_diff {
                         Expr::Const(0.0)
                     } else {
@@ -203,7 +205,18 @@ impl Expr {
 
                         Self::cheap_mul(Expr::Const(n), Self::cheap_mul(power_term, base_diff))
                     }
-                } else {
+                } else if let Expr::Const(0.0) = base_diff {
+                    if let Expr::Const(0.0) = exp_diff {
+                        Expr::Const(0.0)
+                    } else {
+                        // d(a^v)/dx = a^v * v' * ln(a). This is needed for
+                        // parameterized powers such as x^b in fitting problems.
+                        Self::cheap_mul(
+                            Self::cheap_pow(base.as_ref().clone(), exp.as_ref().clone()),
+                            Self::cheap_mul(exp_diff, Expr::Ln(base.clone())),
+                        )
+                    }
+                } else if let Expr::Const(0.0) = exp_diff {
                     Self::cheap_mul(
                         Self::cheap_mul(
                             exp.as_ref().clone(),
@@ -212,7 +225,20 @@ impl Expr {
                                 Self::cheap_sub(exp.as_ref().clone(), Expr::Const(1.0)),
                             ),
                         ),
-                        base.differentiate_single_pass(var),
+                        base_diff,
+                    )
+                } else {
+                    // General real power rule:
+                    // d(u^v) = u^v * (v' * ln(u) + v * u' / u).
+                    Self::cheap_mul(
+                        Self::cheap_pow(base.as_ref().clone(), exp.as_ref().clone()),
+                        Self::cheap_add(
+                            Self::cheap_mul(exp_diff, Expr::Ln(base.clone())),
+                            Self::cheap_mul(
+                                exp.as_ref().clone(),
+                                Self::cheap_div(base_diff, base.as_ref().clone()),
+                            ),
+                        ),
                     )
                 }
             }
@@ -379,16 +405,40 @@ impl Expr {
                 )),
                 Box::new(Expr::Mul(rhs.clone(), rhs.clone())),
             ),
-            Expr::Pow(base, exp) => Expr::Mul(
-                Box::new(Expr::Mul(
-                    exp.clone(),
-                    Box::new(Expr::Pow(
-                        base.clone(),
-                        Box::new(Expr::Sub(exp.clone(), Box::new(Expr::Const(1.0)))),
-                    )),
-                )),
-                Box::new(base.differentiate_raw(var)),
-            ),
+            Expr::Pow(base, exp) => {
+                let base_diff = base.differentiate_raw(var);
+                let exp_diff = exp.differentiate_raw(var);
+
+                if let Expr::Const(n) = exp.as_ref() {
+                    Expr::Mul(
+                        Box::new(Expr::Mul(
+                            Box::new(Expr::Const(*n)),
+                            Box::new(Expr::Pow(
+                                base.clone(),
+                                Box::new(Expr::Sub(
+                                    Box::new(Expr::Const(*n)),
+                                    Box::new(Expr::Const(1.0)),
+                                )),
+                            )),
+                        )),
+                        Box::new(base_diff),
+                    )
+                } else {
+                    Expr::Mul(
+                        Box::new(Expr::Pow(base.clone(), exp.clone())),
+                        Box::new(Expr::Add(
+                            Box::new(Expr::Mul(
+                                Box::new(exp_diff),
+                                Box::new(Expr::Ln(base.clone())),
+                            )),
+                            Box::new(Expr::Mul(
+                                exp.clone(),
+                                Box::new(Expr::Div(Box::new(base_diff), base.clone())),
+                            )),
+                        )),
+                    )
+                }
+            }
             Expr::Exp(expr) => Expr::Mul(
                 Box::new(Expr::Exp(expr.clone())),
                 Box::new(expr.differentiate_raw(var)),

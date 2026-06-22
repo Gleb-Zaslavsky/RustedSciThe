@@ -17,7 +17,7 @@
 //! Почему здесь sparse:
 //! эту маленькую систему можно было бы сделать и dense, но sparse-настройка
 //! демонстрирует production-ориентированный путь, который важен на больших якобианах.
-//! 
+//!
 //! запуск: cargo run --example lsode2_lambdify_guide
 
 use RustedSciThe::numerical::LSODE2::{

@@ -15,7 +15,7 @@
 //!
 //! Примечание:
 //! пример специально проверяет наличие `tcc` перед сборкой.
-//! 
+//!
 //! запуск: cargo run --example lsode2_aot_guide
 
 use RustedSciThe::numerical::LSODE2::{

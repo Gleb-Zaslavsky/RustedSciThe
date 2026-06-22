@@ -99,6 +99,22 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_power_with_variable_exponent() {
+        let x = Expr::Var("x".to_string());
+        let b = Expr::Var("b".to_string());
+        let f = x.clone().pow(b.clone());
+
+        // d(x^b)/db = x^b * ln(x). This column is essential for fitting
+        // models such as a*x^b + c with an analytic Jacobian.
+        let df_db = f.diff("b").simplify();
+        let df_db_func = df_db.lambdify1(&["x", "b"]);
+        let value = df_db_func(&vec![4.0, 0.5]);
+        let expected = 4.0_f64.powf(0.5) * 4.0_f64.ln();
+
+        assert!((value - expected).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_sym_to_str() {
         let x = Expr::Var("x".to_string());
         let f = Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(2.0)));

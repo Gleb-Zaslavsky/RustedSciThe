@@ -12,7 +12,7 @@
 //! The runnable code below is the supported replacement for a hypothetical
 //! Frozen numerical call: it solves the same linear BVP through Damped with a
 //! residual closure and an analytical continuous Jacobian.
-//! 
+//!
 //! run cargo run --example bvp_frozen_numerical_route_guide
 
 use std::collections::HashMap;

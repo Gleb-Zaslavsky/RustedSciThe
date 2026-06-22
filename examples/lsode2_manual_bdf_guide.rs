@@ -3,8 +3,8 @@
 //! Why:
 //! LSODE-style workflows often need explicit method control.
 //! This guide shows how to force BDF family explicitly.
-//! 
-//! 
+//!
+//!
 //! run cargo run --example lsode2_manual_bdf_guide
 //!
 

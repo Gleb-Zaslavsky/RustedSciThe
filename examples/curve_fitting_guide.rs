@@ -6,7 +6,7 @@
 //!
 //! The solver automatically generates analytical Jacobians from symbolic
 //! expressions for efficient and accurate parameter estimation.
-//! 
+//!
 //! run cargo run --example curve_fitting_guide
 
 use RustedSciThe::numerical::optimization::sym_fitting::Fitting;
