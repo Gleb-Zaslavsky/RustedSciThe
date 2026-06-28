@@ -4,9 +4,10 @@ use super::algorithm::{
     Lsode2SwitchTelemetry,
 };
 use super::config::{
-    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2NativeExecutionConfig,
-    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2ResolvedPlan, Lsode2StopComparator,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2LinearSystemStructure,
+    Lsode2NativeExecutionConfig, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
+    Lsode2ResolvedPlan, Lsode2StopComparator, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
@@ -134,10 +135,135 @@ pub struct Lsode2SolveSummary {
     pub algorithm: Lsode2AlgorithmSnapshot,
     pub statistics: IvpBackendStatistics,
     pub native_statistics: Lsode2NativeStatistics,
+    pub evaluation_telemetry: Lsode2EvaluationTelemetry,
     pub native_step_probe: Option<Lsode2NativeStepProbeSummary>,
     pub native_integration_preview: Option<Lsode2NativeIntegrationSummary>,
     pub native_integration_solve: Option<Lsode2NativeIntegrationSummary>,
     pub native_termination_kind: Option<&'static str>,
+}
+
+/// Counter/timer scope selected for user-facing LSODE2 solve diagnostics.
+///
+/// Bridge/BDF and faithful-native routes count different execution layers.  The
+/// bridge counters describe BDF-level residual/Jacobian callbacks, while native
+/// counters describe the faithful native nonlinear inner loop.  This view makes
+/// the active scope explicit so story tests do not compare unrelated counters
+/// as if they were the same physical event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lsode2TelemetryScope {
+    None,
+    BridgeBdfCallbacks,
+    NativeFaithfulInnerLoop,
+}
+
+impl Lsode2TelemetryScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::BridgeBdfCallbacks => "bridge_bdf_callbacks",
+            Self::NativeFaithfulInnerLoop => "native_faithful_inner_loop",
+        }
+    }
+
+    pub fn counter_note(self) -> &'static str {
+        match self {
+            Self::None => "no solver evaluation counters were recorded",
+            Self::BridgeBdfCallbacks => {
+                "residual/jacobian counters are BDF-level callback evaluations"
+            }
+            Self::NativeFaithfulInnerLoop => {
+                "residual/jacobian counters are faithful native nonlinear inner-loop evaluations"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lsode2EvaluationTelemetry {
+    pub scope: Lsode2TelemetryScope,
+    pub residual_evaluations: usize,
+    pub jacobian_evaluations: usize,
+    pub linear_solves: usize,
+    pub residual_ms_total: f64,
+    pub jacobian_ms_total: f64,
+    pub linear_ms_total: f64,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+}
+
+impl Default for Lsode2EvaluationTelemetry {
+    fn default() -> Self {
+        Self {
+            scope: Lsode2TelemetryScope::None,
+            residual_evaluations: 0,
+            jacobian_evaluations: 0,
+            linear_solves: 0,
+            residual_ms_total: 0.0,
+            jacobian_ms_total: 0.0,
+            linear_ms_total: 0.0,
+            accepted_steps: 0,
+            rejected_steps: 0,
+        }
+    }
+}
+
+impl Lsode2EvaluationTelemetry {
+    fn from_statistics(
+        status: &str,
+        statistics: &IvpBackendStatistics,
+        native: &Lsode2NativeStatistics,
+    ) -> Self {
+        let native_has_activity = native.native_step_attempts > 0
+            || native.native_residual_calls > 0
+            || native.native_jacobian_calls > 0
+            || native.native_linear_solve_calls > 0;
+        let native_status =
+            status == "finished_native_faithful" || status == "finished_native_faithful_partial";
+        if native_status || native_has_activity {
+            return Self {
+                scope: Lsode2TelemetryScope::NativeFaithfulInnerLoop,
+                residual_evaluations: native.native_residual_calls,
+                jacobian_evaluations: native.native_jacobian_calls,
+                linear_solves: native.native_linear_solve_calls,
+                residual_ms_total: native.native_residual_ms_total,
+                jacobian_ms_total: native.native_jacobian_ms_total,
+                linear_ms_total: native.native_linear_solve_ms_total,
+                accepted_steps: native.native_step_accepts,
+                rejected_steps: native.native_step_rejects_error_test
+                    + native.native_step_rejects_nonlinear,
+            };
+        }
+
+        let bridge_has_activity = statistics.solve_calls > 0
+            || statistics.step_calls > 0
+            || statistics.residual_calls > 0
+            || statistics.jacobian_calls > 0
+            || native.bridge_solve_calls > 0
+            || native.bridge_step_calls > 0;
+        if bridge_has_activity {
+            return Self {
+                scope: Lsode2TelemetryScope::BridgeBdfCallbacks,
+                residual_evaluations: statistics.residual_calls.max(native.bridge_residual_calls),
+                jacobian_evaluations: statistics.jacobian_calls.max(native.bridge_jacobian_calls),
+                linear_solves: statistics.bdf_nlu_total.max(native.bridge_bdf_nlu_total),
+                residual_ms_total: if statistics.residual_ms_total > 0.0 {
+                    statistics.residual_ms_total
+                } else {
+                    native.bridge_residual_ms_total
+                },
+                jacobian_ms_total: if statistics.jacobian_ms_total > 0.0 {
+                    statistics.jacobian_ms_total
+                } else {
+                    native.bridge_jacobian_ms_total
+                },
+                linear_ms_total: 0.0,
+                accepted_steps: native.bridge_accepted_steps,
+                rejected_steps: 0,
+            };
+        }
+
+        Self::default()
+    }
 }
 
 /// First LSODE2 solver facade.
@@ -824,6 +950,11 @@ impl Lsode2Solver {
             DVector::from_iterator(y.ncols(), (0..y.ncols()).map(|col| y[(y.nrows() - 1, col)]))
         });
         let max_abs_solution = y.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let statistics = self.statistics();
+        let native_statistics = self.native_statistics();
+        let status = self.status().to_string();
+        let evaluation_telemetry =
+            Lsode2EvaluationTelemetry::from_statistics(&status, &statistics, &native_statistics);
 
         Lsode2SolveSummary {
             method: self.config.method.label(),
@@ -832,15 +963,16 @@ impl Lsode2Solver {
             linear_solver_reason: self.resolved_plan.linear_solver_reason,
             resolved_source: self.resolved_plan.source.label(),
             resolved_structure: self.resolved_plan.structure.label(),
-            status: self.status().to_string(),
+            status,
             time_points: t.len(),
             variable_count: y.ncols(),
             final_t,
             final_y,
             max_abs_solution,
             algorithm: self.algorithm_snapshot(),
-            statistics: self.statistics(),
-            native_statistics: self.native_statistics(),
+            statistics,
+            native_statistics,
+            evaluation_telemetry,
             native_step_probe: self.native_step_probe.clone(),
             native_integration_preview: self.native_integration_preview.clone(),
             native_integration_solve: self.native_integration_solve.clone(),
@@ -1205,7 +1337,15 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
     let storage = match config.backend.linear_solver_backend {
         Lsode2LinearSolverBackend::Dense => return,
         Lsode2LinearSolverBackend::SparseFaer => NativeJacobianStorage::SparseTriplets,
-        Lsode2LinearSolverBackend::BandedFaithful => NativeJacobianStorage::Banded,
+        Lsode2LinearSolverBackend::BandedFaithful => match config.linear_system_structure {
+            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 } => {
+                NativeJacobianStorage::Banded { bandwidth: None }
+            }
+            Lsode2LinearSystemStructure::Banded { kl, ku } => NativeJacobianStorage::Banded {
+                bandwidth: Some((kl, ku)),
+            },
+            _ => NativeJacobianStorage::Banded { bandwidth: None },
+        },
     };
 
     let equations = config.eq_system.clone();
@@ -1264,6 +1404,80 @@ mod tests {
         Lsode2ControllerConfig, Lsode2MethodFamily, Lsode2SwitchReason,
     };
     use crate::symbolic::symbolic_engine::Expr;
+
+    #[test]
+    fn evaluation_telemetry_uses_bridge_scope_for_bridge_bdf_counters() {
+        let statistics = IvpBackendStatistics {
+            solve_calls: 1,
+            step_calls: 7,
+            residual_calls: 11,
+            residual_ms_total: 1.25,
+            jacobian_calls: 5,
+            jacobian_ms_total: 0.75,
+            bdf_nlu_total: 4,
+            ..IvpBackendStatistics::default()
+        };
+        let mut native = Lsode2NativeStatistics::default();
+        native.bridge_accepted_steps = 6;
+
+        let telemetry =
+            Lsode2EvaluationTelemetry::from_statistics("finished", &statistics, &native);
+
+        assert_eq!(telemetry.scope, Lsode2TelemetryScope::BridgeBdfCallbacks);
+        assert_eq!(telemetry.scope.label(), "bridge_bdf_callbacks");
+        assert!(telemetry.scope.counter_note().contains("BDF-level"));
+        assert_eq!(telemetry.residual_evaluations, 11);
+        assert_eq!(telemetry.jacobian_evaluations, 5);
+        assert_eq!(telemetry.linear_solves, 4);
+        assert_eq!(telemetry.accepted_steps, 6);
+        assert_eq!(telemetry.rejected_steps, 0);
+        assert_eq!(telemetry.residual_ms_total, 1.25);
+        assert_eq!(telemetry.jacobian_ms_total, 0.75);
+        assert_eq!(telemetry.linear_ms_total, 0.0);
+    }
+
+    #[test]
+    fn evaluation_telemetry_prefers_native_scope_for_faithful_native_runs() {
+        let statistics = IvpBackendStatistics {
+            solve_calls: 1,
+            residual_calls: 999,
+            jacobian_calls: 777,
+            bdf_nlu_total: 333,
+            ..IvpBackendStatistics::default()
+        };
+        let mut native = Lsode2NativeStatistics::default();
+        native.native_step_attempts = 12;
+        native.native_step_accepts = 10;
+        native.native_step_rejects_error_test = 1;
+        native.native_step_rejects_nonlinear = 1;
+        native.native_residual_calls = 42;
+        native.native_residual_ms_total = 3.5;
+        native.native_jacobian_calls = 9;
+        native.native_jacobian_ms_total = 2.0;
+        native.native_linear_solve_calls = 8;
+        native.native_linear_solve_ms_total = 1.25;
+
+        let telemetry = Lsode2EvaluationTelemetry::from_statistics(
+            "finished_native_faithful",
+            &statistics,
+            &native,
+        );
+
+        assert_eq!(
+            telemetry.scope,
+            Lsode2TelemetryScope::NativeFaithfulInnerLoop
+        );
+        assert_eq!(telemetry.scope.label(), "native_faithful_inner_loop");
+        assert!(telemetry.scope.counter_note().contains("inner-loop"));
+        assert_eq!(telemetry.residual_evaluations, 42);
+        assert_eq!(telemetry.jacobian_evaluations, 9);
+        assert_eq!(telemetry.linear_solves, 8);
+        assert_eq!(telemetry.accepted_steps, 10);
+        assert_eq!(telemetry.rejected_steps, 2);
+        assert_eq!(telemetry.residual_ms_total, 3.5);
+        assert_eq!(telemetry.jacobian_ms_total, 2.0);
+        assert_eq!(telemetry.linear_ms_total, 1.25);
+    }
 
     #[test]
     fn native_method_selector_uses_executable_family_when_fallback_is_active() {

@@ -8,6 +8,7 @@ use nalgebra::{DMatrix, DVector};
 use num_traits::Float;
 // Global boolean flag to control MINPACK compatibility
 pub const MINPACK_COMPAT: bool = false; // Set to true for MINPACK compatibility, false for modern behavior
+
 /*
 #[cfg(test)]
 #[allow(

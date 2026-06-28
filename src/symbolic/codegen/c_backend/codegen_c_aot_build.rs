@@ -286,13 +286,10 @@ impl CAotBuildRequest {
         std::fs::create_dir_all(&artifact_dir)?;
         let artifact_dir = absolute_nonverbatim(&artifact_dir)?;
 
-        let expected_filename = if cfg!(target_os = "windows") {
-            format!("lib{}.dll", self.library_spec.library_name)
-        } else if cfg!(target_os = "macos") {
-            format!("lib{}.dylib", self.library_spec.library_name)
-        } else {
-            format!("lib{}.so", self.library_spec.library_name)
-        };
+        let expected_filename = c_shared_library_filename(&self.library_spec.library_name);
+        let relative_expected_so = PathBuf::from("build")
+            .join(self.profile.target_dir_component())
+            .join(&expected_filename);
         let expected_so = artifact_dir.join(expected_filename);
 
         let requested_program = self
@@ -313,7 +310,7 @@ impl CAotBuildRequest {
             "-Wall".to_string(),
             "-Wextra".to_string(),
             "-o".to_string(),
-            expected_so.to_string_lossy().into_owned(),
+            relative_expected_so.to_string_lossy().into_owned(),
             "generated.c".to_string(),
             "aot_interface.c".to_string(),
         ];
@@ -409,6 +406,27 @@ impl ExecutedCAotBuild {
     }
 }
 
+fn c_shared_library_filename(library_name: &str) -> String {
+    let suffix = library_name
+        .rsplit('_')
+        .find(|part| !part.is_empty())
+        .unwrap_or(library_name);
+    let stem = if suffix.len() >= 8 {
+        suffix
+    } else {
+        library_name
+    };
+    let short_stem: String = stem.chars().take(16).collect();
+    let extension = if cfg!(target_os = "windows") {
+        "dll"
+    } else if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    format!("libaot_{short_stem}.{extension}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,7 +497,28 @@ mod tests {
         assert!(result.written.makefile.exists());
         assert!(result.written.generated_c.exists());
         assert!(result.written.generated_h.exists());
+        let output_arg = result
+            .build_args
+            .windows(2)
+            .find(|pair| pair[0] == "-o")
+            .map(|pair| pair[1].clone())
+            .expect("C build command should contain an output argument");
+        assert!(
+            output_arg.starts_with("build"),
+            "C build output should be relative to keep tcc happy on deep Windows paths: {output_arg}"
+        );
         assert_eq!(result.build_workdir(), result.written.library_dir.as_path());
+    }
+
+    #[test]
+    fn c_shared_library_filename_keeps_tcc_outputs_short() {
+        let filename =
+            c_shared_library_filename("generated_ivp_residual_534b35bdcbb8f0ed_very_long_tail");
+        assert!(
+            filename.len() <= 32,
+            "C AOT filenames should remain short for tcc .def emission: {filename}"
+        );
+        assert!(filename.starts_with("libaot_"));
     }
 
     #[test]

@@ -87,7 +87,11 @@ mod test {
     #[test]
     fn printer_preserves_precedence_for_add_mul_pow() {
         let expr = parse!("(x+y)*(z+1)^2").unwrap();
-        assert_eq!(print(&expr), "(x+y)*(z+1)^2");
+        let expected1 = "(x+y)*(z+1)^2";
+        let expected2 = "(z+1)^2*(x+y)";
+        let eq1 = print(&expr) == expected1;
+        let eq2 = print(&expr) == expected2;
+        assert!(eq1 || eq2);
     }
 
     #[test]

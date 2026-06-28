@@ -187,7 +187,7 @@ pub fn render_task_check(spec: &ParsedTaskSpec) -> String {
 }
 
 fn render_ivp_preview(spec: &IvpTaskSpec) -> String {
-    let method = ivp_method_name(&spec.solver.method);
+    let method = ivp_method_label(&spec.solver.method);
     let mut out = String::new();
     out.push_str("[Task preview] IVP\n");
     out.push_str(&format!(
@@ -241,7 +241,7 @@ fn render_ivp_check(spec: &IvpTaskSpec) -> String {
     out.push_str("[Task check] IVP\n");
     out.push_str(&format!(
         "solver=IVP, method={}, arg={}, t0={}, t_end={}\n",
-        ivp_method_name(&spec.solver.method),
+        ivp_method_label(&spec.solver.method),
         spec.equations.arg,
         spec.initial_conditions.t0,
         spec.initial_conditions.t_end
@@ -288,14 +288,14 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
     out
 }
 
-fn ivp_method_name(method: &IvpMethodSpec) -> &'static str {
+fn ivp_method_label(method: &IvpMethodSpec) -> String {
     match method {
-        IvpMethodSpec::NonStiff(_) => "NonStiff",
-        IvpMethodSpec::Radau3 => "Radau3",
-        IvpMethodSpec::Radau5 => "Radau5",
-        IvpMethodSpec::Bdf => "BDF",
-        IvpMethodSpec::BackwardEuler => "BackwardEuler",
-        IvpMethodSpec::Lsode2 => "LSODE2",
+        IvpMethodSpec::NonStiff(name) => name.clone(),
+        IvpMethodSpec::Radau3 => "Radau3".to_string(),
+        IvpMethodSpec::Radau5 => "Radau5".to_string(),
+        IvpMethodSpec::Bdf => "BDF".to_string(),
+        IvpMethodSpec::BackwardEuler => "BackwardEuler".to_string(),
+        IvpMethodSpec::Lsode2 => "LSODE2".to_string(),
     }
 }
 

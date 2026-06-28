@@ -417,6 +417,27 @@ terminal, BVP и task parser вызывают эти функции напрям
 пользовательский формат документов является публичной поверхностью и требует
 регрессионной дисциплины.
 
+- [ ] CLI/task-shell UX contract audit. Current `src/main.rs` is usable and
+  already supports `<task-file>`, `--check`, `convert`, `convert_check`,
+  `--template ivp|bvp` and `--showcase`, while `ivp_dialogue.rs` /
+  `bvp_dialogue.rs` generate parser-ready templates for many current routes.
+  Remaining risk: command discovery, help text, generated templates,
+  `examples/task_docs/*`, task parser grammar and `TASK_DOCS_GUIDE_*` can drift
+  independently. First hardening step should be contract tests around:
+  help/showcase output mentions all supported top-level commands; every
+  generated template parses and passes `render_task_check`; representative CLI
+  subprocess tests cover `--check`, `convert_check`, and template creation into
+  a temp dir. Prefer this before changing UX architecture.
+- [ ] Evaluate migrating manual argument parsing in `main.rs` to `clap` once the
+  command surface is stable. Recommended direction: `clap` subcommands
+  (`run`, `check`, `convert`, `convert-check`, `template`, `showcase`) with
+  backward-compatible aliases for existing invocations. This would improve
+  discoverability, shell completion and error messages without changing task
+  document semantics.
+- [ ] Keep `dialoguer` as the default template wizard for now. `ratatui` should
+  be considered only if we deliberately want a full-screen task-document editor
+  with preview/check panels. For the current needs, Ratatui would add significant
+  UI state/testing complexity without solving the parser/help drift problem.
 - [ ] Поддерживать end-to-end task-doc fixtures для IVP и BVP после изменений
   синтаксиса, substitutions и solver configuration.
 - [ ] Проверить, что examples/task docs и `TASK_DOCS_GUIDE_EN.md` отражают
@@ -994,6 +1015,70 @@ LSODE2: Архитектурное ревью — от быстрых побед
 Выгода: Возможность добавлять новые linear solvers без изменения кода LSODE2.
 
 Предложение: Выделить трейт LinearSolverBackend с методами factorize(&mut self, matrix: ...) -> Result<()> и solve(&self, rhs: &mut [f64]) -> Result<()>. Три существующих имплементации. Lsode2NativeStepEngine параметризуется impl LinearSolverBackend.
+LSODE2 review triage, 2026-06-26
+
+Checked against current code after the unified postprocessing facade:
+- DONE: LSODE2 already exposes `postprocess_dataset()` and
+  `execute_postprocessing()` through `Utils::postprocessing`.
+- DONE: Direct LSODE2 postprocessing is now covered by a contract test that
+  checks shape/orientation: axis length == value rows, variables == value
+  columns, and the initial condition survives in the first dataset row.
+- DONE: IVP task documents with `method: LSODE2` are covered by a runner test
+  that executes modern postprocessing (`save_csv`, `write_report`) through the
+  shared facade.
+
+AI-review items that still look performance/correctness-relevant, not just
+style:
+- FD Jacobian path: VERIFIED and fixed to the safe boundary. Sparse/banded finite
+  differences no longer build a dense `n x n` intermediate before converting to
+  solver storage; they emit sparse triplets / compact banded storage directly.
+  Banded FD storage now also carries an explicit `Option<(kl, ku)>` bandwidth
+  contract: `None` means infer after scan, `Some((kl, ku))` means trust the
+  declared band and avoid scanning/storing off-band rows. Unit tests cover
+  sparse storage, inferred banded storage and declared-band behavior. Remaining
+  deeper optimization would require a new residual-row callback contract,
+  because the current residual closure returns the full vector; do not fake
+  row-skipping behind that API.
+- AOT cold matrix lifecycle: FIXED for
+  `lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix`.
+  The failure was an artifact-path/toolchain lifecycle issue rather than LSODE2
+  mathematics: tcc failed to emit a sidecar `.def` for long deep output names,
+  Zig failed when its build-runner cache lived under the deep generated crate,
+  and Rust/MSVC failed on a long generated cdylib path. The current fix keeps C
+  output filenames short and relative to the build workdir, moves Zig cache dirs
+  to a short external cache root, and shortens default IVP AOT crate/module names
+  while preserving explicit user overrides. Verified with a one-repeat full
+  cold matrix: Lambdify plus tcc/gcc/zig/rust, Sparse/Banded, whole/parallel all
+  reported `ok 1/1`.
+- Config consistency: COVERED by parser/build-config regression tests around
+  LSODE2 controller family, symbolic assembly/execution, AOT toolchain mapping,
+  `lsode2_linear_structure`, `lsode2_linear_solver_policy`, and resolved-plan
+  reasons. During this pass the task-document route no longer calls
+  `with_backend(...)` merely to force `SymbolicGenerated`, because that legacy
+  compatibility API re-inferred `Auto` linear policy as `Force(...)` after
+  parser-side resolution. A full `ResolvedPlan` refactor remains optional until
+  tests expose deeper inconsistent state.
+- Diagnostics/statistics semantics: BASELINE COVERED. `Lsode2SolveSummary` now
+  exposes `evaluation_telemetry` with an explicit `counter_scope`
+  (`bridge_bdf_callbacks` vs `native_faithful_inner_loop`) instead of asking
+  story tests to infer semantics from route names or mixed `max(...)` counters.
+  Unit tests cover bridge-scope and native-scope selection, and the three-body
+  story stage table prints `counter_scope` before residual/Jacobian/linear
+  counters. Remaining work is opportunistic cleanup of older LSODE2 story
+  tables if they need the same normalized view.
+- Fortran parity: PARTIALLY HARDENED. Basic switch handoff and one concrete
+  post-switch retry/error-window contract are now parity-locked: a real switch
+  exposes `MUSED/MCUR/TSW/JSTART=-1`, DSTODA retry choreography does not mutate
+  that trace, and the next no-switch method decision consumes the one-step
+  `JSTART=-1` visibility without changing `TSW`. Remaining work is still
+  hardening-class: do not refactor method-switch/order-selection internals
+  without adding side-by-side trace tests for the specific rare window being
+  touched.
+
+Items treated as backlog/style unless a failing test or benchmark proves impact:
+- Splitting large LSODE2 files, replacing enums with traits, generated builders,
+  macro-generated counters, and broad class-responsibility refactors.
+
 //===================================================================================================================================================================================
 
 

@@ -58,6 +58,18 @@ fn lsode2_solver_execute_postprocessing_writes_report_and_csv() {
         Lsode2Solver::new(exponential_decay_config()).expect("LSODE2 config should build");
 
     solver.solve().expect("LSODE2 solve should complete");
+    let dataset = solver
+        .postprocess_dataset()
+        .expect("LSODE2 result should convert to a postprocessing dataset");
+    assert_eq!(dataset.axis_name, "t");
+    assert_eq!(dataset.variable_names, vec!["y".to_string()]);
+    assert_eq!(dataset.axis.len(), dataset.values.nrows());
+    assert_eq!(dataset.values.ncols(), 1);
+    assert!(
+        (dataset.values[(0, 0)] - 1.0).abs() < 1e-12,
+        "first postprocessing row must preserve the initial condition"
+    );
+
     let report = solver
         .execute_postprocessing(
             &crate::Utils::postprocessing::PostprocessPlan::new()

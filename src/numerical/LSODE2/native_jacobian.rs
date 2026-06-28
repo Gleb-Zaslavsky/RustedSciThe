@@ -20,7 +20,7 @@ type CompiledEntry = (usize, usize, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>);
 pub enum NativeJacobianStorage {
     Dense,
     SparseTriplets,
-    Banded,
+    Banded { bandwidth: Option<(usize, usize)> },
 }
 
 /// Builds a native Jacobian evaluator from symbolic IVP equations.
@@ -112,8 +112,8 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
                 BdfJacobian::SparseTriplets { n: rows, triplets }
             })
         }
-        NativeJacobianStorage::Banded => {
-            let (kl, ku) = infer_bandwidth(rows, cols, &entries);
+        NativeJacobianStorage::Banded { bandwidth } => {
+            let (kl, ku) = bandwidth.unwrap_or_else(|| infer_bandwidth(rows, cols, &entries));
             Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
                 let args = build_args(t, parameter_values.as_ref(), y);
@@ -219,8 +219,9 @@ pub fn compile_native_sparse_aot_jacobian_with_parameter_handle(
                 BdfJacobian::SparseTriplets { n: rows, triplets }
             }))
         }
-        NativeJacobianStorage::Banded => {
-            let (kl, ku) = infer_bandwidth_from_pattern(rows, cols, &pattern);
+        NativeJacobianStorage::Banded { bandwidth } => {
+            let (kl, ku) =
+                bandwidth.unwrap_or_else(|| infer_bandwidth_from_pattern(rows, cols, &pattern));
             Ok(Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
                 let args = build_args(t, parameter_values.as_ref(), y);
@@ -448,7 +449,7 @@ mod tests {
             &equations,
             &variables,
             "t",
-            NativeJacobianStorage::Banded,
+            NativeJacobianStorage::Banded { bandwidth: None },
         );
 
         let out = jacobian(0.0, &DVector::from_vec(vec![1.0, 2.0]));

@@ -141,11 +141,7 @@ impl FittingModelName {
         match self {
             Self::DecExp => Some(vec!["k".to_string()]),
             Self::TwoExp => Some(vec!["p".to_string(), "k".to_string()]),
-            Self::ThreeExp => Some(vec![
-                "p".to_string(),
-                "k".to_string(),
-                "r".to_string(),
-            ]),
+            Self::ThreeExp => Some(vec!["p".to_string(), "k".to_string(), "r".to_string()]),
             _ => None,
         }
     }
@@ -157,10 +153,7 @@ impl FittingModelName {
     pub fn varpro_basis_strs(&self) -> Option<Vec<(&'static str, &'static str)>> {
         match self {
             Self::DecExp => Some(vec![("k", "exp(-k*x)")]),
-            Self::TwoExp => Some(vec![
-                ("p", "exp(-p*x)"),
-                ("k", "exp(-k*x)"),
-            ]),
+            Self::TwoExp => Some(vec![("p", "exp(-p*x)"), ("k", "exp(-k*x)")]),
             Self::ThreeExp => Some(vec![
                 ("p", "exp(-p*x)"),
                 ("k", "exp(-k*x)"),
@@ -178,11 +171,7 @@ impl FittingModelName {
         match self {
             Self::DecExp => Some(vec!["c".to_string()]),
             Self::TwoExp => Some(vec!["a".to_string(), "b".to_string()]),
-            Self::ThreeExp => Some(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-            ]),
+            Self::ThreeExp => Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
             _ => None,
         }
     }
@@ -624,7 +613,10 @@ mod tests {
     fn exponential_models_prefer_varpro_backend() {
         assert_eq!(FittingModelName::DecExp.preferred_method(), Method::VARPRO);
         assert_eq!(FittingModelName::TwoExp.preferred_method(), Method::VARPRO);
-        assert_eq!(FittingModelName::ThreeExp.preferred_method(), Method::VARPRO);
+        assert_eq!(
+            FittingModelName::ThreeExp.preferred_method(),
+            Method::VARPRO
+        );
         assert!(FittingModelName::Linear.uses_classic_lm());
         assert!(FittingModelName::FirstOrder.uses_classic_lm());
     }
@@ -642,7 +634,9 @@ mod tests {
             .fit()
             .expect("default initial guess should be enough for the VarPro path");
 
-        let map = fit.solution_map().expect("fit should expose a solution map");
+        let map = fit
+            .solution_map()
+            .expect("fit should expose a solution map");
         assert_relative_eq!(map["c"], 2.0, epsilon = 1e-6);
         assert_relative_eq!(map["k"], 0.6, epsilon = 1e-6);
         assert!(fit.r_squared() > 0.999_999);

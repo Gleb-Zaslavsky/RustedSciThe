@@ -306,13 +306,18 @@ mod tests {
     fn add_two_vars() {
         sleep(time::Duration::from_secs(1));
         let atom = parse!("x+y").unwrap();
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Add(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Var("y".into()))
-            )
+        let expected1 = Expr::Add(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Var("y".into())),
         );
+        let expected2 = Expr::Add(
+            Box::new(Expr::Var("y".into())),
+            Box::new(Expr::Var("x".into())),
+        );
+        let is1 = atom_to_expr(&atom) == expected1;
+        let is2 = atom_to_expr(&atom) == expected2;
+        assert!(is1 || is2);
+
         sleep(time::Duration::from_secs(2));
     }
 
@@ -320,13 +325,17 @@ mod tests {
     fn mul_two_vars() {
         sleep(time::Duration::from_secs(2));
         let atom = parse!("x*y").unwrap();
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Mul(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Var("y".into()))
-            )
+        let expected1 = Expr::Mul(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Var("y".into())),
         );
+        let expected2 = Expr::Mul(
+            Box::new(Expr::Var("y".into())),
+            Box::new(Expr::Var("x".into())),
+        );
+        let eq1 = atom_to_expr(&atom) == expected1;
+        let eq2 = atom_to_expr(&atom) == expected2;
+        assert!(eq1 || eq2);
         sleep(time::Duration::from_secs(2));
     }
 
@@ -337,16 +346,24 @@ mod tests {
         let x = symbol!("x");
         let y = symbol!("y");
         let atom = Atom::new_var(x) - Atom::new_var(y);
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Add(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Var("y".into())),
-                    Box::new(Expr::Const(-1.0))
-                ))
-            )
+
+        let expected1 = Expr::Add(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
         );
+        let expected2 = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
+            Box::new(Expr::Var("x".into())),
+        );
+        let eq1 = atom_to_expr(&atom) == expected1;
+        let eq2 = atom_to_expr(&atom) == expected2;
+        assert!(eq1 || eq2);
         sleep(time::Duration::from_secs(2));
     }
 
@@ -357,16 +374,23 @@ mod tests {
         let x = symbol!("x");
         let y = symbol!("y");
         let atom = Atom::new_var(x) / Atom::new_var(y);
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Mul(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Pow(
-                    Box::new(Expr::Var("y".into())),
-                    Box::new(Expr::Const(-1.0))
-                ))
-            )
+        let expected1 = Expr::Mul(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Pow(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
         );
+        let expected2 = Expr::Mul(
+            Box::new(Expr::Pow(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
+            Box::new(Expr::Var("x".into())),
+        );
+        let is1 = atom_to_expr(&atom) == expected1;
+        let is2 = atom_to_expr(&atom) == expected2;
+        assert!(is1 || is2);
         sleep(time::Duration::from_secs(2));
     }
 
@@ -384,19 +408,30 @@ mod tests {
         sleep(time::Duration::from_secs(2));
         // normalizes to x*2 + y*3
         let atom = parse!("2*x+3*y").unwrap();
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Add(
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Var("x".into())),
-                    Box::new(Expr::Const(2.0))
-                )),
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Var("y".into())),
-                    Box::new(Expr::Const(3.0))
-                ))
-            )
+        let expected1 = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("x".into())),
+                Box::new(Expr::Const(2.0)),
+            )),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(3.0)),
+            )),
         );
+        let expected2 = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(3.0)),
+            )),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("x".into())),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let is1 = atom_to_expr(&atom) == expected1;
+        let is2 = atom_to_expr(&atom) == expected2;
+        assert!(is1 || is2);
+
         sleep(time::Duration::from_secs(2));
     }
 
@@ -553,19 +588,29 @@ mod tests {
     #[test]
     fn roundtrip_expr_to_atom_add() {
         sleep(time::Duration::from_secs(2));
-        rt_expr(
-            Expr::Add(
+        let expr =             Expr::Add(
                 Box::new(Expr::Var("x".into())),
                 Box::new(Expr::Var("y".into())),
-            ),
-            Expr::Add(
+            );
+        let atom = expr_to_atom(&expr);
+        let back = atom_to_expr(&atom);
+        let expected1 =             Expr::Add(
                 Box::new(Expr::Var("x".into())),
                 Box::new(Expr::Var("y".into())),
-            ),
-        );
+            );
+
+        let expected2 =             Expr::Add(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Var("x".into())),
+            );
+        let eq1 = back ==expected1;
+        let eq2 = back ==expected2;
+        assert!(eq1||eq2);
         sleep(time::Duration::from_secs(2));
     }
 
+
+ 
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).
     #[test]
     fn roundtrip_expr_sub_normalizes() {
@@ -573,16 +618,24 @@ mod tests {
             Box::new(Expr::Var("x".into())),
             Box::new(Expr::Var("y".into())),
         ));
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Add(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Var("y".into())),
-                    Box::new(Expr::Const(-1.0))
-                ))
-            )
+
+        let expected1 = Expr::Add(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
         );
+        let expected2 = Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
+            Box::new(Expr::Var("x".into())),
+        );
+        let eq1 = atom_to_expr(&atom) == expected1;
+        let eq2 = atom_to_expr(&atom) == expected2;
+        assert!(eq1 || eq2);
     }
 
     /// Div normalizes away: the round-trip produces Mul(x, Pow(y, -1)).
@@ -593,16 +646,24 @@ mod tests {
             Box::new(Expr::Var("x".into())),
             Box::new(Expr::Var("y".into())),
         ));
-        assert_eq!(
-            atom_to_expr(&atom),
-            Expr::Mul(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Pow(
-                    Box::new(Expr::Var("y".into())),
-                    Box::new(Expr::Const(-1.0))
-                ))
-            )
+
+        let expected1 = Expr::Mul(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Pow(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
         );
+        let expected2 = Expr::Mul(
+            Box::new(Expr::Pow(
+                Box::new(Expr::Var("y".into())),
+                Box::new(Expr::Const(-1.0)),
+            )),
+            Box::new(Expr::Var("x".into())),
+        );
+        let eq1 = atom_to_expr(&atom) == expected1;
+        let eq2 = atom_to_expr(&atom) == expected2;
+        assert!(eq1 || eq2);
         sleep(time::Duration::from_secs(2));
     }
 

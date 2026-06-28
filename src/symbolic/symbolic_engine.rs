@@ -57,7 +57,6 @@
 
 #![allow(non_camel_case_types)]
 
-use super::pretty_print::LeveledLayout;
 use crate::symbolic::symbolic_metadata::TraversalCache;
 use std::collections::HashMap;
 use std::f64;
@@ -112,6 +111,96 @@ pub enum Expr {
     arctg(Box<Expr>),
     /// Arccotangent function: arccot(x) - uses mathematical notation 'arcctg'
     arcctg(Box<Expr>),
+}
+
+#[derive(Clone, Debug)]
+struct PrettyBlock {
+    lines: Vec<String>,
+    attach_row: usize,
+}
+
+impl PrettyBlock {
+    fn single(line: String) -> Self {
+        Self {
+            lines: vec![line],
+            attach_row: 0,
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn height(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn pad_line_right(line: &str, width: usize) -> String {
+        let current = line.chars().count();
+        if current >= width {
+            line.to_string()
+        } else {
+            format!("{}{}", line, " ".repeat(width - current))
+        }
+    }
+
+    fn centered_in(&self, width: usize) -> Vec<String> {
+        let block_width = self.width();
+        if block_width >= width {
+            return self
+                .lines
+                .iter()
+                .map(|line| Self::pad_line_right(line, block_width))
+                .collect();
+        }
+
+        let pad = width - block_width;
+        let left = pad / 2;
+        let right = pad - left;
+        self.lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "{}{}{}",
+                    " ".repeat(left),
+                    Self::pad_line_right(line, block_width),
+                    " ".repeat(right)
+                )
+            })
+            .collect()
+    }
+
+    fn wrap_parentheses(self) -> Self {
+        let Self { lines, attach_row } = self;
+        if lines.is_empty() {
+            return Self::single("()".to_string());
+        }
+        if lines.len() == 1 {
+            return Self::single(format!("({})", lines[0]));
+        }
+
+        let width = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+        let mut wrapped = Vec::with_capacity(lines.len());
+        let last_index = lines.len() - 1;
+        for (idx, line) in lines.into_iter().enumerate() {
+            let padded = Self::pad_line_right(&line, width);
+            if idx == 0 {
+                wrapped.push(format!("({}", padded));
+            } else if idx == last_index {
+                wrapped.push(format!("{})", padded));
+            } else {
+                wrapped.push(format!("{} ", padded));
+            }
+        }
+        Self {
+            lines: wrapped,
+            attach_row,
+        }
+    }
 }
 
 /// Display implementation for pretty printing symbolic expressions.
@@ -345,6 +434,51 @@ impl Expr {
             write!(f, "({})", operand)
         } else {
             write!(f, "{}", operand)
+        }
+    }
+
+    /// Render an expression in a fully explicit inline form.
+    ///
+    /// This is used only as a fallback for nested fractions where the main
+    /// layout engine would otherwise lose grouping information.
+    fn to_explicit_inline_string(&self) -> String {
+        match self {
+            Expr::Var(_) | Expr::Const(_) => self.to_string(),
+            Expr::Add(lhs, rhs) => format!(
+                "({} + {})",
+                lhs.to_explicit_inline_string(),
+                rhs.to_explicit_inline_string()
+            ),
+            Expr::Sub(lhs, rhs) => format!(
+                "({} - {})",
+                lhs.to_explicit_inline_string(),
+                rhs.to_explicit_inline_string()
+            ),
+            Expr::Mul(lhs, rhs) => format!(
+                "({} * {})",
+                lhs.to_explicit_inline_string(),
+                rhs.to_explicit_inline_string()
+            ),
+            Expr::Div(lhs, rhs) => format!(
+                "({} / {})",
+                lhs.to_explicit_inline_string(),
+                rhs.to_explicit_inline_string()
+            ),
+            Expr::Pow(base, exp) => format!(
+                "({} ^ {})",
+                base.to_explicit_inline_string(),
+                exp.to_explicit_inline_string()
+            ),
+            Expr::Exp(expr) => format!("exp({})", expr.to_explicit_inline_string()),
+            Expr::Ln(expr) => format!("ln({})", expr.to_explicit_inline_string()),
+            Expr::sin(expr) => format!("sin({})", expr.to_explicit_inline_string()),
+            Expr::cos(expr) => format!("cos({})", expr.to_explicit_inline_string()),
+            Expr::tg(expr) => format!("tg({})", expr.to_explicit_inline_string()),
+            Expr::ctg(expr) => format!("ctg({})", expr.to_explicit_inline_string()),
+            Expr::arcsin(expr) => format!("arcsin({})", expr.to_explicit_inline_string()),
+            Expr::arccos(expr) => format!("arccos({})", expr.to_explicit_inline_string()),
+            Expr::arctg(expr) => format!("arctg({})", expr.to_explicit_inline_string()),
+            Expr::arcctg(expr) => format!("arcctg({})", expr.to_explicit_inline_string()),
         }
     }
 
@@ -605,238 +739,242 @@ impl Expr {
 
     /// Internal pretty print using level-based layout system
     fn pretty_print_internal(&self) -> Vec<String> {
-        let layout = self.analyze_levels_with_brackets(0, false);
-        layout.render()
+        self.pretty_block().lines
     }
 
-    /// Analyze expression with bracket handling and structural awareness
-    fn analyze_levels_with_brackets(
-        &self,
-        current_level: i32,
-        force_brackets: bool,
-    ) -> LeveledLayout {
-        let mut layout = LeveledLayout::new();
-        layout.baseline = current_level;
-
+    fn pretty_block(&self) -> PrettyBlock {
         match self {
-            Expr::Var(name) => {
-                let structure_id =
-                    layout.create_structure_context(vec!["var".to_string()], None, 0);
-                layout.add_element_with_context(name.clone(), current_level, structure_id);
-            }
-            Expr::Const(val) => {
-                let structure_id =
-                    layout.create_structure_context(vec!["const".to_string()], None, 0);
-                layout.add_element_with_context(format!("{}", val), current_level, structure_id);
-            }
-            Expr::Add(lhs, rhs) => {
-                let left_needs_brackets = self.needs_brackets_left(lhs);
-                let right_needs_brackets = self.needs_brackets_right(rhs);
-
-                let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
-                let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-
-                if left_needs_brackets {
-                    left_layout.add_brackets();
-                }
-
-                layout = left_layout;
-                layout.merge_horizontal(right_layout, "+", current_level, right_needs_brackets);
-
-                if force_brackets {
-                    layout.add_brackets();
-                }
-            }
-            Expr::Sub(lhs, rhs) => {
-                let left_needs_brackets = self.needs_brackets_left(lhs);
-                let right_needs_brackets = self.needs_brackets_right(rhs);
-
-                let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
-                let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-
-                if left_needs_brackets {
-                    left_layout.add_brackets();
-                }
-
-                layout = left_layout;
-                layout.merge_horizontal(right_layout, "-", current_level, right_needs_brackets);
-
-                if force_brackets {
-                    layout.add_brackets();
-                }
-            }
-            Expr::Mul(lhs, rhs) => {
-                let left_needs_brackets = self.needs_brackets_left(lhs);
-                let right_needs_brackets = self.needs_brackets_right(rhs);
-
-                let mut left_layout = lhs.analyze_levels_with_brackets(current_level, false);
-                let right_layout = rhs.analyze_levels_with_brackets(current_level, false);
-
-                if left_needs_brackets {
-                    left_layout.add_brackets();
-                }
-
-                layout = left_layout;
-                layout.merge_horizontal(right_layout, "*", current_level, right_needs_brackets);
-
-                if force_brackets {
-                    layout.add_brackets();
-                }
-            }
-            Expr::Div(num, den) => {
-                // Use structure-aware level assignment for nested divisions
-                let depth = self.calculate_nesting_depth();
-                let level_offset = if depth > 3 { depth as i32 } else { 1 };
-
-                let num_layout =
-                    num.analyze_levels_with_brackets(current_level + level_offset, false);
-                let den_layout =
-                    den.analyze_levels_with_brackets(current_level - level_offset, false);
-
-                layout.merge_vertical(num_layout, den_layout, current_level);
-            }
+            Expr::Var(name) => PrettyBlock::single(name.clone()),
+            Expr::Const(val) => PrettyBlock::single(format!("{}", val)),
+            Expr::Add(lhs, rhs) => Self::combine_infix_blocks(
+                lhs.pretty_block(),
+                " + ",
+                rhs.pretty_block(),
+                self.needs_brackets_left(lhs),
+                self.needs_brackets_right(rhs),
+            ),
+            Expr::Sub(lhs, rhs) => Self::combine_infix_blocks(
+                lhs.pretty_block(),
+                " - ",
+                rhs.pretty_block(),
+                self.needs_brackets_left(lhs),
+                self.needs_brackets_right(rhs),
+            ),
+            Expr::Mul(lhs, rhs) => Self::combine_infix_blocks(
+                lhs.pretty_block(),
+                " * ",
+                rhs.pretty_block(),
+                self.needs_brackets_left(lhs),
+                self.needs_brackets_right(rhs),
+            ),
+            Expr::Div(num, den) => Self::combine_fraction_blocks(num.pretty_block(), den.pretty_block()),
             Expr::Pow(base, exp) => {
-                if exp.can_use_unicode_superscript() {
-                    let base_needs_brackets = self.needs_brackets_left(base);
-                    let mut base_layout = base.analyze_levels_with_brackets(current_level, false);
-                    if base_needs_brackets {
-                        base_layout.add_brackets();
-                    }
-                    layout = base_layout;
-                    let structure_id =
-                        layout.create_structure_context(vec!["superscript".to_string()], None, 0);
-                    layout.add_element_with_context(
-                        exp.to_unicode_superscript(),
-                        current_level,
-                        structure_id,
-                    );
+                let exp_block = exp.pretty_block();
+                let mut base_block = base.pretty_block();
+
+                if exp.can_use_unicode_superscript()
+                    && exp_block.lines.len() == 1
+                    && base_block.lines.len() == 1
+                {
+                    let base_str = if self.needs_brackets_left(base) {
+                        format!("({})", base_block.lines[0].clone())
+                    } else {
+                        base_block.lines[0].clone()
+                    };
+                    PrettyBlock::single(format!("{}{}", base_str, exp.to_unicode_superscript()))
                 } else {
-                    let base_needs_brackets = self.needs_brackets_left(base);
-                    let mut base_layout = base.analyze_levels_with_brackets(current_level, false);
-                    if base_needs_brackets {
-                        base_layout.add_brackets();
+                    let base_is_fraction = matches!(**base, Expr::Div(_, _));
+                    if self.needs_brackets_left(base) && !base_is_fraction {
+                        base_block = base_block.wrap_parentheses();
                     }
-
-                    // Use isolated level system for complex exponents to prevent conflicts
-                    let exp_layout = exp.analyze_levels_with_brackets(0, false);
-
-                    layout = base_layout;
-                    layout.merge_power_exponent(exp_layout);
-                }
-
-                if force_brackets {
-                    layout.add_brackets();
+                    Self::render_power_block(base_block, exp_block)
                 }
             }
             Expr::Exp(expr) => {
-                if expr.can_use_unicode_superscript() {
-                    let structure_id =
-                        layout.create_structure_context(vec!["exp".to_string()], None, 0);
-                    layout.add_element_with_context(
-                        format!("e{}", expr.to_unicode_superscript()),
-                        current_level,
-                        structure_id,
-                    );
+                let exp_block = expr.pretty_block();
+                if expr.can_use_unicode_superscript() && exp_block.lines.len() == 1 {
+                    PrettyBlock::single(format!("e{}", expr.to_unicode_superscript()))
                 } else {
-                    let mut base_layout = LeveledLayout::new();
-                    base_layout.baseline = current_level;
-                    let structure_id =
-                        base_layout.create_structure_context(vec!["exp_base".to_string()], None, 0);
-                    base_layout.add_element_with_context(
-                        "e".to_string(),
-                        current_level,
-                        structure_id,
-                    );
-
-                    // Use isolated level system for exponent to prevent conflicts
-                    let exp_layout = expr.analyze_levels_with_brackets(0, false);
-
-                    layout = base_layout;
-                    layout.merge_power_exponent(exp_layout);
+                    Self::render_exp_block(exp_block)
                 }
             }
-            _ => {
-                let func_name = match self {
-                    Expr::Ln(_) => "ln",
-                    Expr::sin(_) => "sin",
-                    Expr::cos(_) => "cos",
-                    Expr::tg(_) => "tg",
-                    Expr::ctg(_) => "ctg",
-                    Expr::arcsin(_) => "arcsin",
-                    Expr::arccos(_) => "arccos",
-                    Expr::arctg(_) => "arctg",
-                    Expr::arcctg(_) => "arcctg",
-                    _ => "func",
-                };
-
-                let inner_expr = match self {
-                    Expr::Ln(e)
-                    | Expr::sin(e)
-                    | Expr::cos(e)
-                    | Expr::tg(e)
-                    | Expr::ctg(e)
-                    | Expr::arcsin(e)
-                    | Expr::arccos(e)
-                    | Expr::arctg(e)
-                    | Expr::arcctg(e) => e,
-                    _ => return layout,
-                };
-
-                let inner_layout = inner_expr.analyze_levels_with_brackets(current_level, false);
-                let has_multiple_levels = inner_layout.level_heights.len() > 1;
-
-                if has_multiple_levels {
-                    layout.merge_function_with_multiline(func_name, inner_layout);
-                } else {
-                    let structure_id = layout.create_structure_context(
-                        vec!["func".to_string(), func_name.to_string()],
-                        None,
-                        0,
-                    );
-                    layout.add_element_with_context(
-                        format!("{}(", func_name),
-                        current_level,
-                        structure_id,
-                    );
-                    layout.merge_inline(inner_layout);
-                    layout.add_element_with_context(")".to_string(), current_level, structure_id);
-                }
-            }
+            Expr::Ln(expr) => Self::render_function_block("ln", expr.pretty_block()),
+            Expr::sin(expr) => Self::render_function_block("sin", expr.pretty_block()),
+            Expr::cos(expr) => Self::render_function_block("cos", expr.pretty_block()),
+            Expr::tg(expr) => Self::render_function_block("tg", expr.pretty_block()),
+            Expr::ctg(expr) => Self::render_function_block("ctg", expr.pretty_block()),
+            Expr::arcsin(expr) => Self::render_function_block("arcsin", expr.pretty_block()),
+            Expr::arccos(expr) => Self::render_function_block("arccos", expr.pretty_block()),
+            Expr::arctg(expr) => Self::render_function_block("arctg", expr.pretty_block()),
+            Expr::arcctg(expr) => Self::render_function_block("arcctg", expr.pretty_block()),
         }
-
-        layout
     }
 
-    /// Calculate nesting depth to determine appropriate level offsets
-    fn calculate_nesting_depth(&self) -> usize {
-        match self {
-            Expr::Var(_) | Expr::Const(_) => 0,
-            Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) | Expr::Mul(lhs, rhs) => {
-                1 + lhs
-                    .calculate_nesting_depth()
-                    .max(rhs.calculate_nesting_depth())
-            }
-            Expr::Div(num, den) => {
-                2 + num
-                    .calculate_nesting_depth()
-                    .max(den.calculate_nesting_depth())
-            }
-            Expr::Pow(base, exp) => {
-                2 + base
-                    .calculate_nesting_depth()
-                    .max(exp.calculate_nesting_depth())
-            }
-            Expr::Exp(e)
-            | Expr::Ln(e)
-            | Expr::sin(e)
-            | Expr::cos(e)
-            | Expr::tg(e)
-            | Expr::ctg(e)
-            | Expr::arcsin(e)
-            | Expr::arccos(e)
-            | Expr::arctg(e)
-            | Expr::arcctg(e) => 1 + e.calculate_nesting_depth(),
+    fn combine_infix_blocks(
+        mut left: PrettyBlock,
+        operator: &str,
+        mut right: PrettyBlock,
+        left_needs_brackets: bool,
+        right_needs_brackets: bool,
+    ) -> PrettyBlock {
+        if left_needs_brackets {
+            left = left.wrap_parentheses();
         }
+        if right_needs_brackets {
+            right = right.wrap_parentheses();
+        }
+
+        if left.lines.len() == 1 && right.lines.len() == 1 {
+            return PrettyBlock::single(format!(
+                "{}{}{}",
+                left.lines[0], operator, right.lines[0]
+            ));
+        }
+
+        let left_width = left.width();
+        let right_width = right.width();
+        let op_width = operator.chars().count();
+        let attach_row = left.attach_row.max(right.attach_row);
+        let left_top_pad = attach_row.saturating_sub(left.attach_row);
+        let right_top_pad = attach_row.saturating_sub(right.attach_row);
+        let total_height = (left_top_pad + left.height()).max(right_top_pad + right.height());
+
+        let mut lines = Vec::with_capacity(total_height);
+        for row in 0..total_height {
+            let left_line = if row >= left_top_pad && row < left_top_pad + left.height() {
+                PrettyBlock::pad_line_right(&left.lines[row - left_top_pad], left_width)
+            } else {
+                " ".repeat(left_width)
+            };
+
+            let right_line = if row >= right_top_pad && row < right_top_pad + right.height() {
+                PrettyBlock::pad_line_right(&right.lines[row - right_top_pad], right_width)
+            } else {
+                " ".repeat(right_width)
+            };
+
+            let middle = if row == attach_row {
+                operator.to_string()
+            } else {
+                " ".repeat(op_width)
+            };
+            lines.push(format!("{}{}{}", left_line, middle, right_line));
+        }
+
+        PrettyBlock { lines, attach_row }
+    }
+
+    fn combine_fraction_blocks(num: PrettyBlock, den: PrettyBlock) -> PrettyBlock {
+        let width = num.width().max(den.width()).max(3);
+        let mut lines = Vec::new();
+        lines.extend(num.centered_in(width));
+        lines.push("─".repeat(width));
+        lines.extend(den.centered_in(width));
+        PrettyBlock {
+            lines,
+            attach_row: num.height(),
+        }
+    }
+
+    fn render_block_at(
+        canvas: &mut [Vec<char>],
+        block: &PrettyBlock,
+        top: usize,
+        left: usize,
+    ) {
+        for (row_idx, line) in block.lines.iter().enumerate() {
+            let canvas_row = top + row_idx;
+            if canvas_row >= canvas.len() {
+                continue;
+            }
+            for (col_idx, ch) in line.chars().enumerate() {
+                let canvas_col = left + col_idx;
+                if canvas_col < canvas[canvas_row].len() && ch != ' ' {
+                    canvas[canvas_row][canvas_col] = ch;
+                }
+            }
+        }
+    }
+
+    fn render_power_block(base: PrettyBlock, exp: PrettyBlock) -> PrettyBlock {
+        let base_width = base.width();
+        let exp_width = exp.width();
+        let exp_left = base_width + 1;
+        let total_width = exp_left + exp_width;
+        let base_is_exp_marker = base.height() == 1
+            && base
+                .lines
+                .first()
+                .map(|line| line.as_str())
+                == Some("e");
+        let base_top = if exp.height() == 1 {
+            1
+        } else if base.height() > 1 || base_is_exp_marker {
+            exp.height() + 1
+        } else {
+            exp.height() - 1
+        };
+        let total_height = (base_top + base.height()).max(exp.height());
+        let attach_row = base_top + base.attach_row;
+
+        let mut canvas = vec![vec![' '; total_width]; total_height];
+        Self::render_block_at(&mut canvas, &exp, 0, exp_left);
+        Self::render_block_at(&mut canvas, &base, base_top, 0);
+
+        let lines = canvas
+            .into_iter()
+            .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>();
+
+        PrettyBlock { lines, attach_row }
+    }
+
+    fn render_exp_block(exp: PrettyBlock) -> PrettyBlock {
+        // Natural exponentials should follow the same power geometry as other
+        // powers, but with `e` as the base instead of a textual `e^(...)`.
+        Self::render_power_block(PrettyBlock::single("e".to_string()), exp)
+    }
+
+    fn render_function_block(func_name: &str, inner: PrettyBlock) -> PrettyBlock {
+        if inner.lines.len() == 1 {
+            return PrettyBlock::single(format!("{}({})", func_name, inner.lines[0]));
+        }
+
+        let name_width = func_name.chars().count();
+        let prefix_width = name_width + 1;
+        let inner_width = inner.width();
+        let total_width = prefix_width + inner_width + 2;
+        let total_height = inner.height();
+        let attach_row = inner.attach_row.min(total_height.saturating_sub(1));
+
+        // A multi-line argument is wrapped in scalable mathematical
+        // parentheses. The function name sits on the argument's attachment
+        // axis, so an outer infix operator composes with the complete call.
+        let mut canvas = vec![vec![' '; total_width]; total_height];
+        for (idx, ch) in func_name.chars().enumerate() {
+            canvas[attach_row][idx] = ch;
+        }
+
+        Self::render_block_at(&mut canvas, &inner, 0, prefix_width + 1);
+        let right_col = prefix_width + inner_width + 1;
+        for row in 0..total_height {
+            let (left_bracket, right_bracket) = if row == 0 {
+                ('⎛', '⎞')
+            } else if row + 1 == total_height {
+                ('⎝', '⎠')
+            } else {
+                ('⎜', '⎟')
+            };
+            canvas[row][prefix_width] = left_bracket;
+            canvas[row][right_col] = right_bracket;
+        }
+
+        let lines = canvas
+            .into_iter()
+            .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>();
+
+        PrettyBlock { lines, attach_row }
     }
 
     /// BASIC FEATURES

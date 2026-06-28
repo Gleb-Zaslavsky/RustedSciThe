@@ -270,6 +270,8 @@ fn example_6_trigonometric_native() {
         .with_unknowns(vec!["a".to_string(), "b".to_string(), "c".to_string()])
         .with_initial_guess(vec![2.0, 1.5, 0.5])
         .with_tolerance(1e-8)
+        .with_g_tolerance(1e-8)
+        .with_f_tolerance(1e-8)
         .build();
 
     if let Some(map) = fitting.map_of_solutions {

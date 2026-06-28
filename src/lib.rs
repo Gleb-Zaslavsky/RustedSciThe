@@ -11,3 +11,4 @@ pub mod global;
 pub mod numerical;
 pub mod somelinalg;
 pub mod symbolic;
+pub mod task_shell_cli;

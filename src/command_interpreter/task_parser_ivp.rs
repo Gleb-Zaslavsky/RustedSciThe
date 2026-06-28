@@ -477,11 +477,12 @@ fn build_lsode2_problem_config_from_spec(
             execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
         },
     });
-    let backend = config
-        .backend
-        .clone()
-        .with_jacobian_backend(Lsode2JacobianBackend::SymbolicGenerated);
-    config = config.with_backend(backend);
+    // The task-document route always provides equations, not closures, so the
+    // Jacobian backend must be symbolic. Do not call `with_backend` here:
+    // that legacy compatibility API re-infers linear policy from backend fields
+    // and would turn an explicit `lsode2_linear_solver_policy: auto` into a
+    // forced policy after parser-side structure/policy resolution.
+    config.backend.jacobian_backend = Lsode2JacobianBackend::SymbolicGenerated;
 
     Ok(config)
 }
@@ -1585,6 +1586,194 @@ lsode2_linear_solver_policy: auto
     }
 
     #[test]
+    fn ivp_task_parser_builds_lsode2_banded_auto_resolved_plan() {
+        use crate::numerical::LSODE2::{
+            Lsode2ControllerMode, Lsode2LinearSolverBackend, Lsode2LinearSolverChoice,
+        };
+
+        let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -2.0*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_method_family: bdf
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: banded
+lsode2_linear_solver_policy: auto
+lsode2_native_execution: faithful_bdf_solve
+"#;
+
+        let spec = parse_ivp_task_from_str(input).expect("LSODE2 banded document should parse");
+        let config = build_lsode2_problem_config_from_spec(&spec)
+            .expect("LSODE2 banded document should build problem config");
+        let resolved = config.resolve_plan();
+
+        assert_eq!(config.controller.mode, Lsode2ControllerMode::BdfOnly);
+        assert_eq!(
+            config.residual_jacobian_source,
+            Lsode2ResidualJacobianSource::Symbolic {
+                assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+                execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+            }
+        );
+        assert_eq!(
+            resolved.structure,
+            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+        );
+        assert_eq!(
+            resolved.linear_solver,
+            Lsode2LinearSolverChoice::LapackFaithfulBandedLu
+        );
+        assert_eq!(
+            resolved.linear_solver_reason,
+            "auto_from_linear_structure_banded"
+        );
+        assert_eq!(
+            config.backend.linear_solver_backend,
+            Lsode2LinearSolverBackend::BandedFaithful
+        );
+        assert_eq!(
+            config.backend.jacobian_backend,
+            Lsode2JacobianBackend::SymbolicGenerated
+        );
+    }
+
+    #[test]
+    fn ivp_task_parser_keeps_lsode2_forced_policy_visible_in_resolved_plan() {
+        use crate::numerical::LSODE2::{Lsode2LinearSolverBackend, Lsode2LinearSolverChoice};
+
+        let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -2.0*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: lapack_faithful_banded_lu
+"#;
+
+        let spec =
+            parse_ivp_task_from_str(input).expect("LSODE2 forced-policy document should parse");
+        let config = build_lsode2_problem_config_from_spec(&spec)
+            .expect("LSODE2 forced-policy document should build problem config");
+        let resolved = config.resolve_plan();
+
+        assert_eq!(resolved.structure, Lsode2LinearSystemStructure::Sparse);
+        assert_eq!(
+            resolved.linear_solver,
+            Lsode2LinearSolverChoice::LapackFaithfulBandedLu
+        );
+        assert_eq!(
+            resolved.linear_solver_reason,
+            "forced_by_linear_solver_policy"
+        );
+        assert_eq!(
+            config.backend.linear_solver_backend,
+            Lsode2LinearSolverBackend::BandedFaithful
+        );
+    }
+
+    #[test]
+    fn ivp_task_parser_builds_lsode2_aot_toolchain_backend_contract() {
+        use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+        use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
+        use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
+
+        let output_dir = PathBuf::from("target/lsode2-task-parser-aot-contract");
+        let input = format!(
+            r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -2.0*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.2
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: AOT
+lsode2_aot_toolchain: zig
+lsode2_aot_profile: debug
+lsode2_aot_output_dir: {}
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: auto
+"#,
+            output_dir.display()
+        );
+
+        let spec = parse_ivp_task_from_str(&input).expect("LSODE2 AOT document should parse");
+        let config = build_lsode2_problem_config_from_spec(&spec)
+            .expect("LSODE2 AOT document should build problem config");
+        let resolved = config.resolve_plan();
+
+        assert_eq!(
+            resolved.source,
+            Lsode2ResidualJacobianSource::Symbolic {
+                assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+                execution: Lsode2SymbolicExecutionMode::Aot {
+                    toolchain: Lsode2AotToolchain::Zig,
+                    profile: Lsode2AotProfile::Debug,
+                },
+            }
+        );
+        assert_eq!(
+            resolved.linear_solver,
+            Lsode2LinearSolverChoice::FaerSparseLu
+        );
+        assert_eq!(
+            config.backend.generated_backend.aot_codegen_backend,
+            AotCodegenBackend::Zig
+        );
+        assert_eq!(config.backend.generated_backend.aot_c_compiler, None);
+        assert_eq!(
+            config.backend.generated_backend.output_parent_dir,
+            Some(output_dir)
+        );
+        assert_eq!(
+            config.backend.generated_backend.build_policy,
+            SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Debug,
+            }
+        );
+    }
+
+    #[test]
     fn ivp_task_runner_supports_lsode2_lambdify_path() {
         let input = r#"
 task
@@ -1612,5 +1801,64 @@ lsode2_linear_solver_policy: auto
         let result = run_ivp_task_from_str(input).expect("LSODE2 task should solve");
         assert!(result.status.is_some());
         assert!(result.y_result.is_some());
+    }
+
+    #[test]
+    fn ivp_task_runner_executes_lsode2_modern_postprocessing_plan() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let csv_path = dir.path().join("lsode2_task_solution.csv");
+        let report_path = dir.path().join("lsode2_task_report.md");
+        let input = format!(
+            r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: dense
+lsode2_linear_solver_policy: auto
+
+postprocessing
+save_csv: true
+csv_path: {}
+write_report: true
+report_path: {}
+"#,
+            csv_path.display(),
+            report_path.display()
+        );
+
+        let result = run_ivp_task_from_str(&input).expect("LSODE2 task should solve");
+        let t = result
+            .t_result
+            .as_ref()
+            .expect("LSODE2 task should return a time mesh");
+        let y = result
+            .y_result
+            .as_ref()
+            .expect("LSODE2 task should return a solution matrix");
+        assert_eq!(t.len(), y.nrows());
+        assert_eq!(y.ncols(), 1);
+        assert!(csv_path.exists());
+        assert!(report_path.exists());
+
+        let csv = std::fs::read_to_string(&csv_path).expect("CSV should be readable");
+        assert!(csv.contains("t,y"));
+        let report = std::fs::read_to_string(&report_path).expect("report should be readable");
+        assert!(report.contains("Solver Result Report"));
+        assert!(report.contains("axis: t"));
     }
 }

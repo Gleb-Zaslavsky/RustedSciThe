@@ -141,6 +141,42 @@ impl LeveledLayout {
             (*self.level_heights.get(&level).unwrap_or(&0)).max(1);
     }
 
+    /// Adds a vertically stacked, pre-rendered block as a local layout fragment.
+    ///
+    /// Each provided line is centered to the same width and placed on its own
+    /// level. This is useful for nested fractions where we want to preserve a
+    /// local book-like layout without flattening the structure into a single line.
+    pub fn add_preformatted_block(
+        &mut self,
+        lines: &[String],
+        top_level: i32,
+        structure_id: usize,
+    ) {
+        let width = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+        for (idx, line) in lines.iter().enumerate() {
+            let centered = if line.chars().count() < width {
+                let pad = width - line.chars().count();
+                let left = pad / 2;
+                let right = pad - left;
+                format!("{}{}{}", " ".repeat(left), line, " ".repeat(right))
+            } else {
+                line.clone()
+            };
+
+            let level = top_level - idx as i32;
+            self.elements.push(LayoutElement {
+                content: centered,
+                level,
+                position: 0,
+                structure_id,
+            });
+            *self.level_heights.entry(level).or_insert(0) =
+                (*self.level_heights.get(&level).unwrap_or(&0)).max(1);
+        }
+
+        self.total_width = self.total_width.max(width);
+    }
+
     /// Wraps the entire current layout in parentheses.
     ///
     /// Shifts all existing elements to the right and adds opening/closing brackets
@@ -655,12 +691,10 @@ impl LeveledLayout {
                 .filter(|e| e.level == *level && !e.content.trim().is_empty())
                 .collect();
 
-            // Sort by structure family first, then by position to prevent conflicts
-            level_elements.sort_by(|a, b| {
-                let family_a = self.get_structure_family(a.structure_id);
-                let family_b = self.get_structure_family(b.structure_id);
-                family_a.cmp(&family_b).then(a.position.cmp(&b.position))
-            });
+            // Keep the natural horizontal order. For nested fractions and blocks,
+            // insertion order plus position produces a more legible layout than
+            // family-first grouping.
+            level_elements.sort_by(|a, b| a.position.cmp(&b.position));
 
             if level_elements.is_empty() {
                 continue;

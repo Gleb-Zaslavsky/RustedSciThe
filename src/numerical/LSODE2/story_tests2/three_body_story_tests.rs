@@ -349,11 +349,27 @@ fn story_sparse_chunk_count(rows: usize, strategy: SparseChunkingStrategy) -> us
     }
 }
 
+struct ThreeBodyStorySample {
+    total_ms: f64,
+    prepare_ms: f64,
+    solve_ms: f64,
+    trajectory_drift: f64,
+    counter_scope: &'static str,
+    residual_calls: f64,
+    jacobian_calls: f64,
+    linear_calls: f64,
+    residual_ms: f64,
+    jacobian_ms: f64,
+    linear_ms: f64,
+    accepted_steps: f64,
+    rejected_steps: f64,
+}
+
 fn run_three_body_story_sample_result(
     route: &'static str,
     config: Lsode2ProblemConfig,
     baseline_solution: &DMatrix<f64>,
-) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64), String> {
+) -> Result<ThreeBodyStorySample, String> {
     let started_total = Instant::now();
     let mut solver = Lsode2Solver::new(config).map_err(|err| short_error(&err.to_string()))?;
     let started_prepare = Instant::now();
@@ -381,49 +397,23 @@ fn run_three_body_story_sample_result(
         );
     }
 
-    let is_native_faithful = is_native_faithful_status(&summary.status);
-    let (residual_calls, jacobian_calls, linear_calls, residual_ms, jacobian_ms, linear_ms) =
-        if route == "Lambdify" || !is_native_faithful {
-            (
-                summary.statistics.residual_calls as f64,
-                summary.statistics.jacobian_calls as f64,
-                summary.statistics.bdf_nlu_total as f64,
-                summary.statistics.residual_ms_total,
-                summary.statistics.jacobian_ms_total,
-                0.0,
-            )
-        } else {
-            (
-                summary.native_statistics.native_residual_calls as f64,
-                summary.native_statistics.native_jacobian_calls as f64,
-                summary.native_statistics.native_linear_solve_calls as f64,
-                summary.native_statistics.native_residual_ms_total,
-                summary.native_statistics.native_jacobian_ms_total,
-                summary.native_statistics.native_linear_solve_ms_total,
-            )
-        };
+    let telemetry = summary.evaluation_telemetry;
 
-    let accepted_steps = summary
-        .native_statistics
-        .native_step_accepts
-        .max(summary.native_statistics.bridge_accepted_steps) as f64;
-    let rejected_steps = (summary.native_statistics.native_step_rejects_error_test
-        + summary.native_statistics.native_step_rejects_nonlinear) as f64;
-
-    Ok((
+    Ok(ThreeBodyStorySample {
         total_ms,
         prepare_ms,
         solve_ms,
         trajectory_drift,
-        residual_calls,
-        jacobian_calls,
-        linear_calls,
-        residual_ms,
-        jacobian_ms,
-        linear_ms,
-        accepted_steps,
-        rejected_steps,
-    ))
+        counter_scope: telemetry.scope.label(),
+        residual_calls: telemetry.residual_evaluations as f64,
+        jacobian_calls: telemetry.jacobian_evaluations as f64,
+        linear_calls: telemetry.linear_solves as f64,
+        residual_ms: telemetry.residual_ms_total,
+        jacobian_ms: telemetry.jacobian_ms_total,
+        linear_ms: telemetry.linear_ms_total,
+        accepted_steps: telemetry.accepted_steps as f64,
+        rejected_steps: telemetry.rejected_steps as f64,
+    })
 }
 
 #[test]
@@ -554,18 +544,19 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
             match run_three_body_story_sample_result(route, cfg, &baseline_solution) {
                 Ok(sample) => {
                     row.runs_ok += 1;
-                    row.total_ms.push(sample.0);
-                    row.prepare_ms.push(sample.1);
-                    row.solve_ms.push(sample.2);
-                    row.final_diff.push(sample.3);
-                    row.residual_calls.push(sample.4);
-                    row.jacobian_calls.push(sample.5);
-                    row.nlu_or_native_linear.push(sample.6);
-                    row.residual_ms.push(sample.7);
-                    row.jacobian_ms.push(sample.8);
-                    row.linear_ms.push(sample.9);
-                    row.accepted_steps.push(sample.10);
-                    row.rejected_steps.push(sample.11);
+                    row.counter_scope = Some(sample.counter_scope);
+                    row.total_ms.push(sample.total_ms);
+                    row.prepare_ms.push(sample.prepare_ms);
+                    row.solve_ms.push(sample.solve_ms);
+                    row.final_diff.push(sample.trajectory_drift);
+                    row.residual_calls.push(sample.residual_calls);
+                    row.jacobian_calls.push(sample.jacobian_calls);
+                    row.nlu_or_native_linear.push(sample.linear_calls);
+                    row.residual_ms.push(sample.residual_ms);
+                    row.jacobian_ms.push(sample.jacobian_ms);
+                    row.linear_ms.push(sample.linear_ms);
+                    row.accepted_steps.push(sample.accepted_steps);
+                    row.rejected_steps.push(sample.rejected_steps);
                 }
                 Err(err) => row.record_failure(err),
             }
@@ -694,10 +685,10 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
         "[LSODE2 story] three-body problem stage diagnostics; all time columns are milliseconds"
     );
     println!(
-        "note: residual_calls/jacobian_calls are route-specific telemetry; Lambdify reports bridge/generated-backend counters, while AOT rows report native inner-loop counters"
+        "note: counter_scope makes residual/jacobian semantics explicit: bridge_bdf_callbacks are BDF-level callback evaluations; native_faithful_inner_loop are faithful native nonlinear inner-loop evaluations"
     );
     println!(
-        "matrix | route            | residual_calls | jacobian_calls | linear_calls | residual_ms | jacobian_ms | linear_ms | accepted_steps | rejected_steps"
+        "matrix | route            | counter_scope                 | residual_calls | jacobian_calls | linear_calls | residual_ms | jacobian_ms | linear_ms | accepted_steps | rejected_steps"
     );
     println!(
         "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
@@ -710,9 +701,10 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
                 .unwrap_or_else(|| "-".to_string())
         };
         println!(
-            "{:<6} | {:<16} | {:<14} | {:<14} | {:<12} | {:<11} | {:<11} | {:<9} | {:<14} | {:<14}",
+            "{:<6} | {:<16} | {:<29} | {:<14} | {:<14} | {:<12} | {:<11} | {:<11} | {:<9} | {:<14} | {:<14}",
             row.matrix,
             row.route,
+            row.counter_scope.unwrap_or("-"),
             fmt(&row.residual_calls),
             fmt(&row.jacobian_calls),
             fmt(&row.nlu_or_native_linear),

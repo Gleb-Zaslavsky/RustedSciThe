@@ -632,19 +632,15 @@ fn generated_names(
     problem_key: &str,
     config: &SymbolicIvpGeneratedBackendConfig,
 ) -> (String, String) {
-    let suffix = problem_key
-        .chars()
-        .take(16)
-        .collect::<String>()
-        .replace('-', "_");
+    let suffix = generated_artifact_suffix(problem_key);
     let crate_name = config
         .crate_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_dense_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_dense_{suffix}"));
     let module_name = config
         .module_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_dense_module_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_dense_mod_{suffix}"));
     (crate_name, module_name)
 }
 
@@ -652,19 +648,15 @@ fn generated_residual_names(
     problem_key: &str,
     config: &SymbolicIvpGeneratedBackendConfig,
 ) -> (String, String) {
-    let suffix = problem_key
-        .chars()
-        .take(16)
-        .collect::<String>()
-        .replace('-', "_");
+    let suffix = generated_artifact_suffix(problem_key);
     let crate_name = config
         .crate_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_residual_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_res_{suffix}"));
     let module_name = config
         .module_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_residual_module_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_res_mod_{suffix}"));
     (crate_name, module_name)
 }
 
@@ -672,20 +664,24 @@ fn generated_sparse_names(
     problem_key: &str,
     config: &SymbolicIvpGeneratedBackendConfig,
 ) -> (String, String) {
-    let suffix = problem_key
-        .chars()
-        .take(16)
-        .collect::<String>()
-        .replace('-', "_");
+    let suffix = generated_artifact_suffix(problem_key);
     let crate_name = config
         .crate_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_sparse_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_sp_{suffix}"));
     let module_name = config
         .module_name_override
         .clone()
-        .unwrap_or_else(|| format!("generated_ivp_sparse_module_{suffix}"));
+        .unwrap_or_else(|| format!("ivp_sp_mod_{suffix}"));
     (crate_name, module_name)
+}
+
+fn generated_artifact_suffix(problem_key: &str) -> String {
+    problem_key
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .replace('-', "_")
 }
 
 fn rebuild_isolated_output_parent_dir(base: &Path, route: &str, problem_key: &str) -> PathBuf {
@@ -1539,6 +1535,44 @@ mod tests {
                 .with_equation_parameters(vec!["a".to_string(), "b".to_string(), "c".to_string()])
                 .with_equation_parameter_values(DVector::from_vec(vec![2.0, -0.5, 3.0])),
         )
+    }
+
+    #[test]
+    fn generated_ivp_default_artifact_names_stay_windows_toolchain_friendly() {
+        let config = SymbolicIvpGeneratedBackendConfig::defaults();
+        let problem_key = "534b35bdcbb8f0ed-with-extra-long-tail";
+
+        let (dense_crate, dense_module) = generated_names(problem_key, &config);
+        let (residual_crate, residual_module) = generated_residual_names(problem_key, &config);
+        let (sparse_crate, sparse_module) = generated_sparse_names(problem_key, &config);
+
+        for name in [
+            dense_crate.as_str(),
+            dense_module.as_str(),
+            residual_crate.as_str(),
+            residual_module.as_str(),
+            sparse_crate.as_str(),
+            sparse_module.as_str(),
+        ] {
+            assert!(
+                name.len() <= 32,
+                "default IVP AOT names should stay short for deep Windows cold-build paths: {name}"
+            );
+        }
+        assert!(dense_crate.starts_with("ivp_dense_"));
+        assert!(residual_crate.starts_with("ivp_res_"));
+        assert!(sparse_crate.starts_with("ivp_sp_"));
+
+        let override_config = SymbolicIvpGeneratedBackendConfig::defaults()
+            .with_crate_name_override(Some("custom_generated_crate".to_string()))
+            .with_module_name_override(Some("custom_generated_module".to_string()));
+        assert_eq!(
+            generated_residual_names(problem_key, &override_config),
+            (
+                "custom_generated_crate".to_string(),
+                "custom_generated_module".to_string()
+            )
+        );
     }
 
     #[test]

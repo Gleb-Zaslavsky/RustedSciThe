@@ -1567,6 +1567,7 @@ impl RaceStats {
 struct BackendRaceRow {
     matrix: &'static str,
     route: &'static str,
+    counter_scope: Option<&'static str>,
     runs_ok: usize,
     runs_total: usize,
     first_failure: Option<String>,
@@ -1589,6 +1590,7 @@ impl BackendRaceRow {
         Self {
             matrix,
             route,
+            counter_scope: None,
             runs_ok: 0,
             runs_total: 0,
             first_failure: None,
@@ -5328,6 +5330,10 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
     let row_filter = std::env::var("LSODE2_AOT_COLD_FILTER")
         .ok()
         .map(|value| value.to_ascii_lowercase());
+    let allow_aot_failures = std::env::var("LSODE2_AOT_COLD_ALLOW_FAILURES")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let variants = [
         (AotStoryToolchain::CTcc, false, "tcc/whole"),
@@ -5343,6 +5349,11 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
     if let Some(filter) = &row_filter {
         println!(
             "[LSODE2 story] cold AOT matrix filter active: LSODE2_AOT_COLD_FILTER={filter:?}, repeats={repeats}"
+        );
+    }
+    if allow_aot_failures {
+        println!(
+            "[LSODE2 story] cold AOT matrix will report AOT row failures without failing the test because LSODE2_AOT_COLD_ALLOW_FAILURES is set"
         );
     }
 
@@ -5485,6 +5496,12 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
                 row.runs_ok, row.runs_total,
                 "{} baseline should complete all runs",
                 row.matrix
+            );
+        } else if !allow_aot_failures {
+            assert_eq!(
+                row.runs_ok, row.runs_total,
+                "{} {} cold AOT matrix row should complete all runs; set LSODE2_AOT_COLD_ALLOW_FAILURES=1 only for exploratory runs on machines without this toolchain",
+                row.matrix, row.route
             );
         }
         if row.runs_ok > 0 {

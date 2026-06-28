@@ -15,8 +15,9 @@
 use super::adams_engine::Lsode2AdamsDcfodeTables;
 use super::algorithm::{Lsode2ControllerMode, Lsode2SwitchTelemetry};
 use super::config::{
-    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2ProblemConfig,
-    Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    Lsode2JacobianBackend, Lsode2LinearSolverBackend, Lsode2LinearSystemStructure,
+    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
 };
 use super::correction::{Lsode2CorrectionControlConfig, Lsode2CorrectionController};
 use super::dcfode::Lsode2BdfDcfodeTables;
@@ -182,7 +183,7 @@ impl Lsode2NativeStepEngine {
                     config,
                     method,
                     FaithfulBandedBdfLinearBackend::default(),
-                    NativeJacobianStorage::Banded,
+                    banded_jacobian_storage(config),
                 )?,
             )))),
         }
@@ -759,27 +760,33 @@ fn finite_difference_jacobian_from_residual(
 ) -> BdfJacobian {
     let n = y.len();
     let f0 = residual(t, y);
-    let mut dense = DMatrix::<f64>::zeros(n, n);
     let eps = f64::EPSILON.sqrt();
 
-    for col in 0..n {
-        let yj = y[col];
-        let h = eps * yj.abs().max(atol).max(1.0);
-        let mut y_pert = y.clone_owned();
-        y_pert[col] += h;
-        let f_pert = residual(t, &y_pert);
-        for row in 0..n {
-            dense[(row, col)] = (f_pert[row] - f0[row]) / h;
-        }
-    }
-
     match storage {
-        NativeJacobianStorage::Dense => BdfJacobian::from_dense(dense),
+        NativeJacobianStorage::Dense => {
+            let mut dense = DMatrix::<f64>::zeros(n, n);
+            for col in 0..n {
+                let yj = y[col];
+                let h = eps * yj.abs().max(atol).max(1.0);
+                let mut y_pert = y.clone_owned();
+                y_pert[col] += h;
+                let f_pert = residual(t, &y_pert);
+                for row in 0..n {
+                    dense[(row, col)] = (f_pert[row] - f0[row]) / h;
+                }
+            }
+            BdfJacobian::from_dense(dense)
+        }
         NativeJacobianStorage::SparseTriplets => {
             let mut triplets = Vec::new();
             for col in 0..n {
+                let yj = y[col];
+                let h = eps * yj.abs().max(atol).max(1.0);
+                let mut y_pert = y.clone_owned();
+                y_pert[col] += h;
+                let f_pert = residual(t, &y_pert);
                 for row in 0..n {
-                    let value = dense[(row, col)];
+                    let value = (f_pert[row] - f0[row]) / h;
                     if value != 0.0 {
                         triplets.push(faer::sparse::Triplet::new(row, col, value));
                     }
@@ -787,23 +794,82 @@ fn finite_difference_jacobian_from_residual(
             }
             BdfJacobian::SparseTriplets { n, triplets }
         }
-        NativeJacobianStorage::Banded => {
+        NativeJacobianStorage::Banded {
+            bandwidth: Some((kl, ku)),
+        } => finite_difference_banded_jacobian_from_residual(residual, t, y, atol, kl, ku),
+        NativeJacobianStorage::Banded { bandwidth: None } => {
             let mut kl = 0usize;
             let mut ku = 0usize;
+            let mut entries = Vec::new();
             for col in 0..n {
+                let yj = y[col];
+                let h = eps * yj.abs().max(atol).max(1.0);
+                let mut y_pert = y.clone_owned();
+                y_pert[col] += h;
+                let f_pert = residual(t, &y_pert);
                 for row in 0..n {
-                    let value = dense[(row, col)];
+                    let value = (f_pert[row] - f0[row]) / h;
                     if value != 0.0 {
                         kl = kl.max(row.saturating_sub(col));
                         ku = ku.max(col.saturating_sub(row));
+                        entries.push((row, col, value));
                     }
                 }
             }
             let mut banded = Banded::<f64>::zeros(n, kl, ku)
                 .expect("finite-difference Jacobian bandwidth should define valid banded storage");
-            banded.fill_from_dense(|i, j| dense[(i, j)]);
+            for (row, col, value) in entries {
+                banded
+                    .set(row, col, value)
+                    .expect("finite-difference entry should be inside inferred band");
+            }
             BdfJacobian::Banded(banded)
         }
+    }
+}
+
+fn finite_difference_banded_jacobian_from_residual(
+    residual: &NativeResidualFn,
+    t: f64,
+    y: &DVector<f64>,
+    atol: f64,
+    kl: usize,
+    ku: usize,
+) -> BdfJacobian {
+    let n = y.len();
+    let f0 = residual(t, y);
+    let eps = f64::EPSILON.sqrt();
+    let mut banded = Banded::<f64>::zeros(n, kl, ku)
+        .expect("finite-difference Jacobian bandwidth should define valid banded storage");
+
+    for col in 0..n {
+        let yj = y[col];
+        let h = eps * yj.abs().max(atol).max(1.0);
+        let mut y_pert = y.clone_owned();
+        y_pert[col] += h;
+        let f_pert = residual(t, &y_pert);
+        let first_row = col.saturating_sub(ku);
+        let last_row = (col + kl).min(n.saturating_sub(1));
+        for row in first_row..=last_row {
+            let value = (f_pert[row] - f0[row]) / h;
+            banded
+                .set(row, col, value)
+                .expect("finite-difference entry should be inside declared band");
+        }
+    }
+
+    BdfJacobian::Banded(banded)
+}
+
+fn banded_jacobian_storage(config: &Lsode2ProblemConfig) -> NativeJacobianStorage {
+    match config.linear_system_structure {
+        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 } => {
+            NativeJacobianStorage::Banded { bandwidth: None }
+        }
+        Lsode2LinearSystemStructure::Banded { kl, ku } => NativeJacobianStorage::Banded {
+            bandwidth: Some((kl, ku)),
+        },
+        _ => NativeJacobianStorage::Banded { bandwidth: None },
     }
 }
 
@@ -961,6 +1027,89 @@ mod tests {
             1e-6,
             1e-8,
         )
+    }
+
+    #[test]
+    fn finite_difference_sparse_storage_emits_triplets_without_dense_wrapper() {
+        let residual = |_: f64, y: &DVector<f64>| DVector::from_vec(vec![2.0 * y[0], -3.0 * y[1]]);
+        let y = DVector::from_vec(vec![1.5, -2.0]);
+
+        let jacobian = finite_difference_jacobian_from_residual(
+            &residual,
+            0.0,
+            &y,
+            1.0e-8,
+            NativeJacobianStorage::SparseTriplets,
+        );
+
+        let BdfJacobian::SparseTriplets { n, triplets } = jacobian else {
+            panic!("finite-difference sparse storage should not return a dense Jacobian");
+        };
+        assert_eq!(n, 2);
+        assert_eq!(triplets.len(), 2);
+        assert!(triplets.iter().any(|triplet| triplet.row == 0
+            && triplet.col == 0
+            && (triplet.val - 2.0).abs() < 1e-8));
+        assert!(triplets.iter().any(|triplet| triplet.row == 1
+            && triplet.col == 1
+            && (triplet.val + 3.0).abs() < 1e-8));
+    }
+
+    #[test]
+    fn finite_difference_banded_storage_infers_compact_bandwidth() {
+        let residual =
+            |_: f64, y: &DVector<f64>| DVector::from_vec(vec![y[0] + 5.0 * y[1], -2.0 * y[1]]);
+        let y = DVector::from_vec(vec![1.0, 2.0]);
+
+        let jacobian = finite_difference_jacobian_from_residual(
+            &residual,
+            0.0,
+            &y,
+            1.0e-8,
+            NativeJacobianStorage::Banded { bandwidth: None },
+        );
+
+        let BdfJacobian::Banded(banded) = jacobian else {
+            panic!("finite-difference banded storage should not return a dense Jacobian");
+        };
+        assert_eq!(banded.n(), 2);
+        assert_eq!(banded.kl(), 0);
+        assert_eq!(banded.ku(), 1);
+        assert!((banded[(0, 0)] - 1.0).abs() < 1e-8);
+        assert!((banded[(0, 1)] - 5.0).abs() < 1e-8);
+        assert!((banded[(1, 1)] + 2.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn finite_difference_banded_storage_respects_declared_bandwidth() {
+        let residual = |_: f64, y: &DVector<f64>| {
+            DVector::from_vec(vec![
+                y[0] + 100.0 * y[2],
+                2.0 * y[1],
+                3.0 * y[2] + 200.0 * y[0],
+            ])
+        };
+        let y = DVector::from_vec(vec![1.0, 2.0, 3.0]);
+
+        let jacobian = finite_difference_jacobian_from_residual(
+            &residual,
+            0.0,
+            &y,
+            1.0e-8,
+            NativeJacobianStorage::Banded {
+                bandwidth: Some((0, 0)),
+            },
+        );
+
+        let BdfJacobian::Banded(banded) = jacobian else {
+            panic!("declared finite-difference banded storage should return banded Jacobian");
+        };
+        assert_eq!(banded.n(), 3);
+        assert_eq!(banded.kl(), 0);
+        assert_eq!(banded.ku(), 0);
+        assert!((banded[(0, 0)] - 1.0).abs() < 1e-8);
+        assert!((banded[(1, 1)] - 2.0).abs() < 1e-8);
+        assert!((banded[(2, 2)] - 3.0).abs() < 1e-8);
     }
 
     #[test]

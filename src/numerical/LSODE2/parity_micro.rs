@@ -956,6 +956,120 @@ fn lsoda_switch_probe_gate_and_tsw_ordering_survive_warmup_and_reset_windows() {
 }
 
 #[test]
+fn lsoda_switch_handoff_trace_survives_dstoda_retry_window_without_false_reswitch() {
+    let mut controller = Lsode2AlgorithmController::new_with_capabilities(
+        Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(1),
+        Lsode2ControllerExecutionCapabilities {
+            adams_engine_available: true,
+        },
+    );
+
+    controller.record_accepted_steps_for_switch_probe(2);
+    let switch_to_bdf = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_accepted_steps(3)
+            .with_stiffness_ratio(1.0e8)
+            .with_adams_step_size_cap_estimate(0.1)
+            .with_bdf_step_size_cap_estimate(1.0),
+    );
+    assert_eq!(
+        switch_to_bdf.executed_family(),
+        Some(Lsode2MethodFamily::Bdf)
+    );
+    controller.record_switch_decision_at(switch_to_bdf, Some(0.40));
+
+    let switched = controller.switch_state();
+    assert_eq!(switched.mused, Lsode2MethodFamily::Adams);
+    assert_eq!(switched.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(switched.tsw, Some(0.40));
+    assert_eq!(switched.last_handoff_jstart, Some(-1));
+    assert_eq!(switched.switch_count, 1);
+
+    let mut cycle = make_bdf_cycle_with_step_config(Lsode2StepControlConfig {
+        max_convergence_failures: 2,
+        ..Lsode2StepControlConfig::default()
+    });
+    cycle
+        .state_mut()
+        .set_step_size(0.8)
+        .expect("step-size update should succeed");
+    cycle
+        .state_mut()
+        .set_order(3)
+        .expect("order update should succeed");
+
+    cycle.mark_jacobian_stale();
+    let stale_retry = cycle
+        .retry_after_stale_jacobian_nonlinear_failure()
+        .expect("ICF=1 stale-J retry should remain retryable");
+    assert_eq!(
+        stale_retry.action,
+        Lsode2RetryAction::RetryWithJacobianRefresh
+    );
+    assert_eq!(cycle.icf(), Lsode2Icf::RefreshRequested);
+    assert_eq!(cycle.kflag(), Lsode2Kflag::ConvergenceFailure);
+
+    let during_retry = controller.switch_state();
+    assert_eq!(
+        during_retry, switched,
+        "DSTODA retry branches must not mutate LSODA MUSED/MCUR/TSW/JSTART handoff trace"
+    );
+
+    let correction = Lsode2CorrectionController::scalar(
+        1.0e-3,
+        1.0e-6,
+        Lsode2CorrectionControlConfig::default(),
+    )
+    .expect("build correction controller");
+    let predicted = cycle.predict().expect("retry predictor should succeed");
+    let outcome = cycle
+        .finish_with_correction(
+            predicted.t_trial,
+            predicted.y_pred.as_slice(),
+            &[1.0e-2],
+            &[1.0e-2],
+            &correction,
+            Some(1.0e-4),
+            Some(0.5),
+            2,
+        )
+        .expect("post-switch retry attempt should complete");
+    match outcome {
+        Lsode2StepCycleOutcome::NonlinearRejected { retry, state, .. } => {
+            assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
+            assert_eq!(state.convergence_failures, 1);
+        }
+        other => panic!("expected post-switch nonlinear retry, got {other:?}"),
+    }
+    assert_eq!(cycle.icf(), Lsode2Icf::RefreshDidNotRecover);
+    assert_eq!(cycle.kflag(), Lsode2Kflag::ConvergenceFailure);
+
+    let after_retry = controller.switch_state();
+    assert_eq!(
+        after_retry, switched,
+        "retry/error-window choreography must leave the switch timestamp and handoff marker untouched until the next method decision"
+    );
+
+    let hold = controller.switch_decision_stateful(
+        Lsode2SwitchTelemetry::default()
+            .with_accepted_steps(4)
+            .with_stiffness_ratio(1.0e8)
+            .with_adams_step_size_cap_estimate(10.0)
+            .with_bdf_step_size_cap_estimate(1.0),
+    );
+    controller.record_switch_decision_at(hold, Some(0.45));
+    let held = controller.switch_state();
+    assert_eq!(held.mused, Lsode2MethodFamily::Bdf);
+    assert_eq!(held.mcur, Lsode2MethodFamily::Bdf);
+    assert_eq!(held.tsw, Some(0.40));
+    assert_eq!(
+        held.last_handoff_jstart, None,
+        "the next no-switch method decision consumes JSTART=-1 visibility instead of reporting a fresh handoff"
+    );
+    assert_eq!(held.switch_count, 1);
+}
+
+#[test]
 fn dstoda_label_by_label_matrix_terminal_near_terminal_replay_matches_fortran_style() {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Row {

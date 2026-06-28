@@ -2,8 +2,10 @@ fn main() {
     println!("Task-shell guides index");
     println!();
     println!("CLI storefront:");
-    println!("  - cargo run -- --showcase");
+    println!("  - cargo run -- showcase");
     println!("    Minimal top-level crate showcase from `src/main.rs`.");
+    println!("  - cargo run -- check-ffi-dependencies");
+    println!("    Probe Rust, tcc/gcc/zig, pandoc, gnuplot, and arrayfire status.");
     println!();
     println!("Task dispatch / shell infrastructure:");
     println!("  - examples/task_dispatcher_guide.rs");

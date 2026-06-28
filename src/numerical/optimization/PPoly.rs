@@ -1275,7 +1275,7 @@ mod tests_PPoly {
                 c[0][i] = vec![1.0]; // x coefficient
                 c[1][i] = vec![0.0]; // constant
             } else {
-                c[0][i] = vec![-1.0]; // x coefficient  
+                c[0][i] = vec![-1.0]; // x coefficient
                 c[1][i] = vec![2.0]; // constant
             }
         }

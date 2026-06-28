@@ -9,7 +9,8 @@ use log::info;
 use std::env;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
-use std::process::Command;
+use std::process::{self, Command};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn absolute_nonverbatim(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
@@ -150,8 +151,14 @@ impl ZigAotBuildRequest {
             "build".to_string(),
             format!("-Doptimize={}", self.profile.zig_optimize_flag()),
         ];
-        let local_cache_dir = written.library_dir.join(".zig-local-cache");
-        let global_cache_dir = written.library_dir.join(".zig-global-cache");
+        let cache_stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let cache_key = zig_cache_key(&self.library_spec.library_name, cache_stamp);
+        let cache_root = zig_cache_root();
+        let local_cache_dir = cache_root.join("local").join(&cache_key);
+        let global_cache_dir = cache_root.join("global").join(&cache_key);
         std::fs::create_dir_all(&local_cache_dir)?;
         std::fs::create_dir_all(&global_cache_dir)?;
         let local_cache_dir = absolute_nonverbatim(&local_cache_dir)?;
@@ -220,6 +227,26 @@ impl ExecutedZigAotBuild {
     pub fn succeeded(&self) -> bool {
         self.status_code == Some(0) && self.build.expected_so.exists()
     }
+}
+
+fn zig_cache_root() -> PathBuf {
+    env::var_os("RUSTEDSCITHE_ZIG_CACHE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("rustedscithe-zig-aot-cache"))
+}
+
+fn zig_cache_key(library_name: &str, stamp: u128) -> String {
+    let suffix = library_name
+        .rsplit('_')
+        .find(|part| !part.is_empty())
+        .unwrap_or(library_name);
+    let stem = if suffix.len() >= 8 {
+        suffix
+    } else {
+        library_name
+    };
+    let short_stem: String = stem.chars().take(16).collect();
+    format!("{}-{}-{stamp}", process::id(), short_stem)
 }
 
 #[cfg(test)]
@@ -294,8 +321,22 @@ mod tests {
                     Path::new(value).is_absolute(),
                     "{key} must be absolute so `zig build` does not resolve it relative to the generated crate"
                 );
+                assert!(
+                    !Path::new(value).starts_with(result.written.library_dir.as_path()),
+                    "{key} should stay outside the deep generated crate directory to avoid Windows Zig build-runner path limits"
+                );
             }
         }
+    }
+
+    #[test]
+    fn zig_cache_key_keeps_deep_windows_paths_short() {
+        let key = zig_cache_key("generated_ivp_residual_534b35bdcbb8f0ed_very_long_tail", 42);
+        assert!(key.contains("42"));
+        assert!(
+            key.len() < 64,
+            "Zig cache key should stay compact enough for nested cache paths: {key}"
+        );
     }
 
     #[test]

@@ -226,7 +226,7 @@ pub fn lm(
         let lambda_0 = 1e-2; // initial value of damping paramter, lambda
         let lambda_up_fac = 11.0; // factor for increasing lambda
         let lambda_dn_fac = 9.0; //factor for decreasing lambda
-        let update_type = 1; // 1: Levenberg-Marquardt lambda update, 2: Quadratic update, 3: Nielsen's lambda update equations 
+        let update_type = 1; // 1: Levenberg-Marquardt lambda update, 2: Quadratic update, 3: Nielsen's lambda update equations
 
         let mut stop = false;
         //  initialize Jacobian with finite difference calculation

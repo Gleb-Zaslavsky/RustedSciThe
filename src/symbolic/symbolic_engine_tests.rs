@@ -2175,8 +2175,10 @@ mod tests {
         let multi_line_exp = Expr::Exp(Box::new(x / y));
         let result2 = multi_line_exp.pretty_print();
 
-        // Should use multi-line format for division exponent
+        // Should use a power-style multi-line format, not a textual fallback.
         assert!(result2.contains('\n'));
+        assert!(!result2.contains("e^("));
+        assert!(!result2.contains("exp("));
 
         let lines: Vec<&str> = result2.split('\n').collect();
         // Should have exponent above 'e'
@@ -2252,9 +2254,10 @@ mod tests {
         let ln_complex = Expr::Ln(Box::new(complex_arg));
         let result = ln_complex.pretty_print();
         println!("{}", result);
-        // Should handle multi-line argument properly
-        assert!(result.contains("ln("));
-        assert!(result.contains(')'));
+        // Multi-line function arguments use scalable mathematical parentheses.
+        assert!(result.lines().any(|line| line.starts_with("ln ") && line.contains('⎜')));
+        assert!(result.contains('⎛') && result.contains('⎞'));
+        assert!(result.contains('⎝') && result.contains('⎠'));
     }
 
     #[test]
@@ -2429,6 +2432,77 @@ mod tests {
         println!("{}", result);
         println!("=====================================");
     }
+    #[test]
+    fn test_pretty_print_rather_complex_expression2() {
+        let eq1 = Expr::parse_expression("exp(-a/(b*x))");
+        let eq2 = Expr::parse_expression("x^2+x^3+1/x");
+        let eq3 = Expr::parse_expression("exp(-a/(a+ b*x+ c*x^2))");
+        let complete_expr = (eq1.clone() + eq2)/(eq3 + eq1);
+
+        let result = complete_expr.pretty_print();
+        println!("=== RATHER COMPLEX EXPRESSION ===");
+        println!("{}", result);
+        println!("=====================================");
+
+        assert!(
+            result.contains("─"),
+            "nested divisions should stay as stacked fraction blocks:\n{}",
+            result
+        );
+        assert!(
+            !result.contains(" / "),
+            "nested divisions should not collapse into ambiguous inline division inside a fraction:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pretty_print_function_argument_fraction_stays_grouped() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+
+        let expr = Expr::sin(Box::new(x.clone().pow(Expr::Const(2.0)) / y.clone()));
+        let result = expr.pretty_print();
+        println!("=== FUNCTION FRACTION GROUPING ===");
+        println!("{}", result);
+        println!("==================================");
+
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "multi-line function argument should stay stacked vertically:\n{}",
+            result
+        );
+        assert!(
+            lines
+                .get(1)
+                .map(|line| line.starts_with("sin ") && line.contains('⎜'))
+                .unwrap_or(false),
+            "function name should sit on the fraction axis:\n{}",
+            result
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("x²")),
+            "numerator should stay inside the function block:\n{}",
+            result
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("y")),
+            "denominator should stay inside the function block:\n{}",
+            result
+        );
+        assert!(
+            lines.first().map(|line| line.contains('⎛') && line.contains('⎞')).unwrap_or(false)
+                && lines
+                    .last()
+                    .map(|line| line.contains('⎝') && line.contains('⎠'))
+                    .unwrap_or(false),
+            "scalable parentheses should enclose the complete argument:\n{}",
+            result
+        );
+    }
+
+
 
     #[test]
     fn test_pretty_print_extremely_complex_expression() {
@@ -2468,10 +2542,10 @@ mod tests {
         println!("=====================================");
 
         // Verify it contains all the expected mathematical elements
-        assert!(result.contains("ln("));
-        assert!(result.contains("sin("));
-        assert!(result.contains("cos("));
-        assert!(result.contains("arctg("));
+        assert!(result.contains("ln"));
+        assert!(result.contains("sin"));
+        assert!(result.contains("cos"));
+        assert!(result.contains("arctg"));
         assert!(result.contains('²')); // x²
         assert!(result.contains('³')); // z³
         assert!(result.contains('e')); // exponential
@@ -2531,11 +2605,99 @@ mod tests {
         assert!(result.contains('\n'));
 
         // Should contain trigonometric functions
-        assert!(result.contains("sin("));
-        assert!(result.contains("cos("));
+        assert!(result.contains("sin"));
+        assert!(result.contains("cos"));
 
-        // Should handle nested structure properly
-        assert!(result.contains(") "));
+        let lines: Vec<&str> = result.lines().collect();
+        let denominator_exponent_col = lines
+            .iter()
+            .find_map(|line| line.find("z + 1"))
+            .expect("denominator exponent must remain visible");
+        let denominator_base_right = lines
+            .iter()
+            .find(|line| line.contains("sin(x)"))
+            .and_then(|line| line.rfind(')').map(|col| col + 1))
+            .expect("denominator power base must remain visible");
+        assert!(
+            denominator_exponent_col > denominator_base_right,
+            "parent fraction must preserve the exponent offset of its denominator block:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pretty_print_power_uses_complete_multiline_base() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let z = Expr::Var("z".to_string());
+
+        let result = (x / y).pow(z).pretty_print();
+        println!("=== FRACTION BASE WITH SYMBOLIC POWER ===");
+        println!("{}", result);
+        println!("=========================================");
+
+        let lines: Vec<&str> = result.lines().collect();
+        let exponent_col = lines
+            .iter()
+            .find_map(|line| line.find('z'))
+            .expect("symbolic exponent must remain visible");
+        let fraction_width = lines
+            .iter()
+            .find(|line| line.contains('─'))
+            .map(|line| line.trim_end().chars().count())
+            .expect("fraction base must retain its division bar");
+
+        assert!(
+            exponent_col >= fraction_width,
+            "exponent should start to the right of the complete fraction base:\n{}",
+            result
+        );
+        assert!(
+            lines.iter().any(|line| line.contains('x'))
+                && lines.iter().any(|line| line.contains('y')),
+            "power layout must preserve numerator and denominator:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pretty_print_multiline_base_and_multiline_exponent() {
+        let x = Expr::Var("x".to_string());
+        let y = Expr::Var("y".to_string());
+        let z = Expr::Var("z".to_string());
+        let a = Expr::Var("a".to_string());
+        let b = Expr::Var("b".to_string());
+
+        let base = (Expr::sin(Box::new(x)) + y.clone()) / (Expr::cos(Box::new(z)) + y);
+        let exponent = (a.clone() + Expr::Const(1.0)) / (b.clone() + Expr::Const(2.0));
+        let result = base.pow(exponent).pretty_print();
+        println!("=== MULTILINE BASE AND EXPONENT ===");
+        println!("{}", result);
+        println!("===================================");
+
+        let lines: Vec<&str> = result.lines().collect();
+        let base_bar = lines
+            .iter()
+            .rposition(|line| line.contains('─'))
+            .expect("multiline base must retain its fraction bar");
+        let exponent_bar = lines
+            .iter()
+            .position(|line| line.contains('─'))
+            .expect("multiline exponent must retain its fraction bar");
+
+        assert!(
+            exponent_bar < base_bar,
+            "the exponent fraction should be above the base fraction:\n{}",
+            result
+        );
+        assert!(
+            result.contains("sin(x)")
+                && result.contains("cos(z)")
+                && result.contains('a')
+                && result.contains('b'),
+            "both structured operands must remain intact:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -2595,7 +2757,15 @@ mod tests {
         let ln_arg = sin_part * cos_part;
 
         println!("\n=== Complex case: sin(x²/y) + cos(z³) ===");
-        println!("{}", ln_arg.pretty_print());
+        let result = ln_arg.pretty_print();
+        println!("{}", result);
+        assert!(
+            result
+                .lines()
+                .any(|line| line.starts_with("sin ") && line.contains(" * cos(z³)")),
+            "the outer product should attach to the function axis:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -2624,11 +2794,11 @@ mod tests {
         println!("======================================");
 
         // Should contain all function types
-        assert!(result.contains("ln("));
-        assert!(result.contains("sin("));
-        assert!(result.contains("cos("));
-        assert!(result.contains("tg("));
-        assert!(result.contains("arctg("));
+        assert!(result.contains("ln"));
+        assert!(result.contains("sin"));
+        assert!(result.contains("cos"));
+        assert!(result.contains("tg"));
+        assert!(result.contains("arctg"));
         assert!(result.contains('e'));
 
         // Should have proper division formatting
@@ -2671,7 +2841,21 @@ mod tests {
 
         // Test just the power part alone
         println!("\n=== Just the Power Part ===");
-        println!("{}", right_power.pretty_print());
+        let right_power_pretty = right_power.pretty_print();
+        println!("{}", right_power_pretty);
+
+        assert!(
+            right_power_pretty.contains("x + 1")
+                && !right_power_pretty.contains("(x + 1)")
+                && !right_power_pretty.contains("( x + 1 )"),
+            "complex power exponent should stay visible and unparenthesized in pretty output:\n{}",
+            right_power_pretty
+        );
+        assert!(
+            right_power_pretty.contains('─'),
+            "fractional base should remain a stacked fraction in pretty output:\n{}",
+            right_power_pretty
+        );
     }
 
     #[test]

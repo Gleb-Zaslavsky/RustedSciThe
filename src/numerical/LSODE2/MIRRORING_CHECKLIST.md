@@ -113,7 +113,13 @@ This file is the single source of truth. Historical duplicate audit bullets were
   The implementation no longer cold-rebuilds the cycle and basic `TSW/JSTART`
   visibility is parity-locked, including probe-window reset/hold behavior, but
   harder switch/retry windows still need side-by-side trace evidence for exact
-  `METH/MUSED/MCUR/TSW/JSTART` ordering through retry/error branches.
+  `METH/MUSED/MCUR/TSW/JSTART` ordering through all retry/error branches.
+  One important guard is now locked: after a real family switch, DSTODA
+  retry/error-window choreography must not mutate `MUSED/MCUR/TSW` or report a
+  false fresh `JSTART=-1`; the next no-switch method decision consumes the
+  one-step handoff visibility while preserving the original `TSW`.
+  Locked by:
+  - `numerical::LSODE2::parity_micro::lsoda_switch_handoff_trace_survives_dstoda_retry_window_without_false_reswitch`
 - [x] Label-by-label replay for narrow switch branches (reason/cost/stiff gates) is locked.
   Locked by:
   - `numerical::LSODE2::tests::lsode2_dstoda_switch_choreography_label_replay_reason_cost_stiff_gates`

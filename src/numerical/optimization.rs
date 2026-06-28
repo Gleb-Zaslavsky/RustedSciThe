@@ -123,6 +123,7 @@ pub mod utils;
 pub mod PPoly;
 /// interpolation and extrapolation of data
 pub mod inter_n_extrapolate;
+pub mod kinetic_fitting;
 mod lm_gavin;
 /// H.P.Gavin's Levenberg-Marquardt algorithm
 ///
@@ -201,5 +202,4 @@ pub mod lm_gavin2;
 pub mod minimize_scalar;
 pub mod universal_fitting;
 pub mod varpro;
-pub mod kinetic_fitting;
 pub use universal_fitting::{Method, UniversalFitting, UniversalFittingResult};
