@@ -1,10 +1,19 @@
 //! IVP task-shell built on top of the generic [`DocumentParser`].
 //!
 //! This module turns a structured text document into a typed IVP specification
-//! and then wires it into [`UniversalODESolver`]. It is intentionally narrower
-//! than the historical damped-BVP task parser: the parser stage only validates
-//! and normalizes user input, while solver execution and postprocessing remain
-//! explicit follow-up steps.
+//! and then wires it into [`UniversalODESolver`].
+//!
+//! The parser supports two usage modes:
+//! - full end-to-end task documents, where equations, initial conditions,
+//!   solver selection, solver options, and postprocessing live in one DSL
+//!   document
+//! - split mode, where the document contributes only solver settings and the
+//!   IVP problem itself is assembled from plain Rust data before the solver is
+//!   built
+//!
+//! It is intentionally narrower than the historical damped-BVP task parser:
+//! the parser stage only validates and normalizes user input, while solver
+//! execution and postprocessing remain explicit follow-up steps.
 
 use crate::Utils::postprocessing::{PostprocessDataset, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
@@ -29,6 +38,7 @@ use std::path::PathBuf;
 /// For now we only support IVP tasks, but keeping this enum explicit makes it
 /// easier to expand the textual interface later without redesigning the whole
 /// normalization layer.
+/// Top-level family selector for text-driven task shells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKindSpec {
     Ivp,
@@ -77,6 +87,7 @@ impl IvpMethodSpec {
     }
 }
 
+/// Solver selection extracted from the IVP DSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverSelectionSpec {
     pub task_kind: TaskKindSpec,
@@ -211,6 +222,41 @@ pub struct IvpTaskSpec {
     pub postprocessing: PostprocessingSpec,
 }
 
+impl IvpTaskSpec {
+    /// Extract the problem-only subset from a full IVP task.
+    pub fn problem_spec(&self) -> IvpProblemSpec {
+        IvpProblemSpec {
+            equations: self.equations.clone(),
+            initial_conditions: self.initial_conditions.clone(),
+        }
+    }
+
+    /// Extract the solver-selection and solver-option subset from a full IVP task.
+    pub fn solver_settings_spec(&self) -> IvpSolverSettingsSpec {
+        IvpSolverSettingsSpec {
+            solver: self.solver.clone(),
+            solver_options: self.solver_options.clone(),
+        }
+    }
+}
+
+/// Problem-only subset of the IVP task DSL.
+/// Problem-only subset of the IVP task DSL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IvpProblemSpec {
+    pub equations: EquationSpec,
+    pub initial_conditions: InitialConditionSpec,
+}
+
+/// Solver-settings-only subset of the IVP task DSL.
+/// Solver-settings-only subset of the IVP task DSL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IvpSolverSettingsSpec {
+    pub solver: SolverSelectionSpec,
+    pub solver_options: IvpSolverOptionsSpec,
+}
+
+/// Result of running a normalized IVP task.
 #[derive(Debug)]
 pub struct IvpTaskRunResult {
     pub specification: IvpTaskSpec,
@@ -272,7 +318,7 @@ impl std::error::Error for IvpTaskError {}
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 
-/// Parse a user-facing IVP document into a typed specification.
+/// Parse a full IVP task document from DSL text.
 ///
 /// The generic `DocumentParser` handles syntax. This function is responsible
 /// for IVP-specific normalization:
@@ -296,18 +342,39 @@ pub fn parse_ivp_task_from_str(input: &str) -> Result<IvpTaskSpec, IvpTaskError>
     parse_ivp_task_from_document(document)
 }
 
-pub fn parse_ivp_task_from_document(document: &DocumentMap) -> Result<IvpTaskSpec, IvpTaskError> {
-    let solver = parse_solver_selection(document)?;
+/// Parse only the equation and initial-condition part of the IVP DSL.
+pub fn parse_ivp_problem_from_document(
+    document: &DocumentMap,
+) -> Result<IvpProblemSpec, IvpTaskError> {
     let equations = parse_equations(document)?;
     let initial_conditions = parse_initial_conditions(document, equations.unknowns.len())?;
-    let solver_options = parse_solver_options(document)?;
+    Ok(IvpProblemSpec {
+        equations,
+        initial_conditions,
+    })
+}
+
+/// Parse only the solver-selection and solver-option part of the IVP DSL.
+pub fn parse_ivp_solver_settings_from_document(
+    document: &DocumentMap,
+) -> Result<IvpSolverSettingsSpec, IvpTaskError> {
+    Ok(IvpSolverSettingsSpec {
+        solver: parse_solver_selection(document)?,
+        solver_options: parse_solver_options(document)?,
+    })
+}
+
+/// Parse a full IVP task from an already normalized document map.
+pub fn parse_ivp_task_from_document(document: &DocumentMap) -> Result<IvpTaskSpec, IvpTaskError> {
+    let problem = parse_ivp_problem_from_document(document)?;
+    let solver_settings = parse_ivp_solver_settings_from_document(document)?;
     let postprocessing = parse_postprocessing(document)?;
 
     Ok(IvpTaskSpec {
-        solver,
-        equations,
-        initial_conditions,
-        solver_options,
+        solver: solver_settings.solver,
+        equations: problem.equations,
+        initial_conditions: problem.initial_conditions,
+        solver_options: solver_settings.solver_options,
         postprocessing,
     })
 }
@@ -318,6 +385,25 @@ pub fn parse_ivp_task_from_document(document: &DocumentMap) -> Result<IvpTaskSpe
 /// already be done in the parser/normalizer layer, so here we just move data
 /// into `UniversalODESolver` and forward supported options through setters.
 pub fn build_ivp_solver_from_spec(spec: &IvpTaskSpec) -> Result<UniversalODESolver, IvpTaskError> {
+    build_ivp_solver_from_problem_and_settings(&spec.problem_spec(), &spec.solver_settings_spec())
+}
+
+/// Build a solver from Rust-side problem data plus task-doc solver settings.
+pub fn build_ivp_solver_from_problem_and_settings(
+    problem: &IvpProblemSpec,
+    settings: &IvpSolverSettingsSpec,
+) -> Result<UniversalODESolver, IvpTaskError> {
+    let spec = IvpTaskSpec {
+        solver: settings.solver.clone(),
+        equations: problem.equations.clone(),
+        initial_conditions: problem.initial_conditions.clone(),
+        solver_options: settings.solver_options.clone(),
+        postprocessing: PostprocessingSpec::default(),
+    };
+    build_ivp_solver_from_spec_impl(&spec)
+}
+
+fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<UniversalODESolver, IvpTaskError> {
     if spec.equations.unknowns.len() != spec.initial_conditions.y0.len() {
         return Err(IvpTaskError::Semantic(format!(
             "initial condition vector length {} does not match number of unknowns {}",
@@ -529,6 +615,7 @@ pub fn run_ivp_task(spec: IvpTaskSpec) -> Result<IvpTaskRunResult, IvpTaskError>
     })
 }
 
+/// Write a starter IVP task document template to disk or to the current folder.
 pub fn create_ivp_template_file(path: Option<PathBuf>) {
     use std::env;
     use std::fs::File;
@@ -1206,659 +1293,5 @@ fn value_to_float(value: &Value, section_name: &str, field: &str) -> Result<f64,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn ivp_task_parser_supports_pair_style_equations() {
-        let input = r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-parameters: a
-parameter_values: 2.0
-y: -a*y
-
-initial_conditions
-t0: 0.0
-t_end: 1.0
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-"#;
-
-        let spec = parse_ivp_task_from_str(input).expect("pair-style IVP task should parse");
-        assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
-        assert_eq!(spec.equations.parameter_values["a"], 2.0);
-        assert_eq!(spec.initial_conditions.y0, vec![1.0]);
-        assert_eq!(
-            spec.solver.method,
-            IvpMethodSpec::NonStiff("RK45".to_string())
-        );
-    }
-
-    #[test]
-    fn ivp_task_parser_supports_where_symbolic_substitutions() {
-        let input = r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-y: heat - y
-
-where
-arr: 2.0*t
-heat: arr + 1.0
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-"#;
-
-        let spec =
-            parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
-        let expr = spec.equations.rhs[0].clone();
-        let f = expr.lambdify_borrowed_thread_safe(&["t", "y"]);
-        let value = f(&[0.5, 1.0]);
-        assert!((value - 1.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn ivp_task_parser_reports_bad_where_expression() {
-        let input = r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-y: heat - y
-
-where
-heat: sin(
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-"#;
-
-        let err = parse_ivp_task_from_str(input)
-            .expect_err("bad where expression should be reported as an IVP parser error");
-        let message = err.to_string();
-        assert!(message.contains("where/substitute"));
-        assert!(message.contains("failed to parse symbolic expression"));
-    }
-
-    #[test]
-    fn ivp_task_runner_solves_simple_decay() {
-        let input = r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-unknowns: y
-rhs: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-"#;
-
-        let result = run_ivp_task_from_str(input).expect("simple IVP task should solve");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        let y = result.y_result.expect("solver should produce y_result");
-        let final_y = y[(y.nrows() - 1, 0)];
-        let expected = (-0.2_f64).exp();
-        assert!((final_y - expected).abs() < 1e-2);
-    }
-
-    #[test]
-    fn ivp_task_runner_can_save_csv() {
-        let dir = tempdir().expect("tempdir should be created");
-        let csv_path = dir.path().join("ivp_task_output.csv");
-        let input = format!(
-            r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-y: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.05
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-
-postprocessing
-save_csv: true
-csv_path: {}
-"#,
-            csv_path.display()
-        );
-
-        let result = run_ivp_task_from_str(&input).expect("IVP task should solve and save CSV");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        let contents =
-            std::fs::read_to_string(&csv_path).expect("CSV file should be readable after solve");
-        assert!(contents.contains("t,y"));
-    }
-
-    #[test]
-    fn ivp_task_runner_can_execute_modern_postprocessing_plan() {
-        let dir = tempdir().expect("tempdir should be created");
-        let txt_path = dir.path().join("ivp_task_output.txt");
-        let report_path = dir.path().join("ivp_task_report.md");
-        let input = format!(
-            r#"
-task
-solver: IVP
-method: RK45
-
-equations
-arg: t
-y: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.05
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-
-postprocessing
-save_txt: true
-txt_path: {}
-write_report: true
-report_path: {}
-"#,
-            txt_path.display(),
-            report_path.display()
-        );
-
-        let result = run_ivp_task_from_str(&input).expect("IVP task should solve and postprocess");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        assert!(txt_path.exists());
-        let report = std::fs::read_to_string(&report_path)
-            .expect("report should be readable after postprocessing");
-        assert!(report.contains("Solver Result Report"));
-        assert!(report.contains("axis: t"));
-    }
-
-    #[test]
-    fn ivp_task_runner_supports_backward_euler() {
-        let input = r#"
-task
-solver: IVP
-method: BackwardEuler
-
-equations
-arg: t
-y: -10.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-step_size: 1e-3
-tolerance: 1e-8
-max_iterations: 100
-"#;
-
-        let result = run_ivp_task_from_str(input).expect("Backward Euler IVP task should solve");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        assert!(result.y_result.is_some());
-    }
-
-    #[test]
-    fn ivp_task_runner_supports_bdf() {
-        let input = r#"
-task
-solver: IVP
-method: BDF
-
-equations
-arg: t
-y: -20.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-first_step: Some(1e-3)
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-"#;
-
-        let result = run_ivp_task_from_str(input).expect("BDF IVP task should solve");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        assert!(result.y_result.is_some());
-    }
-
-    #[test]
-    fn ivp_task_runner_supports_radau5() {
-        let input = r#"
-task
-solver: IVP
-method: Radau5
-
-equations
-arg: t
-y: -15.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-first_step: Some(1e-3)
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-"#;
-
-        let result = run_ivp_task_from_str(input).expect("Radau5 IVP task should solve");
-        assert_eq!(result.status.as_deref(), Some("finished"));
-        assert!(result.y_result.is_some());
-    }
-
-    #[test]
-    fn ivp_task_parser_supports_lsode2_method_and_options() {
-        let input = r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -2.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_symbolic_assembly: AtomView
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: sparse
-lsode2_linear_solver_policy: faer_sparse_lu
-lsode2_native_execution: faithful_bdf_solve
-"#;
-
-        let spec = parse_ivp_task_from_str(input).expect("LSODE2 document should parse");
-        assert_eq!(spec.solver.method, IvpMethodSpec::Lsode2);
-        let lsode2 = spec
-            .solver_options
-            .lsode2
-            .as_ref()
-            .expect("LSODE2 options should be present");
-        assert_eq!(
-            lsode2.symbolic_assembly,
-            Some(Lsode2SymbolicAssemblyBackend::AtomView)
-        );
-        assert_eq!(
-            lsode2.linear_system_structure,
-            Some(Lsode2LinearSystemStructure::Sparse)
-        );
-    }
-
-    #[test]
-    fn ivp_task_parser_maps_lsode2_method_family_to_controller_config() {
-        use crate::numerical::LSODE2::Lsode2ControllerMode;
-
-        let cases = [
-            ("LSODA", "auto", Lsode2ControllerMode::AutomaticAdamsBdf),
-            ("LSODE", "adams", Lsode2ControllerMode::AdamsOnly),
-            ("LSODE", "bdf", Lsode2ControllerMode::BdfOnly),
-        ];
-
-        for (method, family, expected_mode) in cases {
-            let input = format!(
-                r#"
-task
-solver: IVP
-method: {method}
-
-equations
-arg: t
-y: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_method_family: {family}
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: sparse
-lsode2_linear_solver_policy: auto
-"#
-            );
-            let spec =
-                parse_ivp_task_from_str(&input).expect("LSODE2 controller document should parse");
-            let config = build_lsode2_problem_config_from_spec(&spec)
-                .expect("LSODE2 controller document should build problem config");
-            assert_eq!(
-                config.controller.mode, expected_mode,
-                "{method}/{family} should map to the expected controller mode"
-            );
-        }
-    }
-
-    #[test]
-    fn ivp_task_parser_builds_lsode2_banded_auto_resolved_plan() {
-        use crate::numerical::LSODE2::{
-            Lsode2ControllerMode, Lsode2LinearSolverBackend, Lsode2LinearSolverChoice,
-        };
-
-        let input = r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -2.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_method_family: bdf
-lsode2_symbolic_assembly: AtomView
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: banded
-lsode2_linear_solver_policy: auto
-lsode2_native_execution: faithful_bdf_solve
-"#;
-
-        let spec = parse_ivp_task_from_str(input).expect("LSODE2 banded document should parse");
-        let config = build_lsode2_problem_config_from_spec(&spec)
-            .expect("LSODE2 banded document should build problem config");
-        let resolved = config.resolve_plan();
-
-        assert_eq!(config.controller.mode, Lsode2ControllerMode::BdfOnly);
-        assert_eq!(
-            config.residual_jacobian_source,
-            Lsode2ResidualJacobianSource::Symbolic {
-                assembly: Lsode2SymbolicAssemblyBackend::AtomView,
-                execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
-            }
-        );
-        assert_eq!(
-            resolved.structure,
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
-        );
-        assert_eq!(
-            resolved.linear_solver,
-            Lsode2LinearSolverChoice::LapackFaithfulBandedLu
-        );
-        assert_eq!(
-            resolved.linear_solver_reason,
-            "auto_from_linear_structure_banded"
-        );
-        assert_eq!(
-            config.backend.linear_solver_backend,
-            Lsode2LinearSolverBackend::BandedFaithful
-        );
-        assert_eq!(
-            config.backend.jacobian_backend,
-            Lsode2JacobianBackend::SymbolicGenerated
-        );
-    }
-
-    #[test]
-    fn ivp_task_parser_keeps_lsode2_forced_policy_visible_in_resolved_plan() {
-        use crate::numerical::LSODE2::{Lsode2LinearSolverBackend, Lsode2LinearSolverChoice};
-
-        let input = r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -2.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: sparse
-lsode2_linear_solver_policy: lapack_faithful_banded_lu
-"#;
-
-        let spec =
-            parse_ivp_task_from_str(input).expect("LSODE2 forced-policy document should parse");
-        let config = build_lsode2_problem_config_from_spec(&spec)
-            .expect("LSODE2 forced-policy document should build problem config");
-        let resolved = config.resolve_plan();
-
-        assert_eq!(resolved.structure, Lsode2LinearSystemStructure::Sparse);
-        assert_eq!(
-            resolved.linear_solver,
-            Lsode2LinearSolverChoice::LapackFaithfulBandedLu
-        );
-        assert_eq!(
-            resolved.linear_solver_reason,
-            "forced_by_linear_solver_policy"
-        );
-        assert_eq!(
-            config.backend.linear_solver_backend,
-            Lsode2LinearSolverBackend::BandedFaithful
-        );
-    }
-
-    #[test]
-    fn ivp_task_parser_builds_lsode2_aot_toolchain_backend_contract() {
-        use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
-        use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
-        use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
-
-        let output_dir = PathBuf::from("target/lsode2-task-parser-aot-contract");
-        let input = format!(
-            r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -2.0*y
-
-initial_conditions
-t0: 0.0
-t_end: 0.2
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_symbolic_assembly: AtomView
-lsode2_symbolic_execution: AOT
-lsode2_aot_toolchain: zig
-lsode2_aot_profile: debug
-lsode2_aot_output_dir: {}
-lsode2_linear_structure: sparse
-lsode2_linear_solver_policy: auto
-"#,
-            output_dir.display()
-        );
-
-        let spec = parse_ivp_task_from_str(&input).expect("LSODE2 AOT document should parse");
-        let config = build_lsode2_problem_config_from_spec(&spec)
-            .expect("LSODE2 AOT document should build problem config");
-        let resolved = config.resolve_plan();
-
-        assert_eq!(
-            resolved.source,
-            Lsode2ResidualJacobianSource::Symbolic {
-                assembly: Lsode2SymbolicAssemblyBackend::AtomView,
-                execution: Lsode2SymbolicExecutionMode::Aot {
-                    toolchain: Lsode2AotToolchain::Zig,
-                    profile: Lsode2AotProfile::Debug,
-                },
-            }
-        );
-        assert_eq!(
-            resolved.linear_solver,
-            Lsode2LinearSolverChoice::FaerSparseLu
-        );
-        assert_eq!(
-            config.backend.generated_backend.aot_codegen_backend,
-            AotCodegenBackend::Zig
-        );
-        assert_eq!(config.backend.generated_backend.aot_c_compiler, None);
-        assert_eq!(
-            config.backend.generated_backend.output_parent_dir,
-            Some(output_dir)
-        );
-        assert_eq!(
-            config.backend.generated_backend.build_policy,
-            SymbolicIvpAotBuildPolicy::BuildIfMissing {
-                profile: AotBuildProfile::Debug,
-            }
-        );
-    }
-
-    #[test]
-    fn ivp_task_runner_supports_lsode2_lambdify_path() {
-        let input = r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: dense
-lsode2_linear_solver_policy: auto
-"#;
-
-        let result = run_ivp_task_from_str(input).expect("LSODE2 task should solve");
-        assert!(result.status.is_some());
-        assert!(result.y_result.is_some());
-    }
-
-    #[test]
-    fn ivp_task_runner_executes_lsode2_modern_postprocessing_plan() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
-        let csv_path = dir.path().join("lsode2_task_solution.csv");
-        let report_path = dir.path().join("lsode2_task_report.md");
-        let input = format!(
-            r#"
-task
-solver: IVP
-method: LSODE2
-
-equations
-arg: t
-y: -y
-
-initial_conditions
-t0: 0.0
-t_end: 0.1
-y0: 1.0
-
-solver_options
-rtol: 1e-6
-atol: 1e-8
-max_step: 0.05
-lsode2_symbolic_execution: LambdifyExpr
-lsode2_linear_structure: dense
-lsode2_linear_solver_policy: auto
-
-postprocessing
-save_csv: true
-csv_path: {}
-write_report: true
-report_path: {}
-"#,
-            csv_path.display(),
-            report_path.display()
-        );
-
-        let result = run_ivp_task_from_str(&input).expect("LSODE2 task should solve");
-        let t = result
-            .t_result
-            .as_ref()
-            .expect("LSODE2 task should return a time mesh");
-        let y = result
-            .y_result
-            .as_ref()
-            .expect("LSODE2 task should return a solution matrix");
-        assert_eq!(t.len(), y.nrows());
-        assert_eq!(y.ncols(), 1);
-        assert!(csv_path.exists());
-        assert!(report_path.exists());
-
-        let csv = std::fs::read_to_string(&csv_path).expect("CSV should be readable");
-        assert!(csv.contains("t,y"));
-        let report = std::fs::read_to_string(&report_path).expect("report should be readable");
-        assert!(report.contains("Solver Result Report"));
-        assert!(report.contains("axis: t"));
-    }
-}
+#[path = "task_parser_ivp_tests.rs"]
+mod task_parser_ivp_tests;

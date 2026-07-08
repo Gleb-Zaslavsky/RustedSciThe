@@ -1,9 +1,18 @@
 //! BVP task-shell built on top of the generic [`DocumentParser`].
 //!
 //! This module mirrors the IVP task shell, but targets the historical
-//! [`crate::numerical::BVP_api::BVP`] facade. The goal is intentionally modest:
-//! provide a small, typed, text-facing entry point that is easy to validate and
-//! easy to extend later.
+//! [`crate::numerical::BVP_api::BVP`] facade.
+//!
+//! The parser supports two usage modes:
+//! - full end-to-end task documents, where equations, boundary conditions,
+//!   mesh, initial guess, solver selection, solver options, and postprocessing
+//!   live in one DSL document
+//! - split mode, where the document contributes only solver settings and the
+//!   BVP problem itself is assembled from plain Rust data before the solver is
+//!   built
+//!
+//! The goal is intentionally modest: provide a small, typed, text-facing entry
+//! point that is easy to validate and easy to extend later.
 //!
 //! The shell keeps the problem description compact while exposing the generated
 //! BVP backend knobs needed by production runs:
@@ -38,11 +47,13 @@ use std::path::PathBuf;
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 
+/// High-level task kind supported by the BVP task shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpTaskKindSpec {
     Bvp,
 }
 
+/// Damped/frozen/naive solver family chosen by the task document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpStrategySpec {
     Damped,
@@ -70,6 +81,7 @@ impl BvpStrategySpec {
     }
 }
 
+/// Linear matrix structure requested by the task document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpLinearBackendSpec {
     Dense,
@@ -97,6 +109,7 @@ impl BvpLinearBackendSpec {
     }
 }
 
+/// Top-level solver selection extracted from the DSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BvpSolverSelectionSpec {
     pub task_kind: BvpTaskKindSpec,
@@ -105,6 +118,7 @@ pub struct BvpSolverSelectionSpec {
     pub backend: BvpLinearBackendSpec,
 }
 
+/// Symbolic equation system and parameter declarations parsed from the DSL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BvpEquationSpec {
     pub arg: String,
@@ -114,11 +128,13 @@ pub struct BvpEquationSpec {
     pub parameter_values: HashMap<String, f64>,
 }
 
+/// Boundary condition map keyed by unknown name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundaryConditionSpec {
     pub conditions: HashMap<String, Vec<(usize, f64)>>,
 }
 
+/// Solver mesh description parsed from the task document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BvpMeshSpec {
     pub t0: f64,
@@ -126,11 +142,13 @@ pub struct BvpMeshSpec {
     pub n_steps: usize,
 }
 
+/// Constant initial guess values for each unknown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BvpInitialGuessSpec {
     pub values: Vec<f64>,
 }
 
+/// Scalar solver options and generated-backend knobs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BvpSolverOptionsSpec {
     pub tolerance: Option<f64>,
@@ -140,6 +158,7 @@ pub struct BvpSolverOptionsSpec {
     pub generated_backend: BvpGeneratedBackendSpec,
 }
 
+/// AOT / backend configuration nested inside solver options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BvpGeneratedBackendSpec {
     pub preset: Option<String>,
@@ -156,6 +175,7 @@ pub struct BvpGeneratedBackendSpec {
     pub refinement_steps: Option<usize>,
 }
 
+/// Optional postprocessing plan collected from the task document.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BvpPostprocessingSpec {
     pub save_csv: bool,
@@ -217,6 +237,7 @@ impl BvpPostprocessingSpec {
     }
 }
 
+/// Fully parsed task document: solver selection, problem, options, and output plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BvpTaskSpec {
     pub solver: BvpSolverSelectionSpec,
@@ -228,12 +249,50 @@ pub struct BvpTaskSpec {
     pub postprocessing: BvpPostprocessingSpec,
 }
 
+/// Problem-only subset of the BVP task DSL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BvpProblemSpec {
+    pub equations: BvpEquationSpec,
+    pub boundary_conditions: BoundaryConditionSpec,
+    pub mesh: BvpMeshSpec,
+    pub initial_guess: BvpInitialGuessSpec,
+}
+
+/// Solver-settings-only subset of the BVP task DSL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BvpSolverSettingsSpec {
+    pub solver: BvpSolverSelectionSpec,
+    pub solver_options: BvpSolverOptionsSpec,
+}
+
+impl BvpTaskSpec {
+    /// Extract only the mathematical problem data from a full task document.
+    pub fn problem_spec(&self) -> BvpProblemSpec {
+        BvpProblemSpec {
+            equations: self.equations.clone(),
+            boundary_conditions: self.boundary_conditions.clone(),
+            mesh: self.mesh.clone(),
+            initial_guess: self.initial_guess.clone(),
+        }
+    }
+
+    /// Extract only the solver-selection and solver-option settings from a full task document.
+    pub fn solver_settings_spec(&self) -> BvpSolverSettingsSpec {
+        BvpSolverSettingsSpec {
+            solver: self.solver.clone(),
+            solver_options: self.solver_options.clone(),
+        }
+    }
+}
+
+/// Parsed task plus the optional solver output matrix.
 #[derive(Debug)]
 pub struct BvpTaskRunResult {
     pub specification: BvpTaskSpec,
     pub result: Option<DMatrix<f64>>,
 }
 
+/// Parser/build error for BVP task documents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BvpTaskError {
     Parser(String),
@@ -287,6 +346,7 @@ impl std::fmt::Display for BvpTaskError {
 
 impl std::error::Error for BvpTaskError {}
 
+/// Parse a full BVP task document from DSL text.
 pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError> {
     let mut parser = DocumentParser::new(input.to_string());
     let pseudonyms = default_bvp_pseudonyms();
@@ -305,53 +365,102 @@ pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError>
     parse_bvp_task_from_document(document)
 }
 
-pub fn parse_bvp_task_from_document(document: &DocumentMap) -> Result<BvpTaskSpec, BvpTaskError> {
-    let solver = parse_bvp_solver_selection(document)?;
+/// Parse only the equation/BC/mesh/initial-guess part of the DSL.
+pub fn parse_bvp_problem_from_document(document: &DocumentMap) -> Result<BvpProblemSpec, BvpTaskError> {
     let equations = parse_bvp_equations(document)?;
     let boundary_conditions = parse_boundary_conditions(document, &equations.unknowns)?;
     let mesh = parse_bvp_mesh(document)?;
     let initial_guess = parse_bvp_initial_guess(document, &equations.unknowns)?;
-    let solver_options = parse_bvp_solver_options(document)?;
-    let postprocessing = parse_bvp_postprocessing(document)?;
 
-    Ok(BvpTaskSpec {
-        solver,
+    Ok(BvpProblemSpec {
         equations,
         boundary_conditions,
         mesh,
         initial_guess,
-        solver_options,
+    })
+}
+
+/// Parse only the solver-selection and solver-option part of the DSL.
+pub fn parse_bvp_solver_settings_from_document(
+    document: &DocumentMap,
+) -> Result<BvpSolverSettingsSpec, BvpTaskError> {
+    Ok(BvpSolverSettingsSpec {
+        solver: parse_bvp_solver_selection(document)?,
+        solver_options: parse_bvp_solver_options(document)?,
+    })
+}
+
+/// Parse a full BVP task from an already parsed document map.
+pub fn parse_bvp_task_from_document(document: &DocumentMap) -> Result<BvpTaskSpec, BvpTaskError> {
+    let problem = parse_bvp_problem_from_document(document)?;
+    let solver_settings = parse_bvp_solver_settings_from_document(document)?;
+    let postprocessing = parse_bvp_postprocessing(document)?;
+
+    Ok(BvpTaskSpec {
+        solver: solver_settings.solver,
+        equations: problem.equations,
+        boundary_conditions: problem.boundary_conditions,
+        mesh: problem.mesh,
+        initial_guess: problem.initial_guess,
+        solver_options: solver_settings.solver_options,
         postprocessing,
     })
 }
 
+/// Build a [`BVP`] solver from a full task specification.
 pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskError> {
-    let dimension = spec.equations.unknowns.len();
-    if spec.initial_guess.values.len() != dimension {
+    build_bvp_solver_from_problem_and_settings(&spec.problem_spec(), &spec.solver_settings_spec())
+}
+
+/// Build a [`BVP`] solver from the Rust-side problem spec plus task-doc solver settings.
+pub fn build_bvp_solver_from_problem_and_settings(
+    problem: &BvpProblemSpec,
+    settings: &BvpSolverSettingsSpec,
+) -> Result<BVP, BvpTaskError> {
+    build_bvp_solver_core(
+        &problem.equations,
+        &problem.boundary_conditions,
+        &problem.mesh,
+        &problem.initial_guess,
+        &settings.solver,
+        &settings.solver_options,
+    )
+}
+
+fn build_bvp_solver_core(
+    equations: &BvpEquationSpec,
+    boundary_conditions: &BoundaryConditionSpec,
+    mesh: &BvpMeshSpec,
+    initial_guess_spec: &BvpInitialGuessSpec,
+    solver_selection: &BvpSolverSelectionSpec,
+    solver_options: &BvpSolverOptionsSpec,
+) -> Result<BVP, BvpTaskError> {
+    let dimension = equations.unknowns.len();
+    if initial_guess_spec.values.len() != dimension {
         return Err(BvpTaskError::Semantic(format!(
             "initial guess dimension {} does not match number of unknowns {}",
-            spec.initial_guess.values.len(),
+            initial_guess_spec.values.len(),
             dimension
         )));
     }
 
-    let initial_guess = DMatrix::from_fn(dimension, spec.mesh.n_steps, |row, _col| {
-        spec.initial_guess.values[row]
+    let initial_guess = DMatrix::from_fn(dimension, mesh.n_steps, |row, _col| {
+        initial_guess_spec.values[row]
     });
 
-    let tolerance = spec.solver_options.tolerance.unwrap_or(1e-5);
-    let max_iterations = spec.solver_options.max_iterations.unwrap_or(50);
-    let (strategy_params, rel_tolerance, bounds) = match spec.solver.strategy {
+    let tolerance = solver_options.tolerance.unwrap_or(1e-5);
+    let max_iterations = solver_options.max_iterations.unwrap_or(50);
+    let (strategy_params, rel_tolerance, bounds) = match solver_selection.strategy {
         BvpStrategySpec::Damped => {
             let rel_tolerance = Some(HashMap::from_iter(
-                spec.equations
+                equations
                     .unknowns
                     .iter()
                     .cloned()
                     .map(|name| (name, 1e-4_f64)),
             ));
             let bounds = Some(HashMap::from_iter(
-                spec.equations
+                equations
                     .unknowns
                     .iter()
                     .cloned()
@@ -371,30 +480,30 @@ pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskErro
         BvpStrategySpec::Frozen | BvpStrategySpec::Naive => (None, None, None),
     };
 
-    let mut solver = BVP::new(
-        spec.equations.rhs.clone(),
+    let mut bvp = BVP::new(
+        equations.rhs.clone(),
         initial_guess,
-        spec.equations.unknowns.clone(),
-        spec.equations.arg.clone(),
-        spec.boundary_conditions.conditions.clone(),
-        spec.mesh.t0,
-        spec.mesh.t_end,
-        spec.mesh.n_steps,
-        spec.solver.scheme.clone(),
-        spec.solver.strategy.as_solver_string(),
+        equations.unknowns.clone(),
+        equations.arg.clone(),
+        boundary_conditions.conditions.clone(),
+        mesh.t0,
+        mesh.t_end,
+        mesh.n_steps,
+        solver_selection.scheme.clone(),
+        solver_selection.strategy.as_solver_string(),
         strategy_params,
-        spec.solver_options.linear_sys_method.clone(),
-        spec.solver.backend.as_solver_string(),
+        solver_options.linear_sys_method.clone(),
+        solver_selection.backend.as_solver_string(),
         tolerance,
         max_iterations,
         rel_tolerance,
         bounds,
-        spec.solver_options.loglevel.clone(),
+        solver_options.loglevel.clone(),
     );
 
     let generated_config = generated_backend_config_from_spec(
-        &spec.solver_options.generated_backend,
-        &spec.solver.backend,
+        &solver_options.generated_backend,
+        &solver_selection.backend,
     )?;
     if matches!(
         generated_config.backend_policy_override,
@@ -411,21 +520,23 @@ pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskErro
                 .to_string(),
         ));
     }
-    if let Some(structure_damp) = &mut solver.structure_damp {
+    if let Some(structure_damp) = &mut bvp.structure_damp {
         structure_damp.set_generated_backend_config(generated_config.clone());
     }
-    if let Some(structure) = &mut solver.structure {
+    if let Some(structure) = &mut bvp.structure {
         structure.set_generated_backend_config(generated_config);
     }
 
-    Ok(solver)
+    Ok(bvp)
 }
 
+/// Parse and run a full BVP task document in one step.
 pub fn run_bvp_task_from_str(input: &str) -> Result<BvpTaskRunResult, BvpTaskError> {
     let spec = parse_bvp_task_from_str(input)?;
     run_bvp_task(spec)
 }
 
+/// Execute a fully parsed BVP task and apply any requested postprocessing.
 pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
     let mut solver = build_bvp_solver_from_spec(&spec)?;
     solver.solve();
@@ -445,6 +556,7 @@ pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     })
 }
 
+/// Write a starter BVP task document template to disk or to the current folder.
 pub fn create_bvp_template_file(path: Option<PathBuf>) {
     use std::env;
     use std::fs::File;
@@ -1271,529 +1383,9 @@ fn value_to_float(value: &Value, section_name: &str, field: &str) -> Result<f64,
     }
 }
 
+
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
+#[path = "task_parser_bvp_tests.rs"]
+mod task_parser_bvp_tests;
 
-    #[test]
-    fn bvp_task_parser_supports_pair_style_equations() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-y: -2.0*y
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 20
-
-initial_guess
-y: 0.0
-"#;
-
-        let spec = parse_bvp_task_from_str(input).expect("pair-style BVP task should parse");
-        assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
-        assert_eq!(spec.mesh.n_steps, 20);
-        assert_eq!(
-            spec.boundary_conditions.conditions["y"],
-            vec![(0usize, 1.0f64)]
-        );
-    }
-
-    #[test]
-    fn bvp_task_parser_supports_where_symbolic_substitutions() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-y: flux - y
-
-where
-flux: 3.0*x
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.0
-"#;
-
-        let spec =
-            parse_bvp_task_from_str(input).expect("BVP with where substitutions should parse");
-        let expr = spec.equations.rhs[0].clone();
-        let f = expr.lambdify_borrowed_thread_safe(&["x", "y"]);
-        let value = f(&[2.0, 1.0]);
-        assert!((value - 5.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn bvp_task_parser_accepts_params_alias_and_where_substitution() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-params: a
-parameter_values: 2.0
-y: heat - a*y
-
-where
-heat: 1.0 + x
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.0
-"#;
-
-        let spec =
-            parse_bvp_task_from_str(input).expect("BVP should accept IVP-style params alias");
-        assert_eq!(spec.equations.parameter_names, vec!["a".to_string()]);
-        assert_eq!(spec.equations.parameter_values["a"], 2.0);
-        let expr = spec.equations.rhs[0].clone();
-        let f = expr.lambdify_borrowed_thread_safe(&["x", "y"]);
-        let value = f(&[0.5, 1.0]);
-        assert!((value + 0.5).abs() < 1e-12);
-    }
-
-    #[test]
-    fn bvp_task_parser_reports_bad_where_expression() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-y: heat - y
-
-where
-heat: sin(
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.0
-"#;
-
-        let err = parse_bvp_task_from_str(input)
-            .expect_err("bad where expression should be reported as a BVP parser error");
-        let message = err.to_string();
-        assert!(message.contains("where/substitute"));
-        assert!(message.contains("failed to parse symbolic expression"));
-    }
-
-    #[test]
-    fn bvp_task_parser_maps_banded_lambdify_generated_backend_config() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Banded
-
-equations
-arg: x
-unknowns: y
-rhs: -y
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.0
-
-solver_options
-generated_backend: banded_lambdify
-banded_linear_solver: lapack
-refinement_steps: 0
-"#;
-
-        let spec = parse_bvp_task_from_str(input).expect("banded BVP task should parse");
-        assert_eq!(spec.solver.backend, BvpLinearBackendSpec::Banded);
-        assert_eq!(
-            spec.solver_options.generated_backend.preset.as_deref(),
-            Some("banded_lambdify")
-        );
-
-        let config = generated_backend_config_from_spec(
-            &spec.solver_options.generated_backend,
-            &spec.solver.backend,
-        )
-        .expect("banded lambdify generated backend config should be valid");
-
-        assert_eq!(config.matrix_backend_override, Some(MatrixBackend::Banded));
-        assert_eq!(
-            config.backend_policy_override,
-            Some(BackendSelectionPolicy::LambdifyOnly)
-        );
-        assert_eq!(
-            config.symbolic_assembly_backend,
-            BvpSymbolicAssemblyBackend::AtomView
-        );
-        assert_eq!(
-            config.banded_linear_solver_config.policy,
-            LinearSolverPolicy::ForceBanded
-        );
-        assert_eq!(
-            config
-                .banded_linear_solver_config
-                .iterative_refinement_steps,
-            0
-        );
-    }
-
-    #[test]
-    fn bvp_task_parser_maps_banded_aot_tcc_generated_backend_config() {
-        let input = r#"
-task
-solver: BVP
-strategy: Frozen
-scheme: forward
-method: Banded
-
-equations
-arg: x
-unknowns: y
-rhs: -y
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.0
-
-solver_options
-generated_backend: banded_aot_tcc
-aot_build_policy: rebuild
-aot_build_profile: release
-aot_compile_preset: dev_fastest
-aot_execution_policy: sequential
-symbolic_backend: atomview
-banded_linear_solver: faithful
-refinement_steps: 1
-"#;
-
-        let spec = parse_bvp_task_from_str(input).expect("banded AOT BVP task should parse");
-        let config = generated_backend_config_from_spec(
-            &spec.solver_options.generated_backend,
-            &spec.solver.backend,
-        )
-        .expect("banded AOT/tcc generated backend config should be valid");
-
-        assert_eq!(config.matrix_backend_override, Some(MatrixBackend::Banded));
-        assert_eq!(
-            config.backend_policy_override,
-            Some(BackendSelectionPolicy::PreferAotThenLambdify)
-        );
-        assert_eq!(
-            config.symbolic_assembly_backend,
-            BvpSymbolicAssemblyBackend::AtomView
-        );
-        assert_eq!(config.aot_codegen_backend, AotCodegenBackend::C);
-        assert_eq!(config.aot_c_compiler.as_deref(), Some("tcc"));
-        assert_eq!(
-            config.aot_execution_policy,
-            AotExecutionPolicy::SequentialOnly
-        );
-        assert!(matches!(
-            config.aot_build_policy,
-            AotBuildPolicy::RebuildAlways {
-                profile: AotBuildProfile::Release
-            }
-        ));
-        assert_eq!(
-            config.banded_linear_solver_config.policy,
-            LinearSolverPolicy::ForceBanded
-        );
-        assert_eq!(
-            config
-                .banded_linear_solver_config
-                .iterative_refinement_steps,
-            1
-        );
-    }
-
-    #[test]
-    fn bvp_task_docs_reject_numeric_backend_policies_because_they_cannot_carry_closures() {
-        for policy in [
-            "numeric_only",
-            "prefer_aot_then_numeric",
-            "prefer_lambdify_then_numeric",
-        ] {
-            let input = format!(
-                r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-unknowns: y
-rhs: -y
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.5
-
-solver_options
-backend_policy: {policy}
-"#
-            );
-
-            let spec = parse_bvp_task_from_str(&input).expect("syntax is valid");
-            let err = match build_bvp_solver_from_spec(&spec) {
-                Ok(_) => panic!("task docs cannot request pure numeric closure route: {policy}"),
-                Err(err) => err,
-            };
-            match err {
-                BvpTaskError::Semantic(message) => {
-                    assert!(
-                        message.contains("cannot provide Rust numeric_rhs closures"),
-                        "unexpected semantic error for {policy}: {message}"
-                    );
-                }
-                other => panic!("expected semantic error for {policy}, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn bvp_task_docs_accept_symbolic_backend_policies_after_numeric_guard() {
-        for policy in ["lambdify_only", "prefer_aot_then_lambdify", "aot_only"] {
-            let input = format!(
-                r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-unknowns: y
-rhs: -y
-
-boundary_conditions
-y_left: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 8
-
-initial_guess
-y: 0.5
-
-solver_options
-backend_policy: {policy}
-"#
-            );
-
-            let spec = parse_bvp_task_from_str(&input).expect("syntax is valid");
-            build_bvp_solver_from_spec(&spec)
-                .unwrap_or_else(|err| panic!("symbolic policy {policy} should be accepted: {err}"));
-        }
-    }
-
-    #[test]
-    fn bvp_task_runner_solves_reference_problem() {
-        let input = r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-unknowns: z, y
-rhs: y-z, -z^3
-
-boundary_conditions
-z_left: 1.0
-y_right: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 20
-
-initial_guess
-guess: 0.0, 0.0
-
-solver_options
-tolerance: 1e-5
-max_iterations: 20
-loglevel: off
-"#;
-
-        let result = run_bvp_task_from_str(input).expect("BVP task should solve");
-        let matrix = result
-            .result
-            .expect("solver should produce a result matrix");
-        assert!(matrix.nrows() > 0);
-        assert!(matrix.ncols() > 0);
-    }
-
-    #[test]
-    fn bvp_task_runner_can_save_csv() {
-        let dir = tempdir().expect("tempdir should be created");
-        let csv_path = dir.path().join("bvp_task_output.csv");
-        let input = format!(
-            r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-unknowns: z, y
-rhs: y-z, -z^3
-
-boundary_conditions
-z_left: 1.0
-y_right: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 20
-
-initial_guess
-z: 0.0
-y: 0.0
-
-solver_options
-tolerance: 1e-5
-max_iterations: 20
-loglevel: off
-
-postprocessing
-save_csv: true
-csv_path: {}
-plot: false
-"#,
-            csv_path.display()
-        );
-
-        let result = run_bvp_task_from_str(&input).expect("BVP task should solve and save CSV");
-        assert!(result.result.is_some());
-        assert!(csv_path.exists());
-    }
-
-    #[test]
-    fn bvp_task_runner_can_execute_modern_postprocessing_plan() {
-        let dir = tempdir().expect("tempdir should be created");
-        let txt_path = dir.path().join("bvp_task_output.txt");
-        let report_path = dir.path().join("bvp_task_report.md");
-        let input = format!(
-            r#"
-task
-solver: BVP
-strategy: Damped
-scheme: forward
-method: Sparse
-
-equations
-arg: x
-unknowns: z, y
-rhs: y-z, -z^3
-
-boundary_conditions
-z_left: 1.0
-y_right: 1.0
-
-mesh
-t0: 0.0
-t_end: 1.0
-n_steps: 20
-
-initial_guess
-z: 0.0
-y: 0.0
-
-solver_options
-tolerance: 1e-5
-max_iterations: 20
-loglevel: off
-
-postprocessing
-save_txt: true
-txt_path: {}
-write_report: true
-report_path: {}
-plot: false
-"#,
-            txt_path.display(),
-            report_path.display()
-        );
-
-        let result = run_bvp_task_from_str(&input).expect("BVP task should solve and postprocess");
-        assert!(result.result.is_some());
-        assert!(txt_path.exists());
-        let report = std::fs::read_to_string(&report_path)
-            .expect("report should be readable after postprocessing");
-        assert!(report.contains("Solver Result Report"));
-        assert!(report.contains("axis: x"));
-    }
-}
