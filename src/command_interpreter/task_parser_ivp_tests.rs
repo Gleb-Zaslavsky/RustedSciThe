@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 use tempfile::tempdir;
 
 fn parse_document_for_ivp(input: &str) -> DocumentMap {
@@ -15,6 +16,39 @@ fn parse_document_for_ivp(input: &str) -> DocumentMap {
         .get_result()
         .expect("IVP document map should exist")
         .clone()
+}
+
+#[test]
+fn ivp_task_parser_supports_file_roundtrip() {
+    let dir = tempdir().expect("temp dir should be created");
+    let path = dir.path().join("ivp_task.txt");
+    fs::write(
+        &path,
+        r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: y
+rhs: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+        "#,
+    )
+    .expect("test task file should be written");
+
+    let spec = parse_ivp_task_from_file(Some(path)).expect("IVP file task should parse");
+    assert_eq!(spec.solver.method, IvpMethodSpec::NonStiff("RK45".to_string()));
+    assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
+    assert_eq!(spec.initial_conditions.y0, vec![1.0]);
 }
 
 #[test]

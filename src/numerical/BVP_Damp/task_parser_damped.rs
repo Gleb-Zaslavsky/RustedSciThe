@@ -11,18 +11,29 @@
 //! - **Pseudonym Support**: Handle common typos and alternative names for configuration keys
 //! - **Grid Refinement**: Parse adaptive grid refinement strategies and parameters
 //! - **Postprocessing**: Configure output options (plotting, saving, logging)
+//! - **Typed Split Parsing**: Parse solver settings and postprocessing into
+//!   fallible spec structs before mutating the solver state
 //! - **Template Generation**: Create configuration file templates for users
 //!
 //! ## Main Methods (NRBVP Implementation)
 //!
 //! ### Core Parsing Methods
 //! - `before_solve_preprocessing()` - Initialize mesh and grid settings before solving
+//! - `parse_bvp_damped_task_from_str(input)` - Parse a full typed task from DSL text
+//! - `parse_bvp_damped_task_from_document(document)` - Parse a full typed task from a document map
+//! - `try_parse_bvp_damped_solver_settings_from_document()` - Parse settings into a typed spec
+//! - `try_parse_bvp_damped_postprocessing_from_document()` - Parse postprocessing into a typed spec
+//! - `try_parse_bvp_damped_task_from_document()` - Parse the full typed BVP Damp task contract
+//! - `apply_bvp_damped_solver_settings()` - Apply typed settings to the solver
+//! - `apply_bvp_damped_postprocessing()` - Apply typed postprocessing actions
+//! - `apply_bvp_damped_task_spec()` - Apply both solver settings and postprocessing
 //! - `set_params_from_hashmap(result)` - Map parsed DocumentMap to solver parameters
 //! - `set_postpocessing_from_hashmap(parser)` - Configure and execute postprocessing options
 //!
 //! ### String-based Parsing
-//! - `parse_settings_from_str_with_exact_names(input)` - Parse from string with exact key names
+//! - `parse_settings_from_str_with_exact_names(input)` - Legacy solver-settings-only parse with exact key names
 //! - `parse_settings(parser)` - Parse with pseudonym support for common typos
+//! - `parse_bvp_damped_task_from_file(path)` - Parse a full typed task from a file
 //!
 //! ### File-based Parsing
 //! - `parse_file(path)` - Load configuration from file and return DocumentParser
@@ -130,11 +141,505 @@
 //! solver.set_postpocessing_from_hashmap(&mut parser);
 //! ```
 
-use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser};
+use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use nalgebra::DVector;
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
+
+type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
+
+/// Typed error returned by the split BVP Damp parser helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BvpDampedTaskError {
+    Parser(String),
+    MissingSection(&'static str),
+    MissingField { section: &'static str, field: String },
+    InvalidField {
+        section: &'static str,
+        field: String,
+        message: String,
+    },
+    UnknownGridRefinementMethod(String),
+}
+
+impl Display for BvpDampedTaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parser(message) => write!(f, "parser error: {}", message),
+            Self::MissingSection(section) => write!(f, "missing section `{}`", section),
+            Self::MissingField {
+                section,
+                field,
+            } => write!(f, "missing field `{}.{}`", section, field),
+            Self::InvalidField {
+                section,
+                field,
+                message,
+            } => write!(f, "invalid field `{}.{}`: {}", section, field, message),
+            Self::UnknownGridRefinementMethod(method) => {
+                write!(f, "unknown grid refinement method `{}`", method)
+            }
+        }
+    }
+}
+
+impl Error for BvpDampedTaskError {}
+
+/// Typed solver settings parsed from a BVP Damp task document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BvpDampedSolverSettingsSpec {
+    pub scheme: String,
+    pub strategy: String,
+    pub linear_sys_method: Option<String>,
+    pub method: String,
+    pub abs_tolerance: f64,
+    pub max_iterations: usize,
+    pub loglevel: Option<String>,
+    pub dont_save_log: bool,
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
+    pub rel_tolerance: Option<HashMap<String, f64>>,
+    pub strategy_params: Option<SolverParams>,
+}
+
+/// Typed postprocessing settings parsed from a BVP Damp task document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BvpDampedPostprocessingSpec {
+    pub plot: bool,
+    pub gnuplot: bool,
+    pub save: bool,
+    pub save_to_csv: bool,
+    pub filename: Option<String>,
+}
+
+/// Full typed BVP Damp task contract: solver settings plus postprocessing.
+///
+/// This is the lightweight analog of the BVP/IVP split-task specs: the damped
+/// solver does not own the physical equations here, but it still benefits from a
+/// single typed object that groups the solver-facing configuration with the
+/// output plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BvpDampedTaskSpec {
+    pub solver_settings: BvpDampedSolverSettingsSpec,
+    pub postprocessing: BvpDampedPostprocessingSpec,
+}
+
+impl BvpDampedTaskSpec {
+    /// Extract the solver-settings subset.
+    pub fn solver_settings_spec(&self) -> BvpDampedSolverSettingsSpec {
+        self.solver_settings.clone()
+    }
+
+    /// Extract the postprocessing subset.
+    pub fn postprocessing_spec(&self) -> BvpDampedPostprocessingSpec {
+        self.postprocessing.clone()
+    }
+}
+
+fn required_section<'a>(
+    document: &'a DocumentMap,
+    section: &'static str,
+) -> Result<&'a GenericSectionMap, BvpDampedTaskError> {
+    document
+        .get(section)
+        .ok_or(BvpDampedTaskError::MissingSection(section))
+}
+
+fn required_values<'a>(
+    section: &'a GenericSectionMap,
+    section_name: &'static str,
+    field: &str,
+) -> Result<&'a Vec<Value>, BvpDampedTaskError> {
+    section
+        .get(field)
+        .ok_or_else(|| BvpDampedTaskError::MissingField {
+            section: section_name,
+            field: field.to_string(),
+        })?
+        .as_ref()
+        .ok_or_else(|| BvpDampedTaskError::MissingField {
+            section: section_name,
+            field: field.to_string(),
+        })
+}
+
+fn first_string(
+    section: &GenericSectionMap,
+    section_name: &'static str,
+    field: &str,
+) -> Result<String, BvpDampedTaskError> {
+    required_values(section, section_name, field)?
+        .first()
+        .and_then(|value| value.as_string())
+        .cloned()
+        .ok_or_else(|| BvpDampedTaskError::InvalidField {
+            section: section_name,
+            field: field.to_string(),
+            message: "expected string".to_string(),
+        })
+}
+
+fn first_usize(
+    section: &GenericSectionMap,
+    section_name: &'static str,
+    field: &str,
+) -> Result<usize, BvpDampedTaskError> {
+    required_values(section, section_name, field)?
+        .first()
+        .and_then(|value| value.as_usize())
+        .ok_or_else(|| BvpDampedTaskError::InvalidField {
+            section: section_name,
+            field: field.to_string(),
+            message: "expected usize".to_string(),
+        })
+}
+
+fn first_float(
+    section: &GenericSectionMap,
+    section_name: &'static str,
+    field: &str,
+) -> Result<f64, BvpDampedTaskError> {
+    required_values(section, section_name, field)?
+        .first()
+        .and_then(|value| value.as_float())
+        .ok_or_else(|| BvpDampedTaskError::InvalidField {
+            section: section_name,
+            field: field.to_string(),
+            message: "expected float".to_string(),
+        })
+}
+
+fn first_bool(
+    section: &GenericSectionMap,
+    section_name: &'static str,
+    field: &str,
+) -> Result<bool, BvpDampedTaskError> {
+    required_values(section, section_name, field)?
+        .first()
+        .and_then(|value| value.as_boolean())
+        .ok_or_else(|| BvpDampedTaskError::InvalidField {
+            section: section_name,
+            field: field.to_string(),
+            message: "expected bool".to_string(),
+        })
+}
+
+fn parse_grid_refinement_method(
+    method_name: &str,
+    method_params: &[f64],
+) -> Result<GridRefinementMethod, BvpDampedTaskError> {
+    let method = match method_name {
+        "doubleoints" => GridRefinementMethod::DoublePoints,
+        "easy" => GridRefinementMethod::Easy(*method_params.first().ok_or_else(|| {
+            BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected at least 1 parameter".to_string(),
+            }
+        })?),
+        "grcarsmooke" => GridRefinementMethod::GrcarSmooke(
+            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+            *method_params.get(2).ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+        ),
+        "pearson" => GridRefinementMethod::Pearson(
+            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 2 parameters".to_string(),
+            })?,
+            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 2 parameters".to_string(),
+            })?,
+        ),
+        "twopnt" => GridRefinementMethod::TwoPoint(
+            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+            *method_params.get(2).ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: "grid_refinement",
+                field: method_name.to_string(),
+                message: "expected 3 parameters".to_string(),
+            })?,
+        ),
+        other => {
+            return Err(BvpDampedTaskError::UnknownGridRefinementMethod(
+                other.to_string(),
+            ))
+        }
+    };
+    Ok(method)
+}
+
+/// Parse the solver-settings block into a typed spec without mutating the solver.
+pub fn parse_bvp_damped_solver_settings_from_document(
+    document: &DocumentMap,
+) -> Result<BvpDampedSolverSettingsSpec, BvpDampedTaskError> {
+    let solver_settings = required_section(document, "solver_settings")?;
+    let scheme = first_string(solver_settings, "solver_settings", "scheme")?;
+    let strategy = first_string(solver_settings, "solver_settings", "strategy")?;
+    let linear_sys_method = solver_settings
+        .get("linear_sys_method")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_option_string())
+        .cloned();
+    let method = first_string(solver_settings, "solver_settings", "method")?;
+    let abs_tolerance = first_float(solver_settings, "solver_settings", "abs_tolerance")?;
+    let max_iterations = first_usize(solver_settings, "solver_settings", "max_iterations")?;
+    let loglevel = solver_settings
+        .get("loglevel")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_option_string())
+        .cloned();
+    let dont_save_log = if solver_settings.get("dont_save_log").is_some() {
+        first_bool(solver_settings, "solver_settings", "dont_save_log")?
+    } else {
+        true
+    };
+
+    let bounds = if let Some(bounds_section) = document.get("bounds") {
+        let bounds = bounds_section
+            .iter()
+            .map(|(key, value)| {
+                let values = value.as_ref().ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "bounds",
+                    field: key.clone(),
+                    message: "expected pair of floats".to_string(),
+                })?;
+                let lower = values
+                    .first()
+                    .and_then(|value| value.as_float())
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "bounds",
+                        field: key.clone(),
+                        message: "expected lower bound float".to_string(),
+                    })?;
+                let upper = values
+                    .get(1)
+                    .and_then(|value| value.as_float())
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "bounds",
+                        field: key.clone(),
+                        message: "expected upper bound float".to_string(),
+                    })?;
+                Ok((key.clone(), (lower, upper)))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Some(bounds)
+    } else {
+        None
+    };
+
+    let rel_tolerance = if let Some(rel_tolerance_section) = document.get("rel_tolerance") {
+        let rel_tolerance = rel_tolerance_section
+            .iter()
+            .map(|(key, value)| {
+                let values = value.as_ref().ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "rel_tolerance",
+                    field: key.clone(),
+                    message: "expected single float".to_string(),
+                })?;
+                let tolerance = values
+                    .first()
+                    .and_then(|value| value.as_float())
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "rel_tolerance",
+                        field: key.clone(),
+                        message: "expected float".to_string(),
+                    })?;
+                Ok((key.clone(), tolerance))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Some(rel_tolerance)
+    } else {
+        None
+    };
+
+    let strategy_params = if let Some(strategy_params_section) = document.get("strategy_params") {
+        let max_jac = strategy_params_section
+            .get("max_jac")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_usize());
+        let max_damp_iter = strategy_params_section
+            .get("max_damp_iter")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_usize());
+        let damp_factor = strategy_params_section
+            .get("damp_factor")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_float());
+
+        let adaptive = if let Some(adaptive_strategy) = document.get("adaptive_strategy") {
+            let version = first_usize(adaptive_strategy, "adaptive_strategy", "version")?;
+            let max_refinements =
+                first_usize(adaptive_strategy, "adaptive_strategy", "max_refinements")?;
+            let grid_method_section = required_section(document, "grid_refinement")?;
+            let (method_name, method_params) = grid_method_section
+                .iter()
+                .next()
+                .ok_or(BvpDampedTaskError::MissingSection("grid_refinement"))?;
+            let method_values = method_params
+                .as_ref()
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.clone(),
+                    message: "expected vector".to_string(),
+                })?;
+            let method_params = method_values
+                .first()
+                .and_then(|value| value.as_vector())
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.clone(),
+                    message: "expected vector payload".to_string(),
+                })?;
+            let grid_method = parse_grid_refinement_method(method_name, method_params)?;
+            Some(AdaptiveGridConfig {
+                version,
+                max_refinements,
+                grid_method,
+            })
+        } else {
+            None
+        };
+
+        Some(SolverParams {
+            max_jac,
+            max_damp_iter,
+            damp_factor,
+            adaptive,
+        })
+    } else {
+        None
+    };
+
+    Ok(BvpDampedSolverSettingsSpec {
+        scheme,
+        strategy,
+        linear_sys_method,
+        method,
+        abs_tolerance,
+        max_iterations,
+        loglevel,
+        dont_save_log,
+        bounds,
+        rel_tolerance,
+        strategy_params,
+    })
+}
+
+/// Parse the postprocessing block into a typed spec without mutating the solver.
+pub fn parse_bvp_damped_postprocessing_from_document(
+    document: &DocumentMap,
+) -> Result<BvpDampedPostprocessingSpec, BvpDampedTaskError> {
+    let postprocessing = if let Some(section) = document.get("postprocessing") {
+        section
+    } else {
+        return Ok(BvpDampedPostprocessingSpec {
+            plot: false,
+            gnuplot: false,
+            save: false,
+            save_to_csv: false,
+            filename: None,
+        });
+    };
+
+    let plot = postprocessing
+        .get("plot")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    let gnuplot = postprocessing
+        .get("gnuplot")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    let save = postprocessing
+        .get("save")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    let save_to_csv = postprocessing
+        .get("save_to_csv")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    let filename = postprocessing
+        .get("filename")
+        .and_then(|value| value.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_string())
+        .cloned();
+
+    Ok(BvpDampedPostprocessingSpec {
+        plot,
+        gnuplot,
+        save,
+        save_to_csv,
+        filename,
+    })
+}
+
+/// Parse the full typed BVP Damp task contract from a document.
+pub fn parse_bvp_damped_task_from_document(
+    document: &DocumentMap,
+) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+    let solver_settings = parse_bvp_damped_solver_settings_from_document(document)?;
+    let postprocessing = parse_bvp_damped_postprocessing_from_document(document)?;
+    Ok(BvpDampedTaskSpec {
+        solver_settings,
+        postprocessing,
+    })
+}
+
+/// Parse the full typed BVP Damp task contract from DSL text.
+pub fn parse_bvp_damped_task_from_str(input: &str) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+    let mut parser = DocumentParser::new(input.to_owned());
+    parser
+        .parse_document()
+        .map_err(BvpDampedTaskError::Parser)?;
+    parser.keys_to_lower_case(Some(vec![
+        "bounds".to_string(),
+        "rel_tolerance".to_string(),
+    ]));
+    let result = parser
+        .get_result()
+        .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+    parse_bvp_damped_task_from_document(result)
+}
 impl NRBVP {
     /// in standard NRBVP approach this operation is made in the new(..) method but when
     /// but if params are passed from the hashmap (and may be by parsing task files), it is done here
@@ -158,242 +663,87 @@ impl NRBVP {
         };
         self.new_grid_enabled = new_grid_enabled_;
     }
-    pub fn set_params_from_hashmap(&mut self, result: DocumentMap) {
-        let solver_settings = result
-            .get("solver_settings")
-            .expect("Failed to get solver settings");
-        let scheme = solver_settings
-            .get("scheme")
-            .expect("Failed to get scheme")
-            .clone()
-            .unwrap()[0]
-            .as_string()
-            .expect("Failed to get scheme as string")
-            .clone();
-        self.scheme = scheme;
-        let strategy = solver_settings
-            .get("strategy")
-            .expect("Failed to get strategy")
-            .clone()
-            .unwrap()[0]
-            .as_string()
-            .expect("Failed to get strategy as string")
-            .clone();
-        self.strategy = strategy;
-        let bind = solver_settings
-            .clone()
-            .get("linear_sys_method")
-            .expect("Failed to get linear_sys_method")
-            .clone()
-            .unwrap();
-        let linear_sys_method = bind[0].as_option_string();
-        self.linear_sys_method = linear_sys_method.cloned();
-        let method = solver_settings
-            .get("method")
-            .expect("Failed to get method")
-            .clone()
-            .unwrap()[0]
-            .as_string()
-            .expect("Failed to get method as string")
-            .clone();
-        self.method = method;
-        let abs_tolerance = solver_settings
-            .get("abs_tolerance")
-            .expect("Failed to get abs_tolerance")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .expect("Failed to get abs_tolerance as float");
-        self.abs_tolerance = abs_tolerance;
-        let max_iterations = solver_settings
-            .get("max_iterations")
-            .expect("Failed to get max_iterations")
-            .clone()
-            .unwrap()[0]
-            .as_usize()
-            .expect("Failed to get max_iterations as usize");
-        self.max_iterations = max_iterations;
-        let loglevel = solver_settings
-            .get("loglevel")
-            .expect("Failed to get loglevel")
-            .clone()
-            .unwrap()[0]
-            .as_string()
-            .cloned();
-        self.loglevel = loglevel;
-        let dont_save_log = if let Some(dont_save_log) = solver_settings.get("dont_save_log") {
-            dont_save_log.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get dont_save_log as bool")
-        } else {
-            true
-        };
-        self.dont_save_log(dont_save_log);
-        if let Some(bounds) = result.get("bounds") {
-            let bounds: HashMap<String, (f64, f64)> = bounds
-                .iter()
-                .map(|(key, value)| {
-                    let binding = value.clone().unwrap();
-                    let value0 = binding[0].as_float().unwrap();
-                    let value1 = binding[1].as_float().unwrap();
-                    (key.to_owned(), (value0, value1))
-                })
-                .collect();
-            self.Bounds = Some(bounds);
-        } else {
-            self.Bounds = None
-        };
-        if let Some(rel_tolerance) = result.get("rel_tolerance") {
-            let rel_tolerance: HashMap<String, f64> = rel_tolerance
-                .iter()
-                .map(|(key, value)| {
-                    let value = value.clone().unwrap()[0]
-                        .as_float()
-                        .expect("Failed to get rel_tolerance as float");
-                    (key.to_owned(), value)
-                })
-                .collect();
-            self.rel_tolerance = Some(rel_tolerance);
-        } else {
-            self.rel_tolerance = None
-        };
-        if let Some(strategy_params) = result.get("strategy_params") {
-            let max_jac = strategy_params
-                .get("max_jac")
-                .expect("Failed to get max_jac")
-                .clone()
-                .unwrap()[0]
-                .as_option_usize();
-            let max_damp_iter = strategy_params
-                .get("max_damp_iter")
-                .expect("Failed to get maxDampIter")
-                .clone()
-                .unwrap()[0]
-                .as_option_usize();
-            let damp_factor = strategy_params
-                .get("damp_factor")
-                .expect("Failed to get DampFacor")
-                .clone()
-                .unwrap()[0]
-                .as_option_float();
-            let adaptive = if let Some(adaptive_strategy) = result.get("adaptive_strategy") {
-                let version = adaptive_strategy
-                    .get("version")
-                    .expect("Failed to get version")
-                    .clone()
-                    .unwrap()[0]
-                    .as_usize()
-                    .expect("Failed to get version as string")
-                    .clone();
-                let max_refinements = adaptive_strategy
-                    .get("max_refinements")
-                    .expect("Failed to get max_refinements")
-                    .clone()
-                    .unwrap()[0]
-                    .as_usize()
-                    .expect("Failed to get max_refinements as int");
-                let grid_method = result.get("grid_refinement").expect("0").clone();
-                let method_name = grid_method.keys().next().unwrap().to_owned();
-                let method_params = grid_method.get(&method_name).unwrap().clone().unwrap()[0]
-                    .as_vector()
-                    .expect("Failed to get grid_refinement as vector")
-                    .clone();
-                let grid_method: GridRefinementMethod = match method_name.as_str() {
-                    "doubleoints" => GridRefinementMethod::DoublePoints,
-                    "easy" => GridRefinementMethod::Easy(method_params[0]),
-                    "grcarsmooke" => GridRefinementMethod::GrcarSmooke(
-                        method_params[0],
-                        method_params[1],
-                        method_params[2],
-                    ),
-                    "pearson" => GridRefinementMethod::Pearson(method_params[0], method_params[1]),
-                    "twopnt" => GridRefinementMethod::TwoPoint(
-                        method_params[0],
-                        method_params[1],
-                        method_params[2],
-                    ),
 
-                    _ => {
-                        panic!("Unknown grid refinement method: {}", method_name)
-                    }
-                };
-                let adaptive = AdaptiveGridConfig {
-                    version,
+    /// Apply typed solver settings to the solver state.
+    pub fn apply_bvp_damped_solver_settings(&mut self, spec: &BvpDampedSolverSettingsSpec) {
+        self.scheme = spec.scheme.clone();
+        self.strategy = spec.strategy.clone();
+        self.linear_sys_method = spec.linear_sys_method.clone();
+        self.method = spec.method.clone();
+        self.abs_tolerance = spec.abs_tolerance;
+        self.max_iterations = spec.max_iterations;
+        self.loglevel = spec.loglevel.clone();
+        self.dont_save_log(spec.dont_save_log);
+        self.Bounds = spec.bounds.clone();
+        self.rel_tolerance = spec.rel_tolerance.clone();
+        self.strategy_params = spec.strategy_params.clone();
+    }
 
-                    max_refinements,
-
-                    grid_method,
-                };
-
-                Some(adaptive)
-            } else {
-                None
-            };
-
-            let solver_params = SolverParams {
-                max_jac,
-                max_damp_iter,
-                damp_factor,
-                adaptive,
-            };
-            self.strategy_params = Some(solver_params);
-        } else {
-            self.strategy_params = None
+    /// Apply typed postprocessing settings to the solver state.
+    pub fn apply_bvp_damped_postprocessing(&mut self, spec: &BvpDampedPostprocessingSpec) {
+        if spec.plot {
+            self.plot_result();
         }
+        if spec.gnuplot {
+            self.gnuplot_result();
+        }
+        if spec.save {
+            self.save_to_file(spec.filename.clone());
+        }
+        if spec.save_to_csv {
+            self.save_to_csv(spec.filename.clone());
+        }
+    }
+
+    /// Parse solver settings into a typed spec without mutating the solver.
+    pub fn try_parse_bvp_damped_solver_settings_from_document(
+        &self,
+        result: &DocumentMap,
+    ) -> Result<BvpDampedSolverSettingsSpec, BvpDampedTaskError> {
+        parse_bvp_damped_solver_settings_from_document(result)
+    }
+
+    /// Parse postprocessing settings into a typed spec without mutating the solver.
+    pub fn try_parse_bvp_damped_postprocessing_from_document(
+        &self,
+        result: &DocumentMap,
+    ) -> Result<BvpDampedPostprocessingSpec, BvpDampedTaskError> {
+        parse_bvp_damped_postprocessing_from_document(result)
+    }
+
+    /// Parse the full typed BVP Damp task contract without mutating the solver.
+    pub fn try_parse_bvp_damped_task_from_document(
+        &self,
+        result: &DocumentMap,
+    ) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+        parse_bvp_damped_task_from_document(result)
+    }
+
+    /// Parse a full typed BVP Damp task from DSL text.
+    pub fn try_parse_bvp_damped_task_from_str(
+        &self,
+        input: &str,
+    ) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+        parse_bvp_damped_task_from_str(input)
+    }
+
+    pub fn set_params_from_hashmap(&mut self, result: DocumentMap) {
+        let spec = parse_bvp_damped_solver_settings_from_document(&result)
+            .expect("Failed to parse BVP Damp solver settings");
+        self.apply_bvp_damped_solver_settings(&spec);
     }
 
     pub fn set_postpocessing_from_hashmap(&mut self, parser: &mut DocumentParser) {
         let result: DocumentMap = parser.get_result().unwrap().clone();
-        let solver_settings = result
-            .get("postprocessing")
-            .expect("Failed to get postpocessing");
-        let plot_flag = if let Some(plot) = solver_settings.get("plot") {
-            plot.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get plot as bool")
-        } else {
-            false
-        };
-        let gnuplot_flag = if let Some(gnuplotflag) = solver_settings.get("gnuplot") {
-            gnuplotflag.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get gnuplot as bool")
-        } else {
-            false
-        };
-        let save_flag = if let Some(save) = solver_settings.get("save") {
-            save.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get save as bool")
-        } else {
-            false
-        };
-        let save_to_csv = if let Some(save) = solver_settings.get("save_to_csv") {
-            save.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get save_to_csv as bool")
-        } else {
-            false
-        };
+        let spec = parse_bvp_damped_postprocessing_from_document(&result)
+            .expect("Failed to parse BVP Damp postprocessing");
+        self.apply_bvp_damped_postprocessing(&spec);
+    }
 
-        let name = if let Some(name) = solver_settings.get("filename") {
-            name.clone().unwrap()[0].as_string().cloned()
-        } else {
-            None
-        };
-
-        if plot_flag {
-            self.plot_result();
-        }
-        if gnuplot_flag {
-            self.gnuplot_result()
-        };
-        if save_flag {
-            self.save_to_file(name.clone());
-        };
-        if save_to_csv {
-            self.save_to_csv(name);
-        };
+    /// Apply the typed full task contract to the solver state.
+    pub fn apply_bvp_damped_task_spec(&mut self, spec: &BvpDampedTaskSpec) {
+        self.apply_bvp_damped_solver_settings(&spec.solver_settings);
+        self.apply_bvp_damped_postprocessing(&spec.postprocessing);
     }
 
     pub fn parse_settings_from_str_with_exact_names(&mut self, input: &str) {
@@ -407,16 +757,44 @@ impl NRBVP {
             "rel_tolerance".to_string(),
         ]));
         let result: DocumentMap = parser.get_result().expect("Failed to get result").clone();
-        self.set_params_from_hashmap(result);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result)
+            .expect("Failed to parse BVP Damp solver settings");
+        self.apply_bvp_damped_solver_settings(&spec);
     }
 
     pub fn parse_file(
         &mut self,
-        path: Option<std::path::PathBuf>,
+        path: Option<PathBuf>,
     ) -> Result<DocumentParser, String> {
         let mut parser = DocumentParser::new(String::new());
         parser.setting_from_file(path)?;
         Ok(parser)
+    }
+
+    /// Parse a full typed BVP Damp task from an on-disk task document.
+    pub fn parse_bvp_damped_task_from_file(
+        &self,
+        path: Option<PathBuf>,
+    ) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+        let mut parser = DocumentParser::new(String::new());
+        parser
+            .setting_from_file(path)
+            .map_err(|e| BvpDampedTaskError::InvalidField {
+                section: "task document",
+                field: "file".to_string(),
+                message: e,
+            })?;
+        parser
+            .parse_document()
+            .map_err(BvpDampedTaskError::Parser)?;
+        parser.keys_to_lower_case(Some(vec![
+            "bounds".to_string(),
+            "rel_tolerance".to_string(),
+        ]));
+        let result = parser
+            .get_result()
+            .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+        parse_bvp_damped_task_from_document(result)
     }
 
     pub fn parse_settings_with_exact_names(
@@ -432,7 +810,9 @@ impl NRBVP {
             .get_result()
             .ok_or("No result after parsing")?
             .clone();
-        self.set_params_from_hashmap(result);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result)
+            .map_err(|e| e.to_string())?;
+        self.apply_bvp_damped_solver_settings(&spec);
         Ok(())
     }
     /// Parses the settings from a string and covers some common typos
@@ -507,7 +887,9 @@ impl NRBVP {
             .get_result()
             .ok_or("No result after parsing")?
             .clone();
-        self.set_params_from_hashmap(result);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result)
+            .map_err(|e| e.to_string())?;
+        self.apply_bvp_damped_solver_settings(&spec);
         Ok(())
     }
 }
@@ -632,9 +1014,21 @@ mod tests {
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
 
+    use super::*;
     use tempfile::tempdir;
 
     use nalgebra::{DMatrix, DVector};
+
+    fn parse_document_for_damped(text: &str) -> DocumentMap {
+        let mut parser = DocumentParser::new(text.to_owned());
+        let _ = parser.parse_document();
+        parser.keys_to_lower_case(Some(vec![
+            "bounds".to_string(),
+            "rel_tolerance".to_string(),
+        ]));
+        parser.get_result().expect("parser produced no result").clone()
+    }
+
     #[test]
     fn test_BVP_with_setting_parsing_no_bounds() {
         let eq1 = Expr::parse_expression("y-z");
@@ -944,5 +1338,183 @@ mod tests {
 
         // let solution = nr.get_result().unwrap();
         // println!("solution {:?}", solution);
+    }
+
+    #[test]
+    fn bvp_damped_solver_settings_spec_parses_typed_settings() {
+        let input = r#"
+        solver_settings
+        scheme: forward
+        strategy: Damped
+        method: Dense
+        linear_sys_method: None
+        abs_tolerance: 1e-6
+        max_iterations: 120
+        loglevel: Some(info)
+        dont_save_log: false
+        bounds
+        y: -1.0, 1.0
+        rel_tolerance
+        y: 1e-4
+        strategy_params
+        max_jac: Some(3)
+        max_damp_iter: Some(10)
+        damp_factor: Some(0.5)
+        adaptive_strategy
+        version: 1
+        max_refinements: 2
+        grid_refinement
+        pearson: [0.1, 1.5]
+        "#;
+        let result = parse_document_for_damped(input);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result).unwrap();
+        assert_eq!(spec.scheme, "forward");
+        assert_eq!(spec.strategy, "Damped");
+        assert_eq!(spec.method, "Dense");
+        assert_eq!(spec.linear_sys_method, None);
+        assert_eq!(spec.abs_tolerance, 1e-6);
+        assert_eq!(spec.max_iterations, 120);
+        assert_eq!(spec.loglevel, Some("info".to_string()));
+        assert!(!spec.dont_save_log);
+        assert_eq!(spec.bounds.as_ref().unwrap()["y"], (-1.0, 1.0));
+        assert_eq!(spec.rel_tolerance.as_ref().unwrap()["y"], 1e-4);
+        assert_eq!(
+            spec.strategy_params,
+            Some(SolverParams {
+                max_jac: Some(3),
+                max_damp_iter: Some(10),
+                damp_factor: Some(0.5),
+                adaptive: Some(AdaptiveGridConfig {
+                    version: 1,
+                    max_refinements: 2,
+                    grid_method: GridRefinementMethod::Pearson(0.1, 1.5),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn bvp_damped_postprocessing_spec_defaults_when_section_missing() {
+        let result = parse_document_for_damped(
+            r#"
+            solver_settings
+            scheme: forward
+            strategy: Damped
+            method: Dense
+            linear_sys_method: None
+            abs_tolerance: 1e-6
+            max_iterations: 100
+            "#,
+        );
+        let spec = parse_bvp_damped_postprocessing_from_document(&result).unwrap();
+        assert!(!spec.plot);
+        assert!(!spec.gnuplot);
+        assert!(!spec.save);
+        assert!(!spec.save_to_csv);
+        assert_eq!(spec.filename, None);
+    }
+
+    #[test]
+    fn bvp_damped_full_task_spec_parses_settings_and_postprocessing() {
+        let result = parse_document_for_damped(
+            r#"
+            solver_settings
+            scheme: trapezoid
+            strategy: Frozen
+            method: Sparse
+            linear_sys_method: Some(faithful)
+            abs_tolerance: 1e-7
+            max_iterations: 42
+            loglevel: Some(info)
+            dont_save_log: false
+
+            postprocessing
+            plot: true
+            gnuplot: true
+            save: true
+            save_to_csv: true
+            filename: damped_task_output
+            "#,
+        );
+
+        let spec = parse_bvp_damped_task_from_document(&result).unwrap();
+        assert_eq!(spec.solver_settings.scheme, "trapezoid");
+        assert_eq!(spec.solver_settings.strategy, "Frozen");
+        assert_eq!(spec.solver_settings.method, "Sparse");
+        assert_eq!(spec.solver_settings.linear_sys_method.as_deref(), Some("faithful"));
+        assert_eq!(spec.solver_settings.abs_tolerance, 1e-7);
+        assert_eq!(spec.solver_settings.max_iterations, 42);
+        assert_eq!(spec.solver_settings.loglevel.as_deref(), Some("info"));
+        assert!(!spec.solver_settings.dont_save_log);
+        assert!(spec.postprocessing.plot);
+        assert!(spec.postprocessing.gnuplot);
+        assert!(spec.postprocessing.save);
+        assert!(spec.postprocessing.save_to_csv);
+        assert_eq!(spec.postprocessing.filename.as_deref(), Some("damped_task_output"));
+
+        let mut nr = NRBVP::default();
+        nr.apply_bvp_damped_solver_settings(&spec.solver_settings);
+        assert_eq!(nr.scheme, "trapezoid");
+        assert_eq!(nr.strategy, "Frozen");
+        assert_eq!(nr.method, "Sparse");
+        assert_eq!(nr.linear_sys_method.as_deref(), Some("faithful"));
+    }
+
+    #[test]
+    fn bvp_damped_full_task_spec_parses_from_str() {
+        let input = r#"
+        solver_settings
+        scheme: forward
+        strategy: Damped
+        method: Dense
+        linear_sys_method: None
+        abs_tolerance: 1e-6
+        max_iterations: 100
+        loglevel: Some(info)
+
+        postprocessing
+        plot: false
+        gnuplot: false
+        save: true
+        save_to_csv: false
+        filename: damped_task.txt
+        "#;
+
+        let spec = parse_bvp_damped_task_from_str(input).unwrap();
+        assert_eq!(spec.solver_settings.scheme, "forward");
+        assert_eq!(spec.solver_settings.strategy, "Damped");
+        assert_eq!(spec.solver_settings.method, "Dense");
+        assert_eq!(spec.solver_settings.linear_sys_method, None);
+        assert!(spec.postprocessing.save);
+        assert_eq!(spec.postprocessing.filename.as_deref(), Some("damped_task.txt"));
+    }
+
+    #[test]
+    fn bvp_damped_solver_settings_rejects_unknown_grid_refinement_method() {
+        let result = parse_document_for_damped(
+            r#"
+            solver_settings
+            scheme: forward
+            strategy: Damped
+            method: Dense
+            linear_sys_method: None
+            abs_tolerance: 1e-6
+            max_iterations: 100
+            strategy_params
+            max_jac: Some(3)
+            max_damp_iter: Some(10)
+            damp_factor: Some(0.5)
+            adaptive_strategy
+            version: 1
+            max_refinements: 2
+            grid_refinement
+            alien: [0.1, 1.5]
+            "#,
+        );
+        let err = parse_bvp_damped_solver_settings_from_document(&result).unwrap_err();
+        assert_eq!(
+            err,
+            BvpDampedTaskError::UnknownGridRefinementMethod("alien".to_string())
+        );
     }
 }

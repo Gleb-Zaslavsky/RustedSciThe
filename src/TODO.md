@@ -428,6 +428,16 @@ terminal, BVP и task parser вызывают эти функции напрям
   generated template parses and passes `render_task_check`; representative CLI
   subprocess tests cover `--check`, `convert_check`, and template creation into
   a temp dir. Prefer this before changing UX architecture.
+- [ ] Split BVP/IVP task parsing into typed problem/settings layers and keep the
+  solver builder out of the raw document parser. The next refactor pass should
+  mirror the working `command_interpreter` shape across the legacy BVP Damp
+  parser: `parse_*_from_document` should produce `*_Spec` values, solver
+  settings must be parsed separately from equations/boundary data, and the old
+  mutating helpers (`set_params_from_hashmap`, `set_postpocessing_from_hashmap`)
+  should become thin compatibility bridges only. Unknown solver names,
+  malformed sections, and grid-refinement dispatch failures should return typed
+  errors instead of `panic!`, while end-to-end docs and split-mode docs remain
+  both supported.
 - [ ] Evaluate migrating manual argument parsing in `main.rs` to `clap` once the
   command surface is stable. Recommended direction: `clap` subcommands
   (`run`, `check`, `convert`, `convert-check`, `template`, `showcase`) with

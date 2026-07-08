@@ -1,8 +1,6 @@
 use super::*;
-
+use std::fs;
 use tempfile::tempdir;
-
-
 
 fn parse_document_for_bvp(input: &str) -> DocumentMap {
 
@@ -35,13 +33,47 @@ fn parse_document_for_bvp(input: &str) -> DocumentMap {
         .expect("BVP document map should exist")
 
         .clone()
-
 }
 
+#[test]
+fn bvp_task_parser_supports_file_roundtrip() {
+    let dir = tempdir().expect("temp dir should be created");
+    let path = dir.path().join("bvp_task.txt");
+    fs::write(
+        &path,
+        r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
 
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+initial_guess
+y: 0.0
+        "#,
+    )
+    .expect("test task file should be written");
+
+    let spec = parse_bvp_task_from_file(Some(path)).expect("BVP file task should parse");
+    assert_eq!(spec.solver.strategy, BvpStrategySpec::Damped);
+    assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
+    assert_eq!(spec.mesh.n_steps, 20);
+}
 
 #[test]
-
 fn bvp_task_parser_supports_pair_style_equations() {
 
     let input = r#"
@@ -1473,6 +1505,5 @@ plot: false
     assert!(report.contains("axis: x"));
 
 }
-
 
 

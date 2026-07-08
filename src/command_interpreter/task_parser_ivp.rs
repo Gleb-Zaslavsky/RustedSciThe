@@ -38,7 +38,6 @@ use std::path::PathBuf;
 /// For now we only support IVP tasks, but keeping this enum explicit makes it
 /// easier to expand the textual interface later without redesigning the whole
 /// normalization layer.
-/// Top-level family selector for text-driven task shells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKindSpec {
     Ivp,
@@ -238,9 +237,13 @@ impl IvpTaskSpec {
             solver_options: self.solver_options.clone(),
         }
     }
+
+    /// Extract the postprocessing subset from a full IVP task.
+    pub fn postprocessing_spec(&self) -> PostprocessingSpec {
+        self.postprocessing.clone()
+    }
 }
 
-/// Problem-only subset of the IVP task DSL.
 /// Problem-only subset of the IVP task DSL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IvpProblemSpec {
@@ -248,7 +251,6 @@ pub struct IvpProblemSpec {
     pub initial_conditions: InitialConditionSpec,
 }
 
-/// Solver-settings-only subset of the IVP task DSL.
 /// Solver-settings-only subset of the IVP task DSL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IvpSolverSettingsSpec {
@@ -340,6 +342,55 @@ pub fn parse_ivp_task_from_str(input: &str) -> Result<IvpTaskSpec, IvpTaskError>
         .get_result()
         .ok_or_else(|| IvpTaskError::Parser("document parser returned no result".to_string()))?;
     parse_ivp_task_from_document(document)
+}
+
+/// Parse a full IVP task document from an on-disk file.
+pub fn parse_ivp_task_from_file(path: Option<PathBuf>) -> Result<IvpTaskSpec, IvpTaskError> {
+    let mut parser = DocumentParser::new(String::new());
+    parser
+        .setting_from_file(path)
+        .map_err(IvpTaskError::Parser)?;
+    parser.parse_document().map_err(IvpTaskError::Parser)?;
+    parser.keys_to_lower_case(Some(vec![
+        "equations".to_string(),
+        "where".to_string(),
+        "substitute".to_string(),
+    ]));
+    let document = parser
+        .get_result()
+        .ok_or_else(|| IvpTaskError::Parser("document parser returned no result".to_string()))?;
+    parse_ivp_task_from_document(document)
+}
+
+/// Fallible alias for [`parse_ivp_problem_from_document`].
+pub fn try_parse_ivp_problem_from_document(
+    document: &DocumentMap,
+) -> Result<IvpProblemSpec, IvpTaskError> {
+    parse_ivp_problem_from_document(document)
+}
+
+/// Fallible alias for [`parse_ivp_solver_settings_from_document`].
+pub fn try_parse_ivp_solver_settings_from_document(
+    document: &DocumentMap,
+) -> Result<IvpSolverSettingsSpec, IvpTaskError> {
+    parse_ivp_solver_settings_from_document(document)
+}
+
+/// Fallible alias for [`parse_ivp_task_from_document`].
+pub fn try_parse_ivp_task_from_document(
+    document: &DocumentMap,
+) -> Result<IvpTaskSpec, IvpTaskError> {
+    parse_ivp_task_from_document(document)
+}
+
+/// Fallible alias for [`parse_ivp_task_from_str`].
+pub fn try_parse_ivp_task_from_str(input: &str) -> Result<IvpTaskSpec, IvpTaskError> {
+    parse_ivp_task_from_str(input)
+}
+
+/// Fallible alias for [`parse_ivp_task_from_file`].
+pub fn try_parse_ivp_task_from_file(path: Option<PathBuf>) -> Result<IvpTaskSpec, IvpTaskError> {
+    parse_ivp_task_from_file(path)
 }
 
 /// Parse only the equation and initial-condition part of the IVP DSL.

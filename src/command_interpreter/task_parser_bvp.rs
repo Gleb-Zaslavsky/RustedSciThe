@@ -283,6 +283,11 @@ impl BvpTaskSpec {
             solver_options: self.solver_options.clone(),
         }
     }
+
+    /// Extract only the postprocessing subset from a full task document.
+    pub fn postprocessing_spec(&self) -> BvpPostprocessingSpec {
+        self.postprocessing.clone()
+    }
 }
 
 /// Parsed task plus the optional solver output matrix.
@@ -363,6 +368,57 @@ pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError>
         .get_result()
         .ok_or_else(|| BvpTaskError::Parser("document parser returned no result".to_string()))?;
     parse_bvp_task_from_document(document)
+}
+
+/// Parse a full BVP task document from an on-disk file.
+pub fn parse_bvp_task_from_file(path: Option<PathBuf>) -> Result<BvpTaskSpec, BvpTaskError> {
+    let mut parser = DocumentParser::new(String::new());
+    parser
+        .setting_from_file(path)
+        .map_err(BvpTaskError::Parser)?;
+    parser.parse_document().map_err(BvpTaskError::Parser)?;
+    parser.keys_to_lower_case(Some(vec![
+        "equations".to_string(),
+        "boundary_conditions".to_string(),
+        "initial_guess".to_string(),
+        "where".to_string(),
+        "substitute".to_string(),
+    ]));
+    let document = parser
+        .get_result()
+        .ok_or_else(|| BvpTaskError::Parser("document parser returned no result".to_string()))?;
+    parse_bvp_task_from_document(document)
+}
+
+/// Fallible alias for [`parse_bvp_problem_from_document`].
+pub fn try_parse_bvp_problem_from_document(
+    document: &DocumentMap,
+) -> Result<BvpProblemSpec, BvpTaskError> {
+    parse_bvp_problem_from_document(document)
+}
+
+/// Fallible alias for [`parse_bvp_solver_settings_from_document`].
+pub fn try_parse_bvp_solver_settings_from_document(
+    document: &DocumentMap,
+) -> Result<BvpSolverSettingsSpec, BvpTaskError> {
+    parse_bvp_solver_settings_from_document(document)
+}
+
+/// Fallible alias for [`parse_bvp_task_from_document`].
+pub fn try_parse_bvp_task_from_document(
+    document: &DocumentMap,
+) -> Result<BvpTaskSpec, BvpTaskError> {
+    parse_bvp_task_from_document(document)
+}
+
+/// Fallible alias for [`parse_bvp_task_from_str`].
+pub fn try_parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError> {
+    parse_bvp_task_from_str(input)
+}
+
+/// Fallible alias for [`parse_bvp_task_from_file`].
+pub fn try_parse_bvp_task_from_file(path: Option<PathBuf>) -> Result<BvpTaskSpec, BvpTaskError> {
+    parse_bvp_task_from_file(path)
 }
 
 /// Parse only the equation/BC/mesh/initial-guess part of the DSL.
