@@ -533,21 +533,24 @@ fn build_lsode2_problem_config_from_spec(
     .with_faithful_bdf_solve(200_000, 200_000);
 
     if !spec.equations.parameter_names.is_empty() {
+        let mut parameter_values = Vec::with_capacity(spec.equations.parameter_names.len());
+        for name in &spec.equations.parameter_names {
+            let value = spec
+                .equations
+                .parameter_values
+                .get(name)
+                .copied()
+                .ok_or_else(|| {
+                    IvpTaskError::MissingField {
+                        section: "equations".to_string(),
+                        field: format!("parameter_values[{name}]"),
+                    }
+                })?;
+            parameter_values.push(value);
+        }
         config = config
             .with_equation_parameters(spec.equations.parameter_names.clone())
-            .with_equation_parameter_values(DVector::from_vec(
-                spec.equations
-                    .parameter_names
-                    .iter()
-                    .map(|name| {
-                        *spec
-                            .equations
-                            .parameter_values
-                            .get(name)
-                            .expect("parameter map should include declared key")
-                    })
-                    .collect(),
-            ));
+            .with_equation_parameter_values(DVector::from_vec(parameter_values));
     }
 
     if let Some(options) = spec.solver_options.lsode2.as_ref() {

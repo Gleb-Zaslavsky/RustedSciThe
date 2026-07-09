@@ -1,18 +1,21 @@
 //! # BVP Damped Task Parser Module
 //!
-//! Configuration parser for Boundary Value Problem (BVP) solver with damped Newton-Raphson method.
-//! Extends the NRBVP solver with file-based and string-based configuration parsing capabilities,
-//! allowing users to define solver parameters, boundary conditions, and postprocessing options
-//! through structured text files or strings.
+//! Configuration parser for the damped BVP solver.
+//!
+//! The module is split into typed parsing plus thin compatibility wrappers:
+//! parse task documents into specs, build solver-ready options from those specs,
+//! and keep the legacy `apply_*` / `set_*` entry points as bridges.
 //!
 //! ## Core Functionality
-//! - **Configuration Parsing**: Parse solver settings from files or strings into NRBVP solver
+//! - **Configuration Parsing**: Parse solver settings from files or strings into typed specs
 //! - **Parameter Mapping**: Convert parsed data into solver-specific data structures
 //! - **Pseudonym Support**: Handle common typos and alternative names for configuration keys
 //! - **Grid Refinement**: Parse adaptive grid refinement strategies and parameters
 //! - **Postprocessing**: Configure output options (plotting, saving, logging)
 //! - **Typed Split Parsing**: Parse solver settings and postprocessing into
 //!   fallible spec structs before mutating the solver state
+//! - **Generated Backend Selection**: Own sparse/banded/AOT selection, compiler
+//!   choice, build policy, execution policy, and chunking from the typed layer
 //! - **Template Generation**: Create configuration file templates for users
 //!
 //! ## Main Methods (NRBVP Implementation)
@@ -24,6 +27,8 @@
 //! - `try_parse_bvp_damped_solver_settings_from_document()` - Parse settings into a typed spec
 //! - `try_parse_bvp_damped_postprocessing_from_document()` - Parse postprocessing into a typed spec
 //! - `try_parse_bvp_damped_task_from_document()` - Parse the full typed BVP Damp task contract
+//! - `build_bvp_damped_solver_options_from_spec()` - Build solver-ready damped options from spec
+//! - `build_bvp_damped_generated_backend_config_from_spec()` - Build generated-backend config from spec
 //! - `apply_bvp_damped_solver_settings()` - Apply typed settings to the solver
 //! - `apply_bvp_damped_postprocessing()` - Apply typed postprocessing actions
 //! - `apply_bvp_damped_task_spec()` - Apply both solver settings and postprocessing
@@ -46,9 +51,14 @@
 //!
 //! ### solver_settings Section
 //! - `scheme`: Discretization scheme ("forward" or "trapezoid")
-//! - `method`: Matrix backend ("Dense" or "Sparse")
+//! - `method`: Matrix backend ("Dense", "Sparse", or "Banded")
 //! - `strategy`: Solver strategy ("Damped", "Naive", "Frozen")
 //! - `linear_sys_method`: Linear system solver method (Optional)
+//! - `generated_backend`: Optional generated-backend preset such as `banded_aot_tcc`
+//! - `matrix_backend`, `backend_policy`, `symbolic_backend`
+//! - `aot_codegen_backend`, `aot_c_compiler`, `aot_build_policy`, `aot_build_profile`
+//! - `aot_compile_preset`, `aot_execution_policy`
+//! - `banded_linear_solver`, `refinement_steps`
 //! - `abs_tolerance`: Absolute convergence tolerance
 //! - `max_iterations`: Maximum solver iterations
 //! - `loglevel`: Logging level (Optional)
@@ -112,8 +122,10 @@
 //! the requested postprocessing actions (plotting, saving, etc.).
 //!
 //! ### 6. Error Handling Strategy
-//! Uses `expect()` with descriptive messages for required fields and graceful
-//! `unwrap_or()` defaults for optional fields to provide clear error feedback.
+//! Typed parsing uses fallible helpers and returns structured errors for missing
+//! sections, missing fields, invalid values, and unsupported backend names. The
+//! legacy compatibility wrappers still exist, but the typed path does not rely on
+//! user-input panics.
 //!
 //! ### 7. Mesh Initialization
 //! `before_solve_preprocessing()` creates uniform mesh from t0, t_end, and n_steps,
@@ -142,8 +154,18 @@
 //! ```
 
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
+};
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+use crate::numerical::BVP_Damp::generated_solver_handoff::{
+    AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
+};
+use crate::somelinalg::banded::{LinearSolverConfig, LinearSolverPolicy};
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
 use nalgebra::DVector;
 use std::collections::HashMap;
 use std::error::Error;
@@ -196,6 +218,7 @@ pub struct BvpDampedSolverSettingsSpec {
     pub strategy: String,
     pub linear_sys_method: Option<String>,
     pub method: String,
+    pub generated_backend: BvpDampedGeneratedBackendSpec,
     pub abs_tolerance: f64,
     pub max_iterations: usize,
     pub loglevel: Option<String>,
@@ -203,6 +226,23 @@ pub struct BvpDampedSolverSettingsSpec {
     pub bounds: Option<HashMap<String, (f64, f64)>>,
     pub rel_tolerance: Option<HashMap<String, f64>>,
     pub strategy_params: Option<SolverParams>,
+}
+
+/// Typed generated-backend settings parsed from a BVP Damp task document.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BvpDampedGeneratedBackendSpec {
+    pub preset: Option<String>,
+    pub matrix_backend: Option<String>,
+    pub backend_policy: Option<String>,
+    pub symbolic_backend: Option<String>,
+    pub aot_codegen_backend: Option<String>,
+    pub aot_c_compiler: Option<String>,
+    pub aot_build_policy: Option<String>,
+    pub aot_build_profile: Option<String>,
+    pub aot_compile_preset: Option<String>,
+    pub aot_execution_policy: Option<String>,
+    pub banded_linear_solver: Option<String>,
+    pub refinement_steps: Option<usize>,
 }
 
 /// Typed postprocessing settings parsed from a BVP Damp task document.
@@ -236,6 +276,23 @@ impl BvpDampedTaskSpec {
     /// Extract the postprocessing subset.
     pub fn postprocessing_spec(&self) -> BvpDampedPostprocessingSpec {
         self.postprocessing.clone()
+    }
+}
+
+impl BvpDampedGeneratedBackendSpec {
+    /// Build the generated-backend config without mutating a live solver.
+    pub fn build_generated_backend_config(
+        &self,
+        method: &str,
+    ) -> Result<GeneratedBackendConfig, BvpDampedTaskError> {
+        build_bvp_damped_generated_backend_config_from_spec(self, method)
+    }
+}
+
+impl BvpDampedSolverSettingsSpec {
+    /// Build solver-ready damped options from the typed settings spec.
+    pub fn build_solver_options(&self) -> Result<DampedSolverOptions, BvpDampedTaskError> {
+        build_bvp_damped_solver_options_from_spec(self)
     }
 }
 
@@ -327,6 +384,51 @@ fn first_bool(
         })
 }
 
+fn get_optional_string(
+    section: &GenericSectionMap,
+    field: &str,
+    section_name: &'static str,
+) -> Result<Option<String>, BvpDampedTaskError> {
+    match section.get(field) {
+        Some(Some(values)) => {
+            let value = values
+                .first()
+                .and_then(|value| value.as_string().or_else(|| value.as_option_string()))
+                .cloned()
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: section_name,
+                    field: field.to_string(),
+                    message: "expected string".to_string(),
+                })?;
+            Ok(Some(value))
+        }
+        Some(None) => Ok(None),
+        None => Ok(None),
+    }
+}
+
+fn get_optional_usize(
+    section: &GenericSectionMap,
+    field: &str,
+    section_name: &'static str,
+) -> Result<Option<usize>, BvpDampedTaskError> {
+    match section.get(field) {
+        Some(Some(values)) => {
+            let value = values
+                .first()
+                .and_then(|value| value.as_usize().or_else(|| value.as_option_usize()))
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: section_name,
+                    field: field.to_string(),
+                    message: "expected usize".to_string(),
+                })?;
+            Ok(Some(value))
+        }
+        Some(None) => Ok(None),
+        None => Ok(None),
+    }
+}
+
 fn parse_grid_refinement_method(
     method_name: &str,
     method_params: &[f64],
@@ -395,6 +497,341 @@ fn parse_grid_refinement_method(
     Ok(method)
 }
 
+fn normalized_option(raw: Option<&str>) -> Option<String> {
+    raw.map(normalize_token).filter(|value| !value.is_empty())
+}
+
+fn normalize_token(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+fn invalid_solver_option(field: &str, message: String) -> BvpDampedTaskError {
+    BvpDampedTaskError::InvalidField {
+        section: "solver_settings",
+        field: field.to_string(),
+        message,
+    }
+}
+
+fn parse_generated_backend_options(
+    section: &GenericSectionMap,
+) -> Result<BvpDampedGeneratedBackendSpec, BvpDampedTaskError> {
+    Ok(BvpDampedGeneratedBackendSpec {
+        preset: get_optional_string(section, "generated_backend", "solver_settings")?,
+        matrix_backend: get_optional_string(section, "matrix_backend", "solver_settings")?,
+        backend_policy: get_optional_string(section, "backend_policy", "solver_settings")?,
+        symbolic_backend: get_optional_string(section, "symbolic_backend", "solver_settings")?,
+        aot_codegen_backend: get_optional_string(
+            section,
+            "aot_codegen_backend",
+            "solver_settings",
+        )?,
+        aot_c_compiler: get_optional_string(section, "aot_c_compiler", "solver_settings")?,
+        aot_build_policy: get_optional_string(section, "aot_build_policy", "solver_settings")?,
+        aot_build_profile: get_optional_string(section, "aot_build_profile", "solver_settings")?,
+        aot_compile_preset: get_optional_string(section, "aot_compile_preset", "solver_settings")?,
+        aot_execution_policy: get_optional_string(
+            section,
+            "aot_execution_policy",
+            "solver_settings",
+        )?,
+        banded_linear_solver: get_optional_string(
+            section,
+            "banded_linear_solver",
+            "solver_settings",
+        )?,
+        refinement_steps: get_optional_usize(section, "refinement_steps", "solver_settings")?,
+    })
+}
+
+fn parse_aot_build_profile(raw: &str) -> Result<AotBuildProfile, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "release" => Ok(AotBuildProfile::Release),
+        "debug" => Ok(AotBuildProfile::Debug),
+        other => Err(invalid_solver_option(
+            "aot_build_profile",
+            format!("unknown AOT build profile `{other}`"),
+        )),
+    }
+}
+
+fn parse_aot_build_policy(
+    raw_policy: Option<&str>,
+    raw_profile: Option<&str>,
+) -> Result<AotBuildPolicy, BvpDampedTaskError> {
+    let profile = parse_aot_build_profile(raw_profile.unwrap_or("release"))?;
+    match normalized_option(raw_policy).as_deref() {
+        None | Some("use_if_available") | Some("use") | Some("auto") => {
+            Ok(AotBuildPolicy::UseIfAvailable)
+        }
+        Some("build_if_missing") | Some("build") => Ok(AotBuildPolicy::BuildIfMissing { profile }),
+        Some("require_prebuilt") | Some("require") | Some("prebuilt") => {
+            Ok(AotBuildPolicy::RequirePrebuilt)
+        }
+        Some("rebuild_always") | Some("rebuild") => Ok(AotBuildPolicy::RebuildAlways { profile }),
+        Some(other) => Err(invalid_solver_option(
+            "aot_build_policy",
+            format!("unknown AOT build policy `{other}`"),
+        )),
+    }
+}
+
+fn parse_aot_codegen_backend(raw: &str) -> Result<AotCodegenBackend, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "rust" | "rs" => Ok(AotCodegenBackend::Rust),
+        "c" => Ok(AotCodegenBackend::C),
+        "zig" => Ok(AotCodegenBackend::Zig),
+        other => Err(invalid_solver_option(
+            "aot_codegen_backend",
+            format!("unknown AOT codegen backend `{other}`"),
+        )),
+    }
+}
+
+fn parse_aot_execution_policy(raw: &str) -> Result<AotExecutionPolicy, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "auto" => Ok(AotExecutionPolicy::Auto),
+        "sequential" | "sequential_only" | "seq" => Ok(AotExecutionPolicy::SequentialOnly),
+        "parallel" => Err(invalid_solver_option(
+            "aot_execution_policy",
+            "`parallel` requires a ParallelExecutorConfig and is not yet exposed in task files"
+                .to_string(),
+        )),
+        other => Err(invalid_solver_option(
+            "aot_execution_policy",
+            format!("unknown AOT execution policy `{other}`"),
+        )),
+    }
+}
+
+fn parse_backend_policy(raw: &str) -> Result<BackendSelectionPolicy, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "numeric" | "numeric_only" => Ok(BackendSelectionPolicy::NumericOnly),
+        "lambdify" | "lambdify_only" => Ok(BackendSelectionPolicy::LambdifyOnly),
+        "aot" | "aot_only" => Ok(BackendSelectionPolicy::AotOnly),
+        "prefer_aot" | "prefer_aot_then_lambdify" | "aot_then_lambdify" => {
+            Ok(BackendSelectionPolicy::PreferAotThenLambdify)
+        }
+        "prefer_aot_then_numeric" | "aot_then_numeric" => {
+            Ok(BackendSelectionPolicy::PreferAotThenNumeric)
+        }
+        "prefer_lambdify_then_numeric" | "lambdify_then_numeric" => {
+            Ok(BackendSelectionPolicy::PreferLambdifyThenNumeric)
+        }
+        other => Err(invalid_solver_option(
+            "backend_policy",
+            format!("unknown backend policy `{other}`"),
+        )),
+    }
+}
+
+fn parse_symbolic_backend(raw: &str) -> Result<BvpSymbolicAssemblyBackend, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "exprlegacy" | "expr_legacy" | "legacy" => Ok(BvpSymbolicAssemblyBackend::ExprLegacy),
+        "atomview" | "atom_view" | "atom" => Ok(BvpSymbolicAssemblyBackend::AtomView),
+        other => Err(invalid_solver_option(
+            "symbolic_backend",
+            format!("unknown symbolic backend `{other}`"),
+        )),
+    }
+}
+
+fn apply_aot_compile_preset(
+    config: GeneratedBackendConfig,
+    raw: &str,
+) -> Result<GeneratedBackendConfig, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "production" | "prod" | "release" => Ok(config.with_aot_compile_production()),
+        "fast_build" | "fastbuild" => Ok(config.with_aot_compile_fast_build()),
+        "dev_fastest" | "devfastest" | "debug_fast" => Ok(config.with_aot_compile_dev_fastest()),
+        other => Err(invalid_solver_option(
+            "aot_compile_preset",
+            format!("unknown AOT compile preset `{other}`"),
+        )),
+    }
+}
+
+fn apply_matrix_backend_override(
+    config: GeneratedBackendConfig,
+    raw: &str,
+) -> Result<GeneratedBackendConfig, BvpDampedTaskError> {
+    match normalize_token(raw).as_str() {
+        "default" | "none" => Ok(config),
+        "sparse" | "sparse_col" | "sparsecol" => {
+            Ok(config.with_matrix_backend_override(MatrixBackend::SparseCol))
+        }
+        "banded" => Ok(config.with_matrix_backend_override(MatrixBackend::Banded)),
+        "dense" => Ok(config.with_matrix_backend_override(MatrixBackend::Dense)),
+        other => Err(invalid_solver_option(
+            "matrix_backend",
+            format!("unknown matrix backend `{other}`"),
+        )),
+    }
+}
+
+fn parse_banded_linear_solver_config(
+    raw_solver: Option<&str>,
+    refinement_steps: Option<usize>,
+) -> Result<LinearSolverConfig, BvpDampedTaskError> {
+    let refinement_steps = refinement_steps.unwrap_or(0);
+    let config = match normalized_option(raw_solver).as_deref() {
+        None | Some("default") | Some("auto") => {
+            LinearSolverConfig::auto().with_iterative_refinement_steps(refinement_steps)
+        }
+        Some("faithful") | Some("lapack") | Some("lapack_style_banded_lu") => {
+            LinearSolverConfig::faithful_banded_with_refinement(refinement_steps)
+        }
+        Some("block_tridiagonal") | Some("block_tridiagonal_lu") => LinearSolverConfig {
+            policy: LinearSolverPolicy::ForceBlockTridiagonal,
+            iterative_refinement_steps: refinement_steps,
+            ..LinearSolverConfig::default()
+        },
+        Some("block_tridiagonal_consistent")
+        | Some("block_tridiagonal_lu_consistent")
+        | Some("consistent") => LinearSolverConfig {
+            policy: LinearSolverPolicy::ForceBlockTridiagonalConsistent,
+            iterative_refinement_steps: refinement_steps,
+            ..LinearSolverConfig::default()
+        },
+        Some("faer_sparse") | Some("faer_sparse_lu") => LinearSolverConfig {
+            policy: LinearSolverPolicy::ForceFaerSparse,
+            iterative_refinement_steps: refinement_steps,
+            ..LinearSolverConfig::default()
+        },
+        Some("general_partial_pivot") | Some("dense_general_pivot") => LinearSolverConfig {
+            policy: LinearSolverPolicy::ForceGeneralBandedPartialPivot,
+            iterative_refinement_steps: refinement_steps,
+            ..LinearSolverConfig::default()
+        },
+        Some(other) => {
+            return Err(invalid_solver_option(
+                "banded_linear_solver",
+                format!("unknown banded linear solver `{other}`"),
+            ))
+        }
+    };
+    Ok(config)
+}
+
+/// Build the generated-backend config from typed damped solver settings.
+pub fn build_bvp_damped_generated_backend_config_from_spec(
+    spec: &BvpDampedGeneratedBackendSpec,
+    method: &str,
+) -> Result<GeneratedBackendConfig, BvpDampedTaskError> {
+    let mut config = match normalized_option(spec.preset.as_deref()).as_deref() {
+        None | Some("default") | Some("defaults") => match normalize_token(method).as_str() {
+            "banded" => GeneratedBackendConfig::banded_defaults(),
+            "dense" | "sparse" => GeneratedBackendConfig::sparse_defaults(),
+            other => {
+                return Err(invalid_solver_option(
+                    "method",
+                    format!("unknown solver matrix route `{other}`"),
+                ))
+            }
+        },
+        Some("sparse") | Some("sparse_default") | Some("sparse_defaults") => {
+            GeneratedBackendConfig::sparse_defaults()
+        }
+        Some("sparse_lambdify") | Some("lambdify_sparse") => {
+            GeneratedBackendConfig::sparse_defaults()
+                .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
+        }
+        Some("sparse_aot") | Some("sparse_build_if_missing") => {
+            GeneratedBackendConfig::sparse_build_if_missing_release()
+        }
+        Some("sparse_aot_gcc") | Some("sparse_atomview_gcc") => {
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_gcc()
+        }
+        Some("sparse_aot_tcc") | Some("sparse_atomview_tcc") | Some("sparse_repeated") => {
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_tcc()
+        }
+        Some("sparse_aot_zig") | Some("sparse_atomview_zig") => {
+            GeneratedBackendConfig::sparse_atomview_build_if_missing_release_zig()
+        }
+        Some("banded") | Some("banded_default") | Some("banded_defaults") => {
+            GeneratedBackendConfig::banded_defaults()
+        }
+        Some("banded_lambdify") | Some("lambdify_banded") => {
+            GeneratedBackendConfig::banded_lambdify_defaults()
+        }
+        Some("banded_aot") | Some("banded_build_if_missing") => {
+            GeneratedBackendConfig::banded_build_if_missing_release()
+        }
+        Some("banded_aot_gcc") | Some("banded_atomview_gcc") => {
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_gcc()
+        }
+        Some("banded_aot_tcc") | Some("banded_atomview_tcc") | Some("banded_repeated") => {
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc()
+        }
+        Some("banded_aot_zig") | Some("banded_atomview_zig") => {
+            GeneratedBackendConfig::banded_atomview_build_if_missing_release_zig()
+        }
+        Some(other) => {
+            return Err(invalid_solver_option(
+                "generated_backend",
+                format!("unknown generated backend preset `{other}`"),
+            ))
+        }
+    };
+
+    if let Some(matrix_backend) = spec.matrix_backend.as_deref() {
+        config = apply_matrix_backend_override(config, matrix_backend)?;
+    }
+    if let Some(policy) = spec.backend_policy.as_deref() {
+        config = config.with_backend_policy_override(Some(parse_backend_policy(policy)?));
+    }
+    if let Some(symbolic_backend) = spec.symbolic_backend.as_deref() {
+        config = config.with_symbolic_assembly_backend(parse_symbolic_backend(symbolic_backend)?);
+    }
+    if let Some(codegen_backend) = spec.aot_codegen_backend.as_deref() {
+        config = config.with_aot_codegen_backend(parse_aot_codegen_backend(codegen_backend)?);
+    }
+    if let Some(compiler) = spec.aot_c_compiler.as_deref() {
+        config = config.with_aot_c_compiler(compiler);
+    }
+    if spec.aot_build_policy.is_some() || spec.aot_build_profile.is_some() {
+        config = config.with_aot_build_policy(parse_aot_build_policy(
+            spec.aot_build_policy.as_deref(),
+            spec.aot_build_profile.as_deref(),
+        )?);
+    }
+    if let Some(compile_preset) = spec.aot_compile_preset.as_deref() {
+        config = apply_aot_compile_preset(config, compile_preset)?;
+    }
+    if let Some(execution_policy) = spec.aot_execution_policy.as_deref() {
+        config = config.with_aot_execution_policy(parse_aot_execution_policy(execution_policy)?);
+    }
+    if spec.banded_linear_solver.is_some() || spec.refinement_steps.is_some() {
+        config = config.with_banded_linear_solver_config(parse_banded_linear_solver_config(
+            spec.banded_linear_solver.as_deref(),
+            spec.refinement_steps,
+        )?);
+    }
+
+    Ok(config)
+}
+
+/// Build solver-ready damped options from typed solver settings.
+pub fn build_bvp_damped_solver_options_from_spec(
+    spec: &BvpDampedSolverSettingsSpec,
+) -> Result<DampedSolverOptions, BvpDampedTaskError> {
+    let generated_backend_config =
+        build_bvp_damped_generated_backend_config_from_spec(&spec.generated_backend, &spec.method)?;
+    Ok(DampedSolverOptions::new(
+        spec.scheme.clone(),
+        spec.strategy.clone(),
+        spec.strategy_params.clone(),
+        spec.linear_sys_method.clone(),
+        spec.method.clone(),
+        spec.abs_tolerance,
+        spec.rel_tolerance.clone(),
+        spec.max_iterations,
+        spec.bounds.clone(),
+        spec.loglevel.clone(),
+    )
+    .with_generated_backend_config(generated_backend_config))
+}
+
 /// Parse the solver-settings block into a typed spec without mutating the solver.
 pub fn parse_bvp_damped_solver_settings_from_document(
     document: &DocumentMap,
@@ -422,6 +859,7 @@ pub fn parse_bvp_damped_solver_settings_from_document(
     } else {
         true
     };
+    let generated_backend = parse_generated_backend_options(solver_settings)?;
 
     let bounds = if let Some(bounds_section) = document.get("bounds") {
         let bounds = bounds_section
@@ -547,6 +985,7 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         strategy,
         linear_sys_method,
         method,
+        generated_backend,
         abs_tolerance,
         max_iterations,
         loglevel,
@@ -665,7 +1104,18 @@ impl NRBVP {
     }
 
     /// Apply typed solver settings to the solver state.
+    ///
+    /// This remains a compatibility wrapper around the fallible typed path.
     pub fn apply_bvp_damped_solver_settings(&mut self, spec: &BvpDampedSolverSettingsSpec) {
+        self.try_apply_bvp_damped_solver_settings(spec)
+            .expect("typed damped solver settings should produce a generated backend config");
+    }
+
+    /// Fallible bridge that applies typed solver settings to the solver state.
+    pub fn try_apply_bvp_damped_solver_settings(
+        &mut self,
+        spec: &BvpDampedSolverSettingsSpec,
+    ) -> Result<(), BvpDampedTaskError> {
         self.scheme = spec.scheme.clone();
         self.strategy = spec.strategy.clone();
         self.linear_sys_method = spec.linear_sys_method.clone();
@@ -677,6 +1127,10 @@ impl NRBVP {
         self.Bounds = spec.bounds.clone();
         self.rel_tolerance = spec.rel_tolerance.clone();
         self.strategy_params = spec.strategy_params.clone();
+        let config =
+            build_bvp_damped_generated_backend_config_from_spec(&spec.generated_backend, &spec.method)?;
+        self.set_generated_backend_config(config);
+        Ok(())
     }
 
     /// Apply typed postprocessing settings to the solver state.
@@ -1010,7 +1464,15 @@ mod tests {
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
         AdaptiveGridConfig, NRBVP, SolverParams,
     };
+    use crate::numerical::BVP_Damp::generated_solver_handoff::{
+        AotBuildPolicy, AotBuildProfile, AotExecutionPolicy,
+    };
     use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+    use crate::somelinalg::banded::LinearSolverPolicy;
+    use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+    use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+    use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+    use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
 
@@ -1390,6 +1852,128 @@ mod tests {
                     grid_method: GridRefinementMethod::Pearson(0.1, 1.5),
                 }),
             })
+        );
+    }
+
+    #[test]
+    fn bvp_damped_solver_settings_spec_builds_generated_backend_config() {
+        let input = r#"
+        solver_settings
+        scheme: trapezoid
+        strategy: Damped
+        method: Banded
+        linear_sys_method: faithful
+        abs_tolerance: 1e-6
+        max_iterations: 120
+        generated_backend: banded_aot_tcc
+        matrix_backend: banded
+        backend_policy: prefer_aot_then_lambdify
+        symbolic_backend: AtomView
+        aot_codegen_backend: C
+        aot_c_compiler: tcc
+        aot_build_policy: build_if_missing
+        aot_build_profile: release
+        aot_compile_preset: dev_fastest
+        aot_execution_policy: sequential
+        banded_linear_solver: faithful
+        refinement_steps: 0
+        "#;
+        let result = parse_document_for_damped(input);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result).unwrap();
+        let options = build_bvp_damped_solver_options_from_spec(&spec).unwrap();
+
+        assert_eq!(
+            options.generated_backend_config.backend_policy_override,
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            options.generated_backend_config.matrix_backend_override,
+            Some(MatrixBackend::Banded)
+        );
+        assert_eq!(
+            options.generated_backend_config.symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_codegen_backend,
+            AotCodegenBackend::C
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_c_compiler.as_deref(),
+            Some("tcc")
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_build_policy,
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+        assert_eq!(
+            options.generated_backend_config.aot_execution_policy,
+            AotExecutionPolicy::SequentialOnly
+        );
+        assert_eq!(
+            options.generated_backend_config.banded_linear_solver_config.policy,
+            LinearSolverPolicy::ForceBanded
+        );
+        assert_eq!(
+            options.generated_backend_config
+                .banded_linear_solver_config
+                .iterative_refinement_steps,
+            0
+        );
+    }
+
+    #[test]
+    fn bvp_damped_try_apply_solver_settings_populates_generated_backend_config() {
+        let input = r#"
+        solver_settings
+        scheme: forward
+        strategy: Damped
+        method: Sparse
+        linear_sys_method: None
+        abs_tolerance: 1e-6
+        max_iterations: 100
+        generated_backend: sparse_aot_tcc
+        backend_policy: prefer_aot_then_lambdify
+        symbolic_backend: AtomView
+        aot_codegen_backend: C
+        aot_c_compiler: tcc
+        aot_build_policy: build_if_missing
+        aot_build_profile: release
+        aot_execution_policy: sequential
+        "#;
+        let result = parse_document_for_damped(input);
+        let spec = parse_bvp_damped_solver_settings_from_document(&result).unwrap();
+
+        let mut nr = NRBVP::default();
+        nr.try_apply_bvp_damped_solver_settings(&spec).unwrap();
+
+        assert_eq!(
+            nr.generated_backend_config().backend_policy_override,
+            Some(BackendSelectionPolicy::PreferAotThenLambdify)
+        );
+        assert_eq!(
+            nr.generated_backend_config().symbolic_assembly_backend,
+            BvpSymbolicAssemblyBackend::AtomView
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_codegen_backend,
+            AotCodegenBackend::C
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_c_compiler.as_deref(),
+            Some("tcc")
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_build_policy,
+            AotBuildPolicy::BuildIfMissing {
+                profile: AotBuildProfile::Release
+            }
+        );
+        assert_eq!(
+            nr.generated_backend_config().aot_execution_policy,
+            AotExecutionPolicy::SequentialOnly
         );
     }
 

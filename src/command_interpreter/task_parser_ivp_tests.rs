@@ -838,3 +838,46 @@ parallel: false
         .expect("Rust problem + DSL settings should build");
     let _ = solver;
 }
+
+#[test]
+fn ivp_task_parser_reports_missing_parameter_values_during_lsode2_build() {
+    let problem = IvpProblemSpec {
+        equations: EquationSpec {
+            arg: "t".to_string(),
+            unknowns: vec!["y".to_string()],
+            rhs: vec![Expr::parse_expression("-a*y")],
+            parameter_names: vec!["a".to_string()],
+            parameter_values: HashMap::new(),
+        },
+        initial_conditions: InitialConditionSpec {
+            t0: 0.0,
+            t_end: 1.0,
+            y0: vec![1.0],
+        },
+    };
+
+    let settings_doc = r#"
+task
+solver: IVP
+method: LSODE2
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: auto
+"#;
+    let document = parse_document_for_ivp(settings_doc);
+    let settings =
+        parse_ivp_solver_settings_from_document(&document).expect("solver settings should parse");
+
+    match build_ivp_solver_from_problem_and_settings(&problem, &settings) {
+        Ok(_) => panic!("missing parameter values should be reported"),
+        Err(err) => {
+            let message = err.to_string();
+            assert!(message.contains("parameter_values[a]"));
+        }
+    }
+}
