@@ -654,11 +654,11 @@ impl BE {
 
 mod tests {
     use super::*;
-    use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
-    use std::collections::HashMap;
 
     #[test]
     fn be_new_with_options_installs_generated_backend_mode() {
+        use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
+
         let solver = BE::new_with_options(
             BeSolverOptions::new(
                 vec![Expr::parse_expression("y")],
@@ -683,6 +683,8 @@ mod tests {
 
     #[test]
     fn generated_backend_surface_mode_updates_be_config() {
+        use crate::symbolic::symbolic_ivp_generated::SymbolicIvpAotBuildPolicy;
+
         let solver = BE::new()
             .with_dense_generated_backend_mode(DenseIvpGeneratedBackendMode::BuildIfMissingRelease);
 

@@ -16,7 +16,7 @@ mod tests {
         bootstrap_hint: &'static str,
         policy: BvpSciLinearSolvePolicy,
     }
-
+    #[allow(dead_code)]
     #[derive(Clone)]
     struct BandedRow {
         source: &'static str,

@@ -301,7 +301,7 @@ pub fn lmpar(
 
         // Update bounds and parameter
         let new_parl = if fp > 0.0 { parl.max(*par) } else { parl };
-        let new_paru = if fp < 0.0 { paru.min(*par) } else { paru };
+        let _new_paru = if fp < 0.0 { paru.min(*par) } else { paru };
 
         *par = new_parl.max(*par + parc);
     }

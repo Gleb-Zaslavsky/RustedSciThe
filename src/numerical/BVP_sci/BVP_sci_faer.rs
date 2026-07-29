@@ -287,7 +287,7 @@ fn faer_dense_to_dmatrix(mat: &faer_dense_mat) -> DMatrix<f64> {
 fn dmatrix_to_faer_dense(mat: &DMatrix<f64>) -> faer_dense_mat {
     faer_dense_mat::from_fn(mat.nrows(), mat.ncols(), |row, col| mat[(row, col)])
 }
-
+#[allow(dead_code)]
 fn sparse_to_dmatrix(mat: &faer_mat) -> DMatrix<f64> {
     let (nrows, ncols) = mat.shape();
     let mut dense = DMatrix::zeros(nrows, ncols);
@@ -298,7 +298,7 @@ fn sparse_to_dmatrix(mat: &faer_mat) -> DMatrix<f64> {
     }
     dense
 }
-
+#[allow(dead_code)]
 fn dmatrix_to_sparse(mat: &DMatrix<f64>) -> faer_mat {
     let mut triplets = Vec::new();
     for col in 0..mat.ncols() {
@@ -412,7 +412,7 @@ impl SingularTermPlumbing {
 
         dmatrix_to_faer_dense(&out)
     }
-
+    #[allow(dead_code)]
     fn wrap_pointwise_jacobians(&self, x: &faer_col, jacobians: Vec<faer_mat>) -> Vec<faer_mat> {
         let mut wrapped = Vec::with_capacity(jacobians.len());
         for (idx, jacobian) in jacobians.into_iter().enumerate() {
@@ -2694,8 +2694,8 @@ pub fn solve_bvp_with_strategy_params(
 pub fn solve_bvp_with_strategy_and_linear_policy(
     fun: &ODEFunction,
     bc: &BCFunction,
-    mut x: faer_col,
-    mut y: faer_dense_mat,
+    x: faer_col,
+    y: faer_dense_mat,
     p: Option<faer_col>,
     _s: Option<faer_dense_mat>,
     fun_jac: Option<&ODEJacobian>,

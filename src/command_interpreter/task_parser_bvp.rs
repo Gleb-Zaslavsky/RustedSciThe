@@ -422,7 +422,9 @@ pub fn try_parse_bvp_task_from_file(path: Option<PathBuf>) -> Result<BvpTaskSpec
 }
 
 /// Parse only the equation/BC/mesh/initial-guess part of the DSL.
-pub fn parse_bvp_problem_from_document(document: &DocumentMap) -> Result<BvpProblemSpec, BvpTaskError> {
+pub fn parse_bvp_problem_from_document(
+    document: &DocumentMap,
+) -> Result<BvpProblemSpec, BvpTaskError> {
     let equations = parse_bvp_equations(document)?;
     let boundary_conditions = parse_boundary_conditions(document, &equations.unknowns)?;
     let mesh = parse_bvp_mesh(document)?;
@@ -1439,9 +1441,6 @@ fn value_to_float(value: &Value, section_name: &str, field: &str) -> Result<f64,
     }
 }
 
-
-
 #[cfg(test)]
 #[path = "task_parser_bvp_tests.rs"]
 mod task_parser_bvp_tests;
-

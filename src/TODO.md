@@ -455,6 +455,133 @@ terminal, BVP и task parser вызывают эти функции напрям
 - [ ] При добавлении новых solver routes сначала расширять parser tests, затем
   примеры и README, чтобы executable не отставал от library API.
 
+### P2: граф именованных символьных выражений и масштабируемая подстановка
+
+Цель: `parameters` остаются числовыми константами, а `where` / `substitute`
+могут задавать произвольное число уровней именованных выражений. IVP и BVP
+должны использовать один и тот же механизм разрешения зависимостей, обнаружения
+циклов и построения итоговых правых частей. При этом нельзя усложнять обычный
+IVP/BVP путь ради гипотетических систем из тысяч definitions.
+
+Текущее состояние и принятые ограничения:
+
+- [x] `src/symbolic/symexpr_graphs.rs` уже содержит корректный прототип
+  `SymbolicSystem`: duplicate/cycle detection, свободные и выходные переменные,
+  подсистему зависимостей цели, deterministic evaluation order, полное и
+  частичное раскрытие.
+- [x] Убрать независимую рекурсивную реализацию
+  `resolve_substitution_aliases` из `task_parser_common.rs`; каноническим
+  механизмом для IVP и BVP должен стать `SymbolicSystem`, а parser common
+  должен содержать только преобразование task-doc sections в typed definitions
+  и отображение `SymbolicSystemError` в человекочитаемую parser error.
+- [x] Зафиксировать семантику имён: коллизии между argument,
+  unknowns, `parameters` и `where` aliases; duplicate aliases между `where` и
+  `substitute`; undefined names; явно разрешённые free variables; несколько
+  requested outputs. Никакого порядка, зависящего от итерации `HashMap`.
+- [x] Числовые `parameters` применяются ко всем именованным definitions до
+  разрешения графа; затем полностью разрешённые aliases подставляются в RHS.
+  Это покрыто общими и BVP/IVP regression tests.
+- [x] Сохранить обычное полное раскрытие как основной IVP/BVP путь. Для
+  типичных task documents с десятками либо примерно сотней definitions и
+  глубиной 4--5 компактный `Vec<Expr>` проще, дешевле и лучше совместим с
+  существующими Lambdify/AOT/solver API, чем отдельный DAG runtime.
+
+Один публичный API, две внутренние стратегии:
+
+- [ ] Не заводить два несвязанных пользовательских подстановщика. Ввести один
+  typed API с политикой наподобие
+  `ResolutionPolicy::{Expand, Program, Auto}`. IVP/BVP task parsers используют
+  `Auto` с консервативным предпочтением `Expand`; advanced callers могут
+  принудительно выбрать стратегию для тестов и специальных задач.
+- [ ] `Expand` возвращает обычные полностью разрешённые `Expr` и остается
+  compatibility/default route. Добавить checked limits, чтобы патологическая
+  подстановка завершалась typed error, а не исчерпанием памяти.
+- [ ] `Program` добавить только для крупных систем: например
+  `SymbolicProgram { inputs, bindings, outputs }`, где bindings находятся в
+  топологическом порядке, ссылаются на ранее вычисленные значения и каждая
+  общая зависимость вычисляется один раз.
+- [ ] `Auto` должен выбирать стратегию не только по количеству definitions.
+  До клонирования деревьев вычислять capped estimate: прогнозируемое число
+  узлов после раскрытия requested outputs, максимальную глубину, fan-out
+  общих dependencies и growth ratio относительно исходной системы.
+  Использовать saturating arithmetic и детерминированные configurable limits.
+- [ ] Не переключать `Auto` на `Program`, пока конкретный downstream consumer
+  не умеет принять `SymbolicProgram`. На первом этапе IVP/BVP используют
+  checked `Expand`; при превышении лимита возвращают понятную ошибку с
+  рекомендацией program-aware route. После поддержки Program в
+  Lambdify/AOT переключение сможет стать прозрачным.
+- [ ] Для `Program` добавить API одной и нескольких целей:
+  `compile_target(s)` / `evaluation_plan_for_targets`. План вырезает
+  недостижимые definitions, сохраняет общую dependency один раз и возвращает
+  детерминированный порядок bindings.
+- [ ] Только при доказанной потребности добавить прямое вычисление
+  `SymbolicProgram` и lowering нескольких outputs в общий
+  `CodegenIR::LinearBlock`. Проверить, гарантирует ли `Lowerer::lower_many`
+  переиспользование общих инструкций; при необходимости добавить multi-output
+  CSE на границе `SymbolicProgram -> LinearBlock`.
+
+Роль `View`:
+
+- [ ] Использовать `Atom` / `AtomView` как компактное packed-представление и
+  zero-copy traversal внутри отдельного выражения. Не считать `AtomView`
+  межвыраженческим DAG: отдельные owning `Atom` по-прежнему физически содержат
+  свои байты.
+- [ ] Сделать небольшой benchmark `Expr` vs packed `Atom` для definitions,
+  traversal, substitution/lowering и peak bytes. Перевод graph/program
+  bindings на `Atom` допустим только при измеримом выигрыше и сохранении
+  round-trip semantics.
+- [ ] Рассматривать глобальную миграцию `Expr` на `Arc<ExprNode>` или arena
+  `ExprId` как отдельный P3/RFC. Gate: реальные профили больших систем должны
+  показать, что checked expansion и named-program + temporaries не решают
+  основную проблему памяти/времени. Такая миграция не является условием
+  интеграции многоуровневого `where` в IVP/BVP.
+
+Обязательные correctness и growth tests:
+
+- [x] Цепочка `a -> b -> D -> x1`, несколько outputs и `expand_until`.
+- [ ] Diamond/shared graph (`a`, `b=a*a`, `c=b+b`, `d=c*c`) с проверкой, что
+  estimator заранее обнаруживает превышение заданного growth limit; после
+  появления `Program` его evaluation plan содержит каждое binding один раз.
+- [ ] Direct cycle, indirect cycle, self-reference, duplicate definition,
+  unknown requested target и детерминированное сообщение о конкретном цикле.
+- [x] Parameters внутри definitions нескольких уровней и одинаковая BVP/IVP
+  семантика разрешения цепочки из трёх `where` aliases. Свободные variables,
+  argument/unknown references и запрещённые name collisions остаются отдельной
+  проверкой ниже.
+- [x] Одинаковые BVP/IVP task documents получают одинаково разрешённые
+  RHS через общий parser helper; добавить end-to-end parser regression tests
+  минимум с тремя уровнями `where`. Закрыто focused tests без solver runtime.
+- [ ] Численная эквивалентность трёх путей на малых системах: legacy full
+  expansion, checked `Expand`, а после реализации сложного пути также
+  `SymbolicProgram` interpreter и lowered `LinearBlock`.
+- [ ] Auto-policy tests: небольшая IVP/BVP система выбирает `Expand`; большая
+  независимая система без сильного роста также может выбрать `Expand`;
+  небольшой pathological shared graph превышает growth budget независимо от
+  малого числа definitions; крупный shared graph выбирает `Program`, когда
+  consumer объявляет его поддержку.
+- [ ] Performance/growth regression для большого shared graph должен измерять
+  estimated/actual node count, bytes и IR instruction count отдельно от noisy
+  wall clock.
+
+Acceptance gates:
+
+- [x] В `task_parser_common.rs` нет второго рекурсивного resolver графа.
+- [x] BVP и IVP используют один common named-expression pipeline для
+  `where` / `substitute`.
+- [x] Обычный небольшой task-doc solve сохраняет простой `Expr` route без
+  DAG-runtime overhead.
+- [ ] Патологический рост обнаруживается до построения огромного `Expr`.
+- [ ] Выбор `Auto` наблюдаем через diagnostics и воспроизводим; существуют
+  explicit `Expand` / `Program` overrides.
+- [x] Старые одноуровневые `where` / `substitute` документы сохраняют
+  совместимость; direct/indirect cycles и duplicate aliases дают user-facing
+  errors. Коллизии с parameter/argument/unknown и нераскрытые символы RHS
+  возвращают typed parser errors до создания solver-а.
+- [ ] Program/View/arena work не блокирует ближайшую интеграцию корректного
+  многоуровневого `where` в IVP/BVP.
+- [ ] Focused graph/parser tests зелёные; advanced codegen benchmarks
+  добавляются вместе с `Program`, а не заранее.
+
 ## P2: документация и presentation
 
 - [ ] Связать README с новыми IVP/BVP user guides и task-doc guide, не

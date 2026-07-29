@@ -3,9 +3,7 @@ use super::{
     Lsode2JacobianCurrency, Lsode2Kflag, Lsode2NativeStatistics, Lsode2ProblemConfig,
     Lsode2RedoStage, Lsode2SolveSummary, Lsode2Solver,
 };
-use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedResidualAotBackend, register_linked_residual_backend, unregister_linked_residual_backend,
-};
+use crate::symbolic::codegen::codegen_aot_runtime_link::unregister_linked_residual_backend;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
@@ -13,8 +11,7 @@ use crate::symbolic::symbolic_ivp::{
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 use nalgebra::DVector;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
 use std::time::Instant;
 use tempfile::tempdir;
 

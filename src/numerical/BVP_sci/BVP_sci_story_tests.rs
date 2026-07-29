@@ -171,7 +171,7 @@ mod tests {
     fn stats_counter_us_as_ms(stats: &BvpSciStatistics, key: &str) -> f64 {
         stats_count(stats, key) as f64 / 1_000.0
     }
-
+    #[allow(dead_code)]
     fn stats_diagnostic_ms(stats: &BvpSciStatistics, key: &str) -> f64 {
         stats
             .diagnostics
@@ -777,7 +777,7 @@ mod tests {
             max,
         }
     }
-
+    #[allow(dead_code)]
     fn summarize_reason<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
         let reasons: Vec<&str> = values.into_iter().collect();
         if reasons.is_empty() {

@@ -157,10 +157,10 @@ use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
 };
-use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
+use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use crate::somelinalg::banded::{LinearSolverConfig, LinearSolverPolicy};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
@@ -179,7 +179,10 @@ type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 pub enum BvpDampedTaskError {
     Parser(String),
     MissingSection(&'static str),
-    MissingField { section: &'static str, field: String },
+    MissingField {
+        section: &'static str,
+        field: String,
+    },
     InvalidField {
         section: &'static str,
         field: String,
@@ -193,10 +196,9 @@ impl Display for BvpDampedTaskError {
         match self {
             Self::Parser(message) => write!(f, "parser error: {}", message),
             Self::MissingSection(section) => write!(f, "missing section `{}`", section),
-            Self::MissingField {
-                section,
-                field,
-            } => write!(f, "missing field `{}.{}`", section, field),
+            Self::MissingField { section, field } => {
+                write!(f, "missing field `{}.{}`", section, field)
+            }
             Self::InvalidField {
                 section,
                 field,
@@ -443,55 +445,71 @@ fn parse_grid_refinement_method(
             }
         })?),
         "grcarsmooke" => GridRefinementMethod::GrcarSmooke(
-            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
-            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
-            *method_params.get(2).ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
+            *method_params
+                .first()
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
+            *method_params
+                .get(1)
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
+            *method_params
+                .get(2)
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
         ),
         "pearson" => GridRefinementMethod::Pearson(
-            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 2 parameters".to_string(),
-            })?,
-            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 2 parameters".to_string(),
-            })?,
+            *method_params
+                .first()
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 2 parameters".to_string(),
+                })?,
+            *method_params
+                .get(1)
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 2 parameters".to_string(),
+                })?,
         ),
         "twopnt" => GridRefinementMethod::TwoPoint(
-            *method_params.first().ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
-            *method_params.get(1).ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
-            *method_params.get(2).ok_or_else(|| BvpDampedTaskError::InvalidField {
-                section: "grid_refinement",
-                field: method_name.to_string(),
-                message: "expected 3 parameters".to_string(),
-            })?,
+            *method_params
+                .first()
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
+            *method_params
+                .get(1)
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
+            *method_params
+                .get(2)
+                .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                    section: "grid_refinement",
+                    field: method_name.to_string(),
+                    message: "expected 3 parameters".to_string(),
+                })?,
         ),
         other => {
             return Err(BvpDampedTaskError::UnknownGridRefinementMethod(
                 other.to_string(),
-            ))
+            ));
         }
     };
     Ok(method)
@@ -707,7 +725,7 @@ fn parse_banded_linear_solver_config(
             return Err(invalid_solver_option(
                 "banded_linear_solver",
                 format!("unknown banded linear solver `{other}`"),
-            ))
+            ));
         }
     };
     Ok(config)
@@ -726,7 +744,7 @@ pub fn build_bvp_damped_generated_backend_config_from_spec(
                 return Err(invalid_solver_option(
                     "method",
                     format!("unknown solver matrix route `{other}`"),
-                ))
+                ));
             }
         },
         Some("sparse") | Some("sparse_default") | Some("sparse_defaults") => {
@@ -770,7 +788,7 @@ pub fn build_bvp_damped_generated_backend_config_from_spec(
             return Err(invalid_solver_option(
                 "generated_backend",
                 format!("unknown generated backend preset `{other}`"),
-            ))
+            ));
         }
     };
 
@@ -865,11 +883,13 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         let bounds = bounds_section
             .iter()
             .map(|(key, value)| {
-                let values = value.as_ref().ok_or_else(|| BvpDampedTaskError::InvalidField {
-                    section: "bounds",
-                    field: key.clone(),
-                    message: "expected pair of floats".to_string(),
-                })?;
+                let values = value
+                    .as_ref()
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "bounds",
+                        field: key.clone(),
+                        message: "expected pair of floats".to_string(),
+                    })?;
                 let lower = values
                     .first()
                     .and_then(|value| value.as_float())
@@ -898,11 +918,13 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         let rel_tolerance = rel_tolerance_section
             .iter()
             .map(|(key, value)| {
-                let values = value.as_ref().ok_or_else(|| BvpDampedTaskError::InvalidField {
-                    section: "rel_tolerance",
-                    field: key.clone(),
-                    message: "expected single float".to_string(),
-                })?;
+                let values = value
+                    .as_ref()
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "rel_tolerance",
+                        field: key.clone(),
+                        message: "expected single float".to_string(),
+                    })?;
                 let tolerance = values
                     .first()
                     .and_then(|value| value.as_float())
@@ -945,13 +967,14 @@ pub fn parse_bvp_damped_solver_settings_from_document(
                 .iter()
                 .next()
                 .ok_or(BvpDampedTaskError::MissingSection("grid_refinement"))?;
-            let method_values = method_params
-                .as_ref()
-                .ok_or_else(|| BvpDampedTaskError::InvalidField {
-                    section: "grid_refinement",
-                    field: method_name.clone(),
-                    message: "expected vector".to_string(),
-                })?;
+            let method_values =
+                method_params
+                    .as_ref()
+                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        section: "grid_refinement",
+                        field: method_name.clone(),
+                        message: "expected vector".to_string(),
+                    })?;
             let method_params = method_values
                 .first()
                 .and_then(|value| value.as_vector())
@@ -1065,7 +1088,9 @@ pub fn parse_bvp_damped_task_from_document(
 }
 
 /// Parse the full typed BVP Damp task contract from DSL text.
-pub fn parse_bvp_damped_task_from_str(input: &str) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
+pub fn parse_bvp_damped_task_from_str(
+    input: &str,
+) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
     let mut parser = DocumentParser::new(input.to_owned());
     parser
         .parse_document()
@@ -1127,8 +1152,10 @@ impl NRBVP {
         self.Bounds = spec.bounds.clone();
         self.rel_tolerance = spec.rel_tolerance.clone();
         self.strategy_params = spec.strategy_params.clone();
-        let config =
-            build_bvp_damped_generated_backend_config_from_spec(&spec.generated_backend, &spec.method)?;
+        let config = build_bvp_damped_generated_backend_config_from_spec(
+            &spec.generated_backend,
+            &spec.method,
+        )?;
         self.set_generated_backend_config(config);
         Ok(())
     }
@@ -1216,10 +1243,7 @@ impl NRBVP {
         self.apply_bvp_damped_solver_settings(&spec);
     }
 
-    pub fn parse_file(
-        &mut self,
-        path: Option<PathBuf>,
-    ) -> Result<DocumentParser, String> {
+    pub fn parse_file(&mut self, path: Option<PathBuf>) -> Result<DocumentParser, String> {
         let mut parser = DocumentParser::new(String::new());
         parser.setting_from_file(path)?;
         Ok(parser)
@@ -1264,8 +1288,8 @@ impl NRBVP {
             .get_result()
             .ok_or("No result after parsing")?
             .clone();
-        let spec = parse_bvp_damped_solver_settings_from_document(&result)
-            .map_err(|e| e.to_string())?;
+        let spec =
+            parse_bvp_damped_solver_settings_from_document(&result).map_err(|e| e.to_string())?;
         self.apply_bvp_damped_solver_settings(&spec);
         Ok(())
     }
@@ -1341,8 +1365,8 @@ impl NRBVP {
             .get_result()
             .ok_or("No result after parsing")?
             .clone();
-        let spec = parse_bvp_damped_solver_settings_from_document(&result)
-            .map_err(|e| e.to_string())?;
+        let spec =
+            parse_bvp_damped_solver_settings_from_document(&result).map_err(|e| e.to_string())?;
         self.apply_bvp_damped_solver_settings(&spec);
         Ok(())
     }
@@ -1472,8 +1496,8 @@ mod tests {
     use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
     use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
-    use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
     use crate::symbolic::symbolic_engine::Expr;
+    use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
     use std::collections::HashMap;
 
     use super::*;
@@ -1488,7 +1512,10 @@ mod tests {
             "bounds".to_string(),
             "rel_tolerance".to_string(),
         ]));
-        parser.get_result().expect("parser produced no result").clone()
+        parser
+            .get_result()
+            .expect("parser produced no result")
+            .clone()
     }
 
     #[test]
@@ -1913,11 +1940,15 @@ mod tests {
             AotExecutionPolicy::SequentialOnly
         );
         assert_eq!(
-            options.generated_backend_config.banded_linear_solver_config.policy,
+            options
+                .generated_backend_config
+                .banded_linear_solver_config
+                .policy,
             LinearSolverPolicy::ForceBanded
         );
         assert_eq!(
-            options.generated_backend_config
+            options
+                .generated_backend_config
                 .banded_linear_solver_config
                 .iterative_refinement_steps,
             0
@@ -2025,7 +2056,10 @@ mod tests {
         assert_eq!(spec.solver_settings.scheme, "trapezoid");
         assert_eq!(spec.solver_settings.strategy, "Frozen");
         assert_eq!(spec.solver_settings.method, "Sparse");
-        assert_eq!(spec.solver_settings.linear_sys_method.as_deref(), Some("faithful"));
+        assert_eq!(
+            spec.solver_settings.linear_sys_method.as_deref(),
+            Some("faithful")
+        );
         assert_eq!(spec.solver_settings.abs_tolerance, 1e-7);
         assert_eq!(spec.solver_settings.max_iterations, 42);
         assert_eq!(spec.solver_settings.loglevel.as_deref(), Some("info"));
@@ -2034,7 +2068,10 @@ mod tests {
         assert!(spec.postprocessing.gnuplot);
         assert!(spec.postprocessing.save);
         assert!(spec.postprocessing.save_to_csv);
-        assert_eq!(spec.postprocessing.filename.as_deref(), Some("damped_task_output"));
+        assert_eq!(
+            spec.postprocessing.filename.as_deref(),
+            Some("damped_task_output")
+        );
 
         let mut nr = NRBVP::default();
         nr.apply_bvp_damped_solver_settings(&spec.solver_settings);
@@ -2070,7 +2107,10 @@ mod tests {
         assert_eq!(spec.solver_settings.method, "Dense");
         assert_eq!(spec.solver_settings.linear_sys_method, None);
         assert!(spec.postprocessing.save);
-        assert_eq!(spec.postprocessing.filename.as_deref(), Some("damped_task.txt"));
+        assert_eq!(
+            spec.postprocessing.filename.as_deref(),
+            Some("damped_task.txt")
+        );
     }
 
     #[test]

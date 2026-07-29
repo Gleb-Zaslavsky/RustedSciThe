@@ -588,29 +588,27 @@ mod tests {
     #[test]
     fn roundtrip_expr_to_atom_add() {
         sleep(time::Duration::from_secs(2));
-        let expr =             Expr::Add(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Var("y".into())),
-            );
+        let expr = Expr::Add(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Var("y".into())),
+        );
         let atom = expr_to_atom(&expr);
         let back = atom_to_expr(&atom);
-        let expected1 =             Expr::Add(
-                Box::new(Expr::Var("x".into())),
-                Box::new(Expr::Var("y".into())),
-            );
+        let expected1 = Expr::Add(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Var("y".into())),
+        );
 
-        let expected2 =             Expr::Add(
-                Box::new(Expr::Var("y".into())),
-                Box::new(Expr::Var("x".into())),
-            );
-        let eq1 = back ==expected1;
-        let eq2 = back ==expected2;
-        assert!(eq1||eq2);
+        let expected2 = Expr::Add(
+            Box::new(Expr::Var("y".into())),
+            Box::new(Expr::Var("x".into())),
+        );
+        let eq1 = back == expected1;
+        let eq2 = back == expected2;
+        assert!(eq1 || eq2);
         sleep(time::Duration::from_secs(2));
     }
 
-
- 
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).
     #[test]
     fn roundtrip_expr_sub_normalizes() {

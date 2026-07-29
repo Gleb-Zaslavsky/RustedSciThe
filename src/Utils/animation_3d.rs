@@ -273,7 +273,7 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
             },
             TextColor(Color::srgb(0.0, 0.0, 0.0)), // Black text
             TextFont {
-                font_size: 16.0,
+                font_size: FontSize::Px(16.0),
                 ..default()
             },
         ))
@@ -293,7 +293,7 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
         },
         TextColor(Color::srgb(0.6, 0.6, 0.6)), // Gray text
         TextFont {
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         LegendMarker, // Marker component for identification

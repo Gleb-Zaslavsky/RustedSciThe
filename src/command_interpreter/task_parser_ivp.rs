@@ -540,11 +540,9 @@ fn build_lsode2_problem_config_from_spec(
                 .parameter_values
                 .get(name)
                 .copied()
-                .ok_or_else(|| {
-                    IvpTaskError::MissingField {
-                        section: "equations".to_string(),
-                        field: format!("parameter_values[{name}]"),
-                    }
+                .ok_or_else(|| IvpTaskError::MissingField {
+                    section: "equations".to_string(),
+                    field: format!("parameter_values[{name}]"),
                 })?;
             parameter_values.push(value);
         }

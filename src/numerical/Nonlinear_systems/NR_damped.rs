@@ -1,4 +1,4 @@
-use log::{error, info, warn};
+use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{

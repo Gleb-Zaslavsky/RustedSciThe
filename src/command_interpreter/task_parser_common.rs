@@ -6,10 +6,16 @@
 use crate::command_interpreter::task_parser::{DocumentMap, Value};
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
-use std::collections::{HashMap, HashSet};
+use crate::symbolic::symexpr_graphs::{Definition, SymbolicSystem};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 
+/// Parsed symbolic IVP/BVP equations after task-document parameters and named
+/// aliases have been resolved.
+///
+/// `rhs` is solver-ready: it may reference only [`Self::arg`] and the declared
+/// [`Self::unknowns`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedEquationSystem {
     pub arg: String,
@@ -19,6 +25,7 @@ pub struct ParsedEquationSystem {
     pub parameter_values: HashMap<String, f64>,
 }
 
+/// Typed validation error shared by IVP and BVP task-document parsers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SharedEquationParseError {
     MissingSection(&'static str),
@@ -64,6 +71,11 @@ impl std::fmt::Display for SharedEquationParseError {
 
 impl std::error::Error for SharedEquationParseError {}
 
+/// Parses the solver-facing `equations` section of an IVP or BVP task document.
+///
+/// The pipeline validates declaration names, expands `where`/`substitute`
+/// aliases through [`SymbolicSystem`], substitutes numeric parameters, and
+/// rejects unresolved RHS symbols before any numerical solver is constructed.
 pub fn parse_symbolic_equation_system(
     document: &DocumentMap,
     default_arg: &str,
@@ -110,6 +122,7 @@ pub fn parse_symbolic_equation_system(
         });
     }
 
+    validate_unknown_names(&unknowns).map_err(SharedEquationParseError::Semantic)?;
     let unknown_set: HashSet<&str> = unknowns.iter().map(String::as_str).collect();
     if unknown_set.contains(arg.as_str()) {
         return Err(SharedEquationParseError::Semantic(format!(
@@ -129,14 +142,12 @@ pub fn parse_symbolic_equation_system(
         }
     }
 
-    let substitutions = parse_symbolic_substitutions(document).map_err(|message| {
-        SharedEquationParseError::InvalidField {
+    let substitutions = parse_equation_substitutions(document, &parameter_values, &arg, &unknowns)
+        .map_err(|message| SharedEquationParseError::InvalidField {
             section: "where/substitute".to_string(),
             field: "*".to_string(),
             message,
-        }
-    })?;
-    let substitutions = apply_parameter_values_to_substitutions(substitutions, &parameter_values);
+        })?;
     let rhs = rhs_raw
         .iter()
         .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
@@ -144,7 +155,8 @@ pub fn parse_symbolic_equation_system(
     let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
         .into_iter()
         .map(|expr| expr.set_variable_from_map(&parameter_values))
-        .collect();
+        .collect::<Vec<_>>();
+    validate_equation_rhs_variables(&rhs, &arg, &unknowns)?;
 
     Ok(ParsedEquationSystem {
         arg,
@@ -155,21 +167,119 @@ pub fn parse_symbolic_equation_system(
     })
 }
 
+/// Parses `where` and `substitute` definitions and fully resolves aliases.
+///
+/// This compatibility helper intentionally returns ordinary [`Expr`] trees.
+/// IVP/BVP task documents are normally small, so this keeps their existing
+/// solver interfaces simple while [`SymbolicSystem`] provides common cycle and
+/// duplicate-definition validation.
 pub fn parse_symbolic_substitutions(
     document: &DocumentMap,
 ) -> Result<HashMap<String, Expr>, String> {
-    let mut raw: HashMap<String, Expr> = HashMap::new();
-    for section_name in ["where", "substitute"] {
-        if let Some(section) = document.get(section_name) {
-            parse_substitution_section(section_name, section, &mut raw)?;
-        }
-    }
-    if raw.is_empty() {
-        return Ok(HashMap::new());
-    }
-    resolve_substitution_aliases(&raw)
+    parse_symbolic_substitutions_with_parameter_values(document, &HashMap::new())
 }
 
+/// Parses symbolic aliases after substituting numeric task-document parameters
+/// into every definition.
+///
+/// Parameters are applied before dependency resolution so every expanded alias
+/// and final equation observes the same numeric values.
+pub fn parse_symbolic_substitutions_with_parameter_values(
+    document: &DocumentMap,
+    parameter_values: &HashMap<String, f64>,
+) -> Result<HashMap<String, Expr>, String> {
+    parse_symbolic_substitutions_with_context(document, parameter_values, &HashMap::new())
+}
+
+/// Resolves task-document aliases while reserving names owned by the equation
+/// system. This prevents aliases from silently replacing `arg`, unknowns, or
+/// numeric parameters before the solver sees the final RHS expressions.
+fn parse_equation_substitutions(
+    document: &DocumentMap,
+    parameter_values: &HashMap<String, f64>,
+    arg: &str,
+    unknowns: &[String],
+) -> Result<HashMap<String, Expr>, String> {
+    let mut reserved_names = HashMap::new();
+    reserved_names.insert(arg.to_string(), "independent argument");
+    for unknown in unknowns {
+        reserved_names.insert(unknown.clone(), "unknown");
+    }
+    for parameter in parameter_values.keys() {
+        reserved_names.insert(parameter.clone(), "parameter");
+    }
+
+    parse_symbolic_substitutions_with_context(document, parameter_values, &reserved_names)
+}
+
+fn parse_symbolic_substitutions_with_context(
+    document: &DocumentMap,
+    parameter_values: &HashMap<String, f64>,
+    reserved_names: &HashMap<String, &'static str>,
+) -> Result<HashMap<String, Expr>, String> {
+    let mut definitions = Vec::new();
+    for section_name in ["where", "substitute"] {
+        if let Some(section) = document.get(section_name) {
+            parse_substitution_section(section_name, section, &mut definitions)?;
+        }
+    }
+    if definitions.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    for definition in &definitions {
+        if let Some(owner) = reserved_names.get(&definition.name) {
+            return Err(format!(
+                "symbolic alias `{}` conflicts with reserved {owner} name",
+                definition.name
+            ));
+        }
+    }
+
+    let definitions = definitions.into_iter().map(|definition| {
+        Definition::new(
+            definition.name,
+            definition
+                .expression
+                .set_variable_from_map(parameter_values),
+        )
+    });
+
+    resolve_substitution_definitions(definitions)
+}
+
+/// Validates the final solver-facing RHS expressions after parameters and
+/// symbolic aliases have been applied. A generic [`SymbolicSystem`] may keep
+/// free variables, but an IVP/BVP callback can only evaluate its independent
+/// argument and declared state variables.
+fn validate_equation_rhs_variables(
+    rhs: &[Expr],
+    arg: &str,
+    unknowns: &[String],
+) -> Result<(), SharedEquationParseError> {
+    let mut allowed = HashSet::with_capacity(unknowns.len() + 1);
+    allowed.insert(arg);
+    allowed.extend(unknowns.iter().map(String::as_str));
+
+    for (index, expression) in rhs.iter().enumerate() {
+        let unresolved = expression
+            .all_arguments_are_variables()
+            .into_iter()
+            .filter(|name| !allowed.contains(name.as_str()))
+            .collect::<BTreeSet<_>>();
+
+        if !unresolved.is_empty() {
+            return Err(SharedEquationParseError::Semantic(format!(
+                "rhs expression {index} contains undeclared symbol(s): {}",
+                unresolved.into_iter().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Applies already resolved named substitutions to one expression.
 pub fn apply_symbolic_substitutions(expr: Expr, substitutions: &HashMap<String, Expr>) -> Expr {
     let mut expanded = expr;
     for (alias, replacement) in substitutions {
@@ -178,6 +288,7 @@ pub fn apply_symbolic_substitutions(expr: Expr, substitutions: &HashMap<String, 
     expanded
 }
 
+/// Applies already resolved named substitutions to each expression in order.
 pub fn apply_symbolic_substitutions_to_vec(
     exprs: Vec<Expr>,
     substitutions: &HashMap<String, Expr>,
@@ -188,6 +299,10 @@ pub fn apply_symbolic_substitutions_to_vec(
         .collect()
 }
 
+/// Applies numeric parameter values to an externally supplied substitution map.
+///
+/// This compatibility helper is intentionally separate from the canonical task
+/// document path, which substitutes parameters before graph expansion.
 pub fn apply_parameter_values_to_substitutions(
     substitutions: HashMap<String, Expr>,
     parameter_values: &HashMap<String, f64>,
@@ -198,14 +313,34 @@ pub fn apply_parameter_values_to_substitutions(
         .collect()
 }
 
+/// Validates the independent argument and numeric parameter declarations.
 pub fn validate_symbol_names(arg: &str, parameter_names: &[String]) -> Result<(), String> {
     if arg.trim().is_empty() {
         return Err("independent argument name cannot be empty".to_string());
     }
     let mut seen = HashSet::new();
     for name in parameter_names {
+        if name.trim().is_empty() {
+            return Err("parameter name cannot be empty".to_string());
+        }
         if !seen.insert(name) {
             return Err(format!("duplicate parameter name `{name}`"));
+        }
+    }
+    Ok(())
+}
+
+/// Validates state-variable names before symbolic substitutions or solver
+/// construction. An explicit duplicate would otherwise make RHS-to-state
+/// alignment ambiguous even when the expression text itself is valid.
+fn validate_unknown_names(unknowns: &[String]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for name in unknowns {
+        if name.trim().is_empty() {
+            return Err("unknown name cannot be empty".to_string());
+        }
+        if !seen.insert(name) {
+            return Err(format!("duplicate unknown name `{name}`"));
         }
     }
     Ok(())
@@ -214,7 +349,7 @@ pub fn validate_symbol_names(arg: &str, parameter_names: &[String]) -> Result<()
 fn parse_substitution_section(
     section_name: &str,
     section: &GenericSectionMap,
-    raw: &mut HashMap<String, Expr>,
+    definitions: &mut Vec<Definition>,
 ) -> Result<(), String> {
     for (alias, values_opt) in section {
         let Some(values) = values_opt else {
@@ -233,10 +368,12 @@ fn parse_substitution_section(
                 "section `{section_name}` key `{alias}` must be a string expression"
             ));
         };
-        raw.insert(
+        // Preserve every definition until SymbolicSystem validates duplicates.
+        // A HashMap here would silently let `substitute` overwrite `where`.
+        definitions.push(Definition::new(
             alias.clone(),
             parse_substitution_expr_safe(expr_text, section_name, alias)?,
-        );
+        ));
     }
     Ok(())
 }
@@ -455,51 +592,19 @@ fn value_to_float(
     }
 }
 
-fn resolve_substitution_aliases(
-    raw: &HashMap<String, Expr>,
+/// Resolves definitions through the shared graph implementation used by both
+/// IVP and BVP parsers.
+fn resolve_substitution_definitions(
+    definitions: impl IntoIterator<Item = Definition>,
 ) -> Result<HashMap<String, Expr>, String> {
-    fn resolve_one(
-        name: &str,
-        raw: &HashMap<String, Expr>,
-        resolved: &mut HashMap<String, Expr>,
-        visiting: &mut HashSet<String>,
-    ) -> Result<Expr, String> {
-        if let Some(expr) = resolved.get(name) {
-            return Ok(expr.clone());
-        }
-        if !raw.contains_key(name) {
-            return Err(format!(
-                "internal substitution error: alias `{name}` was requested but not found"
-            ));
-        }
-        if !visiting.insert(name.to_string()) {
-            return Err(format!(
-                "cyclic symbolic substitution detected around `{name}`"
-            ));
-        }
+    let system = SymbolicSystem::new(definitions)
+        .map_err(|error| format!("invalid symbolic substitutions: {error}"))?;
 
-        let mut expr = raw[name].clone();
-        let deps: Vec<String> = raw
-            .keys()
-            .filter(|dep| dep.as_str() != name && expr.contains_variable(dep.as_str()))
-            .cloned()
-            .collect();
-        for dep in deps {
-            let replacement = resolve_one(&dep, raw, resolved, visiting)?;
-            expr = expr.substitute_variable(&dep, &replacement);
-        }
-
-        visiting.remove(name);
-        resolved.insert(name.to_string(), expr.clone());
-        Ok(expr)
-    }
-
-    let mut resolved: HashMap<String, Expr> = HashMap::new();
-    for alias in raw.keys() {
-        let mut visiting = HashSet::new();
-        let _ = resolve_one(alias, raw, &mut resolved, &mut visiting)?;
-    }
-    Ok(resolved)
+    Ok(system
+        .expand_all()
+        .map_err(|error| format!("failed to expand symbolic substitutions: {error}"))?
+        .into_iter()
+        .collect())
 }
 
 #[cfg(test)]
@@ -566,5 +671,165 @@ gain: base + a
         assert!(rendered.contains('3'));
         assert!(rendered.contains('2'));
         assert!(!rendered.contains('a'));
+    }
+
+    #[test]
+    fn symbolic_substitutions_reject_duplicate_aliases_across_sections() {
+        let doc = r#"
+where
+gain: 2 * t
+
+substitute
+gain: 3 * t
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser
+            .parse_document()
+            .expect("parse substitution sections");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error = parse_symbolic_substitutions(map)
+            .expect_err("duplicate aliases must not silently overwrite one another");
+
+        assert!(error.contains("invalid symbolic substitutions"));
+        assert!(error.contains("определена более одного раза"));
+        assert!(error.contains("gain"));
+    }
+
+    #[test]
+    fn symbolic_substitutions_report_indirect_cycles() {
+        let doc = r#"
+where
+a: b + 1
+b: c + 1
+c: a + 1
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser
+            .parse_document()
+            .expect("parse cyclic substitution section");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error =
+            parse_symbolic_substitutions(map).expect_err("indirect alias cycle must be reported");
+
+        assert!(error.contains("циклическая зависимость"));
+        assert!(error.contains("a"));
+        assert!(error.contains("b"));
+        assert!(error.contains("c"));
+    }
+
+    #[test]
+    fn equation_alias_cannot_shadow_an_unknown() {
+        let doc = r#"
+equations
+arg: t
+unknowns: y
+rhs: y
+
+where
+y: 2 * t
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equation document");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error = parse_symbolic_equation_system(map, "t")
+            .expect_err("an alias must not replace a state variable");
+
+        assert!(matches!(
+            &error,
+            SharedEquationParseError::InvalidField { .. }
+        ));
+        assert!(error.to_string().contains("alias `y`"));
+        assert!(error.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn equation_alias_cannot_shadow_argument_or_parameter() {
+        let cases = [
+            (
+                r#"
+equations
+arg: t
+unknowns: y
+rhs: y
+
+where
+t: 2 * y
+"#,
+                "independent argument",
+            ),
+            (
+                r#"
+equations
+arg: t
+parameters: gain
+parameter_values: 2.0
+unknowns: y
+rhs: gain * y
+
+where
+gain: t + y
+"#,
+                "parameter",
+            ),
+        ];
+
+        for (document, reserved_owner) in cases {
+            let mut parser = DocumentParser::new(document.to_string());
+            parser.parse_document().expect("parse equation document");
+            let map = parser.get_result().expect("document map should exist");
+
+            let error = parse_symbolic_equation_system(map, "t")
+                .expect_err("an alias must not replace a solver-owned name");
+
+            assert!(matches!(
+                &error,
+                SharedEquationParseError::InvalidField { .. }
+            ));
+            assert!(error.to_string().contains(reserved_owner));
+        }
+    }
+
+    #[test]
+    fn equation_rhs_rejects_undeclared_symbols_after_alias_expansion() {
+        let doc = r#"
+equations
+arg: t
+unknowns: y
+rhs: source - y
+
+where
+source: misspelled_gain * t
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equation document");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error = parse_symbolic_equation_system(map, "t")
+            .expect_err("undeclared symbolic inputs must be reported before solving");
+
+        assert!(matches!(&error, SharedEquationParseError::Semantic(_)));
+        assert!(error.to_string().contains("misspelled_gain"));
+    }
+
+    #[test]
+    fn equation_system_rejects_duplicate_unknown_names() {
+        let doc = r#"
+equations
+arg: t
+unknowns: y, y
+rhs: -y, -y
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equation document");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error = parse_symbolic_equation_system(map, "t")
+            .expect_err("duplicate state variables must not reach solver construction");
+
+        assert!(matches!(&error, SharedEquationParseError::Semantic(_)));
+        assert!(error.to_string().contains("duplicate unknown name `y`"));
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.12"
+version = "0.4.15"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -74,12 +74,12 @@ panic = "abort"
 
 [dependencies]
 arrayfire = { version = "3.8.0", package = "arrayfire_fork", optional = true }
-itertools = "0.14.0"
+itertools = "0.15.0"
 nalgebra = { version = "0.35.0", features = [ "sparse"] }
 nalgebra-sparse = "0.12.0"
 num-traits = "0.2.17"
 sprs = "0.11.4"
-rand = "0.10.1"
+rand = "0.10.2"
 ndarray = "0.17.2"
 num = "0.4.3"
 num-complex = "0.4.6"
@@ -88,19 +88,19 @@ gnuplot = "0.0.46"
 csv = "1.4.0"
 splines = "5.0.0"
 approx = "0.5.1"
-
-faer =  { version ="0.24.0", features = [ "rayon"] }
+petgraph = "0.8"
+faer =  { version ="0.24.4", features = [ "rayon"] }
 faer_gmres = "0.5.0"
 rayon="1.11.0"
-regex = "1.12.3"
+regex = "1.13.1"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 simplelog = "0.12.2"
-log = "0.4.29"
+log = "0.4.33"
 chrono = "0.4.41"
 loc = "0.5.0"
-toml = "1.1.2+spec-1.1.0"
-sysinfo = "0.39.3"
+toml = "1.1.4+spec-1.1.0"
+sysinfo = "0.39.6"
 tabled = "0.21.0"
 sys-info = "0.9.1"
 criterion = "0.8.2"
@@ -113,32 +113,32 @@ gauss-quad = "0.3.0"
 prettytable = "0.10.0"
 textplots = "0.8.7"
 wide = "1.5.0"
-bevy = "0.18.1"
-thiserror = "2.0.18"
-fastLowess = "1.3.0"
+bevy = "0.19.0"
+thiserror = "2.0.19"
+fastLowess = "2.0.0"
 bspline = "1.1.0"
 lapack = { version = "0.20", optional = true }
-openblas-src = { version = "0.10.15", default-features = false, features = ["system"], optional = true }
+openblas-src = { version = "0.10.16", default-features = false, features = ["system"], optional = true }
 
 
 colored = "3.1.1"
 dialoguer = "0.12.0"
-clap = { version = "4.5.20", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive"] }
 
 
 ahash = "0.8"
 append-only-vec = "0.1"
 byteorder = "1.5"
-bytes = "1.5"
+bytes = "1.12.1"
 once_cell = "1.19"
 smallvec = "1.15.2"
 smartstring = "1.0"
-libloading = "0.8.9"
+libloading = "0.9.0"
 
 
 
 assert_matches = "1.5"
-mockall = "0.14.0"
+mockall = "0.15.0"
 typed_test_gen = "0.1"
 
 
@@ -175,6 +175,12 @@ path = "examples/rus/symbolic_lambdify_and_simplify_guide.rs"
 [[example]]
 name = "rus_symbolic_derivatives_guide"
 path = "examples/rus/symbolic_derivatives_guide.rs"
+[[example]]
+name = "task_document_symbolic_aliases_guide"
+path = "examples/task_document_symbolic_aliases_guide.rs"
+[[example]]
+name = "rus_task_document_symbolic_aliases_guide"
+path = "examples/rus/task_document_symbolic_aliases_guide.rs"
 [[example]]
 name = "rus_bvp_backends_guide"
 path = "examples/rus/bvp_backends_guide.rs"

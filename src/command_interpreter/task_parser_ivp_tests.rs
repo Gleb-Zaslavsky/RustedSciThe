@@ -46,7 +46,10 @@ step_size: 1e-3
     .expect("test task file should be written");
 
     let spec = parse_ivp_task_from_file(Some(path)).expect("IVP file task should parse");
-    assert_eq!(spec.solver.method, IvpMethodSpec::NonStiff("RK45".to_string()));
+    assert_eq!(
+        spec.solver.method,
+        IvpMethodSpec::NonStiff("RK45".to_string())
+    );
     assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
     assert_eq!(spec.initial_conditions.y0, vec![1.0]);
 }
@@ -107,12 +110,46 @@ solver_options
 step_size: 1e-3
 "#;
 
-    let spec =
-        parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
+    let spec = parse_ivp_task_from_str(input).expect("IVP with where substitutions should parse");
     let expr = spec.equations.rhs[0].clone();
     let f = expr.lambdify_borrowed_thread_safe(&["t", "y"]);
     let value = f(&[0.5, 1.0]);
     assert!((value - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn ivp_task_parser_resolves_multilevel_where_with_numeric_parameters() {
+    let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+parameters: gain
+parameter_values: 3.0
+y: source - y
+
+where
+base: gain * t
+shifted: base + 1.0
+source: 2.0 * shifted
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+"#;
+
+    let spec = parse_ivp_task_from_str(input)
+        .expect("IVP parser should resolve a multilevel symbolic definition chain");
+    let rhs = spec.equations.rhs[0].lambdify_borrowed_thread_safe(&["t", "y"]);
+
+    // source = 2 * (gain * t + 1), so source - y = 4 at t=0.5, y=1.
+    assert!((rhs(&[0.5, 1.0]) - 4.0).abs() < 1e-12);
 }
 
 #[test]
@@ -520,8 +557,7 @@ lsode2_linear_structure: sparse
 lsode2_linear_solver_policy: lapack_faithful_banded_lu
 "#;
 
-    let spec =
-        parse_ivp_task_from_str(input).expect("LSODE2 forced-policy document should parse");
+    let spec = parse_ivp_task_from_str(input).expect("LSODE2 forced-policy document should parse");
     let config = build_lsode2_problem_config_from_spec(&spec)
         .expect("LSODE2 forced-policy document should build problem config");
     let resolved = config.resolve_plan();
@@ -734,7 +770,10 @@ parallel: false
 
     assert_eq!(problem.equations.unknowns, vec!["y".to_string()]);
     assert_eq!(problem.equations.parameter_values["a"], 2.0);
-    assert_eq!(settings.solver.method, IvpMethodSpec::NonStiff("RK45".to_string()));
+    assert_eq!(
+        settings.solver.method,
+        IvpMethodSpec::NonStiff("RK45".to_string())
+    );
 
     let solver = build_ivp_solver_from_problem_and_settings(&problem, &settings)
         .expect("split IVP mode should build a solver");
@@ -832,8 +871,8 @@ step_size: 1e-3
 parallel: false
 "#;
     let document = parse_document_for_ivp(settings_doc);
-    let settings = parse_ivp_solver_settings_from_document(&document)
-        .expect("solver settings should parse");
+    let settings =
+        parse_ivp_solver_settings_from_document(&document).expect("solver settings should parse");
     let solver = build_ivp_solver_from_problem_and_settings(&problem, &settings)
         .expect("Rust problem + DSL settings should build");
     let _ = solver;

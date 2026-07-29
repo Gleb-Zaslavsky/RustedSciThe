@@ -120,7 +120,7 @@ pub enum BvpSciGeneratedMatrixBackend {
 }
 
 pub(crate) const BVP_SCI_TEST_ARTIFACT_REV: &str = "rev2-bounds";
-
+#[allow(dead_code)]
 pub(crate) fn generated_test_artifact_dir(label: &str) -> String {
     format!("target/generated-bvp-sci-tests/{BVP_SCI_TEST_ARTIFACT_REV}/{label}")
 }

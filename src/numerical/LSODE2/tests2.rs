@@ -626,6 +626,7 @@ fn lsode2_1d_solid_combustion_switches_bdf_to_adams_aot() {
 //ATTENTION! SUBLIMATION IS DISABLED UNTIL "STOP CONDITION" WILL BE IMPLEMENTED OTHERWISE SUBLIMATION WILL UNPHYSICALLY DOMINATE THE SOLUTION AND PREVENT PLATEAUING,
 // ALSOO PULL SOLUSION TO BELOW ZERO
 // IMPLEMENT STOP CONDITION AND RETURN
+#[allow(dead_code)]
 fn C_func() -> Expr {
     let T = Expr::Var("T".to_string());
     let t = T / Expr::Const(1000.0);
@@ -1033,6 +1034,7 @@ fn subliamtion_be_test() {
     );
 }
 //#[test]
+#[allow(dead_code)]
 fn sublimation_bdf_test() {
     let eqs = sublimation_func();
     let vars = vec![
@@ -1446,6 +1448,7 @@ fn no_subliamtion_radau_test() {
 }
 
 //#[test]
+#[allow(dead_code)]
 fn no_sublimation_bdf_test() {
     let eqs = combustion_1d_problem();
     let vars = vec![

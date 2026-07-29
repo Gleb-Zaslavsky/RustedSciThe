@@ -352,6 +352,7 @@ pub struct LMMinpackState {
 }
 
 impl LevenbergMarquardtMinpack {
+    #[allow(dead_code)]
     /// Small helper: compute (J^T J + par * D^2)
     fn build_augmented(&self, jtj: &DMatrix<f64>, par: f64, diag: &DVector<f64>) -> DMatrix<f64> {
         let n = jtj.nrows();
@@ -365,6 +366,7 @@ impl LevenbergMarquardtMinpack {
     /// lmpar-like simple bracket-and-bisect solver for par.
     /// Solves (JtJ + par D^2) p = -g  and aims to enforce ||D p|| ≤ delta.
     /// Returns (p, par).
+    #[allow(dead_code)]
     fn find_par(
         &self,
         solver: LinearSolverKind,

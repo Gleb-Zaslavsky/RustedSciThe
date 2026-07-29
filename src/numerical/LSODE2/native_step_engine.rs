@@ -130,7 +130,7 @@ fn should_force_refresh_on_first_correction(
 ) -> bool {
     retry_refresh_requested || predictor_ipup.needs_update()
 }
-
+#[allow(dead_code)]
 pub enum Lsode2NativeStepEngine {
     Dense(Box<Lsode2NativeStepEngineImpl<DenseLuBdfLinearBackend>>),
     Sparse(Box<Lsode2NativeStepEngineImpl<FaerSparseBdfLinearBackend>>),
@@ -703,7 +703,7 @@ where
             .map_err(map_runtime_state_error)?;
         Ok(())
     }
-
+    #[allow(dead_code)]
     fn reconcile_accepted_first_nordsieck_derivative(
         &mut self,
         t_new: f64,

@@ -260,7 +260,7 @@ impl Lsode2StepController {
         order_current: usize,
         order_cap: usize,
         suggested_growth: f64,
-        accepted_error_norm: f64,
+        _accepted_error_norm: f64,
         suggested_order: usize,
     ) -> Lsode2AcceptDecision {
         self.accepted_steps += 1;

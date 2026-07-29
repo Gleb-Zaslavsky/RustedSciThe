@@ -343,7 +343,7 @@ fn draw_static_multiplot(mut gizmos: Gizmos, mut commands: Commands, plot: Res<M
                 Text2d(format!("{:.2}", xv)),            // Text content
                 Transform::from_xyz(wx, wy - 18.0, 0.1), // Position (Z=0.1 for layering)
                 TextFont {
-                    font_size: plot.config.axis_font_size,
+                    font_size: FontSize::Px(plot.config.axis_font_size),
                     ..default() // Use default font
                 },
                 TextColor(Color::srgb(0.1, 0.1, 0.1)), // Dark gray text
@@ -366,7 +366,7 @@ fn draw_static_multiplot(mut gizmos: Gizmos, mut commands: Commands, plot: Res<M
                 Text2d(format!("{:.2}", yv)),
                 Transform::from_xyz(-240.0, wy - 6.0, 0.1), // Left of Y-axis
                 TextFont {
-                    font_size: plot.config.axis_font_size,
+                    font_size: FontSize::Px(plot.config.axis_font_size),
                     ..default()
                 },
                 TextColor(Color::srgb(0.1, 0.1, 0.1)),
@@ -432,7 +432,7 @@ fn setup_axis_labels(mut commands: Commands, plot_data: Res<MultiPlotData>) {
             Text2d(x_label.to_string()),
             Transform::from_xyz(0.0, vshift_world - subplot_half_world - 10.0, 0.1),
             TextFont {
-                font_size: 18.0, // Slightly larger for axis labels
+                font_size: FontSize::Px(18.0), // Slightly larger for axis labels
                 ..default()
             },
             TextColor(label_color),
@@ -448,7 +448,7 @@ fn setup_axis_labels(mut commands: Commands, plot_data: Res<MultiPlotData>) {
             Text2d(format!("{}", label)),
             Transform::from_xyz(label_offset, vshift_world, 0.1),
             TextFont {
-                font_size: plot_data.config.axis_font_size,
+                font_size: FontSize::Px(plot_data.config.axis_font_size),
                 ..default()
             },
             TextColor(label_color),

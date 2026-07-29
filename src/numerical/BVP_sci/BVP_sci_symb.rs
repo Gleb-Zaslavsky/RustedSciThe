@@ -563,7 +563,7 @@ struct PreparedBvpSciProblem {
     values: Vec<String>,
     bounds: Option<HashMap<String, Vec<(usize, f64)>>>,
 }
-
+#[allow(dead_code)]
 pub(crate) struct ExprLegacyPreparedBvpSciProblem {
     pub(crate) legacy_residual: Arc<ODEFunction>,
     pub(crate) legacy_sparse_jacobian: Arc<ODEJacobian>,

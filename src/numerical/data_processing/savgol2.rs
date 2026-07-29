@@ -172,7 +172,7 @@ pub fn SG_coeffs_dyn(
     let pos: Vec<f64> = if rem == 0 {
         let f = 0.5f64;
         (0..window_length)
-            .map(|i| (half_window - i as f64 - f))
+            .map(|i| half_window - i as f64 - f)
             .collect::<Vec<_>>()
     } else {
         (0..window_length)
