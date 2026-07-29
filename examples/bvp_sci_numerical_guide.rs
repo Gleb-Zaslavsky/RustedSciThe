@@ -23,8 +23,8 @@ use std::time::Instant;
 use RustedSciThe::numerical::BVP_Damp::BVP_utils::CustomTimer;
 use RustedSciThe::numerical::BVP_sci::BVP_sci_faer::{faer_col, faer_dense_mat, faer_mat};
 use RustedSciThe::numerical::BVP_sci::BVP_sci_numerical::{
-    NumericalBvpClosureProblem, NumericalBvpSolveOptions, NumericalJacobianMode,
-    solve_numerical_bvp, solve_numerical_bvp_fd, solve_numerical_bvp_with_jacobian,
+    NumericalBvpClosureProblem, NumericalBvpSolveOptions, solve_numerical_bvp_fd,
+    solve_numerical_bvp_with_jacobian,
 };
 use faer::sparse::Triplet;
 

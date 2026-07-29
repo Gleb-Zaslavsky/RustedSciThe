@@ -25,6 +25,7 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendFlavor {
+    #[allow(dead_code)]
     Lambdify,
     AotTcc,
 }

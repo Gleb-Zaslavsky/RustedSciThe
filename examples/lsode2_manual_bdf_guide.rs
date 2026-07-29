@@ -9,9 +9,8 @@
 //!
 
 use RustedSciThe::numerical::LSODE2::{
-    Lsode2ControllerConfig, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
-    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
-    Lsode2SymbolicExecutionMode,
+    Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;

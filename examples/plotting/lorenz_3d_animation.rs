@@ -1,4 +1,4 @@
-use RustedSciThe::Utils::animation_3d::{create_3d_animation, generate_line};
+use RustedSciThe::Utils::animation_3d::create_3d_animation;
 use RustedSciThe::numerical::BDF::BDF_api::ODEsolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};

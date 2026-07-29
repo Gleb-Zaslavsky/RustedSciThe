@@ -2,18 +2,22 @@ use std::collections::HashMap;
 
 use RustedSciThe::command_interpreter::task_parser::DocumentParser;
 use RustedSciThe::command_interpreter::task_parser_bvp::{
+    BoundaryConditionSpec, BvpEquationSpec, BvpInitialGuessSpec, BvpMeshSpec, BvpProblemSpec,
     build_bvp_solver_from_problem_and_settings, build_bvp_solver_from_spec,
-    parse_bvp_solver_settings_from_document, parse_bvp_task_from_str, BoundaryConditionSpec,
-    BvpEquationSpec, BvpInitialGuessSpec, BvpMeshSpec, BvpProblemSpec,
+    parse_bvp_solver_settings_from_document, parse_bvp_task_from_str,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 // Run with:
 // cargo run --example bvp_task_shell_guide
 
-fn parse_settings_document(text: &str) -> RustedSciThe::command_interpreter::task_parser::DocumentMap {
+fn parse_settings_document(
+    text: &str,
+) -> RustedSciThe::command_interpreter::task_parser::DocumentMap {
     let mut parser = DocumentParser::new(text.to_string());
-    parser.parse_document().expect("settings document should parse");
+    parser
+        .parse_document()
+        .expect("settings document should parse");
     parser
         .get_result()
         .expect("settings document map should exist")

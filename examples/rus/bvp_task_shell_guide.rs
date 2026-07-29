@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use RustedSciThe::command_interpreter::task_parser::DocumentParser;
 use RustedSciThe::command_interpreter::task_parser_bvp::{
+    BoundaryConditionSpec, BvpEquationSpec, BvpInitialGuessSpec, BvpMeshSpec, BvpProblemSpec,
     build_bvp_solver_from_problem_and_settings, build_bvp_solver_from_spec,
-    parse_bvp_solver_settings_from_document, parse_bvp_task_from_str, BoundaryConditionSpec,
-    BvpEquationSpec, BvpInitialGuessSpec, BvpMeshSpec, BvpProblemSpec,
+    parse_bvp_solver_settings_from_document, parse_bvp_task_from_str,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
@@ -15,7 +15,9 @@ fn parse_settings_document(
     text: &str,
 ) -> RustedSciThe::command_interpreter::task_parser::DocumentMap {
     let mut parser = DocumentParser::new(text.to_string());
-    parser.parse_document().expect("документ со settings должен распарситься");
+    parser
+        .parse_document()
+        .expect("документ со settings должен распарситься");
     parser
         .get_result()
         .expect("карта документа settings должна существовать")
@@ -63,7 +65,8 @@ plot: false
         spec.solver.strategy, spec.solver.backend, spec.equations.unknowns
     );
 
-    let mut solver = build_bvp_solver_from_spec(&spec).expect("полная BVP-задача должна собираться");
+    let mut solver =
+        build_bvp_solver_from_spec(&spec).expect("полная BVP-задача должна собираться");
     solver.solve();
     let full_matrix = solver
         .get_result()
