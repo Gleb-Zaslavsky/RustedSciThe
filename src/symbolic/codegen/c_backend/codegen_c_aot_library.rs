@@ -278,6 +278,11 @@ clean:\n\
     }
 
     fn emit_aot_interface_c(&self) -> String {
+        let jacobian_zero_init = if self.manifest.matrix_backend.as_str() == "dense" {
+            "    for (size_t i = 0; i < out_len; ++i) out[i] = 0.0;\n"
+        } else {
+            ""
+        };
         let residual_chunk_exports = self
             .manifest
             .functions
@@ -325,11 +330,13 @@ clean:\n\
     const double* args = args_ptr;\n\
     double* out = out_ptr;\n\
     (void)args_len;\n\
+    {jacobian_zero_init}\
     {fn_name}(args, out);\n\
     return 1;\n\
 }}\n",
                     fn_name = chunk.fn_name,
                     out_len = chunk.len,
+                    jacobian_zero_init = jacobian_zero_init,
                 )
             })
             .collect::<Vec<_>>()
@@ -404,10 +411,10 @@ RUSTEDSCITHE_AOT_EXPORT int rustedscithe_aot_eval_jacobian_values(\n\
     const double* args = args_ptr;\n\
     double* out = out_ptr;\n\
     (void)args_len;\n\
-{}\n\
+{}{}\n\
     return 1;\n\
 }}\n",
-            residual_dispatch, jacobian_dispatch
+            residual_dispatch, jacobian_zero_init, jacobian_dispatch
         ) + residual_chunk_exports.as_str()
             + jacobian_chunk_exports.as_str()
     }
@@ -617,6 +624,7 @@ mod tests {
         assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
         assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
         assert!(aot_interface_c.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
+        assert!(aot_interface_c.contains("for (size_t i = 0; i < out_len; ++i) out[i] = 0.0;"));
     }
 
     #[test]

@@ -24,7 +24,8 @@ use crate::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend,
     Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     Lsode2NativeExecutionConfig, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
 use crate::numerical::Radau::Radau_main::RadauOrder;
@@ -138,6 +139,8 @@ pub struct Lsode2TaskOptionsSpec {
     pub linear_system_structure: Option<Lsode2LinearSystemStructure>,
     pub linear_solver_policy: Option<Lsode2LinearSolverPolicy>,
     pub native_execution: Option<Lsode2NativeExecutionConfig>,
+    /// Optional solver-owned termination condition from the task document.
+    pub stop_conditions: Vec<Lsode2StopCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +338,7 @@ pub fn parse_ivp_task_from_str(input: &str) -> Result<IvpTaskSpec, IvpTaskError>
     parser.parse_document().map_err(IvpTaskError::Parser)?;
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "where".to_string(),
         "substitute".to_string(),
     ]));
@@ -353,6 +357,7 @@ pub fn parse_ivp_task_from_file(path: Option<PathBuf>) -> Result<IvpTaskSpec, Iv
     parser.parse_document().map_err(IvpTaskError::Parser)?;
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "where".to_string(),
         "substitute".to_string(),
     ]));
@@ -597,6 +602,21 @@ fn build_lsode2_problem_config_from_spec(
         }
         if let Some(native_execution) = options.native_execution {
             config = config.with_native_execution(native_execution);
+        }
+        for condition in &options.stop_conditions {
+            config = match condition.comparator {
+                Lsode2StopComparator::GreaterEqual => {
+                    config.with_stop_condition_ge(condition.variable.clone(), condition.target)
+                }
+                Lsode2StopComparator::LessEqual => {
+                    config.with_stop_condition_le(condition.variable.clone(), condition.target)
+                }
+                Lsode2StopComparator::AbsDistance => config.with_stop_condition_abs(
+                    condition.variable.clone(),
+                    condition.target,
+                    condition.tolerance,
+                ),
+            };
         }
     }
 
@@ -843,13 +863,15 @@ fn parse_lsode2_options(
     let linear_structure = parse_lsode2_linear_structure(section)?;
     let linear_policy = parse_lsode2_linear_solver_policy(section)?;
     let native_execution = parse_lsode2_native_execution(section)?;
+    let stop_conditions = parse_lsode2_stop_conditions(section)?;
 
     let has_any = assembly.is_some()
         || execution.is_some()
         || controller.is_some()
         || linear_structure.is_some()
         || linear_policy.is_some()
-        || native_execution.is_some();
+        || native_execution.is_some()
+        || !stop_conditions.is_empty();
     if !has_any {
         return Ok(None);
     }
@@ -861,6 +883,7 @@ fn parse_lsode2_options(
         linear_system_structure: linear_structure,
         linear_solver_policy: linear_policy,
         native_execution,
+        stop_conditions,
     }))
 }
 
@@ -1118,6 +1141,74 @@ fn parse_lsode2_native_execution(
         }
     };
     Ok(Some(mode))
+}
+
+/// Parse one LSODE2 stop condition from task-document fields.
+///
+/// The condition is intentionally explicit rather than encoded in one compact
+/// string so malformed target values and unknown comparators remain typed
+/// task-parser errors:
+///
+/// ```text
+/// lsode2_stop_variable: eta_ox
+/// lsode2_stop_comparator: le
+/// lsode2_stop_target: 1e-3
+/// lsode2_stop_tolerance: 0.0
+/// ```
+fn parse_lsode2_stop_conditions(
+    section: &GenericSectionMap,
+) -> Result<Vec<Lsode2StopCondition>, IvpTaskError> {
+    const FIELDS: [&str; 4] = [
+        "lsode2_stop_variable",
+        "lsode2_stop_comparator",
+        "lsode2_stop_target",
+        "lsode2_stop_tolerance",
+    ];
+    let variable = get_optional_string(section, "lsode2_stop_variable", "solver_options")?;
+    let Some(variable) = variable else {
+        if FIELDS
+            .iter()
+            .skip(1)
+            .any(|field| section.contains_key(*field))
+        {
+            return Err(IvpTaskError::MissingField {
+                section: "solver_options".to_string(),
+                field: "lsode2_stop_variable".to_string(),
+            });
+        }
+        return Ok(Vec::new());
+    };
+
+    let target = get_optional_float(section, "lsode2_stop_target")?.ok_or_else(|| {
+        IvpTaskError::MissingField {
+            section: "solver_options".to_string(),
+            field: "lsode2_stop_target".to_string(),
+        }
+    })?;
+    let comparator_raw = get_optional_string(section, "lsode2_stop_comparator", "solver_options")?
+        .unwrap_or_else(|| "ge".to_string());
+    let comparator = match comparator_raw.trim().to_ascii_lowercase().as_str() {
+        "ge" | ">=" | "greater_equal" | "greater_or_equal" => Lsode2StopComparator::GreaterEqual,
+        "le" | "<=" | "less_equal" | "less_or_equal" => Lsode2StopComparator::LessEqual,
+        "abs" | "abs_distance" | "distance" => Lsode2StopComparator::AbsDistance,
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "lsode2_stop_comparator".to_string(),
+                message: format!(
+                    "unknown LSODE2 stop comparator `{other}` (use ge, le, or abs_distance)"
+                ),
+            });
+        }
+    };
+    let tolerance = get_optional_float(section, "lsode2_stop_tolerance")?.unwrap_or(0.0);
+
+    Ok(vec![Lsode2StopCondition {
+        variable,
+        target,
+        comparator,
+        tolerance: tolerance.abs(),
+    }])
 }
 
 fn get_required_section<'a>(

@@ -4,6 +4,12 @@ pub mod LM_vanilla;
 pub mod NR_damped;
 pub mod engine;
 pub mod error;
+pub mod nonlinear_aot_ffi_transpose_story_tests;
+pub mod nonlinear_aot_large_story_tests;
+pub mod nonlinear_external_aot_story_tests;
+pub mod nonlinear_lambdify_acceptance_tests;
+pub mod nonlinear_lambdify_stage_story_tests;
+pub mod nonlinear_parameter_story_tests;
 ///  Example#1
 /// ```
 ///
@@ -52,6 +58,7 @@ pub mod error;
 /// assert!((solution.x[0] - 3.0).abs() < 1e-6);
 ///  ```
 pub mod nonlinear_solver_tests;
+pub mod nonlinear_stress_tests;
 pub mod prelude;
 pub mod problem;
 pub mod symbolic;
@@ -61,6 +68,7 @@ pub mod symbolic_aot_solver_tests;
 pub mod symbolic_aot_test_support;
 pub mod symbolic_backend;
 pub mod symbolic_generated;
+pub(crate) mod symbolic_legacy;
 pub mod trust_region;
 pub mod trust_region_LM;
 pub mod trust_region_lmpar;

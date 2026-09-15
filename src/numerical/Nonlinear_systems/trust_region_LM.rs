@@ -8,17 +8,16 @@
 //! parameter update into the usual Newton-like step `x_{k+1} = x_k - p`.
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome, scaled_norm,
-    scaling_vector,
+    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
+    eval_residual_with_runtime, measure_linear_operation, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 use crate::numerical::optimization::qr_LM::PivotedQR;
 use crate::numerical::optimization::trust_region_LM::determine_lambda_and_parameter_update;
-use nalgebra::{DMatrix, DVector};
-
 #[cfg(test)]
 use approx::assert_relative_eq;
+use nalgebra::{DMatrix, DVector};
 
 /// Output of the MINPACK-style trust-region subproblem.
 #[derive(Debug, Clone)]
@@ -176,46 +175,57 @@ impl NonlinearMethod for TrustRegionLMMethod {
         }
 
         runtime.linear_solves += 1;
-        let parameter = solve_trust_region_subproblem(
-            &state.jacobian,
-            &state.residual,
-            &method_state.diag,
-            method_state.delta,
-            method_state.lambda,
-        )
-        .map_err(|message| SolveError::LinearSolveFailure(message.to_string()))?;
+        let parameter =
+            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
+                solve_trust_region_subproblem(
+                    &state.jacobian,
+                    &state.residual,
+                    &method_state.diag,
+                    method_state.delta,
+                    method_state.lambda,
+                )
+                .map_err(|message| SolveError::LinearSolveFailure(message.to_string()))
+            })?;
 
-        method_state.lambda = parameter.lambda;
+        let TrustRegionResult {
+            step: parameter_step,
+            lambda,
+            scaled_step_norm,
+            ..
+        } = parameter;
+        method_state.lambda = lambda;
 
-        if method_state.first_trust_region_iteration
-            && parameter.scaled_step_norm < method_state.delta
-        {
-            method_state.delta = parameter.scaled_step_norm;
+        if method_state.first_trust_region_iteration && scaled_step_norm < method_state.delta {
+            method_state.delta = scaled_step_norm;
         }
         method_state.first_trust_region_iteration = false;
 
-        let nonlinear_step = -parameter.step.clone();
+        let nonlinear_step = -parameter_step;
         if nonlinear_step.norm() < options.tolerance {
-            if state.residual_norm <= 10.0 * options.tolerance {
+            if state.residual_norm <= options.tolerance {
                 return Ok(StepOutcome::Converged);
             }
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let trial_x = if let Some(bounds) = &options.bounds {
-            bounds.project(&(&state.x + &nonlinear_step))
-        } else {
-            &state.x + &nonlinear_step
-        };
+        let mut trial_x = &state.x + &nonlinear_step;
+        if let Some(bounds) = &options.bounds {
+            bounds.project_in_place(&mut trial_x);
+        }
         let effective_step = &trial_x - &state.x;
         if effective_step.norm() < options.tolerance {
-            if state.residual_norm <= 10.0 * options.tolerance {
+            if state.residual_norm <= options.tolerance {
                 return Ok(StepOutcome::Converged);
             }
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let trial_residual = problem.residual(&trial_x)?;
+        let trial_residual = eval_residual_with_runtime(
+            problem,
+            &trial_x,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         let trial_norm = trial_residual.norm();
 
         let actual_reduction = if trial_norm * P1 < state.residual_norm {
@@ -226,8 +236,8 @@ impl NonlinearMethod for TrustRegionLMMethod {
 
         let predicted_reduction = {
             let residual_norm = state.residual_norm.max(f64::EPSILON);
-            let temp1 = (&state.jacobian * &parameter.step).norm() / residual_norm;
-            let temp2 = (parameter.lambda.sqrt() * parameter.scaled_step_norm) / residual_norm;
+            let temp1 = (&state.jacobian * &nonlinear_step).norm() / residual_norm;
+            let temp2 = (lambda.sqrt() * scaled_step_norm) / residual_norm;
             temp1.powi(2) + temp2.powi(2) / HALF
         };
         let dir_derivative = -predicted_reduction * HALF;

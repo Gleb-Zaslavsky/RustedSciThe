@@ -1,8 +1,12 @@
+use std::borrow::Cow;
+
 use nalgebra::{DMatrix, DVector};
 
+use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, scaled_norm, scaling_vector, solve_linear_system,
+    IterationState, LinearSolverKind, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics,
+    SolveOptions, StepOutcome, eval_residual_with_runtime, measure_linear_operation,
+    measure_linear_system_operation_owned, scaled_norm, scaling_vector, solve_linear_system,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
@@ -107,28 +111,82 @@ impl NonlinearMethod for LevenbergMarquardtMethod {
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
-        let jtj = state.jacobian.transpose() * &state.jacobian;
-        let scaling = if self.diag_scaling {
-            DMatrix::from_diagonal(&jtj.diagonal())
+        self.step_impl(problem, state, method_state, options, runtime, None)
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        true
+    }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, workspace)
+    }
+}
+
+impl LevenbergMarquardtMethod {
+    fn step_impl<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut LevenbergMarquardtState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        mut workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        let mut regularized = state.jacobian.transpose() * &state.jacobian;
+        if self.diag_scaling {
+            TrustRegionScaling::add_jtj_diagonal_regularization_in_place(
+                &mut regularized,
+                method_state.lambda,
+            );
         } else {
-            DMatrix::identity(jtj.nrows(), jtj.ncols())
-        };
+            TrustRegionScaling::add_identity_regularization_in_place(
+                &mut regularized,
+                method_state.lambda,
+            );
+        }
         runtime.linear_solves += 1;
-        let step = solve_linear_system(
+        let rhs = -state.jacobian.transpose() * &state.residual;
+        let step = measure_linear_system_operation_owned(
             options.linear_solver,
-            &(&jtj + method_state.lambda * scaling),
-            &(-state.jacobian.transpose() * &state.residual),
+            regularized,
+            &rhs,
+            runtime,
+            options.diagnostics.collect_statistics,
         )?;
         if step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let trial_x = if let Some(bounds) = &options.bounds {
-            bounds.project(&(&state.x + &step))
+        let trial_x = if let Some(workspace) = workspace.as_deref_mut() {
+            workspace.set_affine_trial(&state.x, 1.0, &step)?;
+            if let Some(bounds) = &options.bounds {
+                bounds.project_in_place(workspace.trial_x_mut());
+            }
+            Cow::Borrowed(workspace.trial_x())
         } else {
-            &state.x + &step
+            let mut trial_x = &state.x + &step;
+            if let Some(bounds) = &options.bounds {
+                bounds.project_in_place(&mut trial_x);
+            }
+            Cow::Owned(trial_x)
         };
-        let trial_residual = problem.residual(&trial_x)?;
+        let trial_residual = eval_residual_with_runtime(
+            problem,
+            &trial_x,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
+        let trial_is_converged =
+            trial_residual.norm_squared() < options.tolerance * options.tolerance;
         let actual = state.residual.norm_squared() - trial_residual.norm_squared();
         let predicted = state.residual.norm_squared()
             - (&state.residual + &state.jacobian * &step).norm_squared();
@@ -138,11 +196,13 @@ impl NonlinearMethod for LevenbergMarquardtMethod {
             0.0
         };
 
-        if rho > 0.0 {
+        // A tiny roundoff-level negative reduction must not reject a point
+        // that already satisfies the user-requested residual tolerance.
+        if trial_is_converged || rho > 0.0 {
             method_state.lambda = (method_state.lambda / self.decrease_factor).max(self.min_lambda);
             runtime.accepted_steps += 1;
             Ok(StepOutcome::Continue {
-                next_x: trial_x,
+                next_x: trial_x.into_owned(),
                 accepted: true,
             })
         } else {
@@ -544,14 +604,17 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         // Determine par and step with the shared MINPACK-style trust-region solver.
         let _solver_kind = options.linear_solver;
         runtime.linear_solves += 1;
-        let subproblem = solve_trust_region_subproblem(
-            &state.jacobian,
-            &state.residual,
-            &method_state.diag,
-            method_state.delta,
-            method_state.par,
-        )
-        .map_err(|message| SolveError::LinearSolveFailure(message.to_string()))?;
+        let subproblem =
+            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
+                solve_trust_region_subproblem(
+                    &state.jacobian,
+                    &state.residual,
+                    &method_state.diag,
+                    method_state.delta,
+                    method_state.par,
+                )
+                .map_err(|message| SolveError::LinearSolveFailure(message.to_string()))
+            })?;
         let pvec = subproblem.step;
         let par = subproblem.lambda;
         method_state.par = par;
@@ -569,7 +632,7 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         // MINPACK computes a parameter update `p` and applies it as `x_new = x - p`.
         let mut trial_x = &state.x - &pvec;
         if let Some(bounds) = &options.bounds {
-            trial_x = bounds.project(&trial_x);
+            bounds.project_in_place(&mut trial_x);
         }
 
         // Evaluate residual at trial_x

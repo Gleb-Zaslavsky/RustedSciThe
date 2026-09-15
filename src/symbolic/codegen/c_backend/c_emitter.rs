@@ -138,7 +138,29 @@ impl CEmitter {
         arity: usize,
         out: &mut String,
     ) {
+        let output_indices = (0..ir.outputs.len()).collect::<Vec<_>>();
+        Self::emit_block_function_into_with_output_indices(
+            ir,
+            fn_name,
+            arity,
+            &output_indices,
+            out,
+        );
+    }
+
+    fn emit_block_function_into_with_output_indices(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        output_indices: &[usize],
+        out: &mut String,
+    ) {
         Self::validate_identifier(fn_name, "function");
+        assert_eq!(
+            ir.outputs.len(),
+            output_indices.len(),
+            "dense output indices must match lowered outputs"
+        );
 
         // Function signature
         out.push_str(&format!(
@@ -168,7 +190,7 @@ impl CEmitter {
         }
 
         // Output assignments
-        for (index, output) in ir.outputs.iter().enumerate() {
+        for (&index, output) in output_indices.iter().zip(&ir.outputs) {
             let _ = write!(out, "    outputs[{}] = ", index);
             Self::push_temp_name(out, *output);
             out.push_str(";\n");
@@ -211,6 +233,32 @@ impl CEmitter {
     ) -> String {
         let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir) + 96);
         Self::emit_dense_jacobian_block_function_into(ir, fn_name, arity, rows, cols, &mut out);
+        out
+    }
+
+    /// Emits a dense Jacobian block while omitting entries proven to be zero.
+    /// The complete output buffer is still owned by the caller and must be
+    /// zero-initialized before this function is dispatched.
+    pub fn emit_dense_jacobian_block_function_with_output_offsets(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        rows: usize,
+        cols: usize,
+        output_indices: &[usize],
+    ) -> String {
+        let mut out = String::with_capacity(Self::linear_block_capacity_hint(ir) + 128);
+        out.push_str(&format!(
+            "/* Dense Jacobian block: {} rows x {} cols, structural zeros elided */\n",
+            rows, cols
+        ));
+        Self::emit_block_function_into_with_output_indices(
+            ir,
+            fn_name,
+            arity,
+            output_indices,
+            &mut out,
+        );
         out
     }
 

@@ -150,6 +150,7 @@ fn print_showcase() {
     println!("  cargo run --example radau_backends_guide");
     println!("  cargo run --example curve_fitting_guide");
     println!("  cargo run --example nonlinear_systems_guide");
+    println!("  cargo run --example nonlinear_systems_modern_guide");
 }
 
 fn print_run_summary(result: &TaskRunResult) {

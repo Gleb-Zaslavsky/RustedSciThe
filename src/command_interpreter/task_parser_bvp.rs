@@ -359,6 +359,7 @@ pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError>
     parser.parse_document().map_err(BvpTaskError::Parser)?;
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "boundary_conditions".to_string(),
         "initial_guess".to_string(),
         "where".to_string(),
@@ -379,6 +380,7 @@ pub fn parse_bvp_task_from_file(path: Option<PathBuf>) -> Result<BvpTaskSpec, Bv
     parser.parse_document().map_err(BvpTaskError::Parser)?;
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "boundary_conditions".to_string(),
         "initial_guess".to_string(),
         "where".to_string(),

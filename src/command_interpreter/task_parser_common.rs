@@ -84,26 +84,8 @@ pub fn parse_symbolic_equation_system(
     let arg = get_optional_string(section, "arg", "equations")?
         .unwrap_or_else(|| default_arg.to_string());
 
-    let parameter_names =
-        get_optional_string_list(section, "parameters", "equations")?.unwrap_or_default();
-    let parameter_values_vec =
-        get_optional_float_list(section, "parameter_values", "equations")?.unwrap_or_default();
-    if parameter_names.len() != parameter_values_vec.len() {
-        return Err(SharedEquationParseError::InvalidField {
-            section: "equations".to_string(),
-            field: "parameter_values".to_string(),
-            message: format!(
-                "expected {} parameter values, got {}",
-                parameter_names.len(),
-                parameter_values_vec.len()
-            ),
-        });
-    }
-    let parameter_values: HashMap<String, f64> = parameter_names
-        .iter()
-        .cloned()
-        .zip(parameter_values_vec)
-        .collect();
+    let (parameter_names, parameter_values) =
+        parse_numeric_parameter_declarations(document, section)?;
 
     validate_symbol_names(&arg, &parameter_names).map_err(SharedEquationParseError::Semantic)?;
 
@@ -165,6 +147,90 @@ pub fn parse_symbolic_equation_system(
         parameter_names,
         parameter_values,
     })
+}
+
+/// Parses numeric task parameters declared in either supported document form.
+///
+/// The compact legacy form stays inside `equations`:
+///
+/// ```text
+/// parameters: rate, offset
+/// parameter_values: 2.0, 0.5
+/// ```
+///
+/// The readable form is a dedicated section and is preferable for larger
+/// models:
+///
+/// ```text
+/// parameters
+/// rate: 2.0
+/// offset: 0.5
+/// ```
+///
+/// Both forms are intentionally mutually exclusive. Silently merging them
+/// would make a duplicated parameter name depend on parser implementation
+/// details instead of the task document's explicit intent.
+fn parse_numeric_parameter_declarations(
+    document: &DocumentMap,
+    equations: &GenericSectionMap,
+) -> Result<(Vec<String>, HashMap<String, f64>), SharedEquationParseError> {
+    let uses_inline_form =
+        equations.contains_key("parameters") || equations.contains_key("parameter_values");
+    let section_parameters = document.get("parameters");
+
+    if uses_inline_form && section_parameters.is_some() {
+        return Err(SharedEquationParseError::InvalidField {
+            section: "parameters".to_string(),
+            field: "*".to_string(),
+            message: "use either `equations.parameters` with `parameter_values` or the dedicated `parameters` section, not both".to_string(),
+        });
+    }
+
+    if let Some(parameters) = section_parameters {
+        let mut parameter_names = parameters.keys().cloned().collect::<Vec<_>>();
+        parameter_names.sort();
+        let mut parameter_values = HashMap::with_capacity(parameter_names.len());
+
+        for name in &parameter_names {
+            let values = get_required_values(parameters, "parameters", name)?;
+            if values.len() != 1 {
+                return Err(SharedEquationParseError::InvalidField {
+                    section: "parameters".to_string(),
+                    field: name.clone(),
+                    message: "expected exactly one numeric value".to_string(),
+                });
+            }
+            parameter_values.insert(
+                name.clone(),
+                value_to_float(&values[0], "parameters", name)?,
+            );
+        }
+
+        return Ok((parameter_names, parameter_values));
+    }
+
+    let parameter_names =
+        get_optional_string_list(equations, "parameters", "equations")?.unwrap_or_default();
+    let parameter_values_vec =
+        get_optional_float_list(equations, "parameter_values", "equations")?.unwrap_or_default();
+    if parameter_names.len() != parameter_values_vec.len() {
+        return Err(SharedEquationParseError::InvalidField {
+            section: "equations".to_string(),
+            field: "parameter_values".to_string(),
+            message: format!(
+                "expected {} parameter values, got {}",
+                parameter_names.len(),
+                parameter_values_vec.len()
+            ),
+        });
+    }
+    let parameter_values = parameter_names
+        .iter()
+        .cloned()
+        .zip(parameter_values_vec)
+        .collect();
+
+    Ok((parameter_names, parameter_values))
 }
 
 /// Parses `where` and `substitute` definitions and fully resolves aliases.
@@ -671,6 +737,61 @@ gain: base + a
         assert!(rendered.contains('3'));
         assert!(rendered.contains('2'));
         assert!(!rendered.contains('a'));
+    }
+
+    #[test]
+    fn equation_system_accepts_readable_parameter_section() {
+        let doc = r#"
+equations
+arg: t
+unknowns: y
+rhs: source - y
+
+parameters
+R: 2.0
+offset: 0.5
+
+where
+source: R * t + offset
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equation document");
+        let map = parser.get_result().expect("document map should exist");
+
+        let parsed = parse_symbolic_equation_system(map, "t")
+            .expect("dedicated parameters section should parse");
+
+        assert_eq!(parsed.parameter_names, vec!["R", "offset"]);
+        assert_eq!(parsed.parameter_values["R"], 2.0);
+        assert_eq!(parsed.parameter_values["offset"], 0.5);
+        let rhs = parsed.rhs[0].lambdify_borrowed_thread_safe(&["t", "y"]);
+        assert!((rhs(&[3.0, 1.0]) - 5.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn equation_system_rejects_mixed_parameter_declaration_styles() {
+        let doc = r#"
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+unknowns: y
+rhs: -rate * y
+
+parameters
+rate: 3.0
+"#;
+        let mut parser = DocumentParser::new(doc.to_string());
+        parser.parse_document().expect("parse equation document");
+        let map = parser.get_result().expect("document map should exist");
+
+        let error = parse_symbolic_equation_system(map, "t")
+            .expect_err("mixed parameter declaration styles must be rejected");
+        assert!(matches!(
+            error,
+            SharedEquationParseError::InvalidField { .. }
+        ));
+        assert!(error.to_string().contains("either"));
     }
 
     #[test]

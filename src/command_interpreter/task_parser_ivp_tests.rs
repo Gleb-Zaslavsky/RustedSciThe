@@ -9,6 +9,7 @@ fn parse_document_for_ivp(input: &str) -> DocumentMap {
     parser.parse_document().expect("IVP document should parse");
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "where".to_string(),
         "substitute".to_string(),
     ]));
@@ -84,6 +85,36 @@ step_size: 1e-3
         spec.solver.method,
         IvpMethodSpec::NonStiff("RK45".to_string())
     );
+}
+
+#[test]
+fn ivp_task_parser_preserves_readable_parameter_section_symbol_case() {
+    let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: T
+rhs: -R*T
+
+parameters
+R: 2.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+"#;
+
+    let spec = parse_ivp_task_from_str(input)
+        .expect("IVP task with a readable parameter section should parse");
+
+    assert_eq!(spec.equations.parameter_names, vec!["R"]);
+    assert_eq!(spec.equations.parameter_values["R"], 2.0);
+    let rhs = spec.equations.rhs[0].lambdify_borrowed_thread_safe(&["t", "T"]);
+    assert!((rhs(&[0.0, 3.0]) + 6.0).abs() < 1e-12);
 }
 
 #[test]
@@ -397,6 +428,9 @@ lsode2_symbolic_execution: LambdifyExpr
 lsode2_linear_structure: sparse
 lsode2_linear_solver_policy: faer_sparse_lu
 lsode2_native_execution: faithful_bdf_solve
+lsode2_stop_variable: y
+lsode2_stop_comparator: le
+lsode2_stop_target: 0.5
 "#;
 
     let spec = parse_ivp_task_from_str(input).expect("LSODE2 document should parse");
@@ -414,6 +448,44 @@ lsode2_native_execution: faithful_bdf_solve
         lsode2.linear_system_structure,
         Some(Lsode2LinearSystemStructure::Sparse)
     );
+    assert_eq!(lsode2.stop_conditions.len(), 1);
+    assert_eq!(lsode2.stop_conditions[0].variable, "y");
+    assert_eq!(
+        lsode2.stop_conditions[0].comparator,
+        crate::numerical::LSODE2::Lsode2StopComparator::LessEqual
+    );
+
+    let config = build_lsode2_problem_config_from_spec(&spec)
+        .expect("parsed LSODE2 stop condition should reach the native config");
+    assert_eq!(config.stop_conditions.len(), 1);
+    assert_eq!(config.stop_conditions[0].variable, "y");
+    assert_eq!(config.stop_conditions[0].target, 0.5);
+}
+
+#[test]
+fn ivp_task_parser_rejects_partial_lsode2_stop_condition() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+lsode2_stop_target: 0.1
+"#;
+
+    let error = parse_ivp_task_from_str(input)
+        .expect_err("a stop target without its state variable must be rejected");
+    assert!(matches!(error, IvpTaskError::MissingField { .. }));
+    assert!(error.to_string().contains("lsode2_stop_variable"));
 }
 
 #[test]

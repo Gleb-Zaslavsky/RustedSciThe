@@ -1,11 +1,11 @@
-use nalgebra::{DMatrix, DVector};
-
 use crate::numerical::Nonlinear_systems::engine::{
     IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, solve_linear_system,
+    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
+    measure_linear_system_operation, solve_linear_system,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
+use nalgebra::{DMatrix, DVector};
 
 /// Trust-region method with a dogleg step.
 #[derive(Debug, Clone, Copy)]
@@ -78,39 +78,44 @@ impl NonlinearMethod for TrustRegionMethod {
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
         runtime.linear_solves += 1;
-        let newton_step =
-            solve_linear_system(options.linear_solver, &state.jacobian, &(-&state.residual))
-                .unwrap_or_else(|_| DVector::zeros(state.x.len()));
+        let newton_step = measure_linear_system_operation(
+            options.linear_solver,
+            &state.jacobian,
+            &(-&state.residual),
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         let gradient = state.jacobian.transpose() * &state.residual;
         if gradient.norm_squared() < options.tolerance.powi(2) {
-            return Ok(StepOutcome::Terminated(TerminationReason::Converged));
-        }
-
-        let alpha =
-            gradient.dot(&gradient) / (&state.jacobian * &gradient).norm_squared().max(1e-16);
-        let step = dogleg_step(
-            &newton_step,
-            &(-alpha * gradient.clone()),
-            method_state.delta,
-        );
-        if step.norm() < options.tolerance {
-            if state.residual_norm <= 10.0 * options.tolerance
-                || gradient.norm() <= 10.0 * options.tolerance
-            {
+            if state.residual_norm <= options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::Converged));
             }
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let trial_x = if let Some(bounds) = &options.bounds {
-            bounds.project(&(&state.x + &step))
-        } else {
-            &state.x + &step
-        };
-        let trial_residual = problem.residual(&trial_x)?;
+        let alpha =
+            gradient.dot(&gradient) / (&state.jacobian * &gradient).norm_squared().max(1e-16);
+        let step = dogleg_step(newton_step, &(-alpha * &gradient), method_state.delta);
+        if step.norm() < options.tolerance {
+            if state.residual_norm <= options.tolerance {
+                return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+            }
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
+        }
+
+        let mut trial_x = &state.x + &step;
+        if let Some(bounds) = &options.bounds {
+            bounds.project_in_place(&mut trial_x);
+        }
+        let trial_residual = eval_residual_with_runtime(
+            problem,
+            &trial_x,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         let actual = state.residual.norm_squared() - trial_residual.norm_squared();
-        let predicted = -2.0 * state.residual.dot(&(&state.jacobian * &step))
-            - step.dot(&(state.jacobian.transpose() * &state.jacobian * &step));
+        let jacobian_step = &state.jacobian * &step;
+        let predicted = -2.0 * state.residual.dot(&jacobian_step) - jacobian_step.norm_squared();
         let rho = actual / predicted.max(1e-16);
 
         if rho < 0.25 {
@@ -139,9 +144,9 @@ impl NonlinearMethod for TrustRegionMethod {
 }
 
 /// Computes a dogleg step inside a trust region.
-fn dogleg_step(newton_step: &DVector<f64>, cauchy_step: &DVector<f64>, delta: f64) -> DVector<f64> {
+fn dogleg_step(newton_step: DVector<f64>, cauchy_step: &DVector<f64>, delta: f64) -> DVector<f64> {
     if newton_step.norm() <= delta {
-        return newton_step.clone();
+        return newton_step;
     }
     if cauchy_step.norm() >= delta {
         return delta / cauchy_step.norm() * cauchy_step;
@@ -455,7 +460,7 @@ impl DoglegState {
         // CASE 2a: Gauss-Newton step is inside trust region
         if self.norm_dgn <= delta {
             // GN step is optimal since it minimizes quadratic model
-            println!("gauss newton step norm <= delta: return gauss newton step");
+            log::debug!("gauss newton step norm <= delta: return gauss newton step");
             return Ok(self.dx_gn.clone());
         }
 
@@ -463,7 +468,7 @@ impl DoglegState {
         // Find point on dogleg path: dx = dx_sd + β*(dx_gn - dx_sd)
         // where β ∈ [0,1] such that ||D*dx|| = delta
         let beta = self.compute_dogleg_beta(1.0, delta, diag)?;
-        println!("beta = {}", beta);
+        log::debug!("dogleg beta = {}", beta);
         // Compute final dogleg step
         // dx = dx_sd + β * (dx_gn - dx_sd)
         let dx_diff = &self.dx_gn - &self.dx_sd;
@@ -540,12 +545,14 @@ impl DoglegState {
         gradient: &DVector<f64>,
         dx: &DVector<f64>,
     ) -> Result<f64, DoglegError> {
-        // pred = -g^T dx - (1/2) dx^T J^T J dx
+        // pred = -g^T dx - (1/2) dx^T J^T J dx.
+        // Since workn is J*dx, the quadratic term is ||J*dx||^2;
+        // forming J^T*workn would add an unnecessary matrix-vector product.
         let linear_term = -gradient.dot(dx);
 
         // Compute J*dx
         self.workn = jacobian * dx;
-        let quadratic_term = -0.5 * dx.dot(&(jacobian.transpose() * &self.workn));
+        let quadratic_term = -0.5 * self.workn.dot(&self.workn);
 
         Ok(linear_term + quadratic_term)
     }
@@ -794,57 +801,65 @@ impl NonlinearMethod for PowellDoglegMethod {
         let gradient = state.jacobian.transpose() * &state.residual;
 
         if gradient.norm_squared() < options.tolerance.powi(2) {
-            return Ok(StepOutcome::Terminated(TerminationReason::Converged));
-        }
-
-        method_state
-            .dogleg_state
-            .preloop(
-                &state.jacobian,
-                &state.residual,
-                &gradient,
-                &method_state.scaling,
-            )
-            .map_err(|e| {
-                SolveError::NumericalBreakdown(format!("Dogleg preloop failed: {:?}", e))
-            })?;
-
-        let step = if self.use_double_dogleg {
-            method_state.dogleg_state.double_step(
-                &state.jacobian,
-                &state.residual,
-                &gradient,
-                &method_state.scaling,
-                method_state.delta,
-            )
-        } else {
-            method_state.dogleg_state.step(
-                &state.jacobian,
-                &state.residual,
-                &method_state.scaling,
-                method_state.delta,
-            )
-        }
-        .map_err(|e| SolveError::NumericalBreakdown(format!("Dogleg step failed: {:?}", e)))?;
-
-        runtime.linear_solves += 1;
-
-        if step.norm() < options.tolerance {
-            if state.residual_norm <= 10.0 * options.tolerance
-                || gradient.norm() <= 10.0 * options.tolerance
-            {
+            if state.residual_norm <= options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::Converged));
             }
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let trial_x = if let Some(bounds) = &options.bounds {
-            bounds.project(&(&state.x + &step))
-        } else {
-            &state.x + &step
-        };
+        let step =
+            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
+                method_state
+                    .dogleg_state
+                    .preloop(
+                        &state.jacobian,
+                        &state.residual,
+                        &gradient,
+                        &method_state.scaling,
+                    )
+                    .map_err(|e| {
+                        SolveError::NumericalBreakdown(format!("Dogleg preloop failed: {:?}", e))
+                    })?;
 
-        let trial_residual = problem.residual(&trial_x)?;
+                if self.use_double_dogleg {
+                    method_state.dogleg_state.double_step(
+                        &state.jacobian,
+                        &state.residual,
+                        &gradient,
+                        &method_state.scaling,
+                        method_state.delta,
+                    )
+                } else {
+                    method_state.dogleg_state.step(
+                        &state.jacobian,
+                        &state.residual,
+                        &method_state.scaling,
+                        method_state.delta,
+                    )
+                }
+                .map_err(|e| SolveError::NumericalBreakdown(format!("Dogleg step failed: {:?}", e)))
+            })?;
+
+        runtime.linear_solves += 1;
+
+        if step.norm() < options.tolerance {
+            if state.residual_norm <= options.tolerance {
+                return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+            }
+            return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
+        }
+
+        let mut trial_x = &state.x + &step;
+        if let Some(bounds) = &options.bounds {
+            bounds.project_in_place(&mut trial_x);
+        }
+
+        let trial_residual = eval_residual_with_runtime(
+            problem,
+            &trial_x,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         let actual = state.residual.norm_squared() - trial_residual.norm_squared();
         let predicted = method_state
             .dogleg_state
@@ -1158,6 +1173,9 @@ mod tests {
         assert!(pred_reduction.is_ok());
 
         let pred_reduction = pred_reduction.unwrap();
+        let j_step = &jacobian * &step;
+        let reference = -gradient.dot(&step) - 0.5 * j_step.dot(&j_step);
+        assert_relative_eq!(pred_reduction, reference, epsilon = 1.0e-12);
         // For a descent direction, predicted reduction should be positive
         assert!(
             pred_reduction > 0.0,
@@ -1400,7 +1418,7 @@ mod powell_dogleg_tests {
         .expect("symbolic problem");
 
         let options = SolveOptions {
-            tolerance: 1e-6,
+            tolerance: 1e-8,
             max_iterations: 100,
             ..SolveOptions::default()
         };

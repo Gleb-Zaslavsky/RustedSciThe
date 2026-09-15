@@ -30,6 +30,7 @@ use crate::numerical::Nonlinear_systems::symbolic::{
 use crate::symbolic::codegen::codegen_aot_resolution::{
     AotResolutionStatus, AotResolver, ResolvedAotArtifact,
 };
+use crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_dense_backend;
 use crate::symbolic::codegen::codegen_provider_api::PreparedProblem;
 use log::{info, warn};
 
@@ -106,30 +107,37 @@ pub fn select_symbolic_nonlinear_backend<'a>(
                 PreparedProblem::dense(prepared_aot_problem.as_prepared_problem());
             let resolution =
                 resolver.map(|resolver| resolver.resolve_prepared_problem(&generic_prepared));
-            let effective_backend = match resolution.as_ref().map(|resolved| resolved.status) {
-                Some(AotResolutionStatus::Compiled) => {
-                    info!("Selected compiled AOT backend for symbolic nonlinear problem");
-                    SelectedSymbolicNonlinearBackendKind::AotCompiled
-                }
-                Some(AotResolutionStatus::RegisteredButNotBuilt) => {
-                    warn!(
-                        "Selected nonlinear AOT backend, but artifact is registered and not built"
-                    );
-                    SelectedSymbolicNonlinearBackendKind::AotRegisteredButNotBuilt
-                }
-                Some(AotResolutionStatus::Missing) | None => match policy {
-                    SymbolicBackendSelectionPolicy::AotOnly => {
-                        warn!("AOT-only nonlinear backend requested, but artifact is missing");
-                        SelectedSymbolicNonlinearBackendKind::AotMissing
+            let linked_runtime_available =
+                resolve_linked_dense_backend(&prepared_aot_problem.problem_key()).is_some();
+            let effective_backend = if linked_runtime_available {
+                info!("Selected linked compiled AOT runtime for symbolic nonlinear problem");
+                SelectedSymbolicNonlinearBackendKind::AotCompiled
+            } else {
+                match resolution.as_ref().map(|resolved| resolved.status) {
+                    Some(AotResolutionStatus::Compiled) => {
+                        info!("Selected compiled AOT backend for symbolic nonlinear problem");
+                        SelectedSymbolicNonlinearBackendKind::AotCompiled
                     }
-                    SymbolicBackendSelectionPolicy::PreferAotThenLambdify => {
-                        info!(
-                            "AOT artifact missing for symbolic nonlinear problem; falling back to lambdify"
+                    Some(AotResolutionStatus::RegisteredButNotBuilt) => {
+                        warn!(
+                            "Selected nonlinear AOT backend, but artifact is registered and not built"
                         );
-                        SelectedSymbolicNonlinearBackendKind::Lambdify
+                        SelectedSymbolicNonlinearBackendKind::AotRegisteredButNotBuilt
                     }
-                    SymbolicBackendSelectionPolicy::LambdifyOnly => unreachable!(),
-                },
+                    Some(AotResolutionStatus::Missing) | None => match policy {
+                        SymbolicBackendSelectionPolicy::AotOnly => {
+                            warn!("AOT-only nonlinear backend requested, but artifact is missing");
+                            SelectedSymbolicNonlinearBackendKind::AotMissing
+                        }
+                        SymbolicBackendSelectionPolicy::PreferAotThenLambdify => {
+                            info!(
+                                "AOT artifact missing for symbolic nonlinear problem; falling back to lambdify"
+                            );
+                            SelectedSymbolicNonlinearBackendKind::Lambdify
+                        }
+                        SymbolicBackendSelectionPolicy::LambdifyOnly => unreachable!(),
+                    },
+                }
             };
 
             SelectedSymbolicNonlinearBackend {
@@ -277,8 +285,14 @@ mod tests {
         let x0 = DVector::from_vec(vec![3.0, -1.0]);
         let residual = compiled.residual(&x0).expect("residual");
         let jacobian = compiled.jacobian(&x0).expect("jacobian");
+        let mut residual_into = DVector::zeros(2);
+        compiled
+            .residual_into(&x0, &mut residual_into)
+            .expect("residual into");
         assert_relative_eq!(residual[0], 0.0, epsilon = 1e-12);
         assert_relative_eq!(residual[1], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(residual_into[0], residual[0], epsilon = 1e-12);
+        assert_relative_eq!(residual_into[1], residual[1], epsilon = 1e-12);
         assert_relative_eq!(jacobian[(0, 0)], 6.0, epsilon = 1e-12);
         assert_relative_eq!(jacobian[(0, 1)], -2.0, epsilon = 1e-12);
         assert_relative_eq!(jacobian[(1, 0)], 1.0, epsilon = 1e-12);
@@ -309,7 +323,7 @@ mod tests {
         let (_dir, resolver, problem_key) = linked_dense_resolver_for_problem(&baseline);
         register_parameterized_dense_backend(&problem_key);
 
-        let compiled = SymbolicNonlinearProblem::from_expressions_with_backend_selection(
+        let mut compiled = SymbolicNonlinearProblem::from_expressions_with_backend_selection(
             vec![
                 a.clone() * x.clone() + y.clone() - Expr::Const(3.0),
                 x.clone() - y.clone(),
@@ -334,6 +348,22 @@ mod tests {
         assert_relative_eq!(jacobian[(0, 1)], 1.0, epsilon = 1e-12);
         assert_relative_eq!(jacobian[(1, 0)], 1.0, epsilon = 1e-12);
         assert_relative_eq!(jacobian[(1, 1)], -1.0, epsilon = 1e-12);
+
+        compiled
+            .set_parameter_values(DVector::from_vec(vec![4.0]))
+            .expect("first AOT parameter update");
+        let updated_residual = compiled.residual(&x0).expect("updated residual");
+        let updated_jacobian = compiled.jacobian(&x0).expect("updated jacobian");
+        assert_relative_eq!(updated_residual[0], 2.0, epsilon = 1e-12);
+        assert_relative_eq!(updated_jacobian[(0, 0)], 4.0, epsilon = 1e-12);
+
+        compiled
+            .set_parameter_values(DVector::from_vec(vec![0.5]))
+            .expect("second AOT parameter update");
+        let second_residual = compiled.residual(&x0).expect("second updated residual");
+        let second_jacobian = compiled.jacobian(&x0).expect("second updated jacobian");
+        assert_relative_eq!(second_residual[0], -1.5, epsilon = 1e-12);
+        assert_relative_eq!(second_jacobian[(0, 0)], 0.5, epsilon = 1e-12);
 
         unregister_linked_dense_backend(&problem_key);
     }

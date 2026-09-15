@@ -9,11 +9,11 @@
 //!   └── aot_interface.zig (FFI wrapper matching Rust interface)
 //! ```
 
+use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_provider_api::{
     PreparedBandedProblem, PreparedDenseProblem, PreparedProblem, PreparedSparseProblem,
 };
-use crate::symbolic::codegen::CodegenIR::{CodegenLanguage, CodegenModule};
 use log::info;
 use std::fs;
 use std::io;
@@ -157,6 +157,11 @@ pub fn build(b: *std.Build) void {{\n\
     }
 
     fn emit_aot_interface_zig(&self) -> String {
+        let jacobian_zero_init = if self.manifest.matrix_backend.as_str() == "dense" {
+            "    for (0..out_len) |index| out_ptr[index] = 0.0;\n"
+        } else {
+            ""
+        };
         let residual_len = self.manifest.io.residual_len;
         let jacobian_nnz = self
             .manifest
@@ -202,11 +207,13 @@ pub fn build(b: *std.Build) void {{\n\
 ) bool {{\n\
     _ = args_len;\n\
     if (out_len != {out_len}) return false;\n\
+{jacobian_zero_init}\
     generated.{fn_name}(args_ptr, out_ptr);\n\
     return true;\n\
 }}\n",
                     fn_name = chunk.fn_name,
                     out_len = chunk.len,
+                    jacobian_zero_init = jacobian_zero_init,
                 )
             })
             .collect::<Vec<_>>()
@@ -276,11 +283,13 @@ export fn rustedscithe_aot_eval_jacobian_values(\n\
 ) bool {{\n\
     _ = args_len;\n\
     if (out_len != {jacobian_nnz}) return false;\n\
+{jacobian_zero_init}\
 {jacobian_dispatch}\n\
     return true;\n\
 }}\n",
             residual_len = residual_len,
             jacobian_nnz = jacobian_nnz,
+            jacobian_zero_init = jacobian_zero_init,
             residual_dispatch = residual_dispatch,
             jacobian_dispatch = jacobian_dispatch,
         ) + residual_chunk_exports.as_str()
@@ -311,6 +320,7 @@ fn validate_library_name(library_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::codegen::CodegenIR::CodegenModule;
     use crate::symbolic::codegen::codegen_provider_api::{
         BackendKind, MatrixBackend, PreparedBandedProblem, PreparedDenseProblem, PreparedProblem,
     };
@@ -320,7 +330,6 @@ mod tests {
     use crate::symbolic::codegen::codegen_tasks::{
         BandedChunkingStrategy, BandedExprEntry, BandedJacobianTask, JacobianTask, ResidualTask,
     };
-    use crate::symbolic::codegen::CodegenIR::CodegenModule;
     use crate::symbolic::symbolic_engine::Expr;
     use tempfile::tempdir;
 
@@ -418,6 +427,7 @@ mod tests {
         assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
         assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
         assert!(aot_interface.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
+        assert!(aot_interface.contains("for (0..out_len) |index| out_ptr[index] = 0.0;"));
     }
 
     #[test]
@@ -484,12 +494,16 @@ mod tests {
             &module,
         );
 
-        assert!(library_spec
-            .zig_source
-            .contains("const std = @import(\"std\");"));
-        assert!(!library_spec
-            .zig_source
-            .contains("pub mod generated_fixture"));
+        assert!(
+            library_spec
+                .zig_source
+                .contains("const std = @import(\"std\");")
+        );
+        assert!(
+            !library_spec
+                .zig_source
+                .contains("pub mod generated_fixture")
+        );
         assert!(!library_spec.zig_source.contains("#![allow(clippy::all)]"));
     }
 

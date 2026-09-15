@@ -246,6 +246,13 @@ pub const JACOBIAN_CHUNK_NAMES: &[&str] = &[\n{}];\n",
     }
 
     fn emit_lib_rs(&self) -> String {
+        // Dense Jacobian blocks may omit structural zeros. Clear the complete
+        // ABI buffer before dispatch so reused output buffers stay correct.
+        let jacobian_zero_init = if self.manifest.matrix_backend.as_str() == "dense" {
+            "        out.fill(0.0);\n"
+        } else {
+            ""
+        };
         let residual_chunk_exports = self
             .manifest
             .functions
@@ -297,6 +304,7 @@ pub unsafe extern \"C\" fn rustedscithe_aot_chunk_{fn_name}(\n\
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
         let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
         let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
+        {jacobian_zero_init}\
         generated::{module_name}::{fn_name}(args, out);\n\
     }}));\n\
     result.is_ok()\n\
@@ -304,6 +312,7 @@ pub unsafe extern \"C\" fn rustedscithe_aot_chunk_{fn_name}(\n\
                     fn_name = chunk.fn_name,
                     module_name = self.module_name,
                     out_len = chunk.len,
+                    jacobian_zero_init = jacobian_zero_init,
                 )
             })
             .collect::<Vec<_>>()
@@ -392,11 +401,12 @@ pub unsafe extern \"C\" fn rustedscithe_aot_eval_jacobian_values(\n\
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{\n\
         let args = unsafe {{ std::slice::from_raw_parts(args_ptr, args_len) }};\n\
         let out = unsafe {{ std::slice::from_raw_parts_mut(out_ptr, out_len) }};\n\
-        {}\n\
+        {}{}\n\
     }}));\n\
     result.is_ok()\n\
 }}\n",
             residual_dispatch.replace("generated::", &format!("generated::{}::", self.module_name)),
+            jacobian_zero_init,
             jacobian_dispatch.replace("generated::", &format!("generated::{}::", self.module_name))
         ) + residual_chunk_exports.as_str()
             + jacobian_chunk_exports.as_str()
@@ -584,6 +594,7 @@ mod tests {
         assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_residual_chunk_1"));
         assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_0"));
         assert!(lib_rs.contains("rustedscithe_aot_chunk_eval_jacobian_chunk_1"));
+        assert!(lib_rs.contains("out.fill(0.0);"));
     }
 
     #[test]

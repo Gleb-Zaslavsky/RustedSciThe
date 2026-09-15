@@ -1,9 +1,11 @@
+use std::borrow::Cow;
+
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
-    solve_linear_system,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_residual_norm_with_runtime, measure_linear_system_operation,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
@@ -112,14 +114,53 @@ impl NonlinearMethod for DampedNewtonMethod {
         &self,
         problem: &P,
         state: &IterationState,
-        _method_state: &mut Self::MethodState,
+        method_state: &mut Self::MethodState,
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, None)
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        true
+    }
+
+    fn supports_trial_residual_workspace(&self) -> bool {
+        true
+    }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, workspace)
+    }
+}
+
+impl DampedNewtonMethod {
+    fn step_impl<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        _method_state: &mut (),
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        mut workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
         runtime.linear_solves += 1;
         // Compute Newton step:
-        let newton_step =
-            solve_linear_system(options.linear_solver, &state.jacobian, &state.residual)?;
+        let newton_step = measure_linear_system_operation(
+            options.linear_solver,
+            &state.jacobian,
+            &state.residual,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         if newton_step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
@@ -131,19 +172,40 @@ impl NonlinearMethod for DampedNewtonMethod {
         let current_norm = state.residual_norm;
 
         for _ in 0..self.max_line_search_steps {
-            let trial_x = &state.x - alpha * &newton_step;
-            let trial_x = if let Some(bounds) = &options.bounds {
-                bounds.project(&trial_x)
+            let (trial_x, trial_norm) = if let Some(workspace) = workspace.as_deref_mut() {
+                workspace.set_affine_trial(&state.x, -alpha, &newton_step)?;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(workspace.trial_x_mut());
+                }
+                let (trial_point, residual_output) = workspace.trial_x_and_residual_mut();
+                let trial_norm = eval_residual_norm_with_runtime(
+                    problem,
+                    trial_point,
+                    runtime,
+                    options.diagnostics.collect_statistics,
+                    residual_output,
+                )?;
+                (Cow::Borrowed(trial_point), trial_norm)
             } else {
-                trial_x
+                let mut trial_x = &state.x - alpha * &newton_step;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(&mut trial_x);
+                }
+                let trial_norm = eval_residual_norm_with_runtime(
+                    problem,
+                    &trial_x,
+                    runtime,
+                    options.diagnostics.collect_statistics,
+                    None,
+                )?;
+                (Cow::Owned(trial_x), trial_norm)
             };
-            let trial_norm = problem.residual(&trial_x)?.norm();
             if trial_norm < current_norm * (1.0 - self.sufficient_decrease * alpha)
                 || trial_norm < options.tolerance
             {
                 runtime.accepted_steps += 1;
                 return Ok(StepOutcome::Continue {
-                    next_x: trial_x,
+                    next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             }
@@ -218,14 +280,53 @@ impl NonlinearMethod for DampedNewtonMethodAdvanced {
         &self,
         problem: &P,
         state: &IterationState,
-        _method_state: &mut Self::MethodState,
+        method_state: &mut Self::MethodState,
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, None)
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        true
+    }
+
+    fn supports_trial_residual_workspace(&self) -> bool {
+        true
+    }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, workspace)
+    }
+}
+
+impl DampedNewtonMethodAdvanced {
+    fn step_impl<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        _method_state: &mut (),
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        mut workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
         runtime.linear_solves += 1;
         // Compute Newton step:
-        let newton_step =
-            solve_linear_system(options.linear_solver, &state.jacobian, &state.residual)?;
+        let newton_step = measure_linear_system_operation(
+            options.linear_solver,
+            &state.jacobian,
+            &state.residual,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
 
         if newton_step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
@@ -254,16 +355,34 @@ impl NonlinearMethod for DampedNewtonMethodAdvanced {
         for k in 0..self.max_damping_iterations {
             info!("Damping iteration {}, lambda = {:.6e}", k, lambda);
 
-            let damped_step = lambda * &newton_step;
-            let trial_x = &state.x - &damped_step;
-
-            let trial_x = if let Some(bounds) = &options.bounds {
-                bounds.project(&trial_x)
+            let (trial_x, trial_norm) = if let Some(workspace) = workspace.as_deref_mut() {
+                workspace.set_affine_trial(&state.x, -lambda, &newton_step)?;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(workspace.trial_x_mut());
+                }
+                let (trial_point, residual_output) = workspace.trial_x_and_residual_mut();
+                let trial_norm = eval_residual_norm_with_runtime(
+                    problem,
+                    trial_point,
+                    runtime,
+                    options.diagnostics.collect_statistics,
+                    residual_output,
+                )?;
+                (Cow::Borrowed(trial_point), trial_norm)
             } else {
-                trial_x
+                let mut trial_x = &state.x - lambda * &newton_step;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(&mut trial_x);
+                }
+                let trial_norm = eval_residual_norm_with_runtime(
+                    problem,
+                    &trial_x,
+                    runtime,
+                    options.diagnostics.collect_statistics,
+                    None,
+                )?;
+                (Cow::Owned(trial_x), trial_norm)
             };
-
-            let trial_norm = problem.residual(&trial_x)?.norm();
 
             info!(
                 "Trial norm = {:.6e}, current norm = {:.6e}",
@@ -281,7 +400,7 @@ impl NonlinearMethod for DampedNewtonMethodAdvanced {
                 info!("Damping coefficient accepted");
                 runtime.accepted_steps += 1;
                 return Ok(StepOutcome::Continue {
-                    next_x: trial_x,
+                    next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             }

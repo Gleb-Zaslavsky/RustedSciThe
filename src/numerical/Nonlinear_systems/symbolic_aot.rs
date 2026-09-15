@@ -16,7 +16,7 @@ use crate::numerical::Nonlinear_systems::symbolic::{
 };
 use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
-    AotBuildProfile, AotBuildRequest, AotBuildResult,
+    AotBuildProfile, AotBuildRequest, AotBuildResult, AotCompileConfig,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
 use log::info;
@@ -62,13 +62,39 @@ pub fn materialize_symbolic_nonlinear_aot_build(
     output_parent_dir: &Path,
     profile: AotBuildProfile,
 ) -> io::Result<AotBuildResult> {
+    materialize_symbolic_nonlinear_aot_build_with_compile_config(
+        crate_name,
+        module_name,
+        problem,
+        options,
+        output_parent_dir,
+        profile,
+        AotCompileConfig::default(),
+    )
+}
+
+/// Materializes a nonlinear AOT build with explicit Rust compile settings.
+///
+/// The compile settings affect only the external cold build. They do not
+/// change the generated ABI, runtime plan, or numerical evaluation path.
+pub fn materialize_symbolic_nonlinear_aot_build_with_compile_config(
+    crate_name: &str,
+    module_name: &str,
+    problem: &SymbolicNonlinearProblem,
+    options: SymbolicDenseAotOptions,
+    output_parent_dir: &Path,
+    profile: AotBuildProfile,
+    compile_config: AotCompileConfig,
+) -> io::Result<AotBuildResult> {
     let crate_spec = generated_aot_crate_from_symbolic_nonlinear_problem(
         crate_name,
         module_name,
         problem,
         options,
     );
-    AotBuildRequest::new(crate_spec, output_parent_dir, profile).materialize()
+    AotBuildRequest::new(crate_spec, output_parent_dir, profile)
+        .with_compile_config(compile_config)
+        .materialize()
 }
 
 #[cfg(test)]
@@ -167,5 +193,30 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("libgenerated_nonlinear_symbolic_build.rlib")
         );
+    }
+
+    #[test]
+    fn nonlinear_symbolic_aot_bridge_exposes_explicit_fast_build_profile() {
+        let problem = elementary_problem();
+        let dir = tempdir().expect("tempdir should exist");
+        let result = materialize_symbolic_nonlinear_aot_build_with_compile_config(
+            "generated_nonlinear_symbolic_fast_build",
+            "generated_nonlinear_symbolic_fast_build_module",
+            &problem,
+            SymbolicDenseAotOptions::default(),
+            dir.path(),
+            AotBuildProfile::Release,
+            AotCompileConfig::fast_build(),
+        )
+        .expect("fast AOT build request should materialize");
+
+        assert_eq!(
+            result.cargo_env,
+            vec![(
+                "RUSTFLAGS".to_string(),
+                "-C opt-level=1 -C codegen-units=16".to_string()
+            )]
+        );
+        assert_eq!(result.cargo_command_line(), "cargo build --release");
     }
 }

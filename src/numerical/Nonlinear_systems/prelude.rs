@@ -9,9 +9,9 @@
 // Core engine types
 pub use crate::numerical::Nonlinear_systems::engine::{
     DiagnosticsOptions, EngineLogLevel, IterationRecord, IterationState, LinearSolverKind,
-    MemoryDiagnostics, NewtonMethod, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    SolveResult, SolveStatistics, SolverEngine, StepOutcome, scaled_norm, scaling_vector,
-    solve_linear_system,
+    MemoryDiagnostics, MethodWorkspace, NewtonMethod, NonlinearMethod, RuntimeDiagnostics,
+    SolveAttemptStatistics, SolveOptions, SolveResult, SolveStatistics, SolverEngine,
+    StatisticsAvailability, StepOutcome, scaled_norm, scaling_vector, solve_linear_system,
 };
 
 // Error types
@@ -56,8 +56,11 @@ pub use crate::numerical::Nonlinear_systems::trust_region_LM::{
 
 // Symbolic problem adapter
 pub use crate::numerical::Nonlinear_systems::symbolic::{
-    PreparedSymbolicNonlinearAotProblem, SymbolicBackendConfig, SymbolicBackendKind,
-    SymbolicDenseAotOptions, SymbolicNonlinearProblem, SymbolicProblemOptions,
+    BoundSymbolicNonlinearProblem, LambdifyExecutionPolicy, NonlinearParameterSchema,
+    NonlinearParameterValues, PreparedSymbolicNonlinearAotProblem,
+    PreparedSymbolicNonlinearProblem, SymbolicArtifactAction, SymbolicArtifactPolicy,
+    SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions, SymbolicNonlinearProblem,
+    SymbolicPreparationReport, SymbolicProblemOptions,
 };
 pub use crate::numerical::Nonlinear_systems::symbolic_aot::{
     generated_aot_crate_from_symbolic_nonlinear_problem, materialize_symbolic_nonlinear_aot_build,
@@ -69,7 +72,7 @@ pub use crate::numerical::Nonlinear_systems::symbolic_backend::{
 };
 pub use crate::numerical::Nonlinear_systems::symbolic_generated::{
     DenseGeneratedBackendMode, PreparedGeneratedSymbolicProblem, SymbolicAotBuildPolicy,
-    SymbolicGeneratedBackendConfig,
+    SymbolicAotBuildRetryPolicy, SymbolicGeneratedBackendConfig,
 };
 
 /// User-facing wrapper around every nonlinear-system solver exported by the prelude.
@@ -281,6 +284,68 @@ impl NonlinearMethod for NonlinearSolverMethod {
             )),
         }
     }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        match (self, method_state) {
+            (Self::Newton(method), NonlinearSolverMethodState::Newton(inner)) => {
+                method.step_with_workspace(problem, state, inner, options, runtime, workspace)
+            }
+            (Self::DampedNewton(method), NonlinearSolverMethodState::DampedNewton(inner)) => {
+                method.step_with_workspace(problem, state, inner, options, runtime, workspace)
+            }
+            (
+                Self::DampedNewtonAdvanced(method),
+                NonlinearSolverMethodState::DampedNewtonAdvanced(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (
+                Self::LevenbergMarquardt(method),
+                NonlinearSolverMethodState::LevenbergMarquardt(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (
+                Self::LevenbergMarquardtMinpack(method),
+                NonlinearSolverMethodState::LevenbergMarquardtMinpack(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (
+                Self::NielsenLevenbergMarquardt(method),
+                NonlinearSolverMethodState::NielsenLevenbergMarquardt(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (
+                Self::NielsenLevenbergMarquardtAdvanced(method),
+                NonlinearSolverMethodState::NielsenLevenbergMarquardtAdvanced(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (Self::TrustRegion(method), NonlinearSolverMethodState::TrustRegion(inner)) => {
+                method.step_with_workspace(problem, state, inner, options, runtime, workspace)
+            }
+            (Self::PowellDogleg(method), NonlinearSolverMethodState::PowellDogleg(inner)) => {
+                method.step_with_workspace(problem, state, inner, options, runtime, workspace)
+            }
+            (Self::TrustRegionLM(method), NonlinearSolverMethodState::TrustRegionLM(inner)) => {
+                method.step_with_workspace(problem, state, inner, options, runtime, workspace)
+            }
+            _ => Err(SolveError::InvalidConfig(
+                "solver method state does not match the selected enum variant".to_string(),
+            )),
+        }
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        matches!(
+            self,
+            Self::DampedNewton(_)
+                | Self::DampedNewtonAdvanced(_)
+                | Self::LevenbergMarquardt(_)
+                | Self::NielsenLevenbergMarquardt(_)
+                | Self::NielsenLevenbergMarquardtAdvanced(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +383,32 @@ mod facade_tests {
     fn enum_facade_reports_name() {
         let method = NonlinearSolverMethod::TrustRegionLM(TrustRegionLMMethod::default());
         assert_eq!(method.name(), "trust_region_lm");
+    }
+
+    #[test]
+    fn workspace_policy_keeps_unbenchmarked_trust_region_methods_owned() {
+        assert!(
+            NonlinearSolverMethod::LevenbergMarquardt(LevenbergMarquardtMethod::default())
+                .supports_step_workspace()
+        );
+        assert!(
+            NonlinearSolverMethod::NielsenLevenbergMarquardt(
+                NielsenLevenbergMarquardtMethod::default()
+            )
+            .supports_step_workspace()
+        );
+        assert!(
+            !NonlinearSolverMethod::TrustRegion(TrustRegionMethod::default())
+                .supports_step_workspace()
+        );
+        assert!(
+            !NonlinearSolverMethod::PowellDogleg(PowellDoglegMethod::default())
+                .supports_step_workspace()
+        );
+        assert!(
+            !NonlinearSolverMethod::TrustRegionLM(TrustRegionLMMethod::default())
+                .supports_step_workspace()
+        );
     }
 
     #[test]

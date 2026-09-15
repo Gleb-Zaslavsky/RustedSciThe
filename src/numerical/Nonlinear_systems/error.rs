@@ -30,6 +30,26 @@ pub enum SolveError {
     },
     /// Solver configuration is invalid.
     InvalidConfig(String),
+    /// The declared symbolic parameter schema is invalid.
+    InvalidParameterSchema(String),
+    /// Parameter values were created for a different ordered schema.
+    ParameterSchemaMismatch(String),
+    /// The declared symbolic variable schema is invalid.
+    InvalidVariableSchema(String),
+    /// An equation references a symbol absent from the declared schema.
+    UndeclaredSymbol {
+        /// Zero-based equation index.
+        equation_index: usize,
+        /// Referenced symbol name.
+        name: String,
+    },
+    /// A parameter value is not finite.
+    NonFiniteParameterValue {
+        /// Index of the invalid parameter.
+        index: usize,
+        /// Invalid value.
+        value: f64,
+    },
     /// Initial point violates the provided bounds.
     InfeasibleInitialGuess {
         /// Index of the offending variable.
@@ -78,6 +98,28 @@ impl Display for SolveError {
                 )
             }
             SolveError::InvalidConfig(msg) => write!(f, "invalid solver configuration: {msg}"),
+            SolveError::InvalidParameterSchema(msg) => {
+                write!(f, "invalid nonlinear parameter schema: {msg}")
+            }
+            SolveError::ParameterSchemaMismatch(msg) => {
+                write!(f, "nonlinear parameter schema mismatch: {msg}")
+            }
+            SolveError::InvalidVariableSchema(msg) => {
+                write!(f, "invalid nonlinear variable schema: {msg}")
+            }
+            SolveError::UndeclaredSymbol {
+                equation_index,
+                name,
+            } => write!(
+                f,
+                "equation {equation_index} references undeclared symbol '{name}'"
+            ),
+            SolveError::NonFiniteParameterValue { index, value } => {
+                write!(
+                    f,
+                    "non-finite nonlinear parameter at index {index}: {value}"
+                )
+            }
             SolveError::InfeasibleInitialGuess {
                 index,
                 value,

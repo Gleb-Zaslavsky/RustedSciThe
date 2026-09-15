@@ -1,9 +1,12 @@
+use std::borrow::Cow;
+
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome, scaled_norm,
-    scaling_vector, solve_linear_system,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_jacobian_with_runtime, eval_residual_with_runtime,
+    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
@@ -425,6 +428,36 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethodAdvanced {
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, None)
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        true
+    }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, workspace)
+    }
+}
+
+impl NielsenLevenbergMarquardtMethodAdvanced {
+    fn step_impl<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut NielsenLevenbergMarquardtStateAdvanced,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        mut workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
         // Update scaling based on current Jacobian
         TrustRegionScaling::update_scaling(
             &state.jacobian,
@@ -491,14 +524,21 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethodAdvanced {
 
             // SOLVE TRUST REGION SUBPROBLEM with current parameters
             // Create scaled regularization matrix based on method
-            let reg = TrustRegionScaling::create_scaled_regularization(
+            runtime.linear_solves += 1;
+            let mut regularized = jtj.clone();
+            TrustRegionScaling::add_scaled_regularization_in_place(
+                &mut regularized,
                 method_state.mu,
                 &method_state.scaling,
                 &self.scaling_method,
             );
-
-            runtime.linear_solves += 1;
-            let step = solve_linear_system(options.linear_solver, &(&jtj + reg), &gradient)?;
+            let step = measure_linear_system_operation_owned(
+                options.linear_solver,
+                regularized,
+                &gradient,
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
 
             info!("Step vector norm: {:.6e}", step.norm());
 
@@ -512,14 +552,27 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethodAdvanced {
             }
 
             // Compute trial point
-            let trial_x = if let Some(bounds) = &options.bounds {
-                bounds.project(&(&state.x + &step))
+            let trial_x = if let Some(workspace) = workspace.as_deref_mut() {
+                workspace.set_affine_trial(&state.x, 1.0, &step)?;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(workspace.trial_x_mut());
+                }
+                Cow::Borrowed(workspace.trial_x())
             } else {
-                &state.x + &step
+                let mut trial_x = &state.x + &step;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(&mut trial_x);
+                }
+                Cow::Owned(trial_x)
             };
 
             // Evaluate function at trial point
-            let trial_residual = problem.residual(&trial_x)?;
+            let trial_residual = eval_residual_with_runtime(
+                problem,
+                &trial_x,
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
 
             // Compute reduction ratio using selected method
             let rho = ReductionRatioSolver::solve_reduction_ratio(
@@ -570,7 +623,7 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethodAdvanced {
 
                 runtime.accepted_steps += 1;
                 return Ok(StepOutcome::Continue {
-                    next_x: trial_x,
+                    next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             } else {
@@ -718,6 +771,36 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethod {
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, None)
+    }
+
+    fn supports_step_workspace(&self) -> bool {
+        true
+    }
+
+    fn step_with_workspace<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut Self::MethodState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
+        self.step_impl(problem, state, method_state, options, runtime, workspace)
+    }
+}
+
+impl NielsenLevenbergMarquardtMethod {
+    fn step_impl<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        state: &IterationState,
+        method_state: &mut NielsenLevenbergMarquardtState,
+        options: &SolveOptions,
+        runtime: &mut RuntimeDiagnostics,
+        mut workspace: Option<&mut MethodWorkspace>,
+    ) -> Result<StepOutcome, SolveError> {
         let scaling = scaling_vector(&state.jacobian, self.use_column_scaling);
         let gradient = -state.jacobian.transpose() * &state.residual;
         if let Some(g_tol) = self.g_tolerance {
@@ -733,21 +816,50 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethod {
 
         let jtj = state.jacobian.transpose() * &state.jacobian;
         for _ in 0..self.max_rejections {
-            let reg = DMatrix::from_diagonal(&scaling.map(|v| method_state.mu * v * v));
             runtime.linear_solves += 1;
-            let step = solve_linear_system(options.linear_solver, &(&jtj + reg), &gradient)?;
+            let mut regularized = jtj.clone();
+            TrustRegionScaling::add_squared_diagonal_regularization_in_place(
+                &mut regularized,
+                method_state.mu,
+                &scaling,
+            );
+            let step = measure_linear_system_operation_owned(
+                options.linear_solver,
+                regularized,
+                &gradient,
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
             if scaled_norm(&scaling, &step) < options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
             }
 
-            let trial_x = if let Some(bounds) = &options.bounds {
-                bounds.project(&(&state.x + &step))
+            let trial_x = if let Some(workspace) = workspace.as_deref_mut() {
+                workspace.set_affine_trial(&state.x, 1.0, &step)?;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(workspace.trial_x_mut());
+                }
+                Cow::Borrowed(workspace.trial_x())
             } else {
-                &state.x + &step
+                let mut trial_x = &state.x + &step;
+                if let Some(bounds) = &options.bounds {
+                    bounds.project_in_place(&mut trial_x);
+                }
+                Cow::Owned(trial_x)
             };
-            let trial_residual = problem.residual(&trial_x)?;
+            let trial_residual = eval_residual_with_runtime(
+                problem,
+                &trial_x,
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
             let actual = state.residual.norm_squared() - trial_residual.norm_squared();
-            let trial_jacobian = problem.jacobian(&trial_x)?;
+            let trial_jacobian = eval_jacobian_with_runtime(
+                problem,
+                &trial_x,
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
             let predicted = 0.5
                 * step.dot(
                     &(step.component_mul(&scaling).map(|v| method_state.mu * v)
@@ -770,7 +882,7 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethod {
                 method_state.nu = self.nu_init;
                 runtime.accepted_steps += 1;
                 return Ok(StepOutcome::Continue {
-                    next_x: trial_x,
+                    next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             }

@@ -71,7 +71,21 @@ impl ZigEmitter {
     ///
     /// Signature: `pub fn function_name(inputs: [*]const f64, outputs: [*]f64) void`
     pub fn emit_block_function(ir: &LinearBlock, fn_name: &str, _arity: usize) -> String {
+        let output_indices = (0..ir.outputs.len()).collect::<Vec<_>>();
+        Self::emit_block_function_with_output_indices(ir, fn_name, &output_indices)
+    }
+
+    fn emit_block_function_with_output_indices(
+        ir: &LinearBlock,
+        fn_name: &str,
+        output_indices: &[usize],
+    ) -> String {
         Self::validate_identifier(fn_name, "function");
+        assert_eq!(
+            ir.outputs.len(),
+            output_indices.len(),
+            "dense output indices must match lowered outputs"
+        );
         let live = Self::live_instructions_for_block(ir);
         let mut out = String::new();
         out.push_str(&format!(
@@ -87,7 +101,7 @@ impl ZigEmitter {
         for instr in live {
             Self::emit_instruction(instr, &mut out);
         }
-        for (index, output) in ir.outputs.iter().enumerate() {
+        for (&index, output) in output_indices.iter().zip(&ir.outputs) {
             out.push_str(&format!(
                 "    outputs[{}] = {};\n",
                 index,
@@ -162,7 +176,9 @@ impl ZigEmitter {
             | Instr::Sub { a, b, .. }
             | Instr::Mul { a, b, .. }
             | Instr::Div { a, b, .. }
-            | Instr::Pow { base: a, exp: b, .. } => vec![*a, *b],
+            | Instr::Pow {
+                base: a, exp: b, ..
+            } => vec![*a, *b],
             Instr::Exp { x, .. }
             | Instr::Ln { x, .. }
             | Instr::Sin { x, .. }
@@ -201,6 +217,30 @@ impl ZigEmitter {
             rows, cols
         ));
         out.push_str(&Self::emit_block_function(ir, fn_name, arity));
+        out
+    }
+
+    /// Emits a dense Jacobian block while omitting entries proven to be zero.
+    /// The complete output buffer is still owned by the caller and must be
+    /// zero-initialized before this function is dispatched.
+    pub fn emit_dense_jacobian_block_function_with_output_offsets(
+        ir: &LinearBlock,
+        fn_name: &str,
+        _arity: usize,
+        rows: usize,
+        cols: usize,
+        output_indices: &[usize],
+    ) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "// Dense Jacobian block: {} rows x {} cols, structural zeros elided\n",
+            rows, cols
+        ));
+        out.push_str(&Self::emit_block_function_with_output_indices(
+            ir,
+            fn_name,
+            output_indices,
+        ));
         out
     }
 

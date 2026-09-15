@@ -1321,6 +1321,50 @@ impl RustEmitter {
         out
     }
 
+    fn emit_block_function_with_output_offsets(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        output_offsets: &[usize],
+    ) -> String {
+        Self::validate_identifier(fn_name, "function");
+        assert_eq!(
+            ir.outputs.len(),
+            output_offsets.len(),
+            "dense output offsets must match lowered outputs"
+        );
+        let output_len = output_offsets
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |offset| offset + 1);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "pub fn {}(args: &[f64], out: &mut [f64]) {{\n",
+            fn_name
+        ));
+        out.push_str(&format!(
+            "    debug_assert!(args.len() >= {}, \"expected at least {} arguments\");\n",
+            arity, arity
+        ));
+        out.push_str(&format!(
+            "    debug_assert!(out.len() >= {}, \"expected at least {} output slots\");\n",
+            output_len, output_len
+        ));
+        for instr in &ir.instructions {
+            Self::emit_instruction(instr, &mut out);
+        }
+        for (&offset, output) in output_offsets.iter().zip(&ir.outputs) {
+            out.push_str(&format!(
+                "    out[{}] = {};\n",
+                offset,
+                Self::temp_name(*output)
+            ));
+        }
+        out.push_str("}\n");
+        out
+    }
+
     /// Emit a residual block function with explicit vector-length metadata.
     pub fn emit_residual_block_function(
         ir: &LinearBlock,
@@ -1348,6 +1392,31 @@ impl RustEmitter {
             rows, cols
         ));
         out.push_str(&Self::emit_block_function(ir, fn_name, arity));
+        out
+    }
+
+    /// Emits a dense Jacobian block while skipping symbolic structural zeros.
+    /// The caller still supplies the complete dense output slice; omitted
+    /// positions must therefore be zero-initialized by the ABI wrapper.
+    pub fn emit_dense_jacobian_block_function_with_output_offsets(
+        ir: &LinearBlock,
+        fn_name: &str,
+        arity: usize,
+        rows: usize,
+        cols: usize,
+        output_offsets: &[usize],
+    ) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "// Dense Jacobian block: {} rows x {} cols, structural zeros elided\n",
+            rows, cols
+        ));
+        out.push_str(&Self::emit_block_function_with_output_offsets(
+            ir,
+            fn_name,
+            arity,
+            output_offsets,
+        ));
         out
     }
 
@@ -1537,6 +1606,8 @@ pub struct GeneratedBlock {
     pub ir: LinearBlock,
     /// Optional typed output-layout metadata used for specialized emitters.
     pub layout: Option<CodegenOutputLayout>,
+    /// Optional local output positions for dense blocks with elided zeros.
+    output_offsets: Option<Vec<usize>>,
 }
 
 /// Fine-grained lowering breakdown for an atom-backed generated block.
@@ -1626,6 +1697,7 @@ impl GeneratedBlock {
             vars: vars.iter().map(|s| s.to_string()).collect(),
             ir: Expr::lower_many_to_linear(exprs, vars),
             layout: None,
+            output_offsets: None,
         }
     }
 
@@ -1638,6 +1710,7 @@ impl GeneratedBlock {
             ir: Lowerer::new(&plan.input_names)
                 .lower_many_iter(plan.outputs.iter().map(|output| output.expr)),
             layout: Some(plan.layout),
+            output_offsets: None,
         }
     }
 
@@ -1652,7 +1725,31 @@ impl GeneratedBlock {
     /// Builds a typed dense Jacobian block from a flattened task plan.
     pub fn from_dense_jacobian_plan(plan: &CodegenTaskPlan<'_>) -> Self {
         match plan.layout {
-            CodegenOutputLayout::Matrix { .. } => Self::from_task_plan(plan),
+            CodegenOutputLayout::Matrix { rows, cols } => {
+                let nonzero_outputs = plan
+                    .outputs
+                    .iter()
+                    .filter(|output| !output.expr.is_zero())
+                    .collect::<Vec<_>>();
+                let output_offsets = nonzero_outputs
+                    .iter()
+                    .map(|output| {
+                        let (row, col) = output.coordinate.unwrap_or_else(|| {
+                            panic!("dense Jacobian output is missing matrix coordinates")
+                        });
+                        row * cols + col
+                    })
+                    .collect::<Vec<_>>();
+                let is_dense = output_offsets.len() == rows * cols;
+                Self {
+                    fn_name: plan.fn_name.to_string(),
+                    vars: plan.input_names.iter().map(|s| s.to_string()).collect(),
+                    ir: Lowerer::new(&plan.input_names)
+                        .lower_many_iter(nonzero_outputs.iter().map(|output| output.expr)),
+                    layout: Some(plan.layout),
+                    output_offsets: (!is_dense).then_some(output_offsets),
+                }
+            }
             _ => panic!("dense Jacobian plan must have matrix layout"),
         }
     }
@@ -1803,6 +1900,7 @@ impl GeneratedBlock {
                 vars: vars.to_vec(),
                 ir: final_ir,
                 layout,
+                output_offsets: None,
             },
             breakdown,
         )
@@ -1816,15 +1914,25 @@ impl GeneratedBlock {
                 self.vars.len(),
                 len,
             ),
-            Some(CodegenOutputLayout::Matrix { rows, cols }) => {
-                RustEmitter::emit_dense_jacobian_block_function(
+            Some(CodegenOutputLayout::Matrix { rows, cols }) => match &self.output_offsets {
+                Some(offsets) => {
+                    RustEmitter::emit_dense_jacobian_block_function_with_output_offsets(
+                        &self.ir,
+                        &self.fn_name,
+                        self.vars.len(),
+                        rows,
+                        cols,
+                        offsets,
+                    )
+                }
+                None => RustEmitter::emit_dense_jacobian_block_function(
                     &self.ir,
                     &self.fn_name,
                     self.vars.len(),
                     rows,
                     cols,
-                )
-            }
+                ),
+            },
             Some(CodegenOutputLayout::SparseValues { rows, cols, nnz }) => {
                 RustEmitter::emit_sparse_values_block_function(
                     &self.ir,
@@ -2090,16 +2198,28 @@ impl CodegenModule {
                         &mut out,
                     )
                 }
-                Some(CodegenOutputLayout::Matrix { rows, cols }) => {
-                    CEmitter::emit_dense_jacobian_block_function_into(
+                Some(CodegenOutputLayout::Matrix { rows, cols }) => match &block.output_offsets {
+                    Some(offsets) => {
+                        out.push_str(
+                            &CEmitter::emit_dense_jacobian_block_function_with_output_offsets(
+                                &block.ir,
+                                &block.fn_name,
+                                block.vars.len(),
+                                rows,
+                                cols,
+                                offsets,
+                            ),
+                        );
+                    }
+                    None => CEmitter::emit_dense_jacobian_block_function_into(
                         &block.ir,
                         &block.fn_name,
                         block.vars.len(),
                         rows,
                         cols,
                         &mut out,
-                    )
-                }
+                    ),
+                },
                 Some(CodegenOutputLayout::SparseValues { rows, cols, nnz }) => {
                     CEmitter::emit_sparse_values_block_function_into(
                         &block.ir,
@@ -2153,15 +2273,25 @@ impl CodegenModule {
                         len,
                     )
                 }
-                Some(CodegenOutputLayout::Matrix { rows, cols }) => {
-                    ZigEmitter::emit_dense_jacobian_block_function(
+                Some(CodegenOutputLayout::Matrix { rows, cols }) => match &block.output_offsets {
+                    Some(offsets) => {
+                        ZigEmitter::emit_dense_jacobian_block_function_with_output_offsets(
+                            &block.ir,
+                            &block.fn_name,
+                            block.vars.len(),
+                            rows,
+                            cols,
+                            offsets,
+                        )
+                    }
+                    None => ZigEmitter::emit_dense_jacobian_block_function(
                         &block.ir,
                         &block.fn_name,
                         block.vars.len(),
                         rows,
                         cols,
-                    )
-                }
+                    ),
+                },
                 Some(CodegenOutputLayout::SparseValues { rows, cols, nnz }) => {
                     ZigEmitter::emit_sparse_values_block_function(
                         &block.ir,
@@ -2268,7 +2398,8 @@ mod tests {
         fixture_block_eval, fixture_scalar_eval,
     };
     use crate::symbolic::codegen::codegen_tasks::{
-        CodegenOutputLayout, IvpResidualTask, ResidualTask, SparseExprEntry, SparseJacobianTask,
+        CodegenOutputLayout, IvpResidualTask, JacobianTask, ResidualTask, SparseExprEntry,
+        SparseJacobianTask,
     };
     use tempfile::tempdir;
 
@@ -2714,6 +2845,31 @@ mod tests {
 
         assert!(source.contains("// Residual block: 2 outputs"));
         assert!(source.contains("pub fn eval_residual(args: &[f64], out: &mut [f64])"));
+    }
+
+    #[test]
+    fn dense_jacobian_codegen_elides_structural_zeros_but_keeps_global_offsets() {
+        let jacobian = vec![
+            vec![Expr::Var("x".to_string()), Expr::Const(0.0)],
+            vec![Expr::Const(0.0), Expr::Var("y".to_string())],
+        ];
+        let task = JacobianTask {
+            fn_name: "eval_jacobian",
+            jacobian: &jacobian,
+            variables: &["x", "y"],
+            params: None,
+        };
+        let block = GeneratedBlock::from_dense_jacobian_plan(&task.plan());
+        let source = CodegenModule::new("generated_diagonal")
+            .add_dense_jacobian_plan(&task.plan())
+            .emit_source();
+
+        assert_eq!(block.output_offsets.as_deref(), Some(&[0, 3][..]));
+        assert!(source.contains("structural zeros elided"));
+        assert!(source.contains("out[0]"));
+        assert!(source.contains("out[3]"));
+        assert!(!source.contains("out[1] ="));
+        assert!(!source.contains("out[2] ="));
     }
 
     #[test]

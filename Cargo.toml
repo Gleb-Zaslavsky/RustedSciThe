@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -61,6 +61,12 @@ harness = false
 [[bench]]
 name = "block_tridiag_benches"
 harness = false
+[[bench]]
+name = "nonlinear_systems_benches"
+harness = false
+[[bench]]
+name = "nonlinear_systems_allocation_audit"
+harness = false
 
 [profile.bench]
 opt-level = 3
@@ -108,6 +114,7 @@ enum_dispatch = "0.3.13"
 src = "0.0.6"
 nom = "8.0.0"
 tempfile = "3.27.0"
+fs2 = "0.4.3"
 cfg-if = "1.0.4"
 gauss-quad = "0.3.0"
 prettytable = "0.10.0"
@@ -178,6 +185,27 @@ path = "examples/rus/symbolic_derivatives_guide.rs"
 [[example]]
 name = "task_document_symbolic_aliases_guide"
 path = "examples/task_document_symbolic_aliases_guide.rs"
+[[example]]
+name = "ivp_kinetics_symbolic_preflight_guide"
+path = "examples/ivp_kinetics_symbolic_preflight_guide.rs"
+[[example]]
+name = "nonlinear_systems_modern_guide"
+path = "examples/nonlinear_systems_modern_guide.rs"
+[[example]]
+name = "nonlinear_lambdify_legacy_guide"
+path = "examples/nonlinear_lambdify_legacy_guide.rs"
+[[example]]
+name = "nonlinear_lambdify_prepared_guide"
+path = "examples/nonlinear_lambdify_prepared_guide.rs"
+[[example]]
+name = "nonlinear_aot_lifecycle_guide"
+path = "examples/nonlinear_aot_lifecycle_guide.rs"
+[[example]]
+name = "rus_nonlinear_systems_modern_guide"
+path = "examples/rus/nonlinear_systems_modern_guide.rs"
+[[example]]
+name = "rus_nonlinear_aot_lifecycle_guide"
+path = "examples/rus/nonlinear_aot_lifecycle_guide.rs"
 [[example]]
 name = "rus_task_document_symbolic_aliases_guide"
 path = "examples/rus/task_document_symbolic_aliases_guide.rs"

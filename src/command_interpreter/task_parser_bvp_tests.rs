@@ -13,6 +13,7 @@ fn parse_document_for_bvp(input: &str) -> DocumentMap {
 
     parser.keys_to_lower_case(Some(vec![
         "equations".to_string(),
+        "parameters".to_string(),
         "boundary_conditions".to_string(),
         "initial_guess".to_string(),
         "where".to_string(),
@@ -119,6 +120,44 @@ y: 0.0
         spec.boundary_conditions.conditions["y"],
         vec![(0usize, 1.0f64)]
     );
+}
+
+#[test]
+fn bvp_task_parser_preserves_readable_parameter_section_symbol_case() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+unknowns: T
+rhs: -R*T
+
+parameters
+R: 2.0
+
+boundary_conditions
+T_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+initial_guess
+T: 1.0
+"#;
+
+    let spec = parse_bvp_task_from_str(input)
+        .expect("BVP task with a readable parameter section should parse");
+
+    assert_eq!(spec.equations.parameter_names, vec!["R"]);
+    assert_eq!(spec.equations.parameter_values["R"], 2.0);
+    let rhs = spec.equations.rhs[0].lambdify_borrowed_thread_safe(&["x", "T"]);
+    assert!((rhs(&[0.0, 3.0]) + 6.0).abs() < 1e-12);
 }
 
 #[test]

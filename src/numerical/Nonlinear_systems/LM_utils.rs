@@ -138,6 +138,62 @@ impl TrustRegionScaling {
         }
         regularization
     }
+
+    /// Adds `mu * D^T * D` to an existing normal-equation matrix in place.
+    ///
+    /// The regularization is diagonal, so materializing a dense `DMatrix` is
+    /// unnecessary in the LM trial loop. Keeping this operation in place
+    /// also lets the caller consume the resulting matrix in the factorizer.
+    pub(crate) fn add_scaled_regularization_in_place(
+        matrix: &mut DMatrix<f64>,
+        mu: f64,
+        diag: &DVector<f64>,
+        method: &ScalingMethod,
+    ) {
+        debug_assert_eq!(matrix.nrows(), matrix.ncols());
+        debug_assert_eq!(matrix.nrows(), diag.len());
+
+        for index in 0..diag.len() {
+            let increment = match method {
+                ScalingMethod::Levenberg => mu,
+                ScalingMethod::Marquardt | ScalingMethod::More => mu * diag[index] * diag[index],
+            };
+            matrix[(index, index)] += increment;
+        }
+    }
+
+    /// Adds `mu * diag^2` to a dense normal-equation matrix in place.
+    pub(crate) fn add_squared_diagonal_regularization_in_place(
+        matrix: &mut DMatrix<f64>,
+        mu: f64,
+        diag: &DVector<f64>,
+    ) {
+        debug_assert_eq!(matrix.nrows(), matrix.ncols());
+        debug_assert_eq!(matrix.nrows(), diag.len());
+
+        for index in 0..diag.len() {
+            matrix[(index, index)] += mu * diag[index] * diag[index];
+        }
+    }
+
+    /// Adds classic LM's diagonal scaling to `J^T J` without allocating a
+    /// second dense matrix. Its diagonal is the diagonal of `J^T J` itself.
+    pub(crate) fn add_jtj_diagonal_regularization_in_place(matrix: &mut DMatrix<f64>, lambda: f64) {
+        debug_assert_eq!(matrix.nrows(), matrix.ncols());
+        for index in 0..matrix.nrows() {
+            let diagonal = matrix[(index, index)];
+            matrix[(index, index)] += lambda * diagonal;
+        }
+    }
+
+    /// Adds classic LM's `lambda * I` regularization without materializing an
+    /// identity matrix.
+    pub(crate) fn add_identity_regularization_in_place(matrix: &mut DMatrix<f64>, lambda: f64) {
+        debug_assert_eq!(matrix.nrows(), matrix.ncols());
+        for index in 0..matrix.nrows() {
+            matrix[(index, index)] += lambda;
+        }
+    }
 }
 /////////////////////END OF SCALING////////////////////////////////////////////////////////////////////////
 
@@ -747,3 +803,50 @@ impl TrustRegionSubproblem {
 }
 /////////////////////////END OF TRUST REGION SUBPROBLEM SOLVERS////////////////////////////////////////////////
 */
+
+#[cfg(test)]
+mod tests {
+    use super::{ScalingMethod, TrustRegionScaling};
+    use nalgebra::{DMatrix, DVector};
+
+    #[test]
+    fn in_place_regularization_matches_materialized_matrix() {
+        let base =
+            DMatrix::from_row_slice(3, 3, &[4.0, 0.5, -0.25, 0.5, 9.0, 1.25, -0.25, 1.25, 16.0]);
+        let scaling = DVector::from_vec(vec![2.0, 3.0, 4.0]);
+        let mu = 0.125;
+
+        for method in [ScalingMethod::Levenberg, ScalingMethod::Marquardt] {
+            let mut actual = base.clone();
+            TrustRegionScaling::add_scaled_regularization_in_place(
+                &mut actual,
+                mu,
+                &scaling,
+                &method,
+            );
+
+            let regularization =
+                TrustRegionScaling::create_scaled_regularization(mu, &scaling, &method);
+            let expected = &base + regularization;
+            assert!((actual - expected).norm() < 1e-14);
+        }
+
+        let mut actual = base.clone();
+        TrustRegionScaling::add_jtj_diagonal_regularization_in_place(&mut actual, mu);
+        let diagonal = DMatrix::from_diagonal(&base.diagonal());
+        let expected = &base + mu * diagonal;
+        assert!((actual - expected).norm() < 1e-14);
+    }
+
+    #[test]
+    fn identity_regularization_updates_only_the_diagonal() {
+        let base = DMatrix::from_row_slice(2, 2, &[2.0, 3.0, 5.0, 7.0]);
+        let mut actual = base.clone();
+        TrustRegionScaling::add_identity_regularization_in_place(&mut actual, 0.75);
+
+        assert_eq!(actual[(0, 0)], 2.75);
+        assert_eq!(actual[(0, 1)], 3.0);
+        assert_eq!(actual[(1, 0)], 5.0);
+        assert_eq!(actual[(1, 1)], 7.75);
+    }
+}
