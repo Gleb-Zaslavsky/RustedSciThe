@@ -4,9 +4,10 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, LinearSolverKind, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics,
-    SolveOptions, StepOutcome, eval_residual_with_runtime, measure_linear_operation,
-    measure_linear_system_operation_owned, scaled_norm, scaling_vector, solve_linear_system,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics,
+    SolveOptions,
+    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
+    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
@@ -365,7 +366,12 @@ MAIN OUTER LOOP:
 
 */
 
-/// MINPACK-style Levenberg-Marquardt variant (approximation of `lmder` behavior).
+/// Fortran-aligned MINPACK Levenberg-Marquardt variant based on `lmder`.
+///
+/// The nonlinear iteration follows the original MINPACK acceptance,
+/// trust-region update, scaling, and termination ordering. Its linearized
+/// subproblem is solved by the shared pivoted-QR/LMPAR implementation in
+/// `trust_region_LM`.
 #[derive(Debug, Clone)]
 pub struct LevenbergMarquardtMinpack {
     /// tolerance on reduction in the sum of squares (ftol)
@@ -412,83 +418,61 @@ pub struct LMMinpackState {
 }
 
 impl LevenbergMarquardtMinpack {
-    #[allow(dead_code)]
-    /// Small helper: compute (J^T J + par * D^2)
-    fn build_augmented(&self, jtj: &DMatrix<f64>, par: f64, diag: &DVector<f64>) -> DMatrix<f64> {
-        let n = jtj.nrows();
-        let mut mat = jtj.clone();
-        for i in 0..n {
-            mat[(i, i)] += par * diag[i] * diag[i];
+    /// Fortran LMPAR is implemented by the shared trust-region helper below.
+    /// Applies the `lmder` trust-region radius/parameter update verbatim.
+    ///
+    /// The middle ratio interval is intentionally a no-op.  In particular,
+    /// `0.25 < ratio < 0.75` must not be treated like the high-ratio branch.
+    fn update_trust_region(
+        method_state: &mut LMMinpackState,
+        ratio: f64,
+        actred: f64,
+        pnorm: f64,
+        fnorm: f64,
+        fnorm1: f64,
+        dirder: f64,
+    ) {
+        const P1: f64 = 0.1;
+        const P5: f64 = 0.5;
+        const P25: f64 = 0.25;
+        const P75: f64 = 0.75;
+
+        if ratio <= P25 {
+            let mut temp = P5;
+            if actred < 0.0 {
+                temp = P5 * dirder / (dirder + P5 * actred);
+            }
+            if P1 * fnorm1 >= fnorm || temp < P1 {
+                temp = P1;
+            }
+            method_state.delta = temp * method_state.delta.min(pnorm / P1);
+            method_state.par /= temp;
+        } else if method_state.par == 0.0 || ratio >= P75 {
+            method_state.delta = pnorm / P5;
+            method_state.par *= P5;
         }
-        mat
     }
 
-    /// lmpar-like simple bracket-and-bisect solver for par.
-    /// Solves (JtJ + par D^2) p = -g  and aims to enforce ||D p|| ≤ delta.
-    /// Returns (p, par).
-    #[allow(dead_code)]
-    fn find_par(
-        &self,
-        solver: LinearSolverKind,
-        jtj: &DMatrix<f64>,
-        g: &DVector<f64>,
-        diag: &DVector<f64>,
-        delta: f64,
-    ) -> Result<(DVector<f64>, f64), SolveError> {
-        // try par = 0 first
-        let mut par = 0.0;
-        let mut p = solve_linear_system(solver, &self.build_augmented(jtj, par, diag), &(-g))?;
-        let mut pnorm = scaled_norm(diag, &p);
-        if pnorm <= delta {
-            return Ok((p, par));
+    /// Computes MINPACK's scaled gradient test from the original Jacobian.
+    ///
+    /// For `J P = Q R`, MINPACK evaluates `R^T Q^T f` and divides each
+    /// component by the corresponding original column norm.  This is exactly
+    /// `J^T f` in the original variable ordering, so no approximate `J^T J`
+    /// expression is needed here.
+    fn scaled_gradient_norm(jacobian: &DMatrix<f64>, residual: &DVector<f64>) -> f64 {
+        let fnorm = residual.norm();
+        if fnorm == 0.0 {
+            return 0.0;
         }
-
-        // find an upper bound for par by increasing until pnorm <= delta
-        let mut par_lo = 0.0;
-        let mut par_hi: f64 = 1.0;
-        for _ in 0..60 {
-            let mat = self.build_augmented(jtj, par_hi, diag);
-            match solve_linear_system(solver, &mat, &(-g)) {
-                Ok(p_try) => {
-                    let pn = scaled_norm(diag, &p_try);
-                    if pn <= delta {
-                        p = p_try;
-                        pnorm = pn;
-                        par = par_hi;
-                        break;
-                    } else {
-                        par_hi *= 10.0;
-                    }
-                }
-                Err(_) => {
-                    // If solve fails, grow par_hi and continue
-                    par_hi *= 10.0;
-                }
-            }
-        }
-
-        if pnorm > delta {
-            // perform bisection search between par_lo and par_hi
-            for _ in 0..80 {
-                let par_mid = 0.5 * (par_lo + par_hi);
-                let mat = self.build_augmented(jtj, par_mid, diag);
-                let p_try = solve_linear_system(solver, &mat, &(-g))?;
-                let pn = scaled_norm(diag, &p_try);
-                if pn <= delta {
-                    par_hi = par_mid;
-                    p = p_try;
-                    pnorm = pn;
-                } else {
-                    par_lo = par_mid;
-                }
-                if (par_hi - par_lo).abs() < 1e-18 {
-                    break;
-                }
-            }
-            par = par_hi;
-        }
-
-        Ok((p, par))
+        let gradient = jacobian.transpose() * residual;
+        jacobian
+            .column_iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                let column_norm = column.norm();
+                (column_norm > 0.0).then(|| (gradient[index] / fnorm / column_norm).abs())
+            })
+            .fold(0.0, f64::max)
     }
 }
 
@@ -503,15 +487,35 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         _residual: &DVector<f64>,
         jacobian: &DMatrix<f64>,
     ) -> Result<Self::MethodState, SolveError> {
+        if !self.ftol.is_finite()
+            || self.ftol < 0.0
+            || !self.xtol.is_finite()
+            || self.xtol < 0.0
+            || !self.gtol.is_finite()
+            || self.gtol < 0.0
+            || self.maxfev == 0
+            || !self.factor.is_finite()
+            || self.factor <= 0.0
+        {
+            return Err(SolveError::InvalidConfig(
+                "MINPACK tolerances, maxfev and factor must be finite and valid".to_string(),
+            ));
+        }
         let n = jacobian.ncols();
         // build initial diag
         let diag = if self.mode == 2 {
             if let Some(d) = &self.diag {
-                if d.len() != n {
-                    return Err(SolveError::DimensionMismatch {
-                        expected: n,
-                        actual: d.len(),
-                        context: "lm diag",
+                if d.len() != n || d.iter().any(|value| *value <= 0.0 || !value.is_finite()) {
+                    return Err(if d.len() != n {
+                        SolveError::DimensionMismatch {
+                            expected: n,
+                            actual: d.len(),
+                            context: "lm diag",
+                        }
+                    } else {
+                        SolveError::InvalidConfig(
+                            "mode=2 requires finite positive diag entries".to_string(),
+                        )
                     });
                 }
                 d.clone()
@@ -533,7 +537,9 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             par: 0.0,
             delta,
             diag,
-            nfev: 0,
+            // The generic engine has already evaluated F(x0) before calling
+            // method initialization, matching MINPACK's initial NFEV = 1.
+            nfev: 1,
             njev: 0,
         })
     }
@@ -549,50 +555,32 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         // MINPACK constants (used by rules below)
         let p1 = 0.1;
         let p5 = 0.5;
-        let p25 = 0.25;
-        let p75 = 0.75;
         let p0001 = 1e-4;
         let epsmch = f64::EPSILON;
 
-        let n = state.jacobian.ncols();
+        if method_state.nfev >= self.maxfev {
+            return Ok(StepOutcome::Terminated(TerminationReason::MaxIterations));
+        }
 
         // Norm of current residual
         let fnorm = state.residual.norm();
 
-        // Form J^T*J and gradient g = J^T * f
         let j = &state.jacobian;
-        let jtj = j.transpose() * j;
-        let g = j.transpose() * &state.residual;
 
-        // Approximate scaled gradient norm (simple test)
-        let mut gnorm: f64 = 0.0;
-        if fnorm > 0.0 {
-            for jcol in 0..n {
-                let colnorm = j.column(jcol).norm();
-                if colnorm > 0.0 {
-                    // compute dot of column with qtf-like vector approximated by g/fnorm
-                    let mut sum = 0.0;
-                    for i in 0..n {
-                        sum += jtj[(i, jcol)] * (g[i] / fnorm);
-                    }
-                    let denom = if self.mode == 2 {
-                        method_state.diag[jcol]
-                    } else {
-                        colnorm
-                    };
-                    if denom != 0.0 {
-                        gnorm = gnorm.max((sum.abs()) / denom);
-                    }
-                }
-            }
-        }
+        let gnorm = Self::scaled_gradient_norm(j, &state.residual);
         if gnorm <= self.gtol {
-            return Ok(StepOutcome::Terminated(TerminationReason::Converged));
+            // MINPACK calls this an orthogonality termination (INFO=4).  The
+            // generic root-solving API has no separate INFO=4 variant, so do
+            // not report a root when the residual is still above tolerance.
+            if state.residual_norm <= options.tolerance {
+                return Ok(StepOutcome::Converged);
+            }
+            return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
         }
 
         // if mode==1, update diag to be max(diag, column_norm)
         if self.mode != 2 {
-            for jcol in 0..n {
+            for jcol in 0..j.ncols() {
                 let colnorm = j.column(jcol).norm();
                 method_state.diag[jcol] = method_state.diag[jcol].max(colnorm);
                 if method_state.diag[jcol] == 0.0 {
@@ -602,7 +590,6 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         }
 
         // Determine par and step with the shared MINPACK-style trust-region solver.
-        let _solver_kind = options.linear_solver;
         runtime.linear_solves += 1;
         let subproblem =
             measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
@@ -636,9 +623,12 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         }
 
         // Evaluate residual at trial_x
-        let trial_residual = problem
-            .residual(&trial_x)
-            .map_err(|e| SolveError::ResidualEvaluation(format!("{:?}", e)))?;
+        let trial_residual = eval_residual_with_runtime(
+            problem,
+            &trial_x,
+            runtime,
+            options.diagnostics.collect_statistics,
+        )?;
         method_state.nfev += 1;
         let fnorm1 = trial_residual.norm();
 
@@ -655,34 +645,57 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         let temp2 = (par.sqrt() * pnorm) / fnorm.max(1e-300);
         let prered = temp1 * temp1 + (temp2 * temp2) / p5;
         let dirder = -(temp1 * temp1 + temp2 * temp2);
-
         let ratio = if prered != 0.0 { actred / prered } else { 0.0 };
 
-        // Update delta and par following MINPACK-like rules (simplified)
-        if ratio > p25 {
-            if par == 0.0 || ratio < p75 {
-                method_state.delta = pnorm / p5;
-                method_state.par = 0.5 * par;
-            } else {
-                method_state.delta = pnorm / p5;
-            }
-        } else {
-            let mut temp = p5;
-            if actred < 0.0 {
-                temp = p5 * dirder / (dirder + p5 * actred);
-            }
-            if p1 * fnorm1 >= fnorm || temp < p1 {
-                temp = p1;
-            }
-            method_state.delta = temp * method_state.delta.min(pnorm / p1);
-            if par != 0.0 {
-                method_state.par = par / temp;
-            }
-        }
+        Self::update_trust_region(method_state, ratio, actred, pnorm, fnorm, fnorm1, dirder);
+
+        // Keep MINPACK's termination ordering: these checks are made after
+        // updating the trust-region state, for both accepted and rejected
+        // trials.  On a rejected trial the current iterate and xnorm remain
+        // unchanged; on an accepted trial the candidate norm is the new
+        // xnorm.
+        let accepted = ratio >= p0001;
+        let trial_xnorm = scaled_norm(&method_state.diag, &trial_x);
+        let termination_xnorm = if accepted { trial_xnorm } else { xnorm };
+        let function_converged = actred.abs() <= self.ftol
+            && prered <= self.ftol
+            && p5 * ratio <= 1.0;
+        let parameter_converged = method_state.delta <= self.xtol * termination_xnorm;
+        let stringent_function =
+            actred.abs() <= epsmch && prered <= epsmch && p5 * ratio <= 1.0;
+        let stringent_parameter =
+            p1 * (p1 * method_state.delta).max(pnorm) <= epsmch * termination_xnorm;
+        let stringent_gradient = gnorm <= epsmch;
 
         // Decide acceptance
-        if ratio > p0001 {
+        if accepted {
             runtime.accepted_steps += 1;
+            if function_converged
+                || parameter_converged
+                || method_state.nfev >= self.maxfev
+                || stringent_function
+                || stringent_parameter
+                || stringent_gradient
+            {
+                let reason = if fnorm1 <= options.tolerance {
+                    // Preserve the generic root-solver contract even when a
+                    // method-specific stopping criterion fires on the same
+                    // accepted trial.
+                    TerminationReason::Converged
+                } else if function_converged || parameter_converged {
+                    // MINPACK INFO=1/2/3 are progress criteria, not proof
+                    // that a root was reached.
+                    TerminationReason::Stagnation
+                } else if method_state.nfev >= self.maxfev {
+                    TerminationReason::MaxIterations
+                } else {
+                    // MINPACK INFO=6/7/8 are machine-precision exits. The
+                    // generic root API maps those non-root exits to
+                    // Stagnation.
+                    TerminationReason::Stagnation
+                };
+                return Ok(StepOutcome::AcceptedAndTerminated { next_x: trial_x, reason });
+            }
             return Ok(StepOutcome::Continue {
                 next_x: trial_x,
                 accepted: true,
@@ -691,14 +704,15 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             runtime.rejected_steps += 1;
         }
 
-        // Termination (mapped from MINPACK conditions)
+        // Termination (mapped from MINPACK conditions).  These are deliberately
+        // after the acceptance decision so an accepted trial is never lost.
         if method_state.nfev >= self.maxfev {
             return Ok(StepOutcome::Terminated(TerminationReason::MaxIterations));
         }
-        if actred.abs() <= epsmch && prered <= epsmch && p5 * ratio <= 1.0 {
+        if function_converged || parameter_converged || stringent_function {
             return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
         }
-        if method_state.delta <= epsmch * xnorm {
+        if stringent_parameter || stringent_gradient {
             return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
         }
 
@@ -714,6 +728,7 @@ mod lm_minpack_tests {
     use super::*;
     use crate::numerical::Nonlinear_systems::engine::{SolveOptions, SolverEngine};
     use crate::numerical::Nonlinear_systems::error::TerminationReason;
+    use crate::numerical::Nonlinear_systems::problem::NonlinearProblem;
     use approx::assert_relative_eq;
     use nalgebra::{DMatrix, DVector};
 
@@ -857,5 +872,154 @@ mod lm_minpack_tests {
         // check equations nearly zero
         //   let r = Coupled.residual(&x).expect("residual");
         //   assert!(r[0].abs() < 1e-6 && r[1].abs() < 1e-6, "residuals not small: {:?}", r);
+    }
+
+    #[test]
+    fn lm_minpack_trust_region_update_matches_fortran_branch_ordering() {
+        let mut state = LMMinpackState {
+            par: 4.0,
+            delta: 10.0,
+            diag: DVector::from_element(1, 1.0),
+            nfev: 0,
+            njev: 0,
+        };
+
+        // MINPACK leaves both values unchanged for 0.25 < ratio < 0.75.
+        LevenbergMarquardtMinpack::update_trust_region(
+            &mut state, 0.5, 0.5, 2.0, 1.0, 0.1, -0.25,
+        );
+        assert_eq!(state.delta, 10.0);
+        assert_eq!(state.par, 4.0);
+
+        // For ratio >= 0.75, MINPACK expands the radius and halves par.
+        LevenbergMarquardtMinpack::update_trust_region(
+            &mut state, 0.9, 0.8, 2.0, 1.0, 0.1, -0.25,
+        );
+        assert_eq!(state.delta, 4.0);
+        assert_eq!(state.par, 2.0);
+
+        // For ratio <= 0.25, the rejected-step branch shrinks the radius and
+        // increases par according to the computed reduction model.
+        LevenbergMarquardtMinpack::update_trust_region(
+            &mut state, 0.1, 0.1, 2.0, 1.0, 0.1, -0.25,
+        );
+        assert_eq!(state.delta, 2.0);
+        assert_eq!(state.par, 4.0);
+    }
+
+    #[test]
+    fn lm_minpack_gradient_norm_uses_jacobian_transpose_residual() {
+        let jacobian = DMatrix::from_diagonal(&DVector::from_vec(vec![2.0, 3.0]));
+        let residual = DVector::from_vec(vec![1.0, 1.0]);
+        let expected = 1.0 / 2.0_f64.sqrt();
+
+        assert!((LevenbergMarquardtMinpack::scaled_gradient_norm(&jacobian, &residual)
+            - expected)
+            .abs()
+            < 1e-15);
+    }
+
+    struct StationaryNonRoot;
+
+    impl NonlinearProblem for StationaryNonRoot {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn residual(&self, _x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+            Ok(DVector::from_element(1, 1.0))
+        }
+    }
+
+    impl JacobianProvider for StationaryNonRoot {
+        fn jacobian(&self, _x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+            Ok(DMatrix::zeros(1, 1))
+        }
+    }
+
+    #[test]
+    fn lm_minpack_does_not_report_stationary_nonroot_as_converged() {
+        let result = SolverEngine::new(
+            LevenbergMarquardtMinpack::default(),
+            SolveOptions {
+                tolerance: 1e-10,
+                max_iterations: 8,
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&StationaryNonRoot, DVector::from_element(1, 0.0))
+        .expect("stationary problem should terminate with a typed result");
+
+        assert_eq!(result.termination, TerminationReason::Stagnation);
+        assert!(result.residual_norm > 1e-10);
+    }
+
+    #[test]
+    fn lm_minpack_ftol_stops_after_returning_the_accepted_trial() {
+        let result = SolverEngine::new(
+            LevenbergMarquardtMinpack {
+                ftol: 1.0e9,
+                xtol: 0.0,
+                gtol: 0.0,
+                maxfev: 100,
+                ..LevenbergMarquardtMinpack::default()
+            },
+            SolveOptions {
+                tolerance: 1.0e-12,
+                max_iterations: 20,
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&ScalarQuadratic, DVector::from_element(1, 1.5))
+        .expect("ftol termination should return a typed result");
+
+        assert_eq!(result.termination, TerminationReason::Stagnation);
+        assert_ne!(result.x[0], 1.5);
+        assert!(result.residual_norm < (1.5_f64 * 1.5 - 2.0).abs());
+    }
+
+    #[test]
+    fn lm_minpack_xtol_stops_after_returning_the_accepted_trial() {
+        let result = SolverEngine::new(
+            LevenbergMarquardtMinpack {
+                ftol: 0.0,
+                xtol: 1.0e9,
+                gtol: 0.0,
+                maxfev: 100,
+                ..LevenbergMarquardtMinpack::default()
+            },
+            SolveOptions {
+                tolerance: 1.0e-12,
+                max_iterations: 20,
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&ScalarQuadratic, DVector::from_element(1, 1.5))
+        .expect("xtol termination should return a typed result");
+
+        assert_eq!(result.termination, TerminationReason::Stagnation);
+        assert_ne!(result.x[0], 1.5);
+        assert!(result.residual_norm < (1.5_f64 * 1.5 - 2.0).abs());
+    }
+
+    #[test]
+    fn lm_minpack_maxfev_stops_after_returning_the_accepted_trial() {
+        let result = SolverEngine::new(
+            LevenbergMarquardtMinpack {
+                maxfev: 2,
+                ..LevenbergMarquardtMinpack::default()
+            },
+            SolveOptions {
+                tolerance: 1.0e-12,
+                max_iterations: 20,
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&ScalarQuadratic, DVector::from_element(1, 1.5))
+        .expect("maxfev termination should return a typed result");
+
+        assert_eq!(result.termination, TerminationReason::MaxIterations);
+        assert_ne!(result.x[0], 1.5);
+        assert!(result.residual_norm < (1.5_f64 * 1.5 - 2.0).abs());
     }
 }

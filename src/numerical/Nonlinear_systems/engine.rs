@@ -308,6 +308,15 @@ pub enum StepOutcome {
         next_x: DVector<f64>,
         accepted: bool,
     },
+    /// Accept the trial point and then stop with a method-specific reason.
+    ///
+    /// Trust-region methods need this outcome for criteria that are evaluated
+    /// after MINPACK-style acceptance. Returning only `Terminated` would lose
+    /// the already accepted trial point.
+    AcceptedAndTerminated {
+        next_x: DVector<f64>,
+        reason: TerminationReason,
+    },
     /// Stop because the method detected convergence.
     Converged,
     /// Stop with an explicit reason.
@@ -719,6 +728,72 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                         state.jacobian,
                         state.residual_norm,
                         iteration,
+                        reason,
+                        history,
+                        stats,
+                        self.options.diagnostics.enable_memory_diagnostics,
+                        solve_started,
+                    ));
+                }
+                StepOutcome::AcceptedAndTerminated { next_x, reason } => {
+                    let mut next_x = next_x;
+                    if let Some(bounds) = &self.options.bounds {
+                        bounds.project_in_place(&mut next_x);
+                    }
+                    let step_norm = (&next_x - &state.x).norm();
+                    state.x = next_x;
+                    if problem.supports_residual_into() {
+                        let residual = workspace
+                            .residual
+                            .as_mut()
+                            .expect("residual workspace must exist when enabled");
+                        eval_residual_into(
+                            problem,
+                            &state.x,
+                            residual,
+                            &mut stats,
+                            collect_statistics,
+                        )?;
+                        std::mem::swap(&mut state.residual, residual);
+                    } else {
+                        state.residual =
+                            eval_residual(problem, &state.x, &mut stats, collect_statistics)?;
+                    }
+                    if problem.supports_jacobian_into() {
+                        let jacobian = workspace
+                            .jacobian
+                            .as_mut()
+                            .expect("Jacobian workspace must exist when enabled");
+                        eval_jacobian_into(
+                            problem,
+                            &state.x,
+                            jacobian,
+                            &mut stats,
+                            collect_statistics,
+                        )?;
+                        std::mem::swap(&mut state.jacobian, jacobian);
+                    } else {
+                        state.jacobian =
+                            eval_jacobian(problem, &state.x, &mut stats, collect_statistics)?;
+                    }
+                    state.residual_norm = state.residual.norm();
+                    push_history(
+                        &self.options,
+                        &mut history,
+                        iteration + 1,
+                        state.residual_norm,
+                        step_norm,
+                        true,
+                    );
+                    stats.iterations = iteration + 1;
+                    record_attempt(&mut stats, attempt_start, &runtime, iteration, false);
+                    merge_runtime(&mut stats, &runtime, collect_statistics);
+                    return Ok(build_result(
+                        state.x,
+                        state.residual,
+                        state.jacobian,
+                        state.residual_norm,
+                        iteration + 1,
                         reason,
                         history,
                         stats,
@@ -1559,6 +1634,19 @@ mod tests {
                 assert!((left_x - right_x).norm() < 1e-12);
             }
             (StepOutcome::Converged, StepOutcome::Converged) => {}
+            (
+                StepOutcome::AcceptedAndTerminated {
+                    next_x: left_x,
+                    reason: left_reason,
+                },
+                StepOutcome::AcceptedAndTerminated {
+                    next_x: right_x,
+                    reason: right_reason,
+                },
+            ) => {
+                assert_eq!(left_reason, right_reason);
+                assert!((left_x - right_x).norm() < 1e-12);
+            }
             (StepOutcome::Terminated(left), StepOutcome::Terminated(right)) => {
                 assert_eq!(left, right);
             }
