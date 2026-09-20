@@ -17,6 +17,14 @@ pub enum BandedError {
     #[error("zero or numerically tiny pivot at index {index}, value={value}")]
     ZeroPivot { index: usize, value: f64 },
 
+    #[error("non-finite {stage} callback value at row={row}, col={col}, value={value}")]
+    NonFiniteCallbackValue {
+        stage: &'static str,
+        row: usize,
+        col: usize,
+        value: f64,
+    },
+
     #[error("solver has not been factorized")]
     NotFactorized,
 

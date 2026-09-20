@@ -8,6 +8,7 @@
 
 use std::{
     borrow::Borrow,
+    cell::RefCell,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -72,6 +73,11 @@ impl EvaluationCache {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 /// Constant bindings for exact rational evaluation keyed by full atoms.
@@ -107,9 +113,64 @@ pub struct FunctionMap {
 pub struct PreparedEvaluator {
     nodes: Vec<PreparedNode>,
     root: usize,
-    vars: Vec<Symbol>,
-    var_atoms: Vec<Atom>,
+    vars: Arc<[Symbol]>,
+    var_atoms: Arc<[Atom]>,
     function_map: FunctionMap,
+    // BVP residual/Jacobian expressions normally contain only numeric nodes and
+    // builtins.  Keep that fact so their hot callback path can skip the custom
+    // function maps and cache bookkeeping entirely.
+    plain_numeric: bool,
+}
+
+/// Reusable scratch storage for one prepared evaluation on one worker thread.
+///
+/// `PreparedEvaluator::evaluate` remains allocation-safe and keeps its public
+/// behavior, but the hot Lambdify closure uses this workspace through a
+/// thread-local.  AtomView BVP callbacks evaluate many scalar expressions in
+/// parallel; allocating a fresh `results` vector for every scalar entry made
+/// that route substantially slower than the Expr callback even though both
+/// had the same symbolic sparsity.
+#[derive(Default)]
+struct EvaluationWorkspace {
+    results: Vec<f64>,
+    cache: EvaluationCache,
+    symbol_map: FloatSymbolMap,
+    atom_map: HashMap<Atom, f64>,
+    arg_buffer: Vec<f64>,
+}
+
+thread_local! {
+    static EVALUATION_WORKSPACE: RefCell<EvaluationWorkspace> =
+        RefCell::new(EvaluationWorkspace::default());
+}
+
+/// Immutable variable ABI shared by a batch of prepared evaluators.
+///
+/// BVP residual and Jacobian entries all use the same flattened argument
+/// ordering. Keeping the index and variable atoms in one shared context avoids
+/// rebuilding O(number_of_variables) metadata for every scalar callback.
+pub(crate) struct PreparedVariableContext {
+    pub(crate) vars: Arc<[Symbol]>,
+    pub(crate) var_atoms: Arc<[Atom]>,
+    pub(crate) var_index: HashMap<Symbol, usize>,
+}
+
+impl PreparedVariableContext {
+    pub(crate) fn new(vars: &[Symbol]) -> Self {
+        let vars: Arc<[Symbol]> = vars.to_vec().into();
+        let var_atoms: Arc<[Atom]> = vars.iter().copied().map(Atom::new_var).collect();
+        let var_index = vars
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, symbol)| (symbol, i))
+            .collect();
+        Self {
+            vars,
+            var_atoms,
+            var_index,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -192,25 +253,41 @@ impl FunctionMap {
 impl PreparedEvaluator {
     /// Compile `atom` into a reusable numeric evaluation plan.
     pub fn new(atom: &Atom, vars: &[Symbol], function_map: &FunctionMap) -> Result<Self, String> {
-        let var_index: HashMap<Symbol, usize> = vars
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(i, symbol)| (symbol, i))
-            .collect();
+        let context = PreparedVariableContext::new(vars);
+        Self::new_with_context(atom, &context, function_map)
+    }
+
+    /// Compile an atom while reusing a caller-owned variable ABI.
+    ///
+    /// Large BVP batches compile many scalar residual/Jacobian entries against
+    /// the same argument ABI. Rebuilding the symbol-to-index map for every
+    /// entry makes cold preparation quadratic in the number of mesh unknowns.
+    /// The map is immutable during compilation, so it can safely be shared by
+    /// all Rayon workers.
+    pub(crate) fn new_with_context(
+        atom: &Atom,
+        context: &PreparedVariableContext,
+        function_map: &FunctionMap,
+    ) -> Result<Self, String> {
         let mut compiler = PreparedCompiler {
             nodes: Vec::new(),
             cache: HashMap::default(),
-            var_index: &var_index,
+            var_index: &context.var_index,
         };
         let root = compiler.compile_view(atom.as_view())?;
+        let plain_numeric = function_map.is_empty()
+            && compiler
+                .nodes
+                .iter()
+                .all(|node| !matches!(node, PreparedNode::Custom { .. }));
 
         Ok(Self {
             nodes: compiler.nodes,
             root,
-            vars: vars.to_vec(),
-            var_atoms: vars.iter().copied().map(Atom::new_var).collect(),
+            vars: Arc::clone(&context.vars),
+            var_atoms: Arc::clone(&context.var_atoms),
             function_map: function_map.clone(),
+            plain_numeric,
         })
     }
 
@@ -230,6 +307,35 @@ impl PreparedEvaluator {
         values: &[f64],
         function_map: &FunctionMap,
     ) -> Result<f64, String> {
+        let mut workspace = EvaluationWorkspace::default();
+        self.evaluate_with_workspace(values, function_map, &mut workspace)
+    }
+
+    /// Evaluate using scratch storage local to the current worker thread.
+    ///
+    /// This is intentionally crate-visible: public callers retain the simple
+    /// allocating `evaluate` API, while prepared callback builders can opt into
+    /// the reuse contract without exposing mutable evaluator state or a Mutex.
+    pub(crate) fn evaluate_thread_local(&self, values: &[f64]) -> Result<f64, String> {
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            if self.plain_numeric {
+                self.evaluate_plain_numeric(values, &mut workspace)
+            } else {
+                self.evaluate_with_workspace(values, &self.function_map, &mut workspace)
+            }
+        })
+    }
+
+    /// Evaluate the common AtomView numeric subset without initializing the
+    /// general custom-function evaluation state.  This is the path used by
+    /// BVP scalar callbacks; custom symbolic functions continue to use the
+    /// fully general evaluator below.
+    fn evaluate_plain_numeric(
+        &self,
+        values: &[f64],
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, String> {
         if values.len() != self.vars.len() {
             return Err(format!(
                 "Prepared evaluator expected {} argument(s), got {}",
@@ -238,11 +344,57 @@ impl PreparedEvaluator {
             ));
         }
 
-        let mut results = vec![0.0; self.nodes.len()];
-        let mut cache = EvaluationCache::default();
-        let mut symbol_map = None;
-        let mut atom_map = None;
-        let mut arg_buffer = Vec::new();
+        workspace.results.resize(self.nodes.len(), 0.0);
+        let results = &mut workspace.results;
+        for (index, node) in self.nodes.iter().enumerate() {
+            results[index] = match node {
+                PreparedNode::Const(value) => *value,
+                PreparedNode::Var(var_index) => values[*var_index],
+                PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
+                PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
+                PreparedNode::Builtin { symbol, arg } => {
+                    evaluate_builtin_function(*symbol, results[*arg])?
+                }
+                PreparedNode::Custom { symbol, .. } => {
+                    return Err(format!(
+                        "Custom function {} requires the general evaluator",
+                        symbol
+                    ));
+                }
+            };
+        }
+
+        Ok(results[self.root])
+    }
+
+    fn evaluate_with_workspace(
+        &self,
+        values: &[f64],
+        function_map: &FunctionMap,
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, String> {
+        if values.len() != self.vars.len() {
+            return Err(format!(
+                "Prepared evaluator expected {} argument(s), got {}",
+                self.vars.len(),
+                values.len()
+            ));
+        }
+
+        workspace.results.resize(self.nodes.len(), 0.0);
+        workspace.cache.clear();
+        workspace.symbol_map.clear();
+        workspace.atom_map.clear();
+        workspace.arg_buffer.clear();
+
+        let results = &mut workspace.results;
+        let cache = &mut workspace.cache;
+        let symbol_map = &mut workspace.symbol_map;
+        let atom_map = &mut workspace.atom_map;
+        let arg_buffer = &mut workspace.arg_buffer;
+        let mut symbol_map_ready = false;
+        let mut atom_map_ready = false;
 
         for (index, node) in self.nodes.iter().enumerate() {
             results[index] = match node {
@@ -263,23 +415,29 @@ impl PreparedEvaluator {
                     arg_buffer.extend(args.iter().map(|i| results[*i]));
 
                     if let Some(fun) = function_map.get_symbol(symbol) {
-                        let symbol_map_ref = symbol_map.get_or_insert_with(|| {
+                        if !symbol_map_ready {
                             self.vars
                                 .iter()
                                 .copied()
                                 .zip(values.iter().copied())
-                                .collect::<FloatSymbolMap>()
-                        });
-                        fun(&arg_buffer, symbol_map_ref, function_map, &mut cache)?
+                                .for_each(|(symbol, value)| {
+                                    symbol_map.insert(symbol, value);
+                                });
+                            symbol_map_ready = true;
+                        }
+                        fun(arg_buffer, symbol_map, function_map, cache)?
                     } else if let Some(fun) = function_map.get(symbol) {
-                        let atom_map_ref = atom_map.get_or_insert_with(|| {
+                        if !atom_map_ready {
                             self.var_atoms
                                 .iter()
                                 .cloned()
                                 .zip(values.iter().copied())
-                                .collect::<HashMap<Atom, f64>>()
-                        });
-                        fun(&arg_buffer, atom_map_ref, function_map, &mut cache)?
+                                .for_each(|(atom, value)| {
+                                    atom_map.insert(atom, value);
+                                });
+                            atom_map_ready = true;
+                        }
+                        fun(arg_buffer, atom_map, function_map, cache)?
                     } else {
                         return Err(format!("Missing function {}", symbol));
                     }

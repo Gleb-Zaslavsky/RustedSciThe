@@ -9,29 +9,41 @@ use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
 use crate::numerical::BVP_Damp::BVP_traits::{
-    Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting,
+    Fun, FunEnum, Jac, LinearSolveTiming, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::BvpDerivativeScheme;
+use crate::numerical::BVP_Damp::factor_runtime::prepare_factor_owner_runtime;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyFrozenGeneratedSolverState,
     BandedGeneratedBackendMode, BuildFrozenSolverRequest, FrozenGeneratedSolverState,
     FrozenSolverBuildRequest, GeneratedBackendConfig, SparseGeneratedBackendMode,
     try_generate_and_apply_frozen_solver_state,
 };
+use crate::numerical::BVP_Damp::prepared_runtime::{
+    BvpPreparedResourceSnapshot, BvpPreparedRuntime, BvpRuntimeRevision, PreparedPlanFingerprint,
+    fingerprint_bytes, fingerprint_debug,
+};
 use crate::numerical::BVP_Damp::solver_common::{
     DEFAULT_MAX_ITERATIONS, cleanup_registered_aot_artifacts, default_dense_method_name,
     default_forward_scheme_name, default_placeholder_y, default_sparse_method_name,
     frozen_point_mesh,
 };
+use crate::numerical::BVP_Damp::telemetry::{
+    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetryRecorder, BvpTelemetrySnapshot,
+};
 use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::bvp::telemetry::{
+    BvpGenerationTelemetrySnapshot, BvpLambdifyTelemetry, BvpLambdifyTelemetryMode,
+};
 use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
 };
+use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::symbolic_functions_BVP::{
-    BvpBackendIntegrationError, BvpSymbolicAssemblyBackend,
+    BvpBackendIntegrationError, BvpMatrixBackend, BvpSymbolicAssemblyBackend,
 };
 
 use chrono::Local;
@@ -69,6 +81,8 @@ pub struct FrozenBvpStatistics {
     pub counters: HashMap<String, usize>,
     pub timers: HashMap<String, String>,
     pub diagnostics: HashMap<String, String>,
+    /// Typed telemetry for new consumers; legacy maps above remain compatible.
+    pub telemetry: BvpTelemetrySnapshot,
 }
 
 impl FrozenSolverOptions {
@@ -96,6 +110,38 @@ impl FrozenSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Selects the runtime telemetry level for Lambdify callbacks.
+    ///
+    /// The default is [`BvpLambdifyTelemetryMode::Off`]. Use `Counters` for
+    /// cheap call counts or `Detailed` when callback wall-clock timings are
+    /// needed for a diagnostic/story run.
+    pub fn with_lambdify_telemetry_mode(mut self, mode: BvpLambdifyTelemetryMode) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_lambdify_telemetry_mode(mode);
+        self
+    }
+
+    /// Selects typed solver decision logging for diagnostic runs.
+    pub fn with_bvp_logging_mode(mut self, mode: BvpLoggingMode) -> Self {
+        self.generated_backend_config = self.generated_backend_config.with_bvp_logging_mode(mode);
+        self
+    }
+
+    /// Configures bounded typed decision logging for the solver runtime.
+    pub fn with_bvp_logging_config(mut self, config: BvpLoggingConfig) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_bvp_logging_config(config);
+        self
+    }
+
+    /// Selects whether solver counters and stage timers are collected.
+    pub fn with_bvp_telemetry_mode(mut self, mode: BvpTelemetryMode) -> Self {
+        self.generated_backend_config = self.generated_backend_config.with_bvp_telemetry_mode(mode);
         self
     }
 
@@ -192,6 +238,18 @@ impl FrozenSolverOptions {
         self.generated_backend_config = self
             .generated_backend_config
             .with_symbolic_assembly_backend(backend);
+        self
+    }
+
+    /// Selects the matrix backend through the typed API.
+    ///
+    /// The historical `method: String` field is retained for compatibility,
+    /// while the normalized generated-backend configuration becomes the source
+    /// of truth for new callers.
+    pub fn with_matrix_backend(mut self, backend: MatrixBackend) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_matrix_backend_override(backend);
         self
     }
 
@@ -354,7 +412,15 @@ pub struct NRBVP {
     pub p: f64,
     pub y: Box<dyn VectorType>,
     m: usize, // iteration counter without jacobian recalculation
-    old_jac: Option<Box<dyn MatrixType>>,
+    /// Internal prepared factor for direct Dense/faer Frozen solves.
+    /// Banded keeps ownership inside `BandedMatrixType`; legacy callers never
+    /// see this field or the factor-owner runtime.
+    /// Common prepared-runtime owner for reusable Dense/faer factors.
+    ///
+    /// Banded ownership remains inside `BandedMatrixType`; callbacks and
+    /// mesh/layout are separate migration slices.
+    factor_owner: BvpPreparedRuntime,
+    prepared_runtime_revision: BvpRuntimeRevision,
     jac_recalc: bool,
     error_old: f64,
     variable_string: Vec<String>, // vector of indexed variable names
@@ -362,7 +428,15 @@ pub struct NRBVP {
     generated_backend_config: GeneratedBackendConfig,
     generated_backend_selected_backend: Option<SelectedBackendKind>,
     generated_backend_runtime_diagnostics: HashMap<String, String>,
-    calc_statistics: HashMap<String, usize>,
+    telemetry_counters: BvpTelemetryRecorder,
+    generation_telemetry: Option<BvpGenerationTelemetrySnapshot>,
+    atom_discretization_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
+    legacy_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    atom_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    direct_banded_jacobian_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry>,
+    parameter_binding: Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
     custom_timer: CustomTimer,
     no_reports: bool,
 }
@@ -377,7 +451,35 @@ impl ApplyFrozenGeneratedSolverState for NRBVP {
         self.variable_string = state.variable_string;
         self.bandwidth = state.bandwidth;
         self.generated_backend_selected_backend = Some(state.selected_backend);
+        let backend_fallback = matches!(
+            self.generated_backend_config
+                .effective_backend_policy(&self.method),
+            BackendSelectionPolicy::PreferAotThenLambdify
+                | BackendSelectionPolicy::PreferAotThenNumeric
+        ) && matches!(
+            state.selected_backend,
+            SelectedBackendKind::Lambdify | SelectedBackendKind::Numeric
+        );
+        self.telemetry_counters.record_backend_selection(
+            match state.selected_backend {
+                SelectedBackendKind::Numeric => 1,
+                SelectedBackendKind::Lambdify => 2,
+                SelectedBackendKind::AotCompiled => 3,
+                SelectedBackendKind::AotRegisteredButNotBuilt => 4,
+                SelectedBackendKind::AotMissing => 5,
+            },
+            backend_fallback,
+        );
         self.generated_backend_runtime_diagnostics = state.runtime_diagnostics;
+        self.generation_telemetry = state.generation_telemetry;
+        self.atom_discretization_telemetry = state.atom_discretization_telemetry;
+        self.legacy_lambdify_telemetry = state.legacy_lambdify_telemetry;
+        self.atom_lambdify_telemetry = state.atom_lambdify_telemetry;
+        self.direct_banded_jacobian_telemetry = state.direct_banded_jacobian_telemetry;
+        self.parameter_binding = state.parameter_binding;
+        self.invalidate_linear_runtime();
+        self.prepared_runtime_revision
+            .mark_prepared_with_fingerprint(self.prepared_plan_fingerprint());
     }
 }
 
@@ -413,11 +515,65 @@ impl BuildFrozenSolverRequest for NRBVP {
             symbolic_assembly_backend: self.generated_backend_config.symbolic_assembly_backend,
             matrix_backend_override: self.generated_backend_config.matrix_backend_override,
             banded_linear_solver_config: self.generated_backend_config.banded_linear_solver_config,
+            lambdify_telemetry_mode: self.generated_backend_config.lambdify_telemetry_mode,
+            lambdify_execution_policy: self.generated_backend_config.lambdify_execution_policy,
         }
     }
 }
 
 impl NRBVP {
+    /// Returns the resource state paired with the prepared Frozen runtime.
+    pub(crate) fn prepared_resource_snapshot_for_diagnostics(&self) -> BvpPreparedResourceSnapshot {
+        self.factor_owner.resource_snapshot()
+    }
+
+    /// Computes the identity captured by a prepared Frozen runtime.
+    ///
+    /// This check is performed only at the prepared-solve boundary. It catches
+    /// direct writes to historical public fields without adding work to the
+    /// residual/Jacobian callbacks.
+    fn prepared_plan_fingerprint(&self) -> PreparedPlanFingerprint {
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        fingerprint_debug(&mut hash, &self.eq_system);
+        fingerprint_debug(&mut hash, &self.initial_guess.as_slice());
+        fingerprint_debug(&mut hash, &self.values);
+        fingerprint_debug(&mut hash, &self.arg);
+        fingerprint_debug(&mut hash, &self.BorderConditions);
+        fingerprint_debug(&mut hash, &(self.t0, self.t_end, self.n_steps));
+        fingerprint_debug(&mut hash, &self.scheme);
+        fingerprint_debug(&mut hash, &self.strategy);
+        fingerprint_debug(&mut hash, &self.strategy_params);
+        fingerprint_debug(&mut hash, &self.linear_sys_method);
+        fingerprint_debug(&mut hash, &self.method);
+        fingerprint_debug(&mut hash, &self.tolerance);
+        fingerprint_debug(&mut hash, &self.max_iterations);
+        fingerprint_debug(&mut hash, &self.param_names);
+        fingerprint_debug(&mut hash, &self.param_values);
+        fingerprint_debug(&mut hash, &self.x_mesh.as_slice());
+        fingerprint_debug(&mut hash, &self.generated_backend_config);
+        fingerprint_debug(&mut hash, &self.generated_backend_selected_backend);
+        fingerprint_bytes(&mut hash, b"bvp-frozen-prepared-plan-v1");
+        PreparedPlanFingerprint(hash)
+    }
+
+    /// Drops all state derived from the current Jacobian.
+    ///
+    /// Frozen reuse is valid only while the callback inputs and discretization
+    /// remain unchanged. Parameter/continuation changes must therefore clear
+    /// both the matrix and its owned factor, rather than merely forcing the
+    /// next iteration to recalculate the Jacobian.
+    fn invalidate_linear_runtime(&mut self) {
+        self.prepared_runtime_revision.factor_invalidated();
+        let had_owned_factor = self.factor_owner.has_factor();
+        self.factor_owner.invalidate_numeric_jacobian();
+        if had_owned_factor {
+            self.telemetry_counters.record_factorization_invalidation();
+        }
+        self.jac_recalc = true;
+        self.m = 0;
+        self.error_old = 0.0;
+    }
+
     #[inline]
     fn effective_runtime_method(&self) -> String {
         self.generated_backend_config.effective_method(&self.method)
@@ -473,7 +629,8 @@ impl NRBVP {
             p: 0.0,
             y: y0,
             m: 0,
-            old_jac: None,
+            factor_owner: BvpPreparedRuntime::new(),
+            prepared_runtime_revision: BvpRuntimeRevision::default(),
             jac_recalc: true,
             error_old: 0.0,
             variable_string: Vec::new(), // vector of indexed variable names
@@ -481,11 +638,13 @@ impl NRBVP {
             generated_backend_config: GeneratedBackendConfig::default(),
             generated_backend_selected_backend: None,
             generated_backend_runtime_diagnostics: HashMap::new(),
-            calc_statistics: HashMap::from([
-                ("number of iterations".to_string(), 0),
-                ("number of jacobians recalculations".to_string(), 0),
-                ("number of solving linear systems".to_string(), 0),
-            ]),
+            telemetry_counters: BvpTelemetryRecorder::default(),
+            generation_telemetry: None,
+            atom_discretization_telemetry: None,
+            legacy_lambdify_telemetry: None,
+            atom_lambdify_telemetry: None,
+            direct_banded_jacobian_telemetry: None,
+            parameter_binding: None,
             custom_timer: CustomTimer::new(),
             no_reports: false,
         }
@@ -604,6 +763,16 @@ impl NRBVP {
 
     /// Returns a solver configured with the provided generated-backend settings.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
+        self.telemetry_counters.set_logging_config(
+            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig {
+                mode: config.bvp_logging_mode,
+                max_events: config.bvp_logging_max_events,
+            },
+        );
+        self.telemetry_counters
+            .set_telemetry_mode(config.bvp_telemetry_mode);
+        self.custom_timer
+            .set_telemetry_mode(config.bvp_telemetry_mode);
         self.generated_backend_config = config;
         self
     }
@@ -764,9 +933,168 @@ impl NRBVP {
         }
     }
 
+    /// Fallible counterpart of [`NRBVP::task_check`] for typed callers.
+    ///
+    /// The historical `task_check()` and `eq_generate()` methods remain
+    /// compatibility panic wrappers; generated preparation uses this method so
+    /// malformed task documents and strategy parameters stay inside `Result`.
+    pub fn try_task_check(&self) -> Result<(), BvpBackendIntegrationError> {
+        let invalid_problem =
+            |field: &str, message: String| BvpBackendIntegrationError::InvalidProblem {
+                field: field.to_string(),
+                message,
+            };
+        let invalid_option = |field: &str, value: String, message: String| {
+            BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: field.to_string(),
+                value,
+                message,
+            }
+        };
+
+        if self.values.is_empty() {
+            return Err(invalid_problem(
+                "values",
+                "at least one unknown is required".into(),
+            ));
+        }
+        if self.initial_guess.shape() != (self.values.len(), self.n_steps) {
+            return Err(invalid_problem(
+                "initial_guess",
+                format!(
+                    "shape {:?} must be ({}, {})",
+                    self.initial_guess.shape(),
+                    self.values.len(),
+                    self.n_steps
+                ),
+            ));
+        }
+        if !self.t0.is_finite() || !self.t_end.is_finite() || self.t_end <= self.t0 {
+            return Err(invalid_problem(
+                "interval",
+                format!(
+                    "expected finite t_end > t0, got [{}, {}]",
+                    self.t0, self.t_end
+                ),
+            ));
+        }
+        if self.n_steps < 1 {
+            return Err(invalid_problem(
+                "n_steps",
+                format!("expected n_steps >= 1, got {}", self.n_steps),
+            ));
+        }
+        if self.max_iterations < 1 {
+            return Err(invalid_option(
+                "max_iterations",
+                self.max_iterations.to_string(),
+                "expected max_iterations >= 1".into(),
+            ));
+        }
+        if !self.tolerance.is_finite() || self.tolerance <= 0.0 {
+            return Err(invalid_option(
+                "tolerance",
+                self.tolerance.to_string(),
+                "expected a finite positive tolerance".into(),
+            ));
+        }
+        if !matches!(
+            self.scheme.to_ascii_lowercase().as_str(),
+            "forward" | "trapezoid" | "trapezoidal"
+        ) {
+            return Err(invalid_option(
+                "scheme",
+                self.scheme.clone(),
+                "supported values are forward and trapezoid".into(),
+            ));
+        }
+        let effective_method = self.generated_backend_config.effective_method(&self.method);
+        if BvpMatrixBackend::from_legacy_method(&effective_method).is_none() {
+            return Err(invalid_option(
+                "method",
+                effective_method,
+                "unknown matrix backend".into(),
+            ));
+        }
+        match self.strategy.as_str() {
+            "Naive" => {
+                if self.strategy_params.is_some() {
+                    return Err(invalid_option(
+                        "strategy_params",
+                        format!("{:?}", self.strategy_params),
+                        "Naive strategy does not accept strategy parameters".into(),
+                    ));
+                }
+            }
+            "Frozen" => {
+                let Some(params) = self.strategy_params.as_ref() else {
+                    return Err(invalid_option(
+                        "strategy_params",
+                        "missing".into(),
+                        "Frozen strategy requires exactly one strategy parameter".into(),
+                    ));
+                };
+                if params.len() != 1 {
+                    return Err(invalid_option(
+                        "strategy_params",
+                        format!("{params:?}"),
+                        "Frozen strategy requires exactly one strategy parameter".into(),
+                    ));
+                }
+                let (name, value) = params.iter().next().expect("len checked above");
+                let valid = match (name.as_str(), value.as_ref()) {
+                    ("Frozen_naive", None) => true,
+                    ("every_m", Some(values)) => {
+                        values.len() == 1 && values[0].is_finite() && values[0] > 0.0
+                    }
+                    ("at_high_morm", Some(values)) => {
+                        values.len() == 1 && values[0].is_finite() && values[0] > 0.0
+                    }
+                    ("at_low_speed", Some(values)) => {
+                        values.len() == 1 && values[0].is_finite() && values[0] <= 1.0
+                    }
+                    ("complex", Some(values)) => {
+                        values.len() == 3 && values.iter().all(|value| value.is_finite())
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(invalid_option(
+                        "strategy_params",
+                        format!("{params:?}"),
+                        "unsupported Frozen strategy parameter shape or value".into(),
+                    ));
+                }
+            }
+            strategy => {
+                return Err(invalid_option(
+                    "strategy",
+                    strategy.to_string(),
+                    "supported values are Frozen and Naive".into(),
+                ));
+            }
+        }
+        if self.BorderConditions.is_empty()
+            || self.BorderConditions.len() != self.values.len()
+            || self
+                .BorderConditions
+                .keys()
+                .any(|name| !self.values.iter().any(|value| value == name))
+        {
+            return Err(invalid_problem(
+                "boundary_conditions",
+                format!(
+                    "expected one boundary-condition entry per unknown, got {} for {} unknowns",
+                    self.BorderConditions.len(),
+                    self.values.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn try_eq_generate(&mut self) -> Result<(), BvpBackendIntegrationError> {
-        self.task_check();
-        strategy_check(&self.strategy, &self.strategy_params);
+        self.try_task_check()?;
         let effective_method = self.generated_backend_config.effective_method(&self.method);
         let effective_policy = self
             .generated_backend_config
@@ -795,12 +1123,16 @@ impl NRBVP {
 
     /// Installs an optional compiled AOT resolver used by backend selection.
     pub fn set_aot_resolver(&mut self, resolver: Option<AotResolver>) {
-        self.generated_backend_config.resolver = resolver;
+        let mut config = self.generated_backend_config.clone();
+        config.resolver = resolver;
+        self.set_generated_backend_config(config);
     }
 
     /// Installs the solver-level AOT execution policy.
     pub fn set_aot_execution_policy(&mut self, policy: AotExecutionPolicy) {
-        self.generated_backend_config.aot_execution_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_execution_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT execution policy.
@@ -810,7 +1142,9 @@ impl NRBVP {
 
     /// Installs the solver-level AOT build policy.
     pub fn set_aot_build_policy(&mut self, policy: AotBuildPolicy) {
-        self.generated_backend_config.aot_build_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_build_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT build policy.
@@ -820,7 +1154,9 @@ impl NRBVP {
 
     /// Installs explicit solver-level AOT chunking overrides.
     pub fn set_aot_chunking_policy(&mut self, policy: AotChunkingPolicy) {
-        self.generated_backend_config.aot_chunking_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_chunking_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT chunking overrides.
@@ -830,7 +1166,9 @@ impl NRBVP {
 
     /// Installs an explicit AtomView AOT optimization profile.
     pub fn set_atom_optimization_profile(&mut self, profile: AtomOptimizationProfile) {
-        self.generated_backend_config.atom_optimization_profile = profile;
+        let mut config = self.generated_backend_config.clone();
+        config.atom_optimization_profile = profile;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured AtomView AOT optimization profile.
@@ -845,7 +1183,9 @@ impl NRBVP {
 
     /// Installs an explicit generated-backend selection policy override.
     pub fn set_backend_policy_override(&mut self, backend_policy: Option<BackendSelectionPolicy>) {
-        self.generated_backend_config.backend_policy_override = backend_policy;
+        let mut config = self.generated_backend_config.clone();
+        config.backend_policy_override = backend_policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured generated-backend selection policy override, if present.
@@ -855,46 +1195,161 @@ impl NRBVP {
 
     /// Installs the complete generated-backend configuration in one call.
     pub fn set_generated_backend_config(&mut self, config: GeneratedBackendConfig) {
+        self.invalidate_linear_runtime();
+        self.telemetry_counters.set_logging_config(
+            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig {
+                mode: config.bvp_logging_mode,
+                max_events: config.bvp_logging_max_events,
+            },
+        );
+        self.telemetry_counters
+            .set_telemetry_mode(config.bvp_telemetry_mode);
+        self.custom_timer
+            .set_telemetry_mode(config.bvp_telemetry_mode);
         self.generated_backend_config = config;
+        self.prepared_runtime_revision.configuration_changed();
     }
 
-    /// Installs the symbolic parameter names used by the generated residual/Jacobian.
-    pub fn set_params(&mut self, params: Option<&[&str]>) {
-        self.param_names = params
+    /// Changes Lambdify runtime telemetry for the next generated callback build.
+    pub fn set_lambdify_telemetry_mode(&mut self, mode: BvpLambdifyTelemetryMode) {
+        let config = self
+            .generated_backend_config
+            .clone()
+            .with_lambdify_telemetry_mode(mode);
+        self.set_generated_backend_config(config);
+    }
+
+    /// Changes typed solver decision logging for subsequent runtime events.
+    pub fn set_bvp_logging_mode(&mut self, mode: BvpLoggingMode) {
+        let config = self
+            .generated_backend_config
+            .clone()
+            .with_bvp_logging_mode(mode);
+        self.set_generated_backend_config(config);
+    }
+
+    /// Replaces the complete bounded typed decision logging policy.
+    pub fn set_bvp_logging_config(&mut self, config: BvpLoggingConfig) {
+        self.set_generated_backend_config(
+            self.generated_backend_config
+                .clone()
+                .with_bvp_logging_config(config),
+        );
+    }
+
+    /// Changes solver counter/timer collection for subsequent solves.
+    pub fn set_bvp_telemetry_mode(&mut self, mode: BvpTelemetryMode) {
+        self.generated_backend_config.bvp_telemetry_mode = mode;
+        self.telemetry_counters.set_telemetry_mode(mode);
+        self.custom_timer.set_telemetry_mode(mode);
+    }
+
+    /// Returns the Lambdify callback telemetry policy used for new callbacks.
+    pub fn lambdify_telemetry_mode(&self) -> BvpLambdifyTelemetryMode {
+        self.generated_backend_config.lambdify_telemetry_mode
+    }
+
+    /// Replaces boundary conditions through the revision-tracked API.
+    ///
+    /// The public field remains for source compatibility; prepared callers
+    /// should use this setter so factors and generated callbacks are invalidated
+    /// when the physical boundary problem changes.
+    pub fn set_boundary_conditions(&mut self, conditions: HashMap<String, Vec<(usize, f64)>>) {
+        if self.BorderConditions != conditions {
+            self.BorderConditions = conditions;
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.problem_changed();
+            self.result = None;
+        }
+    }
+
+    /// Fallible typed setter for symbolic parameter names.
+    pub fn try_set_params(
+        &mut self,
+        params: Option<&[&str]>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let param_names: Vec<String> = params
             .map(|items| items.iter().map(|name| (*name).to_string()).collect())
             .unwrap_or_default();
         if let Some(values) = self.param_values.as_ref() {
-            assert_eq!(
-                values.len(),
-                self.param_names.len(),
-                "param_values length must match param_names length"
-            );
+            if values.len() != param_names.len() {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "param_names".to_string(),
+                    value: format!("{} names", param_names.len()),
+                    message: format!(
+                        "param_values length {} must match param_names length {}",
+                        values.len(),
+                        param_names.len()
+                    ),
+                });
+            }
         }
+        if self.param_names != param_names {
+            self.param_names = param_names;
+            self.parameter_binding = None;
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.parameters_changed();
+        }
+        Ok(())
     }
 
-    /// Installs the numeric values for the already-declared symbolic parameters.
-    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+    /// Compatibility wrapper for [`Self::try_set_params`].
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.try_set_params(params)
+            .unwrap_or_else(|error| panic!("invalid BVP parameter names: {error:?}"));
+    }
+
+    /// Fallible typed setter for the numeric values of symbolic parameters.
+    /// Parameters are evaluator inputs, not Newton unknowns and are never
+    /// included in the symbolic derivative layout.
+    pub fn try_set_param_values(
+        &mut self,
+        values: Option<Vec<f64>>,
+    ) -> Result<(), BvpBackendIntegrationError> {
         if let Some(values_ref) = values.as_ref() {
-            assert_eq!(
-                values_ref.len(),
-                self.param_names.len(),
-                "param_values length must match param_names length"
-            );
+            if values_ref.len() != self.param_names.len() {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "param_values".to_string(),
+                    value: format!("{} values", values_ref.len()),
+                    message: format!(
+                        "expected exactly {} values for declared symbolic parameters",
+                        self.param_names.len()
+                    ),
+                });
+            }
         }
-        self.param_values = values;
+        if self.param_values != values {
+            self.param_values = values;
+            if let Some(binding) = &self.parameter_binding {
+                binding.replace(self.param_values.clone());
+                self.prepared_runtime_revision
+                    .refresh_prepared_fingerprint(self.prepared_plan_fingerprint());
+            } else {
+                self.prepared_runtime_revision.parameters_changed();
+            }
+            self.invalidate_linear_runtime();
+        }
+        Ok(())
+    }
+
+    /// Compatibility wrapper for [`Self::try_set_param_values`].
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        self.try_set_param_values(values)
+            .unwrap_or_else(|error| panic!("invalid BVP parameter values: {error:?}"));
     }
 
     /// Sets the symbolic assembly backend used before lambdify/AOT lowering.
     pub fn set_symbolic_assembly_backend(&mut self, backend: BvpSymbolicAssemblyBackend) {
-        self.generated_backend_config = self
+        let config = self
             .generated_backend_config
             .clone()
             .with_symbolic_assembly_backend(backend);
+        self.set_generated_backend_config(config);
     }
 
     /// Installs a high-level sparse generated-backend mode on an existing solver.
     pub fn set_sparse_generated_backend_mode(&mut self, mode: SparseGeneratedBackendMode) {
-        self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+        self.set_generated_backend_config(GeneratedBackendConfig::from_sparse_mode(mode));
     }
 
     /// Installs the standard sparse generated-backend defaults.
@@ -928,6 +1383,22 @@ impl NRBVP {
         &self.generated_backend_config
     }
 
+    /// Returns the normalized configuration and the backend selected so far.
+    /// This is read-only and never triggers equation generation.
+    pub fn resolved_plan(&self) -> crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan {
+        let mut plan =
+            crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan::from_common_for_solver(
+                &self.generated_backend_config,
+                &self.method,
+                &self.scheme,
+                crate::numerical::BVP_Damp::resolved_plan::strategy_from_name(&self.strategy),
+            );
+        if let Some(selected) = self.generated_backend_selected_backend {
+            plan = plan.with_selected_backend(selected);
+        }
+        plan
+    }
+
     /// Removes registered generated AOT artifact directories owned by this solver resolver.
     ///
     /// This is an explicit lifecycle operation for cold-build/story/debug workflows. Call it only
@@ -939,8 +1410,9 @@ impl NRBVP {
 
     /// Returns accumulated operation statistics and actual backend diagnostics.
     pub fn get_statistics(&self) -> FrozenBvpStatistics {
-        let mut counters = self.calc_statistics.clone();
-        if let Some(jac) = &self.old_jac {
+        let telemetry_counters = self.telemetry_counters.snapshot();
+        let mut counters = telemetry_counters.to_legacy_map();
+        if let Some(jac) = &self.factor_owner.old_jac {
             let shape = jac.shape();
             counters.insert("number of jacobian elements".to_string(), shape.0 * shape.1);
         }
@@ -948,10 +1420,53 @@ impl NRBVP {
         counters.insert("number of grid points".to_string(), self.x_mesh.len());
         let mut diagnostics = self.generated_backend_runtime_diagnostics.clone();
         self.append_generated_backend_diagnostics(&mut diagnostics);
+        let timings = self.custom_timer.snapshot();
+        let scopes = self
+            .telemetry_counters
+            .scopes_snapshot(&timings, &telemetry_counters);
+        let storage = self
+            .factor_owner
+            .old_jac
+            .as_ref()
+            .map(|jac| {
+                crate::numerical::BVP_Damp::telemetry::BvpStorageBytes::for_solver_method(
+                    &self.effective_runtime_method(),
+                    jac.shape().0,
+                    jac.shape().1,
+                    self.bandwidth,
+                )
+            })
+            .unwrap_or_default();
         FrozenBvpStatistics {
             counters,
             timers: self.custom_timer.get_all(),
             diagnostics,
+            telemetry: BvpTelemetrySnapshot {
+                telemetry_mode: self.telemetry_counters.telemetry_mode(),
+                counters: telemetry_counters,
+                timings,
+                scopes,
+                storage,
+                plan: Some(self.resolved_plan()),
+                log_events: self.telemetry_counters.log_events_snapshot(),
+                log_events_dropped: self.telemetry_counters.dropped_log_events(),
+                solve_id: self.telemetry_counters.solve_id(),
+                logging_config: self.telemetry_counters.logging_config(),
+                atom_discretization: self.atom_discretization_telemetry,
+                generation: self.generation_telemetry,
+                legacy_lambdify: self
+                    .legacy_lambdify_telemetry
+                    .as_ref()
+                    .map(BvpLambdifyTelemetry::snapshot),
+                atom_lambdify: self
+                    .atom_lambdify_telemetry
+                    .as_ref()
+                    .map(BvpLambdifyTelemetry::snapshot),
+                direct_banded_jacobian: self
+                    .direct_banded_jacobian_telemetry
+                    .as_ref()
+                    .map(crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry::snapshot),
+            },
         }
     }
 
@@ -1022,78 +1537,178 @@ impl NRBVP {
         self.generated_backend_config.symbolic_assembly_backend
     }
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
+        self.invalidate_linear_runtime();
         self.p = p;
         self.y = y;
         self.initial_guess = initial_guess;
     }
     pub fn set_p(&mut self, p: f64) {
+        if self.p != p {
+            self.invalidate_linear_runtime();
+        }
         self.p = p;
     }
 
-    ///Newton-Raphson method
-    /// realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
-    pub fn iteration(&mut self) -> Box<dyn VectorType> {
+    /// Fallible Newton iteration used by the typed solve path.
+    pub fn try_iteration(&mut self) -> Result<Box<dyn VectorType>, BvpBackendIntegrationError> {
         let p = self.p;
         let y = &*self.y;
         let fun = &self.fun;
         let fun_begin = Instant::now();
-        let new_fun = fun.call(p, y);
+        self.telemetry_counters.record_residual_call();
+        let new_fun = fun.try_call(p, y).map_err(|error| {
+            BvpBackendIntegrationError::CallbackExecutionFailed {
+                stage: "residual".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         self.custom_timer.append_to_fun_time(fun_begin.elapsed());
-        let jac = self
-            .jac
-            .as_mut()
-            .expect("Frozen BVP iteration requires an installed Jacobian callback");
         let now = Instant::now();
 
-        let new_j = if self.jac_recalc {
+        let reused_factorization;
+        if self.jac_recalc {
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let begin = Instant::now();
             self.custom_timer.jac_tic();
-            let new_j = jac.call(p, y);
+            let callback_result = match self.jac.as_mut() {
+                Some(jacobian) => jacobian.try_call(p, y),
+                None => {
+                    self.custom_timer.jac_tac();
+                    return Err(BvpBackendIntegrationError::PipelinePanicked(
+                        "Frozen BVP iteration requires an installed Jacobian callback".into(),
+                    ));
+                }
+            };
+            let new_j = match callback_result {
+                Ok(jacobian) => jacobian,
+                Err(error) => {
+                    self.custom_timer.jac_tac();
+                    return Err(BvpBackendIntegrationError::CallbackExecutionFailed {
+                        stage: "Jacobian".to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            };
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
             self.custom_timer.jac_tac();
-            self.old_jac = Some(new_j.clone_box());
+            if self
+                .factor_owner
+                .old_jac
+                .as_ref()
+                .map(|jacobian| jacobian.factorization_ready())
+                .unwrap_or(false)
+            {
+                self.telemetry_counters.record_factorization_invalidation();
+            }
+            // The cached Jacobian is read-only during a frozen reuse window.
+            // Store the callback result directly instead of cloning the full
+            // matrix on every iteration.
+            self.factor_owner.old_jac = Some(new_j);
+            let fresh_jacobian = self.factor_owner.old_jac.as_ref().ok_or_else(|| {
+                BvpBackendIntegrationError::PipelinePanicked(
+                    "Frozen BVP Jacobian callback returned no cached matrix".into(),
+                )
+            })?;
+            *self.factor_owner.borrow_mut() = prepare_factor_owner_runtime(
+                fresh_jacobian.as_ref(),
+                self.bandwidth,
+                self.linear_sys_method.as_deref(),
+            );
+            self.prepared_runtime_revision
+                .mark_numeric_jacobian_current();
+            if self.factor_owner.borrow().is_some() {
+                self.prepared_runtime_revision.mark_factor_current();
+            }
+            reused_factorization = false;
             self.m = 0;
-            *self
-                .calc_statistics
-                .entry("number of jacobians recalculations".to_string())
-                .or_insert(0) += 1;
-            new_j
+            self.telemetry_counters.record_jacobian_recalculation();
         } else {
             self.m = self.m + 1;
-            self.old_jac
+            reused_factorization = self
+                .factor_owner
+                .borrow()
                 .as_ref()
-                .expect(
-                    "Frozen BVP iteration requires a cached Jacobian matrix when reuse is enabled",
+                .map(|owner| owner.has_solved_rhs())
+                .unwrap_or(false)
+                || self
+                    .factor_owner
+                    .old_jac
+                    .as_ref()
+                    .map(|jacobian| jacobian.factorization_ready())
+                    .unwrap_or(false);
+        }
+
+        let new_j = self
+            .factor_owner
+            .old_jac
+            .as_ref()
+            .ok_or_else(|| {
+                BvpBackendIntegrationError::PipelinePanicked(
+                    "Frozen BVP iteration requires a cached Jacobian matrix when reuse is enabled"
+                        .into(),
                 )
-                .clone_box()
-        };
+            })?
+            .as_ref();
 
         //   println!("new fun = {:?}", &new_fun);
         let linear_begin = Instant::now();
-        let delta: Box<dyn VectorType> = new_j.solve_sys(
-            &*new_fun,
-            self.linear_sys_method.clone(),
-            self.tolerance,
-            self.max_iterations,
-            self.bandwidth,
-            y,
-        );
+        let (delta, linear_timing) = if let Some(owner) = self.factor_owner.borrow_mut().as_mut() {
+            let (delta, factorization, rhs_solve) =
+                owner.try_solve(&*new_fun).map_err(|error| {
+                    BvpBackendIntegrationError::LinearSolveFailed {
+                        backend: "owned-factor".to_string(),
+                        matrix_rows: new_j.shape().0,
+                        matrix_columns: new_j.shape().1,
+                        rhs_len: new_fun.len(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+            (
+                delta,
+                LinearSolveTiming {
+                    factorization,
+                    rhs_solve,
+                },
+            )
+        } else {
+            new_j.solve_sys_with_timing(
+                &*new_fun,
+                self.linear_sys_method.clone(),
+                self.tolerance,
+                self.max_iterations,
+                self.bandwidth,
+                y,
+            )
+        };
         self.custom_timer
-            .append_to_linear_sys_time(linear_begin.elapsed());
-        *self
-            .calc_statistics
-            .entry("number of solving linear systems".to_string())
-            .or_insert(0) += 1;
+            .append_to_linear_sys_time(linear_begin.elapsed() + linear_timing.factorization);
+        self.custom_timer
+            .append_to_factorization_time(linear_timing.factorization);
+        self.custom_timer
+            .append_to_rhs_solve_time(linear_timing.rhs_solve);
+        self.telemetry_counters.record_linear_solve();
+        self.telemetry_counters.record_rhs_solve();
+        if reused_factorization {
+            self.telemetry_counters.record_factorization_cache_hit();
+        } else {
+            self.telemetry_counters.record_factorization();
+        }
         let elapsed = now.elapsed();
         elapsed_time(elapsed);
         //  println!(" \n \n dy= {:?}", &delta);
         // element wise subtraction
-        let new_y: Box<dyn VectorType> = y - &*delta;
+        let new_y = y - &*delta;
 
-        new_y
+        Ok(new_y)
+    }
+
+    /// Legacy panic-wrapper retained for callers using the historical API.
+    pub fn iteration(&mut self) -> Box<dyn VectorType> {
+        self.try_iteration().unwrap_or_else(|error| {
+            panic!("Frozen BVP iteration failed during fallible runtime path: {error:?}")
+        })
     }
     pub fn main_loop(&mut self) -> Option<DVector<f64>> {
         self.try_main_loop().unwrap_or_else(|err| {
@@ -1111,11 +1726,14 @@ impl NRBVP {
         let mut i = 0;
 
         while i < self.max_iterations {
-            *self
-                .calc_statistics
-                .entry("number of iterations".to_string())
-                .or_insert(0) += 1;
-            let new_y = self.iteration();
+            self.telemetry_counters.record_iteration();
+            let iteration_started = self.telemetry_counters.start_iteration_scope();
+            let iteration_result = self.try_iteration();
+            if iteration_result.is_err() {
+                self.telemetry_counters
+                    .finish_iteration_scope(iteration_started);
+            }
+            let new_y = iteration_result?;
             let y1 = new_y.subtract(&*self.y);
             let dy: Box<dyn VectorType> = y1.clone_box();
 
@@ -1123,7 +1741,7 @@ impl NRBVP {
             self.jac_recalc = frozen_jac_recalc(
                 &self.strategy,
                 &self.strategy_params,
-                &self.old_jac,
+                &self.factor_owner.old_jac,
                 self.m,
                 error,
                 self.error_old,
@@ -1134,11 +1752,15 @@ impl NRBVP {
                 log::info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
                 self.max_error = error;
+                self.telemetry_counters
+                    .finish_iteration_scope(iteration_started);
                 return Ok(Some(new_y.to_DVectorType()));
             } else {
                 let new_y: Box<dyn VectorType> = new_y.clone_box();
                 self.y = new_y;
                 i += 1;
+                self.telemetry_counters
+                    .finish_iteration_scope(iteration_started);
             }
         }
         Ok(None)
@@ -1151,16 +1773,49 @@ impl NRBVP {
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         // TODO! сравнить явный мэш с неявным
         // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
+        self.telemetry_counters.begin_solve();
         self.custom_timer.start();
-        self.custom_timer.symbolic_operations_tic();
-        self.try_eq_generate()?;
-        self.custom_timer.symbolic_operations_tac();
         let begin = Instant::now();
-        let res = self.try_main_loop()?;
+        let res = (|| {
+            self.custom_timer.symbolic_operations_tic();
+            self.try_eq_generate()?;
+            self.custom_timer.symbolic_operations_tac();
+            self.try_main_loop()
+        })();
+        self.custom_timer.finish();
+        self.telemetry_counters.record_termination(
+            matches!(&res, Ok(Some(_))),
+            if matches!(&res, Ok(Some(_))) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);
 
         Ok(res)
+    }
+
+    /// Solves using callbacks prepared by an earlier `try_eq_generate` call.
+    ///
+    /// Numeric parameter values may be rebound between calls; structural or
+    /// configuration changes are rejected until preparation is repeated.
+    pub fn try_solver_prepared(
+        &mut self,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        if !self
+            .prepared_runtime_revision
+            .is_current_with_fingerprint(self.prepared_plan_fingerprint())
+        {
+            return Err(BvpBackendIntegrationError::PreparedRuntimeInvalidated {
+                reason:
+                    "prepared Frozen plan is stale; call try_eq_generate before try_solver_prepared"
+                        .to_string(),
+            });
+        }
+        self.try_main_loop()
     }
     /// Compatibility-only wrapper over [`NRBVP::try_solver`].
     ///
@@ -1314,6 +1969,205 @@ impl NRBVP {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
+    use std::time::Duration;
+
+    #[test]
+    fn frozen_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
+        let solver = NRBVP::new(
+            Vec::new(),
+            DMatrix::zeros(0, 0),
+            Vec::new(),
+            String::new(),
+            HashMap::new(),
+            0.0,
+            0.0,
+            1,
+            "Naive".to_string(),
+            None,
+            None,
+            "Dense".to_string(),
+            1e-8,
+            1,
+        );
+        let stats = solver.get_statistics();
+
+        assert_eq!(
+            stats.counters["number of iterations"],
+            stats.telemetry.counters.iterations as usize
+        );
+        assert_eq!(
+            stats.counters["number of factorizations"],
+            stats.telemetry.counters.factorizations as usize
+        );
+        assert_eq!(
+            stats.counters["number of RHS solves"],
+            stats.telemetry.counters.rhs_solves as usize
+        );
+        assert!(stats.telemetry.timings.total >= stats.telemetry.timings.jacobian);
+    }
+
+    #[test]
+    fn frozen_statistics_expose_atom_discretization_telemetry() {
+        let mut solver = NRBVP::new(
+            Vec::new(),
+            DMatrix::zeros(0, 0),
+            Vec::new(),
+            String::new(),
+            HashMap::new(),
+            0.0,
+            0.0,
+            1,
+            "Naive".to_string(),
+            None,
+            None,
+            "Dense".to_string(),
+            1e-8,
+            1,
+        );
+        let expected = BvpAtomDiscretizationTelemetrySnapshot {
+            boundary_conditions: Duration::from_micros(2),
+            discretization: Duration::from_micros(3),
+            boundary_application: Duration::from_micros(5),
+            flat_list: Duration::from_micros(7),
+            consistency: Duration::from_micros(11),
+            bounds_and_tolerances: Duration::from_micros(13),
+            total: Duration::from_micros(41),
+        };
+        solver.atom_discretization_telemetry = Some(expected);
+
+        let actual = solver
+            .get_statistics()
+            .telemetry
+            .atom_discretization
+            .expect("Frozen statistics should preserve Atom preparation telemetry");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn changing_continuation_parameter_invalidates_owned_factor() {
+        let mut solver = NRBVP::new(
+            Vec::new(),
+            DMatrix::zeros(1, 1),
+            vec!["y".to_string()],
+            "x".to_string(),
+            HashMap::from([("y".to_string(), vec![(0, 0.0)])]),
+            0.0,
+            1.0,
+            1,
+            "Naive".to_string(),
+            None,
+            None,
+            "Dense".to_string(),
+            1e-8,
+            1,
+        );
+        *solver.factor_owner.borrow_mut() = Some(
+            prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
+                .expect("dense factor owner runtime"),
+        );
+
+        solver.set_p(1.0);
+
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            1
+        );
+    }
+
+    #[test]
+    fn changing_parameters_invalidates_owned_factor() {
+        let mut solver = NRBVP::new(
+            Vec::new(),
+            DMatrix::zeros(1, 1),
+            vec!["y".to_string()],
+            "x".to_string(),
+            HashMap::from([("y".to_string(), vec![(0, 0.0)])]),
+            0.0,
+            1.0,
+            1,
+            "Naive".to_string(),
+            None,
+            None,
+            "Dense".to_string(),
+            1e-8,
+            1,
+        );
+        *solver.factor_owner.borrow_mut() = Some(
+            prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
+                .expect("dense factor owner runtime"),
+        );
+
+        solver.set_params(Some(&["alpha"]));
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.jac_recalc);
+
+        *solver.factor_owner.borrow_mut() = Some(
+            prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
+                .expect("dense factor owner runtime"),
+        );
+        solver.set_param_values(Some(vec![1.0]));
+
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            2
+        );
+    }
+
+    #[test]
+    fn changing_backend_policy_invalidates_owned_factor() {
+        let mut solver = sparse_surface_test_solver_with_naive_strategy();
+        *solver.factor_owner.borrow_mut() = Some(
+            prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
+                .expect("dense factor owner runtime"),
+        );
+
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            1
+        );
+    }
+
+    #[test]
+    fn frozen_try_iteration_surfaces_residual_callback_panic_as_typed_error() {
+        let mut solver = sparse_surface_test_solver();
+        solver.fun = convert_to_fun(Box::new(|_, _| {
+            panic!("frozen residual callback failed deliberately")
+        }));
+
+        let error = solver
+            .try_iteration()
+            .expect_err("a callback panic must not escape Frozen try_iteration");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                if stage == "residual"
+                    && message.contains("frozen residual callback failed deliberately")
+        ));
+    }
+
+    use crate::numerical::BVP_Damp::BVP_traits::convert_to_fun;
     use crate::numerical::BVP_Damp::generated_solver_handoff::{
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
         BandedGeneratedBackendMode, GeneratedBackendConfig, SparseGeneratedBackendMode,

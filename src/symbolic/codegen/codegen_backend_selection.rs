@@ -14,6 +14,7 @@
 use crate::symbolic::codegen::codegen_aot_resolution::{
     AotResolutionStatus, AotResolver, ResolvedAotArtifact,
 };
+use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend, PreparedProblem};
 use log::{info, warn};
 
@@ -43,6 +44,19 @@ pub enum SelectedBackendKind {
 #[derive(Debug, Clone)]
 pub struct SelectedBackend<'a> {
     pub problem: PreparedProblem<'a>,
+    pub requested_backend: BackendKind,
+    pub effective_backend: SelectedBackendKind,
+    pub matrix_backend: MatrixBackend,
+    pub aot_resolution: Option<ResolvedAotArtifact>,
+}
+
+/// Selection result for a prepared manifest whose symbolic payload is owned
+/// by a backend-specific plan rather than the historical `PreparedProblem`.
+///
+/// AtomView AOT uses this form so registry lookup does not construct an Expr
+/// runtime plan merely to decide whether an artifact is available.
+#[derive(Debug, Clone)]
+pub struct SelectedManifestBackend {
     pub requested_backend: BackendKind,
     pub effective_backend: SelectedBackendKind,
     pub matrix_backend: MatrixBackend,
@@ -118,6 +132,98 @@ pub fn select_backend<'a>(
     }
 
     selection
+}
+
+/// Selects an AOT/lambdify branch from an owned manifest.
+///
+/// This is intentionally parallel to [`select_backend`] but has no borrowed
+/// `Expr` representation. It is the lifecycle entrypoint for AtomView-native
+/// AOT plans.
+pub fn select_backend_by_manifest(
+    manifest: &PreparedProblemManifest,
+    policy: BackendSelectionPolicy,
+    resolver: Option<&AotResolver>,
+) -> SelectedManifestBackend {
+    let matrix_backend = manifest.matrix_backend;
+    let selected_aot = || {
+        let aot_resolution = resolver.map(|resolver| resolver.resolve_by_manifest(manifest));
+        let effective_backend = match aot_resolution.as_ref().map(|resolved| resolved.status) {
+            Some(AotResolutionStatus::Compiled) => SelectedBackendKind::AotCompiled,
+            Some(AotResolutionStatus::RegisteredButNotBuilt) => {
+                SelectedBackendKind::AotRegisteredButNotBuilt
+            }
+            Some(AotResolutionStatus::Missing) | None => SelectedBackendKind::AotMissing,
+        };
+        SelectedManifestBackend {
+            requested_backend: BackendKind::Aot,
+            effective_backend,
+            matrix_backend,
+            aot_resolution,
+        }
+    };
+    let selected = match policy {
+        BackendSelectionPolicy::NumericOnly => SelectedManifestBackend {
+            requested_backend: BackendKind::Numeric,
+            effective_backend: SelectedBackendKind::Numeric,
+            matrix_backend,
+            aot_resolution: None,
+        },
+        BackendSelectionPolicy::LambdifyOnly
+        | BackendSelectionPolicy::PreferLambdifyThenNumeric => SelectedManifestBackend {
+            requested_backend: BackendKind::Lambdify,
+            effective_backend: SelectedBackendKind::Lambdify,
+            matrix_backend,
+            aot_resolution: None,
+        },
+        BackendSelectionPolicy::PreferAotThenLambdify => {
+            let aot = selected_aot();
+            if matches!(
+                aot.effective_backend,
+                SelectedBackendKind::AotCompiled | SelectedBackendKind::AotRegisteredButNotBuilt
+            ) {
+                aot
+            } else {
+                SelectedManifestBackend {
+                    requested_backend: BackendKind::Lambdify,
+                    effective_backend: SelectedBackendKind::Lambdify,
+                    matrix_backend,
+                    aot_resolution: None,
+                }
+            }
+        }
+        BackendSelectionPolicy::AotOnly => selected_aot(),
+        BackendSelectionPolicy::PreferAotThenNumeric => {
+            let aot = selected_aot();
+            if aot.effective_backend == SelectedBackendKind::AotMissing {
+                SelectedManifestBackend {
+                    requested_backend: BackendKind::Numeric,
+                    effective_backend: SelectedBackendKind::Numeric,
+                    matrix_backend,
+                    aot_resolution: aot.aot_resolution,
+                }
+            } else {
+                aot
+            }
+        }
+    };
+    match selected.effective_backend {
+        SelectedBackendKind::AotCompiled => info!(
+            "Selected compiled AtomView AOT backend for {:?} matrix backend",
+            selected.matrix_backend
+        ),
+        SelectedBackendKind::AotRegisteredButNotBuilt => {
+            warn!("Selected AtomView AOT backend, but artifact is not built yet")
+        }
+        SelectedBackendKind::AotMissing => warn!(
+            "AtomView AOT artifact is missing; effective backend is {:?}",
+            selected.requested_backend
+        ),
+        SelectedBackendKind::Numeric | SelectedBackendKind::Lambdify => info!(
+            "Selected {:?} backend for {:?} AtomView manifest",
+            selected.effective_backend, selected.matrix_backend
+        ),
+    }
+    selected
 }
 
 fn select_non_aot<'a>(
@@ -287,6 +393,57 @@ mod tests {
             selected.effective_backend,
             SelectedBackendKind::AotRegisteredButNotBuilt
         );
+        assert!(selected.aot_resolution.is_some());
+    }
+
+    #[test]
+    fn manifest_selection_preserves_atom_native_matrix_contract() {
+        let prepared = sample_prepared_problem();
+        let manifest =
+            crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(&prepared);
+        let selected = select_backend_by_manifest(
+            &manifest,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            Some(&AotResolver::new(AotRegistry::new())),
+        );
+
+        assert_eq!(selected.matrix_backend, MatrixBackend::Dense);
+        assert_eq!(selected.requested_backend, BackendKind::Lambdify);
+        assert_eq!(selected.effective_backend, SelectedBackendKind::Lambdify);
+        assert!(selected.aot_resolution.is_none());
+    }
+
+    #[test]
+    fn manifest_selection_reuses_registered_artifact_without_expr_runtime_plan() {
+        let prepared = sample_prepared_problem();
+        let manifest =
+            crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(&prepared);
+        let dir = tempdir().expect("tempdir should exist");
+        let build = AotBuildRequest::new(
+            generated_aot_crate_from_prepared_problem(
+                "generated_manifest_select_fixture",
+                "generated_manifest_select_module",
+                &prepared,
+            ),
+            dir.path(),
+            AotBuildProfile::Release,
+        )
+        .materialize()
+        .expect("build request should materialize");
+        fs::create_dir_all(&build.artifact_dir).expect("artifact dir should be creatable");
+        fs::write(&build.expected_rlib, b"fake rlib").expect("expected rlib should be writable");
+
+        let mut registry = AotRegistry::new();
+        registry.register_materialized_build(manifest.clone(), &build);
+        let selected = select_backend_by_manifest(
+            &manifest,
+            BackendSelectionPolicy::AotOnly,
+            Some(&AotResolver::new(registry)),
+        );
+
+        assert_eq!(selected.requested_backend, BackendKind::Aot);
+        assert_eq!(selected.effective_backend, SelectedBackendKind::AotCompiled);
+        assert_eq!(selected.matrix_backend, MatrixBackend::Dense);
         assert!(selected.aot_resolution.is_some());
     }
 }

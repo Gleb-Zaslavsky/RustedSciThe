@@ -1757,8 +1757,9 @@ impl GeneratedBlock {
     /// Builds a typed sparse-values block from a flattened task plan.
     pub fn from_sparse_values_plan(plan: &CodegenTaskPlan<'_>) -> Self {
         match plan.layout {
-            CodegenOutputLayout::SparseValues { .. } => Self::from_task_plan(plan),
-            _ => panic!("sparse-values plan must have sparse-values layout"),
+            CodegenOutputLayout::SparseValues { .. }
+            | CodegenOutputLayout::BandedValues { .. } => Self::from_task_plan(plan),
+            _ => panic!("sparse/banded-values plan must have sparse-values layout"),
         }
     }
 
@@ -1943,6 +1944,16 @@ impl GeneratedBlock {
                     nnz,
                 )
             }
+            Some(CodegenOutputLayout::BandedValues { rows, cols, slots, .. }) => {
+                RustEmitter::emit_sparse_values_block_function(
+                    &self.ir,
+                    &self.fn_name,
+                    self.vars.len(),
+                    rows,
+                    cols,
+                    slots,
+                )
+            }
             None => RustEmitter::emit_block_function(&self.ir, &self.fn_name, self.vars.len()),
         }
     }
@@ -1962,7 +1973,8 @@ impl GeneratedBlock {
 
 fn should_apply_atom_temp_reuse(block: &LinearBlock, layout: Option<CodegenOutputLayout>) -> bool {
     match layout {
-        Some(CodegenOutputLayout::SparseValues { .. }) => false,
+        Some(CodegenOutputLayout::SparseValues { .. })
+        | Some(CodegenOutputLayout::BandedValues { .. }) => false,
         // Current AtomView BVP microbenchmarks show temp reuse is a net loss
         // for residual vector blocks as well, so keep Auto conservative until
         // we have a stronger residual-specific heuristic.
@@ -2231,6 +2243,17 @@ impl CodegenModule {
                         &mut out,
                     )
                 }
+                Some(CodegenOutputLayout::BandedValues { rows, cols, slots, .. }) => {
+                    CEmitter::emit_sparse_values_block_function_into(
+                        &block.ir,
+                        &block.fn_name,
+                        block.vars.len(),
+                        rows,
+                        cols,
+                        slots,
+                        &mut out,
+                    )
+                }
                 None => CEmitter::emit_block_function_into(
                     &block.ir,
                     &block.fn_name,
@@ -2300,6 +2323,16 @@ impl CodegenModule {
                         rows,
                         cols,
                         nnz,
+                    )
+                }
+                Some(CodegenOutputLayout::BandedValues { rows, cols, slots, .. }) => {
+                    ZigEmitter::emit_sparse_values_block_function(
+                        &block.ir,
+                        &block.fn_name,
+                        block.vars.len(),
+                        rows,
+                        cols,
+                        slots,
                     )
                 }
                 None => {

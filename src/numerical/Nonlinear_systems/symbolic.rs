@@ -123,6 +123,270 @@ pub enum SymbolicArtifactAction {
     FallbackToLambdify,
 }
 
+/// Controls collection of the optional detailed preparation timeline.
+///
+/// The existing aggregate [`SymbolicPreparationReport`] remains available in
+/// both modes. Detailed stage timing is opt-in so constructing a prepared
+/// problem does not allocate stage records unless the caller asks for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreparationTelemetryMode {
+    /// Do not collect per-stage preparation records.
+    #[default]
+    Disabled,
+    /// Collect the detailed preparation timeline.
+    Collect,
+}
+
+impl PreparationTelemetryMode {
+    /// Returns whether detailed preparation records should be collected.
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Collect)
+    }
+}
+
+/// Input representation used by one preparation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationInputKind {
+    /// The caller supplied already constructed symbolic expressions.
+    Expressions,
+    /// The caller supplied strings that were parsed before preparation.
+    Strings,
+}
+
+/// Execution branch used by the prepared symbolic backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationExecutionMode {
+    /// Sequential Lambdify callback preparation/evaluation layout.
+    Sequential,
+    /// Parallel Lambdify callback preparation/evaluation layout.
+    Parallel,
+    /// Generated or linked AOT backend layout.
+    Aot,
+}
+
+/// Stable names for detailed symbolic preparation stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationStage {
+    /// Structural input, schema, dimension, and free-symbol validation.
+    InputValidation,
+    /// Parsing equation strings into symbolic expressions.
+    ExpressionParsing,
+    /// Import/materialization of an already constructed expression graph.
+    ExpressionGraphMaterialization,
+    /// Differentiation of residual expressions into a Jacobian.
+    JacobianDifferentiation,
+    /// Preparation of residual evaluator callbacks.
+    ResidualCallbackPreparation,
+    /// Preparation of Jacobian evaluator callbacks.
+    JacobianCallbackPreparation,
+    /// Transfer of validated numeric parameter values into the prepared view.
+    ParameterBinding,
+    /// Assembly of the solver-facing prepared problem.
+    PreparedProblemAssembly,
+    /// AOT materialization, compilation, linking, or runtime registration.
+    AotMaterialization,
+    /// Final consistency validation after backend assembly.
+    FinalValidation,
+}
+
+impl PreparationStage {
+    /// Returns the canonical report order. A stage can still be unavailable
+    /// when the selected constructor/backend did not execute it.
+    pub const ALL: &'static [Self] = &[
+        Self::InputValidation,
+        Self::ExpressionParsing,
+        Self::ExpressionGraphMaterialization,
+        Self::JacobianDifferentiation,
+        Self::ResidualCallbackPreparation,
+        Self::JacobianCallbackPreparation,
+        Self::ParameterBinding,
+        Self::PreparedProblemAssembly,
+        Self::AotMaterialization,
+        Self::FinalValidation,
+    ];
+}
+
+/// Timing record for one preparation stage.
+///
+/// `None` means that the stage was not applicable or could not be isolated;
+/// it is deliberately different from a measured zero duration/count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationStageTiming {
+    /// Stable stage identifier.
+    pub stage: PreparationStage,
+    /// Exclusive wall-clock duration when the stage was measured.
+    pub wall_time: Option<Duration>,
+    /// Number of logical operations represented by the record, if defined.
+    pub calls: Option<u64>,
+    /// Number of equations, callbacks, jobs, or other stage items, if useful.
+    pub items: Option<usize>,
+}
+
+/// Detailed, opt-in preparation telemetry for one prepared problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationTelemetry {
+    /// Inclusive end-to-end preparation duration.
+    pub total_wall_time: Duration,
+    /// Exclusive records in the stable [`PreparationStage`] order.
+    pub stages: Vec<PreparationStageTiming>,
+    /// Representation supplied by the caller.
+    pub input_kind: PreparationInputKind,
+    /// Number of equations in the prepared system.
+    pub equation_count: usize,
+    /// Number of unknown variables in the prepared system.
+    pub variable_count: usize,
+    /// Number of declared numeric parameters.
+    pub parameter_count: usize,
+    /// Selected callback/backend execution mode.
+    pub execution_mode: PreparationExecutionMode,
+    /// Whether this report describes a reused prepared object.
+    pub reused_prepared_problem: bool,
+    /// Backend-internal generated job counts, when available.
+    pub generated_residual_jobs: Option<usize>,
+    /// Backend-internal generated job counts, when available.
+    pub generated_jacobian_jobs: Option<usize>,
+    /// Time not attributed to one of the measured exclusive stages.
+    pub unattributed_wall_time: Duration,
+}
+
+impl PreparationTelemetry {
+    fn new(
+        input_kind: PreparationInputKind,
+        equation_count: usize,
+        variable_count: usize,
+        parameter_count: usize,
+        execution_mode: PreparationExecutionMode,
+    ) -> Self {
+        Self {
+            total_wall_time: Duration::ZERO,
+            stages: PreparationStage::ALL
+                .iter()
+                .copied()
+                .map(|stage| PreparationStageTiming {
+                    stage,
+                    wall_time: None,
+                    calls: None,
+                    items: None,
+                })
+                .collect(),
+            input_kind,
+            equation_count,
+            variable_count,
+            parameter_count,
+            execution_mode,
+            reused_prepared_problem: false,
+            generated_residual_jobs: None,
+            generated_jacobian_jobs: None,
+            unattributed_wall_time: Duration::ZERO,
+        }
+    }
+
+    /// Returns the record for one stage.
+    pub fn stage(&self, stage: PreparationStage) -> Option<&PreparationStageTiming> {
+        self.stages.iter().find(|record| record.stage == stage)
+    }
+
+    fn record(
+        &mut self,
+        stage: PreparationStage,
+        wall_time: Duration,
+        calls: Option<u64>,
+        items: Option<usize>,
+    ) {
+        if let Some(record) = self.stage_mut(stage) {
+            record.wall_time = Some(wall_time);
+            record.calls = calls;
+            record.items = items;
+        }
+    }
+
+    fn stage_mut(&mut self, stage: PreparationStage) -> Option<&mut PreparationStageTiming> {
+        self.stages.iter_mut().find(|record| record.stage == stage)
+    }
+
+    fn recompute_unattributed(&mut self) {
+        let accounted = self
+            .stages
+            .iter()
+            .filter_map(|record| record.wall_time)
+            .fold(Duration::ZERO, |sum, duration| sum.saturating_add(duration));
+        self.unattributed_wall_time = self.total_wall_time.saturating_sub(accounted);
+    }
+
+    pub(crate) fn set_total_wall_time(&mut self, total_wall_time: Duration) {
+        self.total_wall_time = total_wall_time;
+        self.recompute_unattributed();
+    }
+
+    pub(crate) fn set_execution_mode(&mut self, execution_mode: PreparationExecutionMode) {
+        self.execution_mode = execution_mode;
+    }
+
+    pub(crate) fn set_generated_jobs(
+        &mut self,
+        residual_jobs: Option<usize>,
+        jacobian_jobs: Option<usize>,
+    ) {
+        self.generated_residual_jobs = residual_jobs;
+        self.generated_jacobian_jobs = jacobian_jobs;
+    }
+
+    pub(crate) fn record_measured_stage(
+        &mut self,
+        stage: PreparationStage,
+        wall_time: Duration,
+        calls: Option<u64>,
+        items: Option<usize>,
+    ) {
+        self.record(stage, wall_time, calls, items);
+        self.recompute_unattributed();
+    }
+}
+
+/// Internal recorder used to keep detailed instrumentation out of disabled
+/// preparation hot paths.
+pub(crate) struct PreparationTelemetryRecorder {
+    telemetry: PreparationTelemetry,
+}
+
+impl PreparationTelemetryRecorder {
+    pub(crate) fn new(
+        mode: PreparationTelemetryMode,
+        input_kind: PreparationInputKind,
+        equation_count: usize,
+        variable_count: usize,
+        parameter_count: usize,
+        execution_mode: PreparationExecutionMode,
+    ) -> Option<Self> {
+        mode.is_enabled().then(|| Self {
+            telemetry: PreparationTelemetry::new(
+                input_kind,
+                equation_count,
+                variable_count,
+                parameter_count,
+                execution_mode,
+            ),
+        })
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        stage: PreparationStage,
+        started: Instant,
+        calls: Option<u64>,
+        items: Option<usize>,
+    ) {
+        self.telemetry
+            .record(stage, started.elapsed(), calls, items);
+    }
+
+    pub(crate) fn finish(mut self, total_wall_time: Duration) -> PreparationTelemetry {
+        self.telemetry.total_wall_time = total_wall_time;
+        self.telemetry.recompute_unattributed();
+        self.telemetry
+    }
+}
+
 /// Preparation/build telemetry shared by direct Lambdify and generated AOT
 /// entry points.
 ///
@@ -139,6 +403,13 @@ pub struct SymbolicPreparationReport {
     pub artifact_action: SymbolicArtifactAction,
     /// Manifest-derived artifact identity, when an AOT plan was prepared.
     pub artifact_key: Option<String>,
+    /// On-disk lifecycle identity, including build profile and compile
+    /// settings when this call knows the concrete build configuration.
+    ///
+    /// This is intentionally separate from `artifact_key`: the latter is the
+    /// resolver key for the mathematical/generated problem, while this key
+    /// prevents incompatible compiler settings from sharing one publication.
+    pub artifact_lifecycle_key: Option<String>,
     /// End-to-end preparation time, excluding later numerical solves.
     pub preparation_duration: Duration,
     /// Time spent in the AOT materialize/build/register stage performed by
@@ -148,22 +419,51 @@ pub struct SymbolicPreparationReport {
     pub generated_residual_jobs: Option<usize>,
     /// Number of generated Jacobian jobs/chunks, when an AOT plan exists.
     pub generated_jacobian_jobs: Option<usize>,
+    /// Optional detailed stage attribution collected by explicit opt-in.
+    pub detailed: Option<PreparationTelemetry>,
 }
 
 impl SymbolicPreparationReport {
-    fn direct_lambdify(duration: Duration, backend: SymbolicBackendKind) -> Self {
+    fn direct_lambdify(
+        duration: Duration,
+        backend: SymbolicBackendKind,
+        detailed: Option<PreparationTelemetry>,
+    ) -> Self {
         Self {
             effective_backend: backend,
             artifact_policy: SymbolicArtifactPolicy::NotRequested,
             artifact_action: SymbolicArtifactAction::NotApplicable,
             artifact_key: None,
+            artifact_lifecycle_key: None,
             preparation_duration: duration,
             build_duration: None,
             generated_residual_jobs: None,
             generated_jacobian_jobs: None,
+            detailed,
         }
     }
 }
+
+/// Typed failure returned by the opt-in detailed preparation constructor.
+///
+/// The ordinary constructors keep their existing `SolveError` contract. This
+/// wrapper is available when a caller needs the completed preparation stages
+/// together with the typed failure, for example in a diagnostics or CI report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolicPreparationFailure {
+    /// The original typed construction or validation error.
+    pub error: SolveError,
+    /// Stages completed before the failure, when detailed telemetry was opted in.
+    pub telemetry: Option<PreparationTelemetry>,
+}
+
+impl std::fmt::Display for SymbolicPreparationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "symbolic preparation failed: {}", self.error)
+    }
+}
+
+impl std::error::Error for SymbolicPreparationFailure {}
 
 /// High-level symbolic backend selection for nonlinear systems.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -358,6 +658,8 @@ pub struct SymbolicProblemOptions {
     pub backend_config: SymbolicBackendConfig,
     /// Runtime execution policy for the prepared Lambdify backend.
     pub lambdify_execution_policy: LambdifyExecutionPolicy,
+    /// Optional detailed preparation-stage telemetry.
+    pub preparation_telemetry: PreparationTelemetryMode,
 }
 
 impl SymbolicProblemOptions {
@@ -396,6 +698,12 @@ impl SymbolicProblemOptions {
         self
     }
 
+    /// Enables or disables detailed preparation-stage telemetry.
+    pub fn with_preparation_telemetry(mut self, mode: PreparationTelemetryMode) -> Self {
+        self.preparation_telemetry = mode;
+        self
+    }
+
     /// Convenience preset for the existing lambdify backend.
     pub fn with_lambdify_backend(self) -> Self {
         self.with_backend_config(SymbolicBackendConfig::lambdify())
@@ -404,6 +712,19 @@ impl SymbolicProblemOptions {
     /// Convenience preset for the future AOT backend.
     pub fn with_aot_backend(self) -> Self {
         self.with_backend_config(SymbolicBackendConfig::aot())
+    }
+}
+
+fn preparation_execution_mode(
+    backend: SymbolicBackendKind,
+    policy: LambdifyExecutionPolicy,
+) -> PreparationExecutionMode {
+    match backend {
+        SymbolicBackendKind::Aot => PreparationExecutionMode::Aot,
+        SymbolicBackendKind::Lambdify => match policy {
+            LambdifyExecutionPolicy::Sequential => PreparationExecutionMode::Sequential,
+            LambdifyExecutionPolicy::Parallel { .. } => PreparationExecutionMode::Parallel,
+        },
     }
 }
 
@@ -915,6 +1236,7 @@ impl PreparedSymbolicBackend {
         equation_parameters: Option<&[String]>,
         execution_policy: LambdifyExecutionPolicy,
         config: &SymbolicBackendConfig,
+        preparation_recorder: Option<&mut PreparationTelemetryRecorder>,
     ) -> Result<Self, SolveError> {
         match config.kind {
             SymbolicBackendKind::Lambdify => Ok(Self {
@@ -923,6 +1245,7 @@ impl PreparedSymbolicBackend {
                     variables,
                     equation_parameters,
                     execution_policy,
+                    preparation_recorder,
                 )?),
             }),
             SymbolicBackendKind::Aot => Err(SolveError::InvalidConfig(
@@ -1290,6 +1613,7 @@ impl SymbolicNonlinearProblem {
             options.equation_parameter_values,
             options.lambdify_execution_policy,
             options.backend_config,
+            options.preparation_telemetry,
         )
     }
 
@@ -1314,6 +1638,7 @@ impl SymbolicNonlinearProblem {
             options.equation_parameter_values,
             options.lambdify_execution_policy,
             SymbolicBackendConfig::lambdify(),
+            options.preparation_telemetry,
         )?;
 
         let selected = select_symbolic_nonlinear_backend(&problem, policy, resolver, aot_options);
@@ -1325,10 +1650,15 @@ impl SymbolicNonlinearProblem {
                     problem.preparation_report.artifact_action =
                         SymbolicArtifactAction::FallbackToLambdify;
                 }
-                problem.preparation_report.preparation_duration = preparation_started.elapsed();
+                let preparation_duration = preparation_started.elapsed();
+                problem.preparation_report.preparation_duration = preparation_duration;
+                if let Some(detailed) = problem.preparation_report.detailed.as_mut() {
+                    detailed.set_total_wall_time(preparation_duration);
+                }
                 Ok(problem)
             }
             SelectedSymbolicNonlinearBackendKind::AotCompiled => {
+                let aot_materialization_started = Instant::now();
                 let prepared_key = selected
                     .prepared_aot_problem
                     .as_ref()
@@ -1369,7 +1699,23 @@ impl SymbolicNonlinearProblem {
                 problem.preparation_report.generated_jacobian_jobs =
                     Some(prepared_manifest.functions.jacobian_chunks.len());
                 problem.preparation_report.effective_backend = SymbolicBackendKind::Aot;
-                problem.preparation_report.preparation_duration = preparation_started.elapsed();
+                let preparation_duration = preparation_started.elapsed();
+                problem.preparation_report.preparation_duration = preparation_duration;
+                let generated_jobs = (
+                    problem.preparation_report.generated_residual_jobs,
+                    problem.preparation_report.generated_jacobian_jobs,
+                );
+                if let Some(detailed) = problem.preparation_report.detailed.as_mut() {
+                    detailed.set_execution_mode(PreparationExecutionMode::Aot);
+                    detailed.set_generated_jobs(generated_jobs.0, generated_jobs.1);
+                    detailed.record_measured_stage(
+                        PreparationStage::AotMaterialization,
+                        aot_materialization_started.elapsed(),
+                        Some(1),
+                        None,
+                    );
+                    detailed.set_total_wall_time(preparation_duration);
+                }
                 Ok(problem)
             }
             SelectedSymbolicNonlinearBackendKind::AotRegisteredButNotBuilt => {
@@ -1398,6 +1744,7 @@ impl SymbolicNonlinearProblem {
             equation_parameter_values,
             LambdifyExecutionPolicy::default(),
             backend_config,
+            PreparationTelemetryMode::Disabled,
         )
     }
 
@@ -1409,8 +1756,10 @@ impl SymbolicNonlinearProblem {
         equation_parameter_values: Option<DVector<f64>>,
         lambdify_execution_policy: LambdifyExecutionPolicy,
         backend_config: SymbolicBackendConfig,
+        preparation_telemetry: PreparationTelemetryMode,
     ) -> Result<Self, SolveError> {
         let preparation_started = Instant::now();
+        let input_validation_started = Instant::now();
         if equations.is_empty() {
             return Err(SolveError::InvalidConfig(
                 "equation system must not be empty".to_string(),
@@ -1485,6 +1834,28 @@ impl SymbolicNonlinearProblem {
             }
         }
 
+        let execution_mode =
+            preparation_execution_mode(backend_config.kind, lambdify_execution_policy);
+        let mut preparation_recorder = PreparationTelemetryRecorder::new(
+            preparation_telemetry,
+            PreparationInputKind::Expressions,
+            equations.len(),
+            variables.len(),
+            parameter_schema
+                .as_ref()
+                .map_or(0, |schema| schema.names().len()),
+            execution_mode,
+        );
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::InputValidation,
+                input_validation_started,
+                Some(1),
+                Some(equations.len()),
+            );
+        }
+
+        let parameter_binding_started = Instant::now();
         let parameter_values = match (parameter_schema.as_ref(), equation_parameter_values) {
             (Some(schema), Some(values)) => Some(NonlinearParameterValues::new(schema, values)?),
             (Some(_), None) => None,
@@ -1495,6 +1866,14 @@ impl SymbolicNonlinearProblem {
             }
             (None, None) => None,
         };
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::ParameterBinding,
+                parameter_binding_started,
+                Some(1),
+                parameter_values.as_ref().map(|_| 1),
+            );
+        }
         let parameter_names = parameter_schema.as_ref().map(|schema| schema.names());
 
         let backend = PreparedSymbolicBackend::from_expressions(
@@ -1503,11 +1882,23 @@ impl SymbolicNonlinearProblem {
             parameter_names,
             lambdify_execution_policy,
             &backend_config,
+            preparation_recorder.as_mut(),
         )?;
+        let assembly_started = Instant::now();
         let symbolic_jacobian = backend
             .symbolic_jacobian()
             .map_or_else(Vec::new, <[Vec<Expr>]>::to_vec);
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::PreparedProblemAssembly,
+                assembly_started,
+                Some(1),
+                Some(equations.len()),
+            );
+        }
         let prepared_backend_kind = backend.kind();
+        let preparation_duration = preparation_started.elapsed();
+        let detailed = preparation_recorder.map(|recorder| recorder.finish(preparation_duration));
 
         Ok(Self {
             backend_config,
@@ -1518,8 +1909,9 @@ impl SymbolicNonlinearProblem {
             parameter_schema,
             parameter_values,
             preparation_report: SymbolicPreparationReport::direct_lambdify(
-                preparation_started.elapsed(),
+                preparation_duration,
                 prepared_backend_kind,
+                detailed,
             ),
         })
     }
@@ -1545,11 +1937,110 @@ impl SymbolicNonlinearProblem {
         equations: Vec<String>,
         options: SymbolicProblemOptions,
     ) -> Result<Self, SolveError> {
+        let parsing_started = Instant::now();
         let expressions = equations
             .iter()
-            .map(|equation| Expr::parse_expression(equation))
-            .collect::<Vec<_>>();
-        Self::from_expressions_with_options(expressions, options)
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(equation).map_err(|error| {
+                    SolveError::InvalidConfig(format!(
+                        "failed to parse symbolic equation {index}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parsing_duration = parsing_started.elapsed();
+        let mut problem = Self::from_expressions_with_options(expressions, options)?;
+        problem.record_external_preparation_stage(
+            PreparationStage::ExpressionParsing,
+            parsing_duration,
+            Some(equations.len() as u64),
+            Some(equations.len()),
+            PreparationInputKind::Strings,
+        );
+        Ok(problem)
+    }
+
+    /// Builds a symbolic problem and preserves opt-in telemetry on failure.
+    ///
+    /// The compatibility constructors continue to return [`SolveError`]. Use
+    /// this entry point when a diagnostics pipeline needs both the typed error
+    /// and the stages completed before it occurred. A disabled telemetry mode
+    /// returns `telemetry: None` even on failure.
+    pub fn from_strings_with_options_detailed(
+        equations: Vec<String>,
+        options: SymbolicProblemOptions,
+    ) -> Result<Self, SymbolicPreparationFailure> {
+        let preparation_started = Instant::now();
+        let input_kind = PreparationInputKind::Strings;
+        let execution_mode = preparation_execution_mode(
+            options.backend_config.kind,
+            options.lambdify_execution_policy,
+        );
+        let mut failure_telemetry = options.preparation_telemetry.is_enabled().then(|| {
+            PreparationTelemetry::new(
+                input_kind,
+                equations.len(),
+                options.variables.as_ref().map_or(0, Vec::len),
+                options.equation_parameters.as_ref().map_or(0, Vec::len),
+                execution_mode,
+            )
+        });
+        let parsing_started = Instant::now();
+        let expressions = equations
+            .iter()
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(equation).map_err(|error| {
+                    SolveError::InvalidConfig(format!(
+                        "failed to parse symbolic equation {index}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let parsing_duration = parsing_started.elapsed();
+        if let Some(telemetry) = failure_telemetry.as_mut() {
+            telemetry.record(
+                PreparationStage::ExpressionParsing,
+                parsing_duration,
+                Some(equations.len() as u64),
+                Some(equations.len()),
+            );
+        }
+        let expressions = match expressions {
+            Ok(expressions) => expressions,
+            Err(error) => {
+                if let Some(telemetry) = failure_telemetry.as_mut() {
+                    telemetry.set_total_wall_time(preparation_started.elapsed());
+                }
+                return Err(SymbolicPreparationFailure {
+                    error,
+                    telemetry: failure_telemetry,
+                });
+            }
+        };
+
+        match Self::from_expressions_with_options(expressions, options) {
+            Ok(mut problem) => {
+                problem.record_external_preparation_stage(
+                    PreparationStage::ExpressionParsing,
+                    parsing_duration,
+                    Some(equations.len() as u64),
+                    Some(equations.len()),
+                    input_kind,
+                );
+                Ok(problem)
+            }
+            Err(error) => {
+                if let Some(telemetry) = failure_telemetry.as_mut() {
+                    telemetry.set_total_wall_time(preparation_started.elapsed());
+                }
+                Err(SymbolicPreparationFailure {
+                    error,
+                    telemetry: failure_telemetry,
+                })
+            }
+        }
     }
 
     /// Builds a symbolic problem from equation strings through explicit backend selection.
@@ -1560,17 +2051,34 @@ impl SymbolicNonlinearProblem {
         resolver: Option<&AotResolver>,
         aot_options: SymbolicDenseAotOptions,
     ) -> Result<Self, SolveError> {
+        let parsing_started = Instant::now();
         let expressions = equations
             .iter()
-            .map(|equation| Expr::parse_expression(equation))
-            .collect::<Vec<_>>();
-        Self::from_expressions_with_backend_selection(
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(equation).map_err(|error| {
+                    SolveError::InvalidConfig(format!(
+                        "failed to parse symbolic equation {index}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parsing_duration = parsing_started.elapsed();
+        let mut problem = Self::from_expressions_with_backend_selection(
             expressions,
             options,
             policy,
             resolver,
             aot_options,
-        )
+        )?;
+        problem.record_external_preparation_stage(
+            PreparationStage::ExpressionParsing,
+            parsing_duration,
+            Some(equations.len() as u64),
+            Some(equations.len()),
+            PreparationInputKind::Strings,
+        );
+        Ok(problem)
     }
 
     /// Builds a symbolic problem from equation strings and explicit backend config.
@@ -1581,17 +2089,34 @@ impl SymbolicNonlinearProblem {
         equation_parameter_values: Option<DVector<f64>>,
         backend_config: SymbolicBackendConfig,
     ) -> Result<Self, SolveError> {
+        let parsing_started = Instant::now();
         let expressions = equations
             .iter()
-            .map(|equation| Expr::parse_expression(equation))
-            .collect::<Vec<_>>();
-        Self::from_expressions_with_backend(
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(equation).map_err(|error| {
+                    SolveError::InvalidConfig(format!(
+                        "failed to parse symbolic equation {index}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parsing_duration = parsing_started.elapsed();
+        let mut problem = Self::from_expressions_with_backend(
             expressions,
             variables,
             equation_parameters,
             equation_parameter_values,
             backend_config,
-        )
+        )?;
+        problem.record_external_preparation_stage(
+            PreparationStage::ExpressionParsing,
+            parsing_duration,
+            Some(equations.len() as u64),
+            Some(equations.len()),
+            PreparationInputKind::Strings,
+        );
+        Ok(problem)
     }
 
     /// Returns the variable names used by the symbolic system.
@@ -1617,6 +2142,26 @@ impl SymbolicNonlinearProblem {
     /// Returns immutable preparation/build telemetry for this symbolic provider.
     pub fn preparation_report(&self) -> &SymbolicPreparationReport {
         &self.preparation_report
+    }
+
+    pub(crate) fn record_external_preparation_stage(
+        &mut self,
+        stage: PreparationStage,
+        wall_time: Duration,
+        calls: Option<u64>,
+        items: Option<usize>,
+        input_kind: PreparationInputKind,
+    ) {
+        self.preparation_report.preparation_duration = self
+            .preparation_report
+            .preparation_duration
+            .saturating_add(wall_time);
+        if let Some(detailed) = self.preparation_report.detailed.as_mut() {
+            detailed.input_kind = input_kind;
+            detailed.total_wall_time = self.preparation_report.preparation_duration;
+            detailed.record(stage, wall_time, calls, items);
+            detailed.recompute_unattributed();
+        }
     }
 
     /// Replaces preparation telemetry when an outer lifecycle wrapper adds
@@ -2760,6 +3305,33 @@ mod tests {
             }
             Err(other) => panic!("expected InvalidConfig, got {other:?}"),
             Ok(_) => panic!("AOT backend is not wired yet"),
+        }
+    }
+
+    #[test]
+    fn string_constructor_accepts_unary_signs_and_reports_invalid_syntax() {
+        let signed = SymbolicNonlinearProblem::from_strings_with_options(
+            vec!["x - -0.5".to_string()],
+            SymbolicProblemOptions::new().with_variables(vec!["x".to_string()]),
+        )
+        .expect("serialized unary-minus syntax should remain parseable");
+        assert_relative_eq!(
+            signed
+                .residual(&DVector::from_vec(vec![1.0]))
+                .expect("signed residual"),
+            DVector::from_vec(vec![1.5]),
+            epsilon = 1.0e-12
+        );
+
+        match SymbolicNonlinearProblem::from_strings_with_options(
+            vec!["x + )".to_string()],
+            SymbolicProblemOptions::new().with_variables(vec!["x".to_string()]),
+        ) {
+            Err(SolveError::InvalidConfig(message)) => {
+                assert!(message.contains("equation 0"));
+            }
+            Err(other) => panic!("expected InvalidConfig, got {other:?}"),
+            Ok(_) => panic!("malformed user input must return a typed construction error"),
         }
     }
 

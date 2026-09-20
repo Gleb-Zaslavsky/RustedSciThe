@@ -1,3 +1,7 @@
+//! Architecture lane: frozen ExprLegacy correctness oracle and pure-numeric
+//! contracts. AtomView parity is added beside this corpus, never by deleting
+//! established regression cases.
+
 #[cfg(test)]
 mod tests {
 

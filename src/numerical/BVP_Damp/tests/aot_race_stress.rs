@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+//! Architecture lane: isolated AOT lifecycle and cold/warm stress stories.
+//! The legacy route remains an oracle while AtomView parity is added.
+
 mod tests {
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
         DampedBvpStatistics, DampedSolverOptions, NRBVP, SolverParams,
@@ -8,6 +11,7 @@ mod tests {
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
         GeneratedBackendConfig,
     };
+    use crate::numerical::BVP_Damp::test_common::uniform_initial_guess;
     use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
     use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
@@ -177,14 +181,6 @@ mod tests {
         aot_compile_link_ms: Aggregate,
         aot_register_link_ms: Aggregate,
         status: String,
-    }
-
-    fn uniform_initial_guess(variable_count: usize, n_steps: usize, value: f64) -> DMatrix<f64> {
-        DMatrix::from_column_slice(
-            variable_count,
-            n_steps,
-            DVector::from_element(variable_count * n_steps, value).as_slice(),
-        )
     }
 
     fn make_combustion_solver(
@@ -3952,7 +3948,7 @@ mod tests {
     #[ignore = "very heavy process-isolated cold combustion-3000 ExprLegacy Banded Lambdify vs tcc whole/chunk4 end-to-end control"]
     fn combustion_3000_banded_lambdify_vs_aot_end_to_end_stress() {
         run_combustion_3000_banded_isolated_stress_story(
-            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_3000_banded_lambdify_vs_aot_end_to_end_stress",
+            "numerical::BVP_Damp::test_aot_race_stress::tests::combustion_3000_banded_lambdify_vs_aot_end_to_end_stress",
             "ExprLegacy",
             vec![
                 RaceVariant {
@@ -3999,7 +3995,7 @@ mod tests {
     #[ignore = "very heavy process-isolated cold combustion-3000 AtomView Banded Lambdify vs tcc whole/chunk4 production end-to-end stress test"]
     fn combustion_3000_banded_atomview_lambdify_vs_aot_end_to_end_stress() {
         run_combustion_3000_banded_isolated_stress_story(
-            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_3000_banded_atomview_lambdify_vs_aot_end_to_end_stress",
+            "numerical::BVP_Damp::test_aot_race_stress::tests::combustion_3000_banded_atomview_lambdify_vs_aot_end_to_end_stress",
             "AtomView",
             vec![
                 RaceVariant {
@@ -4164,7 +4160,7 @@ mod tests {
     #[ignore = "process-isolated combustion-1000 Banded ExprLegacy/AtomView symbolic frontend comparison for Lambdify and tcc AOT"]
     fn combustion_1000_banded_symbolic_frontend_honest_wall_clock_table() {
         run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
-            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_banded_symbolic_frontend_honest_wall_clock_table",
+            "numerical::BVP_Damp::test_aot_race_stress::tests::combustion_1000_banded_symbolic_frontend_honest_wall_clock_table",
             "Banded",
             vec![
                 RaceVariant {
@@ -4215,7 +4211,7 @@ mod tests {
     #[ignore = "process-isolated combustion-1000 Banded AtomView tcc Full vs NoCse optimization-profile end-to-end story"]
     fn combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story() {
         run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
-            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story",
+            "numerical::BVP_Damp::test_aot_race_stress::tests::combustion_1000_banded_atomview_tcc_cse_profile_end_to_end_story",
             "Banded",
             vec![
                 RaceVariant {
@@ -4257,7 +4253,7 @@ mod tests {
     #[ignore = "process-isolated combustion-1000 Sparse ExprLegacy/AtomView symbolic frontend comparison for Lambdify and tcc AOT"]
     fn combustion_1000_sparse_symbolic_frontend_honest_wall_clock_table() {
         run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
-            "numerical::BVP_Damp::BVP_Damp_tests4::tests::combustion_1000_sparse_symbolic_frontend_honest_wall_clock_table",
+            "numerical::BVP_Damp::test_aot_race_stress::tests::combustion_1000_sparse_symbolic_frontend_honest_wall_clock_table",
             "Sparse",
             vec![
                 RaceVariant {

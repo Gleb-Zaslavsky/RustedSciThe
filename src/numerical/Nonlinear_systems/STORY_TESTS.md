@@ -2686,35 +2686,36 @@ maximum of total, residual, Jacobian, and linear stages. It also checks equal
 solver-level `R/J/L/I` counters, pointwise Lambdify/AOT solution agreement,
 and a strict `RequirePrebuilt` reuse with no second build.
 
-**Interim release result (three runs per route):** The compact generated
-codegen and the lifecycle path both passed at dimensions `128` and `512`.
-The first post-fix `128` run used `16` small row chunks and reported AOT
-`build=442.807 ms`, warm `total=0.530 ms`, `residual=0.010 ms`,
-`jacobian=0.242 ms`, `linear=0.274 ms`, with equal `R/J/L/I=5/5/4/4`
-counters. A subsequent `512` run with the corrected moderate `32`-row
-chunking used `16` chunks and reported AOT `build=1358.902 ms`, warm
-`total=21.739 ms`, `residual=0.036 ms`, `jacobian=6.714 ms`,
-`linear=14.809 ms`, with the same counters. Both strict `RequirePrebuilt`
-checks performed no second build and both routes agreed numerically.
+**Release result (five runs per route):** The compact generated codegen and the
+lifecycle path passed at dimensions `128` and `512`. The final matrix used
+`32`-row Jacobian chunks and reported:
 
-The `128` measurement predates the final `32`-row story setting and is kept
-only as a compact-codegen diagnostic; it is not mixed with the final
-cross-dimension performance claim.
+```text
+dimension | route           | preparation_ms | build_ms | total_ms | residual_ms | jacobian_ms | linear_ms | mean R/J/L/I
+128       | Lambdify warm   |          1.541 |        - |    0.516 |       0.012 |       0.178 |     0.315 | 5/5/4/4
+128       | AOT warm        |        369.916 |  365.162 |    0.397 |       0.006 |       0.113 |     0.275 | 5/5/4/4
+512       | Lambdify warm   |          6.658 |        - |   17.242 |       0.040 |       2.296 |    14.723 | 5/5/4/4
+512       | AOT warm        |       1397.577 | 1347.717 |   17.835 |       0.028 |       2.913 |    14.705 | 5/5/4/4
+```
+
+Both strict `RequirePrebuilt` checks performed no second build, and all routes
+agreed numerically within the test gate.
 
 **Interpretation:** Structural-zero elision removed the generated-code size
 problem: the former `14.7 s` cold build and Rust compiler stack-overflow
-failure are no longer representative for this diagonal corpus. The `512`
-case still has AOT warm Jacobian overhead (`6.714 ms` versus `2.188 ms` for
-Lambdify), while linear-stage time is comparable. This points to FFI/buffer
-adaptation or generated-chunk invocation overhead, not to a solver trajectory
-or correctness defect. Cold preparation/build remains separate from warm
-numerical timing.
+failure are no longer representative for this diagonal corpus. At `512`, AOT
+is about `3.4%` slower in total warm time and its Jacobian stage is about
+`27%` slower, while residual and linear stages are slightly faster or
+comparable. This points to generated-chunk/FFI overhead rather than a solver
+trajectory or correctness defect. Cold preparation/build remains separate
+from warm numerical timing.
 
-**Conclusion:** The structural codegen and large-case lifecycle/correctness
-gates are closed for the exercised dimensions. The final five-run release
-comparison with the current chunk setting remains an open performance gate;
-in particular, no universal AOT warm-speed claim is made until the remaining
-Jacobian adapter overhead is profiled.
+**Conclusion:** The structural codegen, lifecycle, correctness, and final
+five-run cross-dimension warm-comparison gates are closed for this corpus.
+The measured recommendation is workload-specific: AOT is numerically sound
+and can reduce callback-stage cost, but it is not faster end-to-end at `512`
+because Jacobian overhead offsets that gain. No universal AOT warm-speed
+claim is made.
 
 ## 54. Dense AOT FFI And Transpose Stage Story
 
@@ -3091,3 +3092,337 @@ supports keeping the existing TrustRegionLM ownership unchanged, but does not
 claim that one initial point is faster than another. The TODO item is closed;
 a future method-level isolation benchmark is optional hardening, not an
 indication of a confirmed defect.
+
+## 60. NASA TP-1907 CHON + Graphite Gate
+
+**Tests:**
+
+- `tp1907_chon_graphite_reproducer_has_finite_expected_initial_state`
+- `tp1907_chon_graphite_reproducer_is_rank_deficient_without_phase_control`
+- `tp1907_chon_graphite_methods_are_finite_and_do_not_claim_a_missing_root`
+- `tp1907_backtracking_lm_reports_finite_residual_and_balance`
+
+**Debug command:**
+
+```powershell
+cargo test --lib numerical::Nonlinear_systems::tp1907_chon_graphite_tests -- --nocapture --test-threads=1
+```
+
+**Release command:**
+
+```powershell
+cargo test --release --lib numerical::Nonlinear_systems::tp1907_chon_graphite_tests -- --nocapture --test-threads=1
+```
+
+**Hypothesis:** The supplied NASA TP-1907 CHON + graphite system is a useful
+stress reproducer for the nonlinear methods, but its raw inventory equations
+must not dominate the thermodynamic equations numerically. Row scaling should
+preserve the zero set and let the methods make safe progress. Because the
+paste-ready system explicitly excludes phase control and normalization, a
+zero-residual convergence assertion would be an invalid correctness criterion.
+
+**Result:** The 18-variable reproducer has finite initial residual/Jacobian
+values and the supplied initial residual norm is `1.248643832783359e2`. The
+Jacobian has rank `17`, with one singular value at machine zero. On the
+inventory-row-scaled problem, Minpack LM, Nielsen LM, and Trust-Region LM all
+returned finite in-bounds results and reduced the residual to approximately
+`3.888302e-3`; none reported `Converged`. The separate public backtracking LM
+check returned a finite in-bounds result with scaled residual `1.988207` and
+raw inventory balance metric `8.941349e8`, matching the independent reference
+trace for the same identity-damped/backtracking policy.
+
+**Interpretation:** The common rank deficiency is caused by the incomplete
+physical system, not by separate solver failures. The large raw
+inventory derivatives are also a legitimate scaling hazard, so the test keeps
+the row-scaled diagnostic path explicit instead of silently changing the
+production solver's residual semantics.
+
+The backtracking result is therefore a successful implementation-parity
+check, not a successful chemical-equilibrium solve: this fixture has no
+phase-control/normalization equation, and its raw inventory balance is not
+expected to be small from the supplied seed.
+
+**Conclusion:** The gate is accepted as a correctness/safety gate: it catches
+bad transcription, non-finite behavior, bounds violations, failure to reduce
+the residual, and false success. It is not yet a full chemical-equilibrium
+convergence gate. That requires the omitted phase-control/normalization rule
+and a validated physical reference solution; this remains an explicit TODO.
+
+## 61. TP-1907 0.4.15 versus Current LM Replay
+
+**Test:**
+
+- `tp1907_exact_replay_traces_current_and_historical_lm_policies`
+
+**Debug command:**
+
+```powershell
+cargo test --lib numerical::Nonlinear_systems::tp1907_chon_graphite_tests::tests::tp1907_exact_replay_traces_current_and_historical_lm_policies --no-default-features -- --ignored --nocapture --test-threads=1
+```
+
+**Release command:**
+
+```powershell
+cargo test --release --lib numerical::Nonlinear_systems::tp1907_chon_graphite_tests::tests::tp1907_exact_replay_traces_current_and_historical_lm_policies --no-default-features -- --ignored --nocapture --test-threads=1
+```
+
+**Hypothesis:** The TP-1907 regression could be caused either by an
+optimization bug or by the deliberate conversion of the old approximate
+MINPACK implementation into a stricter Fortran-style method.
+
+**Result:** The exact serialized 18-equation graph and Jacobian are unchanged
+to the established `1e-12` parity gate. On the same physical seed and bounds,
+the copied 0.4.15 MINPACK policy reaches the same `~3.888302e-3` scaled
+residual floor as the current policy. The current and historical Trust-Region
+LM step formulas also agree on the relevant physical route. In the limited
+log-coordinate plus balance-scale surrogate, the old policy reports
+`Converged` at `7.160093e-9` while the physical inventory error remains about
+`6.99e5`; the current policy reports a non-root termination instead.
+
+**Interpretation:** The observed old success is not evidence that the recent
+allocation/workspace refactor broke LM algebra. The strongest confirmed change
+is semantic: 0.4.15 could turn MINPACK orthogonality/progress exits into a
+false root success, whereas the current implementation preserves the generic
+contract that `Converged` requires the requested residual. The better basin is
+associated with normalization/recovery, not with restoring the old trust-radius
+branch.
+
+**Conclusion:** Do not weaken convergence checks or revert the canonical
+MINPACK policy. The remaining gap is an exact cross-project normalized-recovery
+parity fixture: the current surrogate is useful for diagnosis but does not
+rebuild KiThe's normalized composition, seed, and inventory request. Until that
+fixture is exported, TP-1907 remains a stress/safety gate rather than proof of
+full chemical-equilibrium convergence.
+
+## 62. Backtracking Levenberg-Marquardt Public Method
+
+**Tests:**
+
+- `backtracking_lm_solves_scalar_problem_with_identity_damping`
+- `backtracking_lm_rejects_infeasible_trials_without_clipping_them`
+- `facade_tests::enum_facade_reports_name`
+- `facade_tests::workspace_policy_keeps_unbenchmarked_trust_region_methods_owned`
+- `facade_tests::enum_facade_solves_plain_problem_with_backtracking_lm`
+
+**Debug command:**
+
+```powershell
+cargo test --lib numerical::Nonlinear_systems::prelude::facade_tests --no-default-features -- --nocapture --test-threads=1
+cargo test --lib numerical::Nonlinear_systems::LM_backtracking --no-default-features -- --nocapture --test-threads=1
+```
+
+**Release command:**
+
+```powershell
+cargo test --release --lib numerical::Nonlinear_systems::prelude::facade_tests --no-default-features -- --nocapture --test-threads=1
+cargo test --release --lib numerical::Nonlinear_systems::LM_backtracking --no-default-features -- --nocapture --test-threads=1
+```
+
+**Hypothesis:** The identity-damped normal-equation method with strict
+residual-decrease backtracking should be available as an independent public
+LM choice, without changing the faithful canonical implementations.
+
+**Result:** The focused tests verify scalar convergence, feasible trial
+handling without clipping, the public enum name, and workspace integration.
+The method uses `(J^T J + lambda I) delta = -J^T residual`, halves `alpha` on
+failed trials, decreases `lambda` after acceptance, and increases it after a
+fully failed line search.
+
+**Interpretation:** This is a mathematical-policy variant, not an alias for
+the classical configurable-scaling LM. Historical provenance is retained only
+in the parity audit; the public API and documentation use the algorithmic
+name `BacktrackingLevenbergMarquardt`.
+
+**Conclusion:** The backtracking LM route is now an explicit peer in
+`NonlinearSolverMethod`. The existing classical LM, Nielsen, and MINPACK
+routes remain unchanged and retain their respective faithful policies.
+
+## 63. Detailed Preparation Telemetry
+
+**Tests and benchmark:**
+
+- `nonlinear_preparation_telemetry_tests`
+- `nonlinear_preparation_telemetry`
+
+**Debug command:**
+
+```powershell
+cargo test --lib nonlinear_preparation_telemetry_tests -- --nocapture --test-threads=1
+cargo run --bench nonlinear_preparation_telemetry -- --noplot
+```
+
+**Release command:**
+
+```powershell
+cargo test --release --lib nonlinear_preparation_telemetry_tests -- --nocapture --test-threads=1
+cargo bench --bench nonlinear_preparation_telemetry -- --noplot
+```
+
+**Hypothesis:** Preparation cost must be attributable without mixing it with
+parameter binding, callback evaluation, or nonlinear solver iterations. The
+same stable stage vocabulary must work for string input and sequential or
+parallel prepared Lambdify routes, while unavailable stages remain explicit.
+
+**Result:** The correctness gate passed 6/6. Detailed telemetry is opt-in,
+reports stable stage order, keeps string parsing distinct from direct
+expression input, preserves the same report through repeated parameter
+binding, exposes the same schema for the parallel route, and turns malformed
+input in the generated string constructor into a typed `InvalidConfig` error.
+The detailed constructor also preserves partial telemetry on a failed parse.
+The release report uses five repetitions and `median[min,max]` milliseconds:
+
+```text
+dimension | cold total median[min,max] | Jacobian differentiation | repeated Jacobian callback | repeated total
+3         | 0.160[0.070,0.470]         | 0.075[0.040,0.376]         | 0.000[0.000,0.002]           | 0.000[0.000,0.001]
+15        | 0.244[0.218,0.354]         | 0.130[0.111,0.191]         | 0.001[0.001,0.003]           | 0.002[0.002,0.003]
+40        | 0.452[0.446,0.631]         | 0.177[0.171,0.315]         | 0.003[0.003,0.008]           | 0.004[0.003,0.004]
+128       | 1.431[1.403,1.706]         | 0.433[0.395,0.583]         | 0.025[0.025,0.044]           | 0.028[0.027,0.029]
+256       | 3.614[3.426,3.901]         | 1.007[0.979,1.276]         | 0.096[0.095,0.182]           | 0.101[0.100,0.105]
+512       | 9.485[8.931,9.577]         | 2.507[2.333,2.599]         | 0.579[0.573,0.718]           | 0.592[0.579,0.662]
+```
+
+Prepared Newton attempts were measured separately, excluding preparation and
+binding: `0.122 ms [0.119,0.185]` at dimension 128, with two residual calls,
+two Jacobian calls, one linear solve, and `Converged` termination.
+
+The same executable now prints Table D, comparing cold preparation with
+telemetry disabled versus enabled. This is intentionally evidence-only: the
+result should be used to estimate instrumentation overhead, not to change the
+default mode from `Disabled`.
+
+Table D result: dimension 40 was `0.465 ms` disabled versus `0.491 ms`
+enabled (`+5.6%`); dimension 128 was `1.651 ms` versus `1.680 ms`
+(`+1.8%`); dimension 512 was `11.804 ms` versus `10.838 ms` (`-8.2%`).
+All three min/max ranges overlap, so this run shows no systematic measurable
+overhead beyond normal process noise.
+
+**Interpretation:** On this synthetic independent-equation corpus, symbolic
+preparation grows with system size and is materially distinct from warm
+callback cost. Rebinding is below the millisecond display precision, while
+the Jacobian callback remains the dominant warm callback stage at dimension
+512. The enabled telemetry path remains within the run-to-run spread of the
+disabled path. These numbers are a machine-specific baseline, not a universal
+default policy or a claim that one backend is faster in all systems.
+
+**Conclusion:** The first detailed preparation telemetry contract is accepted
+for successful preparation, reuse, malformed-input failure reporting, and the
+current instrumentation-overhead baseline. Failed AOT materialization,
+typed solver-failure telemetry, and any composite preparation-plus-solve
+report remain separate follow-up work; no solver mathematics or backend policy
+was changed by this milestone.
+
+## 64. Nonlinear AOT Lifecycle Identity
+
+**Tests:**
+
+- `symbolic_generated::tests::nonlinear_aot_lifecycle_identity_separates_profile_and_compile_settings`
+- `symbolic_generated::tests::nonlinear_aot_ready_marker_rejects_a_different_compile_identity`
+- `symbolic_generated::tests::generated_backend_build_if_missing_materializes_build_and_updates_resolver`
+- `symbolic_generated::tests::generated_backend_reuses_updated_resolver_with_linked_runtime`
+
+**Debug command:**
+
+```powershell
+cargo test --lib numerical::Nonlinear_systems::symbolic_generated::tests::nonlinear_aot_lifecycle_identity -- --nocapture --test-threads=1
+cargo test --lib numerical::Nonlinear_systems::symbolic_generated::tests::nonlinear_aot_ready_marker_rejects_a_different_compile_identity -- --nocapture --test-threads=1
+cargo test --lib numerical::Nonlinear_systems::symbolic_generated::tests::generated_backend_build_if_missing_materializes_build_and_updates_resolver -- --nocapture --test-threads=1
+cargo test --lib numerical::Nonlinear_systems::symbolic_generated::tests::generated_backend_reuses_updated_resolver_with_linked_runtime -- --nocapture --test-threads=1
+```
+
+**Release command:**
+
+```powershell
+cargo test --release --lib numerical::Nonlinear_systems::symbolic_generated::tests -- --nocapture --test-threads=1
+```
+
+**Hypothesis:** A manifest key describing the mathematical problem is not
+enough to identify an on-disk AOT publication. Different profiles or rustc
+compile settings must not share a ready marker, generated crate namespace, or
+lifecycle lock, while the resolver must continue to resolve the same
+mathematical problem by its manifest key.
+
+**Result:** The release generated-backend acceptance suite passes `14/14`
+non-ignored tests in `0.99s`. Identical profile/configuration inputs produce
+the same lifecycle key; `Debug` versus `Release` and production versus
+`AotCompileConfig::fast_build()` produce different keys. A ready marker written
+for the fast-build identity is rejected for the production identity. The three
+remaining ignored tests are the previously established concurrent and
+cross-process lifecycle stories and were not part of this ordinary release
+run.
+
+**Interpretation:** The nonlinear Rust AOT route now separates mathematical
+resolver identity from on-disk build identity. Parameter values remain outside
+both identities, and the generated ABI plus resolver lookup are unchanged.
+The public preparation report exposes both `artifact_key` and the known
+`artifact_lifecycle_key`; a `RequirePrebuilt` call using an externally supplied
+resolver may legitimately report no lifecycle key because its original build
+profile is unavailable.
+
+**Conclusion:** The artifact-identity correctness gate is closed for the
+current Rust high-level route. External compiler/toolchain settings are still
+open because the nonlinear high-level configuration does not yet expose
+`RUSTFLAGS`, toolchain selection, or extra build arguments. Large warm AOT
+performance and Jacobian-stage profiling remain independent open gates.
+
+## 65. Large AOT Jacobian Layout And Adapter Profile
+
+**Test name:**
+`nonlinear_aot_ffi_transpose_story_tests::nonlinear_aot_jacobian_layout_strategy_story`
+
+**Debug command:**
+
+```powershell
+$env:NONLINEAR_AOT_LAYOUT_DIMENSION="128"
+$env:NONLINEAR_AOT_LAYOUT_RUNS="5"
+cargo test nonlinear_aot_jacobian_layout_strategy_story -- --ignored --nocapture --test-threads=1
+Remove-Item Env:\NONLINEAR_AOT_LAYOUT_DIMENSION
+Remove-Item Env:\NONLINEAR_AOT_LAYOUT_RUNS
+```
+
+**Release command:**
+
+```powershell
+$env:NONLINEAR_AOT_LAYOUT_DIMENSION="512"
+$env:NONLINEAR_AOT_LAYOUT_RUNS="10"
+cargo test --release nonlinear_aot_jacobian_layout_strategy_story -- --ignored --nocapture --test-threads=1
+Remove-Item Env:\NONLINEAR_AOT_LAYOUT_DIMENSION
+Remove-Item Env:\NONLINEAR_AOT_LAYOUT_RUNS
+```
+
+**Hypothesis:** The dense AOT Jacobian cost has three separable parts: generated
+callback execution, row-major-to-column-major adaptation, and the complete
+caller-facing `jacobian_into` path. Comparing `Whole`, `ByRowCount(32)`, and
+`ByRowCount(64)` on the same diagonal system should show whether row chunking
+or the adapter dominates the warm path.
+
+**Protocol:** Each strategy is materialized into an independent AOT artifact
+and dynamically linked. The test checks that every generated callback produces
+the same dense Jacobian as the public `jacobian_into` path before collecting
+warm samples. Build and symbolic preparation are excluded from the reported
+stage timings; lifecycle correctness remains covered by Section 64.
+
+**Result:** Release run passed with `10` repetitions at `n=512`:
+
+```text
+strategy | callback_ms | copy_ms | full_jacobian_ms
+whole    |       0.014 |   0.216 |            0.301
+rows-32  |       0.017 |   0.307 |            0.340
+rows-64  |       0.015 |   0.243 |            0.318
+```
+
+All three strategies produced identical Jacobians. The `Whole` route was
+fastest; its caller-side copy was about `72%` of the full `jacobian_into`
+time (`0.216/0.301`).
+
+**Interpretation:** The callback itself is small (`0.014 ms`), while the
+row-major-to-column-major adaptation dominates the measured full path. Row
+chunking adds generated dispatch and copy overhead on this compact dense
+corpus, without reducing callback time. The result supports `Whole` as the
+default for this route; it does not establish a universal policy for sparse,
+banded, or non-compact Jacobians.
+
+**Conclusion:** The profiling gate is closed for the current compact dense AOT
+route. The existing dense ABI and numerical output layout remain unchanged,
+and no further adapter optimization is justified from this corpus alone. The
+large warm end-to-end AOT comparison in Section 53 remains a separate open
+performance gate.

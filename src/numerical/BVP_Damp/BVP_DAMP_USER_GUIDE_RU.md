@@ -159,6 +159,28 @@ Lambdify означает: вы задаете систему через `Expr`,
 
 Lambdify остается лучшим первым запуском новой постановки: в этот момент важнее всего проверить уравнения, граничные условия и начальное приближение без зависимости от внешнего toolchain. Для малых одноразовых расчетов он часто выигрывает end-to-end. Однако после оптимизации `AtomView` это уже не следует переносить на большие задачи: на measured combustion BVP с `n_steps = 1000` cold `tcc` AOT оказался быстрее Lambdify и в Sparse, и в Banded маршруте.
 
+#### Параллелизм callback-ов Lambdify
+
+Для вычисления невязки и якобиана используется явная политика
+`BvpLambdifyExecutionPolicy`:
+
+```rust
+use RustedSciThe::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
+
+let sequential = BvpLambdifyExecutionPolicy::Sequential;
+let forced_parallel = BvpLambdifyExecutionPolicy::Parallel { min_work: 0 };
+let automatic = BvpLambdifyExecutionPolicy::Auto { min_work: 0 };
+```
+
+`Sequential` удобен для маленьких систем и воспроизводимой диагностики.
+`Parallel` является явным экспериментальным override. `Auto` -- осторожный
+production-режим: кроме заданного пользователем порога требуется не менее
+восьми скалярных вычислений на worker Rayon, поэтому маленькая задача остается
+последовательной, а большая может использовать раздельные буферы worker-ов.
+Решение детерминировано и не выполняет скрытую калибровку запуска потоков
+внутри первого callback. Точку break-even следует проверять story/performance
+тестами на конкретной машине.
+
 ### AOT
 
 AOT (ahead-of-time) - это compiled backend. Символические выражения проходят через intermediate representation, затем генерируется код, собирается отдельный артефакт и подключается как runtime callback. Философия простая: заплатить за подготовку заранее, чтобы последующие вызовы невязки и якобиана были дешевле.
@@ -654,3 +676,40 @@ cargo run --example bvp_frozen_numerical_route_guide
 Низкоуровневый codegen/performance слой дополнительно документируется в [`../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md`](../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md). Это полезно, когда нужно понять, проблема в самом BVP solver loop или в generated callback backend.
 
 В рабочем коде лучше использовать `try_solve()` вместо `solve()`: первый возвращает typed errors, второй оставлен как compatibility wrapper и паникует при ошибках. Для production BVP-задач typed error почти всегда лучше, чем красивый panic с грустной музыкой.
+
+## 16. Типизированное логирование решений
+
+Числовая телеметрия и логирование решений разделены. Typed-снимок
+`telemetry` содержит счетчики и таймеры стадий, а опциональный trace объясняет
+выбор или fallback backend, обновление якобиана, отклонение damping-шага,
+уточнение сетки, ограничение шага bounds, non-finite значения и завершение.
+
+```rust
+use RustedSciThe::numerical::BVP_Damp::{
+    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+};
+use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
+
+let config = GeneratedBackendConfig::banded_lambdify_defaults()
+    // Counters — совместимый режим; Off отключает сбор счетчиков и таймеров.
+    .with_bvp_telemetry_mode(BvpTelemetryMode::Off)
+    .with_bvp_logging_config(
+        BvpLoggingConfig::new(BvpLoggingMode::Warnings).with_max_events(128),
+    );
+// Передайте config через builder солвера или set_bvp_logging_config.
+let trace = &solver.get_statistics().telemetry;
+println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
+```
+
+`BvpTelemetryMode::Off` отключает счетчики solver-а, stage timers и timing
+подстадий callback без изменения численного алгоритма. Режим telemetry
+независим от `BvpLoggingMode`: можно оставить ограниченный decision trace,
+не включая подробный сбор счетчиков и времени. `Counters` остается режимом
+по умолчанию для совместимости, а `Detailed` дополнительно собирает timing
+подстадий callback.
+
+По умолчанию действует `Off`, и события не сохраняются. `Warnings` оставляет
+восстанавливаемые и неуспешные решения, `Detailed` также сохраняет обычные
+адаптивные решения. Буфер ограничен на каждый solve, поэтому большая задача не
+может бесконечно наращивать память диагностики. При достижении лимита проверяйте
+`log_events_dropped`.

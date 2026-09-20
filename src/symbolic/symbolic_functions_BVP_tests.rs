@@ -6,7 +6,7 @@ use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepa
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    register_linked_sparse_backend, unregister_linked_sparse_backend, LinkedSparseAotBackend,
+    LinkedSparseAotBackend, register_linked_sparse_backend, unregister_linked_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
@@ -15,8 +15,8 @@ use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_orchestrator::AutoExecutionMode;
 use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend, PreparedProblem};
 use crate::symbolic::codegen::codegen_runtime_api::{
-    recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
-    ResidualChunkingStrategy,
+    ResidualChunkingStrategy, recommended_residual_chunking_for_parallelism,
+    recommended_row_chunking_for_parallelism,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
@@ -267,6 +267,13 @@ fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
     );
     assert_eq!(residual.to_DVectorType(), expected_residual);
     assert_eq!(jacobian_value.to_DMatrixType(), expected_jacobian);
+    let direct_telemetry = jacobian
+        .direct_banded_jacobian_telemetry_snapshot()
+        .expect("direct Banded callback should expose typed telemetry");
+    assert_eq!(direct_telemetry.calls, 1);
+    assert_eq!(direct_telemetry.errors, 0);
+    assert!(direct_telemetry.work_items > 0);
+    assert!(direct_telemetry.elapsed > std::time::Duration::ZERO);
     let binding = jacobian
         .last_lambdify_binding_timer_snapshot
         .as_ref()
@@ -280,6 +287,32 @@ fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
             "missing non-negative callback compilation stage {stage}"
         );
     }
+}
+
+#[test]
+fn legacy_lambdify_dense_callbacks_expose_typed_runtime_telemetry() {
+    let mut jacobian = build_small_symbolic_case();
+    jacobian.compile_lambdified_problem_with_config(
+        "x",
+        vec!["y", "z"],
+        BvpBackendConfig::lambdify(BvpMatrixBackend::Dense),
+    );
+
+    let state = DVector::from_vec(vec![0.5, 1.25]);
+    let _residual = jacobian.residiual_function.call(0.0, &state);
+    let _jacobian = jacobian
+        .jac_function
+        .as_mut()
+        .expect("dense legacy Jacobian callback should exist")
+        .call(0.0, &state);
+
+    let telemetry = jacobian
+        .legacy_lambdify_telemetry_snapshot()
+        .expect("legacy Lambdify installation should expose typed telemetry");
+    assert_eq!(telemetry.residual_calls, 1);
+    assert_eq!(telemetry.jacobian_calls, 1);
+    assert!(telemetry.residual_elapsed > std::time::Duration::ZERO);
+    assert!(telemetry.jacobian_elapsed > std::time::Duration::ZERO);
 }
 
 #[test]
@@ -687,10 +720,12 @@ fn select_sparse_backend_prefers_compiled_aot_when_registered_artifact_exists() 
     );
     assert_eq!(selection.matrix_backend, MatrixBackend::SparseCol);
     assert!(selection.is_compiled_aot());
-    assert!(selection
-        .aot_resolution
-        .as_ref()
-        .is_some_and(|resolved| resolved.is_compiled()));
+    assert!(
+        selection
+            .aot_resolution
+            .as_ref()
+            .is_some_and(|resolved| resolved.is_compiled())
+    );
 }
 
 #[test]
@@ -791,10 +826,12 @@ fn prepare_sparse_backend_execution_preserves_compiled_aot_selection_metadata() 
     match execution {
         BvpSparseExecutionPlan::AotCompiled(selected) => {
             assert_eq!(selected.effective_backend, SelectedBackendKind::AotCompiled);
-            assert!(selected
-                .aot_resolution
-                .as_ref()
-                .is_some_and(|resolved| resolved.is_compiled()));
+            assert!(
+                selected
+                    .aot_resolution
+                    .as_ref()
+                    .is_some_and(|resolved| resolved.is_compiled())
+            );
         }
         other => panic!("expected AotCompiled plan, got {other:?}"),
     }
@@ -980,6 +1017,28 @@ fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
             legacy_residual[index]
         );
     }
+    let legacy_telemetry = legacy
+        .legacy_lambdify_telemetry_snapshot()
+        .expect("ExprLegacy callbacks should expose typed telemetry");
+    let legacy_preparation = legacy
+        .last_symbolic_jacobian_telemetry_snapshot()
+        .expect("ExprLegacy symbolic preparation should expose typed telemetry");
+    assert!(legacy_preparation.row_differentiation > std::time::Duration::ZERO);
+    assert_eq!(legacy_telemetry.residual_calls, 1);
+    assert_eq!(legacy_telemetry.jacobian_calls, 1);
+    assert!(
+        atom.legacy_lambdify_telemetry_snapshot().is_none(),
+        "AtomView callbacks must not be charged to ExprLegacy telemetry"
+    );
+    let atom_telemetry = atom
+        .atom_lambdify_telemetry_snapshot()
+        .expect("AtomView callbacks should expose separate typed telemetry");
+    let atom_preparation = atom
+        .last_symbolic_jacobian_telemetry_snapshot()
+        .expect("AtomView symbolic preparation should expose typed telemetry");
+    assert!(atom_preparation.row_differentiation > std::time::Duration::ZERO);
+    assert_eq!(atom_telemetry.residual_calls, 1);
+    assert_eq!(atom_telemetry.jacobian_calls, 1);
     assert_eq!(atom_jacobian.nrows(), legacy_jacobian.nrows());
     assert_eq!(atom_jacobian.ncols(), legacy_jacobian.ncols());
     for row in 0..atom_jacobian.nrows() {
@@ -1035,6 +1094,16 @@ fn generate_bvp_with_atom_discretization_matches_legacy_banded_path() {
         "forward".to_string(),
         "Banded".to_string(),
         bandwidth,
+    );
+
+    let atom_direct = atom.direct_banded_problem();
+    assert!(
+        atom_direct.atom_symbolic_jacobian_sparse.is_some(),
+        "AtomView Banded runtime must receive packed derivative entries"
+    );
+    assert!(
+        atom_direct.atom_vector_of_functions.is_some(),
+        "AtomView Banded runtime must receive packed residual atoms"
     );
 
     let args = DVector::from_vec(
@@ -1337,10 +1406,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics_large_grid() {
 
     println!(
         "[two-point sparse bundle diagnostics large-grid] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
-        max_index,
-        max_diff,
-        legacy_residual[max_index],
-        atom_residual[max_index]
+        max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
 }
 
@@ -1435,10 +1501,7 @@ fn atom_two_point_sparse_bundle_residual_diagnostics_with_explicit_h() {
 
     println!(
         "[two-point sparse bundle diagnostics explicit-h] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
-        max_index,
-        max_diff,
-        legacy_residual[max_index],
-        atom_residual[max_index]
+        max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
 }
 
@@ -1758,9 +1821,11 @@ fn sparse_solver_provider_exposes_compiled_aot_metadata_for_real_bvp() {
         provider.effective_backend(),
         SelectedBackendKind::AotCompiled
     );
-    assert!(provider
-        .resolved_aot_artifact()
-        .is_some_and(|resolved| resolved.is_compiled()));
+    assert!(
+        provider
+            .resolved_aot_artifact()
+            .is_some_and(|resolved| resolved.is_compiled())
+    );
     assert_eq!(provider.jacobian_shape(), (12, 12));
     assert_eq!(provider.jacobian_structure().nnz(), 28);
 }
@@ -2072,9 +2137,11 @@ fn sparse_solver_bundle_collects_real_bvp_compiled_aot_metadata() {
 
     assert!(!bundle.is_runtime_callable());
     assert_eq!(bundle.effective_backend(), SelectedBackendKind::AotCompiled);
-    assert!(bundle
-        .resolved_aot_artifact()
-        .is_some_and(|resolved| resolved.is_compiled()));
+    assert!(
+        bundle
+            .resolved_aot_artifact()
+            .is_some_and(|resolved| resolved.is_compiled())
+    );
     assert_eq!(bundle.jacobian_shape(), (12, 12));
     assert_eq!(bundle.sparse_structure.nnz(), 28);
     assert_eq!(bundle.variable_string.len(), 12);

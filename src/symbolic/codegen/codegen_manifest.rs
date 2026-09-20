@@ -5,6 +5,7 @@
 //! their strings and basic scalar metadata so they are independent from the
 //! borrowed symbolic task inputs that produced them.
 
+use crate::symbolic::bvp::atom_aot::AtomAotPreparedPlan;
 use crate::symbolic::codegen::codegen_provider_api::{
     BackendKind, MatrixBackend, PreparedBandedProblem, PreparedDenseProblem, PreparedProblem,
     PreparedSparseProblem,
@@ -117,6 +118,49 @@ impl PreparedProblemManifest {
             ),
         }
     }
+
+    /// Builds an owned manifest directly from an AtomView AOT plan.
+    ///
+    /// This is deliberately separate from the `From<&PreparedProblem>`
+    /// implementations below.  Calling those implementations would require
+    /// constructing the historical Expr runtime plans and would reintroduce
+    /// the conversion that the Atom-native AOT route is intended to remove.
+    pub fn from_atom_aot_plan(
+        backend_kind: BackendKind,
+        matrix_backend: MatrixBackend,
+        plan: &AtomAotPreparedPlan,
+        functions: GeneratedFunctionsManifest,
+    ) -> Self {
+        let (rows, cols) = plan.matrix_layout().shape();
+        Self {
+            backend_kind,
+            matrix_backend,
+            io: ProblemIoManifest {
+                input_names: plan.input_names().to_vec(),
+                residual_len: plan.residuals().len(),
+                jacobian_rows: rows,
+                jacobian_cols: cols,
+                jacobian_nnz: Some(plan.matrix_layout().value_count()),
+            },
+            functions,
+            expression_signature: atom_expression_signature(plan),
+        }
+    }
+}
+
+fn atom_expression_signature(plan: &AtomAotPreparedPlan) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for atom in plan.residuals() {
+        atom.hash(&mut hasher);
+    }
+    for entry in plan.jacobian_entries() {
+        entry.row.hash(&mut hasher);
+        entry.col.hash(&mut hasher);
+        entry.value.hash(&mut hasher);
+    }
+    plan.input_names().hash(&mut hasher);
+    plan.matrix_layout().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Hash symbolic structure directly rather than rendering an entire generated

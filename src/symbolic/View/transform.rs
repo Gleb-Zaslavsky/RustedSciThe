@@ -19,6 +19,21 @@ pub fn substitute_symbol_values(atom: &Atom, value_map: &HashMap<Symbol, f64>) -
     substitute_symbol_values_view(atom.as_view(), value_map)
 }
 
+/// Rename variables and bind one independent-variable symbol in a single
+/// Atom-native traversal.
+///
+/// BVP discretization performs this operation for every equation at every
+/// mesh step. Keeping the independent-variable binding in the same traversal
+/// avoids allocating a temporary one-entry substitution map for each row.
+pub fn rename_and_bind_symbol(
+    atom: &Atom,
+    rename_map: &HashMap<Symbol, Symbol>,
+    bound_symbol: Symbol,
+    value: f64,
+) -> Atom {
+    rename_and_bind_symbol_view(atom.as_view(), rename_map, bound_symbol, value)
+}
+
 /// Rename variable symbols in a borrowed atom view.
 pub fn rename_symbols_view(view: AtomView<'_>, rename_map: &HashMap<Symbol, Symbol>) -> Atom {
     match view {
@@ -111,6 +126,67 @@ pub fn substitute_symbol_values_view(view: AtomView<'_>, value_map: &HashMap<Sym
     }
 }
 
+/// Borrowed-view implementation of [`rename_and_bind_symbol`].
+pub fn rename_and_bind_symbol_view(
+    view: AtomView<'_>,
+    rename_map: &HashMap<Symbol, Symbol>,
+    bound_symbol: Symbol,
+    value: f64,
+) -> Atom {
+    match view {
+        AtomView::Num(_) => view.to_owned(),
+        AtomView::Var(v) => {
+            let symbol = rename_map
+                .get(&v.get_symbol())
+                .copied()
+                .unwrap_or(v.get_symbol());
+            if symbol == bound_symbol {
+                approximate_f64_atom(value)
+            } else {
+                Atom::new_var(symbol)
+            }
+        }
+        AtomView::Fun(f) => {
+            let mut builder = FunctionBuilder::new(f.get_symbol());
+            for arg in f.iter() {
+                builder = builder.add_arg(rename_and_bind_symbol_view(
+                    arg,
+                    rename_map,
+                    bound_symbol,
+                    value,
+                ));
+            }
+            builder.finish()
+        }
+        AtomView::Pow(p) => {
+            let (base, exp) = p.get_base_exp();
+            let mut result = Atom::default();
+            let bound_base = rename_and_bind_symbol_view(base, rename_map, bound_symbol, value);
+            let bound_exp = rename_and_bind_symbol_view(exp, rename_map, bound_symbol, value);
+            result.to_pow(bound_base.as_view(), bound_exp.as_view());
+            result
+        }
+        AtomView::Mul(m) => {
+            let mut result = Atom::default();
+            let mul = result.to_mul();
+            for arg in m.iter() {
+                let bound = rename_and_bind_symbol_view(arg, rename_map, bound_symbol, value);
+                mul.extend(bound.as_view());
+            }
+            result
+        }
+        AtomView::Add(a) => {
+            let mut result = Atom::default();
+            let add = result.to_add();
+            for arg in a.iter() {
+                let bound = rename_and_bind_symbol_view(arg, rename_map, bound_symbol, value);
+                add.extend(bound.as_view());
+            }
+            result
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -150,5 +226,24 @@ mod tests {
         let rendered = atom_to_expr(&substituted).to_string();
         assert!(rendered.contains("2"));
         assert!(!rendered.contains("t"));
+    }
+
+    #[test]
+    fn rename_and_bind_rewrites_both_roles_in_one_traversal() {
+        let expr = Expr::parse_expression("y + x");
+        let atom = expr_to_atom(&expr);
+        let mut rename = HashMap::default();
+        rename.insert(
+            Symbol::new(crate::wrap_symbol!("y")),
+            Symbol::new(crate::wrap_symbol!("y_3")),
+        );
+
+        let bound =
+            rename_and_bind_symbol(&atom, &rename, Symbol::new(crate::wrap_symbol!("x")), 0.25);
+        let rendered = atom_to_expr(&bound).to_string();
+
+        assert!(rendered.contains("y_3"));
+        assert!(rendered.contains("1 / 4"));
+        assert!(!rendered.contains("x"));
     }
 }

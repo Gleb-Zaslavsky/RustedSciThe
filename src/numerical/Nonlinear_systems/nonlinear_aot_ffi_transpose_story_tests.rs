@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! cargo test --release nonlinear_aot_ffi_callback_and_transpose_stage_story -- --ignored --nocapture --test-threads=1
+//! cargo test --release nonlinear_aot_jacobian_layout_strategy_story -- --ignored --nocapture --test-threads=1
 //! ```
 
 #![cfg(test)]
@@ -26,6 +27,7 @@ use crate::numerical::Nonlinear_systems::symbolic_generated::{
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     resolve_linked_dense_backend, unregister_linked_dense_backend,
 };
+use crate::symbolic::codegen::codegen_runtime_api::DenseJacobianChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
@@ -199,4 +201,147 @@ fn nonlinear_aot_ffi_callback_and_transpose_stage_story() {
         full_mean, full_std
     );
     unregister_linked_dense_backend(&problem_key);
+}
+
+#[derive(Debug)]
+struct LayoutStrategyProfile {
+    name: &'static str,
+    callback_ms: f64,
+    copy_ms: f64,
+    full_ms: f64,
+}
+
+/// Compare generated Jacobian block layout with the caller-side adaptation cost.
+///
+/// Each strategy gets its own artifact namespace. The test deliberately keeps
+/// the numerical problem and ABI fixed, so a timing difference is attributable
+/// to generated block dispatch or the row-major-to-column-major adapter rather
+/// than to solver iterations or symbolic preparation.
+#[test]
+#[ignore = "release-oriented AOT Jacobian layout and adapter profiling story"]
+fn nonlinear_aot_jacobian_layout_strategy_story() {
+    let _guard = aot_solver_test_guard();
+    let dimension = std::env::var("NONLINEAR_AOT_LAYOUT_DIMENSION")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 8)
+        .unwrap_or(512);
+    let repetitions = std::env::var("NONLINEAR_AOT_LAYOUT_RUNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 3)
+        .unwrap_or(10);
+    let (equations, variables, point) = diagonal_problem(dimension);
+    let strategies = [
+        ("whole", DenseJacobianChunkingStrategy::Whole),
+        (
+            "rows-32",
+            DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 32 },
+        ),
+        (
+            "rows-64",
+            DenseJacobianChunkingStrategy::ByRowCount { rows_per_chunk: 64 },
+        ),
+    ];
+
+    let mut profiles = Vec::with_capacity(strategies.len());
+    for (name, jacobian_strategy) in strategies {
+        let output_dir = tempfile::tempdir().expect("AOT output directory should exist");
+        let built = SymbolicNonlinearProblem::from_expressions_with_generated_backend(
+            equations.clone(),
+            SymbolicProblemOptions::new().with_variables(variables.clone()),
+            SymbolicGeneratedBackendConfig::new()
+                .with_backend_policy_override(Some(SymbolicBackendSelectionPolicy::AotOnly))
+                .with_build_policy(SymbolicAotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Release,
+                })
+                .with_aot_options(SymbolicDenseAotOptions {
+                    jacobian_strategy,
+                    ..SymbolicDenseAotOptions::default()
+                })
+                .with_output_parent_dir(Some(output_dir.path().to_path_buf())),
+        )
+        .expect("AOT layout fixture should build");
+        let problem_key = built
+            .preparation_report
+            .artifact_key
+            .clone()
+            .expect("AOT layout fixture should publish a key");
+        let linked = resolve_linked_dense_backend(&problem_key)
+            .expect("AOT layout fixture should register a linked backend");
+        let prepared = built.into_prepared();
+        let bound = prepared
+            .bind_without_parameters()
+            .expect("AOT layout fixture should bind without parameters");
+
+        let mut expected = DMatrix::zeros(dimension, dimension);
+        bound
+            .jacobian_into(&point, &mut expected)
+            .expect("reference AOT Jacobian should succeed");
+        let args = point.as_slice();
+        let mut callback_output = vec![0.0; dimension * dimension];
+        let mut adapted = DMatrix::zeros(dimension, dimension);
+        (linked.jacobian_eval)(args, &mut callback_output);
+        copy_row_major_jacobian_into_column_major(
+            &callback_output,
+            adapted.as_mut_slice(),
+            dimension,
+            dimension,
+        );
+        assert_eq!(adapted, expected, "strategy {name} changed Jacobian values");
+
+        let callback_samples = (0..repetitions)
+            .map(|_| {
+                let started = Instant::now();
+                (linked.jacobian_eval)(args, &mut callback_output);
+                black_box(&callback_output);
+                duration_ms(started.elapsed())
+            })
+            .collect::<Vec<_>>();
+        let copy_samples = (0..repetitions)
+            .map(|_| {
+                let started = Instant::now();
+                copy_row_major_jacobian_into_column_major(
+                    &callback_output,
+                    adapted.as_mut_slice(),
+                    dimension,
+                    dimension,
+                );
+                black_box(&adapted);
+                duration_ms(started.elapsed())
+            })
+            .collect::<Vec<_>>();
+        let full_samples = (0..repetitions)
+            .map(|_| {
+                let started = Instant::now();
+                bound
+                    .jacobian_into(&point, &mut adapted)
+                    .expect("full AOT Jacobian path should succeed");
+                black_box(&adapted);
+                duration_ms(started.elapsed())
+            })
+            .collect::<Vec<_>>();
+        let (callback_ms, _) = mean_std(&callback_samples);
+        let (copy_ms, _) = mean_std(&copy_samples);
+        let (full_ms, _) = mean_std(&full_samples);
+        profiles.push(LayoutStrategyProfile {
+            name,
+            callback_ms,
+            copy_ms,
+            full_ms,
+        });
+        assert!(unregister_linked_dense_backend(&problem_key).is_some());
+    }
+
+    println!(
+        "[Nonlinear AOT Jacobian layout] dimension={dimension}; runs={repetitions}; build excluded"
+    );
+    println!("strategy | callback_ms | copy_ms | full_jacobian_ms");
+    println!("-----------------------------------------------------");
+    for profile in profiles {
+        println!(
+            "{:<8} | {:>11.3} | {:>7.3} | {:>16.3}",
+            profile.name, profile.callback_ms, profile.copy_ms, profile.full_ms
+        );
+    }
 }

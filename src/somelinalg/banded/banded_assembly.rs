@@ -157,10 +157,18 @@ impl BandedAssembly {
         let mut out = Banded::<f64>::zeros(self.n, self.kl, self.ku)?;
 
         for offset in -(self.kl as isize)..=(self.ku as isize) {
-            let diag = self.diag(offset).unwrap();
-            for pos in 0..diag.len() {
-                let (i, j) = self.diag_pos_to_ij(offset, pos)?;
-                out[(i, j)] = diag[pos];
+            let diag = self.diag(offset).ok_or(BandedError::DimensionMismatch)?;
+            let band_row = (self.ku as isize - offset) as usize;
+            let band_row_start = band_row * self.n;
+            let column_start = if offset >= 0 { offset as usize } else { 0 };
+            for (pos, value) in diag.iter().copied().enumerate() {
+                // `BandedAssembly` stores a diagonal densely by its own
+                // position, while `Banded` stores the same value at the
+                // LAPACK-style `(band_row, column)` slot. Both layouts are
+                // already validated by `BandedAssembly::zeros`, so this
+                // avoids repeated coordinate/bounds checks in the factor
+                // preparation hot path.
+                out.as_mut_slice()[band_row_start + column_start + pos] = value;
             }
         }
 
@@ -178,9 +186,19 @@ impl BandedAssembly {
 
         let mut out = BlockTridiagonal::zeros(n_blocks, block_size)?;
 
+        // Conversion is performed once per numeric factorization. Keep the
+        // storage walk branch-light: `get`/`set` would repeat integer and
+        // bounds checks for every scalar entry in every block.
+        let value_in_band = |i: usize, j: usize| -> f64 {
+            let offset = j as isize - i as isize;
+            let pos = if offset >= 0 { i } else { j };
+            self.diagonals[(offset + self.kl as isize) as usize][pos]
+        };
+
         for blk in 0..n_blocks {
             let r0 = blk * block_size;
             let c0 = blk * block_size;
+            let diag_block = &mut out.diag_blocks_mut()[blk];
 
             // diagonal block
             for i in 0..block_size {
@@ -188,8 +206,7 @@ impl BandedAssembly {
                     let gi = r0 + i;
                     let gj = c0 + j;
                     if self.in_band(gi, gj) {
-                        let v = self.get(gi, gj)?;
-                        out.set_diag(blk, i, j, v)?;
+                        diag_block[i * block_size + j] = value_in_band(gi, gj);
                     }
                 }
             }
@@ -198,12 +215,13 @@ impl BandedAssembly {
             if blk > 0 {
                 let lr0 = blk * block_size;
                 let lc0 = (blk - 1) * block_size;
+                let lower_block = &mut out.lower_blocks_mut()[blk - 1];
                 for i in 0..block_size {
                     for j in 0..block_size {
                         let gi = lr0 + i;
                         let gj = lc0 + j;
-                        if let Ok(v) = self.get(gi, gj) {
-                            out.set_lower(blk - 1, i, j, v)?;
+                        if self.in_band(gi, gj) {
+                            lower_block[i * block_size + j] = value_in_band(gi, gj);
                         }
                     }
                 }
@@ -213,12 +231,13 @@ impl BandedAssembly {
             if blk + 1 < n_blocks {
                 let ur0 = blk * block_size;
                 let uc0 = (blk + 1) * block_size;
+                let upper_block = &mut out.upper_blocks_mut()[blk];
                 for i in 0..block_size {
                     for j in 0..block_size {
                         let gi = ur0 + i;
                         let gj = uc0 + j;
-                        if let Ok(v) = self.get(gi, gj) {
-                            out.set_upper(blk, i, j, v)?;
+                        if self.in_band(gi, gj) {
+                            upper_block[i * block_size + j] = value_in_band(gi, gj);
                         }
                     }
                 }
@@ -277,11 +296,15 @@ impl BandedAssembly {
         let len = self
             .diag_len(offset)
             .ok_or(BandedError::DimensionMismatch)?;
+        let diag = self
+            .diag_mut(offset)
+            .ok_or(BandedError::DimensionMismatch)?;
         for pos in 0..len {
-            let (i, j) = self.diag_pos_to_ij(offset, pos)?;
-            let diag = self
-                .diag_mut(offset)
-                .ok_or(BandedError::DimensionMismatch)?;
+            let (i, j) = if offset >= 0 {
+                (pos, offset as usize + pos)
+            } else {
+                ((-offset) as usize + pos, pos)
+            };
             diag[pos] = f(i, j);
         }
         Ok(())
@@ -291,8 +314,7 @@ impl BandedAssembly {
     where
         F: FnMut(isize, usize, usize) -> f64,
     {
-        let offsets: Vec<isize> = self.offsets().collect();
-        for offset in offsets {
+        for offset in self.min_offset()..=self.max_offset() {
             self.fill_diag_with(offset, |i, j| f(offset, i, j))?;
         }
         Ok(())
@@ -353,8 +375,7 @@ pub fn fill_banded_assembly_sequential<F>(
 where
     F: FnMut(isize, usize, usize) -> f64,
 {
-    let offsets: Vec<isize> = asm.offsets().collect();
-    for offset in offsets {
+    for offset in asm.min_offset()..=asm.max_offset() {
         asm.fill_diag_with(offset, |i, j| f(offset, i, j))?;
     }
     Ok(())
@@ -386,17 +407,12 @@ where
     use rayon::prelude::*;
 
     let kl = asm.kl();
-    let infos: Vec<(isize, usize)> = asm
-        .diagonals()
-        .iter()
-        .enumerate()
-        .map(|(d_idx, diag)| (d_idx as isize - kl as isize, diag.len()))
-        .collect();
-
     asm.diagonals_mut()
         .par_iter_mut()
-        .zip(infos.into_par_iter())
-        .for_each(|(diag, (offset, len))| {
+        .enumerate()
+        .for_each(|(d_idx, diag)| {
+            let offset = d_idx as isize - kl as isize;
+            let len = diag.len();
             for pos in 0..len {
                 let (i, j) = if offset >= 0 {
                     (pos, offset as usize + pos)

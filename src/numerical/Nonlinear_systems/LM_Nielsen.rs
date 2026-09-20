@@ -909,6 +909,26 @@ mod tests {
     use crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem;
     use approx::assert_relative_eq;
 
+    #[test]
+    fn nielsen_initial_damping_preserves_legacy_marquardt_scaling() {
+        let jacobian = DMatrix::from_diagonal(&DVector::from_vec(vec![2.0, 3.0]));
+        let residual = DVector::from_element(2, 1.0);
+        let x0 = DVector::zeros(2);
+        let options = SolveOptions::default();
+
+        let plain = NielsenLevenbergMarquardtMethod::default()
+            .init(&RosenbrockProblem, &x0, &options, &residual, &jacobian)
+            .expect("valid Nielsen state");
+        let advanced = NielsenLevenbergMarquardtMethodAdvanced::default()
+            .init(&RosenbrockProblem, &x0, &options, &residual, &jacobian)
+            .expect("valid advanced Nielsen state");
+
+        // D = column norms, so max(diag(J^T J) * D^2) = max(4*4, 9*9).
+        let expected = 81.0e-6;
+        assert_relative_eq!(plain.mu, expected, epsilon = 1.0e-15);
+        assert_relative_eq!(advanced.mu, expected, epsilon = 1.0e-15);
+    }
+
     struct RosenbrockProblem;
 
     impl NonlinearProblem for RosenbrockProblem {

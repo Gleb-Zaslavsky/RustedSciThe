@@ -77,14 +77,6 @@ impl NonlinearMethod for TrustRegionMethod {
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
-        runtime.linear_solves += 1;
-        let newton_step = measure_linear_system_operation(
-            options.linear_solver,
-            &state.jacobian,
-            &(-&state.residual),
-            runtime,
-            options.diagnostics.collect_statistics,
-        )?;
         let gradient = state.jacobian.transpose() * &state.residual;
         if gradient.norm_squared() < options.tolerance.powi(2) {
             if state.residual_norm <= options.tolerance {
@@ -95,7 +87,26 @@ impl NonlinearMethod for TrustRegionMethod {
 
         let alpha =
             gradient.dot(&gradient) / (&state.jacobian * &gradient).norm_squared().max(1e-16);
-        let step = dogleg_step(newton_step, &(-alpha * &gradient), method_state.delta);
+        let cauchy_step = -alpha * &gradient;
+        let cauchy_norm = cauchy_step.norm();
+
+        // A boundary Cauchy step is already a valid trust-region step. Do not
+        // factor J before knowing that the Newton endpoint is needed: a
+        // rank-deficient Jacobian must not make the robust gradient branch
+        // fail prematurely.
+        let step = if cauchy_norm >= method_state.delta {
+            method_state.delta / cauchy_norm * cauchy_step
+        } else {
+            runtime.linear_solves += 1;
+            let newton_step = measure_linear_system_operation(
+                options.linear_solver,
+                &state.jacobian,
+                &(-&state.residual),
+                runtime,
+                options.diagnostics.collect_statistics,
+            )?;
+            dogleg_step(newton_step, &cauchy_step, method_state.delta)
+        };
         if step.norm() < options.tolerance {
             if state.residual_norm <= options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::Converged));
@@ -1293,6 +1304,47 @@ mod tests2 {
         assert_eq!(result.termination, TerminationReason::Converged);
         assert!((result.x[0] - expected).abs() < 1e-8);
         assert!((result.x[1] - expected).abs() < 1e-8);
+    }
+
+    #[test]
+    fn trust_region_does_not_factor_rank_deficient_jacobian_for_boundary_cauchy_step() {
+        struct RankDeficientProblem;
+
+        impl NonlinearProblem for RankDeficientProblem {
+            fn dimension(&self) -> usize {
+                2
+            }
+
+            fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+                let residual = x[0] + x[1] - 1.0;
+                Ok(DVector::from_vec(vec![residual, residual]))
+            }
+        }
+
+        impl JacobianProvider for RankDeficientProblem {
+            fn jacobian(&self, _x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+                Ok(DMatrix::from_row_slice(2, 2, &[1.0, 1.0, 1.0, 1.0]))
+            }
+        }
+
+        let method = TrustRegionMethod {
+            delta_init: 0.1,
+            delta_max: 1.0,
+            ..TrustRegionMethod::default()
+        };
+        let result = SolverEngine::new(
+            method,
+            SolveOptions {
+                max_iterations: 1,
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&RankDeficientProblem, DVector::zeros(2))
+        .expect("boundary Cauchy step should not require a singular Newton solve");
+
+        assert_eq!(result.termination, TerminationReason::MaxIterations);
+        assert_eq!(result.statistics.linear_solves, 0);
+        assert!(result.residual_norm < 2.0_f64.sqrt());
     }
 }
 

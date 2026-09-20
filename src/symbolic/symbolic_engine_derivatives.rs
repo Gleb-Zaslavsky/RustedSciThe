@@ -625,10 +625,13 @@ impl Expr {
     }
     /// Computes the derivative of a single-variable expression.
     /// If the expression has multiple variables, returns an error.
-    pub fn diff1D(&self)->Result<Expr, String>{
+    pub fn diff1D(&self) -> Result<Expr, String> {
         let vars = self.all_arguments_are_variables();
         if vars.len() != 1 {
-            return Err(format!("diff1D is only applicable to single-variable expressions. Found variables: {:?}", vars));
+            return Err(format!(
+                "diff1D is only applicable to single-variable expressions. Found variables: {:?}",
+                vars
+            ));
         }
         Ok(self.diff(&vars[0]))
     }
@@ -962,7 +965,8 @@ impl Expr {
     /// Parsed symbolic expression
     ///
     /// # Panics
-    /// Panics if the expression cannot be parsed (invalid syntax)
+    /// Panics if the expression cannot be parsed. Prefer
+    /// [`Self::try_parse_expression`] for user-provided input.
     ///
     /// # Examples
     /// ```rust, ignore
@@ -976,11 +980,15 @@ impl Expr {
     /// - Functions: sin, cos, exp, ln, etc.
     /// - Parentheses for grouping
     pub fn parse_expression(input: &str) -> Expr {
-        let expr = match parse_expression_func(0, input) {
-            Ok(expr) => Ok(expr),
-            Err(err) => Err(err),
-        };
-        expr.unwrap()
+        Self::try_parse_expression(input)
+            .unwrap_or_else(|error| panic!("invalid symbolic expression '{input}': {error}"))
+    }
+
+    /// Fallibly parses a mathematical expression without panicking on invalid
+    /// user input. This is the parser entry point for task documents and
+    /// string-based solver constructors.
+    pub fn try_parse_expression(input: &str) -> Result<Expr, String> {
+        parse_expression_func(0, input)
     }
 
     /// Parses multiple expressions from a vector of strings.
@@ -1321,7 +1329,7 @@ impl Expr {
             self.evaluate_multi_diff_from_linspace(start.clone(), end.clone(), num_values);
         //println!("vector_of_vectors_of_dy_dx_analytical  {:?}", vector_of_vectors_of_dy_dx_analytical);
         let analitical_function = &self.lambdify_wrapped(); // get the analtical function
-        // let's define step
+                                                            // let's define step
         let max_end = end.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
         let min_start = start.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
         let step = (1.0 / 1e4) * (max_end - min_start) / (num_values as f64 - 1.0); //
@@ -1790,17 +1798,20 @@ mod diff1d_tests {
     fn test_diff1d_simple_polynomial() {
         // f(x) = x^2 + 3x + 5  →  f'(x) = 2x + 3
         let x = Expr::Var("x".to_string());
-        let f = x.clone().pow(Expr::Const(2.0))
-            + Expr::Const(3.0) * x.clone()
-            + Expr::Const(5.0);
+        let f = x.clone().pow(Expr::Const(2.0)) + Expr::Const(3.0) * x.clone() + Expr::Const(5.0);
 
-        let df = f.diff1D().expect("diff1D should succeed for single-variable expr");
+        let df = f
+            .diff1D()
+            .expect("diff1D should succeed for single-variable expr");
         let df_fn = df.lambdify1D();
 
         // At x = 2: f'(2) = 2*2 + 3 = 7
         let val = df_fn(2.0);
-        assert!((val - 7.0).abs() < 1e-10,
-            "diff1D(x^2+3x+5) at x=2: expected 7, got {}", val);
+        assert!(
+            (val - 7.0).abs() < 1e-10,
+            "diff1D(x^2+3x+5) at x=2: expected 7, got {}",
+            val
+        );
     }
 
     #[test]
@@ -1815,8 +1826,12 @@ mod diff1d_tests {
         // At x = π/4: cos(π/4) ≈ 0.7071067811865476
         let expected = std::f64::consts::FRAC_PI_4.cos();
         let val = df_fn(std::f64::consts::FRAC_PI_4);
-        assert!((val - expected).abs() < 1e-10,
-            "diff1D(sin(x)) at π/4: expected {}, got {}", expected, val);
+        assert!(
+            (val - expected).abs() < 1e-10,
+            "diff1D(sin(x)) at π/4: expected {}, got {}",
+            expected,
+            val
+        );
     }
 
     #[test]
@@ -1831,8 +1846,12 @@ mod diff1d_tests {
         // At x = 0.5: 2*exp(1) ≈ 5.43656365691809
         let expected = 2.0 * (1.0_f64).exp();
         let val = df_fn(0.5);
-        assert!((val - expected).abs() < 1e-10,
-            "diff1D(exp(2x)) at x=0.5: expected {}, got {}", expected, val);
+        assert!(
+            (val - expected).abs() < 1e-10,
+            "diff1D(exp(2x)) at x=0.5: expected {}, got {}",
+            expected,
+            val
+        );
     }
 
     #[test]
@@ -1846,8 +1865,11 @@ mod diff1d_tests {
 
         // At x = 2: 2*2/(4+1) = 4/5 = 0.8
         let val = df_fn(2.0);
-        assert!((val - 0.8).abs() < 1e-10,
-            "diff1D(ln(x^2+1)) at x=2: expected 0.8, got {}", val);
+        assert!(
+            (val - 0.8).abs() < 1e-10,
+            "diff1D(ln(x^2+1)) at x=2: expected 0.8, got {}",
+            val
+        );
     }
 
     #[test]
@@ -1859,8 +1881,11 @@ mod diff1d_tests {
 
         // At x = 3: 3*9 + 2 = 29
         let val = df_fn(3.0);
-        assert!((val - 29.0).abs() < 1e-10,
-            "diff1D(x^3+2x) at x=3: expected 29, got {}", val);
+        assert!(
+            (val - 29.0).abs() < 1e-10,
+            "diff1D(x^3+2x) at x=3: expected 29, got {}",
+            val
+        );
     }
 
     // ── Error paths ──
@@ -1873,7 +1898,10 @@ mod diff1d_tests {
         let f = x.clone() * y.clone();
 
         let result = f.diff1D();
-        assert!(result.is_err(), "diff1D should return Err for multi-variable expression");
+        assert!(
+            result.is_err(),
+            "diff1D should return Err for multi-variable expression"
+        );
         let err_msg = result.unwrap_err();
         assert!(err_msg.contains("x"), "Error should mention variable x");
         assert!(err_msg.contains("y"), "Error should mention variable y");
@@ -1885,7 +1913,10 @@ mod diff1d_tests {
         let f = Expr::Const(42.0);
 
         let result = f.diff1D();
-        assert!(result.is_err(), "diff1D should return Err for constant expression");
+        assert!(
+            result.is_err(),
+            "diff1D should return Err for constant expression"
+        );
     }
 
     #[test]
@@ -1897,6 +1928,9 @@ mod diff1d_tests {
         let f = x.clone() + y.clone() * z.clone();
 
         let result = f.diff1D();
-        assert!(result.is_err(), "diff1D should return Err for 3-variable expression");
+        assert!(
+            result.is_err(),
+            "diff1D should return Err for 3-variable expression"
+        );
     }
 }

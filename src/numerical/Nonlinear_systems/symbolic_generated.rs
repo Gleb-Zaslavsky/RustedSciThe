@@ -13,9 +13,9 @@
 
 use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::symbolic::{
-    SymbolicArtifactAction, SymbolicArtifactPolicy, SymbolicBackendConfig, SymbolicBackendKind,
-    SymbolicDenseAotOptions, SymbolicNonlinearProblem, SymbolicPreparationReport,
-    SymbolicProblemOptions,
+    PreparationInputKind, PreparationStage, SymbolicArtifactAction, SymbolicArtifactPolicy,
+    SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions, SymbolicNonlinearProblem,
+    SymbolicPreparationReport, SymbolicProblemOptions,
 };
 use crate::numerical::Nonlinear_systems::symbolic_aot::materialize_symbolic_nonlinear_aot_build_with_compile_config;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
@@ -496,6 +496,51 @@ fn generated_names(problem_key: &str, config: &SymbolicGeneratedBackendConfig) -
     (crate_name, module_name)
 }
 
+/// Derives the on-disk lifecycle identity for one generated nonlinear artifact.
+///
+/// `PreparedProblemManifest::problem_key()` identifies the mathematical
+/// problem and generated function layout. It deliberately does not identify
+/// how that source was compiled, so it remains the resolver key. The lifecycle
+/// key additionally separates the build profile and rustc overrides; otherwise
+/// `RequirePrebuilt` could accept an artifact built with different settings.
+fn nonlinear_aot_lifecycle_key(
+    problem_key: &str,
+    config: &SymbolicGeneratedBackendConfig,
+    profile: AotBuildProfile,
+) -> String {
+    // FNV-1a is intentionally small and deterministic here. This key is a
+    // cache namespace, not a cryptographic artifact hash.
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    let mut feed = |value: &str| {
+        for byte in value.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    };
+    feed("nonlinear-aot-lifecycle-v1");
+    feed(problem_key);
+    feed(match profile {
+        AotBuildProfile::Debug => "debug",
+        AotBuildProfile::Release => "release",
+    });
+    feed(&config.aot_compile_config.label());
+    feed(
+        config
+            .crate_name_override
+            .as_deref()
+            .unwrap_or("<default-crate-name>"),
+    );
+    feed(
+        config
+            .module_name_override
+            .as_deref()
+            .unwrap_or("<default-module-name>"),
+    );
+    format!("{hash:016x}")
+}
+
 fn select_with_config<'a>(
     problem: &'a SymbolicNonlinearProblem,
     config: &SymbolicGeneratedBackendConfig,
@@ -608,7 +653,8 @@ fn perform_requested_build(
 
     let prepared = baseline_problem.prepare_dense_aot_problem(config.aot_options);
     let problem_key = prepared.problem_key();
-    let (crate_name, module_name) = generated_names(&problem_key, config);
+    let lifecycle_key = nonlinear_aot_lifecycle_key(&problem_key, config, profile);
+    let (crate_name, module_name) = generated_names(&lifecycle_key, config);
     info!(
         "Materializing dense nonlinear AOT build for crate '{}' with profile {:?}",
         crate_name, profile
@@ -635,11 +681,11 @@ fn perform_requested_build(
                     config.build_policy,
                     SymbolicAotBuildPolicy::BuildIfMissing { .. }
                 ) && build.expected_cdylib.exists()
-                    && nonlinear_aot_ready_marker_matches(&build, &problem_key) =>
+                    && nonlinear_aot_ready_marker_matches(&build, &lifecycle_key) =>
             {
                 info!(
-                    "Reusing persisted nonlinear AOT artifact for problem key {}",
-                    problem_key
+                    "Reusing persisted nonlinear AOT artifact for problem key {} and lifecycle key {}",
+                    problem_key, lifecycle_key
                 );
                 successful_build = Some(build);
                 break;
@@ -659,7 +705,8 @@ fn perform_requested_build(
                 match build.execute() {
                     Ok(executed) if executed.succeeded() => {
                         built_now = true;
-                        if let Err(error) = write_nonlinear_aot_ready_marker(&build, &problem_key) {
+                        if let Err(error) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key)
+                        {
                             warn!(
                                 "Nonlinear AOT build succeeded but ready marker '{}' could not be written: {error}",
                                 nonlinear_aot_ready_marker_path(&build).display()
@@ -706,7 +753,7 @@ fn perform_requested_build(
             let (attempts, detail) =
                 last_failure.unwrap_or_else(|| (0, "unknown build failure".to_string()));
             return Err(SolveError::AotBuildFailed(nonlinear_aot_retry_message(
-                &format!("problem key {problem_key}"),
+                &format!("problem key {problem_key}, lifecycle key {lifecycle_key}"),
                 attempts,
                 &detail,
                 last_transient,
@@ -735,16 +782,17 @@ fn discover_persisted_nonlinear_aot_resolver(
     })?;
     let prepared = baseline_problem.prepare_dense_aot_problem(config.aot_options);
     let problem_key = prepared.problem_key();
-    let _file_lock = acquire_nonlinear_aot_file_lock(
-        output_parent_dir,
-        &problem_key,
-        NONLINEAR_AOT_FILE_LOCK_TIMEOUT,
-    )?;
-    let (crate_name, module_name) = generated_names(&problem_key, config);
 
     // RequirePrebuilt has no profile field for historical API compatibility.
     // Inspect both standard Cargo locations without compiling anything.
     for profile in [AotBuildProfile::Release, AotBuildProfile::Debug] {
+        let lifecycle_key = nonlinear_aot_lifecycle_key(&problem_key, config, profile);
+        let _file_lock = acquire_nonlinear_aot_file_lock(
+            output_parent_dir,
+            &lifecycle_key,
+            NONLINEAR_AOT_FILE_LOCK_TIMEOUT,
+        )?;
+        let (crate_name, module_name) = generated_names(&lifecycle_key, config);
         let build = materialize_symbolic_nonlinear_aot_build_with_compile_config(
             &crate_name,
             &module_name,
@@ -756,11 +804,11 @@ fn discover_persisted_nonlinear_aot_resolver(
         )
         .map_err(|error| SolveError::AotBuildFailed(error.to_string()))?;
         if build.expected_cdylib.exists()
-            && nonlinear_aot_ready_marker_matches(&build, &problem_key)
+            && nonlinear_aot_ready_marker_matches(&build, &lifecycle_key)
         {
             info!(
-                "Discovered persisted nonlinear AOT artifact for RequirePrebuilt, problem key {}",
-                problem_key
+                "Discovered persisted nonlinear AOT artifact for RequirePrebuilt, problem key {} and lifecycle key {}",
+                problem_key, lifecycle_key
             );
             return resolver_from_nonlinear_aot_build(&prepared, &build, None).map(Some);
         }
@@ -811,8 +859,6 @@ impl SymbolicNonlinearProblem {
         let initial_selection =
             select_with_config(&baseline_problem, &config, initial_resolver.as_ref());
 
-        let build_requested =
-            should_build_for_selection(&config, initial_selection.effective_backend);
         let build_started = Instant::now();
         let (build_result, resolver_snapshot) =
             if should_build_for_selection(&config, initial_selection.effective_backend) {
@@ -823,9 +869,16 @@ impl SymbolicNonlinearProblem {
                     select_with_config(&baseline_problem, &config, initial_resolver.as_ref());
                 if should_build_for_selection(&config, selection_after_wait.effective_backend) {
                     let prepared = baseline_problem.prepare_dense_aot_problem(config.aot_options);
+                    let profile = build_profile(config.build_policy).ok_or_else(|| {
+                        SolveError::AotBuildFailed(
+                            "AOT build was requested without a concrete build profile".to_string(),
+                        )
+                    })?;
+                    let lifecycle_key =
+                        nonlinear_aot_lifecycle_key(&prepared.problem_key(), &config, profile);
                     let _file_lock = acquire_nonlinear_aot_file_lock(
                         config.output_parent_dir()?,
-                        &prepared.problem_key(),
+                        &lifecycle_key,
                         NONLINEAR_AOT_FILE_LOCK_TIMEOUT,
                     )?;
                     perform_requested_build(&baseline_problem, &config, initial_resolver.clone())?
@@ -857,6 +910,15 @@ impl SymbolicNonlinearProblem {
                 )
             })
             .unwrap_or((None, None, None));
+        let artifact_lifecycle_key =
+            final_selection
+                .prepared_aot_problem
+                .as_ref()
+                .and_then(|prepared| {
+                    build_profile(config.build_policy).map(|profile| {
+                        nonlinear_aot_lifecycle_key(&prepared.problem_key(), &config, profile)
+                    })
+                });
         let artifact_action = match final_backend {
             SelectedSymbolicNonlinearBackendKind::AotCompiled if build_result.is_some() => {
                 SymbolicArtifactAction::Built
@@ -870,6 +932,25 @@ impl SymbolicNonlinearProblem {
             }
             _ => SymbolicArtifactAction::NotApplicable,
         };
+        let preparation_duration = preparation_started.elapsed();
+        let mut detailed = baseline_problem.preparation_report().detailed.clone();
+        if let Some(report) = detailed.as_mut() {
+            if final_backend == SelectedSymbolicNonlinearBackendKind::AotCompiled {
+                report.set_execution_mode(
+                    crate::numerical::Nonlinear_systems::symbolic::PreparationExecutionMode::Aot,
+                );
+            }
+            report.set_generated_jobs(generated_residual_jobs, generated_jacobian_jobs);
+            if let Some(duration) = build_duration {
+                report.record_measured_stage(
+                    crate::numerical::Nonlinear_systems::symbolic::PreparationStage::AotMaterialization,
+                    duration,
+                    Some(1),
+                    None,
+                );
+            }
+            report.set_total_wall_time(preparation_duration);
+        }
         let preparation_report = SymbolicPreparationReport {
             effective_backend: if final_backend == SelectedSymbolicNonlinearBackendKind::AotCompiled
             {
@@ -880,10 +961,12 @@ impl SymbolicNonlinearProblem {
             artifact_policy: report_artifact_policy(config.build_policy),
             artifact_action,
             artifact_key,
-            preparation_duration: preparation_started.elapsed(),
+            artifact_lifecycle_key,
+            preparation_duration,
             build_duration,
             generated_residual_jobs,
             generated_jacobian_jobs,
+            detailed,
         };
         match final_backend {
             SelectedSymbolicNonlinearBackendKind::Lambdify => {
@@ -956,11 +1039,30 @@ impl SymbolicNonlinearProblem {
         options: SymbolicProblemOptions,
         config: SymbolicGeneratedBackendConfig,
     ) -> Result<PreparedGeneratedSymbolicProblem, SolveError> {
+        let parsing_started = Instant::now();
         let expressions = equations
             .iter()
-            .map(|equation| Expr::parse_expression(equation))
-            .collect::<Vec<_>>();
-        Self::from_expressions_with_generated_backend(expressions, options, config)
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(equation).map_err(|error| {
+                    SolveError::InvalidConfig(format!(
+                        "failed to parse symbolic equation {index}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parsing_duration = parsing_started.elapsed();
+        let mut prepared =
+            Self::from_expressions_with_generated_backend(expressions, options, config)?;
+        prepared.problem.record_external_preparation_stage(
+            PreparationStage::ExpressionParsing,
+            parsing_duration,
+            Some(equations.len() as u64),
+            Some(equations.len()),
+            PreparationInputKind::Strings,
+        );
+        prepared.preparation_report = prepared.problem.preparation_report().clone();
+        Ok(prepared)
     }
 }
 
@@ -1418,6 +1520,78 @@ mod tests {
     }
 
     #[test]
+    fn nonlinear_aot_lifecycle_identity_separates_profile_and_compile_settings() {
+        let problem_key = elementary_problem()
+            .prepare_dense_aot_problem(SymbolicDenseAotOptions::default())
+            .problem_key();
+        let production = SymbolicGeneratedBackendConfig::defaults();
+        let fast = production
+            .clone()
+            .with_aot_compile_config(AotCompileConfig::fast_build());
+
+        let release_production =
+            nonlinear_aot_lifecycle_key(&problem_key, &production, AotBuildProfile::Release);
+        assert_eq!(
+            release_production,
+            nonlinear_aot_lifecycle_key(&problem_key, &production, AotBuildProfile::Release),
+            "identical lifecycle inputs must produce a reusable identity"
+        );
+        assert_ne!(
+            release_production,
+            nonlinear_aot_lifecycle_key(&problem_key, &fast, AotBuildProfile::Release),
+            "compile settings must partition the on-disk lifecycle"
+        );
+        assert_ne!(
+            release_production,
+            nonlinear_aot_lifecycle_key(&problem_key, &production, AotBuildProfile::Debug),
+            "debug and release artifacts must not share a lifecycle identity"
+        );
+    }
+
+    #[test]
+    fn nonlinear_aot_ready_marker_rejects_a_different_compile_identity() {
+        let problem = elementary_problem();
+        let output_dir = tempdir().expect("AOT output directory should exist");
+        let production = SymbolicGeneratedBackendConfig::defaults();
+        let fast = production
+            .clone()
+            .with_aot_compile_config(AotCompileConfig::fast_build());
+        let problem_key = problem
+            .prepare_dense_aot_problem(SymbolicDenseAotOptions::default())
+            .problem_key();
+        let fast_key = nonlinear_aot_lifecycle_key(&problem_key, &fast, AotBuildProfile::Release);
+        let production_key =
+            nonlinear_aot_lifecycle_key(&problem_key, &production, AotBuildProfile::Release);
+        let (crate_name, module_name) = generated_names(&fast_key, &fast);
+        let build = materialize_symbolic_nonlinear_aot_build(
+            &crate_name,
+            &module_name,
+            &problem,
+            SymbolicDenseAotOptions::default(),
+            output_dir.path(),
+            AotBuildProfile::Release,
+        )
+        .expect("AOT request should materialize");
+        std::fs::create_dir_all(
+            build
+                .expected_cdylib
+                .parent()
+                .expect("fixture cdylib should have a parent"),
+        )
+        .expect("fixture artifact directory should be writable");
+        std::fs::write(&build.expected_cdylib, b"complete fixture artifact")
+            .expect("fixture cdylib should be writable");
+
+        write_nonlinear_aot_ready_marker(&build, &fast_key)
+            .expect("ready marker should be written");
+        assert!(nonlinear_aot_ready_marker_matches(&build, &fast_key));
+        assert!(
+            !nonlinear_aot_ready_marker_matches(&build, &production_key),
+            "RequirePrebuilt must reject a marker from another compile configuration"
+        );
+    }
+
+    #[test]
     fn nonlinear_aot_compiler_failure_quarantines_previous_publication() {
         let _guard = aot_solver_test_guard();
         let problem = elementary_problem();
@@ -1431,7 +1605,9 @@ mod tests {
             .with_output_parent_dir(Some(output_dir.path().to_path_buf()));
         let prepared = problem.prepare_dense_aot_problem(SymbolicDenseAotOptions::default());
         let problem_key = prepared.problem_key();
-        let (crate_name, module_name) = generated_names(&problem_key, &config);
+        let lifecycle_key =
+            nonlinear_aot_lifecycle_key(&problem_key, &config, AotBuildProfile::Debug);
+        let (crate_name, module_name) = generated_names(&lifecycle_key, &config);
         let previous = materialize_symbolic_nonlinear_aot_build(
             &crate_name,
             &module_name,
@@ -1450,7 +1626,7 @@ mod tests {
         .expect("fixture artifact directory should be writable");
         std::fs::write(&previous.expected_cdylib, b"previous complete artifact")
             .expect("previous artifact should be writable");
-        write_nonlinear_aot_ready_marker(&previous, &problem_key)
+        write_nonlinear_aot_ready_marker(&previous, &lifecycle_key)
             .expect("previous publication marker should be writable");
 
         let old_cargo = std::env::var_os("CARGO");
@@ -1564,7 +1740,10 @@ mod tests {
             .problem
             .prepare_dense_aot_problem(SymbolicDenseAotOptions::default())
             .problem_key();
-        assert!(nonlinear_aot_ready_marker_matches(build, &problem_key));
+        let require_config = SymbolicGeneratedBackendConfig::require_prebuilt();
+        let lifecycle_key =
+            nonlinear_aot_lifecycle_key(&problem_key, &require_config, AotBuildProfile::Debug);
+        assert!(nonlinear_aot_ready_marker_matches(build, &lifecycle_key));
 
         drop(cold);
         unregister_linked_dense_backend(&problem_key);

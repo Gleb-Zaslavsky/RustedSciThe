@@ -1,4 +1,5 @@
 pub mod LM_Nielsen;
+pub mod LM_backtracking;
 pub mod LM_utils;
 pub mod LM_vanilla;
 pub mod NR_damped;
@@ -10,6 +11,7 @@ pub mod nonlinear_external_aot_story_tests;
 pub mod nonlinear_lambdify_acceptance_tests;
 pub mod nonlinear_lambdify_stage_story_tests;
 pub mod nonlinear_parameter_story_tests;
+pub mod nonlinear_preparation_telemetry_tests;
 ///  Example#1
 /// ```
 ///
@@ -69,6 +71,7 @@ pub mod symbolic_aot_test_support;
 pub mod symbolic_backend;
 pub mod symbolic_generated;
 pub(crate) mod symbolic_legacy;
+pub mod tp1907_chon_graphite_tests;
 pub mod trust_region;
 pub mod trust_region_LM;
 pub mod trust_region_lmpar;

@@ -5,7 +5,10 @@
 //! lives in the sibling symbolic module; this file owns only the legacy
 //! Lambdify evaluator implementation and its optional execution policy.
 
-use super::symbolic::{LambdifyExecutionPolicy, SymbolicBackendKind, SymbolicEvaluationBackend};
+use super::symbolic::{
+    LambdifyExecutionPolicy, PreparationStage, PreparationTelemetryRecorder, SymbolicBackendKind,
+    SymbolicEvaluationBackend,
+};
 use crate::global::THRESHOLD as SYMBOLIC_ZERO_THRESHOLD;
 use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::symbolic::symbolic_engine::Expr;
@@ -63,7 +66,9 @@ impl LegacyLambdifySymbolicBackend {
         variables: &[String],
         equation_parameters: Option<&[String]>,
         execution_policy: LambdifyExecutionPolicy,
+        mut preparation_recorder: Option<&mut PreparationTelemetryRecorder>,
     ) -> Result<Self, SolveError> {
+        let differentiation_started = std::time::Instant::now();
         let mut jacobian = Jacobian::new();
         let variable_refs = variables
             .iter()
@@ -78,6 +83,14 @@ impl LegacyLambdifySymbolicBackend {
         } else {
             jacobian.calc_jacobian();
         }
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::JacobianDifferentiation,
+                differentiation_started,
+                Some(1),
+                Some(equations.len() * variables.len()),
+            );
+        }
 
         let mut input_names = equation_parameters
             .unwrap_or(&[])
@@ -91,10 +104,19 @@ impl LegacyLambdifySymbolicBackend {
         // Nonlinear solves repeatedly evaluate one point, so keep the same
         // compiled scalar expressions but fill solver-owned output buffers
         // directly on this production Lambdify path.
+        let residual_callback_started = std::time::Instant::now();
         let residual_evaluators = equations
             .iter()
             .map(|equation| Expr::lambdify_borrowed_thread_safe(equation, input_names.as_slice()))
             .collect();
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::ResidualCallbackPreparation,
+                residual_callback_started,
+                Some(equations.len() as u64),
+                Some(equations.len()),
+            );
+        }
         let symbolic_jacobian = jacobian.symbolic_jacobian;
         let mut jacobian_nonzero_rows_by_column = vec![Vec::new(); variables.len()];
         for (row_index, row) in symbolic_jacobian.iter().enumerate() {
@@ -105,6 +127,7 @@ impl LegacyLambdifySymbolicBackend {
             }
         }
         let nonzero_jacobian_entries = jacobian_nonzero_rows_by_column.iter().map(Vec::len).sum();
+        let jacobian_callback_started = std::time::Instant::now();
         let jacobian_evaluators = symbolic_jacobian
             .iter()
             .map(|row| {
@@ -117,6 +140,14 @@ impl LegacyLambdifySymbolicBackend {
                     .collect()
             })
             .collect();
+        if let Some(recorder) = preparation_recorder.as_mut() {
+            recorder.record(
+                PreparationStage::JacobianCallbackPreparation,
+                jacobian_callback_started,
+                Some(nonzero_jacobian_entries as u64),
+                Some(nonzero_jacobian_entries),
+            );
+        }
 
         Ok(Self {
             symbolic_jacobian,

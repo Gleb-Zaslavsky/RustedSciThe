@@ -51,12 +51,16 @@ use crate::Utils::postprocessing::{
 };
 use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, MatrixType, VectorType, Vectors_type_casting, finite_difference_jacobian,
+    try_finite_difference_jacobian,
 };
 use crate::numerical::BVP_Damp::BVP_utils::{
     CustomTimer, construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
 };
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
     bound_step_Cantera2, convergence_condition, if_initial_guess_inside_bounds, jac_recalc,
+};
+use crate::numerical::BVP_Damp::factor_runtime::{
+    OwnedLinearFactorRuntime, prepare_factor_owner_runtime,
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyDampedGeneratedSolverState,
@@ -67,14 +71,25 @@ use crate::numerical::BVP_Damp::generated_solver_handoff::{
 use crate::numerical::BVP_Damp::numeric_discretization::{
     NumericBvpJacobian, NumericBvpRhs, build_numeric_generated_solver_state,
 };
+use crate::numerical::BVP_Damp::prepared_runtime::{
+    BvpPreparedPlan, BvpPreparedResourceSnapshot, BvpPreparedRuntime, BvpRuntimeRevision,
+    PreparedPlanFingerprint, fingerprint_bytes, fingerprint_debug,
+};
+use crate::numerical::BVP_Damp::telemetry::{
+    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetryRecorder, BvpTelemetrySnapshot,
+};
 use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::bvp::telemetry::{
+    BvpGenerationTelemetrySnapshot, BvpLambdifyTelemetry, BvpLambdifyTelemetryMode,
+};
 use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
 };
+use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::symbolic_functions_BVP::{
-    BvpBackendIntegrationError, BvpSymbolicAssemblyBackend,
+    BvpBackendIntegrationError, BvpMatrixBackend, BvpSymbolicAssemblyBackend,
 };
 use core::panic;
 use nalgebra::{DMatrix, DVector};
@@ -182,6 +197,8 @@ pub struct DampedBvpStatistics {
     pub counters: HashMap<String, usize>,
     pub timers: HashMap<String, String>,
     pub diagnostics: HashMap<String, String>,
+    /// Typed telemetry for new consumers; legacy maps above remain compatible.
+    pub telemetry: BvpTelemetrySnapshot,
 }
 
 impl DampedSolverOptions {
@@ -217,6 +234,38 @@ impl DampedSolverOptions {
     /// Attaches an explicit generated-backend configuration.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Selects the runtime telemetry level for Lambdify callbacks.
+    ///
+    /// The default is [`BvpLambdifyTelemetryMode::Off`]. Use `Counters` for
+    /// cheap call counts or `Detailed` when callback wall-clock timings are
+    /// needed for a diagnostic/story run.
+    pub fn with_lambdify_telemetry_mode(mut self, mode: BvpLambdifyTelemetryMode) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_lambdify_telemetry_mode(mode);
+        self
+    }
+
+    /// Selects typed solver decision logging for diagnostic runs.
+    pub fn with_bvp_logging_mode(mut self, mode: BvpLoggingMode) -> Self {
+        self.generated_backend_config = self.generated_backend_config.with_bvp_logging_mode(mode);
+        self
+    }
+
+    /// Configures bounded typed decision logging for the solver runtime.
+    pub fn with_bvp_logging_config(mut self, config: BvpLoggingConfig) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_bvp_logging_config(config);
+        self
+    }
+
+    /// Selects whether solver counters and stage timers are collected.
+    pub fn with_bvp_telemetry_mode(mut self, mode: BvpTelemetryMode) -> Self {
+        self.generated_backend_config = self.generated_backend_config.with_bvp_telemetry_mode(mode);
         self
     }
 
@@ -323,6 +372,18 @@ impl DampedSolverOptions {
         self.generated_backend_config = self
             .generated_backend_config
             .with_symbolic_assembly_backend(backend);
+        self
+    }
+
+    /// Selects the matrix backend through the typed API.
+    ///
+    /// The historical `method: String` field is retained for compatibility,
+    /// while the normalized generated-backend configuration becomes the source
+    /// of truth for new callers.
+    pub fn with_matrix_backend(mut self, backend: MatrixBackend) -> Self {
+        self.generated_backend_config = self
+            .generated_backend_config
+            .with_matrix_backend_override(backend);
         self
     }
 
@@ -502,7 +563,13 @@ pub struct NRBVP {
     pub y: Box<dyn VectorType>, // iteration vector
     m: usize,              // iteration counter without jacobian recalculation
     pub BC_position_and_value: Vec<(usize, usize, f64)>, //  where keys are positions of boundary conditions in the global vector and values are the boundary condition values.
-    old_jac: Option<Box<dyn MatrixType>>,
+    /// Common prepared-runtime owner for reusable Dense/faer factors.
+    ///
+    /// The historical field name is retained internally during migration;
+    /// callbacks and mesh/layout are still migrated in separate ownership
+    /// slices.
+    factor_owner: BvpPreparedRuntime,
+    prepared_runtime_revision: BvpRuntimeRevision,
     jac_recalc: bool,            //flag indicating if jacobian should be recalculated
     error_old: f64,              // error of previous iteration
     bounds_vec: Vec<(f64, f64)>, //vector of bounds for each of the unkown variables (discretized vector)
@@ -519,13 +586,22 @@ pub struct NRBVP {
     numeric_jacobian: Option<NumericBvpJacobian>, // optional continuous RHS Jacobian
     generated_backend_selected_backend: Option<SelectedBackendKind>,
     generated_backend_runtime_diagnostics: HashMap<String, String>,
-    calc_statistics: HashMap<String, usize>,
+    telemetry_counters: BvpTelemetryRecorder,
+    generation_telemetry: Option<BvpGenerationTelemetrySnapshot>,
+    atom_discretization_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
+    legacy_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    atom_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    direct_banded_jacobian_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry>,
+    parameter_binding: Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
     nodes_added: Vec<usize>,
     custom_timer: CustomTimer,
 }
 
 impl ApplyDampedGeneratedSolverState for NRBVP {
     fn apply_generated_solver_state(&mut self, state: DampedGeneratedSolverState) {
+        self.factor_owner.borrow_mut().take();
         if let Some(updated_resolver) = state.updated_resolver.clone() {
             self.generated_backend_config.resolver = Some(updated_resolver);
         }
@@ -537,7 +613,34 @@ impl ApplyDampedGeneratedSolverState for NRBVP {
         self.bandwidth = state.bandwidth;
         self.BC_position_and_value = state.bc_position_and_value;
         self.generated_backend_selected_backend = Some(state.selected_backend);
+        let backend_fallback = matches!(
+            self.generated_backend_config
+                .effective_backend_policy(&self.method),
+            BackendSelectionPolicy::PreferAotThenLambdify
+                | BackendSelectionPolicy::PreferAotThenNumeric
+        ) && matches!(
+            state.selected_backend,
+            SelectedBackendKind::Lambdify | SelectedBackendKind::Numeric
+        );
+        self.telemetry_counters.record_backend_selection(
+            match state.selected_backend {
+                SelectedBackendKind::Numeric => 1,
+                SelectedBackendKind::Lambdify => 2,
+                SelectedBackendKind::AotCompiled => 3,
+                SelectedBackendKind::AotRegisteredButNotBuilt => 4,
+                SelectedBackendKind::AotMissing => 5,
+            },
+            backend_fallback,
+        );
         self.generated_backend_runtime_diagnostics = state.runtime_diagnostics;
+        self.generation_telemetry = state.generation_telemetry;
+        self.atom_discretization_telemetry = state.atom_discretization_telemetry;
+        self.legacy_lambdify_telemetry = state.legacy_lambdify_telemetry;
+        self.atom_lambdify_telemetry = state.atom_lambdify_telemetry;
+        self.direct_banded_jacobian_telemetry = state.direct_banded_jacobian_telemetry;
+        self.parameter_binding = state.parameter_binding;
+        self.prepared_runtime_revision
+            .mark_prepared_with_fingerprint(self.prepared_plan_fingerprint());
     }
 }
 
@@ -587,11 +690,62 @@ impl BuildDampedSolverRequest for NRBVP {
             symbolic_assembly_backend: self.generated_backend_config.symbolic_assembly_backend,
             matrix_backend_override: self.generated_backend_config.matrix_backend_override,
             banded_linear_solver_config: self.generated_backend_config.banded_linear_solver_config,
+            lambdify_telemetry_mode: self.generated_backend_config.lambdify_telemetry_mode,
+            lambdify_execution_policy: self.generated_backend_config.lambdify_execution_policy,
         }
     }
 }
 
 impl NRBVP {
+    /// Returns the prepared-plan identity for internal correctness stories.
+    ///
+    /// This is metadata-only and does not expose callback ownership or mutable
+    /// runtime state to callers.
+    pub(crate) fn prepared_plan_for_diagnostics(&self) -> Option<BvpPreparedPlan> {
+        self.prepared_runtime_revision.prepared_plan()
+    }
+
+    /// Returns the resource state paired with the prepared-plan metadata.
+    pub(crate) fn prepared_resource_snapshot_for_diagnostics(&self) -> BvpPreparedResourceSnapshot {
+        self.factor_owner.resource_snapshot()
+    }
+
+    /// Computes the identity captured by a prepared runtime.
+    ///
+    /// The public solver fields are retained for compatibility and can still
+    /// be mutated directly.  Revision-tracked setters remain the fast path;
+    /// this audit catches direct changes at the prepared-solve boundary.  No
+    /// fingerprinting happens while residuals/Jacobians are evaluated.
+    fn prepared_plan_fingerprint(&self) -> PreparedPlanFingerprint {
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        fingerprint_debug(&mut hash, &self.eq_system);
+        fingerprint_debug(&mut hash, &self.initial_guess.as_slice());
+        fingerprint_debug(&mut hash, &self.values);
+        fingerprint_debug(&mut hash, &self.arg);
+        fingerprint_debug(&mut hash, &self.BorderConditions);
+        fingerprint_debug(&mut hash, &(self.t0, self.t_end, self.n_steps));
+        fingerprint_debug(&mut hash, &self.scheme);
+        fingerprint_debug(&mut hash, &self.strategy);
+        fingerprint_debug(&mut hash, &self.strategy_params);
+        fingerprint_debug(&mut hash, &self.linear_sys_method);
+        fingerprint_debug(&mut hash, &self.method);
+        fingerprint_debug(&mut hash, &self.abs_tolerance);
+        fingerprint_debug(&mut hash, &self.rel_tolerance);
+        fingerprint_debug(&mut hash, &self.max_iterations);
+        fingerprint_debug(&mut hash, &self.Bounds);
+        fingerprint_debug(&mut hash, &self.loglevel);
+        fingerprint_debug(&mut hash, &self.param_names);
+        fingerprint_debug(&mut hash, &self.param_values);
+        fingerprint_debug(&mut hash, &self.x_mesh.as_slice());
+        fingerprint_debug(&mut hash, &self.new_grid_enabled);
+        fingerprint_debug(&mut hash, &self.grid_refinemens);
+        fingerprint_debug(&mut hash, &self.bandwidth);
+        fingerprint_debug(&mut hash, &self.generated_backend_selected_backend);
+        fingerprint_debug(&mut hash, &self.resolved_plan());
+        fingerprint_bytes(&mut hash, b"bvp-damped-prepared-plan-v1");
+        PreparedPlanFingerprint(hash)
+    }
+
     #[inline]
     fn effective_runtime_method(&self) -> String {
         self.generated_backend_config.effective_method(&self.method)
@@ -664,13 +818,6 @@ impl NRBVP {
         } else {
             false
         };
-        let vec_of_tuples = vec![
-            ("number of iterations".to_string(), 0),
-            ("number of solving linear systems".to_string(), 0),
-            ("number of jacobians recalculations".to_string(), 0),
-            ("number of grid refinements".to_string(), 0),
-        ];
-        let Hashmap_statistics: HashMap<String, usize> = vec_of_tuples.into_iter().collect();
         NRBVP {
             eq_system,
             initial_guess: initial_guess.clone(),
@@ -703,7 +850,8 @@ impl NRBVP {
             p: 0.0,
             y: y0,
             m: 0,
-            old_jac: None,
+            factor_owner: BvpPreparedRuntime::new(),
+            prepared_runtime_revision: BvpRuntimeRevision::default(),
             jac_recalc: true,
             error_old: 0.0,
 
@@ -720,7 +868,13 @@ impl NRBVP {
             numeric_jacobian: None,
             generated_backend_selected_backend: None,
             generated_backend_runtime_diagnostics: HashMap::new(),
-            calc_statistics: Hashmap_statistics,
+            telemetry_counters: BvpTelemetryRecorder::default(),
+            generation_telemetry: None,
+            atom_discretization_telemetry: None,
+            legacy_lambdify_telemetry: None,
+            atom_lambdify_telemetry: None,
+            direct_banded_jacobian_telemetry: None,
+            parameter_binding: None,
             nodes_added: Vec::new(),
             custom_timer: CustomTimer::new(),
         }
@@ -1060,6 +1214,16 @@ impl NRBVP {
 
     /// Returns a solver configured with the provided generated-backend settings.
     pub fn with_generated_backend_config(mut self, config: GeneratedBackendConfig) -> Self {
+        self.telemetry_counters.set_logging_config(
+            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig {
+                mode: config.bvp_logging_mode,
+                max_events: config.bvp_logging_max_events,
+            },
+        );
+        self.telemetry_counters
+            .set_telemetry_mode(config.bvp_telemetry_mode);
+        self.custom_timer
+            .set_telemetry_mode(config.bvp_telemetry_mode);
         self.generated_backend_config = config;
         self
     }
@@ -1086,30 +1250,99 @@ impl NRBVP {
         self
     }
 
-    /// Sets symbolic parameter names used by RHS evaluation but not solved by Newton.
-    pub fn set_params(&mut self, params: Option<&[&str]>) {
-        self.param_names = params
-            .map(|names| names.iter().map(|name| (*name).to_string()).collect())
-            .unwrap_or_default();
-        if let Some(values) = self.param_values.as_ref() {
-            assert_eq!(
-                values.len(),
-                self.param_names.len(),
-                "param_values length must match param_names length"
-            );
+    /// Replaces boundary conditions through the revision-tracked API.
+    ///
+    /// Direct mutation of the historical public `BorderConditions` field is
+    /// retained for compatibility, but prepared callers should use this
+    /// method so stale callbacks and factors cannot survive a physical change.
+    pub fn set_boundary_conditions(&mut self, conditions: HashMap<String, Vec<(usize, f64)>>) {
+        if self.BorderConditions != conditions {
+            self.BorderConditions = conditions;
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.problem_changed();
+            self.BC_position_and_value.clear();
+            self.result = None;
+            self.full_result = None;
         }
     }
 
-    /// Sets current numeric parameter values used by compiled/lambdified callbacks.
-    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
-        if let Some(ref values) = values {
-            assert_eq!(
-                values.len(),
-                self.param_names.len(),
-                "param_values length must match param_names length"
-            );
+    /// Fallible typed setter for symbolic parameter names.
+    pub fn try_set_params(
+        &mut self,
+        params: Option<&[&str]>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let param_names: Vec<String> = params
+            .map(|names| names.iter().map(|name| (*name).to_string()).collect())
+            .unwrap_or_default();
+        if let Some(values) = self.param_values.as_ref() {
+            if values.len() != param_names.len() {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "param_names".to_string(),
+                    value: format!("{} names", param_names.len()),
+                    message: format!(
+                        "param_values length {} must match param_names length {}",
+                        values.len(),
+                        param_names.len()
+                    ),
+                });
+            }
         }
-        self.param_values = values;
+        if self.param_names != param_names {
+            self.param_names = param_names;
+            self.parameter_binding = None;
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.parameters_changed();
+        }
+        Ok(())
+    }
+
+    /// Compatibility wrapper for [`Self::try_set_params`].
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.try_set_params(params)
+            .unwrap_or_else(|error| panic!("invalid BVP parameter names: {error:?}"));
+    }
+
+    /// Fallible typed setter for the current numeric parameter binding.
+    ///
+    /// Parameters are evaluator inputs, not Newton unknowns, and are not
+    /// differentiated symbolically. Prepared Lambdify callbacks replace the
+    /// numeric binding in place; symbolic preparation and closure compilation
+    /// are retained. Numeric factors still invalidate because Jacobian values
+    /// changed.
+    pub fn try_set_param_values(
+        &mut self,
+        values: Option<Vec<f64>>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        if let Some(ref values) = values {
+            if values.len() != self.param_names.len() {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "param_values".to_string(),
+                    value: format!("{} values", values.len()),
+                    message: format!(
+                        "expected exactly {} values for declared symbolic parameters",
+                        self.param_names.len()
+                    ),
+                });
+            }
+        }
+        if self.param_values != values {
+            self.param_values = values;
+            if let Some(binding) = &self.parameter_binding {
+                binding.replace(self.param_values.clone());
+                self.prepared_runtime_revision
+                    .refresh_prepared_fingerprint(self.prepared_plan_fingerprint());
+            } else {
+                self.prepared_runtime_revision.parameters_changed();
+            }
+            self.invalidate_linear_runtime();
+        }
+        Ok(())
+    }
+
+    /// Compatibility wrapper for [`Self::try_set_param_values`].
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        self.try_set_param_values(values)
+            .unwrap_or_else(|error| panic!("invalid BVP parameter values: {error:?}"));
     }
 
     /// Returns a solver configured with a high-level sparse generated-backend mode.
@@ -1204,7 +1437,36 @@ impl NRBVP {
     }
 
     pub fn set_mesh(&mut self, t0: f64, t_end: f64, n_steps: usize) {
-        self.x_mesh = damped_interval_mesh(t0, t_end, n_steps);
+        let new_mesh = damped_interval_mesh(t0, t_end, n_steps);
+        let mesh_changed = self.n_steps != n_steps || self.x_mesh.as_slice() != new_mesh.as_slice();
+        if mesh_changed {
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.mesh_changed();
+            self.jac = None;
+            self.bounds_vec.clear();
+            self.rel_tolerance_vec.clear();
+            self.variable_string.clear();
+            self.result = None;
+            self.full_result = None;
+            self.grid_refinemens = 0;
+            self.number_of_refined_intervals = 0;
+            self.nodes_added.clear();
+
+            let previous_guess = self.initial_guess.clone();
+            self.initial_guess = DMatrix::from_fn(self.values.len(), n_steps, |row, col| {
+                if row < previous_guess.nrows() && col < previous_guess.ncols() {
+                    previous_guess[(row, col)]
+                } else {
+                    0.0
+                }
+            });
+            self.n_steps = n_steps;
+            self.y = Vectors_type_casting(
+                &DVector::zeros(self.values.len() * n_steps),
+                self.effective_runtime_method(),
+            );
+        }
+        self.x_mesh = new_mesh;
     }
 
     /// Installs a pure numeric RHS callback used by the `NumericOnly` backend route.
@@ -1219,6 +1481,8 @@ impl NRBVP {
     ///
     /// The callback must return a derivative vector with length `values.len()`.
     pub fn set_numeric_rhs(&mut self, rhs: Option<NumericBvpRhs>) {
+        self.invalidate_linear_runtime();
+        self.prepared_runtime_revision.callbacks_changed();
         self.numeric_rhs = rhs;
     }
 
@@ -1228,6 +1492,8 @@ impl NRBVP {
     /// global discretized Newton Jacobian from this local Jacobian, boundary
     /// conditions, and the selected finite-difference scheme.
     pub fn set_numeric_jacobian(&mut self, jacobian: Option<NumericBvpJacobian>) {
+        self.invalidate_linear_runtime();
+        self.prepared_runtime_revision.callbacks_changed();
         self.numeric_jacobian = jacobian;
     }
 
@@ -1356,6 +1622,179 @@ impl NRBVP {
 
         // Validation is implicit in the struct design - if adaptive is Some, grid_method is always present
     }
+
+    /// Fallible counterpart of [`NRBVP::task_check`] for typed callers.
+    ///
+    /// Compatibility callers may keep using `task_check()`, but the production
+    /// `try_*` path must reject malformed user input without panicking or
+    /// terminating the process.
+    pub fn try_task_check(&self) -> Result<(), BvpBackendIntegrationError> {
+        let invalid_problem =
+            |field: &str, message: String| BvpBackendIntegrationError::InvalidProblem {
+                field: field.to_string(),
+                message,
+            };
+        let invalid_option = |field: &str, value: String, message: String| {
+            BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: field.to_string(),
+                value,
+                message,
+            }
+        };
+
+        if self.values.is_empty() {
+            return Err(invalid_problem(
+                "values",
+                "at least one unknown is required".into(),
+            ));
+        }
+        if self.initial_guess.shape() != (self.values.len(), self.n_steps) {
+            return Err(invalid_problem(
+                "initial_guess",
+                format!(
+                    "shape {:?} must be ({}, {})",
+                    self.initial_guess.shape(),
+                    self.values.len(),
+                    self.n_steps
+                ),
+            ));
+        }
+        if !self.t0.is_finite() || !self.t_end.is_finite() || self.t_end <= self.t0 {
+            return Err(invalid_problem(
+                "interval",
+                format!(
+                    "expected finite t_end > t0, got [{}, {}]",
+                    self.t0, self.t_end
+                ),
+            ));
+        }
+        if self.n_steps <= 1 {
+            return Err(invalid_problem(
+                "n_steps",
+                format!("expected n_steps > 1, got {}", self.n_steps),
+            ));
+        }
+        if self.max_iterations <= 1 {
+            return Err(invalid_option(
+                "max_iterations",
+                self.max_iterations.to_string(),
+                "expected max_iterations > 1".into(),
+            ));
+        }
+        if !self.abs_tolerance.is_finite() || self.abs_tolerance <= 0.0 {
+            return Err(invalid_option(
+                "abs_tolerance",
+                self.abs_tolerance.to_string(),
+                "expected a finite positive tolerance".into(),
+            ));
+        }
+        if !matches!(
+            self.scheme.to_ascii_lowercase().as_str(),
+            "forward" | "trapezoid" | "trapezoidal"
+        ) {
+            return Err(invalid_option(
+                "scheme",
+                self.scheme.clone(),
+                "supported values are forward and trapezoid".into(),
+            ));
+        }
+        let effective_method = self.generated_backend_config.effective_method(&self.method);
+        if BvpMatrixBackend::from_legacy_method(&effective_method).is_none() {
+            return Err(invalid_option(
+                "method",
+                effective_method,
+                "unknown matrix backend".into(),
+            ));
+        }
+        if !self.strategy.eq_ignore_ascii_case("damped") {
+            return Err(invalid_option(
+                "strategy",
+                self.strategy.clone(),
+                "damped solver requires strategy=Damped".into(),
+            ));
+        }
+        if self.BorderConditions.is_empty() {
+            return Err(invalid_problem(
+                "boundary_conditions",
+                "at least one boundary condition is required".into(),
+            ));
+        }
+        let total_conditions: usize = self.BorderConditions.values().map(Vec::len).sum();
+        if total_conditions != self.values.len()
+            || self
+                .BorderConditions
+                .keys()
+                .any(|name| !self.values.iter().any(|value| value == name))
+        {
+            return Err(invalid_problem(
+                "boundary_conditions",
+                format!(
+                    "expected one total condition per unknown; got {} for {} unknowns",
+                    total_conditions,
+                    self.values.len()
+                ),
+            ));
+        }
+        let bounds = self.Bounds.as_ref().ok_or_else(|| {
+            invalid_problem("bounds", "bounds are required for the damped solver".into())
+        })?;
+        if bounds.len() != self.values.len() {
+            return Err(invalid_problem(
+                "bounds",
+                format!(
+                    "expected bounds for {} unknowns, got {}",
+                    self.values.len(),
+                    bounds.len()
+                ),
+            ));
+        }
+        for (row, name) in self.values.iter().enumerate() {
+            let Some(&(lower, upper)) = bounds.get(name) else {
+                return Err(invalid_problem(
+                    "bounds",
+                    format!("missing bounds for unknown {name}"),
+                ));
+            };
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(invalid_problem(
+                    "bounds",
+                    format!("invalid interval for {name}: [{lower}, {upper}]"),
+                ));
+            }
+            if self.result.is_none() {
+                for value in self.initial_guess.row(row).iter() {
+                    if !value.is_finite() || *value < lower || *value > upper {
+                        return Err(invalid_problem(
+                            "initial_guess",
+                            format!("value {value} for {name} is outside [{lower}, {upper}]"),
+                        ));
+                    }
+                }
+            }
+        }
+        let rel_tolerance = self.rel_tolerance.as_ref().ok_or_else(|| {
+            invalid_option(
+                "rel_tolerance",
+                "missing".into(),
+                "relative tolerances are required for the damped solver".into(),
+            )
+        })?;
+        if rel_tolerance.len() != self.values.len()
+            || self.values.iter().any(|name| {
+                rel_tolerance
+                    .get(name)
+                    .map(|value| !value.is_finite() || *value <= 0.0)
+                    .unwrap_or(true)
+            })
+        {
+            return Err(invalid_option(
+                "rel_tolerance",
+                format!("{rel_tolerance:?}"),
+                "expected one finite positive tolerance per unknown".into(),
+            ));
+        }
+        Ok(())
+    }
     /// Generates discretized system and Jacobian from symbolic expressions
     ///
     /// This is the core symbolic-to-numerical transformation that:
@@ -1372,8 +1811,14 @@ impl NRBVP {
         mesh_: Option<Vec<f64>>,
         bandwidth: Option<(usize, usize)>,
     ) -> Result<(), BvpBackendIntegrationError> {
-        task_check_mem(self.n_steps, self.values.len(), &self.method);
-        self.task_check();
+        // Memory inspection is advisory diagnostics, not part of the typed
+        // problem-validation contract. In particular, sysinfo/platform
+        // backends must never turn malformed input or restricted CI hosts into
+        // a process-level failure.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task_check_mem(self.n_steps, self.values.len(), &self.method);
+        }));
+        self.try_task_check()?;
 
         let effective_method = self.generated_backend_config.effective_method(&self.method);
         let effective_policy = self
@@ -1445,6 +1890,7 @@ impl NRBVP {
     ///
     /// Used internally during grid refinement to set new problem parameters
     pub fn set_new_step(&mut self, p: f64, y: Box<dyn VectorType>, initial_guess: DMatrix<f64>) {
+        self.invalidate_linear_runtime();
         self.p = p;
         self.y = y;
         self.initial_guess = initial_guess;
@@ -1452,17 +1898,47 @@ impl NRBVP {
 
     /// Sets the parameter value (typically time or spatial coordinate)
     pub fn set_p(&mut self, p: f64) {
+        if self.p != p {
+            self.invalidate_linear_runtime();
+        }
         self.p = p;
+    }
+
+    /// Drops numeric Jacobian/factor state after an input or continuation change.
+    ///
+    /// A symbolic callback may remain reusable, but its numeric values and any
+    /// owned direct factor are only valid for the previous parameter/state
+    /// snapshot. This keeps the Damped cache contract aligned with Frozen.
+    fn invalidate_linear_runtime(&mut self) {
+        self.prepared_runtime_revision.factor_invalidated();
+        let had_owned_factor = self.factor_owner.has_factor();
+        let old_jac_was_factorized = self
+            .factor_owner
+            .old_jac
+            .as_ref()
+            .map(|jacobian| jacobian.factorization_ready())
+            .unwrap_or(false);
+        self.factor_owner.invalidate_numeric_jacobian();
+        if had_owned_factor || old_jac_was_factorized {
+            self.telemetry_counters.record_factorization_invalidation();
+        }
+        self.jac_recalc = true;
+        self.m = 0;
+        self.error_old = 0.0;
     }
 
     /// Installs an optional compiled AOT resolver used by backend selection.
     pub fn set_aot_resolver(&mut self, resolver: Option<AotResolver>) {
-        self.generated_backend_config.resolver = resolver;
+        let mut config = self.generated_backend_config.clone();
+        config.resolver = resolver;
+        self.set_generated_backend_config(config);
     }
 
     /// Installs the solver-level AOT execution policy.
     pub fn set_aot_execution_policy(&mut self, policy: AotExecutionPolicy) {
-        self.generated_backend_config.aot_execution_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_execution_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT execution policy.
@@ -1472,7 +1948,9 @@ impl NRBVP {
 
     /// Installs the solver-level AOT build policy.
     pub fn set_aot_build_policy(&mut self, policy: AotBuildPolicy) {
-        self.generated_backend_config.aot_build_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_build_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT build policy.
@@ -1482,7 +1960,9 @@ impl NRBVP {
 
     /// Installs explicit solver-level AOT chunking overrides.
     pub fn set_aot_chunking_policy(&mut self, policy: AotChunkingPolicy) {
-        self.generated_backend_config.aot_chunking_policy = policy;
+        let mut config = self.generated_backend_config.clone();
+        config.aot_chunking_policy = policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured solver-level AOT chunking overrides.
@@ -1492,7 +1972,9 @@ impl NRBVP {
 
     /// Installs an explicit AtomView AOT optimization profile.
     pub fn set_atom_optimization_profile(&mut self, profile: AtomOptimizationProfile) {
-        self.generated_backend_config.atom_optimization_profile = profile;
+        let mut config = self.generated_backend_config.clone();
+        config.atom_optimization_profile = profile;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured AtomView AOT optimization profile.
@@ -1507,7 +1989,9 @@ impl NRBVP {
 
     /// Installs an explicit generated-backend selection policy override.
     pub fn set_backend_policy_override(&mut self, backend_policy: Option<BackendSelectionPolicy>) {
-        self.generated_backend_config.backend_policy_override = backend_policy;
+        let mut config = self.generated_backend_config.clone();
+        config.backend_policy_override = backend_policy;
+        self.set_generated_backend_config(config);
     }
 
     /// Returns the configured generated-backend selection policy override, if present.
@@ -1517,20 +2001,72 @@ impl NRBVP {
 
     /// Installs the complete generated-backend configuration in one call.
     pub fn set_generated_backend_config(&mut self, config: GeneratedBackendConfig) {
+        self.invalidate_linear_runtime();
+        self.telemetry_counters.set_logging_config(
+            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig {
+                mode: config.bvp_logging_mode,
+                max_events: config.bvp_logging_max_events,
+            },
+        );
+        self.telemetry_counters
+            .set_telemetry_mode(config.bvp_telemetry_mode);
+        self.custom_timer
+            .set_telemetry_mode(config.bvp_telemetry_mode);
         self.generated_backend_config = config;
+        self.prepared_runtime_revision.configuration_changed();
+    }
+
+    /// Changes Lambdify runtime telemetry for the next generated callback build.
+    pub fn set_lambdify_telemetry_mode(&mut self, mode: BvpLambdifyTelemetryMode) {
+        let config = self
+            .generated_backend_config
+            .clone()
+            .with_lambdify_telemetry_mode(mode);
+        self.set_generated_backend_config(config);
+    }
+
+    /// Changes typed solver decision logging for subsequent runtime events.
+    pub fn set_bvp_logging_mode(&mut self, mode: BvpLoggingMode) {
+        let config = self
+            .generated_backend_config
+            .clone()
+            .with_bvp_logging_mode(mode);
+        self.set_generated_backend_config(config);
+    }
+
+    /// Replaces the complete bounded typed decision logging policy.
+    pub fn set_bvp_logging_config(&mut self, config: BvpLoggingConfig) {
+        self.set_generated_backend_config(
+            self.generated_backend_config
+                .clone()
+                .with_bvp_logging_config(config),
+        );
+    }
+
+    /// Changes solver counter/timer collection for subsequent solves.
+    pub fn set_bvp_telemetry_mode(&mut self, mode: BvpTelemetryMode) {
+        self.generated_backend_config.bvp_telemetry_mode = mode;
+        self.telemetry_counters.set_telemetry_mode(mode);
+        self.custom_timer.set_telemetry_mode(mode);
+    }
+
+    /// Returns the Lambdify callback telemetry policy used for new callbacks.
+    pub fn lambdify_telemetry_mode(&self) -> BvpLambdifyTelemetryMode {
+        self.generated_backend_config.lambdify_telemetry_mode
     }
 
     /// Sets the symbolic assembly backend used before lambdify/AOT lowering.
     pub fn set_symbolic_assembly_backend(&mut self, backend: BvpSymbolicAssemblyBackend) {
-        self.generated_backend_config = self
+        let config = self
             .generated_backend_config
             .clone()
             .with_symbolic_assembly_backend(backend);
+        self.set_generated_backend_config(config);
     }
 
     /// Installs a high-level sparse generated-backend mode on an existing solver.
     pub fn set_sparse_generated_backend_mode(&mut self, mode: SparseGeneratedBackendMode) {
-        self.generated_backend_config = GeneratedBackendConfig::from_sparse_mode(mode);
+        self.set_generated_backend_config(GeneratedBackendConfig::from_sparse_mode(mode));
     }
 
     /// Installs the standard sparse generated-backend defaults.
@@ -1564,6 +2100,22 @@ impl NRBVP {
         &self.generated_backend_config
     }
 
+    /// Returns the normalized configuration and the backend selected so far.
+    /// This is read-only and never triggers equation generation.
+    pub fn resolved_plan(&self) -> crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan {
+        let mut plan =
+            crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan::from_common_for_solver(
+                &self.generated_backend_config,
+                &self.method,
+                &self.scheme,
+                crate::numerical::BVP_Damp::resolved_plan::strategy_from_name(&self.strategy),
+            );
+        if let Some(selected) = self.generated_backend_selected_backend {
+            plan = plan.with_selected_backend(selected);
+        }
+        plan
+    }
+
     /// Removes registered generated AOT artifact directories owned by this solver resolver.
     ///
     /// This is an explicit lifecycle operation for cold-build/story/debug workflows. Call it only
@@ -1575,8 +2127,9 @@ impl NRBVP {
 
     /// Returns accumulated nonlinear/callback/linear-solve statistics for the current solver.
     pub fn get_statistics(&self) -> DampedBvpStatistics {
-        let mut counters = self.calc_statistics.clone();
-        if let Some(jac) = &self.old_jac {
+        let telemetry_counters = self.telemetry_counters.snapshot();
+        let mut counters = telemetry_counters.to_legacy_map();
+        if let Some(jac) = &self.factor_owner.old_jac {
             let jac_shape = jac.shape();
             let matrix_weight = checkmem(&**jac);
             counters.insert("jacobian memory, MB".to_string(), matrix_weight as usize);
@@ -1591,12 +2144,55 @@ impl NRBVP {
             self.x_mesh.len() as usize,
         );
         let timers = self.custom_timer.get_all();
+        let timings = self.custom_timer.snapshot();
+        let scopes = self
+            .telemetry_counters
+            .scopes_snapshot(&timings, &telemetry_counters);
+        let storage = self
+            .factor_owner
+            .old_jac
+            .as_ref()
+            .map(|jac| {
+                crate::numerical::BVP_Damp::telemetry::BvpStorageBytes::for_solver_method(
+                    &self.effective_runtime_method(),
+                    jac.shape().0,
+                    jac.shape().1,
+                    self.bandwidth,
+                )
+            })
+            .unwrap_or_default();
         let mut diagnostics = self.generated_backend_runtime_diagnostics.clone();
         self.append_generated_backend_diagnostics(&mut diagnostics);
         DampedBvpStatistics {
             counters,
             timers,
             diagnostics,
+            telemetry: BvpTelemetrySnapshot {
+                telemetry_mode: self.telemetry_counters.telemetry_mode(),
+                counters: telemetry_counters,
+                timings,
+                scopes,
+                storage,
+                plan: Some(self.resolved_plan()),
+                log_events: self.telemetry_counters.log_events_snapshot(),
+                log_events_dropped: self.telemetry_counters.dropped_log_events(),
+                solve_id: self.telemetry_counters.solve_id(),
+                logging_config: self.telemetry_counters.logging_config(),
+                atom_discretization: self.atom_discretization_telemetry,
+                generation: self.generation_telemetry,
+                legacy_lambdify: self
+                    .legacy_lambdify_telemetry
+                    .as_ref()
+                    .map(BvpLambdifyTelemetry::snapshot),
+                atom_lambdify: self
+                    .atom_lambdify_telemetry
+                    .as_ref()
+                    .map(BvpLambdifyTelemetry::snapshot),
+                direct_banded_jacobian: self
+                    .direct_banded_jacobian_telemetry
+                    .as_ref()
+                    .map(crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry::snapshot),
+            },
         }
     }
 
@@ -1697,8 +2293,10 @@ impl NRBVP {
     /// More efficient than `step()` when Jacobian doesn't need recalculation
     pub fn step_with_inv_Jac(&self, p: f64, y: &dyn VectorType) -> Box<dyn VectorType> {
         let fun = &self.fun;
+        self.telemetry_counters.record_residual_call();
         let F_k = fun.call(p, y);
         let inv_J_k = self
+            .factor_owner
             .old_jac
             .as_ref()
             .expect("Damped BVP inverse-Jacobian step requires a cached Jacobian factor")
@@ -1730,20 +2328,36 @@ impl NRBVP {
                     });
                 Box::new(inv)
             };
-            self.old_jac = Some(inv_J_k);
+            let had_owned_factor = self.factor_owner.borrow().is_some();
+            if had_owned_factor
+                || self
+                    .factor_owner
+                    .old_jac
+                    .as_ref()
+                    .map(|jacobian| jacobian.factorization_ready())
+                    .unwrap_or(false)
+            {
+                self.telemetry_counters.record_factorization_invalidation();
+            }
+            self.factor_owner.borrow_mut().take();
+            self.factor_owner.old_jac = Some(inv_J_k);
             self.m = 0;
-            *self
-                .calc_statistics
-                .entry("number of jacobians recalculations".to_string())
-                .or_insert(0) += 1;
+            self.telemetry_counters.record_jacobian_recalculation();
         }
     }
     ////////////////////////////////////////////////////////////////
 
-    /// Internal method for Jacobian recalculation with timing
-    ///
-    /// Recalculates Jacobian matrix when needed and updates performance statistics
+    /// Compatibility wrapper around [`Self::try_recalc_jacobian`].
     fn recalc_jacobian(&mut self) {
+        self.try_recalc_jacobian()
+            .unwrap_or_else(|error| panic!("Damped BVP Jacobian recalculation failed: {error:?}"));
+    }
+
+    /// Fallible Jacobian recalculation used by the solver's `try_*` path.
+    ///
+    /// Shape validation uses the backend's native `shape()` metadata. It does
+    /// not convert a matrix to a dense temporary merely to validate a callback.
+    fn try_recalc_jacobian(&mut self) -> Result<(), BvpBackendIntegrationError> {
         if self.jac_recalc {
             let p = self.p;
             let y = &*self.y;
@@ -1751,23 +2365,88 @@ impl NRBVP {
             let begin = Instant::now();
             self.custom_timer.jac_tic();
             let jac_matrix = if let Some(jac_function) = self.jac.as_mut() {
-                jac_function.call(p, y)
+                match jac_function.try_call(p, y) {
+                    Ok(jacobian) => jacobian,
+                    Err(error) => {
+                        self.custom_timer.jac_tac();
+                        return Err(BvpBackendIntegrationError::CallbackExecutionFailed {
+                            stage: "Jacobian".to_string(),
+                            message: error.to_string(),
+                        });
+                    }
+                }
             } else {
                 let y_runtime =
                     Vectors_type_casting(&y.to_DVectorType(), self.effective_runtime_method());
-                finite_difference_jacobian(&*self.fun, p, &*y_runtime, 1e-8)
+                match try_finite_difference_jacobian(&*self.fun, p, &*y_runtime, 1e-8) {
+                    Ok(jacobian) => jacobian,
+                    Err(error) => {
+                        self.custom_timer.jac_tac();
+                        return Err(BvpBackendIntegrationError::CallbackExecutionFailed {
+                            stage: "Jacobian/finite-difference residual".to_string(),
+                            message: error.to_string(),
+                        });
+                    }
+                }
             };
+            let (actual_rows, actual_columns) = jac_matrix.shape();
+            let expected = y.len();
+            if actual_rows != expected || actual_columns != expected {
+                self.custom_timer.jac_tac();
+                return Err(BvpBackendIntegrationError::CallbackShapeMismatch {
+                    stage: "Jacobian".to_string(),
+                    expected_rows: expected,
+                    expected_columns: expected,
+                    actual_rows,
+                    actual_columns,
+                });
+            }
             info!("jacobian recalculation time: ");
             let elapsed = begin.elapsed();
             elapsed_time(elapsed);
             self.custom_timer.jac_tac();
-            self.old_jac = Some(jac_matrix);
+            let had_owned_factor = self.factor_owner.borrow().is_some();
+            if had_owned_factor
+                || self
+                    .factor_owner
+                    .old_jac
+                    .as_ref()
+                    .map(|jacobian| jacobian.factorization_ready())
+                    .unwrap_or(false)
+            {
+                self.telemetry_counters.record_factorization_invalidation();
+            }
+            self.factor_owner.borrow_mut().take();
+            self.factor_owner.old_jac = Some(jac_matrix);
+            let prepared_owner = self.factor_owner.old_jac.as_ref().and_then(|jacobian| {
+                prepare_factor_owner_runtime(
+                    jacobian.as_ref(),
+                    self.bandwidth,
+                    self.linear_sys_method.as_deref(),
+                )
+            });
+            *self.factor_owner.borrow_mut() = prepared_owner;
+            self.prepared_runtime_revision
+                .mark_numeric_jacobian_current();
+            if self.factor_owner.borrow().is_some() {
+                self.prepared_runtime_revision.mark_factor_current();
+            }
             self.m = 0;
-            *self
-                .calc_statistics
-                .entry("number of jacobians recalculations".to_string())
-                .or_insert(0) += 1;
+            self.telemetry_counters.record_jacobian_recalculation();
         }
+        Ok(())
+    }
+
+    /// Recalculates and validates the prepared Jacobian through the public
+    /// typed boundary.
+    ///
+    /// This is the fallible counterpart of the historical internal
+    /// recalculation path. It is intentionally a thin wrapper: validation,
+    /// factor invalidation and telemetry remain owned by the solver runtime.
+    /// New integrations should use this method instead of relying on the
+    /// panic-based compatibility solver methods.
+    pub fn try_recalculate_jacobian(&mut self) -> Result<(), BvpBackendIntegrationError> {
+        self.try_recalc_jacobian()
     }
 
     /// Computes undamped Newton step and solves linear system
@@ -1787,63 +2466,168 @@ impl NRBVP {
         Box<dyn VectorType>,
         (std::time::Duration, std::time::Duration),
     ) {
+        let (step, timings, _, _) = self.step_with_linear_telemetry(p, y);
+        (step, timings)
+    }
+
+    /// Computes a Newton step and also returns native factor/RHS timings.
+    ///
+    /// The public [`Self::step`] method keeps its historical return shape.
+    /// Solver internals use this richer form to expose typed factorization
+    /// reuse telemetry without changing downstream callers.
+    fn try_step_with_linear_telemetry(
+        &self,
+        p: f64,
+        y: &dyn VectorType,
+    ) -> Result<
+        (
+            Box<dyn VectorType>,
+            (std::time::Duration, std::time::Duration),
+            std::time::Duration,
+            std::time::Duration,
+        ),
+        BvpBackendIntegrationError,
+    > {
+        let mut factor_owner = self.factor_owner.borrow_mut();
+        self.solve_step_with_linear_telemetry(p, y, factor_owner.as_mut())
+    }
+
+    fn solve_step_with_linear_telemetry(
+        &self,
+        p: f64,
+        y: &dyn VectorType,
+        mut factor_owner: Option<&mut OwnedLinearFactorRuntime>,
+    ) -> Result<
+        (
+            Box<dyn VectorType>,
+            (std::time::Duration, std::time::Duration),
+            std::time::Duration,
+            std::time::Duration,
+        ),
+        BvpBackendIntegrationError,
+    > {
         let fun_time_start = Instant::now();
         let fun = &self.fun;
-        let F_k = fun.call(p, y);
+        self.telemetry_counters.record_residual_call();
+        let F_k = fun.try_call(p, y).map_err(|error| {
+            BvpBackendIntegrationError::CallbackExecutionFailed {
+                stage: "residual".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         let fun_time_end = fun_time_start.elapsed();
-        let J_k = self
-            .old_jac
-            .as_ref()
-            .expect("Damped BVP Newton step requires a cached Jacobian matrix");
-        assert_eq!(
-            F_k.len(),
-            J_k.shape().0,
-            "length of F_k {} and number of rows in J_k {} must be equal",
-            F_k.len(),
-            J_k.shape().0
-        );
-        assert_eq!(
-            J_k.shape().0,
-            J_k.shape().1,
-            "J_k must be a square matrix, but got shape {:?}",
-            J_k.shape()
-        );
-        assert_eq!(
-            F_k.len(),
-            J_k.shape().1,
-            "length of F_k {} and number of columns in J_k {} must be equal",
-            F_k.len(),
-            J_k.shape().1
-        );
+        let J_k = self.factor_owner.old_jac.as_ref().ok_or_else(|| {
+            BvpBackendIntegrationError::PipelinePanicked(
+                "Damped BVP Newton step requires a cached Jacobian matrix".to_string(),
+            )
+        })?;
+        let (matrix_rows, matrix_columns) = J_k.shape();
+        if F_k.len() != matrix_rows || matrix_rows != matrix_columns {
+            return Err(BvpBackendIntegrationError::LinearSolveFailed {
+                backend: "legacy-matrix".to_string(),
+                matrix_rows,
+                matrix_columns,
+                rhs_len: F_k.len(),
+                message: format!(
+                    "residual/Jacobian shape mismatch: residual_len={}, Jacobian_shape=({matrix_rows}, {matrix_columns})",
+                    F_k.len()
+                ),
+            });
+        }
         let residual_norm = F_k.norm();
         info!("\n \n residual norm = {:?} ", residual_norm);
         //    println!(" \n \n F_k = {:?} \n \n", F_k.to_DVectorType());
         for el in F_k.iterate() {
-            if el.is_nan() {
+            if !el.is_finite() {
                 error!("\n \n NaN in undamped step residual function \n \n");
-                panic!("Damped BVP step failed: residual vector contains NaN before linear solve")
+                return Err(BvpBackendIntegrationError::LinearSolveFailed {
+                    backend: "legacy-matrix".to_string(),
+                    matrix_rows,
+                    matrix_columns,
+                    rhs_len: F_k.len(),
+                    message: "residual vector contains a non-finite value before linear solve"
+                        .to_string(),
+                });
             }
         }
         // solving equation J_k*dy_k=-F_k for undamped dy_k, but Lambda*dy_k - is dumped step
+        let owned_factor_path = factor_owner.is_some();
         let linear_sys_time_start = Instant::now();
-        let undamped_step_k: Box<dyn VectorType> = J_k.solve_sys(
-            &*F_k,
-            self.linear_sys_method.clone(),
-            self.abs_tolerance,
-            self.max_iterations,
-            self.bandwidth,
-            y,
-        );
+        let (undamped_step_k, linear_timing) = if let Some(owner) = factor_owner.as_mut() {
+            let (step, factorization, rhs_solve) = owner.try_solve(&*F_k).map_err(|error| {
+                BvpBackendIntegrationError::LinearSolveFailed {
+                    backend: "owned-factor".to_string(),
+                    matrix_rows,
+                    matrix_columns,
+                    rhs_len: F_k.len(),
+                    message: format!("{error:?}"),
+                }
+            })?;
+            (
+                step,
+                crate::numerical::BVP_Damp::BVP_traits::LinearSolveTiming {
+                    factorization,
+                    rhs_solve,
+                },
+            )
+        } else {
+            J_k.try_solve_sys_with_timing(
+                &*F_k,
+                self.linear_sys_method.clone(),
+                self.abs_tolerance,
+                self.max_iterations,
+                self.bandwidth,
+                y,
+            )
+            .map_err(|error| BvpBackendIntegrationError::LinearSolveFailed {
+                backend: "matrix-try-api".to_string(),
+                matrix_rows,
+                matrix_columns,
+                rhs_len: F_k.len(),
+                message: error.to_string(),
+            })?
+        };
         //  info!("linear system solution {},\n {} \n {}", undamped_step_k.to_DVectorType(), F_k.to_DVectorType(), J_k.to_DMatrixType());
         let linear_sys_time_end = linear_sys_time_start.elapsed();
+        let reported_linear_time = if owned_factor_path {
+            linear_sys_time_end + linear_timing.factorization
+        } else {
+            linear_sys_time_end
+        };
         for el in undamped_step_k.iterate() {
-            if el.is_nan() {
+            if !el.is_finite() {
                 log::error!("\n \n NaN in damped step deltaY \n \n");
-                panic!("Damped BVP step failed: Newton update contains NaN after linear solve")
+                return Err(BvpBackendIntegrationError::LinearSolveFailed {
+                    backend: "legacy-matrix".to_string(),
+                    matrix_rows,
+                    matrix_columns,
+                    rhs_len: F_k.len(),
+                    message: "Newton update contains a non-finite value after linear solve"
+                        .to_string(),
+                });
             }
         }
-        let pair_of_times = (fun_time_end, linear_sys_time_end);
-        (undamped_step_k, pair_of_times)
+        let pair_of_times = (fun_time_end, reported_linear_time);
+        Ok((
+            undamped_step_k,
+            pair_of_times,
+            linear_timing.factorization,
+            linear_timing.rhs_solve,
+        ))
+    }
+
+    fn step_with_linear_telemetry(
+        &self,
+        p: f64,
+        y: &dyn VectorType,
+    ) -> (
+        Box<dyn VectorType>,
+        (std::time::Duration, std::time::Duration),
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        self.solve_step_with_linear_telemetry(p, y, None)
+            .unwrap_or_else(|error| panic!("Damped BVP step failed: {error:?}"))
     }
 
     /// Performs damped Newton step with line search
@@ -1859,15 +2643,22 @@ impl NRBVP {
     /// * `(0, Some(step))` - Step accepted, continue iterations
     /// * `(-2, None)` - No acceptable damping coefficient found
     /// * `(-3, None)` - Step violates bounds
-    pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
+    pub fn try_damped_step(
+        &mut self,
+    ) -> Result<(i32, Option<Box<dyn VectorType>>), BvpBackendIntegrationError> {
         // macro for saving times
         macro_rules! save_operation_times {
             ($self:expr, $pair_of_times:expr) => {
-                let (fun_time, linear_sys_time) = $pair_of_times;
+                let (fun_time, linear_sys_time, factorization_time, rhs_solve_time) =
+                    $pair_of_times;
                 $self.custom_timer.append_to_fun_time(fun_time);
                 $self
                     .custom_timer
                     .append_to_linear_sys_time(linear_sys_time);
+                $self
+                    .custom_timer
+                    .append_to_factorization_time(factorization_time);
+                $self.custom_timer.append_to_rhs_solve_time(rhs_solve_time);
             };
         }
         //_________________________________________________________________
@@ -1875,22 +2666,51 @@ impl NRBVP {
         let now = Instant::now();
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
-        let (undamped_step_k_minus_1, pair_of_times) = self.step(p, y_k_minus_1);
+        let factorization_ready = self
+            .factor_owner
+            .borrow()
+            .as_ref()
+            .map(|owner| owner.has_solved_rhs())
+            .unwrap_or(false)
+            || self
+                .factor_owner
+                .old_jac
+                .as_ref()
+                .map(|jacobian| jacobian.factorization_ready())
+                .unwrap_or(false);
+        let (undamped_step_k_minus_1, pair_of_times, factorization_time, rhs_solve_time) =
+            self.try_step_with_linear_telemetry(p, y_k_minus_1)?;
         // saving times of corresponding operations
-        save_operation_times!(self, pair_of_times);
-        *self
-            .calc_statistics
-            .entry("number of solving linear systems".to_string())
-            .or_insert(0) += 1;
+        save_operation_times!(
+            self,
+            (
+                pair_of_times.0,
+                pair_of_times.1,
+                factorization_time,
+                rhs_solve_time,
+            )
+        );
+        self.telemetry_counters.record_linear_solve();
+        self.telemetry_counters.record_rhs_solve();
+        if factorization_ready {
+            self.telemetry_counters.record_factorization_cache_hit();
+        } else {
+            self.telemetry_counters.record_factorization();
+        }
 
         let fbound = bound_step_Cantera2(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
         if fbound.is_nan() {
+            self.telemetry_counters.record_non_finite_value(0);
             error!("\n \n fbound is NaN \n \n");
             panic!("Damped BVP damping failed: boundary step factor is NaN")
         }
         if fbound.is_infinite() {
+            self.telemetry_counters.record_non_finite_value(0);
             error!("\n \n fbound is infinite \n \n");
             panic!("Damped BVP damping failed: boundary step factor is infinite")
+        }
+        if fbound < 1.0 {
+            self.telemetry_counters.record_bound_limited_step(fbound);
         }
         // let fbound =1.0;
         info!("\n \n fboundary  = {}", fbound);
@@ -1902,7 +2722,7 @@ impl NRBVP {
             log::warn!(
                 "\n  No damped step can be taken without violating solution component bounds."
             );
-            return (-3, None);
+            return Ok((-3, None));
         }
 
         let maxDampIter = self
@@ -1925,10 +2745,17 @@ impl NRBVP {
 
         let mut k = 0;
         while k < maxDampIter {
+            self.telemetry_counters.record_damping_trial_at(
+                self.telemetry_counters.iterations(),
+                lambda,
+                f64::NAN,
+            );
             if k > 1 {
                 info!("\n \n damped_step number {} ", k);
             }
             info!("\n \n Damping coefficient = {}", lambda);
+
+            let damping_trial_started = self.telemetry_counters.start_damping_trial_scope();
 
             // step the solution by the damped step size: x_{k+1} = x_k + alpha_k*step_k
             let damped_step_k = undamped_step_k_minus_1.mul_float(lambda);
@@ -1936,13 +2763,41 @@ impl NRBVP {
 
             // compute the next undamped step that would result if x1 is accepted
             // J(x_k)^-1 F(x_k+1)
-            let (undamped_step_k, pair_of_times) = self.step(p, &*y_k);
+            let factorization_ready = self
+                .factor_owner
+                .borrow()
+                .as_ref()
+                .map(|owner| owner.has_solved_rhs())
+                .unwrap_or(false)
+                || self
+                    .factor_owner
+                    .old_jac
+                    .as_ref()
+                    .map(|jacobian| jacobian.factorization_ready())
+                    .unwrap_or(false);
+            let step_result = self.try_step_with_linear_telemetry(p, &*y_k);
+            if step_result.is_err() {
+                self.telemetry_counters
+                    .finish_damping_trial_scope(damping_trial_started);
+            }
+            let (undamped_step_k, pair_of_times, factorization_time, rhs_solve_time) = step_result?;
             // saving times of corresponding operations
-            save_operation_times!(self, pair_of_times);
-            *self
-                .calc_statistics
-                .entry("number of solving linear systems".to_string())
-                .or_insert(0) += 1;
+            save_operation_times!(
+                self,
+                (
+                    pair_of_times.0,
+                    pair_of_times.1,
+                    factorization_time,
+                    rhs_solve_time,
+                )
+            );
+            self.telemetry_counters.record_linear_solve();
+            self.telemetry_counters.record_rhs_solve();
+            if factorization_ready {
+                self.telemetry_counters.record_factorization_cache_hit();
+            } else {
+                self.telemetry_counters.record_factorization();
+            }
 
             // compute the weighted norm of step1 (s1 in C++ code)
             let s1 = undamped_step_k.norm();
@@ -1959,7 +2814,10 @@ impl NRBVP {
             elapsed_time(elapsed);
 
             // C++ acceptance criteria: if (s1 < 1.0 || s1 < s0)
-            if (s1 < 1.0) || (s1 < s0) {
+            let accepted = (s1 < 1.0) || (s1 < s0);
+            self.telemetry_counters
+                .finish_damping_trial_scope(damping_trial_started);
+            if accepted {
                 // The criterion for accepting is that the undamped steps decrease in
                 // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
                 S_k = Some(s1);
@@ -1969,6 +2827,11 @@ impl NRBVP {
             }
             // if fail this criterion we must reject it and retries the step with a reduced damping parameter
             lambda = lambda / (2.0f64.powf(k as f64 + DampFacor));
+            self.telemetry_counters.record_damping_rejection_at(
+                self.telemetry_counters.iterations(),
+                lambda,
+                s1,
+            );
             info!("damping coefficient decreased to {}", lambda);
             S_k = Some(s1);
 
@@ -1987,25 +2850,69 @@ impl NRBVP {
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
-                (0, damped_step_result)
+                Ok((0, damped_step_result))
             } else {
                 info!("\n \n  Damping coefficient found (solution has converged)");
                 info!(
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
-                (1, damped_step_result)
+                Ok((1, damped_step_result))
             }
         } else {
             //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
             warn!("\n \n  No damping coefficient found (max damping iterations reached)");
-            (-2, None)
+            Ok((-2, None))
         }
     } // end of damped step
+
+    pub fn damped_step(&mut self) -> (i32, Option<Box<dyn VectorType>>) {
+        self.try_damped_step()
+            .unwrap_or_else(|error| panic!("Damped BVP damped step failed: {error:?}"))
+    }
+    /// Compatibility wrapper around [`Self::try_calc_residual`].
     pub fn calc_residual(&self, y: Box<dyn VectorType>) -> f64 {
+        self.try_calc_residual(y)
+            .unwrap_or_else(|error| panic!("Damped BVP residual evaluation failed: {error:?}"))
+    }
+
+    /// Evaluates and validates one residual callback at the solver boundary.
+    ///
+    /// The validation is limited to vector shape and finiteness. It avoids any
+    /// matrix conversion and therefore does not add a hidden dense allocation
+    /// to the Lambdify hot path.
+    pub fn try_calc_residual(
+        &self,
+        y: Box<dyn VectorType>,
+    ) -> Result<f64, BvpBackendIntegrationError> {
         let fun = &self.fun;
-        let F_k = fun.call(self.p, &*y);
-        F_k.norm()
+        self.telemetry_counters.record_residual_call();
+        let expected_len = y.len();
+        let residual = fun.try_call(self.p, &*y).map_err(|error| {
+            BvpBackendIntegrationError::CallbackExecutionFailed {
+                stage: "residual".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        if residual.len() != expected_len {
+            return Err(BvpBackendIntegrationError::CallbackShapeMismatch {
+                stage: "residual".to_string(),
+                expected_rows: expected_len,
+                expected_columns: 1,
+                actual_rows: residual.len(),
+                actual_columns: 1,
+            });
+        }
+        for (index, value) in residual.iterate().enumerate() {
+            if !value.is_finite() {
+                self.telemetry_counters.record_non_finite_value(index);
+                return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                    stage: "residual".to_string(),
+                    index,
+                });
+            }
+        }
+        Ok(residual.norm())
     }
     /// Main iteration loop for damped Newton-Raphson method
     ///
@@ -2040,26 +2947,34 @@ impl NRBVP {
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
-        let initial_res_nornal = self.calc_residual(self.y.clone_box());
+        let initial_res_nornal = self.try_calc_residual(self.y.clone_box())?;
         info!("norm of the initial residual = {}", initial_res_nornal);
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
         let mut i = 0;
         while i < self.max_iterations {
+            let iteration_started = self.telemetry_counters.start_iteration_scope();
             self.jac_recalc = jac_recalc(
                 &self.strategy_params,
                 self.m,
-                &self.old_jac,
+                &self.factor_owner.old_jac,
                 &mut self.jac_recalc,
             );
-            self.recalc_jacobian();
+            let jacobian_result = self.try_recalc_jacobian();
+            if jacobian_result.is_err() {
+                self.telemetry_counters
+                    .finish_iteration_scope(iteration_started);
+            }
+            jacobian_result?;
             self.m += 1;
             i += 1; // increment the number of iterations
-            *self
-                .calc_statistics
-                .entry("number of iterations".to_string())
-                .or_insert(0) += 1;
-            let (status, damped_step_result) = self.damped_step();
+            self.telemetry_counters.record_iteration();
+            let step_result = self.try_damped_step();
+            if step_result.is_err() {
+                self.telemetry_counters
+                    .finish_iteration_scope(iteration_started);
+            }
+            let (status, damped_step_result) = step_result?;
 
             if status == 0 {
                 // status == 0 means convergence is not reached yet we're going to another iteration
@@ -2088,7 +3003,12 @@ impl NRBVP {
                         )
                     }
                 };
-                let resid_norm = self.calc_residual(y_k_plus_1.clone_box());
+                let residual_result = self.try_calc_residual(y_k_plus_1.clone_box());
+                if residual_result.is_err() {
+                    self.telemetry_counters
+                        .finish_iteration_scope(iteration_started);
+                }
+                let resid_norm = residual_result?;
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
                 // before refining in case it will go wrong
@@ -2105,12 +3025,16 @@ impl NRBVP {
                         .as_ref()
                         .map_or(false, |p| p.adaptive.is_some())
                 {
+                    self.telemetry_counters
+                        .finish_iteration_scope(iteration_started);
                     info!("solving with new grid!");
                     return self.try_solve_with_new_grid();
                 } else {
                     // if adapive is None then we just return the result
                     info!("returning the result");
 
+                    self.telemetry_counters
+                        .finish_iteration_scope(iteration_started);
                     return Ok(result);
                 };
             //  self.max_error = error; // ???
@@ -2136,6 +3060,8 @@ impl NRBVP {
                 }
             } // status <0
 
+            self.telemetry_counters
+                .finish_iteration_scope(iteration_started);
             info!("\n \n end of iteration {} with jac age {} \n \n", i, self.m);
         }
 
@@ -2242,6 +3168,7 @@ impl NRBVP {
                     &y_dvector,
                     self.effective_runtime_method(),
                 );
+                self.telemetry_counters.record_residual_call();
                 let residuals = fun.call(p, &*y);
                 let residuals = residuals.to_DVectorType();
                 Some(residuals)
@@ -2299,15 +3226,24 @@ impl NRBVP {
             "\n \n grid refinement counter = {} \n \n",
             self.grid_refinemens
         );
-        *self
-            .calc_statistics
-            .entry("number of grid refinements".to_string())
-            .or_insert(0) += 1;
+        self.telemetry_counters.record_grid_refinement();
         self.we_need_refinement();
 
         if number_of_nonzero_keys > 0 {
             // Clear old Jacobian completely to avoid dimension mismatch
-            self.old_jac = None;
+            let had_owned_factor = self.factor_owner.borrow().is_some();
+            if had_owned_factor
+                || self
+                    .factor_owner
+                    .old_jac
+                    .as_ref()
+                    .map(|jacobian| jacobian.factorization_ready())
+                    .unwrap_or(false)
+            {
+                self.telemetry_counters.record_factorization_invalidation();
+            }
+            self.factor_owner.borrow_mut().take();
+            self.factor_owner.old_jac = None;
             self.jac = None; // Clear Jacobian function as well
             self.jac_recalc = true; // Force Jacobian recalculation for new grid
             self.m = 0; // Reset Jacobian age counter
@@ -2357,18 +3293,70 @@ impl NRBVP {
     /// typed backend and execution errors but do not need the higher-level
     /// logging wrapper provided by [`NRBVP::try_solve`].
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.telemetry_counters.begin_solve();
         self.custom_timer.start();
-        self.custom_timer.symbolic_operations_tic();
-        self.try_eq_generate(None, None)?;
-        self.custom_timer.symbolic_operations_tac();
         let begin = Instant::now();
-        let res = self.try_main_loop_damped()?;
+        let res = (|| {
+            self.custom_timer.symbolic_operations_tic();
+            self.try_eq_generate(None, None)?;
+            self.custom_timer.symbolic_operations_tac();
+            self.try_main_loop_damped()
+        })();
+        self.custom_timer.finish();
+        self.telemetry_counters.record_termination(
+            matches!(&res, Ok(Some(_))),
+            if matches!(&res, Ok(Some(_))) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);
-        let time = end.as_secs_f64() as usize;
         self.handle_result();
-        self.calc_statistics
-            .insert("time elapsed, s".to_string(), time);
+        self.calc_statistics();
+        self.custom_timer.get_all();
+        Ok(res)
+    }
+
+    /// Solves a system whose symbolic/runtime callbacks have already been
+    /// prepared by [`NRBVP::try_eq_generate`].
+    ///
+    /// This is intentionally separate from [`NRBVP::try_solver`]: the normal
+    /// entry point owns the complete cold lifecycle and regenerates callbacks,
+    /// while prepared callers (benchmarks, parameter sweeps, and integrations
+    /// that explicitly cache a backend) must not pay that preparation cost a
+    /// second time. The result handling and solver statistics remain identical
+    /// to the regular path.
+    pub fn try_solver_prepared(
+        &mut self,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        if !self
+            .prepared_runtime_revision
+            .is_current_with_fingerprint(self.prepared_plan_fingerprint())
+        {
+            return Err(BvpBackendIntegrationError::PreparedRuntimeInvalidated {
+                reason: "prepared plan is stale: a tracked revision or public compatibility input changed; call try_eq_generate before try_solver_prepared".to_string(),
+            });
+        }
+        self.telemetry_counters.begin_solve();
+        self.custom_timer.start();
+        let begin = Instant::now();
+        let res = self.try_main_loop_damped();
+        self.custom_timer.finish();
+        self.telemetry_counters.record_termination(
+            matches!(&res, Ok(Some(_))),
+            if matches!(&res, Ok(Some(_))) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        let res = res?;
+        let end = begin.elapsed();
+        elapsed_time(end);
+        self.handle_result();
         self.calc_statistics();
         self.custom_timer.get_all();
         Ok(res)
@@ -2607,9 +3595,10 @@ impl NRBVP {
     ///
     /// Shows memory usage, iteration counts, and timing information
     fn calc_statistics(&self) {
-        let mut stats = self.calc_statistics.clone();
-        if let Some(jac) = &self.old_jac {
+        let mut stats = self.telemetry_counters.snapshot().to_legacy_map();
+        if let Some(jac) = &self.factor_owner.old_jac {
             let jac_shape = self
+                .factor_owner
                 .old_jac
                 .as_ref()
                 .expect("Damped BVP calc_statistics requires a cached Jacobian when statistics say one is available")
@@ -2662,6 +3651,7 @@ impl NRBVP {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numerical::BVP_Damp::BVP_traits::{convert_to_fun, convert_to_jac};
     use crate::numerical::BVP_Damp::generated_solver_handoff::{
         AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
         GeneratedBackendConfig, SparseGeneratedBackendMode,
@@ -2680,7 +3670,7 @@ mod tests {
     use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
     use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
     use faer::Col;
-    use nalgebra::DMatrix;
+    use nalgebra::{DMatrix, DVector};
     use std::sync::Arc;
 
     fn sparse_surface_test_solver() -> NRBVP {
@@ -2731,6 +3721,399 @@ mod tests {
     }
 
     #[test]
+    fn try_step_with_linear_telemetry_surfaces_missing_cached_jacobian_as_typed_error() {
+        let solver = sparse_surface_test_solver();
+
+        let error = solver
+            .try_step_with_linear_telemetry(solver.p, &*solver.y)
+            .expect_err("a Newton step without a cached Jacobian must be fallible");
+
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::PipelinePanicked(message)
+                if message.contains("cached Jacobian")
+        ));
+    }
+
+    #[test]
+    fn try_step_preserves_partial_telemetry_on_linear_shape_failure() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        solver.fun = Box::new(FunEnum::Dense(Box::new(|_, y| y.clone())));
+        solver.y = Box::new(DVector::from_element(size, 1.0));
+        solver.factor_owner.old_jac = Some(Box::new(DMatrix::<f64>::identity(1, 1)));
+
+        let error = solver
+            .try_step_with_linear_telemetry(solver.p, &*solver.y)
+            .expect_err("a residual/Jacobian shape mismatch must be typed");
+
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::LinearSolveFailed {
+                backend,
+                matrix_rows: 1,
+                matrix_columns: 1,
+                rhs_len,
+                message,
+            } if backend == "legacy-matrix"
+                && rhs_len == size
+                && message.contains("shape mismatch")
+        ));
+        let snapshot = solver.get_statistics().telemetry;
+        assert_eq!(snapshot.counters.residual_calls, 1);
+        assert_eq!(snapshot.counters.linear_solves, 0);
+        assert_eq!(snapshot.counters.factorizations, 0);
+    }
+
+    #[test]
+    fn try_step_preserves_partial_telemetry_on_dense_factorization_failure() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        solver.fun = Box::new(FunEnum::Dense(Box::new(|_, y| y.clone())));
+        solver.y = Box::new(DVector::from_element(size, 1.0));
+        solver.factor_owner.old_jac = Some(Box::new(DMatrix::<f64>::zeros(size, size)));
+
+        let error = solver
+            .try_step_with_linear_telemetry(solver.p, &*solver.y)
+            .expect_err("a singular Dense Jacobian must be typed");
+
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::LinearSolveFailed {
+                backend,
+                matrix_rows,
+                matrix_columns,
+                rhs_len,
+                message,
+            } if backend == "matrix-try-api"
+                && matrix_rows == size
+                && matrix_columns == size
+                && rhs_len == size
+                && message.contains("factorization failed")
+        ));
+        let snapshot = solver.get_statistics().telemetry;
+        assert_eq!(snapshot.counters.residual_calls, 1);
+        assert_eq!(snapshot.counters.linear_solves, 0);
+        assert_eq!(snapshot.counters.factorizations, 0);
+    }
+
+    #[test]
+    fn try_calc_residual_surfaces_callback_shape_mismatch() {
+        let mut solver = sparse_surface_test_solver();
+        let expected_len = solver.y.len();
+        solver.fun = convert_to_fun(Box::new(|_, _| {
+            Box::new(DVector::from_element(1, 0.0)) as Box<dyn VectorType>
+        }));
+
+        let error = solver
+            .try_calc_residual(solver.y.clone_box())
+            .expect_err("a malformed residual callback must be typed");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::CallbackShapeMismatch {
+                stage,
+                expected_rows,
+                expected_columns: 1,
+                actual_rows: 1,
+                actual_columns: 1,
+            } if stage == "residual" && expected_rows == expected_len
+        ));
+    }
+
+    #[test]
+    fn try_calc_residual_surfaces_callback_panic_as_typed_error() {
+        let mut solver = sparse_surface_test_solver();
+        solver.fun = convert_to_fun(Box::new(|_, _| {
+            std::panic::panic_any("residual callback failed deliberately")
+        }));
+
+        let error = solver
+            .try_calc_residual(solver.y.clone_box())
+            .expect_err("a callback panic must not escape the typed residual path");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                if stage == "residual" && message.contains("residual callback failed deliberately")
+        ));
+    }
+
+    #[test]
+    fn try_recalc_jacobian_surfaces_callback_shape_mismatch() {
+        let mut solver = sparse_surface_test_solver();
+        let expected_len = solver.y.len();
+        solver.jac = Some(convert_to_jac(Box::new(|_, _| {
+            Box::new(DMatrix::from_element(1, 1, 1.0)) as Box<dyn MatrixType>
+        })));
+        solver.jac_recalc = true;
+
+        let error = solver
+            .try_recalc_jacobian()
+            .expect_err("a malformed Jacobian callback must be typed");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::CallbackShapeMismatch {
+                stage,
+                expected_rows,
+                expected_columns,
+                actual_rows: 1,
+                actual_columns: 1,
+            } if stage == "Jacobian"
+                && expected_rows == expected_len
+                && expected_columns == expected_len
+        ));
+    }
+
+    #[test]
+    fn try_recalc_jacobian_surfaces_callback_panic_as_typed_error() {
+        let mut solver = sparse_surface_test_solver();
+        solver.jac = Some(convert_to_jac(Box::new(|_, _| {
+            std::panic::panic_any("Jacobian callback failed deliberately")
+        })));
+        solver.jac_recalc = true;
+
+        let error = solver
+            .try_recalc_jacobian()
+            .expect_err("a callback panic must not escape the typed Jacobian path");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                if stage == "Jacobian" && message.contains("Jacobian callback failed deliberately")
+        ));
+    }
+
+    #[test]
+    fn damped_try_step_reuses_owned_dense_factor_for_repeated_rhs() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+        solver.fun = Box::new(FunEnum::Dense(Box::new(|_, y| y.clone())));
+        solver.y = Box::new(DVector::from_element(size, 1.0));
+
+        let first = solver
+            .try_step_with_linear_telemetry(solver.p, &*solver.y)
+            .expect("first owned-factor RHS solve should succeed");
+        let second = solver
+            .try_step_with_linear_telemetry(solver.p, &*solver.y)
+            .expect("repeated owned-factor RHS solve should succeed");
+
+        assert!(first.2 > std::time::Duration::ZERO);
+        assert_eq!(second.2, std::time::Duration::ZERO);
+        assert_eq!(first.0.to_DVectorType(), second.0.to_DVectorType());
+        assert!(
+            solver
+                .factor_owner
+                .borrow()
+                .as_ref()
+                .expect("owned factor should remain installed")
+                .has_solved_rhs()
+        );
+    }
+
+    #[test]
+    fn damped_continuation_change_invalidates_owned_factor() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+        solver.set_p(1.0);
+
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.jac_recalc);
+    }
+
+    #[test]
+    fn damped_mesh_change_invalidates_owned_factor() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+
+        solver.set_mesh(0.0, 2.0, 6);
+
+        assert_eq!(solver.x_mesh.len(), 7);
+        assert_eq!(solver.n_steps, 6);
+        assert_eq!(solver.initial_guess.shape(), (solver.values.len(), 6));
+        assert_eq!(solver.y.len(), solver.values.len() * solver.n_steps);
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.jac_recalc);
+        assert!(!solver.prepared_runtime_revision.is_current());
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            1
+        );
+    }
+
+    #[test]
+    fn damped_identical_mesh_preserves_owned_factor() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+        solver.jac_recalc = false;
+
+        solver.set_mesh(0.0, 1.0, 4);
+
+        assert!(solver.factor_owner.old_jac.is_some());
+        assert!(solver.factor_owner.borrow().is_some());
+        assert!(!solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            0
+        );
+    }
+
+    #[test]
+    fn damped_numeric_callbacks_invalidate_owned_factor() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+
+        solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| y.clone())));
+
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            1
+        );
+
+        let matrix = DMatrix::<f64>::identity(size, size);
+        *solver.factor_owner.borrow_mut() = Some(
+            prepare_factor_owner_runtime(&matrix, (0, 0), None)
+                .expect("dense matrix should produce an owned factor runtime"),
+        );
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        solver.set_numeric_jacobian(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
+            DMatrix::identity(y.len(), y.len())
+        })));
+
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.jac_recalc);
+        assert_eq!(
+            solver
+                .telemetry_counters
+                .snapshot()
+                .factorization_invalidations,
+            2
+        );
+    }
+
+    #[test]
+    fn damped_parameter_rebind_invalidates_owned_factor() {
+        let mut solver = sparse_surface_test_solver();
+        solver.set_params(Some(&["alpha"]));
+        solver.set_param_values(Some(vec![1.0]));
+
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        let owner = prepare_factor_owner_runtime(&matrix, (0, 0), None)
+            .expect("dense matrix should produce an owned factor runtime");
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        *solver.factor_owner.borrow_mut() = Some(owner);
+        solver.set_param_values(Some(vec![2.0]));
+
+        assert!(solver.factor_owner.old_jac.is_none());
+        assert!(solver.factor_owner.borrow().is_none());
+        assert!(solver.jac_recalc);
+    }
+
+    #[test]
+    fn damped_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
+        let solver = NRBVP::default();
+        let stats = solver.get_statistics();
+
+        assert_eq!(
+            stats.counters["number of iterations"],
+            stats.telemetry.counters.iterations as usize
+        );
+        assert_eq!(
+            stats.counters["number of factorizations"],
+            stats.telemetry.counters.factorizations as usize
+        );
+        assert_eq!(
+            stats.counters["number of RHS solves"],
+            stats.telemetry.counters.rhs_solves as usize
+        );
+        assert!(stats.telemetry.timings.total >= stats.telemetry.timings.jacobian);
+    }
+
+    #[test]
+    fn damped_statistics_count_residual_requests_from_shared_self_boundary() {
+        let solver = NRBVP::default();
+        let _ = solver.calc_residual(solver.y.clone_box());
+        let stats = solver.get_statistics();
+
+        assert_eq!(stats.telemetry.counters.residual_calls, 1);
+        assert_eq!(stats.counters["number of residual calls"], 1);
+    }
+
+    #[test]
+    fn prepared_solver_rejects_unprepared_runtime_with_typed_error() {
+        let mut solver = NRBVP::default();
+
+        let error = solver
+            .try_solver_prepared()
+            .expect_err("prepared solve must reject a runtime that was never generated");
+
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::PreparedRuntimeInvalidated { reason }
+                if reason.contains("try_eq_generate")
+        ));
+    }
+
+    #[test]
+    fn generated_backend_policy_change_invalidates_prepared_runtime() {
+        let mut solver = sparse_surface_test_solver();
+        let size = solver.values.len() * solver.n_steps;
+        let matrix = DMatrix::<f64>::identity(size, size);
+        solver.factor_owner.old_jac = Some(Box::new(matrix));
+        solver.prepared_runtime_revision.mark_prepared();
+
+        solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
+
+        assert!(!solver.prepared_runtime_revision.is_current());
+        assert!(solver.factor_owner.old_jac.is_none());
+        let error = solver
+            .try_solver_prepared()
+            .expect_err("a backend policy change must invalidate prepared callbacks");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::PreparedRuntimeInvalidated { .. }
+        ));
+    }
+
+    #[test]
     fn damped_statistics_expose_generated_runtime_diagnostics() {
         let mut solver = NRBVP::default();
         let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
@@ -2757,7 +4140,20 @@ mod tests {
             selected_backend:
                 crate::symbolic::codegen::codegen_backend_selection::SelectedBackendKind::AotCompiled,
             runtime_diagnostics,
+            generation_telemetry: None,
+            atom_discretization_telemetry: Some(
+                crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot {
+                    total: std::time::Duration::from_millis(3),
+                    ..Default::default()
+                },
+            ),
+            legacy_lambdify_telemetry: None,
+            atom_lambdify_telemetry: None,
+            direct_banded_jacobian_telemetry: None,
+            parameter_binding: None,
         });
+
+        assert!(solver.prepared_runtime_revision.is_current());
 
         let stats = solver.get_statistics();
         assert_eq!(
@@ -2773,6 +4169,14 @@ mod tests {
                 .get("aot.runtime.sparse_jacobian.actual_jobs")
                 .map(String::as_str),
             Some("4")
+        );
+        assert_eq!(
+            stats
+                .telemetry
+                .atom_discretization
+                .expect("Atom preparation telemetry should cross solver handoff")
+                .total,
+            std::time::Duration::from_millis(3)
         );
         assert_eq!(
             stats
@@ -3132,6 +4536,42 @@ mod tests {
     }
 
     #[test]
+    fn prepared_solver_detects_direct_compatibility_field_mutation() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver
+            .try_eq_generate(None, None)
+            .expect("baseline preparation should succeed");
+
+        // This intentionally bypasses the setter. The fingerprint is checked
+        // only at the prepared-solve boundary and must reject stale callbacks.
+        solver.abs_tolerance *= 10.0;
+        let error = solver
+            .try_solver_prepared()
+            .expect_err("direct public-field mutation must invalidate the plan");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::PreparedRuntimeInvalidated { reason }
+                if reason.contains("public compatibility input")
+        ));
+    }
+
+    #[test]
+    fn typed_parameter_binding_rejects_wrong_arity_without_panic() {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver
+            .try_set_params(Some(&["alpha", "beta"]))
+            .expect("parameter names should be accepted");
+        let error = solver
+            .try_set_param_values(Some(vec![1.0]))
+            .expect_err("wrong parameter arity must be a typed error");
+        assert!(matches!(
+            error,
+            BvpBackendIntegrationError::InvalidSolverConfiguration { field, .. }
+                if field == "param_values"
+        ));
+    }
+
+    #[test]
     fn numeric_only_without_numeric_rhs_is_rejected_instead_of_lambdify_fallback() {
         let mut solver = sparse_surface_test_solver_with_tolerances();
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
@@ -3173,7 +4613,7 @@ mod tests {
         solver.y = Box::new(runtime_y);
         solver.jac_recalc = true;
         solver.recalc_jacobian();
-        assert!(solver.old_jac.is_some());
+        assert!(solver.factor_owner.old_jac.is_some());
     }
 
     #[test]
@@ -3191,7 +4631,7 @@ mod tests {
         solver.jac_recalc = true;
         solver.recalc_jacobian();
 
-        assert!(solver.old_jac.is_some());
+        assert!(solver.factor_owner.old_jac.is_some());
     }
 
     #[test]

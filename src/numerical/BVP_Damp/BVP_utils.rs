@@ -1,11 +1,15 @@
 use crate::numerical::BVP_Damp::BVP_traits::MatrixType;
+use crate::numerical::BVP_Damp::telemetry::{
+    BvpCallbackStage, BvpCallbackStageTiming, BvpTelemetryMode, BvpTimingSnapshot,
+};
 
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 use regex::Regex;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tabled::{builder::Builder, settings::Style};
@@ -18,25 +22,105 @@ fn percent_of_total(part: f64, total: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CallbackStageAccumulator {
+    durations: [Duration; BvpCallbackStage::ALL.len()],
+}
+
+impl Default for CallbackStageAccumulator {
+    fn default() -> Self {
+        Self {
+            durations: [Duration::ZERO; BvpCallbackStage::ALL.len()],
+        }
+    }
+}
+
+impl CallbackStageAccumulator {
+    #[inline]
+    fn add(&mut self, stage: BvpCallbackStage, duration: Duration) {
+        self.durations[stage.index()] += duration;
+    }
+
+    fn typed_snapshot(self) -> Vec<BvpCallbackStageTiming> {
+        let mut snapshot = Vec::with_capacity(BvpCallbackStage::ALL.len());
+        for stage in BvpCallbackStage::ALL {
+            let duration = self.durations[stage.index()];
+            if duration > Duration::ZERO {
+                snapshot.push(BvpCallbackStageTiming {
+                    stage,
+                    elapsed: duration,
+                });
+            }
+        }
+        snapshot
+    }
+}
+
 thread_local! {
-    static CALLBACK_STAGE_TIMERS: RefCell<HashMap<String, Duration>> = RefCell::new(HashMap::new());
+    // Fixed slots keep callback instrumentation allocation-free. Presentation
+    // maps are materialized only when a caller requests a snapshot/report.
+    static CALLBACK_STAGE_TIMERS: RefCell<CallbackStageAccumulator> =
+        RefCell::new(CallbackStageAccumulator::default());
+    // Compatibility bridge for callbacks that do not yet receive a timer
+    // session explicitly. A running solver installs its own solve-local
+    // accumulator here; old standalone callback users keep the fallback.
+    static ACTIVE_CALLBACK_STAGE_SESSION: RefCell<Option<Rc<RefCell<CallbackStageAccumulator>>>> =
+        RefCell::new(None);
+    // A disabled solve masks the compatibility fallback as well. The prior
+    // value is restored when the solve finishes, so standalone callbacks keep
+    // their historical behaviour outside a solver session.
+    static CALLBACK_STAGE_COLLECTION_ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
 pub fn reset_callback_stage_timers() {
-    CALLBACK_STAGE_TIMERS.with(|timers| timers.borrow_mut().clear());
-}
-
-pub fn record_callback_stage_time(label: &'static str, duration: Duration) {
     CALLBACK_STAGE_TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
-        *timers
-            .entry(label.to_string())
-            .or_insert_with(|| Duration::from_secs(0)) += duration;
+        *timers.borrow_mut() = CallbackStageAccumulator::default();
+    });
+    ACTIVE_CALLBACK_STAGE_SESSION.with(|session| {
+        if let Some(session) = session.borrow().as_ref() {
+            *session.borrow_mut() = CallbackStageAccumulator::default();
+        }
     });
 }
 
+pub fn record_callback_stage_time(label: &'static str, duration: Duration) {
+    if !CALLBACK_STAGE_COLLECTION_ENABLED.with(Cell::get) {
+        return;
+    }
+    let stage = BvpCallbackStage::from_label(label);
+    let recorded_in_session = ACTIVE_CALLBACK_STAGE_SESSION.with(|session| {
+        if let Some(active) = session.borrow().as_ref() {
+            active.borrow_mut().add(stage, duration);
+            true
+        } else {
+            false
+        }
+    });
+    if recorded_in_session {
+        return;
+    }
+    CALLBACK_STAGE_TIMERS.with(|timers| {
+        timers.borrow_mut().add(stage, duration);
+    });
+}
+
+/// Returns fixed-vocabulary callback timings for typed consumers.
+pub fn callback_stage_timings_snapshot() -> Vec<BvpCallbackStageTiming> {
+    ACTIVE_CALLBACK_STAGE_SESSION.with(|session| {
+        if let Some(active) = session.borrow().as_ref() {
+            active.borrow().typed_snapshot()
+        } else {
+            CALLBACK_STAGE_TIMERS.with(|timers| timers.borrow().typed_snapshot())
+        }
+    })
+}
+
+/// Compatibility projection for existing table/report consumers.
 pub fn callback_stage_timer_snapshot() -> HashMap<String, Duration> {
-    CALLBACK_STAGE_TIMERS.with(|timers| timers.borrow().clone())
+    callback_stage_timings_snapshot()
+        .into_iter()
+        .map(|timing| (timing.stage.label().to_string(), timing.elapsed))
+        .collect()
 }
 
 fn insert_duration_timer(
@@ -78,96 +162,265 @@ pub fn elapsed_time(elapsed: Duration) -> (String, f64) {
 #[derive(Debug, Clone)]
 pub struct CustomTimer {
     pub start: Instant,
+    total: Option<Duration>,
     pub jac_time: Instant,
     pub jac: Duration,
     pub fun_time: Instant,
     pub fun: Duration,
     pub linear_system_time: Instant,
     pub linear_system: Duration,
+    /// Time spent constructing numeric linear factors.
+    pub factorization: Duration,
+    /// Time spent solving RHS vectors with already prepared factors.
+    pub rhs_solve: Duration,
     pub symbolic_operations_time: Instant,
     pub symbolic_operations: Duration,
     pub grid_refinement_time: Instant,
     pub grid_refinement: Duration,
+    callback_stage_session: Option<Rc<RefCell<CallbackStageAccumulator>>>,
+    callback_stage_previous_session: Option<Option<Rc<RefCell<CallbackStageAccumulator>>>>,
+    callback_stage_previous_enabled: Option<bool>,
+    enabled: bool,
+    callback_stages_enabled: bool,
 }
 
 impl CustomTimer {
     pub fn new() -> CustomTimer {
         CustomTimer {
             start: Instant::now(),
+            total: None,
             jac_time: Instant::now(),
             jac: Duration::from_secs(0),
             fun_time: Instant::now(),
             fun: Duration::from_secs(0),
             linear_system_time: Instant::now(),
             linear_system: Duration::from_secs(0),
+            factorization: Duration::from_secs(0),
+            rhs_solve: Duration::from_secs(0),
             symbolic_operations_time: Instant::now(),
             symbolic_operations: Duration::from_secs(0),
             grid_refinement_time: Instant::now(),
             grid_refinement: Duration::from_secs(0),
+            callback_stage_session: None,
+            callback_stage_previous_session: None,
+            callback_stage_previous_enabled: None,
+            enabled: true,
+            callback_stages_enabled: true,
         }
     }
+
+    /// Enables or disables all timer collection for this solve session.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.callback_stages_enabled = enabled;
+    }
+
+    /// Applies the public telemetry policy to the timer without changing the
+    /// numerical solver. `Counters` keeps major timings but skips callback
+    /// sub-stage timing; `Detailed` enables both.
+    pub fn set_telemetry_mode(&mut self, mode: BvpTelemetryMode) {
+        self.enabled = mode != BvpTelemetryMode::Off;
+        self.callback_stages_enabled = mode == BvpTelemetryMode::Detailed;
+    }
+
     pub fn start(&mut self) {
-        reset_callback_stage_timers();
+        if let Some(previous) = self.callback_stage_previous_session.take() {
+            ACTIVE_CALLBACK_STAGE_SESSION.with(|session| {
+                session.replace(previous);
+            });
+        }
+        CALLBACK_STAGE_TIMERS.with(|timers| {
+            *timers.borrow_mut() = CallbackStageAccumulator::default();
+        });
+        let previous_enabled = CALLBACK_STAGE_COLLECTION_ENABLED.with(|enabled| {
+            let previous = enabled.get();
+            enabled.set(self.callback_stages_enabled);
+            previous
+        });
+        self.callback_stage_previous_enabled = Some(previous_enabled);
+        if self.enabled && self.callback_stages_enabled {
+            let callback_stage_session = self
+                .callback_stage_session
+                .get_or_insert_with(|| Rc::new(RefCell::new(CallbackStageAccumulator::default())));
+            *callback_stage_session.borrow_mut() = CallbackStageAccumulator::default();
+            let previous = ACTIVE_CALLBACK_STAGE_SESSION
+                .with(|session| session.replace(Some(callback_stage_session.clone())));
+            self.callback_stage_previous_session = Some(previous);
+        } else {
+            self.callback_stage_previous_session = None;
+        }
+        if !self.enabled {
+            self.total = Some(Duration::ZERO);
+            self.jac = Duration::ZERO;
+            self.fun = Duration::ZERO;
+            self.linear_system = Duration::ZERO;
+            self.factorization = Duration::ZERO;
+            self.rhs_solve = Duration::ZERO;
+            self.symbolic_operations = Duration::ZERO;
+            self.grid_refinement = Duration::ZERO;
+            return;
+        }
         self.start = Instant::now();
+        self.total = None;
         self.jac_time = Instant::now();
         self.jac = Duration::from_secs(0);
         self.fun_time = Instant::now();
         self.fun = Duration::from_secs(0);
         self.linear_system_time = Instant::now();
         self.linear_system = Duration::from_secs(0);
+        self.factorization = Duration::from_secs(0);
+        self.rhs_solve = Duration::from_secs(0);
         self.symbolic_operations_time = Instant::now();
         self.symbolic_operations = Duration::from_secs(0);
         self.grid_refinement_time = Instant::now();
         self.grid_refinement = Duration::from_secs(0);
     }
+
+    /// Freezes the solve wall-clock measurement for stable later reads.
+    pub fn finish(&mut self) {
+        if self.enabled {
+            self.total = Some(self.start.elapsed());
+        }
+        if let Some(previous) = self.callback_stage_previous_session.take() {
+            ACTIVE_CALLBACK_STAGE_SESSION.with(|session| {
+                session.replace(previous);
+            });
+        }
+        if let Some(previous) = self.callback_stage_previous_enabled.take() {
+            CALLBACK_STAGE_COLLECTION_ENABLED.with(|enabled| enabled.set(previous));
+        }
+    }
     pub fn jac_tic(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.jac_time = Instant::now();
     }
 
     pub fn jac_tac(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let jac = self.jac_time.elapsed();
         self.jac += jac;
     }
 
     pub fn fun_tic(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.fun_time = Instant::now();
     }
     pub fn fun_tac(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let fun = self.fun_time.elapsed();
         self.fun += fun;
     }
     pub fn append_to_fun_time(&mut self, fun: Duration) {
+        if !self.enabled {
+            return;
+        }
         self.fun += fun;
     }
     pub fn linear_system_tic(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.linear_system_time = Instant::now();
     }
     pub fn linear_system_tac(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let linear_system = self.linear_system_time.elapsed();
         self.linear_system += linear_system;
     }
     pub fn append_to_linear_sys_time(&mut self, linear_system: Duration) {
+        if !self.enabled {
+            return;
+        }
         self.linear_system += linear_system;
     }
+    pub fn append_to_factorization_time(&mut self, factorization: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.factorization += factorization;
+    }
+    pub fn append_to_rhs_solve_time(&mut self, rhs_solve: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.rhs_solve += rhs_solve;
+    }
     pub fn symbolic_operations_tic(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.symbolic_operations_time = Instant::now();
     }
     pub fn symbolic_operations_tac(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let symbolic_operations = self.symbolic_operations_time.elapsed();
         self.symbolic_operations += symbolic_operations;
     }
     pub fn grid_refinement_tic(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.grid_refinement_time = Instant::now();
     }
     pub fn grid_refinement_tac(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let grid_refinement = self.grid_refinement_time.elapsed();
         self.grid_refinement += grid_refinement;
     }
+
+    /// Returns a typed snapshot for programmatic diagnostics.
+    ///
+    /// `get_all` remains the presentation/compatibility adapter. Keeping the
+    /// typed snapshot separate prevents solver code from depending on labels
+    /// and formatted duration strings.
+    pub fn snapshot(&self) -> BvpTimingSnapshot {
+        if !self.enabled {
+            return BvpTimingSnapshot::default();
+        }
+        let callback_stage_timings = self
+            .callback_stage_session
+            .as_ref()
+            .map(|session| session.borrow().typed_snapshot())
+            .unwrap_or_default();
+        let mut callback_stages: Vec<(String, Duration)> = callback_stage_timings
+            .iter()
+            .map(|timing| (timing.stage.label().to_string(), timing.elapsed))
+            .collect();
+        callback_stages.sort_by(|left, right| left.0.cmp(&right.0));
+        BvpTimingSnapshot {
+            total: self.total.unwrap_or_else(|| self.start.elapsed()),
+            residual: self.fun,
+            jacobian: self.jac,
+            linear_system: self.linear_system,
+            factorization: self.factorization,
+            rhs_solve: self.rhs_solve,
+            symbolic_operations: self.symbolic_operations,
+            grid_refinement: self.grid_refinement,
+            callback_stage_timings,
+            callback_stages,
+        }
+    }
+
     pub fn get_all(&self) -> HashMap<String, String> {
         let mut timer_data: HashMap<String, String> = HashMap::new();
 
-        let total_time = self.start.elapsed().as_nanos() as f64;
-        let total_time_string = elapsed_time(self.start.elapsed());
+        let total_duration = self.total.unwrap_or_else(|| self.start.elapsed());
+        let total_time = total_duration.as_nanos() as f64;
+        let total_time_string = elapsed_time(total_duration);
 
         let jac_total_string = elapsed_time(self.jac);
         let jac_total = self.jac.as_nanos() as f64;
@@ -180,6 +433,14 @@ impl CustomTimer {
         let linear_system_total = self.linear_system.as_nanos() as f64;
         let linear_system_time_percent = percent_of_total(linear_system_total, total_time);
         let linear_system_total_string = elapsed_time(self.linear_system);
+
+        let factorization_total = self.factorization.as_nanos() as f64;
+        let factorization_time_percent = percent_of_total(factorization_total, total_time);
+        let factorization_total_string = elapsed_time(self.factorization);
+
+        let rhs_solve_total = self.rhs_solve.as_nanos() as f64;
+        let rhs_solve_time_percent = percent_of_total(rhs_solve_total, total_time);
+        let rhs_solve_total_string = elapsed_time(self.rhs_solve);
 
         let symbolic_operations_total = self.symbolic_operations.as_nanos() as f64;
         let symbolic_operations_time_percent =
@@ -194,6 +455,8 @@ impl CustomTimer {
             - jac_total
             - fun_total
             - linear_system_total
+            - factorization_total
+            - rhs_solve_total
             - symbolic_operations_total
             - grid_refinement_total;
 
@@ -240,6 +503,22 @@ impl CustomTimer {
                 "{}, {}",
                 (linear_system_time_percent * 1000.0).round() / 1000.0,
                 linear_system_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "Factorization (%, ".to_string() + factorization_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (factorization_time_percent * 1000.0).round() / 1000.0,
+                factorization_total_string.1
+            ),
+        );
+        timer_data.insert(
+            "RHS Solve (%, ".to_string() + rhs_solve_total_string.0.as_str() + ")",
+            format!(
+                "{}, {}",
+                (rhs_solve_time_percent * 1000.0).round() / 1000.0,
+                rhs_solve_total_string.1
             ),
         );
         timer_data.insert(
@@ -745,5 +1024,75 @@ mod tests {
             !data_after_reset.contains_key(key),
             "CustomTimer::start should reset callback stage timers"
         );
+    }
+
+    #[test]
+    fn custom_timer_callback_stages_are_solve_local_and_nested_sessions_do_not_mix() {
+        let mut outer = CustomTimer::new();
+        outer.start();
+        record_callback_stage_time("Callback Residual Values", Duration::from_millis(2));
+
+        let mut inner = CustomTimer::new();
+        inner.start();
+        record_callback_stage_time("Callback Jacobian Values", Duration::from_millis(3));
+        inner.finish();
+
+        record_callback_stage_time("Callback Residual Values", Duration::from_millis(4));
+        outer.finish();
+
+        let outer_stages = outer.snapshot().callback_stage_timings;
+        let inner_stages = inner.snapshot().callback_stage_timings;
+        assert_eq!(
+            outer_stages
+                .iter()
+                .find(|timing| timing.stage == BvpCallbackStage::ResidualValues)
+                .map(|timing| timing.elapsed),
+            Some(Duration::from_millis(6))
+        );
+        assert_eq!(
+            inner_stages
+                .iter()
+                .find(|timing| timing.stage == BvpCallbackStage::JacobianValues)
+                .map(|timing| timing.elapsed),
+            Some(Duration::from_millis(3))
+        );
+        assert!(
+            inner_stages
+                .iter()
+                .all(|timing| timing.stage != BvpCallbackStage::ResidualValues)
+        );
+    }
+
+    #[test]
+    fn custom_timer_off_skips_stage_timing_and_callback_collection() {
+        reset_callback_stage_timers();
+        let mut timer = CustomTimer::new();
+        timer.set_telemetry_mode(BvpTelemetryMode::Off);
+        timer.start();
+        timer.fun_tic();
+        timer.fun_tac();
+        record_callback_stage_time("Callback Residual Values", Duration::from_millis(5));
+        timer.finish();
+
+        assert_eq!(timer.snapshot(), BvpTimingSnapshot::default());
+        assert!(callback_stage_timings_snapshot().is_empty());
+    }
+
+    #[test]
+    fn callback_stage_snapshot_keeps_unknown_stages_visible_without_dynamic_hot_state() {
+        reset_callback_stage_timers();
+        record_callback_stage_time("Callback Future Stage", Duration::from_millis(7));
+
+        let typed = callback_stage_timings_snapshot();
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].stage.label(), "Callback Other");
+        assert_eq!(typed[0].elapsed, Duration::from_millis(7));
+
+        let snapshot = callback_stage_timer_snapshot();
+        assert_eq!(
+            snapshot.get("Callback Other").copied(),
+            Some(Duration::from_millis(7))
+        );
+        assert!(!snapshot.contains_key("Callback Future Stage"));
     }
 }

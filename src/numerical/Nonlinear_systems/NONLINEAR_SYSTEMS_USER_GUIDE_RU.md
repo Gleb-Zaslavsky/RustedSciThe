@@ -87,6 +87,59 @@ generic engine, поскольку у него нет отдельной гра�
 `SymbolicPreparationReport`, а не solver-счетчикам. При отключенной статистике
 `attempts` пуст, а поля счетчиков и времени не являются измерениями.
 
+### Подробная телеметрия подготовки
+
+Статистика солвера описывает численные итерации. Если нужно отдельно измерять
+стоимость построения подготовленной символьной задачи, включите опциональную
+телеметрию подготовки:
+
+```rust
+let prepared = PreparedSymbolicNonlinearProblem::from_strings(
+    equations,
+    SymbolicProblemOptions::new()
+        .with_variables(variables)
+        .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+)?;
+
+if let Some(report) = prepared.preparation_report().detailed.as_ref() {
+    println!(
+        "preparation total={:?}, input={:?}, mode={:?}",
+        report.total_wall_time, report.input_kind, report.execution_mode,
+    );
+    for stage in &report.stages {
+        println!("{:?}: {:?}", stage.stage, stage.wall_time);
+    }
+}
+```
+
+Агрегированный `SymbolicPreparationReport` доступен и при отключенной
+подробной телеметрии. Время стадии является исключительным, если реализация
+может выделить его отдельно; `None` означает, что стадия неприменима или ее
+нельзя надежно изолировать, а не нулевое время. Поле
+`unattributed_wall_time` содержит остаток времени подготовки. Обновление
+значений параметров не повторяет подготовку и не создает новый отчет о
+подготовке.
+
+Для диагностического контура, которому нужно сохранить границу ошибки,
+используйте подробный конструктор. Он возвращает `SymbolicPreparationFailure`,
+содержащий исходный `SolveError` и завершенные к моменту ошибки стадии:
+
+```rust
+let attempt = SymbolicNonlinearProblem::from_strings_with_options_detailed(
+    equations,
+    SymbolicProblemOptions::new()
+        .with_variables(variables)
+        .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+);
+if let Err(failure) = attempt {
+    eprintln!("{}; telemetry={:?}", failure, failure.telemetry);
+}
+```
+
+Совместимые конструкторы не меняются и по-прежнему возвращают непосредственно
+`SolveError`. Failure telemetry предназначена для отчетов и отладки и не
+превращает неудачную подготовку в пригодную для решения задачу.
+
 ### Жизненный цикл AOT-артефакта
 
 Для холодного production-подобного запуска задайте каталог вывода и
@@ -100,10 +153,11 @@ let cold = SymbolicNonlinearProblem::from_strings_with_generated_backend(
 )?;
 let resolver = cold.updated_resolver.clone();
 println!(
-    "cold: backend={:?}, action={:?}, key={:?}, build={:?}",
+    "cold: backend={:?}, action={:?}, manifest_key={:?}, lifecycle_key={:?}, build={:?}",
     cold.selected_backend,
     cold.preparation_report.artifact_action,
     cold.preparation_report.artifact_key,
+    cold.preparation_report.artifact_lifecycle_key,
     cold.preparation_report.build_duration,
 );
 ```
@@ -126,6 +180,118 @@ assert_eq!(warm.preparation_report.artifact_action, SymbolicArtifactAction::Reus
 Lambdify. `resolver` является снимком внутри процесса; новый процесс должен
 найти опубликованный совместимый артефакт в настроенном каталоге. После любой
 из этих стадий обновление параметров остается дешевой численной операцией.
+
+## Выбор политики выполнения и backend
+
+### Последовательный и параллельный Lambdify
+
+Политику выполнения callback можно задать при подготовке символьной задачи:
+
+```rust
+let sequential = SymbolicProblemOptions::new()
+    .with_variables(variables.clone())
+    .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential);
+
+let parallel = SymbolicProblemOptions::new()
+    .with_variables(variables)
+    .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel {
+        min_work: 1_500,
+    });
+```
+
+`Sequential` является режимом по умолчанию и первым выбором для небольших
+или разреженных систем. `Parallel { min_work }` включается явно и запускает
+распараллеливание только когда подготовленный объем работы достигает порога.
+`min_work` является правилом runtime-диспетчеризации, а не параметром
+сходимости или точности. Начните с `Sequential`, затем измерьте настоящую
+структуру невязки и якобиана на целевой машине и только после этого выбирайте
+`min_work`.
+
+Это подтверждается release-корпусом. При размерности `512` подготовленный
+Sequential был самым быстрым полным Newton-маршрутом во всех шести строках
+большого корпуса. Parallel был полезен для широкого `band-five` callback и
+оказался быстрее legacy-маршрута, но в полном решении все еще уступал
+подготовленному Sequential. В sweep по порогу `Parallel { min_work: 1 }`
+был примерно на `9-10%` медленнее Sequential, а включение Parallel ровно на
+границе structural `nnz` замедляло путь еще сильнее. Доказательства приведены
+в Sections 44 и 45 `STORY_TESTS.md`.
+
+### Почему новый якобиан не использует Mutex
+
+Подготовленный якобиан уже знает независимую структуру вычисления ненулевых
+элементов. Новый parallel-путь распределяет независимые строки/элементы по
+worker-потокам и пишет непосредственно в принадлежащую вызывающей стороне
+матрицу `DMatrix`. Поэтому ему не нужны общий аккумулятор, поэлементный
+`Mutex` или промежуточная dense-матрица. Legacy compatibility-путь сохраняет
+старую семантику allocated-return и mutex/Rayon dispatch, чтобы не ломать
+существующих пользователей.
+
+Это одновременно архитектурное и производительное решение. На release
+корпусе `band-five`, размерность `512`, legacy Jacobian занимал `1230.7 us`,
+подготовленный Sequential `397.15 us`, а новый mutex-free Parallel `426.31 us`.
+То есть Parallel был примерно в `2.89x` быстрее legacy, хотя Sequential был
+еще быстрее. Parallel не обязан быть быстрее Sequential: для дешевых
+элементов стоимость запуска worker-потоков перекрывает выигрыш. Корректность
+и детерминированность разреженной раскладки проверяются в Sections 41 и 42.
+
+### Lambdify и AOT: когда наступает break-even
+
+Выбирайте Lambdify, если важны короткий запуск, переносимость и небольшое
+число решаемых задач. Выбирайте AOT, если доступен toolchain, артефакт можно
+сохранить и переиспользовать, а выигрыш callback подтвержден именно для вашей
+задачи. Первый AOT-запуск включает materialization, compilation, linking и
+publication; эту стоимость нельзя смешивать с warm solve.
+
+Грубая оценка числа warm-решений до окупаемости:
+
+```text
+break_even_solves ~=
+    (AOT preparation + build - Lambdify preparation)
+    / (Lambdify warm solve - AOT warm solve)
+```
+
+Знаменатель должен быть положительным. Если AOT в warm-режиме медленнее,
+для данной конфигурации break-even отсутствует. В release large-story при
+`n=512` warm total составил `17.242 ms` у Lambdify и `17.835 ms` у AOT;
+якобиан AOT занимал `2.913 ms` против `2.296 ms`, а невязка и linear stage
+были близки. При `n=128` AOT был быстрее (`0.397 ms` против `0.516 ms`), но
+стоимость build около `365 ms` означает тысячи повторных решений до
+амортизации. Поэтому текущие данные не дают универсального утверждения
+«AOT быстрее». Они подтверждают AOT как deployment/lifecycle-вариант с
+зависящим от workload break-even. См. Sections 53, 64 и 65.
+
+### Архитектурные решения и их обоснование
+
+- **Разделение prepared и bound:** parsing, differentiation и построение
+  callback выполняются один раз; новая привязка параметров создает дешевое
+  представление для solver-а. Поэтому parameter sweep должен переиспользовать
+  prepared-объект.
+- **Разделение solver-level и generated-job счетчиков:** один счетчик
+  residual/Jacobian означает один полный запрос к provider. Внутренние AOT
+  chunks/jobs являются backend detail, поэтому Lambdify и AOT сопоставимы.
+- **Разделение manifest и lifecycle identity:** математический artifact key
+  используется resolver-ом, а profile/compiler settings входят в on-disk
+  lifecycle key. Debug-marker не может молча удовлетворить другому build.
+- **Fail-closed RequirePrebuilt:** отсутствующий, устаревший, несовместимый или
+  не связанный артефакт дает typed error; молчаливого fallback на Lambdify нет.
+  Это делает deployment воспроизводимым.
+- **Whole для compact dense AOT по умолчанию:** layout-profile при `n=512`
+  показал, что `Whole` быстрее row chunks 32 и 64. Caller-side adaptation
+  занимала `0.216 ms` из `0.301 ms` полного вызова якобиана. Это вывод для
+  измеренного dense-пути, а не правило для sparse или banded задач.
+
+### Стоимость телеметрии
+
+Solver statistics и preparation telemetry отвечают на разные вопросы.
+`collect_statistics` дает solver-level counters и stage timers, а
+`collect_history` дополнительно сохраняет снимки итераций и может увеличить
+расход памяти. Подробная телеметрия подготовки отдельно включается через
+`PreparationTelemetryMode::Collect`. Release-аудит подготовки показал лишь
+сотые доли миллисекунды разницы между disabled и enabled режимами при
+размерностях `40`, `128` и `512`; диапазоны повторов перекрывались. Это не
+является универсальным процентом стоимости warm solve. Для чистого hot-path
+benchmark отключайте history/statistics, если сами диагностические данные не
+являются предметом эксперимента.
 
 ## Ограничения и диагностика
 
@@ -161,6 +327,34 @@ Levenberg-Marquardt и trust-region полезны для трудных, пло
 или least-squares-подобных систем. Одно число wall-clock не ранжирует все
 методы: сравнивайте сходимость, качество невязки, отвергнутые шаги и времена
 стадий на том классе задач, который важен именно вам.
+
+### Levenberg-Marquardt с backtracking
+
+`BacktrackingLevenbergMarquardt` является самостоятельным вариантом наравне
+с классическим LM, MINPACK, Nielsen и trust-region методами. Он решает
+регуляризованную систему с единичным демпфированием:
+
+`(J^T J + lambda I) delta = -J^T residual`
+
+Затем проверяются допустимые пробные точки: сначала `alpha = 1`, после чего
+`alpha` уменьшается вдвое, пока норма невязки строго не уменьшится или не
+будет достигнуто `alpha_min`. После принятого шага `lambda` умножается на
+`lambda_decrease`, а после полностью неудачного backtracking-поиска — на
+`lambda_increase`. Значения по умолчанию равны `0.3` и `10.0`. Общий движок
+по-прежнему объявляет `Converged` только при достижении заданной точности
+невязки: принятый шаг сам по себе не является доказательством сходимости.
+
+```rust
+let method = NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
+    BacktrackingLevenbergMarquardtMethod::default(),
+);
+let result = method.solve(&problem, initial_guess, SolveOptions::default())?;
+```
+
+Выбирайте этот вариант, когда нужна именно политика единичного демпфирования
+и строгого backtracking с учетом границ. Для классической настраиваемой
+политики масштабирования используйте `LevenbergMarquardt`; варианты намеренно
+разделены и не подменяют друг друга неявно.
 
 ## Аудит аллокаций
 

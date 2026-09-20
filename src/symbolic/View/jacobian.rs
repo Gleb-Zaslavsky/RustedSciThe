@@ -16,7 +16,7 @@ use super::{
 use crate::symbolic::symbolic_engine::Expr;
 
 /// One nonzero sparse Jacobian entry produced by the View-native symbolic path.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SparseAtomJacobianEntry {
     pub row: usize,
     pub col: usize,

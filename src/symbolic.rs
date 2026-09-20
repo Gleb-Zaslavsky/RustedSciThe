@@ -162,6 +162,8 @@ pub mod symbolic_functions2;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 pub mod symbolic_functions_BVP2;
+/// Explicit legacy/direct/telemetry boundaries for the BVP symbolic pipeline.
+pub mod bvp;
 /// modern shared IVP backend contracts and params-aware symbolic preparation
 pub mod symbolic_ivp;
 /// thin IVP bridge into the generic AOT lifecycle

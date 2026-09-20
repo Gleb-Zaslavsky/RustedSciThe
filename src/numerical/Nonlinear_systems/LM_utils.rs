@@ -279,7 +279,10 @@ impl ReductionRatioSolver {
         }
 
         // Actual reduction
-        let actual_reduction = 1.0 - (norm_f_trial / norm_f).powf(2.0);
+        // `norm_f` values are already squared norms.  Squaring their ratio
+        // again would turn the normalized reduction into a fourth-power
+        // quantity and distort More's acceptance ratio.
+        let actual_reduction = 1.0 - norm_f_trial / norm_f;
 
         // Predicted reduction (from quadratic model)
         // Uses method-specific calculation from trust region subproblem

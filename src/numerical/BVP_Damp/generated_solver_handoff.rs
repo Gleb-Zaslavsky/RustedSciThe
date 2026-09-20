@@ -1,5 +1,10 @@
 use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac};
+use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode};
 use crate::somelinalg::banded::LinearSolverConfig;
+use crate::symbolic::bvp::telemetry::{
+    BvpDirectJacobianTelemetry, BvpGenerationTelemetrySnapshot, BvpLambdifyExecutionPolicy,
+    BvpLambdifyTelemetry, BvpLambdifyTelemetryMode,
+};
 use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
     CAotBuildProfile, CAotBuildRequest, CAotCompileConfig,
@@ -18,7 +23,6 @@ use crate::symbolic::codegen::codegen_aot_runtime_link::{
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
 };
-use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_orchestrator::ParallelExecutorConfig;
 use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend};
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
@@ -257,6 +261,20 @@ pub struct DampedGeneratedSolverState {
     pub selected_backend: SelectedBackendKind,
     /// Runtime diagnostics for generated callback execution.
     pub runtime_diagnostics: HashMap<String, String>,
+    /// Typed symbolic/backend preparation stages captured before the solve.
+    pub generation_telemetry: Option<BvpGenerationTelemetrySnapshot>,
+    /// Typed Atom-native preparation telemetry, when the selected route used it.
+    pub atom_discretization_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
+    /// Runtime callback telemetry for the ExprLegacy Lambdify route.
+    pub legacy_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    /// Runtime callback telemetry for the AtomView Lambdify route.
+    pub atom_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    /// Immutable snapshot of the direct no-Mutex Banded callback telemetry.
+    pub direct_banded_jacobian_telemetry: Option<BvpDirectJacobianTelemetry>,
+    /// Numeric parameter binding shared by prepared Lambdify callbacks.
+    pub(crate) parameter_binding:
+        Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
 }
 
 /// Unified callback/metadata handoff for the frozen sparse BVP solver.
@@ -275,6 +293,20 @@ pub struct FrozenGeneratedSolverState {
     pub selected_backend: SelectedBackendKind,
     /// Runtime diagnostics for generated callback execution.
     pub runtime_diagnostics: HashMap<String, String>,
+    /// Typed symbolic/backend preparation stages captured before the solve.
+    pub generation_telemetry: Option<BvpGenerationTelemetrySnapshot>,
+    /// Typed Atom-native preparation telemetry, when the selected route used it.
+    pub atom_discretization_telemetry:
+        Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
+    /// Runtime callback telemetry for the ExprLegacy Lambdify route.
+    pub legacy_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    /// Runtime callback telemetry for the AtomView Lambdify route.
+    pub atom_lambdify_telemetry: Option<BvpLambdifyTelemetry>,
+    /// Immutable snapshot of the direct no-Mutex Banded callback telemetry.
+    pub direct_banded_jacobian_telemetry: Option<BvpDirectJacobianTelemetry>,
+    /// Numeric parameter binding shared by prepared Lambdify callbacks.
+    pub(crate) parameter_binding:
+        Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
 }
 
 /// Applies a damped generated handoff state to a solver-specific runtime object.
@@ -390,7 +422,7 @@ impl AotChunkingPolicy {
 }
 
 /// User-facing configuration for generated backend selection in BVP solvers.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GeneratedBackendConfig {
     /// Optional explicit backend policy override.
     pub backend_policy_override: Option<BackendSelectionPolicy>,
@@ -416,6 +448,18 @@ pub struct GeneratedBackendConfig {
     pub matrix_backend_override: Option<MatrixBackend>,
     /// Native linear solver configuration used by the generated banded runtime path.
     pub banded_linear_solver_config: LinearSolverConfig,
+    /// Runtime collection mode for Lambdify callback telemetry. This has no
+    /// effect on compiled AOT callbacks.
+    pub lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    /// Runtime execution policy for pure Lambdify residual/Jacobian callbacks.
+    /// This is independent from AOT execution policy.
+    pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    /// Opt-in structured decision logging for the BVP solver runtime.
+    pub bvp_logging_mode: BvpLoggingMode,
+    /// Maximum number of retained typed decision events per solve.
+    pub bvp_logging_max_events: usize,
+    /// Collection policy for solver counters and stage timings.
+    pub bvp_telemetry_mode: BvpTelemetryMode,
 }
 
 /// High-level sparse generated-backend modes exposed at solver setup level.
@@ -482,6 +526,48 @@ impl GeneratedBackendConfig {
     /// Creates an empty generated-backend configuration.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the runtime telemetry mode for Lambdify callbacks.
+    pub fn with_lambdify_telemetry_mode(mut self, mode: BvpLambdifyTelemetryMode) -> Self {
+        self.lambdify_telemetry_mode = mode;
+        self
+    }
+
+    /// Selects how pure Lambdify residual/Jacobian callbacks execute.
+    ///
+    /// This policy is separate from AOT execution and is applied only when
+    /// the selected route is Lambdify. The default preserves the historical
+    /// parallel callback behavior.
+    pub fn with_lambdify_execution_policy(mut self, policy: BvpLambdifyExecutionPolicy) -> Self {
+        self.lambdify_execution_policy = policy;
+        self
+    }
+
+    /// Enables typed solver decision logging without changing numerical code.
+    pub fn with_bvp_logging_mode(mut self, mode: BvpLoggingMode) -> Self {
+        self.bvp_logging_mode = mode;
+        self
+    }
+
+    /// Sets the bounded capacity of the typed decision trace.
+    pub fn with_bvp_logging_max_events(mut self, max_events: usize) -> Self {
+        self.bvp_logging_max_events = max_events;
+        self
+    }
+
+    /// Sets the complete structured logging policy.
+    pub fn with_bvp_logging_config(mut self, config: BvpLoggingConfig) -> Self {
+        self.bvp_logging_mode = config.mode;
+        self.bvp_logging_max_events = config.max_events;
+        self
+    }
+
+    /// Selects the solver telemetry collection policy. `Off` avoids counter
+    /// increments, timers, and callback-stage collection on the hot path.
+    pub fn with_bvp_telemetry_mode(mut self, mode: BvpTelemetryMode) -> Self {
+        self.bvp_telemetry_mode = mode;
+        self
     }
 
     /// Creates the default sparse/BVP generated-backend configuration.
@@ -583,6 +669,11 @@ impl GeneratedBackendConfig {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+            bvp_logging_mode: BvpLoggingMode::Off,
+            bvp_logging_max_events: BvpLoggingConfig::default().max_events,
+            bvp_telemetry_mode: BvpTelemetryMode::Counters,
         }
     }
 
@@ -837,8 +928,14 @@ pub struct DampedSolverBuildRequest {
     pub matrix_backend_override: Option<MatrixBackend>,
     /// Native linear solver configuration used by the generated banded runtime path.
     pub banded_linear_solver_config: LinearSolverConfig,
+    /// Runtime collection mode for Lambdify callbacks.
+    pub lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    /// Runtime execution policy for pure Lambdify residual/Jacobian callbacks.
+    pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
 }
 
+// The request carries the pure-Lambdify execution policy separately from AOT
+// execution policy so both solver variants can select the callback regime.
 impl DampedSolverBuildRequest {
     /// Builds a solver-ready callback and metadata state.
     pub fn generate(self) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
@@ -870,6 +967,8 @@ impl DampedSolverBuildRequest {
             self.symbolic_assembly_backend,
             self.matrix_backend_override,
             self.banded_linear_solver_config,
+            self.lambdify_telemetry_mode,
+            self.lambdify_execution_policy,
         )
     }
 }
@@ -982,6 +1081,10 @@ pub struct FrozenSolverBuildRequest {
     pub matrix_backend_override: Option<MatrixBackend>,
     /// Native linear solver configuration used by the generated banded runtime path.
     pub banded_linear_solver_config: LinearSolverConfig,
+    /// Runtime collection mode for Lambdify callbacks.
+    pub lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    /// Runtime execution policy for pure Lambdify residual/Jacobian callbacks.
+    pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
 }
 
 impl FrozenSolverBuildRequest {
@@ -1013,6 +1116,8 @@ impl FrozenSolverBuildRequest {
             self.symbolic_assembly_backend,
             self.matrix_backend_override,
             self.banded_linear_solver_config,
+            self.lambdify_telemetry_mode,
+            self.lambdify_execution_policy,
         )
     }
 }
@@ -1102,12 +1207,18 @@ pub fn generate_damped_solver_state(
     symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
     matrix_backend_override: Option<MatrixBackend>,
     banded_linear_solver_config: LinearSolverConfig,
+    lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    lambdify_execution_policy: BvpLambdifyExecutionPolicy,
 ) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
     let handoff_begin = Instant::now();
     let mut handoff_diagnostics = HashMap::new();
     let param_name_refs = parameter_name_refs(param_names.as_ref());
+    // AtomView is a symbolic assembly choice, not a Sparse-only feature.
+    // Dense must use the same modern bundle when AtomView is selected; the
+    // legacy bundle does not contain the Atom-native discretized functions.
     if matches!(method.as_str(), "Sparse" | "Banded")
         || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
+        || symbolic_assembly_backend == BvpSymbolicAssemblyBackend::AtomView
     {
         let lifecycle_lock_begin = Instant::now();
         let _lifecycle_guard = aot_lifecycle_needs_serialization(backend_policy, aot_build_policy)
@@ -1138,6 +1249,8 @@ pub fn generate_damped_solver_state(
             param_name_refs.as_deref(),
             param_values.clone(),
             banded_linear_solver_config,
+            lambdify_telemetry_mode,
+            lambdify_execution_policy,
         );
         let original_backend_policy = backend_policy;
         let backend_policy =
@@ -1181,6 +1294,8 @@ pub fn generate_damped_solver_state(
                 param_name_refs.as_deref(),
                 retry_param_values.clone(),
                 banded_linear_solver_config,
+                lambdify_telemetry_mode,
+                lambdify_execution_policy,
             );
             let auto_regenerate_begin = Instant::now();
             bundle = try_generate_sparse_bundle(
@@ -1266,6 +1381,8 @@ pub fn generate_damped_solver_state(
             param_name_refs.as_deref(),
             param_values,
             banded_linear_solver_config,
+            lambdify_telemetry_mode,
+            lambdify_execution_policy,
         );
         let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,
@@ -1319,12 +1436,17 @@ pub fn generate_frozen_solver_state(
     symbolic_assembly_backend: BvpSymbolicAssemblyBackend,
     matrix_backend_override: Option<MatrixBackend>,
     banded_linear_solver_config: LinearSolverConfig,
+    lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    lambdify_execution_policy: BvpLambdifyExecutionPolicy,
 ) -> Result<FrozenGeneratedSolverState, BvpBackendIntegrationError> {
     let handoff_begin = Instant::now();
     let mut handoff_diagnostics = HashMap::new();
     let param_name_refs = parameter_name_refs(param_names.as_ref());
+    // Keep AtomView available for Dense as well as Sparse/Banded. Only an
+    // explicit ExprLegacy selection should use the compatibility bundle.
     if matches!(method.as_str(), "Sparse" | "Banded")
         || matches!(matrix_backend_override, Some(MatrixBackend::Banded))
+        || symbolic_assembly_backend == BvpSymbolicAssemblyBackend::AtomView
     {
         let lifecycle_lock_begin = Instant::now();
         let _lifecycle_guard = aot_lifecycle_needs_serialization(backend_policy, aot_build_policy)
@@ -1353,6 +1475,8 @@ pub fn generate_frozen_solver_state(
             param_name_refs.as_deref(),
             param_values.clone(),
             banded_linear_solver_config,
+            lambdify_telemetry_mode,
+            lambdify_execution_policy,
         );
         let original_backend_policy = backend_policy;
         let backend_policy =
@@ -1396,6 +1520,8 @@ pub fn generate_frozen_solver_state(
                 param_name_refs.as_deref(),
                 retry_param_values.clone(),
                 banded_linear_solver_config,
+                lambdify_telemetry_mode,
+                lambdify_execution_policy,
             );
             let auto_regenerate_begin = Instant::now();
             bundle = try_generate_sparse_bundle(
@@ -1481,6 +1607,8 @@ pub fn generate_frozen_solver_state(
             param_name_refs.as_deref(),
             param_values,
             banded_linear_solver_config,
+            lambdify_telemetry_mode,
+            lambdify_execution_policy,
         );
         let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,
@@ -1568,12 +1696,16 @@ fn prepared_bvp_jacobian(
     param_name_refs: Option<&[&str]>,
     param_values: Option<Vec<f64>>,
     banded_linear_solver_config: LinearSolverConfig,
+    lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
+    lambdify_execution_policy: BvpLambdifyExecutionPolicy,
 ) -> Jacobian {
     let mut jacobian_instance = Jacobian::new();
     jacobian_instance.set_symbolic_assembly_backend(symbolic_assembly_backend);
     jacobian_instance.set_params(param_name_refs);
     jacobian_instance.set_param_values(param_values);
     jacobian_instance.set_banded_linear_solver_config(banded_linear_solver_config);
+    jacobian_instance.set_lambdify_telemetry_mode(lambdify_telemetry_mode);
+    jacobian_instance.set_lambdify_execution_policy(lambdify_execution_policy);
     jacobian_instance
 }
 
@@ -1961,12 +2093,14 @@ fn try_materialize_and_build_sparse_aot_bundle(
 ) -> Result<AotResolver, BvpBackendIntegrationError> {
     let selected = bundle.execution.selected();
     let problem_key = selected.problem_key();
-    let manifest_begin = Instant::now();
-    let manifest = PreparedProblemManifest::from(
-        &selected
-            .prepared_problem
-            .as_prepared_problem_for_matrix_backend(selected.matrix_backend),
+    diagnostics.insert(
+        "generated.aot.preparation_route".to_string(),
+        format!("{:?}", selected.preparation_route()),
     );
+    let manifest_begin = Instant::now();
+    let manifest = selected
+        .prepared_problem
+        .manifest_for_matrix_backend(selected.matrix_backend);
     insert_elapsed_ms(diagnostics, "generated.aot.manifest_ms", manifest_begin);
     let mut registry = resolver
         .map(|existing| existing.registry().clone())
@@ -2568,6 +2702,12 @@ pub fn damped_state_from_sparse_solver_bundle(
     let bandwidth = bundle.bandwidth.unwrap_or((0, 0));
     let bc_position_and_value = bundle.bc_position_and_value.clone();
     let runtime_diagnostics = bundle.runtime_diagnostics().clone();
+    let generation_telemetry = bundle.generation_telemetry;
+    let atom_discretization_telemetry = bundle.atom_discretization_telemetry;
+    let legacy_lambdify_telemetry = bundle.legacy_lambdify_telemetry.clone();
+    let atom_lambdify_telemetry = bundle.atom_lambdify_telemetry.clone();
+    let direct_banded_jacobian_telemetry = bundle.direct_banded_jacobian_telemetry.clone();
+    let parameter_binding = bundle.parameter_binding.clone();
 
     let (fun, jac) = bundle
         .into_runtime_callbacks()
@@ -2584,6 +2724,12 @@ pub fn damped_state_from_sparse_solver_bundle(
         updated_resolver,
         selected_backend,
         runtime_diagnostics,
+        generation_telemetry,
+        atom_discretization_telemetry,
+        legacy_lambdify_telemetry,
+        atom_lambdify_telemetry,
+        direct_banded_jacobian_telemetry,
+        parameter_binding,
     }
 }
 
@@ -2612,6 +2758,12 @@ pub fn damped_state_from_legacy_solver_bundle(
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Lambdify,
         runtime_diagnostics: HashMap::new(),
+        generation_telemetry: None,
+        atom_discretization_telemetry: None,
+        legacy_lambdify_telemetry: bundle.legacy_lambdify_telemetry,
+        atom_lambdify_telemetry: bundle.atom_lambdify_telemetry,
+        direct_banded_jacobian_telemetry: bundle.direct_banded_jacobian_telemetry,
+        parameter_binding: bundle.parameter_binding,
     }
 }
 
@@ -2624,6 +2776,12 @@ pub fn frozen_state_from_sparse_solver_bundle(
     let variable_string = bundle.variable_string.clone();
     let bandwidth = bundle.bandwidth.unwrap_or((0, 0));
     let runtime_diagnostics = bundle.runtime_diagnostics().clone();
+    let generation_telemetry = bundle.generation_telemetry;
+    let atom_discretization_telemetry = bundle.atom_discretization_telemetry;
+    let legacy_lambdify_telemetry = bundle.legacy_lambdify_telemetry.clone();
+    let atom_lambdify_telemetry = bundle.atom_lambdify_telemetry.clone();
+    let direct_banded_jacobian_telemetry = bundle.direct_banded_jacobian_telemetry.clone();
+    let parameter_binding = bundle.parameter_binding.clone();
 
     let (fun, jac) = bundle.into_runtime_callbacks().unwrap_or_else(|| {
         panic!("Frozen BVP sparse solver bundle did not provide runtime callbacks")
@@ -2637,6 +2795,12 @@ pub fn frozen_state_from_sparse_solver_bundle(
         updated_resolver,
         selected_backend,
         runtime_diagnostics,
+        generation_telemetry,
+        atom_discretization_telemetry,
+        legacy_lambdify_telemetry,
+        atom_lambdify_telemetry,
+        direct_banded_jacobian_telemetry,
+        parameter_binding,
     }
 }
 
@@ -2662,6 +2826,12 @@ pub fn frozen_state_from_legacy_solver_bundle(
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Lambdify,
         runtime_diagnostics: HashMap::new(),
+        generation_telemetry: None,
+        atom_discretization_telemetry: None,
+        legacy_lambdify_telemetry: bundle.legacy_lambdify_telemetry,
+        atom_lambdify_telemetry: bundle.atom_lambdify_telemetry,
+        direct_banded_jacobian_telemetry: bundle.direct_banded_jacobian_telemetry,
+        parameter_binding: bundle.parameter_binding,
     }
 }
 //=============================================================================================
@@ -2674,6 +2844,7 @@ mod tests {
         BandedGeneratedBackendMode, DampedSolverBuildRequest, FrozenSolverBuildRequest,
         GeneratedBackendConfig, SparseGeneratedBackendMode,
     };
+    use crate::symbolic::bvp::telemetry::{BvpLambdifyExecutionPolicy, BvpLambdifyTelemetryMode};
     use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
     use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
@@ -2725,6 +2896,69 @@ mod tests {
         border_conditions.insert("y".to_string(), vec![(0, 0.0), (1, 0.0)]);
         border_conditions.insert("z".to_string(), vec![(0, 1.0), (1, 1.0)]);
         (eq_system, values, arg, border_conditions)
+    }
+
+    #[test]
+    fn lambdify_telemetry_handles_survive_solver_handoff() {
+        let (eq_system, values, arg, _) = real_bvp_inputs();
+        let border_conditions = HashMap::from([
+            ("y".to_string(), vec![(0, 0.0)]),
+            ("z".to_string(), vec![(0, 1.0)]),
+        ]);
+        let request = DampedSolverBuildRequest {
+            eq_system,
+            values,
+            arg,
+            param_names: None,
+            param_values: None,
+            t0: 0.0,
+            n_steps: Some(4),
+            h: Some(0.25),
+            mesh: None,
+            border_conditions,
+            bounds: None,
+            rel_tolerance: None,
+            scheme: "forward".to_string(),
+            method: "Dense".to_string(),
+            bandwidth: None,
+            backend_policy: BackendSelectionPolicy::LambdifyOnly,
+            resolver: None,
+            aot_execution_policy: AotExecutionPolicy::Auto,
+            aot_build_policy: AotBuildPolicy::UseIfAvailable,
+            aot_compile_config: AotCompileConfig::default(),
+            aot_codegen_backend: AotCodegenBackend::Rust,
+            aot_c_compiler: None,
+            aot_chunking_policy: AotChunkingPolicy::default(),
+            atom_optimization_profile: AtomOptimizationProfile::Full,
+            symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
+            matrix_backend_override: None,
+            banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Detailed,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        };
+
+        let mut state = request
+            .generate()
+            .expect("dense Lambdify handoff should build");
+        let y = nalgebra::DVector::from_fn(state.variable_string.len(), |index, _| {
+            0.2 + index as f64 * 0.01
+        });
+        let _ = state.fun.call(0.0, &y);
+        state
+            .jac
+            .as_mut()
+            .expect("dense Lambdify Jacobian should be present")
+            .call(0.0, &y);
+
+        let telemetry = state
+            .legacy_lambdify_telemetry
+            .as_ref()
+            .expect("handoff should preserve the live ExprLegacy telemetry handle")
+            .snapshot();
+        assert!(telemetry.residual_calls >= 1);
+        assert!(telemetry.jacobian_calls >= 1);
+        assert!(telemetry.residual_elapsed > std::time::Duration::ZERO);
+        assert!(telemetry.jacobian_elapsed > std::time::Duration::ZERO);
     }
 
     fn parameterized_bvp_inputs() -> (
@@ -3244,6 +3478,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let state = request.generate().expect("damped handoff should build");
@@ -3354,6 +3590,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let state = request.generate().expect("frozen handoff should build");
@@ -3427,6 +3665,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let state = request
@@ -3562,6 +3802,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let err = request
@@ -3720,6 +3962,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let state = request
@@ -3789,6 +4033,8 @@ mod tests {
                 matrix_backend_override: Some(MatrixBackend::Banded),
                 banded_linear_solver_config:
                     crate::somelinalg::banded::LinearSolverConfig::faithful_banded(),
+                lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+                lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
             }
         };
 
@@ -3871,6 +4117,8 @@ mod tests {
                 matrix_backend_override: Some(MatrixBackend::Banded),
                 banded_linear_solver_config:
                     crate::somelinalg::banded::LinearSolverConfig::faithful_banded(),
+                lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+                lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
             }
         };
 
@@ -3998,6 +4246,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let err = request
@@ -4105,6 +4355,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let request_b = DampedSolverBuildRequest {
@@ -4135,6 +4387,8 @@ mod tests {
             symbolic_assembly_backend: BvpSymbolicAssemblyBackend::ExprLegacy,
             matrix_backend_override: None,
             banded_linear_solver_config: crate::somelinalg::banded::LinearSolverConfig::default(),
+            lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
+            lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
         };
 
         let state_a = request_a

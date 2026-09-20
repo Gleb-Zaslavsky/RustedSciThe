@@ -4,8 +4,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics,
-    SolveOptions,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
     StepOutcome, eval_residual_with_runtime, measure_linear_operation,
     measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
@@ -657,12 +656,10 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         let accepted = ratio >= p0001;
         let trial_xnorm = scaled_norm(&method_state.diag, &trial_x);
         let termination_xnorm = if accepted { trial_xnorm } else { xnorm };
-        let function_converged = actred.abs() <= self.ftol
-            && prered <= self.ftol
-            && p5 * ratio <= 1.0;
+        let function_converged =
+            actred.abs() <= self.ftol && prered <= self.ftol && p5 * ratio <= 1.0;
         let parameter_converged = method_state.delta <= self.xtol * termination_xnorm;
-        let stringent_function =
-            actred.abs() <= epsmch && prered <= epsmch && p5 * ratio <= 1.0;
+        let stringent_function = actred.abs() <= epsmch && prered <= epsmch && p5 * ratio <= 1.0;
         let stringent_parameter =
             p1 * (p1 * method_state.delta).max(pnorm) <= epsmch * termination_xnorm;
         let stringent_gradient = gnorm <= epsmch;
@@ -694,7 +691,10 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
                     // Stagnation.
                     TerminationReason::Stagnation
                 };
-                return Ok(StepOutcome::AcceptedAndTerminated { next_x: trial_x, reason });
+                return Ok(StepOutcome::AcceptedAndTerminated {
+                    next_x: trial_x,
+                    reason,
+                });
             }
             return Ok(StepOutcome::Continue {
                 next_x: trial_x,
@@ -885,24 +885,18 @@ mod lm_minpack_tests {
         };
 
         // MINPACK leaves both values unchanged for 0.25 < ratio < 0.75.
-        LevenbergMarquardtMinpack::update_trust_region(
-            &mut state, 0.5, 0.5, 2.0, 1.0, 0.1, -0.25,
-        );
+        LevenbergMarquardtMinpack::update_trust_region(&mut state, 0.5, 0.5, 2.0, 1.0, 0.1, -0.25);
         assert_eq!(state.delta, 10.0);
         assert_eq!(state.par, 4.0);
 
         // For ratio >= 0.75, MINPACK expands the radius and halves par.
-        LevenbergMarquardtMinpack::update_trust_region(
-            &mut state, 0.9, 0.8, 2.0, 1.0, 0.1, -0.25,
-        );
+        LevenbergMarquardtMinpack::update_trust_region(&mut state, 0.9, 0.8, 2.0, 1.0, 0.1, -0.25);
         assert_eq!(state.delta, 4.0);
         assert_eq!(state.par, 2.0);
 
         // For ratio <= 0.25, the rejected-step branch shrinks the radius and
         // increases par according to the computed reduction model.
-        LevenbergMarquardtMinpack::update_trust_region(
-            &mut state, 0.1, 0.1, 2.0, 1.0, 0.1, -0.25,
-        );
+        LevenbergMarquardtMinpack::update_trust_region(&mut state, 0.1, 0.1, 2.0, 1.0, 0.1, -0.25);
         assert_eq!(state.delta, 2.0);
         assert_eq!(state.par, 4.0);
     }
@@ -913,10 +907,11 @@ mod lm_minpack_tests {
         let residual = DVector::from_vec(vec![1.0, 1.0]);
         let expected = 1.0 / 2.0_f64.sqrt();
 
-        assert!((LevenbergMarquardtMinpack::scaled_gradient_norm(&jacobian, &residual)
-            - expected)
-            .abs()
-            < 1e-15);
+        assert!(
+            (LevenbergMarquardtMinpack::scaled_gradient_norm(&jacobian, &residual) - expected)
+                .abs()
+                < 1e-15
+        );
     }
 
     struct StationaryNonRoot;

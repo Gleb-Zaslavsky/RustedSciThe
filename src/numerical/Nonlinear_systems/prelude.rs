@@ -23,6 +23,9 @@ pub use crate::numerical::Nonlinear_systems::problem::{
 };
 
 // Levenberg-Marquardt variants (vanilla)
+pub use crate::numerical::Nonlinear_systems::LM_backtracking::{
+    BacktrackingLevenbergMarquardtMethod, BacktrackingLevenbergMarquardtState,
+};
 pub use crate::numerical::Nonlinear_systems::LM_vanilla::{
     LMMinpackState, LevenbergMarquardtMethod, LevenbergMarquardtMinpack, LevenbergMarquardtState,
 };
@@ -57,10 +60,12 @@ pub use crate::numerical::Nonlinear_systems::trust_region_LM::{
 // Symbolic problem adapter
 pub use crate::numerical::Nonlinear_systems::symbolic::{
     BoundSymbolicNonlinearProblem, LambdifyExecutionPolicy, NonlinearParameterSchema,
-    NonlinearParameterValues, PreparedSymbolicNonlinearAotProblem,
-    PreparedSymbolicNonlinearProblem, SymbolicArtifactAction, SymbolicArtifactPolicy,
-    SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions, SymbolicNonlinearProblem,
-    SymbolicPreparationReport, SymbolicProblemOptions,
+    NonlinearParameterValues, PreparationExecutionMode, PreparationInputKind, PreparationStage,
+    PreparationStageTiming, PreparationTelemetry, PreparationTelemetryMode,
+    PreparedSymbolicNonlinearAotProblem, PreparedSymbolicNonlinearProblem, SymbolicArtifactAction,
+    SymbolicArtifactPolicy, SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions,
+    SymbolicNonlinearProblem, SymbolicPreparationFailure, SymbolicPreparationReport,
+    SymbolicProblemOptions,
 };
 pub use crate::numerical::Nonlinear_systems::symbolic_aot::{
     generated_aot_crate_from_symbolic_nonlinear_problem, materialize_symbolic_nonlinear_aot_build,
@@ -97,6 +102,12 @@ pub enum NonlinearSolverMethod {
     ///
     /// Blends Gauss-Newton and gradient descent through a damping parameter.
     LevenbergMarquardt(LevenbergMarquardtMethod),
+    /// Identity-damped LM with feasible residual-decrease backtracking.
+    ///
+    /// This route is kept as an explicit peer of the canonical methods. It is
+    /// useful for workflows that need identity damping and a strict
+    /// residual-decrease line search.
+    BacktrackingLevenbergMarquardt(BacktrackingLevenbergMarquardtMethod),
     /// MINPACK-style Levenberg-Marquardt method.
     ///
     /// Uses MINPACK-inspired trust-region logic and is a good general-purpose least-squares choice.
@@ -140,6 +151,8 @@ pub enum NonlinearSolverMethodState {
     DampedNewtonAdvanced(()),
     /// State for classical LM.
     LevenbergMarquardt(LevenbergMarquardtState),
+    /// State for the backtracking LM method.
+    BacktrackingLevenbergMarquardt(BacktrackingLevenbergMarquardtState),
     /// State for MINPACK LM.
     LevenbergMarquardtMinpack(LMMinpackState),
     /// State for Nielsen LM.
@@ -162,6 +175,7 @@ impl NonlinearSolverMethod {
             Self::DampedNewton(_) => "damped_newton",
             Self::DampedNewtonAdvanced(_) => "damped_newton_advanced",
             Self::LevenbergMarquardt(_) => "levenberg_marquardt",
+            Self::BacktrackingLevenbergMarquardt(_) => "backtracking_levenberg_marquardt",
             Self::LevenbergMarquardtMinpack(_) => "levenberg_marquardt_minpack",
             Self::NielsenLevenbergMarquardt(_) => "nielsen_levenberg_marquardt",
             Self::NielsenLevenbergMarquardtAdvanced(_) => "nielsen_levenberg_marquardt_advanced",
@@ -214,6 +228,9 @@ impl NonlinearMethod for NonlinearSolverMethod {
             Self::LevenbergMarquardt(method) => method
                 .init(problem, x0, options, residual, jacobian)
                 .map(NonlinearSolverMethodState::LevenbergMarquardt),
+            Self::BacktrackingLevenbergMarquardt(method) => method
+                .init(problem, x0, options, residual, jacobian)
+                .map(NonlinearSolverMethodState::BacktrackingLevenbergMarquardt),
             Self::LevenbergMarquardtMinpack(method) => method
                 .init(problem, x0, options, residual, jacobian)
                 .map(NonlinearSolverMethodState::LevenbergMarquardtMinpack),
@@ -257,6 +274,10 @@ impl NonlinearMethod for NonlinearSolverMethod {
             (
                 Self::LevenbergMarquardt(method),
                 NonlinearSolverMethodState::LevenbergMarquardt(inner),
+            ) => method.step(problem, state, inner, options, runtime),
+            (
+                Self::BacktrackingLevenbergMarquardt(method),
+                NonlinearSolverMethodState::BacktrackingLevenbergMarquardt(inner),
             ) => method.step(problem, state, inner, options, runtime),
             (
                 Self::LevenbergMarquardtMinpack(method),
@@ -310,6 +331,10 @@ impl NonlinearMethod for NonlinearSolverMethod {
                 NonlinearSolverMethodState::LevenbergMarquardt(inner),
             ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
             (
+                Self::BacktrackingLevenbergMarquardt(method),
+                NonlinearSolverMethodState::BacktrackingLevenbergMarquardt(inner),
+            ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
+            (
                 Self::LevenbergMarquardtMinpack(method),
                 NonlinearSolverMethodState::LevenbergMarquardtMinpack(inner),
             ) => method.step_with_workspace(problem, state, inner, options, runtime, workspace),
@@ -342,6 +367,7 @@ impl NonlinearMethod for NonlinearSolverMethod {
             Self::DampedNewton(_)
                 | Self::DampedNewtonAdvanced(_)
                 | Self::LevenbergMarquardt(_)
+                | Self::BacktrackingLevenbergMarquardt(_)
                 | Self::NielsenLevenbergMarquardt(_)
                 | Self::NielsenLevenbergMarquardtAdvanced(_)
         )
@@ -383,6 +409,11 @@ mod facade_tests {
     fn enum_facade_reports_name() {
         let method = NonlinearSolverMethod::TrustRegionLM(TrustRegionLMMethod::default());
         assert_eq!(method.name(), "trust_region_lm");
+
+        let method = NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
+            BacktrackingLevenbergMarquardtMethod::default(),
+        );
+        assert_eq!(method.name(), "backtracking_levenberg_marquardt");
     }
 
     #[test]
@@ -394,6 +425,12 @@ mod facade_tests {
         assert!(
             NonlinearSolverMethod::NielsenLevenbergMarquardt(
                 NielsenLevenbergMarquardtMethod::default()
+            )
+            .supports_step_workspace()
+        );
+        assert!(
+            NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
+                BacktrackingLevenbergMarquardtMethod::default()
             )
             .supports_step_workspace()
         );
@@ -426,6 +463,28 @@ mod facade_tests {
                 },
             )
             .expect("solve");
+
+        assert_eq!(result.termination, TerminationReason::Converged);
+        assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-6);
+        assert_relative_eq!(result.x[1], -1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn enum_facade_solves_plain_problem_with_backtracking_lm() {
+        let method = NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
+            BacktrackingLevenbergMarquardtMethod::default(),
+        );
+        let result = method
+            .solve(
+                &PlainProblem,
+                DVector::from_vec(vec![1.0, 1.0]),
+                SolveOptions {
+                    tolerance: 1e-8,
+                    max_iterations: 100,
+                    ..SolveOptions::default()
+                },
+            )
+            .expect("backtracking LM solve");
 
         assert_eq!(result.termination, TerminationReason::Converged);
         assert_relative_eq!(result.x[0], 3.0, epsilon = 1e-6);

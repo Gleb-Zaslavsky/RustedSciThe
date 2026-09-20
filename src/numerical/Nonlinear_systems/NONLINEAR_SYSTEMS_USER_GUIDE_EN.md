@@ -86,6 +86,58 @@ boundary. Backend-internal generated job/chunk counts belong to
 `SymbolicPreparationReport`, not to solver counters. With statistics disabled,
 `attempts` is empty and timing/counter fields are not measurements.
 
+### Detailed Preparation Telemetry
+
+Solver statistics describe numerical attempts. If the cost of building a
+prepared symbolic problem also matters, enable the separate opt-in preparation
+timeline:
+
+```rust
+let prepared = PreparedSymbolicNonlinearProblem::from_strings(
+    equations,
+    SymbolicProblemOptions::new()
+        .with_variables(variables)
+        .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+)?;
+
+if let Some(report) = prepared.preparation_report().detailed.as_ref() {
+    println!(
+        "preparation total={:?}, input={:?}, mode={:?}",
+        report.total_wall_time, report.input_kind, report.execution_mode,
+    );
+    for stage in &report.stages {
+        println!("{:?}: {:?}", stage.stage, stage.wall_time);
+    }
+}
+```
+
+The aggregate `SymbolicPreparationReport` remains available when detailed
+telemetry is disabled. Each detailed stage is an exclusive measurement when
+the implementation can isolate it; `None` means that the stage did not apply
+or could not be isolated, not that it took zero time. `unattributed_wall_time`
+is the remaining preparation time. Binding new parameter values does not
+repeat preparation and therefore does not create a new preparation report.
+
+For diagnostics pipelines that must preserve the failure boundary, use the
+opt-in detailed constructor. It returns `SymbolicPreparationFailure`, which
+contains the original `SolveError` and the completed stage records:
+
+```rust
+let attempt = SymbolicNonlinearProblem::from_strings_with_options_detailed(
+    equations,
+    SymbolicProblemOptions::new()
+        .with_variables(variables)
+        .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+);
+if let Err(failure) = attempt {
+    eprintln!("{}; telemetry={:?}", failure, failure.telemetry);
+}
+```
+
+The compatibility constructors remain unchanged and return `SolveError`
+directly. Failure telemetry is intended for reporting and debugging; it does
+not turn a failed preparation into a usable problem.
+
 ### AOT Artifact Lifecycle
 
 For a cold production-style run, request an output directory and use
@@ -99,10 +151,11 @@ let cold = SymbolicNonlinearProblem::from_strings_with_generated_backend(
 )?;
 let resolver = cold.updated_resolver.clone();
 println!(
-    "cold: backend={:?}, action={:?}, key={:?}, build={:?}",
+    "cold: backend={:?}, action={:?}, manifest_key={:?}, lifecycle_key={:?}, build={:?}",
     cold.selected_backend,
     cold.preparation_report.artifact_action,
     cold.preparation_report.artifact_key,
+    cold.preparation_report.artifact_lifecycle_key,
     cold.preparation_report.build_duration,
 );
 ```
@@ -125,6 +178,128 @@ unlinked artifact; it is not a silent fallback to Lambdify. The resolver is an
 in-process snapshot, so a fresh process must discover the persisted compatible
 artifact from the configured output location. Parameter rebinding remains a
 cheap numerical operation after either lifecycle stage.
+
+`artifact_key` identifies the mathematical/generated problem used by the
+resolver. `artifact_lifecycle_key` additionally identifies the known build
+profile and `AotCompileConfig`, so a ready marker from a different Rust build
+configuration is not reused. When `RequirePrebuilt` receives an externally
+supplied resolver whose original build settings are unknown, the lifecycle key
+is intentionally unavailable rather than guessed.
+
+## Choosing Runtime Policy And Backend
+
+### Sequential Versus Parallel Lambdify
+
+Select the callback execution policy in the prepared symbolic options:
+
+```rust
+let sequential = SymbolicProblemOptions::new()
+    .with_variables(variables.clone())
+    .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential);
+
+let parallel = SymbolicProblemOptions::new()
+    .with_variables(variables)
+    .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel {
+        min_work: 1_500,
+    });
+```
+
+`Sequential` is the default and is the right first choice for small or sparse
+systems. `Parallel { min_work }` is an explicit opt-in: it dispatches only
+when the prepared evaluator work reaches the threshold. The threshold is a
+runtime dispatch rule, not a convergence or accuracy parameter. Start with
+the default policy, then benchmark the actual residual/Jacobian pattern on the
+target machine before choosing `min_work`.
+
+The release corpus supports this conservative policy. At dimension `512`,
+prepared Sequential was the fastest complete Newton route in all six
+large-corpus rows. Parallel was useful for the wider `band-five` callback and
+was faster than the legacy compatibility route there, but it remained slower
+than prepared Sequential in the complete solve. In the threshold sweep,
+`Parallel { min_work: 1 }` was about `9-10%` slower than Sequential on the
+tested patterns; activating parallelism exactly at structural `nnz` was slower
+again. These results are recorded in `STORY_TESTS.md` Sections 44 and 45.
+
+### Why The New Jacobian Does Not Use A Mutex
+
+The prepared Jacobian already knows the independent nonzero evaluator layout.
+The new parallel path assigns disjoint rows/entries to workers and writes
+directly into caller-owned `DMatrix` storage. There is no shared accumulator,
+per-entry `Mutex`, or intermediate dense matrix. The legacy compatibility path
+keeps its old allocated-return and mutex/Rayon dispatch semantics so existing
+callers are not broken.
+
+This is both a correctness and performance design: disjoint writes remove the
+serialization point, while `jacobian_into` removes a result allocation from
+the callback boundary. On the release `band-five` corpus at dimension `512`,
+legacy Jacobian evaluation took `1230.7 us`, prepared Sequential `397.15 us`,
+and prepared mutex-free Parallel `426.31 us`. Thus Parallel was about `2.89x`
+faster than legacy, while Sequential was faster still. Parallel is not
+automatically faster than Sequential because worker scheduling can dominate
+when each evaluator is cheap. Correctness and deterministic sparse-layout
+parity are covered by Sections 41 and 42.
+
+### Lambdify Versus AOT And Break-Even
+
+Use Lambdify when iteration speed, portability, and short startup matter, or
+when the problem will be solved only a few times. Use AOT when a toolchain is
+available, the artifact can be persisted and reused, and callback throughput
+has been demonstrated for the actual workload. The first AOT call includes
+materialization, compilation, linking, and publication; compare that cold
+cost separately from warm solves.
+
+For a rough estimate, use:
+
+```text
+break_even_solves ~=
+    (AOT preparation + build - Lambdify preparation)
+    / (Lambdify warm solve - AOT warm solve)
+```
+
+The denominator must be positive. If AOT is slower when warm, there is no
+break-even point for that workload under the measured configuration. The
+release large-story result demonstrates why this must be measured: at `512`,
+Lambdify warm total was `17.242 ms`, AOT warm total `17.835 ms`; AOT Jacobian
+was `2.913 ms` versus `2.296 ms`, while residual and linear stages were close.
+At `128`, AOT warm was faster (`0.397 ms` versus `0.516 ms`), but its roughly
+`365 ms` build cost implies thousands of repeated solves before amortization.
+Therefore the current evidence does not justify a universal AOT speed claim.
+It supports AOT as a lifecycle and deployment option whose break-even is
+workload-specific. See Sections 53, 64, and 65.
+
+### Architecture Decisions With Evidence
+
+- **Prepared versus bound objects:** symbolic parsing, differentiation, and
+  callback construction happen once; parameter rebinding creates a cheap
+  solver-facing view. This is why parameter sweeps must reuse the prepared
+  object rather than rebuild it.
+- **Solver-level versus generated-job counters:** one residual or Jacobian
+  counter means one complete provider request. Internal AOT chunks/jobs are
+  reported as backend detail, so Lambdify and AOT remain comparable.
+- **Separate manifest and lifecycle identities:** the mathematical artifact
+  key serves resolver lookup, while profile/compiler configuration participates
+  in the on-disk lifecycle key. A `Debug` marker cannot silently satisfy a
+  different build configuration.
+- **Fail-closed prebuilt policy:** `RequirePrebuilt` reports a typed error for
+  missing, stale, incompatible, or unlinked artifacts; it does not silently
+  fall back to Lambdify. This keeps deployment reproducible.
+- **Whole dense AOT blocks by default:** the `n=512` layout profile found
+  `Whole` faster than row chunks 32 and 64. The caller-side adaptation was
+  `0.216 ms` of a `0.301 ms` full Jacobian call, so this is a measured dense
+  route decision, not a rule for sparse or banded systems.
+
+### Telemetry Cost
+
+Solver statistics and preparation telemetry answer different questions.
+`collect_statistics` provides solver-level counts and stage timers;
+`collect_history` additionally stores per-iteration snapshots and can cost
+more memory. Detailed preparation telemetry is separately opt-in through
+`PreparationTelemetryMode::Collect`. The release preparation audit measured
+only hundredths of a millisecond difference between disabled and enabled
+detailed preparation telemetry at dimensions `40`, `128`, and `512`, with
+overlapping run ranges. That audit did not establish a universal warm-solve
+percentage, so use disabled history/statistics for pure hot-path benchmarks
+unless the diagnostic data is itself the subject of the experiment.
 
 ## Bounds And Diagnostics
 
@@ -160,6 +335,34 @@ and trust-region variants are useful for difficult least-squares-like or
 poorly scaled systems. No single wall-clock number ranks all methods: compare
 convergence, residual quality, rejected trials, and stage timings on the
 problem class that matters.
+
+### Backtracking Levenberg-Marquardt
+
+`BacktrackingLevenbergMarquardt` is an explicit peer of the classical,
+MINPACK-style, Nielsen, and trust-region methods. It solves the
+identity-damped normal equations
+
+`(J^T J + lambda I) delta = -J^T residual`
+
+and tests feasible trial points with `alpha = 1`, halving `alpha` until the
+residual norm strictly decreases or `alpha_min` is reached. After an accepted
+step, `lambda` is multiplied by `lambda_decrease`; after a failed line search,
+it is multiplied by `lambda_increase`. The default multipliers are `0.3` and
+`10.0`, respectively. The generic engine still requires the requested residual
+tolerance for `Converged`; a successful line-search step is not, by itself, a
+convergence claim.
+
+```rust
+let method = NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
+    BacktrackingLevenbergMarquardtMethod::default(),
+);
+let result = method.solve(&problem, initial_guess, SolveOptions::default())?;
+```
+
+Use this method when identity damping plus a strict feasible backtracking
+policy is the intended numerical model. Use `LevenbergMarquardt` when the
+classical configurable scaling policy is intended; the two variants are
+deliberately separate and neither silently replaces the other.
 
 ## Allocation Audit
 

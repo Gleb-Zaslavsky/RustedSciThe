@@ -210,9 +210,16 @@ follow-up work; this checklist does not change the solver contract by itself.
   C, and Zig generated dense backends. The ignored cross-toolchain acceptance
   story builds, registers, dynamically links, and solves the same nonlinear
   system; a complete parameterized matrix remains follow-up evidence.
-- [ ] Define artifact identity to include equations, variable order, parameter
-  schema/order, Jacobian representation, compiler/backend settings, and
-  chunking policy; exclude runtime parameter values for parameterized artifacts.
+- [x] Define artifact identity for the supported nonlinear Rust generated
+  route: the manifest key includes equations, variable order, parameter
+  schema/order, Jacobian representation, backend, and chunking layout, while
+  the separate lifecycle key adds build profile, `AotCompileConfig`, and
+  generated-name overrides. Runtime parameter values remain excluded. The
+  resolver continues to use the manifest key; locks, generated crate names,
+  and ready markers use the lifecycle key. See `STORY_TESTS.md` Section 64.
+- [ ] Extend lifecycle identity and ready-marker diagnostics to externally
+  selectable compiler/toolchain, `RUSTFLAGS`, and extra build arguments if
+  those settings become part of the nonlinear high-level AOT configuration.
 - [x] Test the dense generated lifecycle's `BuildIfMissing -> RequirePrebuilt`
   transition, including a strict second call with no new build, reusable bound
   views, and a real parameterized compiled-`cdylib` load/solve cycle. Stale,
@@ -259,11 +266,17 @@ follow-up work; this checklist does not change the solver contract by itself.
   cold materialize/build time, compares total/residual/Jacobian/linear stages,
   and confirms identical solver counters and zero solution difference. The
   tiny system is not used to make a universal performance recommendation.
-- [ ] Run and record the large warm-stage Lambdify versus generated Rust AOT
+- [x] Run and record the large warm-stage Lambdify versus generated Rust AOT
   story (`STORY_TESTS.md` Section 53) at dimensions suitable for performance
   conclusions (at least `128`, preferably also `512`). Compare total and each
   numerical stage over repeated release runs; keep preparation/build time
   separate and do not infer AOT performance from the tiny Section 52 case.
+  The five-run release matrix at `128` and `512` passed with equal solver
+  counters and numerical agreement. At `512`, AOT was slightly slower in
+  total warm time (`17.835` versus `17.242 ms`) and its Jacobian stage was
+  slower (`2.913` versus `2.296 ms`), while residual and linear stages were
+  comparable or faster. This is a corpus-specific result, not a universal
+  AOT-speed claim.
 - [x] Keep large dense generated AOT source compact when the symbolic Jacobian
   contains structural zeros. Known-zero entries are elided from generated
   Rust/C/Zig block functions while the dense ABI is preserved by wrapper-side
@@ -276,11 +289,15 @@ follow-up work; this checklist does not change the solver contract by itself.
   callers and stories can explicitly select `fast_build()` or `dev_fastest()`
   for cold-build latency without changing the generated ABI or numerical
   semantics.
-- [ ] Profile the remaining large dense AOT warm Jacobian overhead separately
+- [x] Profile the remaining large dense AOT warm Jacobian overhead separately
   from generated expression work: compare one whole compact block, moderate
   row chunks, and the caller-owned FFI buffer adaptation. Keep the numerical
   callback contract and dense output layout unchanged while deciding whether
-  another adapter optimization is justified.
+  another adapter optimization is justified. Section 65 records the release
+  result: at `n=512`, `Whole` was fastest (`callback=0.014 ms`, `copy=0.216
+  ms`, `full=0.301 ms`); row chunks 32/64 were slower and no new adapter
+  optimization is justified by this corpus. This conclusion is specific to
+  the compact dense route; the large warm end-to-end AOT story remains open.
 
 ## 5. Reports And Diagnostics
 
@@ -431,6 +448,71 @@ follow-up work; this checklist does not change the solver contract by itself.
   residual, and column buffers, including parameterized residual evaluation.
 - [ ] Measure peak temporary matrix memory and allocation count for a solve,
   not only wall-clock time.
+
+## 7. TP-1907 CHON + Graphite Correctness Gate
+
+- [x] Add a TP-1907 policy trace with the same scaled symbolic
+  residual/Jacobian and initial point. It records diagonal-vs-identity LM,
+  RST Trust Region, and a diagnostic KiThe-style identity/backtracking policy.
+  On the large `1e8` fixture, diagonal LM exposes `SingularJacobian`; identity
+  LM reduces the scaled norm to `~3.9e-3` and stalls; the copied KiThe LM
+  policy reaches the same floor. Therefore a blanket default switch to
+  identity damping or backtracking is not justified by this corpus.
+- [x] Verify the exported KiThe published-oracle moles against the RST symbolic
+  graph. The reconstructed `ln(n)` reproduces physical inventory balance to
+  `~1.2e-6`; its `~1.3e-3` reaction residual is expected because the export
+  prints moles rather than the full-precision internal log-mole vector.
+- [x] Capture the full-precision accepted KiThe log-mole vector, final raw and
+  scaled residuals, `J^T F`, physical balance, and normalized-recovery trace.
+  The accepted result is now known to come from `physical attempt -> extensive
+  normalization -> normalized RST TrustRegionLM -> reconstruction`; direct
+  physical retry is rejected rather than silently accepted.
+- [x] Establish the canonical equation round-trip gate before diagnosing the
+  generic solver further. The exact KiThe-exported 18-equation payload is
+  stored at `fixtures/tp1907_rst_parity_fixture.txt` under its FNV-1a-64
+  identity `0x6dc514792152d82c`. The parser now accepts serializer-emitted
+  unary signs such as `a - -b`, and the public string constructor returns a
+  typed `InvalidConfig` error for malformed input rather than panicking.
+  At the exact KiThe `y_final`, residual and scaled-residual drift are
+  `1.421e-14`, Jacobian drift is `0`, and `J^T F` drift is `1.355e-14`.
+  The previous `~1.308e-3` discrepancy is therefore confined to the compact
+  diagnostic rederivation, not an RST numerical-solver regression.
+- [x] Audit KiThe/native LM parity before changing the generic LM default. The
+  exact fixture replay shows that the 0.4.15 `LM-Minpack` policy does not
+  recover the current physical TP-1907 route; reverting its old approximate
+  gradient and trust-radius branches reaches the same physical residual floor.
+  The refactor therefore did not prove a hot-path algebra regression. It did
+  change a real semantic contract: old orthogonality/small-step exits could be
+  reported as `Converged` without a root residual, while the current code maps
+  those non-root exits to `Stagnation`. A coordinate-shift plus balance-scale
+  surrogate can enter a better basin, but it is not the exact KiThe normalized
+  recovery request. Keep the generic root contract strict and do not promote
+  the surrogate to production normalization.
+- [x] Incorporate the identity-damped, feasible residual-decrease
+  backtracking LM as a separate public peer of the canonical methods. Its
+  public name describes the mathematics rather than historical provenance;
+  the implementation keeps the reference policy of `lambda *= 0.3` after an
+  accepted step and `lambda *= 10` after a failed line search. Correctness and
+  enum-facade coverage are in `LM_backtracking.rs` and `prelude.rs`.
+- [x] Make the generic trust-region method defer the Newton factorization until
+  the Cauchy step lies inside the trust region. This preserves the Cauchy
+  fallback for rank-deficient Jacobians and is covered by a focused regression
+  test; it does not claim full KiThe trust-region parity.
+
+- [x] Add the paste-ready NASA TP-1907 CHON + graphite reproducer as a
+  symbolic 18-variable regression gate with the supplied initial log-mole
+  state, inventories, bounds, and finite residual/Jacobian checks.
+- [x] Verify that the reduced reproducer has rank 17 at the supplied state.
+  The source intentionally omits phase control/normalization, so it is not a
+  valid full-root acceptance problem.
+- [x] Run Minpack LM, Nielsen LM, Trust-Region LM, and backtracking LM on inventory-row-scaled
+  residuals and require finite bounded output, residual reduction, and no
+  false `Converged` result. The gate records method termination and solver
+  counters rather than weakening the root contract.
+- [ ] Do not add a fictitious phase-control equality: graphite selection is an
+  outer active-set/complementarity condition. Instead, transfer the owning
+  model's normalized-coordinate/recovery workflow and strict physical
+  acceptance gate before promoting TP-1907 to a true convergence gate.
 - [x] Add focused Criterion benchmarks for residual/Jacobian dispatch, one
   dense factor-and-solve operation, and one full Newton solve. Keep these
   separate from end-to-end story tests in
@@ -685,3 +767,231 @@ follow-up work; this checklist does not change the solver contract by itself.
   numerical, Lambdify, and AOT routes.
 - [ ] Legacy entry points remain tested and compatible, or have a documented
   typed replacement and migration error.
+
+## 10. Detailed Preparation Telemetry For Prepared Nonlinear Systems
+
+This section is a profiling and observability task. It must not change the
+mathematical algorithms, convergence rules, or backend selection policy before
+the measurements identify a real bottleneck.
+
+### Existing foundation
+
+- [x] Keep `SymbolicPreparationReport` as the stable aggregate preparation/
+  build report. It already exposes effective backend, artifact policy/action,
+  artifact identity, aggregate preparation time, optional build time, and
+  generated residual/Jacobian job counts.
+- [x] Keep `SolveStatistics` and `SolveAttemptStatistics` as the canonical
+  numerical telemetry. They already report solver-level residual/Jacobian/
+  linear counts, accepted/rejected steps, per-attempt data, and stage times.
+- [x] Keep prepared/bound reuse separate from numerical solve state. Existing
+  binding and lifecycle tests prove that parameter updates do not repeat
+  symbolic differentiation, Lambdify, or the covered AOT preparation.
+- [x] Keep one solver-level callback counter independent of backend-internal
+  generated jobs. Generated chunks/jobs may be reported as backend detail, but
+  must not replace the common residual/Jacobian counters.
+- [x] Keep sequential and mutex-free parallel Lambdify execution under the
+  same numerical callback contract and correctness gates.
+
+### Preparation telemetry contract
+
+- [x] Add an explicit opt-in mode for detailed preparation telemetry. The
+  prepared symbolic options now expose `PreparationTelemetryMode::{Disabled,
+  Collect}`; the detailed direct-Lambdify path is disabled by default. Reuse
+  the existing diagnostics design where possible, but do not introduce a
+  second incompatible solver-counter system. The new detailed preparation
+  mode must be disabled by default and must not print logs implicitly.
+- [x] Do not silently change the existing default of
+  `DiagnosticsOptions::collect_statistics` in this task. Solver statistics
+  already have compatibility semantics; detailed preparation instrumentation
+  needs its own explicit opt-in or an explicitly documented extension.
+- [x] Define a stable public preparation report containing
+  ordered stage records plus equation, variable, parameter, backend, and
+  execution-policy metadata. `PreparationTelemetry` is exposed without
+  exposing compiler/job implementation types.
+- [x] Define a stable preparation-stage vocabulary that is meaningful across
+  direct `Expr`, string, Lambdify, and generated-AOT routes. At minimum cover,
+  when applicable: input validation; parsing/import or graph construction;
+  graph materialization/clone; residual differentiation; Jacobian
+  differentiation; residual callback preparation; Jacobian callback
+  preparation; prepared-problem assembly; parameter metadata and initial
+  binding; AOT materialization/build/load; and final validation.
+- [x] Use explicit unavailable values. A stage that did not run or cannot be
+  isolated must be `None`/unavailable, never a fabricated zero duration or
+  zero count. Direct `Expr` input must not pretend that string parsing ran.
+- [x] Choose and document one timing model before exposing the API. The report
+  uses exclusive stage durations, a total wall interval, and explicit
+  `unattributed_wall_time`; nested aggregate/build intervals remain separate.
+- [x] Use monotonic wall-clock timing. Keep `calls`/`items` semantics explicit;
+  generated callback-job counts are backend detail and are not equivalent to
+  solver callback counts.
+- [x] Keep cold preparation, parameter binding, callback evaluation, solver
+  setup, nonlinear iterations, and post-solve validation as distinct lifecycle
+  categories. Parameter rebind must never include graph construction,
+  differentiation, or Lambdification time.
+- [x] Define how preparation failures expose partial telemetry. The opt-in
+  `from_strings_with_options_detailed` path returns a typed failure wrapper
+  carrying completed stages while preserving the existing `SolveError`
+  contract for compatibility callers.
+- [ ] Decide whether a composite user report is needed. Do not copy
+  preparation data into every `SolveResult` by default; a prepared problem's
+  preparation report and the solve result's `SolveStatistics` should remain
+  independently usable unless a concrete integration use case requires a
+  small stable composite view.
+
+### Reuse and execution coverage
+
+- [x] Add explicit telemetry coverage for parameter rebind, one residual
+  evaluation, one Jacobian evaluation, repeated callback evaluation, and a
+  prepared solve at the lifecycle-report level. The first correctness gate
+  proves binding reuse without a changed preparation report; callback/solve
+  timings remain in `SolveStatistics` and the release story.
+- [ ] If a combined residual-plus-Jacobian operation is not a real public
+  backend operation, report it as unavailable rather than adding a synthetic
+  measurement solely for a table column.
+- [x] Verify that sequential and parallel routes publish the same stage names,
+  metadata semantics, and solver-level callback counts. Parallel worker CPU
+  time is not misreported as preparation wall time; worker detail remains
+  unavailable until separately instrumented.
+- [x] Verify that rebinding the same prepared object does not increase
+  differentiation/lambdification/materialization counters or alter the
+  prepared artifact identity.
+
+### Correctness and regression tests
+
+- [x] With detailed telemetry disabled, compare residuals, Jacobians, solver
+  result, termination, callback counts, and algorithmic order against the
+  current behavior. The opt-in design leaves `detailed` absent and does not
+  add callback instrumentation.
+- [x] With detailed telemetry enabled, verify required stages, stable stage
+  ordering, finite non-negative durations, explicit unavailable stages, and
+  the documented total/exclusive-time relationship. Do not assert exact
+  absolute durations in correctness tests.
+- [x] Test successful preparation, parameter reuse, and sequential/parallel
+  parity. The first gate covers report structure and reuse invariants.
+- [x] Cover malformed string input and a failed detailed preparation path with
+  partial telemetry and the unchanged typed error category.
+- [ ] Extend failure telemetry to failed AOT materialization and typed solver
+  failures when a stable caller-facing boundary for those stages is defined.
+- [ ] Preserve the existing string round-trip and componentwise residual/
+  Jacobian parity gates while adding preparation-stage assertions.
+
+### Benchmark and evidence protocol
+
+- [x] Add a dedicated release benchmark with three separate tables: cold
+  preparation, prepared reuse, and solver attempts. Keep build/preparation
+  time out of warm callback and solve timings. The reporting executable is
+  `benches/nonlinear_preparation_telemetry.rs`.
+- [x] Report repeated-run median plus spread, with equation/variable/
+  parameter counts and execution mode. Use dimensions such as `3, 15, 18,
+  40, 64, 128, 256, 512` in the first release corpus; do not turn an
+  impractical dimension into a universal acceptance gate.
+- [x] Include input validation, expression parsing/import, graph work,
+  differentiation, callback preparation, assembly, binding, unattributed time,
+  and total preparation where those stages are measurable. The first
+  release report keeps labels stable and uses `n/a` for unavailable stages.
+- [x] Measure instrumentation overhead independently for enabled versus
+  disabled preparation telemetry. A synthetic microbenchmark alone must not
+  select the default execution policy or justify algorithm changes. Table D
+  in `nonlinear_preparation_telemetry` reports overlapping ranges and no
+  systematic overhead in the first release run.
+- [x] Record the first milestone in `STORY_TESTS.md`: the time spent in graph
+  construction, residual/Jacobian differentiation, residual/Jacobian
+  Lambdification or AOT preparation, callback materialization, prepared
+  assembly, parameter binding, numerical iterations, and unattributed time.
+  The initial release result is recorded in section 63.
+
+### Deliberate non-goals for the first milestone
+
+- [ ] Do not add CPU-time or allocation counters until wall-clock attribution
+  demonstrates that they are needed; they are optional follow-up diagnostics,
+  not replacements for wall time.
+- [ ] Do not redesign `Expr` as a DAG/arena/`Arc` graph, change callback ABI,
+  or alter solver ownership based on telemetry requirements alone.
+- [ ] Do not rank Lambdify versus AOT or sequential versus parallel from cold
+  preparation data mixed with warm solves, and do not promote a default from a
+  single synthetic system.
+
+## 11. Big-Picture Production Hardening
+
+This is the remaining technical-debt ledger for the nonlinear-systems
+subsystem. It is intentionally separate from the completed Lambdify,
+telemetry, and AOT lifecycle milestones. New algorithms must not be added just
+to increase the method count; correctness and workload evidence come first.
+
+### Priority 1: convergence and numerical safety
+
+- [ ] Define one explicit convergence contract for all production methods.
+  Separate residual, step, and gradient tolerances instead of interpreting
+  the single `SolveOptions::tolerance` as all three.
+- [ ] Add final residual validation whenever a method returns
+  `StepOutcome::Converged`. Publish structured termination evidence identifying
+  which residual, step, or gradient criterion actually fired.
+- [ ] Reject non-finite solver options, bounds, initial guesses, residuals,
+  and Jacobians with typed errors before they reach linear algebra routines.
+  Add regression tests for `NaN` and `Inf` in every public input boundary.
+- [ ] Specify the mathematical semantics of box bounds. Distinguish simple
+  trial-point projection from a genuine bounded-root/active-set method, and
+  add correctness tests for active lower and upper bounds.
+- [ ] Complete the accepted-step and rejected/trial-step trace audit for every
+  public method. Record residual/Jacobian evaluations, factorizations, linear
+  solves, acceptance decisions, and method-specific termination behavior.
+
+### Priority 2: Jacobian and linear-algebra contracts
+
+- [ ] Add a first-class finite-difference Jacobian provider with explicit
+  forward/central schemes, relative step policy, bounds-aware perturbations,
+  reusable buffers, and optional parallel evaluation. Compare it against
+  analytical Jacobians on ordinary, scaled, bounded, and singular cases.
+- [ ] Finish the method-wide audit of Jacobian refresh/reuse, trial residual
+  recomputation, matrix conversions, and ownership copies. Every optimization
+  must preserve solution, termination, bounds handling, and acceptance traces.
+- [ ] Add robust public linear-solver choices beyond compatibility `Inverse`
+  and default LU where justified: pivoted QR/SVD for rank-deficient systems,
+  plus typed rank/conditioning diagnostics. Do not replace faithful method
+  mathematics with silent fallback heuristics.
+- [ ] Add peak temporary-memory measurements and dimension-scaled allocation
+  evidence; final-state memory estimates are not peak solve memory.
+
+### Priority 3: scalability and method portfolio
+
+- [ ] Profile real systems with hundreds or thousands of unknowns before
+  choosing a sparse or matrix-free architecture. The current public nonlinear
+  engine is dense `DMatrix`-based; structural sparsity in generated callbacks
+  does not by itself provide a sparse linear solve.
+- [ ] If the workload evidence requires it, design a sparse/matrix-free
+  Jacobian-vector-product path and Newton-Krylov solver without changing the
+  dense compatibility API.
+- [ ] Evaluate Broyden or Anderson acceleration for workloads where Jacobian
+  formation dominates. Add them only with independent correctness gates and
+  a measured advantage over the existing Newton/LM/trust-region methods.
+- [ ] Evaluate continuation/homotopy as a separate orchestration layer for
+  badly scaled or basin-sensitive systems such as TP-1907; do not hide it
+  inside a generic method's convergence heuristics.
+
+### Priority 4: public API and migration quality
+
+- [ ] Add a typed builder for common `SolveOptions` and method configuration,
+  with validation before a solve starts.
+- [ ] Define and test `Send`/`Sync`/`Clone` guarantees for prepared, bound, and
+  AOT-backed problems before promising concurrent reuse in documentation.
+- [ ] Add typed named-parameter/handle binding errors and document whether a
+  parameter schema may exist without an initial value.
+- [ ] Decide whether a small composite preparation-plus-solve report is useful;
+  do not copy preparation telemetry into every result unless a concrete API
+  use case requires it.
+- [ ] Either retire the legacy `NR*.rs` entry points with a migration note or
+  give them explicit compatibility tests and typed-error behavior. They must
+  not be presented as equivalent to the generic `SolverEngine` route.
+
+### Required evidence before closing this block
+
+- [ ] Add correctness corpus coverage for known roots, multiple roots, no-root
+  systems, rank-deficient Jacobians, non-finite callbacks, active bounds, and
+  badly scaled variables/residuals.
+- [ ] Compare analytical, finite-difference, prepared Lambdify, and AOT routes
+  componentwise where the same problem representation is available.
+- [ ] Extend story output with method-specific termination evidence and keep
+  release measurements separate from correctness gates.
+- [ ] Update both nonlinear-system user guides and `STORY_TESTS.md` after each
+  item is implemented; no item is closed by a benchmark without a matching
+  correctness test.

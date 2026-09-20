@@ -1,3 +1,6 @@
+//! Architecture lane: classic symbolic examples and grid-refinement behavior.
+//! Existing cases remain historical regression evidence during migration.
+
 #[cfg(test)]
 mod tets {
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
@@ -783,7 +786,11 @@ mod tets {
         let arg = "x".to_string();
         let tolerance = 1e-9;
         let max_iterations = 20;
-        let t0 = ne.span(None, None).0;
+        // Lane-Emden has a removable singularity in `-2*z/x` at x=0.
+        // This legacy fixture does not yet exercise the solver's limiting-value
+        // policy, so keep the correctness test on a regularized interval and
+        // impose the analytic values at its left endpoint.
+        let t0: f64 = 1.0e-6;
         let t_end = ne.span(None, None).1;
         let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
         let refmethod = AdaptiveGridConfig {
@@ -801,7 +808,15 @@ mod tets {
         let ones = vec![0.7; values.len() * n_steps];
         let initial_guess: DMatrix<f64> =
             DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-        let BorderConditions = ne.boundary_conditions();
+        let mut BorderConditions = ne.boundary_conditions();
+        BorderConditions.insert(
+            "y".to_string(),
+            vec![(0usize, (1.0 + t0 * t0 / 3.0).powf(-0.5))],
+        );
+        BorderConditions.insert(
+            "z".to_string(),
+            vec![(0usize, -t0 / 3.0 * (1.0 + t0 * t0 / 3.0).powf(-1.5))],
+        );
         let Bounds = ne.Bounds();
         println!("eq_syste, {:?}", eq_system.clone());
         println!("values, {:?}", values.clone());

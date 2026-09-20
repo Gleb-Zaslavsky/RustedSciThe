@@ -9,6 +9,8 @@ pub mod postprocessing;
 pub mod profiling;
 /// tiny module to get system information - just a pretty-printing wrapper around famous sys-info crate (might be useful for performance monitoring)
 pub mod sys_info;
+/// test/story report writer kept outside solver and benchmark hot paths
+pub mod test_reporting;
 
 pub mod animation_2d;
 pub mod animation_3d;

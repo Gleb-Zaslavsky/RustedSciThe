@@ -33,14 +33,51 @@ use std::time::Instant;
 
 use super::{
     Atom,
-    atom::FunctionBuilder,
-    conversions::approximate_f64_atom,
+    conversions::{approximate_f64_atom, expr_to_atom},
     state::Symbol,
-    transform::{rename_symbols_view, substitute_symbol_values},
+    transform::{rename_and_bind_symbol, substitute_symbol_values},
 };
+use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
 use rayon::prelude::*;
 use tabled::{builder::Builder, settings::Style};
+
+/// Fallible construction errors for the Atom-native BVP discretization path.
+///
+/// The compatibility constructors below retain their historical panic-based
+/// signatures. New solver code should use the `try_*` constructors so invalid
+/// user configuration remains a typed error at the public boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BvpAtomDiscretizationError {
+    /// The requested one-step discretization scheme is not supported.
+    InvalidScheme(String),
+    /// A residual references a discrete variable that is absent from the
+    /// prepared active-variable layout.
+    MissingVariables(Vec<String>),
+}
+
+impl std::fmt::Display for BvpAtomDiscretizationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidScheme(scheme) => {
+                write!(formatter, "invalid BVP discretization scheme `{scheme}`")
+            }
+            Self::MissingVariables(names) => write!(
+                formatter,
+                "variables not found in atom-discretized system: {names:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BvpAtomDiscretizationError {}
+
+fn validate_scheme(scheme: &str) -> Result<(), BvpAtomDiscretizationError> {
+    match scheme {
+        "forward" | "trapezoid" => Ok(()),
+        other => Err(BvpAtomDiscretizationError::InvalidScheme(other.to_string())),
+    }
+}
 
 /// Atom-native result of BVP discretization.
 ///
@@ -64,6 +101,8 @@ pub struct DiscretizedBvpAtomSystem {
     pub step_sizes: Vec<f64>,
     /// Raw stage timings in milliseconds.
     pub timer_hash: HashMap<String, f64>,
+    /// Typed stage telemetry with sub-millisecond precision.
+    pub telemetry: BvpAtomDiscretizationTelemetrySnapshot,
 }
 
 impl DiscretizedBvpAtomSystem {
@@ -86,11 +125,132 @@ impl DiscretizedBvpAtomSystem {
         timer_hash
     }
 
+    /// Returns the typed Atom discretization telemetry used by new callers.
+    pub fn telemetry_snapshot(&self) -> BvpAtomDiscretizationTelemetrySnapshot {
+        self.telemetry
+    }
+
     /// Renders the normalized timing table in the same human-readable style as the legacy path.
     pub fn render_timer_table(&self) -> String {
         let mut table = Builder::from(self.normalized_timer_hash()).build();
         table.with(Style::modern_rounded());
         table.to_string()
+    }
+}
+
+/// Precomputed symbol-only input for Atom-native BVP discretization.
+///
+/// `Vec<Expr>` is intentionally absent here. It is accepted only by the
+/// compatibility wrapper below, which converts the continuous equations once
+/// before this input reaches the parallel row assembly.
+#[derive(Debug, Clone)]
+pub(crate) struct AtomDiscretizationInput {
+    equations: Vec<Atom>,
+    value_symbols: Vec<Symbol>,
+    arg_symbol: Symbol,
+    matrix_of_symbols: Vec<Vec<Symbol>>,
+    matrix_of_atom_vars: Vec<Vec<Atom>>,
+    rename_maps: Vec<HashMap<Symbol, Symbol>>,
+}
+
+impl AtomDiscretizationInput {
+    fn from_atom_system(
+        equations: Vec<Atom>,
+        value_symbols: Vec<Symbol>,
+        arg_symbol: Symbol,
+        n_steps: usize,
+    ) -> Self {
+        let matrix_of_symbols = indexed_symbol_matrix_symbols(n_steps, &value_symbols);
+        let matrix_of_atom_vars = matrix_of_symbols
+            .iter()
+            .map(|row| row.iter().copied().map(Atom::new_var).collect())
+            .collect();
+        let rename_maps = matrix_of_symbols
+            .iter()
+            .map(|row| {
+                value_symbols
+                    .iter()
+                    .copied()
+                    .zip(row.iter().copied())
+                    .collect::<HashMap<_, _>>()
+            })
+            .collect();
+
+        Self {
+            equations,
+            value_symbols,
+            arg_symbol,
+            matrix_of_symbols,
+            matrix_of_atom_vars,
+            rename_maps,
+        }
+    }
+
+    fn from_expr_system(
+        equations: Vec<Expr>,
+        values: &[String],
+        arg: &str,
+        n_steps: usize,
+    ) -> Self {
+        let value_symbols = values
+            .iter()
+            .map(|value| Symbol::new(crate::wrap_symbol!(value.as_str())))
+            .collect::<Vec<_>>();
+        Self::from_atom_system(
+            equations.iter().map(expr_to_atom).collect(),
+            value_symbols,
+            Symbol::new(crate::wrap_symbol!(arg)),
+            n_steps,
+        )
+    }
+}
+
+/// Mesh-bound Atom-native BVP input used by the production Lambdify path.
+#[derive(Debug, Clone)]
+pub(crate) struct AtomBvpProblem {
+    input: AtomDiscretizationInput,
+    step_sizes: Vec<f64>,
+    mesh_points: Vec<f64>,
+}
+
+impl AtomBvpProblem {
+    fn from_atom_system(
+        equations: Vec<Atom>,
+        value_symbols: Vec<Symbol>,
+        arg_symbol: Symbol,
+        t0: f64,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+    ) -> Self {
+        let (step_sizes, mesh_points, n_steps_total) = create_mesh_atom(n_steps, h, mesh, t0);
+        Self {
+            input: AtomDiscretizationInput::from_atom_system(
+                equations,
+                value_symbols,
+                arg_symbol,
+                n_steps_total,
+            ),
+            step_sizes,
+            mesh_points,
+        }
+    }
+
+    fn from_expr_system(
+        equations: Vec<Expr>,
+        values: &[String],
+        arg: &str,
+        t0: f64,
+        n_steps: Option<usize>,
+        h: Option<f64>,
+        mesh: Option<Vec<f64>>,
+    ) -> Self {
+        let (step_sizes, mesh_points, n_steps_total) = create_mesh_atom(n_steps, h, mesh, t0);
+        Self {
+            input: AtomDiscretizationInput::from_expr_system(equations, values, arg, n_steps_total),
+            step_sizes,
+            mesh_points,
+        }
     }
 }
 
@@ -107,17 +267,77 @@ pub fn eq_step_atom(
     t: f64,
     scheme: &str,
 ) -> Atom {
-    let eq_step_j = rename_and_bind_step(eq_i, &matrix_of_names[j], values, arg, t);
+    try_eq_step_atom(eq_i, matrix_of_names, values, arg, j, t, scheme)
+        .unwrap_or_else(|error| panic!("Atom BVP discretization failed: {error}"))
+}
 
-    match scheme {
+/// Fallible Atom-native equivalent of [`eq_step_atom`].
+pub fn try_eq_step_atom(
+    eq_i: &Atom,
+    matrix_of_names: &[Vec<String>],
+    values: &[String],
+    arg: &str,
+    j: usize,
+    t: f64,
+    scheme: &str,
+) -> Result<Atom, BvpAtomDiscretizationError> {
+    validate_scheme(scheme)?;
+    let value_symbols = values
+        .iter()
+        .map(|value| Symbol::new(crate::wrap_symbol!(value.as_str())))
+        .collect::<Vec<_>>();
+    let matrix_of_symbols = matrix_of_names
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|name| Symbol::new(crate::wrap_symbol!(name.as_str())))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let rename_map = value_symbols
+        .iter()
+        .copied()
+        .zip(matrix_of_symbols[j].iter().copied())
+        .collect::<HashMap<_, _>>();
+    let arg_symbol = Symbol::new(crate::wrap_symbol!(arg));
+    let eq_step_j = rename_and_bind_symbol(eq_i, &rename_map, arg_symbol, t);
+
+    Ok(match scheme {
         "forward" => eq_step_j,
         "trapezoid" => {
-            let eq_step_j_plus_1 =
-                rename_and_bind_step(eq_i, &matrix_of_names[j + 1], values, arg, t);
-            Atom::new_num(1) / Atom::new_num(2) * (eq_step_j + eq_step_j_plus_1)
+            let next_rename_map = value_symbols
+                .iter()
+                .copied()
+                .zip(matrix_of_symbols[j + 1].iter().copied())
+                .collect::<HashMap<_, _>>();
+            let eq_step_j_plus_1 = rename_and_bind_symbol(eq_i, &next_rename_map, arg_symbol, t);
+            let half = Atom::new_num(1) / Atom::new_num(2);
+            atom_mul_raw(&half, &atom_add_raw(&eq_step_j, &eq_step_j_plus_1))
         }
-        _ => panic!("Invalid scheme"),
-    }
+        _ => unreachable!("scheme was validated before assembly"),
+    })
+}
+
+fn eq_step_atom_with_maps(
+    eq_i: &Atom,
+    rename_maps: &[HashMap<Symbol, Symbol>],
+    arg_symbol: Symbol,
+    j: usize,
+    t: f64,
+    scheme: &str,
+) -> Result<Atom, BvpAtomDiscretizationError> {
+    validate_scheme(scheme)?;
+    let eq_step_j = rename_and_bind_symbol(eq_i, &rename_maps[j], arg_symbol, t);
+
+    Ok(match scheme {
+        "forward" => eq_step_j,
+        "trapezoid" => {
+            let eq_step_j_plus_1 = rename_and_bind_symbol(eq_i, &rename_maps[j + 1], arg_symbol, t);
+            let half = Atom::new_num(1) / Atom::new_num(2);
+            atom_mul_raw(&half, &atom_add_raw(&eq_step_j, &eq_step_j_plus_1))
+        }
+        _ => unreachable!("scheme was validated before assembly"),
+    })
 }
 
 fn normalize_timer_percent(value: &mut f64, total: f64) {
@@ -126,6 +346,42 @@ fn normalize_timer_percent(value: &mut f64, total: f64) {
     } else {
         *value /= total / 100.0;
     }
+}
+
+/// Build a product without invoking Atom arithmetic normalization.
+///
+/// This is intentionally local to discretization.  Normalized arithmetic is
+/// preferable for ordinary symbolic work, but it cannot represent a singular
+/// endpoint such as `z / x` after `x` has been bound to zero: coefficient
+/// normalization would try to evaluate `0^-1`.  The resulting raw Atom is
+/// still a valid symbolic structure and is handled by the same downstream
+/// Atom/Lambdify pipeline as every other residual.
+fn atom_mul_raw(lhs: &Atom, rhs: &Atom) -> Atom {
+    let mut result = Atom::default();
+    let product = result.to_mul();
+    product.extend(lhs.as_view());
+    product.extend(rhs.as_view());
+    result
+}
+
+/// Build a raw n-ary sum without eager coefficient normalization.
+fn atom_add_raw(lhs: &Atom, rhs: &Atom) -> Atom {
+    let mut result = Atom::default();
+    let sum = result.to_add();
+    sum.extend(lhs.as_view());
+    sum.extend(rhs.as_view());
+    result
+}
+
+/// Build `lhs - rhs` as a raw Atom sum without eager normalization.
+fn atom_sub_raw(lhs: &Atom, rhs: &Atom) -> Atom {
+    let mut result = Atom::default();
+    let sum = result.to_add();
+    sum.extend(lhs.as_view());
+    let minus_one = Atom::new_num(-1);
+    let neg_rhs = atom_mul_raw(&minus_one, rhs);
+    sum.extend(neg_rhs.as_view());
+    result
 }
 
 /// Atom-native analogue of `discretization_system_BVP_par()`.
@@ -137,14 +393,12 @@ fn normalize_timer_percent(value: &mut f64, total: f64) {
 ///
 /// ## Algorithm
 /// 1. Build the mesh and the step sizes `h_j`.
-/// 2. Build the matrix of discretized variable names `y_i_j`.
+/// 2. Build the matrix of interned discretized symbols `y_i_j`.
 /// 3. Pre-compute boundary-condition substitutions and the set of discrete
 ///    variables removed from the nonlinear unknown vector.
-/// 4. Convert the original RHS system from `Expr` to `Atom` once.
+/// 4. Reuse the already converted RHS atoms and per-step rename maps.
 /// 5. In parallel over mesh intervals, assemble residual rows:
-///    - regular rows use the View-native `eq_step_atom(...)`,
-///    - the singular `t == 0` row currently uses a conservative fallback
-///      through the legacy expression logic to preserve exact semantics.
+///    - every row, including `t == 0`, uses the same Atom-native path.
 /// 6. Apply boundary conditions to every residual row.
 /// 7. Flatten the surviving discrete unknowns into solver order.
 /// 8. Run a consistency check that every tracked active variable really exists
@@ -163,37 +417,142 @@ pub fn discretization_system_bvp_par_atom(
     rel_tolerance: Option<HashMap<String, f64>>,
     scheme: String,
 ) -> DiscretizedBvpAtomSystem {
+    try_discretization_system_bvp_par_atom(
+        eq_system,
+        values,
+        arg,
+        t0,
+        n_steps,
+        h,
+        mesh,
+        border_conditions,
+        bounds,
+        rel_tolerance,
+        scheme,
+    )
+    .unwrap_or_else(|error| panic!("Atom BVP discretization failed: {error}"))
+}
+
+/// Fallible compatibility entry point for the Expr-to-Atom BVP route.
+///
+/// New solver/parser code should use this function so malformed user input is
+/// returned as a typed error instead of becoming a process panic.
+#[allow(clippy::too_many_arguments)]
+pub fn try_discretization_system_bvp_par_atom(
+    eq_system: Vec<Expr>,
+    values: Vec<String>,
+    arg: String,
+    t0: f64,
+    n_steps: Option<usize>,
+    h: Option<f64>,
+    mesh: Option<Vec<f64>>,
+    border_conditions: HashMap<String, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
+    let problem = AtomBvpProblem::from_expr_system(eq_system, &values, &arg, t0, n_steps, h, mesh);
+    let border_conditions = border_conditions
+        .into_iter()
+        .map(|(name, conditions)| (Symbol::new(crate::wrap_symbol!(name.as_str())), conditions))
+        .collect();
+    try_assemble_atom_bvp_problem(problem, border_conditions, bounds, rel_tolerance, scheme)
+}
+
+/// Assemble an already converted and symbol-indexed BVP without crossing
+/// through the compatibility `Expr` representation.
+#[allow(clippy::too_many_arguments)]
+pub fn discretization_system_bvp_par_atom_native(
+    eq_system: Vec<Atom>,
+    values: Vec<Symbol>,
+    arg: Symbol,
+    t0: f64,
+    n_steps: Option<usize>,
+    h: Option<f64>,
+    mesh: Option<Vec<f64>>,
+    border_conditions: HashMap<Symbol, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+) -> DiscretizedBvpAtomSystem {
+    try_discretization_system_bvp_par_atom_native(
+        eq_system,
+        values,
+        arg,
+        t0,
+        n_steps,
+        h,
+        mesh,
+        border_conditions,
+        bounds,
+        rel_tolerance,
+        scheme,
+    )
+    .unwrap_or_else(|error| panic!("Atom BVP discretization failed: {error}"))
+}
+
+/// Fallible entry point for the fully Atom-native BVP route.
+#[allow(clippy::too_many_arguments)]
+pub fn try_discretization_system_bvp_par_atom_native(
+    eq_system: Vec<Atom>,
+    values: Vec<Symbol>,
+    arg: Symbol,
+    t0: f64,
+    n_steps: Option<usize>,
+    h: Option<f64>,
+    mesh: Option<Vec<f64>>,
+    border_conditions: HashMap<Symbol, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
+    let problem = AtomBvpProblem::from_atom_system(eq_system, values, arg, t0, n_steps, h, mesh);
+    try_assemble_atom_bvp_problem(problem, border_conditions, bounds, rel_tolerance, scheme)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_assemble_atom_bvp_problem(
+    problem: AtomBvpProblem,
+    border_conditions: HashMap<Symbol, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
+    validate_scheme(&scheme)?;
     let total_start = Instant::now();
     let mut timer_hash: HashMap<String, f64> = HashMap::new();
-    let (step_sizes, mesh_points, n_steps_total) = create_mesh_atom(n_steps, h, mesh, t0);
-    let (matrix_of_names, matrix_of_atom_vars) = indexed_vars_matrix_atom(n_steps_total, &values);
+    let step_sizes = &problem.step_sizes;
+    let mesh_points = &problem.mesh_points;
+    let n_steps_total = mesh_points.len();
+    let input = &problem.input;
 
     let bc_handling = Instant::now();
-    let bc_lookup: HashMap<String, HashMap<usize, f64>> = border_conditions
+    let bc_lookup: HashMap<Symbol, HashMap<usize, f64>> = border_conditions
         .into_iter()
         .map(|(k, v)| (k, v.into_iter().collect()))
         .collect();
 
-    let mut vars_for_boundary_conditions: HashMap<String, f64> = HashMap::default();
-    let mut vars_to_exclude: HashSet<String> = HashSet::default();
+    let mut bc_value_map: HashMap<Symbol, f64> = HashMap::default();
+    let mut vars_to_exclude: HashSet<Symbol> = HashSet::default();
     let mut bc_pos_n_values = Vec::new();
 
     for (var_name, conditions) in &bc_lookup {
-        if let Some(var_idx) = values.iter().position(|v| v == var_name) {
+        if let Some(var_idx) = input.value_symbols.iter().position(|v| v == var_name) {
             for (&pos, &value) in conditions {
                 match pos {
                     0 => {
-                        let discretized_name = &matrix_of_names[0][var_idx];
-                        vars_for_boundary_conditions.insert(discretized_name.clone(), value);
-                        vars_to_exclude.insert(discretized_name.clone());
+                        let discretized_symbol = input.matrix_of_symbols[0][var_idx];
+                        bc_value_map.insert(discretized_symbol, value);
+                        vars_to_exclude.insert(discretized_symbol);
                         let full_pos = var_idx;
                         bc_pos_n_values.push((full_pos, 0usize, value));
                     }
                     1 => {
-                        let discretized_name = &matrix_of_names[n_steps_total - 1][var_idx];
-                        vars_for_boundary_conditions.insert(discretized_name.clone(), value);
-                        vars_to_exclude.insert(discretized_name.clone());
-                        let full_pos = (n_steps_total - 1) * values.len() + var_idx;
+                        let discretized_symbol =
+                            input.matrix_of_symbols[n_steps_total - 1][var_idx];
+                        bc_value_map.insert(discretized_symbol, value);
+                        vars_to_exclude.insert(discretized_symbol);
+                        let full_pos = (n_steps_total - 1) * input.value_symbols.len() + var_idx;
                         bc_pos_n_values.push((full_pos, 1usize, value));
                     }
                     _ => {}
@@ -201,80 +560,75 @@ pub fn discretization_system_bvp_par_atom(
             }
         }
     }
+    let bc_handling_elapsed = bc_handling.elapsed();
     timer_hash.insert(
         "bc handling".to_string(),
-        bc_handling.elapsed().as_millis() as f64,
+        bc_handling_elapsed.as_millis() as f64,
     );
 
-    let bc_value_map: HashMap<Symbol, f64> = vars_for_boundary_conditions
-        .iter()
-        .map(|(name, value)| (Symbol::new(crate::wrap_symbol!(name.as_str())), *value))
-        .collect();
-
-    let eq_atoms = eq_system
-        .iter()
-        .map(super::conversions::expr_to_atom)
-        .collect::<Vec<_>>();
-
     let discretization_start = Instant::now();
-    let assembled_rows = (0..(n_steps_total - 1))
+    let assembled_rows: Result<Vec<Vec<(Atom, Vec<Symbol>)>>, BvpAtomDiscretizationError> = (0
+        ..(n_steps_total - 1))
         .into_par_iter()
         .map(|j| {
             let t = mesh_points[j];
-            eq_atoms
+            input
+                .equations
                 .iter()
                 .enumerate()
                 .map(|(i, eq_i)| {
                     let mut vars_in_equation = Vec::new();
-                    let y_j_plus_1_name = &matrix_of_names[j + 1][i];
-                    let y_j_name = &matrix_of_names[j][i];
+                    let y_j_plus_1 = input.matrix_of_symbols[j + 1][i];
+                    let y_j = input.matrix_of_symbols[j][i];
 
-                    if !vars_to_exclude.contains(y_j_plus_1_name) {
-                        vars_in_equation.push(y_j_plus_1_name.clone());
+                    if !vars_to_exclude.contains(&y_j_plus_1) {
+                        vars_in_equation.push(y_j_plus_1);
                     }
-                    if !vars_to_exclude.contains(y_j_name) {
-                        vars_in_equation.push(y_j_name.clone());
+                    if !vars_to_exclude.contains(&y_j) {
+                        vars_in_equation.push(y_j);
                     }
-                    for var_idx in 0..values.len() {
-                        let var_name = &matrix_of_names[j][var_idx];
-                        if !vars_to_exclude.contains(var_name) {
-                            vars_in_equation.push(var_name.clone());
+                    for var_idx in 0..input.value_symbols.len() {
+                        let var_symbol = input.matrix_of_symbols[j][var_idx];
+                        if !vars_to_exclude.contains(&var_symbol) {
+                            vars_in_equation.push(var_symbol);
                         }
                     }
 
-                    let residual = if t == 0.0 {
-                        build_residual_atom_expr_fallback(
-                            &eq_system[i],
-                            &matrix_of_names,
-                            &values,
-                            i,
-                            &arg,
-                            j,
-                            t,
-                            step_sizes[j],
-                            &scheme,
-                            &vars_for_boundary_conditions,
-                        )
-                    } else {
-                        let eq_step_j =
-                            eq_step_atom(eq_i, &matrix_of_names, &values, &arg, j, t, &scheme);
-                        let eq_step_j = substitute_symbol_values(&eq_step_j, &bc_value_map);
-                        matrix_of_atom_vars[j + 1][i].clone()
-                            - matrix_of_atom_vars[j][i].clone()
-                            - atom_num_from_f64(step_sizes[j]) * eq_step_j
-                    };
+                    let eq_step_j = eq_step_atom_with_maps(
+                        eq_i,
+                        &input.rename_maps,
+                        input.arg_symbol,
+                        j,
+                        t,
+                        &scheme,
+                    )?;
+                    // Keep this assembly structural rather than normalizing it through
+                    // Atom's arithmetic operators.  A singular endpoint can legitimately
+                    // contain a symbolic `0^-1` term (the same representation retained by
+                    // ExprLegacy); eager coefficient normalization would turn it into a
+                    // division-by-zero panic before the solver gets a chance to apply its
+                    // endpoint policy.
+                    let residual = atom_sub_raw(
+                        &atom_sub_raw(
+                            &input.matrix_of_atom_vars[j + 1][i],
+                            &input.matrix_of_atom_vars[j][i],
+                        ),
+                        &atom_mul_raw(&atom_num_from_f64(step_sizes[j]), &eq_step_j),
+                    );
 
-                    (residual, vars_in_equation)
+                    Ok((residual, vars_in_equation))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, BvpAtomDiscretizationError>>()
         })
-        .collect::<Vec<_>>();
+        .collect();
+    let assembled_rows = assembled_rows?;
+    let discretization_elapsed = discretization_start.elapsed();
     timer_hash.insert(
         "discretization of equations".to_string(),
-        discretization_start.elapsed().as_millis() as f64,
+        discretization_elapsed.as_millis() as f64,
     );
 
-    let (discretized_system, variables_for_all_discrete): (Vec<_>, Vec<_>) =
+    let (discretized_system, variables_for_all_discrete_symbols): (Vec<_>, Vec<_>) =
         assembled_rows.into_iter().flatten().unzip();
 
     let bc_application_start = Instant::now();
@@ -282,61 +636,77 @@ pub fn discretization_system_bvp_par_atom(
         .into_par_iter()
         .map(|eq| substitute_symbol_values(&eq, &bc_value_map))
         .collect::<Vec<_>>();
+    let bc_application_elapsed = bc_application_start.elapsed();
     timer_hash.insert(
         "BC application".to_string(),
-        bc_application_start.elapsed().as_millis() as f64,
+        bc_application_elapsed.as_millis() as f64,
     );
 
     let flat_list_start = Instant::now();
-    let total_vars = values.len() * n_steps_total;
+    let total_vars = input.value_symbols.len() * n_steps_total;
     let mut flat_list_of_names = Vec::with_capacity(total_vars);
     let mut flat_list_of_expr = Vec::with_capacity(total_vars);
     for time_idx in 0..n_steps_total {
-        for var_idx in 0..values.len() {
-            let name = &matrix_of_names[time_idx][var_idx];
-            if !vars_to_exclude.contains(name) {
-                flat_list_of_names.push(name.clone());
-                flat_list_of_expr.push(matrix_of_atom_vars[time_idx][var_idx].clone());
+        for var_idx in 0..input.value_symbols.len() {
+            let symbol = input.matrix_of_symbols[time_idx][var_idx];
+            if !vars_to_exclude.contains(&symbol) {
+                flat_list_of_names.push(symbol.get_stripped_name().to_string());
+                flat_list_of_expr.push(input.matrix_of_atom_vars[time_idx][var_idx].clone());
             }
         }
     }
+
+    let variables_for_all_discrete = variables_for_all_discrete_symbols
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|symbol| symbol.get_stripped_name().to_string())
+                .collect()
+        })
+        .collect::<Vec<Vec<String>>>();
+    let flat_list_elapsed = flat_list_start.elapsed();
     timer_hash.insert(
         "flat list creation".to_string(),
-        flat_list_start.elapsed().as_millis() as f64,
+        flat_list_elapsed.as_millis() as f64,
     );
 
     let consistency_start = Instant::now();
-    let hashset_of_vars: HashSet<&String> = flat_list_of_names.iter().collect();
+    let hashset_of_vars: HashSet<Symbol> = input
+        .matrix_of_symbols
+        .iter()
+        .flat_map(|row| row.iter().copied())
+        .filter(|symbol| !vars_to_exclude.contains(symbol))
+        .collect();
     let mut missing_vars = Vec::new();
-    for var_list in &variables_for_all_discrete {
+    for var_list in &variables_for_all_discrete_symbols {
         for var in var_list {
             if !hashset_of_vars.contains(var) {
-                missing_vars.push(var.clone());
+                missing_vars.push(var.get_stripped_name().to_string());
             }
         }
     }
     if !missing_vars.is_empty() {
         missing_vars.sort_unstable();
         missing_vars.dedup();
-        panic!(
-            "Variables not found in atom-discretized system: {:?}",
-            missing_vars
-        );
+        return Err(BvpAtomDiscretizationError::MissingVariables(missing_vars));
     }
+    let consistency_elapsed = consistency_start.elapsed();
     timer_hash.insert(
         "consistency test".to_string(),
-        consistency_start.elapsed().as_millis() as f64,
+        consistency_elapsed.as_millis() as f64,
     );
 
     let bounds_start = Instant::now();
     let (bounds_vec, tolerance_vec) =
         process_bounds_and_tolerances_atom(bounds, rel_tolerance, &flat_list_of_names);
+    let bounds_elapsed = bounds_start.elapsed();
     timer_hash.insert(
         "bounds and tolerances".to_string(),
-        bounds_start.elapsed().as_millis() as f64,
+        bounds_elapsed.as_millis() as f64,
     );
 
-    let total_end = total_start.elapsed().as_millis() as f64;
+    let total_elapsed = total_start.elapsed();
+    let total_end = total_elapsed.as_millis() as f64;
     timer_hash.insert("total time, ms".to_string(), total_end);
 
     let system = DiscretizedBvpAtomSystem {
@@ -347,36 +717,21 @@ pub fn discretization_system_bvp_par_atom(
         bc_pos_n_values,
         bounds: bounds_vec,
         rel_tolerance_vec: tolerance_vec,
-        mesh_points,
-        step_sizes,
+        mesh_points: problem.mesh_points.clone(),
+        step_sizes: problem.step_sizes.clone(),
         timer_hash,
+        telemetry: BvpAtomDiscretizationTelemetrySnapshot {
+            boundary_conditions: bc_handling_elapsed,
+            discretization: discretization_elapsed,
+            boundary_application: bc_application_elapsed,
+            flat_list: flat_list_elapsed,
+            consistency: consistency_elapsed,
+            bounds_and_tolerances: bounds_elapsed,
+            total: total_elapsed,
+        },
     };
     println!("{}", system.render_timer_table());
-    system
-}
-
-fn rename_and_bind_step(
-    eq_i: &Atom,
-    renamed_values_for_step: &[String],
-    values: &[String],
-    arg: &str,
-    t: f64,
-) -> Atom {
-    let rename_map: HashMap<Symbol, Symbol> = values
-        .iter()
-        .zip(renamed_values_for_step.iter())
-        .map(|(src, dst)| {
-            (
-                Symbol::new(crate::wrap_symbol!(src.as_str())),
-                Symbol::new(crate::wrap_symbol!(dst.as_str())),
-            )
-        })
-        .collect();
-    let renamed = rename_symbols_view(eq_i.as_view(), &rename_map);
-
-    let mut value_map = HashMap::default();
-    value_map.insert(Symbol::new(crate::wrap_symbol!(arg)), t);
-    substitute_symbol_values(&renamed, &value_map)
+    Ok(system)
 }
 
 fn create_mesh_atom(
@@ -401,27 +756,18 @@ fn create_mesh_atom(
     }
 }
 
-fn indexed_vars_matrix_atom(
-    n_steps: usize,
-    values: &[String],
-) -> (Vec<Vec<String>>, Vec<Vec<Atom>>) {
-    let names = (0..n_steps)
+fn indexed_symbol_matrix_symbols(n_steps: usize, values: &[Symbol]) -> Vec<Vec<Symbol>> {
+    (0..n_steps)
         .map(|step| {
             values
                 .iter()
-                .map(|name| format!("{name}_{step}"))
+                .map(|name| {
+                    let indexed_name = format!("{}_{}", name.get_stripped_name(), step);
+                    Symbol::new(crate::wrap_symbol!(indexed_name.as_str()))
+                })
                 .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
-    let atoms = names
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|name| Atom::new_var(Symbol::new(crate::wrap_symbol!(name.as_str()))))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    (names, atoms)
+        .collect()
 }
 
 fn process_bounds_and_tolerances_atom(
@@ -466,152 +812,6 @@ fn atom_num_from_f64(value: f64) -> Atom {
     approximate_f64_atom(value)
 }
 
-fn build_residual_atom_expr_fallback(
-    eq_i: &Expr,
-    matrix_of_names: &[Vec<String>],
-    values: &[String],
-    eq_index: usize,
-    arg: &str,
-    j: usize,
-    t: f64,
-    h: f64,
-    scheme: &str,
-    vars_for_boundary_conditions: &HashMap<String, f64>,
-) -> Atom {
-    let eq_step_j = build_eq_step_expr(matrix_of_names, eq_i, values, arg, j, t, scheme);
-    let y_j_plus_1 = Expr::Var(matrix_of_names[j + 1][eq_index].clone());
-    let y_j = Expr::Var(matrix_of_names[j][eq_index].clone());
-    let residual = y_j_plus_1 - y_j - Expr::Const(h) * eq_step_j;
-    let residual = residual
-        .set_variable_from_map(vars_for_boundary_conditions)
-        .simplify();
-    expr_to_atom_no_norm(&residual)
-}
-
-fn build_eq_step_expr(
-    matrix_of_names: &[Vec<String>],
-    eq_i: &Expr,
-    values: &[String],
-    arg: &str,
-    j: usize,
-    t: f64,
-    scheme: &str,
-) -> Expr {
-    let vec_of_names_on_step = &matrix_of_names[j];
-    let hashmap_for_rename: HashMap<String, String> = values
-        .iter()
-        .zip(vec_of_names_on_step.iter())
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let eq_step_j = eq_i
-        .rename_variables(&hashmap_for_rename)
-        .set_variable(arg, t);
-
-    match scheme {
-        "forward" => eq_step_j,
-        "trapezoid" => {
-            let vec_of_names_on_step = &matrix_of_names[j + 1];
-            let hashmap_for_rename: HashMap<String, String> = values
-                .iter()
-                .zip(vec_of_names_on_step.iter())
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            let eq_step_j_plus_1 = eq_i
-                .rename_variables(&hashmap_for_rename)
-                .set_variable(arg, t);
-            Expr::Const(0.5) * (eq_step_j + eq_step_j_plus_1)
-        }
-        _ => panic!("Invalid scheme"),
-    }
-}
-
-fn expr_to_atom_no_norm(expr: &Expr) -> Atom {
-    match expr {
-        Expr::Var(name) => Atom::new_var(Symbol::new(crate::wrap_symbol!(name.as_str()))),
-        Expr::Const(v) => atom_num_from_f64(*v),
-        Expr::Add(l, r) => {
-            let mut out = Atom::default();
-            let add = out.to_add();
-            let l_atom = expr_to_atom_no_norm(l);
-            let r_atom = expr_to_atom_no_norm(r);
-            add.extend(l_atom.as_view());
-            add.extend(r_atom.as_view());
-            out
-        }
-        Expr::Sub(l, r) => {
-            let mut out = Atom::default();
-            let add = out.to_add();
-            let l_atom = expr_to_atom_no_norm(l);
-            let mut neg_r = Atom::default();
-            let mul = neg_r.to_mul();
-            let minus_one = Atom::new_num(-1);
-            let r_atom = expr_to_atom_no_norm(r);
-            mul.extend(minus_one.as_view());
-            mul.extend(r_atom.as_view());
-            add.extend(l_atom.as_view());
-            add.extend(neg_r.as_view());
-            out
-        }
-        Expr::Mul(l, r) => {
-            let mut out = Atom::default();
-            let mul = out.to_mul();
-            let l_atom = expr_to_atom_no_norm(l);
-            let r_atom = expr_to_atom_no_norm(r);
-            mul.extend(l_atom.as_view());
-            mul.extend(r_atom.as_view());
-            out
-        }
-        Expr::Div(l, r) => {
-            let mut out = Atom::default();
-            let mul = out.to_mul();
-            let l_atom = expr_to_atom_no_norm(l);
-            let r_atom = expr_to_atom_no_norm(r);
-            let mut inv_r = Atom::default();
-            inv_r.to_pow(r_atom.as_view(), Atom::new_num(-1).as_view());
-            mul.extend(l_atom.as_view());
-            mul.extend(inv_r.as_view());
-            out
-        }
-        Expr::Pow(b, e) => {
-            let mut out = Atom::default();
-            let base = expr_to_atom_no_norm(b);
-            let exp = expr_to_atom_no_norm(e);
-            out.to_pow(base.as_view(), exp.as_view());
-            out
-        }
-        Expr::Exp(x) => FunctionBuilder::new(Atom::EXP)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::Ln(x) => FunctionBuilder::new(Atom::LOG)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::sin(x) => FunctionBuilder::new(Atom::SIN)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::cos(x) => FunctionBuilder::new(Atom::COS)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::tg(x) => FunctionBuilder::new(Atom::TAN)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::ctg(x) => FunctionBuilder::new(Atom::COT)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::arcsin(x) => FunctionBuilder::new(Atom::ASIN)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::arccos(x) => FunctionBuilder::new(Atom::ACOS)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::arctg(x) => FunctionBuilder::new(Atom::ATAN)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-        Expr::arcctg(x) => FunctionBuilder::new(Atom::ACOT)
-            .add_arg(expr_to_atom_no_norm(x))
-            .finish(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -620,8 +820,12 @@ mod tests {
         numerical::Examples_and_utils::NonlinEquation,
         symbolic::{
             View::{
-                bvp::{discretization_system_bvp_par_atom, eq_step_atom},
+                bvp::{
+                    BvpAtomDiscretizationError, discretization_system_bvp_par_atom, eq_step_atom,
+                    try_discretization_system_bvp_par_atom, try_eq_step_atom,
+                },
                 conversions::{atom_to_expr, expr_to_atom},
+                state::Symbol,
             },
             symbolic_engine::Expr,
             symbolic_functions_BVP::Jacobian,
@@ -694,6 +898,42 @@ mod tests {
 
         assert!(rendered.contains("y_0"));
         assert!(rendered.contains("y_1"));
+    }
+
+    #[test]
+    fn try_eq_step_atom_rejects_unknown_scheme_without_panicking() {
+        let eq = expr_to_atom(&Expr::parse_expression("y"));
+        let values = vec!["y".to_string()];
+        let matrix = vec![vec!["y_0".to_string()], vec!["y_1".to_string()]];
+
+        let error = try_eq_step_atom(&eq, &matrix, &values, "t", 0, 0.0, "midpoint")
+            .expect_err("unknown scheme must be a typed error");
+        assert_eq!(
+            error,
+            BvpAtomDiscretizationError::InvalidScheme("midpoint".to_string())
+        );
+    }
+
+    #[test]
+    fn try_atom_discretization_rejects_unknown_scheme_without_panicking() {
+        let error = try_discretization_system_bvp_par_atom(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "x".to_string(),
+            0.0,
+            Some(2),
+            None,
+            None,
+            HashMap::new(),
+            None,
+            None,
+            "midpoint".to_string(),
+        )
+        .expect_err("unknown scheme must be a typed error");
+        assert_eq!(
+            error,
+            BvpAtomDiscretizationError::InvalidScheme("midpoint".to_string())
+        );
     }
 
     fn compare_atom_and_expr_discretization(
@@ -853,5 +1093,91 @@ mod tests {
             None,
             "forward".to_string(),
         );
+    }
+
+    #[test]
+    fn atom_discretization_preserves_singular_zero_endpoint_without_panicking() {
+        let system = discretization_system_bvp_par_atom(
+            vec![Expr::parse_expression("z / x"), Expr::parse_expression("y")],
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            0.0,
+            Some(1),
+            None,
+            None,
+            HashMap::new(),
+            None,
+            None,
+            "forward".to_string(),
+        );
+
+        // A singular endpoint is a symbolic responsibility of the caller
+        // (regularization, limiting value, or a problem-specific condition).
+        // Assembly must preserve the structure rather than evaluate 0^-1.
+        let rendered = atom_to_expr(&system.vector_of_functions[0]).to_string();
+        assert!(
+            rendered.contains("0"),
+            "singular endpoint was lost: {rendered}"
+        );
+        assert_eq!(system.variable_string.len(), 4);
+    }
+
+    #[test]
+    fn atom_only_constructor_matches_expr_compatibility_wrapper() {
+        let equations = vec![Expr::parse_expression("y + x"), Expr::parse_expression("z")];
+        let values = vec!["y".to_string(), "z".to_string()];
+        let border_conditions = HashMap::from([("y".to_string(), vec![(0, 1.0)])]);
+        let atom_border_conditions =
+            HashMap::from([(Symbol::new(crate::wrap_symbol!("y")), vec![(0, 1.0)])]);
+
+        let compatibility = discretization_system_bvp_par_atom(
+            equations.clone(),
+            values.clone(),
+            "x".to_string(),
+            0.0,
+            Some(3),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+        let atom_native = super::discretization_system_bvp_par_atom_native(
+            equations.iter().map(expr_to_atom).collect(),
+            values
+                .iter()
+                .map(|name| Symbol::new(crate::wrap_symbol!(name.as_str())))
+                .collect(),
+            Symbol::new(crate::wrap_symbol!("x")),
+            0.0,
+            Some(3),
+            None,
+            None,
+            atom_border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+
+        assert_eq!(compatibility.variable_string, atom_native.variable_string);
+        assert_eq!(
+            compatibility.vector_of_functions.len(),
+            atom_native.vector_of_functions.len()
+        );
+        for (compatibility_row, native_row) in compatibility
+            .vector_of_functions
+            .iter()
+            .zip(atom_native.vector_of_functions.iter())
+        {
+            assert_eq!(
+                atom_to_expr(compatibility_row).to_string(),
+                atom_to_expr(native_row).to_string()
+            );
+        }
+        assert!(compatibility.telemetry.stages_fit_total());
+        assert!(atom_native.telemetry.stages_fit_total());
+        assert!(compatibility.telemetry.total > std::time::Duration::ZERO);
+        assert!(atom_native.telemetry.total > std::time::Duration::ZERO);
     }
 }

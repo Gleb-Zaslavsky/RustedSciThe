@@ -171,7 +171,10 @@ pub fn build_numeric_generated_solver_state(
 
     let n_vars = values.len();
     let full_len = n_vars * (n_steps + 1);
-    let bc_lookup: HashMap<usize, f64> = bc_layout
+    // Boundary positions are immutable after preparation. Keep the callback
+    // lookup as a compact ordered slice instead of rebuilding/iterating a
+    // HashMap on every residual and Jacobian request.
+    let bc_values: Vec<(usize, f64)> = bc_layout
         .iter()
         .map(|(pos, _, value)| (*pos, *value))
         .collect();
@@ -179,7 +182,7 @@ pub fn build_numeric_generated_solver_state(
     let method_owned = method.to_string();
     let scheme_owned = scheme.to_ascii_lowercase();
     let fun_unknown_positions = unknown_positions.clone();
-    let fun_bc_lookup = bc_lookup.clone();
+    let fun_bc_lookup = bc_values.clone();
     let fun_mesh_vec = mesh_vec.clone();
     let fun_param_values = param_values.clone();
     let fun_scheme_owned = scheme_owned.clone();
@@ -201,11 +204,15 @@ pub fn build_numeric_generated_solver_state(
         }
 
         let mut residual = vec![0.0; n_vars * n_steps];
+        let mut y0 = DVector::zeros(n_vars);
+        let mut y1 = DVector::zeros(n_vars);
         for step in 0..n_steps {
             let base0 = step * n_vars;
             let base1 = (step + 1) * n_vars;
-            let y0 = DVector::from_vec(full[base0..base0 + n_vars].to_vec());
-            let y1 = DVector::from_vec(full[base1..base1 + n_vars].to_vec());
+            y0.as_mut_slice()
+                .copy_from_slice(&full[base0..base0 + n_vars]);
+            y1.as_mut_slice()
+                .copy_from_slice(&full[base1..base1 + n_vars]);
 
             let x0 = fun_mesh_vec[step];
             let x1 = fun_mesh_vec[step + 1];
@@ -244,7 +251,14 @@ pub fn build_numeric_generated_solver_state(
 
     let jac = jacobian.map(|jacobian| {
         let jac_unknown_positions = unknown_positions.clone();
-        let jac_bc_lookup = bc_lookup.clone();
+        let jac_full_to_unknown = {
+            let mut map = vec![None; full_len];
+            for (idx, full_pos) in jac_unknown_positions.iter().enumerate() {
+                map[*full_pos] = Some(idx);
+            }
+            map
+        };
+        let jac_bc_lookup = bc_values.clone();
         let jac_mesh_vec = mesh_vec.clone();
         let jac_param_values = param_values.clone();
         let jac_scheme_owned = scheme_owned.clone();
@@ -262,27 +276,40 @@ pub fn build_numeric_generated_solver_state(
             for (pos, value) in &jac_bc_lookup {
                 full[*pos] = *value;
             }
-            let mut full_to_unknown = vec![None; full_len];
             for (idx, full_pos) in jac_unknown_positions.iter().enumerate() {
                 full[*full_pos] = reduced[idx];
-                full_to_unknown[*full_pos] = Some(idx);
             }
 
-            let mut dense = vec![0.0_f64; n_unknowns * n_unknowns];
+            // Dense consumers still receive the legacy row-major staging
+            // buffer. Sparse and Banded consumers can emit their structural
+            // entries directly and avoid an O(n^2) allocation plus scan.
+            let use_dense_staging = vec.is_dense();
+            let mut dense = use_dense_staging.then(|| vec![0.0_f64; n_unknowns * n_unknowns]);
             let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
             let mut add_entry = |row: usize, col: usize, value: f64| {
                 if value == 0.0 {
                     return;
                 }
-                let slot = row * n_unknowns + col;
-                dense[slot] += value;
+                if let Some(dense) = dense.as_mut() {
+                    let slot = row * n_unknowns + col;
+                    dense[slot] += value;
+                } else {
+                    // Each reduced residual row receives at most one
+                    // contribution for a given surviving column: the two
+                    // neighboring node blocks occupy disjoint columns.
+                    triplets.push((row, col, value));
+                }
             };
 
+            let mut y0 = DVector::zeros(n_vars);
+            let mut y1 = DVector::zeros(n_vars);
             for step in 0..n_steps {
                 let base0 = step * n_vars;
                 let base1 = (step + 1) * n_vars;
-                let y0 = DVector::from_vec(full[base0..base0 + n_vars].to_vec());
-                let y1 = DVector::from_vec(full[base1..base1 + n_vars].to_vec());
+                y0.as_mut_slice()
+                    .copy_from_slice(&full[base0..base0 + n_vars]);
+                y1.as_mut_slice()
+                    .copy_from_slice(&full[base1..base1 + n_vars]);
 
                 let x0 = jac_mesh_vec[step];
                 let x1 = jac_mesh_vec[step + 1];
@@ -306,7 +333,7 @@ pub fn build_numeric_generated_solver_state(
                         for row_var in 0..n_vars {
                             let row = base0 + row_var;
                             for col_var in 0..n_vars {
-                                if let Some(col) = full_to_unknown[base0 + col_var] {
+                                if let Some(col) = jac_full_to_unknown[base0 + col_var] {
                                     let identity = if row_var == col_var { -1.0 } else { 0.0 };
                                     add_entry(
                                         row,
@@ -314,7 +341,7 @@ pub fn build_numeric_generated_solver_state(
                                         identity - 0.5 * h * j0[(row_var, col_var)],
                                     );
                                 }
-                                if let Some(col) = full_to_unknown[base1 + col_var] {
+                                if let Some(col) = jac_full_to_unknown[base1 + col_var] {
                                     let identity = if row_var == col_var { 1.0 } else { 0.0 };
                                     add_entry(
                                         row,
@@ -329,11 +356,11 @@ pub fn build_numeric_generated_solver_state(
                         for row_var in 0..n_vars {
                             let row = base0 + row_var;
                             for col_var in 0..n_vars {
-                                if let Some(col) = full_to_unknown[base0 + col_var] {
+                                if let Some(col) = jac_full_to_unknown[base0 + col_var] {
                                     let identity = if row_var == col_var { -1.0 } else { 0.0 };
                                     add_entry(row, col, identity - h * j0[(row_var, col_var)]);
                                 }
-                                if let Some(col) = full_to_unknown[base1 + col_var] {
+                                if let Some(col) = jac_full_to_unknown[base1 + col_var] {
                                     let identity = if row_var == col_var { 1.0 } else { 0.0 };
                                     add_entry(row, col, identity);
                                 }
@@ -343,16 +370,20 @@ pub fn build_numeric_generated_solver_state(
                 }
             }
 
-            for row in 0..n_unknowns {
-                for col in 0..n_unknowns {
-                    let value = dense[row * n_unknowns + col];
-                    if value != 0.0 {
-                        triplets.push((row, col, value));
+            if let Some(dense) = dense.as_ref() {
+                for row in 0..n_unknowns {
+                    for col in 0..n_unknowns {
+                        let value = dense[row * n_unknowns + col];
+                        if value != 0.0 {
+                            triplets.push((row, col, value));
+                        }
                     }
                 }
             }
 
-            vec.from_vector(n_unknowns, n_unknowns, &dense, triplets)
+            let empty_dense = Vec::new();
+            let dense_storage = dense.as_ref().unwrap_or(&empty_dense);
+            vec.from_vector(n_unknowns, n_unknowns, dense_storage, triplets)
         }))
     });
 
@@ -367,6 +398,12 @@ pub fn build_numeric_generated_solver_state(
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Numeric,
         runtime_diagnostics: HashMap::new(),
+        generation_telemetry: None,
+        atom_discretization_telemetry: None,
+        legacy_lambdify_telemetry: None,
+        atom_lambdify_telemetry: None,
+        direct_banded_jacobian_telemetry: None,
+        parameter_binding: None,
     })
 }
 

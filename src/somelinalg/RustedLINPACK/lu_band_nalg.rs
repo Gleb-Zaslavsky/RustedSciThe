@@ -23,6 +23,11 @@ pub struct LU_nalgebra {
     band: DMatrix<f64>,
 }
 impl LU_nalgebra {
+    /// Returns the dimensions of the matrix owned by this factor.
+    pub fn shape(&self) -> (usize, usize) {
+        (self.nrows, self.A.ncols())
+    }
+
     pub fn new(matrix: DMatrix<f64>, bandwidth: Option<(usize, usize)>) -> LU_nalgebra {
         let (nrows, ncols) = matrix.shape();
 

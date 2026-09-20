@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+//! Architecture lane: AOT preparation, runtime diagnostics, and telemetry
+//! semantics, kept separate from correctness and race-stress stories.
+
 mod tests {
     use crate::numerical::BVP_Damp::BVP_traits::{BandedMatrixType, Vectors_type_casting};
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
@@ -9,6 +12,7 @@ mod tests {
         AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, BuildDampedSolverRequest,
         DampedSolverBuildRequest,
     };
+    use crate::numerical::BVP_Damp::test_common::uniform_initial_guess;
     use crate::numerical::Examples_and_utils::NonlinEquation;
     use crate::somelinalg::banded::LinearSystemRef;
     use crate::somelinalg::banded::banded_assembly::BandedAssembly;
@@ -319,14 +323,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = unregister_linked_sparse_backend(&self.problem_key);
         }
-    }
-
-    fn uniform_initial_guess(variable_count: usize, n_steps: usize, value: f64) -> DMatrix<f64> {
-        DMatrix::from_column_slice(
-            variable_count,
-            n_steps,
-            DVector::from_element(variable_count * n_steps, value).as_slice(),
-        )
     }
 
     fn sparse_parallel_policy() -> AotExecutionPolicy {
@@ -1869,6 +1865,42 @@ mod tests {
         toolchain.apply_to(config)
     }
 
+    #[test]
+    fn atomview_aot_selection_keeps_expr_compatibility_payload_empty() {
+        let config = crate::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig::sparse_defaults()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::AotOnly))
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_matrix_backend_override(MatrixBackend::SparseCol);
+        let mut solver = make_combustion_solver(4, config);
+        let bundle = sparse_bundle_from_solver_request(&mut solver)
+            .expect("AtomView AOT selection should build a prepared bundle without compiling");
+        let selected = bundle.execution.selected();
+
+        assert_eq!(
+            selected.preparation_route(),
+            crate::symbolic::bvp::legacy::BvpAotPreparationRoute::AtomViewNative
+        );
+        assert!(selected.prepared_problem.residuals.is_empty());
+        assert!(selected.prepared_problem.sparse_entries.is_empty());
+        assert!(selected.prepared_problem.atom_codegen.is_some());
+        assert_eq!(selected.matrix_backend, MatrixBackend::SparseCol);
+
+        let banded_config = crate::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig::banded_defaults()
+            .with_backend_policy_override(Some(BackendSelectionPolicy::AotOnly));
+        let mut banded_solver = make_combustion_solver(4, banded_config);
+        let banded_bundle = sparse_bundle_from_solver_request(&mut banded_solver)
+            .expect("AtomView Banded AOT selection should build a prepared bundle");
+        let banded_selected = banded_bundle.execution.selected();
+        assert_eq!(
+            banded_selected.preparation_route(),
+            crate::symbolic::bvp::legacy::BvpAotPreparationRoute::AtomViewNative
+        );
+        assert!(banded_selected.prepared_problem.residuals.is_empty());
+        assert!(banded_selected.prepared_problem.sparse_entries.is_empty());
+        assert!(banded_selected.prepared_problem.atom_codegen.is_some());
+        assert_eq!(banded_selected.matrix_backend, MatrixBackend::Banded);
+    }
+
     fn runtime_tuning_sequential_case() -> RuntimeTuningChunkCase {
         RuntimeTuningChunkCase {
             label: "seq",
@@ -2143,7 +2175,7 @@ mod tests {
     fn solve_isolated_cold_tuning_variant(index: usize, n_steps: usize) -> IsolatedColdObservation {
         let output = Command::new(std::env::current_exe().expect("test executable should resolve"))
             .arg("--exact")
-            .arg("numerical::BVP_Damp::BVP_Damp_tests3::tests::aot_combustion_parallel_tuning_reports_runtime_table")
+            .arg("numerical::BVP_Damp::test_aot_diagnostics::tests::aot_combustion_parallel_tuning_reports_runtime_table")
             .arg("--ignored")
             .arg("--nocapture")
             .env(ISOLATED_TUNING_CHILD_INDEX_ENV, index.to_string())
@@ -2424,10 +2456,22 @@ mod tests {
     ) -> NRBVP {
         let eq_system = equation.setup();
         let values = equation.values();
-        let border_conditions = equation.boundary_conditions();
+        let mut border_conditions = equation.boundary_conditions();
         let bounds = equation.Bounds();
         let rel_tolerance = equation.rel_tolerance();
-        let (t0, t_end) = equation.span(None, None);
+        let (t0, t_end) = if matches!(equation, NonlinEquation::LaneEmden5) {
+            // The Lane-Emden equation contains the removable singular term
+            // `-2*z/x`. Keep this AOT fixture finite until the solver has an
+            // explicit limiting-value policy for x=0.
+            let x0: f64 = 1.0e-6;
+            let y0 = (1.0 + x0 * x0 / 3.0).powf(-0.5);
+            let z0 = -x0 / 3.0 * (1.0 + x0 * x0 / 3.0).powf(-1.5);
+            border_conditions.insert("y".to_string(), vec![(0usize, y0)]);
+            border_conditions.insert("z".to_string(), vec![(0usize, z0)]);
+            (x0, equation.span(None, None).1)
+        } else {
+            equation.span(None, None)
+        };
         let initial_guess = uniform_initial_guess(values.len(), n_steps, 0.7);
         let options = DampedSolverOptions::sparse_damped()
             .with_strategy_params(strategy_params)
@@ -3730,7 +3774,7 @@ mod tests {
         }
 
         // Keep this compact: it is an end-to-end toolchain comparison, while large-grid
-        // stress belongs to the BVP_Damp_tests4 release matrices. Rust AOT can become a
+        // stress belongs to the test_aot_race_stress release matrices. Rust AOT can become a
         // compiler-stress test before the solver path is reached on larger generated crates.
         let n_steps = 200usize;
 

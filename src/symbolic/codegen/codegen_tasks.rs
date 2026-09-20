@@ -120,6 +120,19 @@ pub enum CodegenOutputLayout {
         cols: usize,
         nnz: usize,
     },
+    /// Flat values emitted in the native banded callback order.
+    ///
+    /// The callback ABI remains a contiguous `out` slice, just like sparse
+    /// values.  Keeping the band metadata in the layout prevents a banded
+    /// task from being silently treated as an ordinary sparse task by later
+    /// Atom, C, Rust or Zig adapters.
+    BandedValues {
+        rows: usize,
+        cols: usize,
+        kl: usize,
+        ku: usize,
+        slots: usize,
+    },
 }
 
 /// One flattened symbolic output produced by a task plan.
@@ -687,12 +700,13 @@ impl<'a> BandedJacobianTask<'a> {
                 })
                 .collect(),
             // Generated banded code still writes one flat contiguous values
-            // slice; the native band layout is reconstructed by the runtime
-            // plan rather than the emitter.
-            layout: CodegenOutputLayout::SparseValues {
+            // slice, but the band contract is explicit in the layout.
+            layout: CodegenOutputLayout::BandedValues {
                 rows: self.shape.0,
                 cols: self.shape.1,
-                nnz: self.entries.len(),
+                kl: self.kl,
+                ku: self.ku,
+                slots: self.entries.len(),
             },
         }
     }
@@ -842,10 +856,12 @@ impl<'a> BandedJacobianChunkTask<'a> {
                     coordinate: Some((entry.row, entry.col)),
                 })
                 .collect(),
-            layout: CodegenOutputLayout::SparseValues {
+            layout: CodegenOutputLayout::BandedValues {
                 rows: self.shape.0,
                 cols: self.shape.1,
-                nnz: self.entries.len(),
+                kl: self.kl,
+                ku: self.ku,
+                slots: self.entries.len(),
             },
         }
     }
@@ -1317,14 +1333,75 @@ mod tests {
         assert_eq!(plan.kind, CodegenTaskKind::BandedJacobianValues);
         assert_eq!(
             plan.layout,
-            CodegenOutputLayout::SparseValues {
+            CodegenOutputLayout::BandedValues {
                 rows: 2,
                 cols: 2,
-                nnz: 2
+                kl: 0,
+                ku: 1,
+                slots: 2,
             }
         );
         assert_eq!(plan.outputs[0].coordinate, Some((0, 0)));
         assert_eq!(plan.outputs[1].coordinate, Some((0, 1)));
+    }
+
+    #[test]
+    fn banded_chunk_plan_preserves_band_metadata_and_flat_slot_count() {
+        let e0 = Expr::Var("d0".to_string());
+        let e1 = Expr::Var("u0".to_string());
+        let e2 = Expr::Var("d1".to_string());
+        let entries = vec![
+            BandedExprEntry {
+                row: 0,
+                col: 0,
+                diag_offset: 0,
+                diag_position: 0,
+                expr: &e0,
+            },
+            BandedExprEntry {
+                row: 0,
+                col: 1,
+                diag_offset: 1,
+                diag_position: 0,
+                expr: &e1,
+            },
+            BandedExprEntry {
+                row: 1,
+                col: 1,
+                diag_offset: 0,
+                diag_position: 1,
+                expr: &e2,
+            },
+        ];
+        let task = BandedJacobianTask {
+            fn_name: "eval_banded_values",
+            shape: (2, 2),
+            kl: 0,
+            ku: 1,
+            entries: &entries,
+            variables: &["y0", "y1"],
+            params: None,
+        };
+
+        let chunks = task.chunk_with_strategy(BandedChunkingStrategy::ByDiagonalCount {
+            diagonals_per_chunk: 1,
+        });
+        assert_eq!(chunks.len(), 2);
+
+        let plan = chunks[0].plan();
+        assert_eq!(
+            plan.layout,
+            CodegenOutputLayout::BandedValues {
+                rows: 2,
+                cols: 2,
+                kl: 0,
+                ku: 1,
+                slots: 2,
+            }
+        );
+        assert_eq!(plan.outputs.len(), 2);
+        assert_eq!(plan.outputs[0].coordinate, Some((0, 0)));
+        assert_eq!(plan.outputs[1].coordinate, Some((1, 1)));
     }
 
     #[test]

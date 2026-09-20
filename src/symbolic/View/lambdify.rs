@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::{
     atom::Atom,
-    evaluate::{FunctionMap, PreparedEvaluator},
+    evaluate::{FunctionMap, PreparedEvaluator, PreparedVariableContext},
     state::Symbol,
 };
 use crate::wrap_symbol;
@@ -48,10 +48,39 @@ impl Atom {
             );
 
             prepared
-                .evaluate(vals)
+                .evaluate_thread_local(vals)
                 .expect("lambdify: evaluation failed")
         })
     }
+}
+
+/// Compiles one Atom using a batch-shared variable ABI.
+///
+/// The public single-expression API still creates its own context. BVP
+/// batches use this helper so thousands of residual/Jacobian entries do not
+/// repeatedly allocate the same variable index and variable-Atom arrays.
+pub(crate) fn lambdify_with_context(
+    atom: &Atom,
+    context: &PreparedVariableContext,
+    function_map: &FunctionMap,
+) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+    let prepared = Arc::new(
+        PreparedEvaluator::new_with_context(atom, context, function_map)
+            .expect("lambdify: failed to prepare evaluator"),
+    );
+    let n_vars = context.vars.len();
+    Box::new(move |vals: &[f64]| {
+        assert_eq!(
+            vals.len(),
+            n_vars,
+            "lambdify: expected {} argument(s), got {}",
+            n_vars,
+            vals.len()
+        );
+        prepared
+            .evaluate_thread_local(vals)
+            .expect("lambdify: evaluation failed")
+    })
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -157,6 +157,29 @@ Lambdify means symbolic equations (`Expr`) are assembled into the BVP residual/J
 
 Lambdify remains the best first run for a new formulation: at that stage the priority is checking equations, boundary conditions, and the initial guess without depending on an external toolchain. For small one-off solves it often wins end-to-end. After the `AtomView` optimizations, however, this should not be generalized to large problems: in the measured `n_steps = 1000` combustion BVP, cold `tcc` AOT beat Lambdify on both Sparse and Banded routes.
 
+#### Lambdify callback parallelism
+
+Residual and Jacobian callbacks expose an explicit execution policy through
+`BvpLambdifyExecutionPolicy`:
+
+```rust
+use RustedSciThe::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
+
+let sequential = BvpLambdifyExecutionPolicy::Sequential;
+let forced_parallel = BvpLambdifyExecutionPolicy::Parallel { min_work: 0 };
+let automatic = BvpLambdifyExecutionPolicy::Auto { min_work: 0 };
+```
+
+`Sequential` is useful for small systems and deterministic diagnostics.
+`Parallel` is an explicit experiment or measured override. `Auto` is the
+conservative production choice: it requires the caller's lower bound and at
+least eight scalar evaluator items per Rayon worker, so small callbacks stay
+sequential while sufficiently large callbacks may use disjoint worker output.
+The decision is deterministic and does not perform hidden thread-startup
+calibration inside the first callback. Use the story/performance tests to
+measure the break-even point on a particular machine before forcing parallel
+execution.
+
 ### AOT
 
 AOT means ahead-of-time generated backend. Symbolic expressions are lowered through an intermediate representation, code is generated, a separate artifact is compiled, and the solver links that artifact as runtime callbacks. The philosophy is to pay preparation cost once and reduce per-call cost later.
@@ -169,9 +192,25 @@ AOT is unquestionably useful when you solve the same large symbolic problem repe
 
 The symbolic BVP pipeline has two assembly backends.
 
-`ExprLegacy` is the older, established expression route. It remains valuable as a compatibility baseline.
+`ExprLegacy` names the symbolic frontend and the historical runtime route is
+`ExprLegacy + Mutex`: symbolic `Expr` trees are differentiated and the legacy
+callback layer evaluates residual/Jacobian values through its mutex-protected
+structures. It remains valuable as a compatibility baseline.
 
-`AtomView` is the newer route designed for efficient assembly and code generation. Separate process-isolated release measurements on the combustion BVP family show that it removes a particularly expensive symbolic-Jacobian construction cost in both Sparse and Banded routes while preserving the solution to the expected numerical tolerance. For that reason, the Sparse and Banded production presets for both Damped and Frozen solvers now select `AtomView` by default.
+`AtomView` names the packed symbolic frontend and its production Lambdify
+runtime route is `AtomView + no-Mutex`: `Expr` is lowered to Atom once, then
+residual/Jacobian values are evaluated from the packed representation without
+the legacy per-entry mutex path. Separate process-isolated release measurements
+on the combustion BVP family show that it removes a particularly expensive
+symbolic-Jacobian construction cost in both Sparse and Banded routes while
+preserving the solution to the expected numerical tolerance. For that reason,
+the Sparse and Banded production presets for both Damped and Frozen solvers now
+select `AtomView` by default.
+
+The two dimensions should not be conflated in diagnostics: `symbolic_frontend`
+describes cold preparation, while `runtime_route` describes the warm callback
+implementation. A short solve can still have a long wall-clock time if cold
+symbolic preparation dominates; story tests print those stages separately.
 
 For a banded Lambdify solve the production spelling is now intentionally short:
 
@@ -640,3 +679,39 @@ Basic correctness tests live in `BVP_Damp_tests.rs`. Heavier story and performan
 The lower-level codegen/performance layer is documented in [`../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md`](../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md). Use it when you need to distinguish solver-loop cost from generated callback cost.
 
 Prefer `try_solve()` in production code. The older `solve()` wrapper is kept for compatibility and panics on failure, while `try_solve()` returns typed errors that can be logged, retried, or surfaced to users.
+
+## 16. Typed decision logging
+
+Numerical telemetry and decision logging are separate controls. The typed
+`telemetry` snapshot contains counters and stage timings; its optional event
+trace explains backend selection/fallback, Jacobian refresh, damping rejection,
+mesh refinement, bound limiting, non-finite values, and termination.
+
+```rust
+use RustedSciThe::numerical::BVP_Damp::{
+    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+};
+use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
+
+let config = GeneratedBackendConfig::banded_lambdify_defaults()
+    // Counters is the compatibility default; Off is the zero-collection path.
+    .with_bvp_telemetry_mode(BvpTelemetryMode::Off)
+    .with_bvp_logging_config(
+        BvpLoggingConfig::new(BvpLoggingMode::Warnings).with_max_events(128),
+    );
+// Pass `config` through the solver builder or set_bvp_logging_config.
+let trace = &solver.get_statistics().telemetry;
+println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
+```
+
+`BvpTelemetryMode::Off` disables solver counters, stage timers, and callback
+stage timing without changing the numerical algorithm. It is independent from
+`BvpLoggingMode`, so a caller may retain a bounded decision trace while the
+timing/counter collection remains disabled. `Counters` is the compatibility
+default; `Detailed` additionally collects callback sub-stage timings.
+
+`Off` is the default and retains no events. `Warnings` keeps recoverable and
+failed-decision events; `Detailed` also keeps normal adaptive decisions. The
+trace is bounded per solve, so large adaptive problems cannot grow diagnostic
+memory without limit. Check `log_events_dropped` when the configured cap is
+reached.

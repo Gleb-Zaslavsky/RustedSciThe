@@ -12,15 +12,21 @@ use crate::symbolic::View::atom::Atom;
 use crate::symbolic::View::bvp::DiscretizedBvpAtomSystem;
 use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianEntry};
 use crate::symbolic::View::state::Symbol;
+use crate::symbolic::bvp::atom_aot::{AtomAotMatrixLayout, AtomAotPlanError, AtomAotPreparedPlan};
 use crate::symbolic::codegen::CodegenIR::{
     AtomGeneratedBlockBreakdown, AtomOptimizationProfile, AtomTempReusePolicy, CodegenModule,
     GeneratedBlock,
 };
+use crate::symbolic::codegen::codegen_manifest::{
+    GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedProblemManifest,
+};
+use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, SparseChunkingStrategy};
 use rayon::prelude::*;
 
 /// Atom-native sparse BVP codegen problem ready for direct IR/module emission.
+#[derive(Clone, Debug)]
 pub struct PreparedSparseAtomBvpCodegen {
     pub residual_fn_name: String,
     pub jacobian_fn_name: String,
@@ -31,6 +37,7 @@ pub struct PreparedSparseAtomBvpCodegen {
     pub residuals: Vec<Atom>,
     pub sparse_entries: Vec<SparseAtomJacobianEntry>,
     pub shape: (usize, usize),
+    matrix_layout: AtomAotMatrixLayout,
     pub residual_strategy: ResidualChunkingStrategy,
     pub jacobian_strategy: SparseChunkingStrategy,
     residual_chunks: Vec<(usize, usize)>,
@@ -69,6 +76,129 @@ pub struct AtomBvpCodegenModuleBreakdown {
 }
 
 impl PreparedSparseAtomBvpCodegen {
+    /// Marks the flat Jacobian callback as a banded callback without changing
+    /// its contiguous value ABI or entry order.
+    pub fn with_banded_layout(mut self, kl: usize, ku: usize) -> Result<Self, AtomAotPlanError> {
+        let (rows, cols) = self.shape;
+        if kl >= rows || ku >= cols {
+            return Err(AtomAotPlanError::InvalidBandedLayout { kl, ku, rows, cols });
+        }
+        for entry in &self.sparse_entries {
+            let in_band = entry.row.saturating_add(ku) >= entry.col
+                && entry.col.saturating_add(kl) >= entry.row;
+            if !in_band {
+                return Err(AtomAotPlanError::InvalidJacobianCoordinate {
+                    row: entry.row,
+                    col: entry.col,
+                    rows,
+                    cols,
+                });
+            }
+        }
+        self.matrix_layout = AtomAotMatrixLayout::Banded {
+            rows,
+            cols,
+            kl,
+            ku,
+            slots: self.sparse_entries.len(),
+        };
+        Ok(self)
+    }
+
+    fn jacobian_codegen_layout(&self, slots: usize) -> CodegenOutputLayout {
+        match self.matrix_layout {
+            AtomAotMatrixLayout::SparseCsc { rows, cols, .. } => {
+                CodegenOutputLayout::SparseValues {
+                    rows,
+                    cols,
+                    nnz: slots,
+                }
+            }
+            AtomAotMatrixLayout::Banded {
+                rows, cols, kl, ku, ..
+            } => CodegenOutputLayout::BandedValues {
+                rows,
+                cols,
+                kl,
+                ku,
+                slots,
+            },
+        }
+    }
+
+    /// Returns the typed AtomView AOT payload owned by this codegen bridge.
+    ///
+    /// This is intentionally fallible and does not materialize an `Expr`.
+    /// Emitters can validate the symbolic payload and output layout before
+    /// selecting a compiler-specific artifact path.
+    pub fn prepared_aot_plan(&self) -> Result<AtomAotPreparedPlan, AtomAotPlanError> {
+        AtomAotPreparedPlan::from_parts(
+            self.residuals.clone(),
+            self.sparse_entries.clone(),
+            self.input_names.clone(),
+            self.input_symbols.clone(),
+            self.param_names.len(),
+            self.matrix_layout,
+            self.residual_strategy,
+            self.jacobian_strategy,
+        )
+    }
+
+    /// Creates the artifact manifest without materializing an Expr adapter.
+    pub fn prepared_aot_manifest(
+        &self,
+        matrix_backend: MatrixBackend,
+    ) -> Result<PreparedProblemManifest, AtomAotPlanError> {
+        let plan = self.prepared_aot_plan()?;
+        let residual_chunk_names = self
+            .residual_chunks
+            .iter()
+            .enumerate()
+            .map(|(index, &(start, end))| GeneratedChunkManifest {
+                fn_name: if self.residual_chunks.len() == 1 {
+                    self.residual_fn_name.clone()
+                } else {
+                    format!("{}_chunk_{index}", self.residual_fn_name)
+                },
+                offset: start,
+                len: end - start,
+            })
+            .collect::<Vec<_>>();
+        let jacobian_chunk_names = self
+            .sparse_chunks
+            .iter()
+            .enumerate()
+            .map(|(index, &(start, end))| GeneratedChunkManifest {
+                fn_name: if self.sparse_chunks.len() == 1 {
+                    self.jacobian_fn_name.clone()
+                } else {
+                    format!("{}_chunk_{index}", self.jacobian_fn_name)
+                },
+                offset: start,
+                len: end - start,
+            })
+            .collect::<Vec<_>>();
+        Ok(PreparedProblemManifest::from_atom_aot_plan(
+            crate::symbolic::codegen::codegen_provider_api::BackendKind::Aot,
+            matrix_backend,
+            &plan,
+            GeneratedFunctionsManifest {
+                residual_fn_name: self.residual_fn_name.clone(),
+                residual_chunk_names: residual_chunk_names
+                    .iter()
+                    .map(|chunk| chunk.fn_name.clone())
+                    .collect(),
+                residual_chunks: residual_chunk_names,
+                jacobian_fn_name: self.jacobian_fn_name.clone(),
+                jacobian_chunk_names: jacobian_chunk_names
+                    .iter()
+                    .map(|chunk| chunk.fn_name.clone())
+                    .collect(),
+                jacobian_chunks: jacobian_chunk_names,
+            },
+        ))
+    }
+
     /// Emits a regular `CodegenModule` directly from packed atoms.
     pub fn codegen_module(&self, module_name: &str) -> CodegenModule {
         self.codegen_module_with_breakdown(module_name).0
@@ -179,11 +309,7 @@ impl PreparedSparseAtomBvpCodegen {
                         &views,
                         &self.input_names,
                         &self.input_symbols,
-                        Some(CodegenOutputLayout::SparseValues {
-                            rows: self.shape.0,
-                            cols: self.shape.1,
-                            nnz: entries.len(),
-                        }),
+                        Some(self.jacobian_codegen_layout(entries.len())),
                         optimization_profile,
                         reuse_policy,
                     );
@@ -279,6 +405,7 @@ pub fn prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown(
     let residual_chunks =
         chunk_residual_ranges(discretized.vector_of_functions.len(), residual_strategy);
     let sparse_chunks = chunk_sparse_ranges_indices(&sparse_entries, jacobian_strategy);
+    let sparse_nnz = sparse_entries.len();
     let prepared = PreparedSparseAtomBvpCodegen {
         residual_fn_name: residual_fn_name.into(),
         jacobian_fn_name: jacobian_fn_name.into(),
@@ -292,12 +419,16 @@ pub fn prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown(
             discretized.vector_of_functions.len(),
             discretized.variable_string.len(),
         ),
+        matrix_layout: AtomAotMatrixLayout::SparseCsc {
+            rows: discretized.vector_of_functions.len(),
+            cols: discretized.variable_string.len(),
+            nnz: sparse_nnz,
+        },
         residual_strategy,
         jacobian_strategy,
         residual_chunks,
         sparse_chunks,
     };
-    let sparse_nnz = prepared.sparse_entries.len();
     let finalize_codegen_plan_ms = finalize_begin.elapsed().as_secs_f64() * 1_000.0;
 
     (
@@ -434,5 +565,50 @@ mod tests {
         assert!(source.contains("pub mod generated_atom_bvp"));
         assert!(source.contains("eval_bvp_residual_chunk_0"));
         assert!(source.contains("eval_bvp_sparse_values_chunk_0"));
+    }
+
+    #[test]
+    fn atom_bvp_manifest_keeps_explicit_banded_layout_without_expr_adapter() {
+        let eqs = vec![Expr::parse_expression("z"), Expr::parse_expression("-y")];
+        let values = vec!["y".to_string(), "z".to_string()];
+        let boundary_conditions = HashMap::from([
+            ("y".to_string(), vec![(0usize, 1.0)]),
+            ("z".to_string(), vec![(0usize, 0.0)]),
+        ]);
+        let discretized = discretization_system_bvp_par_atom(
+            eqs,
+            values,
+            "x".to_string(),
+            0.0,
+            Some(4),
+            None,
+            Some((0..=4).map(|i| i as f64 / 4.0).collect()),
+            boundary_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+        let prepared = prepare_sparse_bvp_codegen_from_discretized_system(
+            &discretized,
+            "eval_residual",
+            "eval_banded_values",
+            Vec::new(),
+            None,
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+        )
+        .with_banded_layout(7, 7)
+        .expect("fixture should fit the declared band");
+
+        let manifest = prepared
+            .prepared_aot_manifest(MatrixBackend::Banded)
+            .expect("AtomView manifest should validate");
+        assert_eq!(manifest.matrix_backend, MatrixBackend::Banded);
+        assert_eq!(manifest.io.jacobian_rows, manifest.io.jacobian_cols);
+        assert_eq!(
+            manifest.io.jacobian_nnz,
+            Some(prepared.sparse_entries.len())
+        );
+        assert!(manifest.expression_signature != 0);
     }
 }

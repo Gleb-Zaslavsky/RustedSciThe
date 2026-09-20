@@ -55,7 +55,8 @@ fn find_rightmost_operator_outside_brackets(
             ')' => bracket_depth -= 1,
             _ if bracket_depth == 0
                 && operators.contains(&c)
-                && !is_scientific_exponent_sign(&chars, i, c) =>
+                && !is_scientific_exponent_sign(&chars, i, c)
+                && !is_unary_sign(&chars, i, c) =>
             {
                 last_op_pos = Some(i); // Updates to LAST match
                 last_op_char = c; // Remembers which operator
@@ -125,6 +126,22 @@ fn is_scientific_exponent_sign(chars: &[char], index: usize, op: char) -> bool {
         break;
     }
     has_mantissa_digit
+}
+
+/// Returns true when a sign starts an operand instead of separating two
+/// expressions. Scientific-notation signs are handled separately because
+/// their preceding `e` is not an arithmetic operator.
+fn is_unary_sign(chars: &[char], index: usize, op: char) -> bool {
+    if op != '+' && op != '-' {
+        return false;
+    }
+
+    let previous = chars[..index]
+        .iter()
+        .rev()
+        .copied()
+        .find(|character| !character.is_whitespace());
+    matches!(previous, None | Some('(' | '+' | '-' | '*' | '/' | '^'))
 }
 
 /// Parse a string expression into a symbolic tree.
@@ -333,6 +350,22 @@ pub fn parse_expression_func(flg: usize, input: &str) -> Result<Expr, String> {
             return Ok(Expr::Pow(Box::new(base_expr), Box::new(exponent_expr)));
         }
 
+        // Signed numeric constants retain their compact `Expr::Const` form.
+        // Other unary signs apply recursively to one complete operand, which
+        // makes `a - -b`, `a + -b`, and `-(a + b)` unambiguous.
+        if let Ok(value) = input.parse::<f64>() {
+            return Ok(Expr::Const(value));
+        }
+        if let Some(rest) = input.strip_prefix('+') {
+            return parse_expression_func(0, rest);
+        }
+        if let Some(rest) = input.strip_prefix('-') {
+            return Ok(Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(parse_expression_func(0, rest)?),
+            ));
+        }
+
         // Обработка экспоненты и логарифма
         if input.starts_with("exp(") && input.ends_with(')') {
             let fisrt_brac_end = find_pair_to_this_bracket(input, 0);
@@ -492,8 +525,8 @@ fn bracket_matching(input: &str) {
             //  break; // by adding this line, it will stop the loop when the first closing bracket is found, not the last one
         }
     } // end for
-    // If the stack variable is 0, it means that the brackets are balanced and the loop has found the matching closing bracket.
-    // If the stack variable is not 0, it means that the brackets are not balanced and the loop has not found the matching closing bracket.
+      // If the stack variable is 0, it means that the brackets are balanced and the loop has found the matching closing bracket.
+      // If the stack variable is not 0, it means that the brackets are not balanced and the loop has not found the matching closing bracket.
     if stack == 0 {
         println!("Brackets are balanced");
     } else {
@@ -719,6 +752,63 @@ mod tests {
             Expr::Div(
                 Box::new(Expr::Var("J0".to_string())),
                 Box::new(Expr::Const(2.88e-4))
+            )
+        );
+    }
+
+    #[test]
+    fn parser_accepts_unary_signs_after_binary_operators() {
+        let minus_minus = parse_expression_func(0, "a - -b").unwrap();
+        assert_eq!(
+            minus_minus,
+            Expr::Sub(
+                Box::new(Expr::Var("a".to_string())),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(-1.0)),
+                    Box::new(Expr::Var("b".to_string())),
+                )),
+            )
+        );
+
+        let plus_minus = parse_expression_func(0, "a + -b").unwrap();
+        assert_eq!(
+            plus_minus,
+            Expr::Add(
+                Box::new(Expr::Var("a".to_string())),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(-1.0)),
+                    Box::new(Expr::Var("b".to_string())),
+                )),
+            )
+        );
+
+        let parenthesized = parse_expression_func(0, "-(a + b)").unwrap();
+        assert_eq!(
+            parenthesized,
+            Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::Add(
+                    Box::new(Expr::Var("a".to_string())),
+                    Box::new(Expr::Var("b".to_string())),
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn parser_accepts_exported_double_negative_factor() {
+        let expr = parse_expression_func(0, "a - -0.12027235504272604 * (b + c)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Sub(
+                Box::new(Expr::Var("a".to_string())),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(-0.12027235504272604)),
+                    Box::new(Expr::Add(
+                        Box::new(Expr::Var("b".to_string())),
+                        Box::new(Expr::Var("c".to_string())),
+                    )),
+                )),
             )
         );
     }
