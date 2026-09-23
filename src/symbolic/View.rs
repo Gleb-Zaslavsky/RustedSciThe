@@ -35,6 +35,10 @@ pub mod lambdify;
 mod microbench;
 mod normalization_examples;
 pub mod normalize;
+#[cfg(test)]
+mod operation_corpus_tests;
+#[cfg(test)]
+mod scalar_jacobian_story_tests;
 pub mod parser;
 mod pipeline_examples;
 pub mod printer;
@@ -44,7 +48,9 @@ pub mod transform;
 pub use atom::{Atom, AtomCore, AtomView};
 pub use coefficient::Coefficient;
 pub use derivative::{DerivativeError, try_derivative};
-pub use diagnostics::{ExpressionMetrics, OperationCounts, PowerClass, inspect_atoms, inspect_exprs};
+pub use diagnostics::{
+    ExpressionMetrics, OperationCounts, PowerClass, inspect_atoms, inspect_exprs,
+};
 pub use evaluate::{
     EvaluationCache, EvaluationFn, EvaluationSymbolFn, ExactConstMap, ExactSymbolMap,
     FloatSymbolMap, FunctionMap, PreparedEvaluator, evaluate, evaluate_exact,

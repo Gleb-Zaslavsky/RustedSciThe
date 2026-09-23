@@ -17,9 +17,11 @@ use crate::somelinalg::banded::{
     BandedError, LinearSolverConfig, NodeMajorLayout, banded_assembly::BandedAssembly,
 };
 use crate::symbolic::View::atom::Atom;
-use crate::symbolic::View::evaluate::{FunctionMap, PreparedVariableContext};
+use crate::symbolic::View::evaluate::{
+    FunctionMap, PreparedEvaluatorMetrics, PreparedVariableContext,
+};
 use crate::symbolic::View::jacobian::SparseAtomJacobianEntry;
-use crate::symbolic::View::lambdify::lambdify_with_context;
+use crate::symbolic::View::lambdify::lambdify_with_context_and_metrics;
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle;
 use crate::symbolic::bvp::telemetry::{
@@ -246,6 +248,31 @@ impl DirectBandedProblem {
 
 type BandedScalarEvaluator = Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BandedPreparedAtomMetrics {
+    evaluators: usize,
+    nodes: usize,
+    add_nodes: usize,
+    mul_nodes: usize,
+    powi_nodes: usize,
+    pow_nodes: usize,
+    builtin_nodes: usize,
+    custom_nodes: usize,
+}
+
+impl BandedPreparedAtomMetrics {
+    fn add(&mut self, metrics: PreparedEvaluatorMetrics) {
+        self.evaluators += 1;
+        self.nodes += metrics.nodes;
+        self.add_nodes += metrics.add_nodes;
+        self.mul_nodes += metrics.mul_nodes;
+        self.powi_nodes += metrics.powi_nodes;
+        self.pow_nodes += metrics.pow_nodes;
+        self.builtin_nodes += metrics.builtin_nodes;
+        self.custom_nodes += metrics.custom_nodes;
+    }
+}
+
 #[inline]
 fn validate_callback_value(
     stage: &'static str,
@@ -325,6 +352,7 @@ struct CompiledBandedEntry {
     row: usize,
     col: usize,
     evaluator: BandedScalarEvaluator,
+    atom_metrics: Option<PreparedEvaluatorMetrics>,
 }
 
 impl BandedStructurePlan {
@@ -373,8 +401,8 @@ fn compile_atom_scalar_evaluator(
     atom: &Atom,
     context: &PreparedVariableContext,
     function_map: &FunctionMap,
-) -> BandedScalarEvaluator {
-    lambdify_with_context(atom, context, function_map)
+) -> (BandedScalarEvaluator, PreparedEvaluatorMetrics) {
+    lambdify_with_context_and_metrics(atom, context, function_map)
 }
 
 impl DirectBandedProblem {
@@ -503,7 +531,7 @@ impl DirectBandedProblem {
     fn compile_banded_diagonal_plan(
         &self,
         plan: &BandedStructurePlan,
-    ) -> Result<Vec<CompiledBandedDiagonal>, BandedError> {
+    ) -> Result<(Vec<CompiledBandedDiagonal>, BandedPreparedAtomMetrics), BandedError> {
         let atom_native = self.atom_symbolic_jacobian_sparse.is_some();
         let parameter_map = (!atom_native && !self.uses_dynamic_parameter_binding())
             .then(|| self.parameter_substitution_map())
@@ -531,67 +559,72 @@ impl DirectBandedProblem {
         // Lambdification dominates setup for large meshes. Compile independent
         // nonzeros in parallel, then scatter closures into diagonal storage in
         // source order so runtime layout remains deterministic.
-        let compiled_entries: Vec<(usize, usize, BandedScalarEvaluator)> =
-            if let Some(entries) = self.atom_symbolic_jacobian_sparse.as_ref() {
-                entries
-                    .par_iter()
-                    .filter_map(|entry| {
-                        let offset = entry.col as isize - entry.row as isize;
-                        if offset < -(plan.scalar_bandwidth.0 as isize)
-                            || offset > plan.scalar_bandwidth.1 as isize
-                        {
-                            return None;
-                        }
-                        let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
-                        let pos = if offset >= 0 { entry.row } else { entry.col };
-                        Some((
-                            diag_index,
-                            pos,
-                            compile_atom_scalar_evaluator(
-                                &entry.value,
-                                atom_context.as_ref().expect("Atom context must exist"),
-                                atom_function_map
-                                    .as_ref()
-                                    .expect("Atom function map must exist"),
-                            ),
-                        ))
-                    })
-                    .collect()
-            } else {
-                self.symbolic_jacobian_sparse
-                    .par_iter()
-                    .filter_map(|(row, col, expr)| {
-                        let offset = *col as isize - *row as isize;
-                        if offset < -(plan.scalar_bandwidth.0 as isize)
-                            || offset > plan.scalar_bandwidth.1 as isize
-                        {
-                            return None;
-                        }
-                        let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
-                        let pos = if offset >= 0 { *row } else { *col };
-                        let evaluator = if let Some(ref map) = parameter_map {
-                            let prepared_expr = expr.set_variable_from_map(map);
-                            compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
-                        } else {
-                            compile_banded_scalar_evaluator(expr, &argument_name_refs)
-                        };
-                        Some((diag_index, pos, evaluator))
-                    })
-                    .collect()
-            };
+        let compiled_entries: Vec<(
+            usize,
+            usize,
+            BandedScalarEvaluator,
+            Option<PreparedEvaluatorMetrics>,
+        )> = if let Some(entries) = self.atom_symbolic_jacobian_sparse.as_ref() {
+            entries
+                .par_iter()
+                .filter_map(|entry| {
+                    let offset = entry.col as isize - entry.row as isize;
+                    if offset < -(plan.scalar_bandwidth.0 as isize)
+                        || offset > plan.scalar_bandwidth.1 as isize
+                    {
+                        return None;
+                    }
+                    let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
+                    let pos = if offset >= 0 { entry.row } else { entry.col };
+                    let (evaluator, metrics) = compile_atom_scalar_evaluator(
+                        &entry.value,
+                        atom_context.as_ref().expect("Atom context must exist"),
+                        atom_function_map
+                            .as_ref()
+                            .expect("Atom function map must exist"),
+                    );
+                    Some((diag_index, pos, evaluator, Some(metrics)))
+                })
+                .collect()
+        } else {
+            self.symbolic_jacobian_sparse
+                .par_iter()
+                .filter_map(|(row, col, expr)| {
+                    let offset = *col as isize - *row as isize;
+                    if offset < -(plan.scalar_bandwidth.0 as isize)
+                        || offset > plan.scalar_bandwidth.1 as isize
+                    {
+                        return None;
+                    }
+                    let diag_index = (offset + plan.scalar_bandwidth.0 as isize) as usize;
+                    let pos = if offset >= 0 { *row } else { *col };
+                    let evaluator = if let Some(ref map) = parameter_map {
+                        let prepared_expr = expr.set_variable_from_map(map);
+                        compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
+                    } else {
+                        compile_banded_scalar_evaluator(expr, &argument_name_refs)
+                    };
+                    Some((diag_index, pos, evaluator, None))
+                })
+                .collect()
+        };
 
-        for (diag_index, pos, evaluator) in compiled_entries {
+        let mut metrics = BandedPreparedAtomMetrics::default();
+        for (diag_index, pos, evaluator, evaluator_metrics) in compiled_entries {
+            if let Some(evaluator_metrics) = evaluator_metrics {
+                metrics.add(evaluator_metrics);
+            }
             diagonals[diag_index].evaluators.push((pos, evaluator));
         }
 
-        Ok(diagonals)
+        Ok((diagonals, metrics))
     }
 
     /// Builds an entry-wise compile plan used by `EntryChunks` runtime mode.
     fn compile_banded_entry_plan(
         &self,
         plan: &BandedStructurePlan,
-    ) -> Result<Vec<CompiledBandedEntry>, BandedError> {
+    ) -> Result<(Vec<CompiledBandedEntry>, BandedPreparedAtomMetrics), BandedError> {
         let atom_native = self.atom_symbolic_jacobian_sparse.is_some();
         let parameter_map = (!atom_native && !self.uses_dynamic_parameter_binding())
             .then(|| self.parameter_substitution_map())
@@ -608,7 +641,7 @@ impl DirectBandedProblem {
         let argument_name_refs: Vec<&str> =
             argument_names.iter().map(|name| name.as_str()).collect();
         if let Some(entries) = self.atom_symbolic_jacobian_sparse.as_ref() {
-            return Ok(entries
+            let compiled: Vec<CompiledBandedEntry> = entries
                 .par_iter()
                 .filter_map(|entry| {
                     let offset = entry.col as isize - entry.row as isize;
@@ -617,46 +650,63 @@ impl DirectBandedProblem {
                     {
                         return None;
                     }
+                    let (evaluator, metrics) = compile_atom_scalar_evaluator(
+                        &entry.value,
+                        atom_context.as_ref().expect("Atom context must exist"),
+                        atom_function_map
+                            .as_ref()
+                            .expect("Atom function map must exist"),
+                    );
                     Some(CompiledBandedEntry {
                         row: entry.row,
                         col: entry.col,
-                        evaluator: compile_atom_scalar_evaluator(
-                            &entry.value,
-                            atom_context.as_ref().expect("Atom context must exist"),
-                            atom_function_map
-                                .as_ref()
-                                .expect("Atom function map must exist"),
-                        ),
+                        evaluator,
+                        atom_metrics: Some(metrics),
                     })
                 })
-                .collect());
+                .collect();
+            let mut metrics = BandedPreparedAtomMetrics::default();
+            for entry in &compiled {
+                let offset = entry.col as isize - entry.row as isize;
+                if offset >= -(plan.scalar_bandwidth.0 as isize)
+                    && offset <= plan.scalar_bandwidth.1 as isize
+                {
+                    if let Some(atom_metrics) = entry.atom_metrics {
+                        metrics.add(atom_metrics);
+                    }
+                }
+            }
+            return Ok((compiled, metrics));
         }
 
-        Ok(self
-            .symbolic_jacobian_sparse
-            .par_iter()
-            .filter_map(|(row, col, expr)| {
-                let offset = *col as isize - *row as isize;
-                if offset < -(plan.scalar_bandwidth.0 as isize)
-                    || offset > plan.scalar_bandwidth.1 as isize
-                {
-                    return None;
-                }
+        Ok((
+            self.symbolic_jacobian_sparse
+                .par_iter()
+                .filter_map(|(row, col, expr)| {
+                    let offset = *col as isize - *row as isize;
+                    if offset < -(plan.scalar_bandwidth.0 as isize)
+                        || offset > plan.scalar_bandwidth.1 as isize
+                    {
+                        return None;
+                    }
 
-                let evaluator = if let Some(ref map) = parameter_map {
-                    let prepared_expr = expr.set_variable_from_map(map);
-                    compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
-                } else {
-                    compile_banded_scalar_evaluator(expr, &argument_name_refs)
-                };
+                    let evaluator = if let Some(ref map) = parameter_map {
+                        let prepared_expr = expr.set_variable_from_map(map);
+                        compile_banded_scalar_evaluator(&prepared_expr, &argument_name_refs)
+                    } else {
+                        compile_banded_scalar_evaluator(expr, &argument_name_refs)
+                    };
 
-                Some(CompiledBandedEntry {
-                    row: *row,
-                    col: *col,
-                    evaluator,
+                    Some(CompiledBandedEntry {
+                        row: *row,
+                        col: *col,
+                        evaluator,
+                        atom_metrics: None,
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+            BandedPreparedAtomMetrics::default(),
+        ))
     }
 
     /// Returns a high-performance banded Jacobian evaluator producing
@@ -716,14 +766,26 @@ impl DirectBandedProblem {
             Entry(Vec<CompiledBandedEntry>),
         }
 
-        let compiled = match config.jacobian_chunking {
+        let (compiled, prepared_atom_metrics) = match config.jacobian_chunking {
             BandedJacobianChunking::Diagonal => {
-                CompiledPlan::Diagonal(self.compile_banded_diagonal_plan(&plan)?)
+                let (plan, metrics) = self.compile_banded_diagonal_plan(&plan)?;
+                (CompiledPlan::Diagonal(plan), metrics)
             }
             BandedJacobianChunking::EntryChunks => {
-                CompiledPlan::Entry(self.compile_banded_entry_plan(&plan)?)
+                let (plan, metrics) = self.compile_banded_entry_plan(&plan)?;
+                (CompiledPlan::Entry(plan), metrics)
             }
         };
+        telemetry.record_prepared_atom_metrics(
+            prepared_atom_metrics.evaluators,
+            prepared_atom_metrics.nodes,
+            prepared_atom_metrics.add_nodes,
+            prepared_atom_metrics.mul_nodes,
+            prepared_atom_metrics.powi_nodes,
+            prepared_atom_metrics.pow_nodes,
+            prepared_atom_metrics.builtin_nodes,
+            prepared_atom_metrics.custom_nodes,
+        );
         let work_items = match &compiled {
             CompiledPlan::Diagonal(diagonals) => diagonals
                 .iter()
@@ -1016,6 +1078,7 @@ impl DirectBandedProblem {
                                 .as_ref()
                                 .expect("Atom function map must exist"),
                         )
+                        .0
                     })
                     .collect()
             } else {

@@ -329,6 +329,44 @@ mod tests {
         (residual_avg, jacobian_avg)
     }
 
+    fn measure_jacobian_callback_samples(
+        solver: &mut NRBVP,
+        callback_iters: usize,
+        samples: usize,
+    ) -> Vec<f64> {
+        let args = DVector::from_element(solver.values.len() * solver.n_steps, 0.99);
+        let typed = Vectors_type_casting(&args, solver.method.clone());
+        let mut elapsed_samples = Vec::with_capacity(samples);
+
+        for _ in 0..samples {
+            let begin = Instant::now();
+            for _ in 0..callback_iters {
+                let jacobian = solver
+                    .jac
+                    .as_mut()
+                    .expect("solver should expose Jacobian callback")
+                    .call(1.0, &*typed);
+                black_box(jacobian);
+            }
+            elapsed_samples.push(begin.elapsed().as_secs_f64() * 1_000.0);
+        }
+
+        elapsed_samples
+    }
+
+    fn summarize_samples(samples: &[f64]) -> (f64, f64, f64, f64) {
+        assert!(!samples.is_empty(), "callback sample set must not be empty");
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|sample| (sample - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (mean, variance.sqrt(), min, max)
+    }
+
     fn measure_callback_cold_and_warm(solver: &mut NRBVP, warm_samples: usize) -> (f64, f64) {
         let args = DVector::from_element(solver.values.len() * solver.n_steps, 0.99);
         let typed = Vectors_type_casting(&args, solver.method.clone());
@@ -1296,6 +1334,327 @@ mod tests {
         }
         println!("{:<24} | {:>16.6e}", "solution_diff", solution_diff);
         println!("[BVP break-even] finished combustion break-even compare n_steps={n_steps}");
+    }
+
+    /// Release-only aggregate callback baseline for a large real BVP Jacobian.
+    ///
+    /// The small operation corpus and scalar callback probes are useful for
+    /// localizing a lowering decision, but a single expression can be an
+    /// unrepresentative outlier. This story samples the complete Jacobian
+    /// callback produced for the combustion fixture at every sample. It keeps
+    /// Sparse and Banded separate, uses the same state and preparation policy
+    /// for ExprLegacy and AtomView, and reports mean/std/min/max. Matrix
+    /// assembly and the linear solve are intentionally excluded: this is an
+    /// evaluator hot-path checkpoint, not an end-to-end solver benchmark.
+    #[test]
+    #[ignore = "release-only large BVP Jacobian callback distribution baseline"]
+    fn large_bvp_jacobian_callback_distribution_story() {
+        let _test_report = crate::Utils::test_reporting::TestReportCapture::new(
+            "bvp_damp",
+            concat!(
+                module_path!(),
+                "::large_bvp_jacobian_callback_distribution_story"
+            ),
+        );
+        let n_steps = std::env::var("BVP_LARGE_JACOBIAN_STEPS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3_000);
+        let samples = story_repetitions("BVP_LARGE_JACOBIAN_SAMPLES", 7);
+        let callback_iters = story_repetitions("BVP_LARGE_JACOBIAN_ITERS", 3);
+        let mut report = format!(
+            "status: passed\n\nfixture: combustion\nn_steps: {n_steps}\nsamples: {samples}\ncallback_iters: {callback_iters}\ntelemetry: off\nassembly/linear solve: excluded\n\n"
+        );
+        report.push_str(
+            "| matrix | frontend | jacobian_shape | residual_max_diff | mean_ms | std_ms | min_ms | max_ms | samples | callback_iters |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n",
+        );
+
+        println!(
+            "[BVP large Jacobian callback distribution] fixture=combustion; n_steps={n_steps}; samples={samples}; callback_iters={callback_iters}; telemetry=off; assembly/linear solve excluded"
+        );
+        println!(
+            "matrix | frontend | jacobian_shape | residual_max_diff | mean_ms | std_ms | min_ms | max_ms | samples | callback_iters"
+        );
+        println!("{}", "-".repeat(170));
+
+        for matrix in ["Sparse", "Banded"] {
+            let mut legacy = make_combustion_solver(
+                n_steps,
+                combustion_lambdify_options_for_route(
+                    matrix,
+                    BvpSymbolicAssemblyBackend::ExprLegacy,
+                ),
+            );
+            let mut atom = make_combustion_solver(
+                n_steps,
+                combustion_lambdify_options_for_route(matrix, BvpSymbolicAssemblyBackend::AtomView),
+            );
+            legacy.set_lambdify_telemetry_mode(BvpLambdifyTelemetryMode::Off);
+            atom.set_lambdify_telemetry_mode(BvpLambdifyTelemetryMode::Off);
+
+            legacy
+                .try_eq_generate(None, None)
+                .expect("large ExprLegacy BVP Jacobian generation should succeed");
+            atom.try_eq_generate(None, None)
+                .expect("large AtomView BVP Jacobian generation should succeed");
+
+            let args = DVector::from_element(legacy.values.len() * legacy.n_steps, 0.99);
+            let typed = Vectors_type_casting(&args, legacy.method.clone());
+            let legacy_residual = legacy.fun.call(1.0, &*typed).to_DVectorType();
+            let atom_residual = atom.fun.call(1.0, &*typed).to_DVectorType();
+            let residual_diff = legacy_residual
+                .iter()
+                .zip(atom_residual.iter())
+                .map(|(&lhs, &rhs)| (lhs - rhs).abs())
+                .fold(0.0, f64::max);
+
+            let legacy_shape = legacy
+                .jac
+                .as_mut()
+                .expect("large ExprLegacy solver should expose Jacobian")
+                .call(1.0, &*typed)
+                .shape();
+            let atom_shape = atom
+                .jac
+                .as_mut()
+                .expect("large AtomView solver should expose Jacobian")
+                .call(1.0, &*typed)
+                .shape();
+            assert_eq!(
+                legacy_shape, atom_shape,
+                "{matrix} Jacobian shapes diverged"
+            );
+            assert!(
+                residual_diff < 1e-8,
+                "{matrix} residual callbacks diverged: {residual_diff:.3e}"
+            );
+
+            let legacy_samples =
+                measure_jacobian_callback_samples(&mut legacy, callback_iters, samples);
+            let atom_samples =
+                measure_jacobian_callback_samples(&mut atom, callback_iters, samples);
+            let legacy_summary = summarize_samples(&legacy_samples);
+            let atom_summary = summarize_samples(&atom_samples);
+
+            for (frontend, summary) in [("ExprLegacy", legacy_summary), ("AtomView", atom_summary)]
+            {
+                println!(
+                    "{matrix:6} | {frontend:9} | {:>5}x{:<5} | {:>17.3e} | {:>7.3} | {:>7.3} | {:>7.3} | {:>7.3} | {:>7} | {:>14}",
+                    legacy_shape.0,
+                    legacy_shape.1,
+                    residual_diff,
+                    summary.0,
+                    summary.1,
+                    summary.2,
+                    summary.3,
+                    samples,
+                    callback_iters,
+                );
+                writeln!(
+                    report,
+                    "| {matrix} | {frontend} | {}x{} | {:.6e} | {:.6} | {:.6} | {:.6} | {:.6} | {} | {} |",
+                    legacy_shape.0,
+                    legacy_shape.1,
+                    residual_diff,
+                    summary.0,
+                    summary.1,
+                    summary.2,
+                    summary.3,
+                    samples,
+                    callback_iters,
+                )
+                .expect("writing an in-memory large Jacobian report cannot fail");
+            }
+        }
+
+        report.push_str(
+            "\nInterpretation: compare these rows with the historical BVP warm callback baseline only when n_steps, matrix route, telemetry mode and callback repetitions match. The aggregate Jacobian distribution is the primary signal; a single scalar evaluator must not decide the production AtomView policy.\n",
+        );
+        if let Err(error) = write_test_report(
+            "bvp_damp",
+            "large_bvp_jacobian_callback_distribution_story",
+            &report,
+        ) {
+            eprintln!("[BVP test report] unable to write large Jacobian report: {error}");
+        }
+    }
+
+    /// Diagnostic stage breakdown for the Banded callback on the same large
+    /// combustion fixture as the callback distribution story above.
+    ///
+    /// This deliberately uses a separate Detailed-telemetry pass. Its times
+    /// are attribution data, not an apple-to-apple speed ranking, because the
+    /// counters and timers have measurable cost. ExprLegacy remains visible
+    /// in the table as the total callback reference; the direct stage columns
+    /// are populated only when the runtime exposes that typed breakdown.
+    #[test]
+    #[ignore = "release-only Banded Jacobian stage attribution baseline"]
+    fn large_banded_jacobian_stage_attribution_story() {
+        let _test_report = crate::Utils::test_reporting::TestReportCapture::new(
+            "bvp_damp",
+            concat!(
+                module_path!(),
+                "::large_banded_jacobian_stage_attribution_story"
+            ),
+        );
+        let n_steps = std::env::var("BVP_LARGE_JACOBIAN_STEPS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3_000);
+        let samples = story_repetitions("BVP_LARGE_JACOBIAN_STAGE_SAMPLES", 3);
+        let callback_iters = story_repetitions("BVP_LARGE_JACOBIAN_STAGE_ITERS", 1);
+        let mut report = format!(
+            "status: passed\n\nfixture: combustion\nn_steps: {n_steps}\nsamples: {samples}\ncallback_iters: {callback_iters}\ntelemetry: detailed\nroute: Banded\n\n"
+        );
+        report.push_str(
+            "## Cold generation stages (parent and nested scopes are not summed)\n\n| frontend | total_ms | discretization_ms | symbolic_jacobian_ms | bandwidth_ms | backend_selection_ms | runtime_binding_ms | jacobian_compile_ms | residual_compile_ms |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        );
+        report.push_str(
+            "| frontend | total_ms/call | argument_ms/call | evaluator_ms/call | storage_ms/call | assembly_ms/call | calls | evaluator_calls | storage_writes | parallel | sequential | effective_tasks | atom_evaluators | atom_nodes | atom_add | atom_mul | atom_powi | atom_pow | atom_builtin |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        );
+        println!(
+            "[BVP Banded Jacobian stage attribution] fixture=combustion; n_steps={n_steps}; samples={samples}; callback_iters={callback_iters}; telemetry=detailed; ranking excluded"
+        );
+        println!(
+            "frontend | total_ms/call | argument_ms/call | evaluator_ms/call | storage_ms/call | assembly_ms/call | calls | evaluator_calls | storage_writes | parallel | sequential | effective_tasks | atom_evaluators | atom_nodes | atom_add | atom_mul | atom_powi | atom_pow | atom_builtin"
+        );
+        println!("{}", "-".repeat(270));
+
+        for (frontend, assembly) in [
+            ("ExprLegacy", BvpSymbolicAssemblyBackend::ExprLegacy),
+            ("AtomView", BvpSymbolicAssemblyBackend::AtomView),
+        ] {
+            let mut solver = make_combustion_solver(
+                n_steps,
+                combustion_lambdify_options_for_route("Banded", assembly),
+            );
+            solver.set_lambdify_telemetry_mode(BvpLambdifyTelemetryMode::Detailed);
+            solver
+                .try_eq_generate(None, None)
+                .expect("large Banded stage attribution generation should succeed");
+
+            let generation = solver.get_statistics().telemetry.generation;
+            let generation_ms = |duration: Option<std::time::Duration>| {
+                duration
+                    .map(|duration| format!("{:.6}", duration.as_secs_f64() * 1_000.0))
+                    .unwrap_or_else(|| "n/a".to_string())
+            };
+            if let Some(generation) = generation {
+                println!(
+                    "[BVP Banded cold generation] frontend={frontend}; total_ms={:.6}; discretization_ms={:.6}; symbolic_jacobian_ms={:.6}; bandwidth_ms={:.6}; backend_selection_ms={:.6}; runtime_binding_ms={:.6}; jacobian_compile_ms={:.6}; residual_compile_ms={:.6}",
+                    generation.total.as_secs_f64() * 1_000.0,
+                    generation.discretization.as_secs_f64() * 1_000.0,
+                    generation.symbolic_jacobian.as_secs_f64() * 1_000.0,
+                    generation.find_bandwidth.as_secs_f64() * 1_000.0,
+                    generation.backend_selection.as_secs_f64() * 1_000.0,
+                    generation.runtime_binding.as_secs_f64() * 1_000.0,
+                    generation.lambdify_jacobian_compile.as_secs_f64() * 1_000.0,
+                    generation.lambdify_residual_compile.as_secs_f64() * 1_000.0,
+                );
+            }
+            writeln!(
+                report,
+                "| {frontend} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                generation_ms(generation.map(|value| value.total)),
+                generation_ms(generation.map(|value| value.discretization)),
+                generation_ms(generation.map(|value| value.symbolic_jacobian)),
+                generation_ms(generation.map(|value| value.find_bandwidth)),
+                generation_ms(generation.map(|value| value.backend_selection)),
+                generation_ms(generation.map(|value| value.runtime_binding)),
+                generation_ms(generation.map(|value| value.lambdify_jacobian_compile)),
+                generation_ms(generation.map(|value| value.lambdify_residual_compile)),
+            )
+            .expect("writing an in-memory cold generation report cannot fail");
+
+            let samples_ms =
+                measure_jacobian_callback_samples(&mut solver, callback_iters, samples);
+            let total_ms = samples_ms.iter().sum::<f64>() / (samples * callback_iters) as f64;
+            let snapshot = solver
+                .get_statistics()
+                .telemetry
+                .direct_banded_jacobian
+                .unwrap_or_default();
+            let calls = snapshot.calls;
+            let per_call_ms = |duration: std::time::Duration| {
+                if calls == 0 {
+                    0.0
+                } else {
+                    duration.as_secs_f64() * 1_000.0 / calls as f64
+                }
+            };
+            let direct_available = calls > 0;
+            let (argument_ms, evaluator_ms, storage_ms, assembly_ms) = if direct_available {
+                (
+                    per_call_ms(snapshot.argument_prepare_elapsed),
+                    per_call_ms(snapshot.evaluator_elapsed),
+                    per_call_ms(snapshot.storage_write_elapsed),
+                    per_call_ms(snapshot.assembly_alloc_elapsed),
+                )
+            } else {
+                (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+            };
+            let display = |value: f64| {
+                if value.is_nan() {
+                    "n/a".to_string()
+                } else {
+                    format!("{value:.6}")
+                }
+            };
+            println!(
+                "{frontend:9} | {:>14.6} | {:>16} | {:>17} | {:>15} | {:>15} | {:>5} | {:>15} | {:>14} | {:>8} | {:>10} | {:>15} | {:>14} | {:>10} | {:>8} | {:>8} | {:>9} | {:>8} | {:>12}",
+                total_ms,
+                display(argument_ms),
+                display(evaluator_ms),
+                display(storage_ms),
+                display(assembly_ms),
+                snapshot.calls,
+                snapshot.evaluator_calls,
+                snapshot.storage_writes,
+                snapshot.parallel_dispatches,
+                snapshot.sequential_dispatches,
+                snapshot.effective_task_count,
+                snapshot.prepared_atom_evaluators,
+                snapshot.prepared_atom_nodes,
+                snapshot.prepared_atom_add_nodes,
+                snapshot.prepared_atom_mul_nodes,
+                snapshot.prepared_atom_powi_nodes,
+                snapshot.prepared_atom_pow_nodes,
+                snapshot.prepared_atom_builtin_nodes,
+            );
+            writeln!(
+                report,
+                "| {frontend} | {total_ms:.6} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                display(argument_ms),
+                display(evaluator_ms),
+                display(storage_ms),
+                display(assembly_ms),
+                snapshot.calls,
+                snapshot.evaluator_calls,
+                snapshot.storage_writes,
+                snapshot.parallel_dispatches,
+                snapshot.sequential_dispatches,
+                snapshot.effective_task_count,
+                snapshot.prepared_atom_evaluators,
+                snapshot.prepared_atom_nodes,
+                snapshot.prepared_atom_add_nodes,
+                snapshot.prepared_atom_mul_nodes,
+                snapshot.prepared_atom_powi_nodes,
+                snapshot.prepared_atom_pow_nodes,
+                snapshot.prepared_atom_builtin_nodes,
+            )
+            .expect("writing an in-memory Banded stage report cannot fail");
+        }
+
+        report.push_str(
+            "\nInterpretation: cold generation stages are typed wall-clock values in milliseconds. Parent and nested scopes are intentionally reported side by side and must not be summed. `n/a` means that the selected compatibility callback does not expose the direct structured stage stream; it is not zero cost. Compare total callback time only with the telemetry-off distribution story. Use the AtomView stage columns to choose the next Banded optimization boundary.\n",
+        );
+        if let Err(error) = write_test_report(
+            "bvp_damp",
+            "large_banded_jacobian_stage_attribution_story",
+            &report,
+        ) {
+            eprintln!("[BVP test report] unable to write Banded stage report: {error}");
+        }
     }
 
     /// Measures the current pure-Lambdify Sequential/Parallel break-even.

@@ -6,6 +6,95 @@ evaluator optimization. LSODE2 Atom-to-Expr callback measurements are not proof
 of a BVP Atom-native evaluator defect: the execution paths differ. Preserve
 existing routes and baselines; no solver or AOT changes in this planning pass.
 
+Priority update, 2026-09-23: the Banded cold-stage regression is real enough to
+require a guarded rollback probe, not a global AtomView rollback. The historical
+release records showed AtomView symbolic preparation materially cheaper than
+ExprLegacy, while the current capture reversed that ordering (`~721.8 ms` vs
+`~162.3 ms` total generation and `~277.9 ms` vs `~31.2 ms` symbolic-Jacobian
+stage). The low-level `View/jacobian.rs` algorithm is unchanged across the
+suspicious refactor boundary, so the first rollback target is BVP residual
+assembly shape: normalized arithmetic for ordinary rows, the old isolated Expr
+fallback only for a singular `t == 0` endpoint, and raw Atom construction only
+when that endpoint cannot be normalized safely.
+
+Priority update, 2026-09-23: classify Lane-Emden failures as fixture-sensitive
+until the solver has an explicit limiting-value policy at `x = 0`. The equation
+contains the removable but numerically undefined term `-2*z/x`; evaluating the
+literal first-order system at the mathematical endpoint asks a floating-point
+callback to evaluate `0/0`. Numerical solve, refinement, performance and AOT
+baselines therefore use a regularized left endpoint `eps > 0` and the analytic
+values `y(eps)` and `z(eps)`. The `x = 0` form remains valid for symbolic parity
+and no-panic tests only.
+
+- [x] Verify the current Damped Lane-Emden Pearson and Grcar fixtures use the
+  regularized interval and analytic left-endpoint values; both pass in debug.
+- [x] Verify the broader debug `lane_emden` filter and the affected Lambdify /
+  parity tests; no current solver-path failure reproduces after regularization.
+- [ ] Replace remaining ad-hoc `eps` setup with a shared named fixture helper,
+  while allowing each solver family to choose its documented epsilon. Never use
+  `NonlinEquation::span(None, None)` as a numerical Lane-Emden solve domain.
+
+- [x] Apply the narrow BVP assembly rollback probe without changing linear
+  backends, solver iteration logic, or the low-level Atom Jacobian algorithm.
+- [x] Keep the singular endpoint fallback isolated and preserve the native Atom
+  constructor's non-singular parity; all 9 `symbolic::View::bvp::tests` pass in
+  debug after the probe, as do the BVP parity corpus and Lambdify acceptance
+  tests.
+- [ ] Repeat the exact release cold-generation and large Banded callback
+  stories before accepting or rejecting the probe. Debug timings are diagnostic
+  only; the historical release records remain the comparison baseline.
+
+- [x] Add a release-only aggregate callback distribution story for the real
+  combustion BVP (`large_bvp_jacobian_callback_distribution_story`). It keeps
+  Sparse and Banded separate, compares ExprLegacy and AtomView on the same
+  prepared state, checks residual parity and Jacobian shape without dense
+  materialization, and reports mean/std/min/max for the complete Jacobian
+  callback. This is the appropriate scale check for deciding whether a small
+  evaluator outlier represents a production regression.
+- [x] Run and date the aggregate callback story with matching historical
+  settings (`n_steps=3000`, telemetry off, `samples=7`, `callback_iters=3`).
+  Release result: Sparse ExprLegacy `4.006 +/- 0.209 ms`, AtomView
+  `1.228 +/- 0.264 ms`; Banded ExprLegacy `8.268 +/- 0.284 ms`, AtomView
+  `9.763 +/- 0.307 ms`; all residual drifts were `5.55e-17`. The Sparse
+  result supports the AtomView route; the Banded result is an explicit
+  performance regression candidate and must not be generalized away.
+- [ ] Compare this distribution with the matching historical BVP warm
+  baseline and preserve both records. The next optimization branch is
+  Banded-specific attribution, not a global evaluator rewrite.
+- [x] Add a separate Detailed-telemetry Banded attribution story using the
+  same combustion fixture. It reports argument preparation, evaluator,
+  storage-write, assembly allocation and dispatch stages without mixing its
+  timer overhead into the telemetry-off speed story. Debug smoke confirmed
+  that ExprLegacy and AtomView expose the same callback/evaluator/write counts.
+- [x] Run the Banded attribution story in release at `n_steps=3000` and use
+  its stage shares to select one narrow optimization. With detailed telemetry
+  and three callbacks, ExprLegacy measured `3.060700 ms/call` and AtomView
+  `3.587467 ms/call`; both had `188964` evaluator calls, `188964` storage
+  writes, `23637` effective tasks and three parallel dispatches. The gap is
+  therefore about `17.2%` in total and is concentrated in evaluator time
+  (`2.880767` vs `3.431533 ms/call`, about `19.1%`). Argument preparation is
+  negligible (`0.000000` vs `0.000067 ms/call`), and AtomView assembly
+  allocation is slightly lower (`0.109900` vs `0.126567 ms/call`).
+- [ ] Attribute the Banded evaluator gap at the shared View/lowering level.
+  The first diagnostic slice is now in place: direct telemetry records the
+  prepared Atom evaluator/node mix (`Add`, `Mul`, `PowI`, `Pow`, builtin)
+  separately from callback timing. The next evidence must be a dated release
+  run on the same combustion-3000 fixture; debug timings are not a baseline.
+  Release rerun recorded 2026-09-23 17:23 UTC with 21 callbacks: ExprLegacy
+  `2.823738 ms/call`, AtomView `3.336019 ms/call`, equal `1,322,748`
+  evaluator calls and `165,459` effective tasks. AtomView is `18.14%` slower
+  overall and `18.47%` slower in evaluator time. The prepared Atom shape is
+  `62,988` evaluators / `242,928` nodes (`17,994 Add`, `53,982 Mul`,
+  `26,991 PowI`, `17,994` builtin; no general Pow). This confirms the target
+  boundary but does not yet establish node count as the cause.
+  The same capture showed a separate cold-generation gap: approximately
+  `721.823 ms` AtomView versus `162.328 ms` ExprLegacy total generation,
+  with AtomView symbolic-Jacobian preparation around `277.9 ms` versus
+  `31.2 ms`. The new story report now writes exact typed cold stages; keep
+  cold preparation and warm callback optimization as separate work items.
+  Do not optimize binding, dispatch or storage first: the release counters
+  show that those paths are not the current source of the regression.
+
 Review date: 2026-09-19. Status: architecture review plus an intermediate test
 suite migration. The numerical suite is not in its final physical layout yet;
 existing tests remain intact while descriptive module aliases and shared test

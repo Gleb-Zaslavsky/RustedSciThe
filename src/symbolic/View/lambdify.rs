@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::{
     atom::Atom,
-    evaluate::{FunctionMap, PreparedEvaluator, PreparedVariableContext},
+    evaluate::{FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext},
     state::Symbol,
 };
 use crate::wrap_symbol;
@@ -64,12 +64,27 @@ pub(crate) fn lambdify_with_context(
     context: &PreparedVariableContext,
     function_map: &FunctionMap,
 ) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+    lambdify_with_context_and_metrics(atom, context, function_map).0
+}
+
+/// Compiles one Atom and returns its callback together with its immutable IR
+/// shape. The metrics are setup diagnostics only and do not affect callback
+/// execution.
+pub(crate) fn lambdify_with_context_and_metrics(
+    atom: &Atom,
+    context: &PreparedVariableContext,
+    function_map: &FunctionMap,
+) -> (
+    Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+    PreparedEvaluatorMetrics,
+) {
     let prepared = Arc::new(
         PreparedEvaluator::new_with_context(atom, context, function_map)
             .expect("lambdify: failed to prepare evaluator"),
     );
+    let metrics = prepared.metrics();
     let n_vars = context.vars.len();
-    Box::new(move |vals: &[f64]| {
+    let callback = Box::new(move |vals: &[f64]| {
         assert_eq!(
             vals.len(),
             n_vars,
@@ -80,7 +95,8 @@ pub(crate) fn lambdify_with_context(
         prepared
             .evaluate_thread_local(vals)
             .expect("lambdify: evaluation failed")
-    })
+    });
+    (callback, metrics)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

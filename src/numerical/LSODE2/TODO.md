@@ -130,6 +130,12 @@ expensive.
 
 ### AtomViewExprCompat and evaluator policy: 2026-09-23
 
+LSODE2 is a realistic source of production Jacobian shapes for the shared
+`symbolic::View` optimization work. It is not the sole target of that work:
+the same lowering/evaluator changes must improve or preserve the direct BVP
+Atom route. Keep LSODE2 comparison adapters and BVP native callbacks separate,
+and use both as acceptance consumers of the shared View-level corpus.
+
 - [x] Name the current AtomView Lambdify route explicitly as
   `AtomViewExprCompat`: symbolic preparation uses AtomView, then crosses an
   intentional `Atom -> Expr` compatibility boundary before the existing
@@ -268,6 +274,11 @@ expensive.
   Jacobian still uses an explicit `Atom -> Expr` compatibility boundary before
   lambdification, so the stage attribution is correct but this is not yet the
   final zero-conversion production path.
+- [ ] Performance objective: reduce AtomView callback overhead relative to
+  `ExprLegacy` without making the historical AtomView oracle worse. Every
+  candidate optimization must preserve residual/Jacobian parity and avoid
+  regressions on real Sparse/Banded Jacobians; preparation wins alone are not
+  sufficient.
 
 - [ ] Build one process-isolated release harness for the same problem, mesh,
   matrix backend, tolerances, controller family, thread policy, chunking policy,
@@ -303,6 +314,72 @@ expensive.
   while `ExprLegacy` has `127` nodes, depth `7`, and 310 chars. This supports
   expression complexity as the primary hypothesis for the warm Jacobian gap;
   the historical adapter remains retained as an oracle.
+- [x] Added scalar Jacobian callback isolation to the same comparison gate.
+  The debug capture on 2026-09-23 measures identical nonzero `(row, col)`
+  entries and flattened arguments without Sparse/Banded matrix assembly:
+  `AtomViewExprCompat=414.075 ns/call`, `ExprLegacy=334.000 ns/call`, and
+  historical AtomView `421.370 ns/call`, with roundoff-level value parity.
+  This localizes the primary remaining gap to the Atom-derived Expr closure
+  evaluation rather than matrix storage construction.
+- [x] Completed one release scalar-callback isolation capture on the
+  combustion-like fixture. `AtomViewExprCompat` measured `186.090 ns/call`
+  versus `173.755 ns/call` for ExprLegacy, while complete Sparse/Banded
+  Jacobian callbacks were slightly faster than ExprLegacy and all values
+  remained parity-equivalent.
+- [ ] Repeat scalar callback isolation across multiple fresh processes and
+  larger real LSODE2 fixtures before changing the lowering or evaluator. Keep
+  full callback timings beside scalar timings to quantify argument binding and
+  output-assembly cost separately; the current test still produces one timing
+  sample per route.
+- [x] Add an ignored scalar-expression shape corpus covering integer and
+  fractional powers, negative powers, division, `exp`, and `sin`. The corpus
+  reports discrete Expr node metrics separately from preparation,
+  lambdification, and scalar callback timing, and checks derivative parity
+  against the historical AtomView route.
+- [x] Debug corpus capture on 2026-09-23 confirms that Compat reproduces the
+  historical AtomView shape, but node count alone does not predict callback
+  speed. Keep operation form, power classes, function count, and repeated
+  subexpressions in the next analysis.
+- [x] Release timing is not required for the scalar-expression shape corpus:
+  its purpose is discrete structural diagnosis, not a production wall-clock
+  baseline.
+- [x] Extend the structural comparison with explicit operation fingerprints:
+  `Div` versus `Pow(base, -1)`, power classes, function count, and repeated
+  subexpressions. The reusable `ExpressionMetrics::operation_fingerprint`
+  format is now available and attached to the scalar corpus output.
+- [x] Apply operation fingerprints to the real combustion-like Jacobian
+  comparison. The story now reports the exact `Div`/negative-`Pow`, power,
+  function, and repeated-subexpression profile for all three routes.
+- [x] Apply the same fingerprints to larger real LSODE2 Jacobians. The
+  2026-09-23 debug capture covers the nonlinear three-body fixture and a
+  128-variable diffusion chain, with exact/roundoff-level scalar parity.
+- [ ] Use the larger-shape result to select the smallest real closure
+  reproducer for release performance measurement. Do not assume node count is
+  the cause: `ExprLegacy` is larger on three-body, while all routes are
+  structurally identical on the diffusion chain. Compare operation forms,
+  repeated subexpressions, closure instruction shape, and evaluator cost.
+- [x] Add a debug-only real closure-lowering report that separates symbolic
+  preparation, closure construction, and scalar evaluation for the same
+  three-body and diffusion-chain entries. Matrix assembly is excluded and
+  componentwise parity is required. The report confirms that the larger tree
+  is not automatically the slower callback.
+- [x] Add a controlled 22-form operation micro-corpus using the real lowering
+  forms: subtraction/unary signs, `Div` and reciprocal, negative/integer/
+  fractional/nested/variable `Pow`, `exp`/`log`/`sin`/`cos`, coefficients and
+  leaves, n-ary tree shape, and repeated subexpressions. The 2026-09-23 debug
+  corpus passed parity and showed mixed behavior: explicit division and
+  function-heavy forms can be slower, while subtraction chains, n-ary forms
+  and repeated-subexpression lowering can improve. Use this to isolate
+  operation cost before selecting a release reproducer; do not infer
+  per-operation cost from an aggregate tree timer.
+- [x] Move the low-level operation corpus to `symbolic::View` (2026-09-23).
+  LSODE2 now contributes real Jacobian fixtures and integration stories, while
+  the shared View test owns operation-form diagnostics and Expr/Atom parity.
+- [x] Add the real-Jacobian three-boundary release story scaffold (2026-09-23)
+  for ExprLegacy, AtomViewExprCompat and AtomNative. It separates symbolic
+  preparation, Atom conversion, closure construction and scalar callback
+  evaluation, with componentwise parity before timing. Release execution and
+  dated comparison remain pending.
 - [ ] Repeat the expanded release gate on the larger LSODE2 workloads with
   Expr-shape metrics and callback timing. Separate expression complexity from
   evaluator/telemetry overhead before changing the AtomView compatibility

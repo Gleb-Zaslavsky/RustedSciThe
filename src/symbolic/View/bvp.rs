@@ -33,9 +33,10 @@ use std::time::Instant;
 
 use super::{
     Atom,
+    atom::FunctionBuilder,
     conversions::{approximate_f64_atom, expr_to_atom},
     state::Symbol,
-    transform::{rename_and_bind_symbol, substitute_symbol_values},
+    transform::{rename_and_bind_symbol, rename_symbols_view, substitute_symbol_values},
 };
 use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
@@ -105,6 +106,20 @@ pub struct DiscretizedBvpAtomSystem {
     pub telemetry: BvpAtomDiscretizationTelemetrySnapshot,
 }
 
+/// Expr-only endpoint adapter retained for the singular `t == 0` case.
+///
+/// Most of the BVP route is Atom-native.  Lane-Emden-like equations can still
+/// contain a symbolic reciprocal at the singular endpoint, where the old Expr
+/// simplifier has the established boundary semantics.  Keeping this adapter
+/// isolated prevents that exceptional case from shaping every ordinary row.
+#[derive(Debug, Clone)]
+struct ExprBvpEndpointFallback {
+    equations: Vec<Expr>,
+    values: Vec<String>,
+    arg: String,
+    matrix_of_names: Vec<Vec<String>>,
+}
+
 impl DiscretizedBvpAtomSystem {
     /// Returns the discretization timing table normalized to percent of total wall time.
     pub fn normalized_timer_hash(&self) -> HashMap<String, f64> {
@@ -151,6 +166,7 @@ pub(crate) struct AtomDiscretizationInput {
     matrix_of_symbols: Vec<Vec<Symbol>>,
     matrix_of_atom_vars: Vec<Vec<Atom>>,
     rename_maps: Vec<HashMap<Symbol, Symbol>>,
+    expr_endpoint_fallback: Option<ExprBvpEndpointFallback>,
 }
 
 impl AtomDiscretizationInput {
@@ -183,6 +199,7 @@ impl AtomDiscretizationInput {
             matrix_of_symbols,
             matrix_of_atom_vars,
             rename_maps,
+            expr_endpoint_fallback: None,
         }
     }
 
@@ -196,12 +213,19 @@ impl AtomDiscretizationInput {
             .iter()
             .map(|value| Symbol::new(crate::wrap_symbol!(value.as_str())))
             .collect::<Vec<_>>();
-        Self::from_atom_system(
+        let mut input = Self::from_atom_system(
             equations.iter().map(expr_to_atom).collect(),
             value_symbols,
             Symbol::new(crate::wrap_symbol!(arg)),
             n_steps,
-        )
+        );
+        input.expr_endpoint_fallback = Some(ExprBvpEndpointFallback {
+            equations,
+            values: values.to_vec(),
+            arg: arg.to_string(),
+            matrix_of_names: indexed_symbol_matrix_names(n_steps, values),
+        });
+        input
     }
 }
 
@@ -334,7 +358,11 @@ fn eq_step_atom_with_maps(
         "trapezoid" => {
             let eq_step_j_plus_1 = rename_and_bind_symbol(eq_i, &rename_maps[j + 1], arg_symbol, t);
             let half = Atom::new_num(1) / Atom::new_num(2);
-            atom_mul_raw(&half, &atom_add_raw(&eq_step_j, &eq_step_j_plus_1))
+            // Keep the historical normalized form for regular rows.  The raw
+            // constructors are reserved for singular endpoint residuals; on
+            // the normal path normalization removes avoidable `-1` and nested
+            // additive nodes before differentiation.
+            half * (eq_step_j + eq_step_j_plus_1)
         }
         _ => unreachable!("scheme was validated before assembly"),
     })
@@ -565,6 +593,10 @@ fn try_assemble_atom_bvp_problem(
         "bc handling".to_string(),
         bc_handling_elapsed.as_millis() as f64,
     );
+    let bc_value_map_names: HashMap<String, f64> = bc_value_map
+        .iter()
+        .map(|(symbol, value)| (symbol.get_stripped_name().to_string(), *value))
+        .collect();
 
     let discretization_start = Instant::now();
     let assembled_rows: Result<Vec<Vec<(Atom, Vec<Symbol>)>>, BvpAtomDiscretizationError> = (0
@@ -594,27 +626,73 @@ fn try_assemble_atom_bvp_problem(
                         }
                     }
 
-                    let eq_step_j = eq_step_atom_with_maps(
-                        eq_i,
-                        &input.rename_maps,
-                        input.arg_symbol,
-                        j,
-                        t,
-                        &scheme,
-                    )?;
-                    // Keep this assembly structural rather than normalizing it through
-                    // Atom's arithmetic operators.  A singular endpoint can legitimately
-                    // contain a symbolic `0^-1` term (the same representation retained by
-                    // ExprLegacy); eager coefficient normalization would turn it into a
-                    // division-by-zero panic before the solver gets a chance to apply its
-                    // endpoint policy.
-                    let residual = atom_sub_raw(
-                        &atom_sub_raw(
-                            &input.matrix_of_atom_vars[j + 1][i],
-                            &input.matrix_of_atom_vars[j][i],
-                        ),
-                        &atom_mul_raw(&atom_num_from_f64(step_sizes[j]), &eq_step_j),
-                    );
+                    // Restore the proven normalized residual shape on ordinary
+                    // mesh rows.  A raw shape is still required at a singular
+                    // endpoint, where eager coefficient normalization can try
+                    // to evaluate a symbolic `0^-1` before endpoint handling.
+                    let residual = if t == 0.0 {
+                        if let Some(fallback) = input.expr_endpoint_fallback.as_ref() {
+                            build_residual_atom_expr_fallback(
+                                &fallback.equations[i],
+                                &fallback.matrix_of_names,
+                                &fallback.values,
+                                i,
+                                &fallback.arg,
+                                j,
+                                t,
+                                step_sizes[j],
+                                &scheme,
+                                &bc_value_map_names,
+                            )
+                        } else {
+                            // Fully Atom-native callers have no Expr endpoint
+                            // adapter. Use the normalized form when binding is
+                            // safe, and retain a raw symbolic endpoint only if
+                            // coefficient normalization rejects a singular
+                            // reciprocal.
+                            let bound =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    rename_and_bind_symbol(
+                                        eq_i,
+                                        &input.rename_maps[j],
+                                        input.arg_symbol,
+                                        t,
+                                    )
+                                }));
+                            if let Ok(eq_step_j) = bound {
+                                let current = substitute_symbol_values(
+                                    &input.matrix_of_atom_vars[j][i],
+                                    &bc_value_map,
+                                );
+                                let rhs = current + atom_num_from_f64(step_sizes[j]) * eq_step_j;
+                                let negative_rhs = atom_mul_raw(&Atom::new_num(-1), &rhs);
+                                atom_add_raw(&input.matrix_of_atom_vars[j + 1][i], &negative_rhs)
+                            } else {
+                                let eq_step_j =
+                                    rename_symbols_view(eq_i.as_view(), &input.rename_maps[j]);
+                                atom_sub_raw(
+                                    &atom_sub_raw(
+                                        &input.matrix_of_atom_vars[j + 1][i],
+                                        &input.matrix_of_atom_vars[j][i],
+                                    ),
+                                    &atom_mul_raw(&atom_num_from_f64(step_sizes[j]), &eq_step_j),
+                                )
+                            }
+                        }
+                    } else {
+                        let eq_step_j = eq_step_atom_with_maps(
+                            eq_i,
+                            &input.rename_maps,
+                            input.arg_symbol,
+                            j,
+                            t,
+                            &scheme,
+                        )?;
+                        let eq_step_j = substitute_symbol_values(&eq_step_j, &bc_value_map);
+                        input.matrix_of_atom_vars[j + 1][i].clone()
+                            - input.matrix_of_atom_vars[j][i].clone()
+                            - atom_num_from_f64(step_sizes[j]) * eq_step_j
+                    };
 
                     Ok((residual, vars_in_equation))
                 })
@@ -768,6 +846,161 @@ fn indexed_symbol_matrix_symbols(n_steps: usize, values: &[Symbol]) -> Vec<Vec<S
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn indexed_symbol_matrix_names(n_steps: usize, values: &[String]) -> Vec<Vec<String>> {
+    (0..n_steps)
+        .map(|step| {
+            values
+                .iter()
+                .map(|name| format!("{name}_{step}"))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn build_residual_atom_expr_fallback(
+    eq_i: &Expr,
+    matrix_of_names: &[Vec<String>],
+    values: &[String],
+    eq_index: usize,
+    arg: &str,
+    j: usize,
+    t: f64,
+    h: f64,
+    scheme: &str,
+    vars_for_boundary_conditions: &HashMap<String, f64>,
+) -> Atom {
+    let eq_step_j = build_eq_step_expr(matrix_of_names, eq_i, values, arg, j, t, scheme);
+    let y_j_plus_1 = Expr::Var(matrix_of_names[j + 1][eq_index].clone());
+    let y_j = Expr::Var(matrix_of_names[j][eq_index].clone());
+    let residual = y_j_plus_1 - y_j - Expr::Const(h) * eq_step_j;
+    let residual = residual
+        .set_variable_from_map(vars_for_boundary_conditions)
+        .simplify();
+    expr_to_atom_no_norm(&residual)
+}
+
+fn build_eq_step_expr(
+    matrix_of_names: &[Vec<String>],
+    eq_i: &Expr,
+    values: &[String],
+    arg: &str,
+    j: usize,
+    t: f64,
+    scheme: &str,
+) -> Expr {
+    let rename_map: HashMap<String, String> = values
+        .iter()
+        .zip(matrix_of_names[j].iter())
+        .map(|(source, target)| (source.clone(), target.clone()))
+        .collect();
+    let eq_step_j = eq_i.rename_variables(&rename_map).set_variable(arg, t);
+
+    match scheme {
+        "forward" => eq_step_j,
+        "trapezoid" => {
+            let next_rename_map: HashMap<String, String> = values
+                .iter()
+                .zip(matrix_of_names[j + 1].iter())
+                .map(|(source, target)| (source.clone(), target.clone()))
+                .collect();
+            let eq_step_j_plus_1 = eq_i.rename_variables(&next_rename_map).set_variable(arg, t);
+            Expr::Const(0.5) * (eq_step_j + eq_step_j_plus_1)
+        }
+        _ => unreachable!("scheme was validated before endpoint fallback"),
+    }
+}
+
+/// Convert the exceptional endpoint expression without coefficient
+/// normalization.  Normal `Expr -> Atom` conversion is intentionally not used
+/// here because the endpoint may contain a symbolic reciprocal evaluated at
+/// zero; the legacy fallback preserves that structure for later handling.
+fn expr_to_atom_no_norm(expr: &Expr) -> Atom {
+    match expr {
+        Expr::Var(name) => Atom::new_var(Symbol::new(crate::wrap_symbol!(name.as_str()))),
+        Expr::Const(value) => atom_num_from_f64(*value),
+        Expr::Add(left, right) => {
+            let mut out = Atom::default();
+            let add = out.to_add();
+            let left = expr_to_atom_no_norm(left);
+            let right = expr_to_atom_no_norm(right);
+            add.extend(left.as_view());
+            add.extend(right.as_view());
+            out
+        }
+        Expr::Sub(left, right) => {
+            let mut out = Atom::default();
+            let add = out.to_add();
+            let left = expr_to_atom_no_norm(left);
+            let mut negative_right = Atom::default();
+            let mul = negative_right.to_mul();
+            let minus_one = Atom::new_num(-1);
+            let right = expr_to_atom_no_norm(right);
+            mul.extend(minus_one.as_view());
+            mul.extend(right.as_view());
+            add.extend(left.as_view());
+            add.extend(negative_right.as_view());
+            out
+        }
+        Expr::Mul(left, right) => {
+            let mut out = Atom::default();
+            let mul = out.to_mul();
+            let left = expr_to_atom_no_norm(left);
+            let right = expr_to_atom_no_norm(right);
+            mul.extend(left.as_view());
+            mul.extend(right.as_view());
+            out
+        }
+        Expr::Div(left, right) => {
+            let mut out = Atom::default();
+            let mul = out.to_mul();
+            let left = expr_to_atom_no_norm(left);
+            let right = expr_to_atom_no_norm(right);
+            let mut inverse_right = Atom::default();
+            inverse_right.to_pow(right.as_view(), Atom::new_num(-1).as_view());
+            mul.extend(left.as_view());
+            mul.extend(inverse_right.as_view());
+            out
+        }
+        Expr::Pow(base, exponent) => {
+            let mut out = Atom::default();
+            let base = expr_to_atom_no_norm(base);
+            let exponent = expr_to_atom_no_norm(exponent);
+            out.to_pow(base.as_view(), exponent.as_view());
+            out
+        }
+        Expr::Exp(value) => FunctionBuilder::new(Atom::EXP)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::Ln(value) => FunctionBuilder::new(Atom::LOG)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::sin(value) => FunctionBuilder::new(Atom::SIN)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::cos(value) => FunctionBuilder::new(Atom::COS)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::tg(value) => FunctionBuilder::new(Atom::TAN)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::ctg(value) => FunctionBuilder::new(Atom::COT)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::arcsin(value) => FunctionBuilder::new(Atom::ASIN)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::arccos(value) => FunctionBuilder::new(Atom::ACOS)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::arctg(value) => FunctionBuilder::new(Atom::ATAN)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+        Expr::arcctg(value) => FunctionBuilder::new(Atom::ACOT)
+            .add_arg(expr_to_atom_no_norm(value))
+            .finish(),
+    }
 }
 
 fn process_bounds_and_tolerances_atom(
@@ -1171,8 +1404,8 @@ mod tests {
             .zip(atom_native.vector_of_functions.iter())
         {
             assert_eq!(
-                atom_to_expr(compatibility_row).to_string(),
-                atom_to_expr(native_row).to_string()
+                atom_to_expr(compatibility_row).simplify().to_string(),
+                atom_to_expr(native_row).simplify().to_string()
             );
         }
         assert!(compatibility.telemetry.stages_fit_total());

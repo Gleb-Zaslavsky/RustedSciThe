@@ -187,6 +187,7 @@ impl Expr {
                     Box::new(move |args| match exponent {
                         0 => 1.0,
                         1 => bf(args),
+                        -1 => bf(args).recip(),
                         exponent => bf(args).powi(exponent),
                     })
                 } else {

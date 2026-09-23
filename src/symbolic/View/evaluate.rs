@@ -122,6 +122,23 @@ pub struct PreparedEvaluator {
     plain_numeric: bool,
 }
 
+/// Compile-time shape of the prepared Atom evaluator.
+///
+/// These counters are deliberately collected once, while the evaluator is
+/// being prepared. They are used to explain callback-cost differences between
+/// Expr-derived closures and Atom-derived closures; they never run on the
+/// numeric evaluation hot path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PreparedEvaluatorMetrics {
+    pub(crate) nodes: usize,
+    pub(crate) add_nodes: usize,
+    pub(crate) mul_nodes: usize,
+    pub(crate) powi_nodes: usize,
+    pub(crate) pow_nodes: usize,
+    pub(crate) builtin_nodes: usize,
+    pub(crate) custom_nodes: usize,
+}
+
 /// Reusable scratch storage for one prepared evaluation on one worker thread.
 ///
 /// `PreparedEvaluator::evaluate` remains allocation-safe and keeps its public
@@ -297,6 +314,26 @@ impl PreparedEvaluator {
         &self.vars
     }
 
+    /// Returns the immutable operation shape of this prepared evaluator.
+    pub(crate) fn metrics(&self) -> PreparedEvaluatorMetrics {
+        let mut metrics = PreparedEvaluatorMetrics {
+            nodes: self.nodes.len(),
+            ..PreparedEvaluatorMetrics::default()
+        };
+        for node in &self.nodes {
+            match node {
+                PreparedNode::Add(_) => metrics.add_nodes += 1,
+                PreparedNode::Mul(_) => metrics.mul_nodes += 1,
+                PreparedNode::PowI { .. } => metrics.powi_nodes += 1,
+                PreparedNode::Pow { .. } => metrics.pow_nodes += 1,
+                PreparedNode::Builtin { .. } => metrics.builtin_nodes += 1,
+                PreparedNode::Custom { .. } => metrics.custom_nodes += 1,
+                PreparedNode::Const(_) | PreparedNode::Var(_) => {}
+            }
+        }
+        metrics
+    }
+
     /// Evaluate the prepared plan using the function map captured at compile time.
     pub fn evaluate(&self, values: &[f64]) -> Result<f64, String> {
         self.evaluate_with_function_map(values, &self.function_map)
@@ -353,7 +390,9 @@ impl PreparedEvaluator {
                 PreparedNode::Var(var_index) => values[*var_index],
                 PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
                 PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
-                PreparedNode::PowI { base, exponent } => results[*base].powi(*exponent),
+                PreparedNode::PowI { base, exponent } => {
+                    evaluate_integer_power(results[*base], *exponent)
+                }
                 PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
                 PreparedNode::Builtin { symbol, arg } => {
                     evaluate_builtin_function(*symbol, results[*arg])?
@@ -404,7 +443,9 @@ impl PreparedEvaluator {
                 PreparedNode::Var(var_index) => values[*var_index],
                 PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
                 PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
-                PreparedNode::PowI { base, exponent } => results[*base].powi(*exponent),
+                PreparedNode::PowI { base, exponent } => {
+                    evaluate_integer_power(results[*base], *exponent)
+                }
                 PreparedNode::Pow { base, exp } => {
                     let base_eval = results[*base];
                     let exp_eval = results[*exp];
@@ -564,13 +605,20 @@ fn packed_integer_exponent(view: AtomView<'_>) -> Option<i32> {
     let CoefficientView::Natural(numerator, denominator) = num.get_coeff_view() else {
         return None;
     };
-    if denominator != 1
-        || numerator < i32::MIN as i64
-        || numerator > i32::MAX as i64
-    {
+    if denominator != 1 || numerator < i32::MIN as i64 || numerator > i32::MAX as i64 {
         return None;
     }
     Some(numerator as i32)
+}
+
+#[inline]
+fn evaluate_integer_power(base: f64, exponent: i32) -> f64 {
+    match exponent {
+        0 => 1.0,
+        1 => base,
+        -1 => base.recip(),
+        exponent => base.powi(exponent),
+    }
 }
 
 /// Evaluate an owned atom using variable bindings and custom functions.
@@ -1135,8 +1183,7 @@ mod test {
     use ahash::HashMap;
 
     use super::{
-        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols,
-        prepare_evaluator,
+        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator,
     };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
     use crate::{function, parse, symbol};

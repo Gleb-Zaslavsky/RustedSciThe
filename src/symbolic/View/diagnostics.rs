@@ -70,6 +70,36 @@ pub struct ExpressionMetrics {
 }
 
 impl ExpressionMetrics {
+    /// Return a stable, allocation-only fingerprint for structural reports.
+    ///
+    /// This is deliberately not used by evaluators. It makes the distinction
+    /// between an explicit `Div` and a negative `Pow` visible in story reports,
+    /// while sorted function names keep reports reproducible across runs.
+    pub fn operation_fingerprint(&self) -> String {
+        let mut functions: Vec<_> = self.function_kinds.iter().collect();
+        functions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let functions = functions
+            .into_iter()
+            .map(|(name, count)| format!("{name}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            "nodes={};unique={};repeated={};add={};mul={};sub={};div={};pow={};pow-1={};pow-frac={};functions=[{}]",
+            self.tree_nodes,
+            self.unique_subexpressions,
+            self.repeated_subexpressions,
+            self.operations.additions,
+            self.operations.multiplications,
+            self.operations.subtractions,
+            self.operations.divisions,
+            self.operations.powers,
+            self.power_integer_negative,
+            self.power_fractional,
+            functions,
+        )
+    }
+
     fn finish(&mut self, fingerprints: HashMap<String, usize>) {
         self.unique_subexpressions = fingerprints.len();
         self.repeated_subexpressions = self.tree_nodes.saturating_sub(self.unique_subexpressions);
@@ -298,5 +328,18 @@ mod tests {
 
         assert!(metrics.tree_nodes > metrics.unique_subexpressions);
         assert!(metrics.repeated_subexpressions > 0);
+    }
+
+    #[test]
+    fn operation_fingerprint_exposes_division_and_power_forms() {
+        let expr = Expr::parse_expression("exp(x) / (1+x)^0.5");
+        let metrics = inspect_exprs(std::slice::from_ref(&expr));
+        let fingerprint = metrics.operation_fingerprint();
+
+        assert!(fingerprint.contains("div=1"));
+        assert!(fingerprint.contains("pow-frac=1"));
+        assert!(fingerprint.contains("functions=[exp:1]"));
+        assert!(fingerprint.contains("nodes="));
+        assert!(fingerprint.contains("repeated="));
     }
 }

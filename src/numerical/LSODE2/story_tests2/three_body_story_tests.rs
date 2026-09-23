@@ -16,7 +16,7 @@ fn command_available(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn three_body_story_base_config() -> Lsode2ProblemConfig {
+pub(super) fn three_body_story_base_config() -> Lsode2ProblemConfig {
     let k = 39.47841760435743;
     let m0 = 1.0;
     let m1 = 0.5;

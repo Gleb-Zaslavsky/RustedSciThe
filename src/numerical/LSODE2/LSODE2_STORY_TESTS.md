@@ -517,6 +517,243 @@ Jacobian evaluation. This is still a small diagnostic fixture; the same shape
 metrics must be collected in the larger release baseline before generalizing
 the conclusion.
 
+### Scalar callback isolation: debug capture at 14:36 local time (`11:36 UTC`)
+
+The regression gate was extended to evaluate the same seven nonzero scalar
+Jacobian expressions with the same flattened arguments, while excluding
+Sparse/Banded output construction, triplets, band slots, and matrix allocation.
+The report is:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story.md
+```
+
+```text
+route                 | nonzero | scalar_eval_ns/call | max_diff_vs_historical
+--------------------------------------------------------------------------------
+historical-AtomView   |       7 |             420.820 |                0.000e0
+ExprLegacy            |       7 |             335.160 |              7.105e-14
+AtomViewExprCompat    |       7 |             427.175 |                0.000e0
+```
+
+This confirms that the remaining Jacobian gap is already present in the
+scalar Expr closures: `AtomViewExprCompat` is about 24% slower than
+`ExprLegacy` in this debug capture and is close to the historical AtomView
+route. The full Sparse/Banded callback includes argument binding and output
+assembly, so those layers reduce or amplify the visible gap depending on the
+matrix route. This is a localization result, not a release performance
+baseline; it must be repeated in release with several independent process
+runs before selecting an optimization.
+
+### Release scalar isolation recorded on 2026-09-23 at 14:53 local time
+
+The same fixture was rerun in `--release` with telemetry disabled:
+
+```text
+route                 | scalar_eval_ns/call | max_diff_vs_historical
+-------------------------------------------------------------------
+historical-AtomView   |             163.390 |                0.000e0
+ExprLegacy            |             173.755 |              7.105e-14
+AtomViewExprCompat    |             186.090 |                0.000e0
+
+matrix | route                 | residual_ns/call | jacobian_ns/call
+-------------------------------------------------------------------
+Sparse | historical-AtomView   |          160.665 |          246.600
+Sparse | ExprLegacy            |          136.070 |          242.330
+Sparse | AtomViewExprCompat    |          135.330 |          240.290
+Banded | historical-AtomView   |          156.790 |          249.250
+Banded | ExprLegacy            |          133.440 |          247.565
+Banded | AtomViewExprCompat    |          134.035 |          244.235
+```
+
+On this release capture, the isolated Compat scalar callback is only about
+`7%` slower than `ExprLegacy`, while the complete Sparse/Banded callbacks are
+slightly faster than ExprLegacy and numerically identical. This does not
+invalidate the tree-shape hypothesis, but it shows that the small fixture and
+the optimized closure path do not produce a stable large regression. The
+reported `repetitions=20` controls the warm callback count, not twenty
+independent process samples; therefore this is a release baseline capture,
+not yet a final performance claim. The next comparison must use fresh
+processes and several samples on larger LSODE2 systems.
+
+### Low-level scalar shape corpus moved to `symbolic::View` on 2026-09-23
+
+The former four-expression scalar Jacobian corpus was not an LSODE2 solver
+story: it excluded matrix assembly, integration and linear solves. Its test is
+now owned by `symbolic::View` and compares `ExprLegacy`, `AtomViewExprCompat`
+and `AtomNative` at the shared lowering boundary.
+
+The historical rows and operation fingerprints are preserved in:
+
+```text
+src/symbolic/View/STORY_TESTS.md
+test_reports/Symbolic_View/historical__lsode2_atomview_exprcompat_scalar_expression_shape_corpus_story.md
+```
+
+LSODE2 retains the production-sized three-body and diffusion-chain stories
+below. Those stories still own the real fixtures and remain the required
+integration check after every View change.
+
+### Real combustion-like Jacobian fingerprint recorded on 2026-09-23 at 17:40 local time
+
+The same structural comparison was applied to the seven-nonzero Jacobian of
+the combustion-like LSODE2 fixture. Sparse and Banded produce the same
+symbolic shape, as expected; matrix storage is not part of this diagnostic.
+
+```text
+matrix | route                 | nodes | unique | repeated | div | pow | pow-1 | pow-frac | functions
+------------------------------------------------------------------------------------------------------
+Sparse | historical-AtomView   |   151 |     50 |      101 |   0 |  21 |    18 |        0 | exp:6
+Sparse | ExprLegacy            |   127 |     45 |       82 |   9 |   9 |     3 |        0 | exp:6
+Sparse | AtomViewExprCompat    |   151 |     50 |      101 |   0 |  21 |    18 |        0 | exp:6
+Banded | historical-AtomView   |   151 |     50 |      101 |   0 |  21 |    18 |        0 | exp:6
+Banded | ExprLegacy            |   127 |     45 |       82 |   9 |   9 |     3 |        0 | exp:6
+Banded | AtomViewExprCompat    |   151 |     50 |      101 |   0 |  21 |    18 |        0 | exp:6
+```
+
+This is the first real-fixture confirmation that the extra AtomView closure
+work is structural rather than a Sparse/Banded assembly artefact. The debug
+run retained zero residual/Jacobian drift for both matrix routes. It does not
+yet prove that every extra operation costs proportionally more: that requires
+the operation-level reduction and evaluator comparison on the larger LSODE2
+fixtures.
+
+### Larger real Jacobian shape capture recorded on 2026-09-23 at 17:49 local time (`14:49 UTC`)
+
+The structural diagnostic was extended to two real LSODE2 workloads: the
+nonlinear three-body fixture and a 128-variable diffusion chain. It deliberately
+excludes matrix assembly and timing; the purpose is to compare the generated
+nonzero scalar expressions and verify value parity before any release
+benchmark is selected.
+
+```text
+workload       | route                 | nonzero | nodes | unique | repeated | depth | div | pow | pow-frac | max_diff
+---------------------------------------------------------------------------------------------------------------------
+three-body     | historical-AtomView   |      42 |  1570 |    207 |     1363 |    11 |   0 | 228 |       72 | 0.000e0
+three-body     | ExprLegacy            |      42 |  1906 |    244 |     1662 |    13 |  24 | 300 |       72 | 1.563e-12
+three-body     | AtomViewExprCompat    |      42 |  1570 |    207 |     1363 |    11 |   0 | 228 |       72 | 0.000e0
+diffusion-chain| historical-AtomView   |     382 |   382 |     14 |      368 |     1 |   0 |   0 |        0 | 0.000e0
+diffusion-chain| ExprLegacy            |     382 |   382 |     14 |      368 |     1 |   0 |   0 |        0 | 0.000e0
+diffusion-chain| AtomViewExprCompat    |     382 |   382 |     14 |      368 |     1 |   0 |   0 |        0 | 0.000e0
+```
+
+The full report is stored at:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_atomview_exprcompat_large_real_jacobian_shape_story.md
+```
+
+This result rules out a simple explanation that AtomView is slower because it
+always emits more nodes: on `three-body`, `ExprLegacy` emits the larger tree,
+while Compat exactly matches the historical AtomView shape; on the diffusion
+chain all routes are identical. The remaining investigation must therefore
+measure operation form and closure lowering, especially explicit division
+versus negative powers, repeated subexpressions, and function evaluation. The
+test is debug-only and establishes structural/correctness evidence, not a
+release timing baseline.
+
+### Real closure lowering cost capture recorded on 2026-09-23 at 18:10 local time (`15:10 UTC`)
+
+The next debug-only pass measured the same scalar nonzero Jacobian closures
+after symbolic preparation. Matrix assembly, sparse/band output, telemetry,
+and solver control were excluded. `closure_compile_ms` is Expr closure
+construction; `scalar_eval_ns/call` is repeated evaluation of all nonzero
+scalar entries for one fixed argument vector.
+
+```text
+workload       | route                 | nonzero | nodes | div | pow | pow-frac | symbolic_prepare_ms | closure_compile_ms | scalar_eval_ns/call | max_diff
+-----------------------------------------------------------------------------------------------------------------------------------------------
+three-body     | historical-AtomView   |      42 |  1570 |   0 | 228 |       72 |               5.601 |              0.101 |            4915.800 | 0.000e0
+three-body     | ExprLegacy            |      42 |  1906 |  24 | 300 |       72 |               5.336 |              0.068 |            6179.900 | 1.563e-12
+three-body     | AtomViewExprCompat    |      42 |  1570 |   0 | 228 |       72 |               3.879 |              0.064 |            5109.400 | 0.000e0
+diffusion-chain| historical-AtomView   |     382 |   382 |   0 |   0 |        0 |              25.061 |              0.123 |            2779.600 | 0.000e0
+diffusion-chain| ExprLegacy            |     382 |   382 |   0 |   0 |        0 |               3.459 |              0.129 |            2707.250 | 0.000e0
+diffusion-chain| AtomViewExprCompat    |     382 |   382 |   0 |   0 |        0 |              21.429 |              0.114 |            3342.050 | 0.000e0
+```
+
+The complete report is stored at:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_atomview_exprcompat_real_closure_lowering_cost_story.md
+```
+
+This debug capture supports two conclusions. On `three-body`, Compat matches
+historical AtomView structurally and is faster than ExprLegacy in scalar
+evaluation despite the latter's larger tree. On the diffusion chain, all
+routes have the same shape and closure-construction time, with only a small
+evaluation difference, although Compat was slower in this sample. The
+unexpectedly higher diffusion symbolic preparation time for the Atom-derived
+routes is a separate preparation-path signal, not a closure-evaluation
+explanation. No release conclusion should be drawn from these debug
+milliseconds; the next step is a controlled operation micro-corpus and then a
+multi-process release measurement of the selected real entries.
+
+### Controlled operation lowering micro-corpus moved to View on 2026-09-23
+
+The low-level 22-form corpus now belongs to `symbolic::View`. LSODE2 remains
+the source of real production-sized Jacobian fixtures, while the View test
+owns operation-form attribution and Expr/Atom-roundtrip parity. It uses fixed
+`x=1.3`, `y=0.7`, and `p=2.0` arguments, keeps matrix assembly outside the
+measurement, and requires numerical parity for every form. The current report
+is:
+
+```text
+test_reports/Symbolic_View/symbolic__View__operation_lowering_micro_corpus_preserves_values_and_reports_shape.md
+```
+
+```text
+case                     | Expr eval ns | Atom->Expr eval ns | Expr nodes | Atom nodes | structural observation
+---------------------------------------------------------------------------------------------------------------
+subtraction              |       18.430 |             23.030 |          3 |          5 | unary-minus normalization differs
+subtraction-chain        |       27.890 |             22.560 |          7 |          5 | Atom form is shorter
+explicit-division        |       25.480 |             29.010 |          7 |          9 | `Div` becomes `Pow(-1)`
+division-by-expression    |       36.390 |             33.495 |          7 |          9 | reciprocal form is faster here
+negative-power-minus-two |       31.510 |             31.265 |          5 |          5 | equivalent power shape
+power-half               |       32.180 |             35.950 |          5 |          7 | fractional power becomes reciprocal form
+nested-power              |       54.260 |             18.880 |          7 |          3 | simplification changed the tree
+function-log-cos          |       60.690 |             87.500 |         12 |         14 | nested function form grows
+repeated-function         |       43.185 |             53.775 |         11 |          9 | node count falls, evaluator still slower
+rational-coefficient      |       40.125 |             41.020 |         13 |         15 | rational constants stay close
+nary-add-shape            |       29.945 |             26.080 |          9 |          7 | Atom n-ary shape is shorter
+repeated-subexpression    |       80.330 |             69.165 |         17 |         13 | repeated tree is reduced
+```
+
+The last LSODE2-owned run was replaced by the View-owned run; its controlled
+result is mixed rather than a blanket Atom regression. The
+full corpus includes subtraction chains, unary and negative coefficients,
+explicit and implicit division, `Pow(-1)`, `Pow(-2)`, `Pow(2/3)`, `Pow(0.5)`,
+integer/nested/variable powers, `exp`/`log`/`sin`/`cos`, rational and extreme
+coefficients, parameter lookup, n-ary `Add`/`Mul`, and repeated
+subexpressions. Explicit division and nested functions are credible lowering
+candidates; subtraction chains, n-ary forms, and repeated subexpressions can
+improve. The nested-power row is a domain-sensitive simplification and must
+not be generalized without additional signed-domain tests. All 22 pairs were
+numerically identical at the tested state. These are structural diagnostics,
+not release timings; they identify operation forms for the next View-level
+tests before any production rewrite.
+
+### Real Jacobian three-boundary release story (test scaffold added 2026-09-23)
+
+The new integration test uses the real three-body and 128-variable
+diffusion-chain Jacobians as production-sized inputs. It compares the same
+nonzero entries through `ExprLegacy`, `AtomViewExprCompat` (`Expr -> Atom ->
+Expr`) and direct `AtomNative` `PreparedEvaluator` closures.
+
+The report separates symbolic preparation, Atom conversion, closure
+construction and repeated scalar callback evaluation. Matrix assembly, output
+scatter and linear solves are excluded. Both compatibility and native values
+are checked componentwise against ExprLegacy before timings are accepted.
+
+Command:
+
+```powershell
+cargo test --release --lib --no-default-features numerical::LSODE2::story_tests2::lsode2_view_three_boundary_real_jacobian_release_story -- --ignored --nocapture --test-threads=1
+```
+
+This is a bridge between View-level operation attribution and real solver
+fixtures, not a replacement for the existing solver-level stories. Its first
+release result should be dated and compared with the closure-lowering baseline.
+
 ## Prepare-vs-Solve Stage Breakdown
 
 ### Debug verification recorded on 2026-09-23 at 00:40 local time (`21:40 UTC`)

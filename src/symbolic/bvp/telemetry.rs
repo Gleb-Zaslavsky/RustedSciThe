@@ -87,6 +87,14 @@ struct Inner {
     diagonal_dispatches: AtomicU64,
     entry_dispatches: AtomicU64,
     effective_task_count: AtomicU64,
+    prepared_atom_evaluators: AtomicU64,
+    prepared_atom_nodes: AtomicU64,
+    prepared_atom_add_nodes: AtomicU64,
+    prepared_atom_mul_nodes: AtomicU64,
+    prepared_atom_powi_nodes: AtomicU64,
+    prepared_atom_pow_nodes: AtomicU64,
+    prepared_atom_builtin_nodes: AtomicU64,
+    prepared_atom_custom_nodes: AtomicU64,
 }
 
 /// Shared recording handle attached to a direct BVP Jacobian callback.
@@ -144,6 +152,17 @@ pub struct BvpDirectJacobianTelemetrySnapshot {
     /// layout contains a single diagonal. It makes Auto decisions auditable
     /// instead of reporting only the selected branch.
     pub effective_task_count: u64,
+    /// Number of scalar Atom callbacks compiled into the prepared plan.
+    /// Zero means that this route is ExprLegacy or does not expose Atom IR.
+    pub prepared_atom_evaluators: u64,
+    /// Total prepared Atom IR node count across scalar callbacks.
+    pub prepared_atom_nodes: u64,
+    pub prepared_atom_add_nodes: u64,
+    pub prepared_atom_mul_nodes: u64,
+    pub prepared_atom_powi_nodes: u64,
+    pub prepared_atom_pow_nodes: u64,
+    pub prepared_atom_builtin_nodes: u64,
+    pub prepared_atom_custom_nodes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -630,6 +649,52 @@ impl BvpDirectJacobianTelemetry {
             .fetch_add(effective_task_count as u64, Ordering::Relaxed);
     }
 
+    /// Records the compile-time Atom IR shape once per prepared callback plan.
+    ///
+    /// This is intentionally separate from callback counters: repeated
+    /// Jacobian requests must not multiply structural metrics, and disabled
+    /// telemetry returns before touching any atomic field.
+    #[inline]
+    pub fn record_prepared_atom_metrics(
+        &self,
+        evaluators: usize,
+        nodes: usize,
+        add_nodes: usize,
+        mul_nodes: usize,
+        powi_nodes: usize,
+        pow_nodes: usize,
+        builtin_nodes: usize,
+        custom_nodes: usize,
+    ) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        inner
+            .prepared_atom_evaluators
+            .fetch_add(evaluators as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_nodes
+            .fetch_add(nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_add_nodes
+            .fetch_add(add_nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_mul_nodes
+            .fetch_add(mul_nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_powi_nodes
+            .fetch_add(powi_nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_pow_nodes
+            .fetch_add(pow_nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_builtin_nodes
+            .fetch_add(builtin_nodes as u64, Ordering::Relaxed);
+        inner
+            .prepared_atom_custom_nodes
+            .fetch_add(custom_nodes as u64, Ordering::Relaxed);
+    }
+
     /// Returns a consistent-enough lock-free snapshot for diagnostics.
     pub fn snapshot(&self) -> BvpDirectJacobianTelemetrySnapshot {
         let Some(inner) = &self.inner else {
@@ -657,6 +722,14 @@ impl BvpDirectJacobianTelemetry {
             diagonal_dispatches: inner.diagonal_dispatches.load(Ordering::Relaxed),
             entry_dispatches: inner.entry_dispatches.load(Ordering::Relaxed),
             effective_task_count: inner.effective_task_count.load(Ordering::Relaxed),
+            prepared_atom_evaluators: inner.prepared_atom_evaluators.load(Ordering::Relaxed),
+            prepared_atom_nodes: inner.prepared_atom_nodes.load(Ordering::Relaxed),
+            prepared_atom_add_nodes: inner.prepared_atom_add_nodes.load(Ordering::Relaxed),
+            prepared_atom_mul_nodes: inner.prepared_atom_mul_nodes.load(Ordering::Relaxed),
+            prepared_atom_powi_nodes: inner.prepared_atom_powi_nodes.load(Ordering::Relaxed),
+            prepared_atom_pow_nodes: inner.prepared_atom_pow_nodes.load(Ordering::Relaxed),
+            prepared_atom_builtin_nodes: inner.prepared_atom_builtin_nodes.load(Ordering::Relaxed),
+            prepared_atom_custom_nodes: inner.prepared_atom_custom_nodes.load(Ordering::Relaxed),
         }
     }
 }
@@ -764,6 +837,26 @@ mod tests {
         assert_eq!(snapshot.elapsed, Duration::ZERO);
         assert_eq!(snapshot.evaluator_elapsed, Duration::ZERO);
         assert_eq!(snapshot.assembly_alloc_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn direct_jacobian_telemetry_keeps_prepared_atom_shape_separate_from_calls() {
+        let telemetry = BvpDirectJacobianTelemetry::counters();
+        telemetry.record_prepared_atom_metrics(2, 10, 3, 4, 1, 1, 1, 0);
+        telemetry.record_call(Duration::ZERO, 2);
+        telemetry.record_call(Duration::ZERO, 2);
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.calls, 2);
+        assert_eq!(snapshot.evaluator_calls, 0);
+        assert_eq!(snapshot.prepared_atom_evaluators, 2);
+        assert_eq!(snapshot.prepared_atom_nodes, 10);
+        assert_eq!(snapshot.prepared_atom_add_nodes, 3);
+        assert_eq!(snapshot.prepared_atom_mul_nodes, 4);
+        assert_eq!(snapshot.prepared_atom_powi_nodes, 1);
+        assert_eq!(snapshot.prepared_atom_pow_nodes, 1);
+        assert_eq!(snapshot.prepared_atom_builtin_nodes, 1);
+        assert_eq!(snapshot.prepared_atom_custom_nodes, 0);
     }
 
     #[test]
