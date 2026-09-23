@@ -12,6 +12,7 @@
 //! creating an owned prepared snapshot; remaining native Banded Atom work is
 //! tracked in BVP_Damp's TODO.
 
+pub(crate) mod aot_adapters;
 pub(crate) mod aot_telemetry;
 pub(crate) mod atom_aot;
 pub(crate) mod atom_lambdify;

@@ -55,6 +55,21 @@ mod stiff_parity_tests;
 #[cfg(test)]
 mod story_tests2;
 
+#[cfg(test)]
+mod lambdify_stress_story_tests;
+
+#[cfg(test)]
+mod legacy_atomview_lambdify;
+
+pub use crate::symbolic::ivp_telemetry::{
+    IvpColdStage, IvpLambdifyExecutionPolicy, IvpStageTiming, IvpTelemetry, IvpTelemetryExecution,
+    IvpTelemetryMatrixBackend, IvpTelemetryMode, IvpTelemetryRoute, IvpTelemetrySnapshot,
+    IvpWarmStage,
+};
+pub use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, IvpTryDenseJacobianEval, IvpTryResidualEval,
+};
+
 pub use adams_engine::{
     Lsode2AdamsDcfodeError, Lsode2AdamsDcfodeTables, Lsode2AdamsOrderCoefficients,
 };

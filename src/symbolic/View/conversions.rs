@@ -102,11 +102,24 @@ fn bounded_f64_to_ratio(value: f64, max_denominator: i64) -> Option<(i64, i64)> 
 }
 
 fn decimal_f64_to_ratio(value: f64) -> Option<(i64, i64)> {
+    decimal_f64_to_ratio_with_precision(value, 15)
+        .or_else(|| decimal_f64_to_ratio_with_precision(value, 12))
+        .or_else(|| decimal_f64_to_ratio_with_precision(value, 9))
+        .or_else(|| decimal_f64_to_ratio_with_precision(value, 6))
+}
+
+fn decimal_f64_to_ratio_with_precision(value: f64, precision: usize) -> Option<(i64, i64)> {
     if !value.is_finite() {
         return None;
     }
 
-    let formatted = format!("{value:.6e}");
+    // Mesh coordinates and endpoint parameters commonly carry more than six
+    // significant digits.  The old fixed `.6e` fallback changed those values
+    // before Atom lambdification, which can amplify into a visible Jacobian
+    // drift for terms such as `1/x`.  Try the highest useful precision first,
+    // then fall back when the integer ratio no longer fits the compact
+    // coefficient representation.
+    let formatted = format!("{value:.precision$e}");
     let (mantissa, exponent) = formatted.split_once('e')?;
     let exponent = exponent.parse::<i32>().ok()?;
     let negative = mantissa.starts_with('-');
@@ -292,6 +305,24 @@ mod tests {
         assert_eq!(
             atom_to_expr(&atom),
             Expr::Div(Box::new(Expr::Const(1.0)), Box::new(Expr::Const(3.0)))
+        );
+    }
+
+    #[test]
+    fn f64_mesh_coordinate_keeps_sub_micro_precision() {
+        let coordinate = 1.0e-6 + (1.0 - 1.0e-6) / 48.0;
+        let recovered = match atom_to_expr(&approximate_f64_atom(coordinate)) {
+            Expr::Const(value) => value,
+            Expr::Div(numerator, denominator) => match (*numerator, *denominator) {
+                (Expr::Const(numerator), Expr::Const(denominator)) => numerator / denominator,
+                other => panic!("unexpected coordinate representation: {other:?}"),
+            },
+            other => panic!("unexpected coordinate representation: {other:?}"),
+        };
+
+        assert!(
+            (recovered - coordinate).abs() <= 1.0e-14,
+            "mesh coordinate lost precision: source={coordinate:.17e}, recovered={recovered:.17e}"
         );
     }
 

@@ -12,6 +12,7 @@ use crate::symbolic::View::atom::Atom;
 use crate::symbolic::View::bvp::DiscretizedBvpAtomSystem;
 use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianEntry};
 use crate::symbolic::View::state::Symbol;
+use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode;
 use crate::symbolic::bvp::atom_aot::{AtomAotMatrixLayout, AtomAotPlanError, AtomAotPreparedPlan};
 use crate::symbolic::codegen::CodegenIR::{
     AtomGeneratedBlockBreakdown, AtomOptimizationProfile, AtomTempReusePolicy, CodegenModule,
@@ -42,6 +43,13 @@ pub struct PreparedSparseAtomBvpCodegen {
     pub jacobian_strategy: SparseChunkingStrategy,
     residual_chunks: Vec<(usize, usize)>,
     sparse_chunks: Vec<(usize, usize)>,
+    /// Prepacked full compact band values for the opt-in native ABI.
+    ///
+    /// Keeping these atoms on the prepared object makes boundary zero slots a
+    /// cold-path cost. Warm callback generation never recreates maps or
+    /// materializes an `Expr` representation.
+    banded_compact_values: Option<Vec<Atom>>,
+    aot_telemetry_mode: BvpAotTelemetryMode,
 }
 
 /// Fine-grained preparation breakdown for atom-native sparse BVP codegen.
@@ -87,11 +95,11 @@ impl PreparedSparseAtomBvpCodegen {
             let in_band = entry.row.saturating_add(ku) >= entry.col
                 && entry.col.saturating_add(kl) >= entry.row;
             if !in_band {
-                return Err(AtomAotPlanError::InvalidJacobianCoordinate {
+                return Err(AtomAotPlanError::JacobianEntryOutsideBand {
                     row: entry.row,
                     col: entry.col,
-                    rows,
-                    cols,
+                    kl,
+                    ku,
                 });
             }
         }
@@ -102,6 +110,58 @@ impl PreparedSparseAtomBvpCodegen {
             ku,
             slots: self.sparse_entries.len(),
         };
+        Ok(self)
+    }
+
+    /// Enables the native full-slot compact Banded callback ABI.
+    ///
+    /// The first production-safe integration is deliberately restricted to a
+    /// whole Jacobian block. Chunked callbacks have a different outer routing
+    /// contract and are kept on the explicit-entry ABI until that routing is
+    /// migrated and covered by its own parity tests.
+    pub fn with_native_banded_layout(
+        mut self,
+        kl: usize,
+        ku: usize,
+    ) -> Result<Self, AtomAotPlanError> {
+        let (rows, cols) = self.shape;
+        if self.sparse_chunks.len() != 1 {
+            return Err(AtomAotPlanError::MatrixLayoutMismatch {
+                expected: "whole Jacobian chunking for native Banded compact layout",
+            });
+        }
+        let slot_map =
+            crate::symbolic::bvp::atom_aot::AtomAotBandedSlotMap::new(rows, cols, kl, ku)?;
+        let mut values = (0..slot_map.storage_len())
+            .map(|_| Atom::new_num(0i64))
+            .collect::<Vec<_>>();
+        let mut occupied = vec![false; values.len()];
+        for entry in &self.sparse_entries {
+            let storage_index = slot_map.storage_index(entry.row, entry.col).ok_or(
+                AtomAotPlanError::JacobianEntryOutsideBand {
+                    row: entry.row,
+                    col: entry.col,
+                    kl,
+                    ku,
+                },
+            )?;
+            if occupied[storage_index] {
+                return Err(AtomAotPlanError::DuplicateJacobianCoordinate {
+                    row: entry.row,
+                    col: entry.col,
+                });
+            }
+            occupied[storage_index] = true;
+            values[storage_index] = entry.value.clone();
+        }
+        self.matrix_layout = AtomAotMatrixLayout::BandedCompact {
+            rows,
+            cols,
+            kl,
+            ku,
+            slots: slot_map.storage_len(),
+        };
+        self.banded_compact_values = Some(values);
         Ok(self)
     }
 
@@ -123,6 +183,19 @@ impl PreparedSparseAtomBvpCodegen {
                 ku,
                 slots,
             },
+            AtomAotMatrixLayout::BandedCompact {
+                rows,
+                cols,
+                kl,
+                ku,
+                slots,
+            } => CodegenOutputLayout::BandedCompactValues {
+                rows,
+                cols,
+                kl,
+                ku,
+                slots,
+            },
         }
     }
 
@@ -132,7 +205,30 @@ impl PreparedSparseAtomBvpCodegen {
     /// Emitters can validate the symbolic payload and output layout before
     /// selecting a compiler-specific artifact path.
     pub fn prepared_aot_plan(&self) -> Result<AtomAotPreparedPlan, AtomAotPlanError> {
-        AtomAotPreparedPlan::from_parts(
+        self.prepared_aot_plan_with_telemetry(self.aot_telemetry_mode)
+    }
+
+    /// Sets the typed telemetry policy carried by future AOT prepared plans.
+    ///
+    /// The policy is metadata on the prepared route. It does not add any
+    /// work to Atom lowering and `Off` keeps the plan free of an `Arc` state
+    /// allocation.
+    pub fn with_aot_telemetry_mode(mut self, mode: BvpAotTelemetryMode) -> Self {
+        self.aot_telemetry_mode = mode;
+        self
+    }
+
+    /// Returns the telemetry policy captured by this codegen payload.
+    pub const fn aot_telemetry_mode(&self) -> BvpAotTelemetryMode {
+        self.aot_telemetry_mode
+    }
+
+    /// Builds a prepared Atom AOT plan with an explicit telemetry policy.
+    pub fn prepared_aot_plan_with_telemetry(
+        &self,
+        mode: BvpAotTelemetryMode,
+    ) -> Result<AtomAotPreparedPlan, AtomAotPlanError> {
+        AtomAotPreparedPlan::from_parts_with_telemetry(
             self.residuals.clone(),
             self.sparse_entries.clone(),
             self.input_names.clone(),
@@ -141,6 +237,7 @@ impl PreparedSparseAtomBvpCodegen {
             self.matrix_layout,
             self.residual_strategy,
             self.jacobian_strategy,
+            mode,
         )
     }
 
@@ -150,6 +247,18 @@ impl PreparedSparseAtomBvpCodegen {
         matrix_backend: MatrixBackend,
     ) -> Result<PreparedProblemManifest, AtomAotPlanError> {
         let plan = self.prepared_aot_plan()?;
+        self.prepared_aot_manifest_from_plan(matrix_backend, &plan)
+    }
+
+    /// Creates a manifest from an already validated owned plan.
+    ///
+    /// Route adapters use this entrypoint so manifest construction does not
+    /// repeat Atom validation or create a second telemetry stream.
+    pub fn prepared_aot_manifest_from_plan(
+        &self,
+        matrix_backend: MatrixBackend,
+        plan: &AtomAotPreparedPlan,
+    ) -> Result<PreparedProblemManifest, AtomAotPlanError> {
         let residual_chunk_names = self
             .residual_chunks
             .iter()
@@ -164,20 +273,30 @@ impl PreparedSparseAtomBvpCodegen {
                 len: end - start,
             })
             .collect::<Vec<_>>();
-        let jacobian_chunk_names = self
-            .sparse_chunks
-            .iter()
-            .enumerate()
-            .map(|(index, &(start, end))| GeneratedChunkManifest {
-                fn_name: if self.sparse_chunks.len() == 1 {
-                    self.jacobian_fn_name.clone()
-                } else {
-                    format!("{}_chunk_{index}", self.jacobian_fn_name)
-                },
-                offset: start,
-                len: end - start,
-            })
-            .collect::<Vec<_>>();
+        let jacobian_chunk_names = if matches!(
+            plan.matrix_layout(),
+            AtomAotMatrixLayout::BandedCompact { .. }
+        ) {
+            vec![GeneratedChunkManifest {
+                fn_name: self.jacobian_fn_name.clone(),
+                offset: 0,
+                len: plan.matrix_layout().value_count(),
+            }]
+        } else {
+            self.sparse_chunks
+                .iter()
+                .enumerate()
+                .map(|(index, &(start, end))| GeneratedChunkManifest {
+                    fn_name: if self.sparse_chunks.len() == 1 {
+                        self.jacobian_fn_name.clone()
+                    } else {
+                        format!("{}_chunk_{index}", self.jacobian_fn_name)
+                    },
+                    offset: start,
+                    len: end - start,
+                })
+                .collect::<Vec<_>>()
+        };
         Ok(PreparedProblemManifest::from_atom_aot_plan(
             crate::symbolic::codegen::codegen_provider_api::BackendKind::Aot,
             matrix_backend,
@@ -286,36 +405,55 @@ impl PreparedSparseAtomBvpCodegen {
             breakdown.residual_push_ms += push_begin.elapsed().as_secs_f64() * 1_000.0;
         }
 
-        let sparse_blocks = self
-            .sparse_chunks
-            .par_iter()
-            .enumerate()
-            .map(|(chunk_index, &(start, end))| {
-                let entries = &self.sparse_entries[start..end];
-                let fn_name = if self.sparse_chunks.len() == 1 {
-                    self.jacobian_fn_name.clone()
-                } else {
-                    format!("{}_chunk_{chunk_index}", self.jacobian_fn_name)
-                };
-                let collect_begin = std::time::Instant::now();
-                let views = entries
-                    .iter()
-                    .map(|entry| entry.value.as_view())
-                    .collect::<Vec<_>>();
-                let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
-                let (block, atom_breakdown) =
-                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
-                        fn_name,
-                        &views,
-                        &self.input_names,
-                        &self.input_symbols,
-                        Some(self.jacobian_codegen_layout(entries.len())),
-                        optimization_profile,
-                        reuse_policy,
-                    );
-                (block, sparse_view_collect_ms, atom_breakdown)
-            })
-            .collect::<Vec<_>>();
+        let sparse_blocks = if let Some(compact_values) = &self.banded_compact_values {
+            let collect_begin = std::time::Instant::now();
+            let views = compact_values
+                .iter()
+                .map(|atom| atom.as_view())
+                .collect::<Vec<_>>();
+            let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
+            let (block, atom_breakdown) =
+                GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
+                    self.jacobian_fn_name.clone(),
+                    &views,
+                    &self.input_names,
+                    &self.input_symbols,
+                    Some(self.jacobian_codegen_layout(views.len())),
+                    optimization_profile,
+                    reuse_policy,
+                );
+            vec![(block, sparse_view_collect_ms, atom_breakdown)]
+        } else {
+            self.sparse_chunks
+                .par_iter()
+                .enumerate()
+                .map(|(chunk_index, &(start, end))| {
+                    let entries = &self.sparse_entries[start..end];
+                    let fn_name = if self.sparse_chunks.len() == 1 {
+                        self.jacobian_fn_name.clone()
+                    } else {
+                        format!("{}_chunk_{chunk_index}", self.jacobian_fn_name)
+                    };
+                    let collect_begin = std::time::Instant::now();
+                    let views = entries
+                        .iter()
+                        .map(|entry| entry.value.as_view())
+                        .collect::<Vec<_>>();
+                    let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
+                    let (block, atom_breakdown) =
+                        GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
+                            fn_name,
+                            &views,
+                            &self.input_names,
+                            &self.input_symbols,
+                            Some(self.jacobian_codegen_layout(entries.len())),
+                            optimization_profile,
+                            reuse_policy,
+                        );
+                    (block, sparse_view_collect_ms, atom_breakdown)
+                })
+                .collect::<Vec<_>>()
+        };
         for (block, view_collect_ms, atom_breakdown) in sparse_blocks {
             breakdown.sparse_view_collect_ms += view_collect_ms;
             accumulate_block_breakdown(&mut breakdown, &atom_breakdown, false);
@@ -428,6 +566,8 @@ pub fn prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown(
         jacobian_strategy,
         residual_chunks,
         sparse_chunks,
+        banded_compact_values: None,
+        aot_telemetry_mode: BvpAotTelemetryMode::Off,
     };
     let finalize_codegen_plan_ms = finalize_begin.elapsed().as_secs_f64() * 1_000.0;
 
@@ -517,6 +657,7 @@ fn chunk_sparse_ranges_indices(
 mod tests {
     use super::*;
     use crate::symbolic::View::bvp::discretization_system_bvp_par_atom;
+    use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode;
     use crate::symbolic::symbolic_engine::Expr;
     use std::collections::HashMap;
 
@@ -609,6 +750,132 @@ mod tests {
             manifest.io.jacobian_nnz,
             Some(prepared.sparse_entries.len())
         );
+        assert_eq!(
+            manifest.io.jacobian_layout,
+            Some(
+                crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout::BandedExplicit
+            )
+        );
         assert!(manifest.expression_signature != 0);
+
+        // All language emitters consume this same already-lowered Atom plan.
+        // The source syntax differs, but function names and the callback ABI
+        // must not silently diverge when the matrix layout is Banded.
+        for language in [
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::Rust,
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::C,
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::Zig,
+        ] {
+            let source = prepared
+                .clone()
+                .codegen_module("generated_atom_bvp")
+                .with_language(language)
+                .emit_source();
+            assert!(!source.is_empty());
+            assert!(
+                source.contains("eval_residual"),
+                "{language:?} emitter lost the residual callback name"
+            );
+            assert!(
+                source.contains("eval_banded_values"),
+                "{language:?} emitter lost the Banded callback name"
+            );
+        }
+
+        let off_plan = prepared
+            .prepared_aot_plan()
+            .expect("default AtomView AOT plan should validate");
+        assert_eq!(off_plan.telemetry_snapshot().mode, BvpAotTelemetryMode::Off);
+        assert_eq!(
+            off_plan.telemetry_snapshot().validation,
+            std::time::Duration::ZERO
+        );
+
+        let detailed_plan = prepared
+            .with_aot_telemetry_mode(BvpAotTelemetryMode::Detailed)
+            .prepared_aot_plan()
+            .expect("detailed AtomView AOT plan should validate");
+        assert_eq!(
+            detailed_plan.telemetry_snapshot().mode,
+            BvpAotTelemetryMode::Detailed
+        );
+        assert!(detailed_plan.telemetry_snapshot().validation > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn atom_bvp_native_banded_codegen_emits_complete_compact_slots() {
+        let eqs = vec![Expr::parse_expression("z"), Expr::parse_expression("-y")];
+        let values = vec!["y".to_string(), "z".to_string()];
+        let boundary_conditions = HashMap::from([
+            ("y".to_string(), vec![(0usize, 1.0)]),
+            ("z".to_string(), vec![(0usize, 0.0)]),
+        ]);
+        let discretized = discretization_system_bvp_par_atom(
+            eqs,
+            values,
+            "x".to_string(),
+            0.0,
+            Some(4),
+            None,
+            Some((0..=4).map(|i| i as f64 / 4.0).collect()),
+            boundary_conditions,
+            None,
+            None,
+            "forward".to_string(),
+        );
+        let prepared = prepare_sparse_bvp_codegen_from_discretized_system(
+            &discretized,
+            "eval_residual",
+            "eval_native_banded_values",
+            Vec::new(),
+            None,
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+        )
+        .with_native_banded_layout(7, 7)
+        .expect("fixture should fit the declared native band");
+
+        let plan = prepared
+            .prepared_aot_plan()
+            .expect("native compact AtomView plan should validate");
+        let (rows, cols) = plan.matrix_layout().shape();
+        let expected_slots = (7 + 7 + 1) * cols;
+        assert_eq!(rows, cols);
+        assert_eq!(plan.matrix_layout().value_count(), expected_slots);
+
+        let manifest = prepared
+            .prepared_aot_manifest(MatrixBackend::Banded)
+            .expect("native compact manifest should validate");
+        assert_eq!(manifest.io.jacobian_nnz, Some(expected_slots));
+        assert_eq!(
+            manifest.io.jacobian_layout,
+            Some(
+                crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout::BandedCompact {
+                    kl: 7,
+                    ku: 7,
+                }
+            )
+        );
+        assert_eq!(manifest.functions.jacobian_chunks.len(), 1);
+        assert_eq!(manifest.functions.jacobian_chunks[0].offset, 0);
+        assert_eq!(manifest.functions.jacobian_chunks[0].len, expected_slots);
+
+        let module = prepared.codegen_module("generated_native_banded");
+        assert_eq!(
+            module.total_block_output_count(),
+            discretized.vector_of_functions.len() + expected_slots
+        );
+        for language in [
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::Rust,
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::C,
+            crate::symbolic::codegen::CodegenIR::CodegenLanguage::Zig,
+        ] {
+            let source = prepared
+                .clone()
+                .codegen_module("generated_native_banded")
+                .with_language(language)
+                .emit_source();
+            assert!(source.contains("eval_native_banded_values"));
+        }
     }
 }

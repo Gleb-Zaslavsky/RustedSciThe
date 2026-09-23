@@ -166,6 +166,8 @@ pub mod symbolic_functions_BVP2;
 pub mod bvp;
 /// modern shared IVP backend contracts and params-aware symbolic preparation
 pub mod symbolic_ivp;
+/// opt-in typed telemetry for symbolic IVP preparation and callbacks
+pub mod ivp_telemetry;
 /// thin IVP bridge into the generic AOT lifecycle
 pub mod symbolic_ivp_aot;
 /// high-level generated-backend orchestration for IVP symbolic problems

@@ -23,6 +23,18 @@ pub struct ProblemIoManifest {
     pub jacobian_rows: usize,
     pub jacobian_cols: usize,
     pub jacobian_nnz: Option<usize>,
+    /// Explicit callback storage contract. `None` is used for residual-only
+    /// artifacts that do not publish a Jacobian callback.
+    pub jacobian_layout: Option<PreparedJacobianLayout>,
+}
+
+/// Jacobian value ABI recorded in a prepared artifact manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreparedJacobianLayout {
+    Dense,
+    SparseExplicit,
+    BandedExplicit,
+    BandedCompact { kl: usize, ku: usize },
 }
 
 /// Generated function naming metadata extracted from runtime plans.
@@ -44,11 +56,40 @@ pub struct GeneratedFunctionsManifest {
     pub jacobian_chunks: Vec<GeneratedChunkManifest>,
 }
 
+/// Symbolic frontend that owns a prepared artifact.
+///
+/// This is part of the manifest identity rather than presentation metadata:
+/// an artifact produced from the AtomView graph must never be reused as if it
+/// were an ExprLegacy artifact, even when both happen to have compatible
+/// dimensions and callback names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreparedSymbolicRoute {
+    /// Historical boxed-`Expr` preparation and compatibility callbacks.
+    ExprLegacy,
+    /// Canonical packed-`Atom` preparation and native codegen callbacks.
+    AtomViewNative,
+    /// A generic prepared artifact whose frontend is not represented by the
+    /// BVP-specific route enum (for example a residual-only compatibility
+    /// artifact).
+    Generic,
+}
+
+impl PreparedSymbolicRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExprLegacy => "ExprLegacy",
+            Self::AtomViewNative => "AtomViewNative",
+            Self::Generic => "Generic",
+        }
+    }
+}
+
 /// Compact owned manifest for a prepared dense or sparse problem.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreparedProblemManifest {
     pub backend_kind: BackendKind,
     pub matrix_backend: MatrixBackend,
+    pub symbolic_route: PreparedSymbolicRoute,
     pub io: ProblemIoManifest,
     pub functions: GeneratedFunctionsManifest,
     pub expression_signature: u64,
@@ -79,6 +120,7 @@ impl PreparedProblemManifest {
         Self {
             backend_kind,
             matrix_backend,
+            symbolic_route: PreparedSymbolicRoute::Generic,
             io: ProblemIoManifest {
                 input_names: residual_plan
                     .input_names
@@ -89,6 +131,7 @@ impl PreparedProblemManifest {
                 jacobian_rows: 0,
                 jacobian_cols: 0,
                 jacobian_nnz: Some(0),
+                jacobian_layout: None,
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: residual_plan.fn_name.to_string(),
@@ -135,12 +178,26 @@ impl PreparedProblemManifest {
         Self {
             backend_kind,
             matrix_backend,
+            symbolic_route: PreparedSymbolicRoute::AtomViewNative,
             io: ProblemIoManifest {
                 input_names: plan.input_names().to_vec(),
                 residual_len: plan.residuals().len(),
                 jacobian_rows: rows,
                 jacobian_cols: cols,
                 jacobian_nnz: Some(plan.matrix_layout().value_count()),
+                jacobian_layout: Some(match plan.matrix_layout() {
+                    crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::SparseCsc { .. } => {
+                        PreparedJacobianLayout::SparseExplicit
+                    }
+                    crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Banded { .. } => {
+                        PreparedJacobianLayout::BandedExplicit
+                    }
+                    crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::BandedCompact {
+                        kl,
+                        ku,
+                        ..
+                    } => PreparedJacobianLayout::BandedCompact { kl: *kl, ku: *ku },
+                }),
             },
             functions,
             expression_signature: atom_expression_signature(plan),
@@ -272,6 +329,7 @@ impl<'a> From<&PreparedDenseProblem<'a>> for PreparedProblemManifest {
         Self {
             backend_kind: problem.backend_kind,
             matrix_backend: problem.matrix_backend,
+            symbolic_route: PreparedSymbolicRoute::ExprLegacy,
             io: ProblemIoManifest {
                 input_names: problem
                     .input_names()
@@ -282,6 +340,7 @@ impl<'a> From<&PreparedDenseProblem<'a>> for PreparedProblemManifest {
                 jacobian_rows: problem.jacobian_plan.rows,
                 jacobian_cols: problem.jacobian_plan.cols,
                 jacobian_nnz: None,
+                jacobian_layout: Some(PreparedJacobianLayout::Dense),
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: problem.residual_plan.fn_name.to_string(),
@@ -329,6 +388,7 @@ impl<'a> From<&PreparedSparseProblem<'a>> for PreparedProblemManifest {
         Self {
             backend_kind: problem.backend_kind,
             matrix_backend: problem.matrix_backend,
+            symbolic_route: PreparedSymbolicRoute::ExprLegacy,
             io: ProblemIoManifest {
                 input_names: problem
                     .input_names()
@@ -339,6 +399,7 @@ impl<'a> From<&PreparedSparseProblem<'a>> for PreparedProblemManifest {
                 jacobian_rows: problem.jacobian_plan.structure.rows,
                 jacobian_cols: problem.jacobian_plan.structure.cols,
                 jacobian_nnz: Some(problem.jacobian_plan.structure.nnz()),
+                jacobian_layout: Some(PreparedJacobianLayout::SparseExplicit),
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: problem.residual_plan.fn_name.to_string(),
@@ -386,6 +447,7 @@ impl<'a> From<&PreparedBandedProblem<'a>> for PreparedProblemManifest {
         Self {
             backend_kind: problem.backend_kind,
             matrix_backend: problem.matrix_backend,
+            symbolic_route: PreparedSymbolicRoute::ExprLegacy,
             io: ProblemIoManifest {
                 input_names: problem
                     .input_names()
@@ -396,6 +458,7 @@ impl<'a> From<&PreparedBandedProblem<'a>> for PreparedProblemManifest {
                 jacobian_rows: problem.jacobian_plan.structure.rows,
                 jacobian_cols: problem.jacobian_plan.structure.cols,
                 jacobian_nnz: Some(problem.jacobian_plan.structure.nnz()),
+                jacobian_layout: Some(PreparedJacobianLayout::BandedExplicit),
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: problem.residual_plan.fn_name.to_string(),
@@ -496,6 +559,7 @@ mod tests {
 
         assert_eq!(manifest.backend_kind, BackendKind::Aot);
         assert_eq!(manifest.matrix_backend, MatrixBackend::Dense);
+        assert_eq!(manifest.symbolic_route, PreparedSymbolicRoute::ExprLegacy);
         assert_eq!(
             manifest.io.input_names,
             vec!["x".to_string(), "y".to_string()]
@@ -609,6 +673,42 @@ mod tests {
             dense0.problem_key(),
             values_only.problem_key(),
             "artifact keys must include backend identity to avoid stale cross-route reuse"
+        );
+    }
+
+    #[test]
+    fn artifact_key_tracks_symbolic_frontend_route() {
+        let residuals = vec![Expr::parse_expression("x + 1")];
+        let jacobian = vec![vec![Expr::parse_expression("1")]];
+        let vars = vec!["x"];
+        let prepared = PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        );
+        let legacy = PreparedProblemManifest::from(&prepared);
+        let mut atom = legacy.clone();
+        atom.symbolic_route = PreparedSymbolicRoute::AtomViewNative;
+
+        assert_eq!(legacy.symbolic_route.as_str(), "ExprLegacy");
+        assert_eq!(atom.symbolic_route.as_str(), "AtomViewNative");
+        assert_ne!(
+            legacy.problem_key(),
+            atom.problem_key(),
+            "frontend route must participate in artifact identity"
         );
     }
 

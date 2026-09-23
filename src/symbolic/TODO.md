@@ -1,5 +1,11 @@
 # TODO: Coordinated ExprLegacy to Prepared AtomView Migration
 
+Priority update, 2026-09-23: pause further LSODE2/BVP evaluator migration while
+investigating [View/Lambdify execution cost](View/TODO.md). Atom-derived
+Jacobian expressions can evaluate more slowly despite fast preparation.
+The target below is conditional on workload-specific correctness and measured
+cold/warm performance, not a mandate to replace every Expr evaluator.
+
 Execution priority updated on 2026-09-18: start with BVP Damped/Frozen using
 the [local architecture review and checklist](../numerical/BVP_Damp/TODO.md).
 The numbered workstreams below describe scope; the rollout section determines
@@ -56,8 +62,9 @@ its own correctness and release-performance gates.
 - [ ] IVP Lambdify callbacks clone parameter values under `RwLock`, allocate a
   flattened `time + parameters + state` vector, and allocate owned result
   vectors/matrices on every call.
-- [ ] `symbolic_functions_BVP::install_atom_discretized_system` converts the
-  Atom-native residuals and variables back to `Expr` for legacy consumers.
+- [x] BVP `install_atom_discretized_system` keeps residuals, variables, and
+  metadata in the Atom-native discretized system. Expr compatibility data is
+  materialized only by an explicitly requested legacy/compatibility accessor.
 - [x] BVP AtomView still maintains an Expr compatibility cache for legacy
   consumers and the generated-backend bridge, but native Banded Lambdify no
   longer reads that cache at runtime.
@@ -282,12 +289,11 @@ diagonal evaluation; preserve it when introducing reusable output buffers.
 
 - [ ] Reuse `DiscretizedBvpAtomSystem` as the Atom-native source of residuals,
   variables, boundary metadata, bounds, and tolerances.
-- [ ] Stop requiring `install_atom_discretized_system` to materialize all
-  residuals and variables back into `Expr` for the Atom runtime path. Retain a
-  lazy compatibility view only for public/legacy APIs that explicitly request
-  Expr objects.
-- [ ] Keep sparse Jacobian entries as `Atom` after differentiation. Do not
-  convert them to Expr before Lambdify callback preparation.
+- [x] The Atom runtime path no longer requires
+  `install_atom_discretized_system` to materialize residuals and variables back
+  into `Expr`; the compatibility view is explicit and lazy.
+- [x] Native AtomView Jacobian entries remain `Atom` after differentiation and
+  are consumed directly by AtomView Lambdify callback preparation.
 - [ ] Compile one shared residual/Jacobian value plan, then adapt it to dense,
   faer sparse, and native banded storage.
 - [ ] Remove per-nonzero dense matrix locking.
@@ -315,7 +321,67 @@ diagonal evaluation; preserve it when introducing reusable output buffers.
 - [ ] Re-run stage timings (`residual_ms`, `jacobian_ms`, `linear_ms`, total)
   with identical numerical work and multi-run summaries.
 - [ ] Do not promote a default based only on AOT stories; the new direct Atom
-  Lambdify path needs its own production-size evidence.
+   Lambdify path needs its own production-size evidence.
+
+### BVP status audit (2026-09-22)
+
+The dated status below is the current BVP-specific reading of the migration
+checklist. The Phase 4 checkboxes above remain the historical work plan; this
+section prevents completed AtomView work from being mistaken for open work,
+without claiming that the whole BVP runtime has already been replaced.
+
+Completed or demonstrated in the current BVP pilot:
+
+- [x] `bvp::atom_lambdify` has native AtomView callback paths for Dense, faer
+  sparse, and Banded Lambdify. The native callback path does not read the
+  compatibility `Expr` cache at runtime.
+- [x] `Sequential`, explicit `Parallel`, and `Auto` execution policies exist
+  for AtomView callbacks, with debug correctness coverage for residuals,
+  Jacobians, sparse layouts, and Banded layouts.
+- [x] BVP symbolic/runtime responsibilities are separated into explicit
+  `legacy_symbolic`, `legacy_lambdify`, `atom_lambdify`, and direct Banded
+  modules; the old public module paths remain compatibility facades.
+- [x] Parameter rebinding, fixed sparse-pattern checks, compact Banded slot
+  checks, and callback-stage telemetry are covered by the current BVP test
+  corpus. Release measurements exist for the main Lambdify routes, but must be
+  refreshed after the current module split before being treated as final.
+- [x] The legacy Mutex/Expr callback implementation remains available as a
+  separate numerical oracle. It is intentionally retained for parity and
+  regression localization, not used as the AtomView hot path.
+
+Still open or only partially complete for BVP production readiness:
+
+- [ ] Finish one typed prepared Atom runtime owner at the solver boundary for
+  callbacks, mesh/layout, Jacobian value plans, and numeric factors. The
+  current callbacks are separated, but Dense/faer/Banded are not yet owned by
+  one complete `PreparedPlan` runtime.
+- [ ] Audit the remaining explicit Expr materialization at compatibility
+  boundaries, especially the retained `Vec<Expr>` AOT adapter. Native BVP
+  Lambdify assembly and callbacks are already Atom-native; this item is not a
+  claim that ordinary AtomView Lambdify still performs an implicit round-trip.
+- [ ] Complete the invalidation matrix for parameters, mesh, boundary
+  conditions, state values, solver policy, Jacobian pattern, and factor
+  ownership. Prove that rebind/refinement/policy changes cannot reuse a stale
+  callback or factor.
+- [ ] Extend componentwise parity beyond final solutions: accepted/rejected
+  Newton traces, damping trials, refinement decisions, callback values, fixed
+  CSC ordering, compact Banded slots, and final mesh for ExprLegacy versus
+  AtomView and Sequential/Parallel/Auto.
+- [ ] Finish the fallible boundary for symbolic conversion, callback shape/
+  value failures, and linear-runtime failures. Compatibility panic wrappers may
+  remain, but new BVP user paths must return typed errors with partial
+  diagnostics.
+- [ ] Close the warm-path allocation audit: residual/Jacobian input and output
+  buffers, triplet/index construction, conversions, copies, worker chunks, and
+  factor storage bytes. Dense remains a small-problem control; optimization
+  priority is AtomView Sparse and Banded.
+- [ ] Refresh the release baseline after the current refactor using identical
+  numerical work and repetitions. Record cold preparation, warm callbacks,
+  factorization/RHS solve, integer counters, and per-stage telemetry in the BVP
+  story files before changing the hot path again.
+- [ ] Keep AOT lifecycle and AtomView-native AOT generation as a separate gate;
+  the BVP Lambdify checklist must not mark AOT production-ready merely because
+  native Lambdify callbacks are correct.
 
 ## Phase 5: Legacy API Isolation And Compatibility
 

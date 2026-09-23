@@ -22,8 +22,8 @@ use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
-    BvpBackendConfig, BvpBackendKind, BvpMatrixBackend, BvpSparseExecutionPlan,
-    BvpSymbolicAssemblyBackend, Jacobian,
+    BvpBackendConfig, BvpBackendIntegrationError, BvpBackendKind, BvpMatrixBackend,
+    BvpSparseExecutionPlan, BvpSymbolicAssemblyBackend, Jacobian,
 };
 use crate::symbolic::symbolic_functions_BVP2::{BandedJacobianChunking, BandedLambdifyConfig};
 use nalgebra::{DMatrix, DVector};
@@ -671,6 +671,29 @@ fn select_sparse_backend_falls_back_to_lambdify_when_aot_is_missing() {
 }
 
 #[test]
+fn try_select_sparse_backend_rejects_incomplete_atomview_without_expr_fallback() {
+    let mut jacobian = build_parameterized_symbolic_case();
+    jacobian.symbolic_assembly_backend = BvpSymbolicAssemblyBackend::AtomView;
+    jacobian.atom_discretized_system = None;
+
+    let error = jacobian
+        .try_select_sparse_backend(
+            "fixture_residual",
+            "fixture_sparse_values",
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            Some(&AotResolver::new(AotRegistry::new())),
+        )
+        .expect_err("incomplete AtomView state must not silently use ExprLegacy");
+
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::AtomAotPlanPreparationFailed { .. }
+    ));
+}
+
+#[test]
 fn select_sparse_backend_prefers_compiled_aot_when_registered_artifact_exists() {
     let mut jacobian = build_parameterized_symbolic_case();
     jacobian.calc_jacobian_parallel_smart_optimized();
@@ -938,6 +961,9 @@ fn generate_bvp_with_backend_selection_matches_main_lambdify_sparse_path() {
 fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
     let mut legacy = Jacobian::new();
+    legacy.set_lambdify_telemetry_mode(
+        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed,
+    );
     legacy.generate_BVP_with_params(
         eq_system.clone(),
         values.clone(),
@@ -957,6 +983,9 @@ fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
     );
 
     let mut atom = Jacobian::new();
+    atom.set_lambdify_telemetry_mode(
+        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed,
+    );
     atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
     atom.generate_BVP_with_params(
         eq_system,
@@ -1054,6 +1083,67 @@ fn generate_bvp_with_atom_discretization_matches_legacy_sparse_path() {
 }
 
 #[test]
+fn atomview_native_aot_preparation_does_not_materialize_expr_sparse_cache() {
+    let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
+    let mut atom = Jacobian::new();
+    atom.set_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+    atom.generate_BVP_with_params(
+        eq_system,
+        values,
+        arg,
+        None,
+        0.0,
+        None,
+        Some(6),
+        None,
+        None,
+        border_conditions,
+        None,
+        None,
+        "forward".to_string(),
+        "Sparse".to_string(),
+        None,
+    );
+
+    assert!(
+        atom.symbolic_jacobian_sparse.is_empty(),
+        "AtomView preparation must not eagerly materialize the Expr sparse cache"
+    );
+    assert!(
+        !atom.symbolic_jacobian_sparse_entries_owned().is_empty(),
+        "the explicit compatibility accessor must still provide Expr entries"
+    );
+
+    let selected = atom
+        .try_select_sparse_backend(
+            "eval_bvp_residual",
+            "eval_bvp_sparse_values",
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("complete AtomView preparation should select a typed AOT route");
+    assert_eq!(
+        selected.preparation_route(),
+        crate::symbolic::symbolic_functions_BVP::BvpAotPreparationRoute::AtomViewNative
+    );
+    let plan = selected
+        .prepared_problem
+        .atom_aot_plan()
+        .expect("AtomView selection must own its prepared native plan");
+    assert!(matches!(
+        plan.matrix_layout(),
+        crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::SparseCsc { .. }
+    ));
+    assert_eq!(
+        plan.telemetry_snapshot().conversions,
+        0,
+        "native AtomView AOT preparation must not report Atom-to-Expr conversions"
+    );
+}
+
+#[test]
 fn generate_bvp_with_atom_discretization_matches_legacy_banded_path() {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
     let bandwidth = Some((2, 2));
@@ -1095,6 +1185,26 @@ fn generate_bvp_with_atom_discretization_matches_legacy_banded_path() {
         "Banded".to_string(),
         bandwidth,
     );
+
+    let selected = atom
+        .try_select_sparse_backend(
+            "eval_bvp_residual",
+            "eval_bvp_sparse_values",
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+            BackendSelectionPolicy::PreferAotThenLambdify,
+            None,
+        )
+        .expect("complete AtomView Banded preparation should select a typed AOT route");
+    let plan = selected
+        .prepared_problem
+        .atom_aot_plan()
+        .expect("Banded AtomView selection must own its prepared native plan");
+    assert!(matches!(
+        plan.matrix_layout(),
+        crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Banded { .. }
+    ));
+    assert_eq!(plan.telemetry_snapshot().conversions, 0);
 
     let atom_direct = atom.direct_banded_problem();
     assert!(
@@ -1741,6 +1851,22 @@ fn sparse_solver_provider_evaluates_real_bvp_lambdify_plan() {
     assert_eq!(provider.effective_backend(), SelectedBackendKind::Lambdify);
     assert_eq!(residual_out, expected_residual.as_slice().to_vec());
     assert_eq!(jacobian_values_out, expected_values);
+
+    let input_error = provider
+        .try_residual_into(&args[..args.len() - 1], &mut residual_out)
+        .expect_err("short callback input must be reported as a typed error");
+    assert!(matches!(
+        input_error,
+        BvpBackendIntegrationError::CallbackInputLengthMismatch { .. }
+    ));
+    let short_jacobian_len = jacobian_values_out.len() - 1;
+    let output_error = provider
+        .try_jacobian_values_into(&args, &mut jacobian_values_out[..short_jacobian_len])
+        .expect_err("short Jacobian output must be reported as a typed error");
+    assert!(matches!(
+        output_error,
+        BvpBackendIntegrationError::CallbackShapeMismatch { .. }
+    ));
 }
 
 #[test]
@@ -1959,8 +2085,12 @@ fn sparse_solver_provider_executes_linked_compiled_aot_backend_for_real_bvp() {
     let mut provider = jacobian.sparse_solver_provider(execution);
     let mut residual_out = vec![0.0; provider.residual_len()];
     let mut jacobian_values_out = vec![0.0; provider.jacobian_structure().nnz()];
-    provider.residual_into(&args, &mut residual_out);
-    provider.jacobian_values_into(&args, &mut jacobian_values_out);
+    provider
+        .try_residual_into(&args, &mut residual_out)
+        .expect("linked AOT residual callback should be fallible and successful");
+    provider
+        .try_jacobian_values_into(&args, &mut jacobian_values_out)
+        .expect("linked AOT Jacobian callback should be fallible and successful");
 
     assert!(provider.is_runtime_callable());
     assert_eq!(

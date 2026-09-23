@@ -339,14 +339,14 @@ mod tests {
             .try_eq_generate(None, None)
             .expect("symbolic frontend should prepare the damping fixture");
 
-        solver.fun = convert_to_fun(Box::new(|_, vector: &dyn VectorType| {
+        let fun = convert_to_fun(Box::new(|_, vector: &dyn VectorType| {
             let values = vector
                 .as_any()
                 .downcast_ref::<DVector<f64>>()
                 .expect("damping fixture uses a dense vector");
             Box::new(values.map(|value| value.powi(3) - 2.0 * value - 2.0)) as Box<dyn VectorType>
         }));
-        solver.jac = Some(convert_to_jac(Box::new(|_, vector: &dyn VectorType| {
+        let jac = Some(convert_to_jac(Box::new(|_, vector: &dyn VectorType| {
             let values = vector
                 .as_any()
                 .downcast_ref::<DVector<f64>>()
@@ -354,6 +354,9 @@ mod tests {
             let diagonal = values.map(|value| 3.0 * value * value - 2.0);
             Box::new(DMatrix::from_diagonal(&diagonal)) as Box<dyn MatrixType>
         })));
+        solver
+            .try_replace_prepared_callbacks(fun, jac)
+            .expect("explicit callback replacement should refresh the prepared fixture");
         solver
             .try_solver_prepared()
             .expect("rejected damping fixture should solve through the prepared path");

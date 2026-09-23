@@ -193,7 +193,7 @@ AOT безусловно имеет смысл, когда вы решаете �
 
 В символическом BVP pipeline есть два пути сборки выражений:
 
-`ExprLegacy` - старый, проверенный путь через классические `Expr`-структуры. Он полезен как compatibility baseline и страховка.
+`ExprLegacy` - старый, проверенный путь через классические `Expr`-структуры. Он полезен как compatibility baseline и страховка, но больше не является production-default для Sparse/Banded Lambdify.
 
 `AtomView` - более современный путь, рассчитанный на эффективную сборку и codegen. Отдельные process-isolated release-измерения на семействе combustion BVP показали, что он снимает особенно дорогую стоимость построения символьного якобиана и в разреженном (Sparse), и в полосовом (Banded) пути, сохраняя решение в ожидаемой численной точности. Поэтому production-пресеты Sparse и Banded и для Damped, и для Frozen солвера теперь выбирают `AtomView` по умолчанию.
 
@@ -671,7 +671,40 @@ cargo run --example bvp_frozen_numerical_route_guide
 
 ## 15. Где смотреть примеры и регрессии
 
-Базовые correctness-тесты находятся в `BVP_Damp_tests.rs`. Более тяжелые story/performance-прогоны - в `BVP_Damp_tests3.rs` и `BVP_Damp_tests4.rs`. Сводка гипотез, команд и результатов ведется в [`BVP_DAMP_STORY_TESTS.md`](BVP_DAMP_STORY_TESTS.md).
+Suite разделен по назначению в `src/numerical/BVP_Damp/tests/`:
+
+- `basic_correctness.rs` и `classic_examples.rs` - быстрые correctness-проверки
+  в debug.
+- `lambdify_acceptance.rs`, `lambdify_cross_product.rs`,
+  `lambdify_lifecycle.rs`, `parity_corpus.rs` и `parameter_rebind.rs` -
+  AtomView/ExprLegacy, matrix backends, execution policies и invalidation.
+- `aot_diagnostics.rs`, `aot_runtime_contract.rs` и `aot_race_stress.rs` -
+  архитектурные и lifecycle story-тесты; дорогие части обычно помечены
+  `#[ignore]` и запускаются явно.
+- `telemetry_story.rs`, `backend_compare.rs` и `frozen_runtime_story.rs` -
+  отдельные диагностические и performance-прогоны.
+
+Например:
+
+```powershell
+cargo test --lib --no-default-features numerical::BVP_Damp::test_correctness -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_lambdify_lifecycle -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_parity_corpus -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_aot_runtime_contract -- --nocapture --test-threads=1
+```
+
+Ignored release story-тесты отделены от debug correctness:
+
+```powershell
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_aot_diagnostics -- --ignored --nocapture --test-threads=1
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_aot_race_stress -- --ignored --nocapture --test-threads=1
+```
+
+Подробные тесты дублируют захваченный вывод в `test_reports/BVP_Damp*`.
+Это generated output, а не вход Cargo; в нем есть имя теста, timestamp и
+статус `passed/failed`. Сводка story-тестов ведется в
+[`BVP_DAMP_STORY_TESTS.md`](BVP_DAMP_STORY_TESTS.md), а исторические
+performance-, correctness- и AOT-сравнения остаются в отдельных story-файлах.
 
 Низкоуровневый codegen/performance слой дополнительно документируется в [`../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md`](../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md). Это полезно, когда нужно понять, проблема в самом BVP solver loop или в generated callback backend.
 

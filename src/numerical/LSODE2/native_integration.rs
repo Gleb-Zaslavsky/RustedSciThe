@@ -12,6 +12,7 @@ use super::native_step_engine::{
     Lsode2NativeStepAttemptReport, Lsode2NativeStepEngine, Lsode2NativeStepMethod,
 };
 use super::statistics::Lsode2NativeStatistics;
+use crate::symbolic::ivp_telemetry::IvpWarmStage;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 
 #[derive(Debug, Clone, Copy)]
@@ -100,16 +101,20 @@ where
         Lsode2NativeStepMethod,
     ) -> Option<Lsode2NativeStepMethod>,
 {
-    let mut engine = match Lsode2NativeStepEngine::from_problem_config_with_method(config, method)?
-    {
-        Some(engine) => engine,
-        None => {
+    let mut engine = match Lsode2NativeStepEngine::from_problem_config_with_method(config, method) {
+        Ok(Some(engine)) => engine,
+        Ok(None) => {
             return Ok(Lsode2NativeIntegrationOutcome {
                 summary: None,
                 statistics: Lsode2NativeStatistics::default(),
             });
         }
+        Err(error) => {
+            config.telemetry.record_error();
+            return Err(error);
+        }
     };
+    let _controller_scope = config.telemetry.scoped_warm_stage(IvpWarmStage::Controller);
 
     let mut first_report: Option<Lsode2NativeStepAttemptReport> = None;
     let mut last_report: Option<Lsode2NativeStepAttemptReport> = None;
@@ -135,7 +140,13 @@ where
         )
     {
         engine.clamp_step_to_t_bound(config.t_bound)?;
-        let report = engine.step_once()?;
+        let report = match engine.step_once() {
+            Ok(report) => report,
+            Err(error) => {
+                config.telemetry.record_error();
+                return Err(error);
+            }
+        };
         if first_report.is_none() {
             first_report = Some(report.clone());
         }
@@ -144,21 +155,44 @@ where
         total_iterations += report.iterations;
         rejected_steps += report.retry_count;
         if report.accepted() {
+            config.telemetry.record_accepted_step();
             accepted_steps += 1;
             let state = engine.state_snapshot();
             let accepted_y = engine.current_solution();
             accepted_t_history.push(state.t);
             accepted_y_history.push(accepted_y.clone());
-            reached_stop_condition = stop_condition_reached(&stop_conditions, &accepted_y);
+            reached_stop_condition = {
+                let _stop_scope = config
+                    .telemetry
+                    .scoped_warm_stage(IvpWarmStage::ControllerStopCondition);
+                stop_condition_reached(&stop_conditions, &accepted_y)
+            };
             if !reached_stop_condition {
-                if let Some(next_method) = next_method_policy(&report, current_method) {
+                let next_method = {
+                    let _switch_scope = config
+                        .telemetry
+                        .scoped_warm_stage(IvpWarmStage::ControllerMethodPolicy);
+                    next_method_policy(&report, current_method)
+                };
+                if let Some(next_method) = next_method {
                     if next_method != current_method {
-                        engine.switch_method(config, next_method)?;
+                        config.telemetry.record_method_switch();
+                        let switch_result = {
+                            let _switch_scope = config
+                                .telemetry
+                                .scoped_warm_stage(IvpWarmStage::ControllerMethodSwitch);
+                            engine.switch_method(config, next_method)
+                        };
+                        if let Err(error) = switch_result {
+                            config.telemetry.record_error();
+                            return Err(error);
+                        }
                         current_method = next_method;
                     }
                 }
             }
         } else {
+            config.telemetry.record_rejected_step();
             rejected_steps += 1;
         }
         last_report = Some(report);
@@ -263,6 +297,7 @@ fn stop_condition_reached(conditions: &[ResolvedStopCondition], y: &[f64]) -> bo
 mod tests {
     use super::*;
     use crate::numerical::LSODE2::Lsode2ProblemConfig;
+    use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetryMode, IvpWarmStage};
     use crate::symbolic::symbolic_engine::Expr;
     use nalgebra::DVector;
 
@@ -347,5 +382,45 @@ mod tests {
         assert!(summary.accepted_steps > 0);
         assert!(summary.final_t > 0.0);
         assert!(summary.last_report.predicted.order <= 4);
+    }
+
+    #[test]
+    fn native_integration_populates_shared_typed_telemetry() {
+        let telemetry = IvpTelemetry::with_mode(IvpTelemetryMode::Counters);
+        let config = exponential_decay_config().with_telemetry(telemetry.clone());
+        let outcome = run_native_integration(&config, Lsode2NativeIntegrationLimits::new(4, 2))
+            .expect("native integration should populate telemetry");
+        let summary = outcome
+            .summary
+            .expect("integration should produce a summary");
+        let snapshot = telemetry.snapshot();
+
+        assert_eq!(
+            snapshot.warm_stage(IvpWarmStage::Controller).calls,
+            1,
+            "one controller scope should cover the integration run"
+        );
+        assert_eq!(snapshot.accepted_steps, summary.accepted_steps as u64);
+        assert!(snapshot.residual_requests > 0);
+        assert!(snapshot.jacobian_requests > 0);
+        assert!(snapshot.factorization_requests > 0);
+        assert!(snapshot.linear_solve_requests > 0);
+        assert!(snapshot.warm_stage(IvpWarmStage::RhsSolve).calls > 0);
+        assert!(snapshot.warm_stage(IvpWarmStage::ControllerPredictor).calls > 0);
+        assert!(snapshot.warm_stage(IvpWarmStage::ControllerStepSetup).calls > 0);
+        assert!(snapshot.warm_stage(IvpWarmStage::ControllerIteration).calls > 0);
+        assert!(snapshot.warm_stage(IvpWarmStage::ControllerOutcome).calls > 0);
+        assert!(
+            snapshot
+                .warm_stage(IvpWarmStage::ControllerStopCondition)
+                .calls
+                > 0
+        );
+        assert!(
+            snapshot
+                .warm_stage(IvpWarmStage::ControllerMethodPolicy)
+                .calls
+                > 0
+        );
     }
 }

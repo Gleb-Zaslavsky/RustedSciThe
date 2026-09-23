@@ -126,6 +126,7 @@
 //! - Clear error messages for debugging
 
 use crate::numerical::BDF::BDF_solver::{BDF, BdfJacobian, BdfLinearBackend};
+use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
@@ -172,6 +173,7 @@ pub struct BdfSolverOptions {
     pub equation_parameter_values: Option<DVector<f64>>,
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     pub symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
+    pub lambdify_execution_policy: IvpLambdifyExecutionPolicy,
 }
 
 impl BdfSolverOptions {
@@ -210,6 +212,7 @@ impl BdfSolverOptions {
             equation_parameter_values: None,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: IvpSymbolicAssemblyBackend::ExprLegacy,
+            lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
         }
     }
 
@@ -225,6 +228,12 @@ impl BdfSolverOptions {
     /// Selects symbolic Jacobian assembly backend for generated IVP preparation.
     pub fn with_symbolic_assembly_backend(mut self, backend: IvpSymbolicAssemblyBackend) -> Self {
         self.symbolic_assembly_backend = backend;
+        self
+    }
+
+    /// Selects the runtime policy for independent Lambdify callback entries.
+    pub fn with_lambdify_execution_policy(mut self, policy: IvpLambdifyExecutionPolicy) -> Self {
+        self.lambdify_execution_policy = policy;
         self
     }
 
@@ -382,6 +391,7 @@ pub struct ODEsolver {
     /// High-level generated-backend orchestration config reused across solves.
     generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
+    lambdify_execution_policy: IvpLambdifyExecutionPolicy,
     statistics: Arc<Mutex<IvpBackendStatistics>>,
     /// Optional factory for replacing the default dense Newton linear backend
     /// after each generated BDF instance is initialized.
@@ -472,6 +482,7 @@ impl ODEsolver {
             backend_prepared: false,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: IvpSymbolicAssemblyBackend::ExprLegacy,
+            lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
@@ -502,6 +513,7 @@ impl ODEsolver {
         solver.equation_parameters = options.equation_parameters;
         solver.equation_parameter_values = options.equation_parameter_values;
         solver.symbolic_assembly_backend = options.symbolic_assembly_backend;
+        solver.lambdify_execution_policy = options.lambdify_execution_policy;
         solver
     }
 
@@ -817,6 +829,7 @@ impl ODEsolver {
             options = options.with_equation_parameter_values(values);
         }
         options = options.with_symbolic_assembly_backend(self.symbolic_assembly_backend);
+        options = options.with_lambdify_execution_policy(self.lambdify_execution_policy);
 
         if self.bdf_native_jacobian_factory.is_some() {
             return self.try_generate_with_native_jacobian(start, options);

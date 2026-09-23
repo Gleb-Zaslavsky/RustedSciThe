@@ -3,6 +3,25 @@ use crate::symbolic::symbolic_ir::{CompiledBatch, compile_many};
 use std::f64::consts::PI;
 const LAMBDIFY_METHOD: usize = 0;
 
+/// Return a safe `powi` exponent for a finite integer Expr constant.
+///
+/// Keeping this decision at the numeric lowering boundary preserves the
+/// symbolic representation while avoiding a generic `powf` call for the very
+/// common reciprocal and small-integer powers produced by differentiation.
+fn constant_integer_exponent(expr: &Expr) -> Option<i32> {
+    let Expr::Const(value) = expr else {
+        return None;
+    };
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || *value < i32::MIN as f64
+        || *value > i32::MAX as f64
+    {
+        return None;
+    }
+    Some(*value as i32)
+}
+
 impl Expr {
     /// LAMBDIFICATION - Converting Symbolic Expressions to Executable Functions
 
@@ -164,8 +183,16 @@ impl Expr {
             }
             Expr::Pow(b, e) => {
                 let bf = b.lambdify_borrowed_thread_safe(vars);
-                let ef = e.lambdify_borrowed_thread_safe(vars);
-                Box::new(move |args| bf(args).powf(ef(args)))
+                if let Some(exponent) = constant_integer_exponent(e) {
+                    Box::new(move |args| match exponent {
+                        0 => 1.0,
+                        1 => bf(args),
+                        exponent => bf(args).powi(exponent),
+                    })
+                } else {
+                    let ef = e.lambdify_borrowed_thread_safe(vars);
+                    Box::new(move |args| bf(args).powf(ef(args)))
+                }
             }
             Expr::Exp(e) => {
                 let f = e.lambdify_borrowed_thread_safe(vars);
@@ -498,6 +525,31 @@ mod tests {
         let args = [1.25, -0.5];
 
         assert!((func1(&args) - func2(&args)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lambdify_constant_integer_powers_preserve_numeric_semantics() {
+        let x = Expr::Var("x".to_string());
+        let cases = [
+            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(-1.0))), -2.0_f64),
+            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(3.0))), -2.0_f64),
+            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.0))), 0.0_f64),
+            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.5))), 4.0_f64),
+        ];
+
+        for (expr, value) in cases {
+            let callback = expr.lambdify1(&["x"]);
+            let expected = match &expr {
+                Expr::Pow(_, exponent) => {
+                    let Expr::Const(exponent) = exponent.as_ref() else {
+                        unreachable!()
+                    };
+                    value.powf(*exponent)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(callback(&[value]), expected);
+        }
     }
 
     #[test]

@@ -7,8 +7,9 @@
 use crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedResidualChunk, LinkedSparseAotBackend,
-    LinkedSparseJacobianChunk, register_linked_dense_backend, register_linked_residual_backend,
-    register_linked_sparse_backend,
+    LinkedSparseJacobianChunk, try_register_linked_dense_backend,
+    try_register_linked_residual_backend, try_register_linked_sparse_backend,
+    validate_compact_banded_manifest,
 };
 use libloading::Library;
 use log::{info, warn};
@@ -211,7 +212,7 @@ pub fn register_generated_c_residual_backend(
 
     let backend =
         LinkedResidualAotBackend::new(artifact.problem_key.clone(), residual_len, residual_eval);
-    register_linked_residual_backend(backend.clone());
+    try_register_linked_residual_backend(backend.clone()).map_err(|error| error.to_string())?;
     info!(
         "Registered C residual AOT backend with problem_key='{}'",
         artifact.problem_key
@@ -249,6 +250,7 @@ pub fn register_generated_c_sparse_backend(
         .io
         .jacobian_nnz
         .unwrap_or(shape.0 * shape.1);
+    let jacobian_layout = artifact.manifest.io.jacobian_layout.clone();
 
     let residual_loaded = Arc::clone(&loaded);
     let residual_eval = Arc::new(move |args: &[f64], out: &mut [f64]| {
@@ -268,7 +270,14 @@ pub fn register_generated_c_sparse_backend(
         };
         assert!(
             ok != 0,
-            "generated C sparse library jacobian callback returned false"
+            "generated C sparse library jacobian callback returned false: \
+             args_len={}, out_len={}, manifest_values={}, shape={}x{}, layout={:?}",
+            args.len(),
+            out.len(),
+            nnz,
+            shape.0,
+            shape.1,
+            jacobian_layout,
         );
     });
 
@@ -284,7 +293,7 @@ pub fn register_generated_c_sparse_backend(
         jacobian_values_eval,
     )
     .with_chunked_evaluators(residual_chunks, jacobian_value_chunks);
-    register_linked_sparse_backend(backend.clone());
+    try_register_linked_sparse_backend(backend.clone()).map_err(|error| error.to_string())?;
     info!(
         "Registered C sparse AOT backend with problem_key='{}'",
         artifact.problem_key
@@ -294,12 +303,19 @@ pub fn register_generated_c_sparse_backend(
 
 /// Registers a compiled C AOT banded backend.
 ///
-/// Banded codegen currently shares the same flat Jacobian-values ABI as the
-/// sparse backend; the solver-facing layer reconstructs native banded storage.
+/// Registers a generated Banded library while preserving its manifest-declared
+/// explicit-entry or AtomView-native compact-slot ABI.
 pub fn register_generated_c_banded_backend(
     artifact: &RegisteredAotArtifact,
 ) -> Result<LinkedSparseAotBackend, String> {
-    register_generated_c_sparse_backend(artifact)
+    let compact_layout = validate_compact_banded_manifest(&artifact.manifest)?;
+    let backend = register_generated_c_sparse_backend(artifact)?;
+    let Some((rows, cols, kl, ku)) = compact_layout else {
+        return Ok(backend);
+    };
+    let backend = backend.with_banded_compact_layout(rows, cols, kl, ku);
+    try_register_linked_sparse_backend(backend.clone()).map_err(|error| error.to_string())?;
+    Ok(backend)
 }
 
 /// Registers a compiled C AOT dense backend from a registered artifact.
@@ -357,7 +373,7 @@ pub fn register_generated_c_dense_backend(
         residual_eval,
         jacobian_eval,
     );
-    register_linked_dense_backend(backend.clone());
+    try_register_linked_dense_backend(backend.clone()).map_err(|error| error.to_string())?;
     info!(
         "Registered C dense AOT backend with problem_key='{}'",
         artifact.problem_key
@@ -378,12 +394,16 @@ mod tests {
         PreparedProblemManifest {
             backend_kind: BackendKind::Aot,
             matrix_backend: MatrixBackend::SparseCol,
+            symbolic_route: crate::symbolic::codegen::codegen_manifest::PreparedSymbolicRoute::Generic,
             io: ProblemIoManifest {
                 input_names: vec!["x".to_string()],
                 residual_len: 1,
                 jacobian_rows: 1,
                 jacobian_cols: 1,
                 jacobian_nnz: Some(1),
+                jacobian_layout: Some(
+                    crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout::SparseExplicit,
+                ),
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: "eval_residual".to_string(),
@@ -427,6 +447,35 @@ mod tests {
         assert!(
             !err.contains("compiled C sparse library does not exist"),
             "manifest mismatch must be checked before filesystem/load errors: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_c_banded_registration_rejects_invalid_compact_manifest_before_loading() {
+        let mut artifact = mismatched_artifact();
+        artifact.manifest.matrix_backend = MatrixBackend::Banded;
+        artifact.manifest.io.jacobian_rows = 3;
+        artifact.manifest.io.jacobian_cols = 3;
+        artifact.manifest.io.jacobian_nnz = Some(8);
+        artifact.manifest.io.jacobian_layout = Some(
+            crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout::BandedCompact {
+                kl: 1,
+                ku: 1,
+            },
+        );
+        artifact.problem_key = artifact.manifest_problem_key();
+
+        let err = match register_generated_c_banded_backend(&artifact) {
+            Ok(_) => panic!("invalid compact manifest must be rejected before loading C"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("storage length mismatch"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !err.contains("compiled C sparse library does not exist"),
+            "manifest validation must precede filesystem/load errors: {err}"
         );
     }
 

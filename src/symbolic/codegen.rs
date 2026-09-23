@@ -7,6 +7,8 @@ pub mod rust_backend;
 pub mod codegen_aot_driver;
 /// registry of materialized generated AOT crates and artifact metadata
 pub mod codegen_aot_registry;
+/// shared typed artifact lifecycle states, diagnostics and fault points
+pub mod codegen_aot_lifecycle;
 /// resolution of registered generated AOT artifacts back into solver-facing metadata
 pub mod codegen_aot_resolution;
 /// process-local registry of statically linked generated AOT backends

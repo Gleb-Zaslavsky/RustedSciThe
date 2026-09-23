@@ -179,6 +179,7 @@ enum PreparedNode {
     Var(usize),
     Add(Box<[usize]>),
     Mul(Box<[usize]>),
+    PowI { base: usize, exponent: i32 },
     Pow { base: usize, exp: usize },
     Builtin { symbol: Symbol, arg: usize },
     Custom { symbol: Symbol, args: Box<[usize]> },
@@ -352,6 +353,7 @@ impl PreparedEvaluator {
                 PreparedNode::Var(var_index) => values[*var_index],
                 PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
                 PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::PowI { base, exponent } => results[*base].powi(*exponent),
                 PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
                 PreparedNode::Builtin { symbol, arg } => {
                     evaluate_builtin_function(*symbol, results[*arg])?
@@ -402,6 +404,7 @@ impl PreparedEvaluator {
                 PreparedNode::Var(var_index) => values[*var_index],
                 PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
                 PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::PowI { base, exponent } => results[*base].powi(*exponent),
                 PreparedNode::Pow { base, exp } => {
                     let base_eval = results[*base];
                     let exp_eval = results[*exp];
@@ -516,9 +519,14 @@ impl<'a> PreparedCompiler<'a> {
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
-                PreparedNode::Pow {
-                    base: self.compile_view(base)?,
-                    exp: self.compile_view(exp)?,
+                let base = self.compile_view(base)?;
+                if let Some(exponent) = packed_integer_exponent(exp) {
+                    PreparedNode::PowI { base, exponent }
+                } else {
+                    PreparedNode::Pow {
+                        base,
+                        exp: self.compile_view(exp)?,
+                    }
                 }
             }
             AtomView::Mul(m) => {
@@ -542,6 +550,27 @@ impl<'a> PreparedCompiler<'a> {
         self.cache.insert(view, index);
         Ok(index)
     }
+}
+
+/// Decode only the integer exponent range supported by `f64::powi`.
+///
+/// Values outside `i32` remain on the generic `powf` path. This keeps the
+/// lowering conservative for packed coefficients while removing the common
+/// reciprocal/small-integer exponent node from prepared callback evaluation.
+fn packed_integer_exponent(view: AtomView<'_>) -> Option<i32> {
+    let AtomView::Num(num) = view else {
+        return None;
+    };
+    let CoefficientView::Natural(numerator, denominator) = num.get_coeff_view() else {
+        return None;
+    };
+    if denominator != 1
+        || numerator < i32::MIN as i64
+        || numerator > i32::MAX as i64
+    {
+        return None;
+    }
+    Some(numerator as i32)
 }
 
 /// Evaluate an owned atom using variable bindings and custom functions.
@@ -1105,7 +1134,10 @@ fn pow_coefficient(base: Coefficient, exp: i64) -> Result<Coefficient, String> {
 mod test {
     use ahash::HashMap;
 
-    use super::{ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols};
+    use super::{
+        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols,
+        prepare_evaluator,
+    };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
     use crate::{function, parse, symbol};
 
@@ -1147,6 +1179,16 @@ mod test {
             .evaluate(&HashMap::default(), &FunctionMap::new())
             .unwrap();
         assert!((result - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn prepared_evaluator_preserves_integer_and_fractional_power_values() {
+        let expr = parse!("x^(-1)+x^3+sqrt(x)").unwrap();
+        let x = symbol!("x");
+        let evaluator = prepare_evaluator(&expr, &[x], &FunctionMap::new()).unwrap();
+        let value = evaluator.evaluate(&[4.0]).unwrap();
+        let expected = 4.0_f64.powi(-1) + 4.0_f64.powi(3) + 4.0_f64.sqrt();
+        assert!((value - expected).abs() < 1e-12);
     }
 
     #[test]

@@ -133,6 +133,20 @@ pub enum CodegenOutputLayout {
         ku: usize,
         slots: usize,
     },
+    /// Complete LAPACK-style compact band storage, including boundary slots
+    /// that do not correspond to a matrix coordinate.
+    ///
+    /// This is intentionally distinct from [`BandedValues`]. The latter is
+    /// the compatibility ABI containing only the prepared non-zero entries;
+    /// this layout is the native full-slot ABI with
+    /// `(kl + ku + 1) * cols` callback values.
+    BandedCompactValues {
+        rows: usize,
+        cols: usize,
+        kl: usize,
+        ku: usize,
+        slots: usize,
+    },
 }
 
 /// One flattened symbolic output produced by a task plan.

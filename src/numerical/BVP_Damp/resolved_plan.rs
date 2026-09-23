@@ -9,7 +9,7 @@ use super::NR_Damp_solver_damped::{BvpDerivativeScheme, DampedSolverOptions};
 use super::NR_Damp_solver_frozen::FrozenSolverOptions;
 use super::generated_solver_handoff::{AotBuildPolicy, AotExecutionPolicy, GeneratedBackendConfig};
 use crate::somelinalg::banded::LinearSolverPolicy;
-use crate::symbolic::bvp::legacy::{BvpMatrixBackend, BvpSymbolicAssemblyBackend};
+use crate::symbolic::bvp::legacy::BvpSymbolicAssemblyBackend;
 use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
 };
@@ -262,6 +262,7 @@ fn linear_algorithm_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::bvp::legacy::BvpMatrixBackend;
 
     #[test]
     fn damped_and_frozen_defaults_share_the_same_normalized_backend_contract() {

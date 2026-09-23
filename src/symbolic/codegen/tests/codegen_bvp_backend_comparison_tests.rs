@@ -44,15 +44,17 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
     CAotBuildProfile, CAotBuildRequest, CAotCompileConfig, ExecutedCAotBuild,
 };
 use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
-use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::register_generated_c_sparse_backend;
+use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
+    register_generated_c_banded_backend, register_generated_c_sparse_backend,
+};
 use crate::symbolic::codegen::codegen_adapters::{
     banded_ir_blocks, residual_ir_blocks, sparse_ir_blocks,
 };
 use crate::symbolic::codegen::codegen_aot_driver::{AotCodegenBackend, GeneratedAotArtifact};
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    register_generated_sparse_cdylib_backend, unregister_linked_sparse_backend,
-    LinkedSparseAotBackend,
+    register_generated_banded_cdylib_backend, register_generated_sparse_cdylib_backend,
+    unregister_linked_sparse_backend, LinkedSparseAotBackend,
 };
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_provider_api::{MatrixBackend, PreparedProblem};
@@ -67,7 +69,9 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_build::{
     ExecutedZigAotBuild, ZigAotBuildProfile, ZigAotBuildRequest,
 };
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_registry::register_zig_build_in_registry;
-use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::register_generated_zig_sparse_backend;
+use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
+    register_generated_zig_banded_backend, register_generated_zig_sparse_backend,
+};
 use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::symbolic_functions_BVP::{
     BvpPreparedSparseAotProblem, BvpSymbolicAssemblyBackend, Jacobian,
@@ -2629,7 +2633,11 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
                 .register_materialized_build(manifest, &build)
                 .clone();
             let link_begin = Instant::now();
-            let linked = match register_generated_sparse_cdylib_backend(&registered) {
+            let linked = match if matrix_backend == MatrixBackend::Banded {
+                register_generated_banded_cdylib_backend(&registered)
+            } else {
+                register_generated_sparse_cdylib_backend(&registered)
+            } {
                 Ok(linked) => linked,
                 Err(err) => {
                     return failed_build_metrics(
@@ -2731,7 +2739,11 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
             }
             let registered = register_c_build_in_registry(&mut registry, manifest, &build).clone();
             let link_begin = Instant::now();
-            let linked = match register_generated_c_sparse_backend(&registered) {
+            let linked = match if matrix_backend == MatrixBackend::Banded {
+                register_generated_c_banded_backend(&registered)
+            } else {
+                register_generated_c_sparse_backend(&registered)
+            } {
                 Ok(linked) => linked,
                 Err(err) => {
                     return failed_build_metrics(
@@ -2824,7 +2836,11 @@ fn build_and_link_backend_with_preset_for_matrix_backend(
             let registered =
                 register_zig_build_in_registry(&mut registry, manifest, &build).clone();
             let link_begin = Instant::now();
-            let linked = match register_generated_zig_sparse_backend(&registered) {
+            let linked = match if matrix_backend == MatrixBackend::Banded {
+                register_generated_zig_banded_backend(&registered)
+            } else {
+                register_generated_zig_sparse_backend(&registered)
+            } {
                 Ok(linked) => linked,
                 Err(err) => {
                     return failed_build_metrics(
@@ -4683,3 +4699,262 @@ fn diagnose_combustion_1000_real_banded_jacobian_with_row_scaling() {
 }
 
 */
+
+/// Materializes one AtomView-native compact Banded artifact and reconnects it
+/// through the same registry/link boundary used by the solver.
+///
+/// This helper deliberately lives beside the broader comparison harness rather
+/// than inside the solver test module.  It exercises the complete external
+/// lifecycle without making ordinary correctness tests invoke a compiler.
+fn materialize_native_compact_banded_backend(
+    prepared: &BvpPreparedSparseAotProblem,
+    backend: AotCodegenBackend,
+    c_compiler: Option<&str>,
+    tag: &str,
+) -> Result<(LinkedSparseAotBackend, String), String> {
+    let (artifact, _) = prepared
+        .try_generated_native_banded_aot_artifact_with_breakdown(
+            format!("native_compact_{tag}"),
+            &format!("native_compact_module_{tag}"),
+            backend,
+            AtomOptimizationProfile::FastBootstrap,
+        )
+        .map_err(|error| format!("native compact artifact preparation failed: {error}"))?;
+
+    let manifest = match &artifact {
+        GeneratedAotArtifact::Rust(crate_spec) => crate_spec.manifest.clone(),
+        GeneratedAotArtifact::C(library_spec) => library_spec.manifest.clone(),
+        GeneratedAotArtifact::Zig(library_spec) => library_spec.manifest.clone(),
+    };
+    let output_parent_dir = unique_compare_artifact_dir("native-compact", tag);
+    let mut registry = AotRegistry::new();
+
+    let linked = match artifact {
+        GeneratedAotArtifact::Rust(crate_spec) => {
+            let build = AotBuildRequest::new(crate_spec, &output_parent_dir, AotBuildProfile::Debug)
+                .with_compile_config(AotCompileConfig::dev_fastest())
+                .materialize()
+                .map_err(|error| format!("Rust compact materialize failed: {error}"))?;
+            let executed = build
+                .execute()
+                .map_err(|error| format!("Rust compact build execution failed: {error}"))?;
+            if !executed.succeeded() {
+                return Err(format!(
+                    "Rust compact build failed: status={:?}\n{}",
+                    executed.status_code, executed.stderr
+                ));
+            }
+            let registered = registry.register_materialized_build(manifest, &build).clone();
+            register_generated_banded_cdylib_backend(&registered)
+                .map_err(|error| format!("Rust compact link failed: {error}"))?
+        }
+        GeneratedAotArtifact::C(library_spec) => {
+            let compiler = c_compiler.ok_or_else(|| "C compiler is unavailable".to_string())?;
+            let compile = CAotCompileConfig::dev_fastest().with_compiler(compiler.to_string());
+            let build = CAotBuildRequest::new(
+                library_spec,
+                &output_parent_dir,
+                CAotBuildProfile::Debug,
+            )
+            .with_compile_config(compile)
+            .materialize()
+            .map_err(|error| format!("C compact materialize failed: {error}"))?;
+            let executed = build
+                .execute()
+                .map_err(|error| format!("C compact build execution failed: {error}"))?;
+            if !executed.succeeded() {
+                return Err(format!(
+                    "C compact build failed: status={:?}\n{}",
+                    executed.status_code, executed.stderr
+                ));
+            }
+            let registered = register_c_build_in_registry(&mut registry, manifest, &build).clone();
+            register_generated_c_banded_backend(&registered)
+                .map_err(|error| format!("C compact link failed: {error}"))?
+        }
+        GeneratedAotArtifact::Zig(library_spec) => {
+            let build = ZigAotBuildRequest::new(
+                library_spec,
+                &output_parent_dir,
+                ZigAotBuildProfile::Debug,
+            )
+            .materialize()
+            .map_err(|error| format!("Zig compact materialize failed: {error}"))?;
+            let executed = build
+                .execute()
+                .map_err(|error| format!("Zig compact build execution failed: {error}"))?;
+            if !executed.succeeded() {
+                return Err(format!(
+                    "Zig compact build failed: status={:?}\n{}",
+                    executed.status_code, executed.stderr
+                ));
+            }
+            let registered = register_zig_build_in_registry(&mut registry, manifest, &build).clone();
+            register_generated_zig_banded_backend(&registered)
+                .map_err(|error| format!("Zig compact link failed: {error}"))?
+        }
+    };
+
+    let problem_key = linked.problem_key.clone();
+    Ok((linked, problem_key))
+}
+
+#[test]
+#[ignore = "materializes AtomView-native compact Banded Rust/C/Zig artifacts; run before the expensive release AOT stories"]
+fn bvp_atomview_native_compact_banded_materialized_cross_toolchain_parity() {
+    let _test_report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_Damp_AOT",
+        concat!(
+            module_path!(),
+            "::bvp_atomview_native_compact_banded_materialized_cross_toolchain_parity"
+        ),
+    );
+
+    let spec = ScenarioSpec {
+        label: "small-damp1-24",
+        runtime_iters: 1,
+        runtime_samples: 1,
+        build_jacobian: || build_real_bvp_damp1_case(24),
+    };
+    let baseline = build_scenario_data_with_backend(&spec, BvpSymbolicAssemblyBackend::ExprLegacy);
+    let atom_jacobian = build_jacobian_for_spec(&spec, BvpSymbolicAssemblyBackend::AtomView);
+    let atom_prepared = atom_jacobian
+        .prepare_atom_native_aot_problem(
+            "eval_native_compact_residual",
+            "eval_native_compact_jacobian",
+            crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy::Whole,
+            crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy::Whole,
+            MatrixBackend::Banded,
+        )
+        .expect("AtomView native preparation should return a typed result")
+        .expect("AtomView fixture should own a native preparation payload");
+
+    let expected_residual = baseline.lambdify_residual.as_slice();
+    assert_eq!(
+        atom_prepared.param_names.len() + atom_prepared.variable_names.len(),
+        baseline.args.len(),
+        "AtomView and ExprLegacy must expose the same flattened input ABI"
+    );
+    let atom_plan = atom_prepared
+        .atom_aot_plan()
+        .expect("AtomView preparation should own an AOT plan");
+    let baseline_dense = baseline
+        .prepared
+        .as_prepared_problem()
+        .jacobian_plan
+        .assemble_sparse_col_mat(&baseline.lambdify_jacobian)
+        .to_DMatrixType();
+    let slot_map = atom_plan
+        .native_banded_slot_map()
+        .expect("compact AtomView plan should expose a native slot map");
+    let expected_compact = slot_map
+        .slots()
+        .iter()
+        .map(|slot| {
+            slot.matrix_row
+                .map(|row| baseline_dense[(row, slot.column)])
+                .unwrap_or(0.0)
+        })
+        .collect::<Vec<_>>();
+    // `prepare_atom_native_aot_problem` owns the explicit-entry Banded plan;
+    // the dedicated artifact builder upgrades it to full compact slots.  The
+    // slot map is therefore the source of truth for the materialized ABI.
+    let expected_storage_len = slot_map.storage_len();
+    assert_eq!(expected_storage_len, expected_compact.len());
+
+    let c_compiler = if command_exists("gcc") {
+        Some("gcc")
+    } else if command_exists("tcc") {
+        Some("tcc")
+    } else {
+        None
+    };
+    let routes = [
+        (AotCodegenBackend::Rust, None),
+        (AotCodegenBackend::C, c_compiler),
+        (AotCodegenBackend::Zig, command_exists("zig").then_some("zig")),
+    ];
+
+    println!(
+        "[BVP compact AOT parity] fixture={} shape={:?} compact_values={} available={{Rust:true,C:{},Zig:{}}}",
+        spec.label,
+        atom_prepared.shape,
+        expected_storage_len,
+        c_compiler.is_some(),
+        command_exists("zig")
+    );
+
+    for (backend, tool) in routes {
+        if backend != AotCodegenBackend::Rust && tool.is_none() {
+            println!("backend={backend:?} status=skipped toolchain-unavailable");
+            continue;
+        }
+        let tag = match backend {
+            AotCodegenBackend::Rust => "rust",
+            AotCodegenBackend::C => "c",
+            AotCodegenBackend::Zig => "zig",
+        };
+        let (linked, problem_key) = materialize_native_compact_banded_backend(
+            &atom_prepared,
+            backend,
+            tool,
+            tag,
+        )
+        .unwrap_or_else(|error| panic!("compact {backend:?} materialization failed: {error}"));
+
+        let mut residual = vec![0.0; linked.residual_len];
+        linked
+            .try_residual_eval(&baseline.args, &mut residual)
+            .expect("materialized compact residual callback should accept fixture inputs");
+        let mut jacobian = vec![0.0; linked.jacobian_output_len().unwrap()];
+        linked
+            .try_jacobian_values_eval(&baseline.args, &mut jacobian)
+            .expect("materialized compact Jacobian callback should accept fixture inputs");
+        let residual_diff = max_abs_diff(&residual, expected_residual);
+        let jacobian_diff = max_abs_diff(&jacobian, &expected_compact);
+        println!(
+            "backend={backend:?} status=ok residual_diff={residual_diff:.3e} compact_jacobian_diff={jacobian_diff:.3e} output_len={}",
+            jacobian.len()
+        );
+        assert!(residual_diff <= 1.0e-12, "compact residual parity drift: {residual_diff:e}");
+        assert!(jacobian_diff <= 1.0e-12, "compact Jacobian parity drift: {jacobian_diff:e}");
+        let _ = unregister_linked_sparse_backend(&problem_key);
+    }
+}
+
+#[test]
+fn bvp_native_compact_builder_rejects_incomplete_atom_route_without_fallback() {
+    let spec = ScenarioSpec {
+        label: "small-damp1-24",
+        runtime_iters: 1,
+        runtime_samples: 1,
+        build_jacobian: || build_real_bvp_damp1_case(24),
+    };
+    let atom_jacobian = build_jacobian_for_spec(&spec, BvpSymbolicAssemblyBackend::AtomView);
+    let mut incomplete = atom_jacobian
+        .prepare_atom_native_aot_problem(
+            "eval_native_compact_residual",
+            "eval_native_compact_jacobian",
+            crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy::Whole,
+            crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy::Whole,
+            MatrixBackend::Banded,
+        )
+        .expect("AtomView native preparation should return a typed result")
+        .expect("AtomView fixture should own a native preparation payload");
+    incomplete.atom_aot_plan = None;
+
+    let error = incomplete
+        .try_generated_native_banded_aot_artifact_with_breakdown(
+            "incomplete_native_compact_route",
+            "incomplete_native_compact_module",
+            AotCodegenBackend::Rust,
+            AtomOptimizationProfile::FastBootstrap,
+        )
+        .expect_err("incomplete AtomView route must not fall back to ExprLegacy");
+    assert!(matches!(
+        error,
+        crate::symbolic::bvp::legacy::BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+            ..
+        }
+    ));
+}

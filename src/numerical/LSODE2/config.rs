@@ -7,6 +7,7 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::SymbolicIvpAotOptions;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -805,6 +806,10 @@ pub struct Lsode2ProblemConfig {
     pub controller: Lsode2ControllerConfig,
     pub backend: Lsode2BackendConfig,
     pub native_execution: Lsode2NativeExecutionConfig,
+    /// Runtime policy for independent Lambdify residual/Jacobian entries.
+    pub lambdify_execution_policy: IvpLambdifyExecutionPolicy,
+    /// Optional shared telemetry for symbolic preparation and native execution.
+    pub telemetry: IvpTelemetry,
 }
 
 impl Lsode2ProblemConfig {
@@ -844,7 +849,22 @@ impl Lsode2ProblemConfig {
             controller: Lsode2ControllerConfig::default(),
             backend: Lsode2BackendConfig::default(),
             native_execution: Lsode2NativeExecutionConfig::default(),
+            lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
+            telemetry: IvpTelemetry::disabled(),
         }
+    }
+
+    /// Enables typed, opt-in telemetry without changing solver numerics.
+    pub fn with_telemetry(mut self, telemetry: IvpTelemetry) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Selects sequential, forced-parallel, or automatic Lambdify callback
+    /// execution. Sequential remains the compatibility default.
+    pub fn with_lambdify_execution_policy(mut self, policy: IvpLambdifyExecutionPolicy) -> Self {
+        self.lambdify_execution_policy = policy;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]

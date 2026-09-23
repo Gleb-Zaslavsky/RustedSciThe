@@ -13,6 +13,10 @@
 //! - a derived `problem_key`,
 //! - and the on-disk locations returned by `AotBuildRequest::materialize()`.
 
+use crate::symbolic::codegen::codegen_aot_lifecycle::{
+    AotArtifactInspection, AotArtifactState, AotFailureDiagnostics, AotFailureKind,
+    AotLifecycleError, AotLifecycleStage, quarantine_generated_tree,
+};
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildResult;
 use std::collections::BTreeMap;
@@ -63,6 +67,18 @@ impl RegisteredAotArtifact {
         self.expected_cdylib.exists() || self.expected_rlib.exists()
     }
 
+    /// Returns a typed filesystem snapshot used by both RequirePrebuilt and
+    /// rebuild orchestration. This is intentionally cheaper and safer than
+    /// trying to infer state from diagnostic strings.
+    pub fn inspect_artifact(&self) -> AotArtifactInspection {
+        AotArtifactInspection::inspect(
+            &self.crate_dir,
+            &self.manifest_file,
+            &self.expected_rlib,
+            &self.expected_cdylib,
+        )
+    }
+
     /// Human-readable lifecycle contract summary for diagnostics and story tables.
     pub fn lifecycle_contract_summary(&self) -> String {
         format!(
@@ -104,6 +120,43 @@ impl RegisteredAotArtifact {
             ));
         }
         issues
+    }
+
+    /// Moves a suspicious generated tree aside before a rebuild.
+    ///
+    /// We never overwrite a stale or partially written tree in place: a
+    /// compiler/linker failure can otherwise leave files that look usable to
+    /// a later RequirePrebuilt request. The quarantine is a sibling directory
+    /// and is deliberately left for diagnostics/cleanup by the caller.
+    pub fn quarantine_generated_tree(&self) -> Result<Option<PathBuf>, AotLifecycleError> {
+        let inspection = self.inspect_artifact();
+        if matches!(
+            inspection.state,
+            AotArtifactState::Missing | AotArtifactState::Ready
+        ) {
+            return Ok(None);
+        }
+        if !self.crate_dir.is_dir() {
+            let mut diagnostics = AotFailureDiagnostics::new(
+                AotLifecycleStage::Materialized,
+                AotFailureKind::PartialArtifact,
+                &self.problem_key,
+                format!(
+                    "generated crate path is not a directory: {}",
+                    self.crate_dir.display()
+                ),
+            );
+            diagnostics.inspection = Some(inspection);
+            return Err(AotLifecycleError::new(diagnostics));
+        }
+        let quarantined = quarantine_generated_tree(&self.crate_dir, &self.problem_key).map_err(
+            |mut error| {
+                error.diagnostics.quarantine_attempted = true;
+                error.diagnostics.inspection = Some(inspection.clone());
+                error
+            },
+        )?;
+        Ok(quarantined)
     }
 
     /// Removes the generated crate/library directory represented by this registry entry.
@@ -176,13 +229,30 @@ impl AotRegistry {
         manifest: PreparedProblemManifest,
         build: &AotBuildResult,
     ) -> &RegisteredAotArtifact {
+        self.try_register_materialized_build(manifest, build)
+            .expect("generated crate metadata should be valid at compatibility boundary")
+    }
+
+    /// Fallible registry insertion used by new lifecycle code.
+    pub fn try_register_materialized_build(
+        &mut self,
+        manifest: PreparedProblemManifest,
+        build: &AotBuildResult,
+    ) -> Result<&RegisteredAotArtifact, AotLifecycleError> {
         let problem_key = manifest.problem_key();
         let crate_name = build
             .written
             .crate_dir
             .file_name()
             .and_then(|name| name.to_str())
-            .expect("generated crate directory should end with a valid crate name")
+            .ok_or_else(|| {
+                AotLifecycleError::new(AotFailureDiagnostics::new(
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::Manifest,
+                    &problem_key,
+                    "generated crate directory has no valid UTF-8 crate name",
+                ))
+            })?
             .to_string();
 
         if let Some(previous) = self.entries_by_problem_key.insert(
@@ -206,9 +276,10 @@ impl AotRegistry {
         self.crate_name_to_problem_key
             .insert(crate_name, problem_key.clone());
 
-        self.entries_by_problem_key
+        Ok(self
+            .entries_by_problem_key
             .get(&problem_key)
-            .expect("newly inserted registry entry should exist")
+            .expect("newly inserted registry entry should exist"))
     }
 
     /// Looks up a registered artifact by its manifest-derived `problem_key`.
@@ -245,6 +316,18 @@ impl AotRegistry {
         artifact.cleanup_generated_tree()?;
         self.remove_by_problem_key(problem_key);
         Ok(true)
+    }
+
+    /// Quarantines a non-ready artifact while retaining the registry entry.
+    /// The caller may then materialize a fresh build under the original path.
+    pub fn quarantine_artifact_by_problem_key(
+        &self,
+        problem_key: &str,
+    ) -> Result<Option<PathBuf>, AotLifecycleError> {
+        let Some(artifact) = self.entries_by_problem_key.get(problem_key) else {
+            return Ok(None);
+        };
+        artifact.quarantine_generated_tree()
     }
 }
 //================================================================================
@@ -382,6 +465,35 @@ mod tests {
                 .lifecycle_contract_summary()
                 .contains("manifest_key_matches=true")
         );
+    }
+
+    #[test]
+    fn registry_quarantines_materialized_tree_before_rebuild() {
+        let prepared = sample_prepared_problem();
+        let manifest = PreparedProblemManifest::from(&prepared);
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_registry_quarantine_fixture",
+            "generated_registry_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("temporary directory should exist");
+        let build = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+        let mut registry = AotRegistry::new();
+        let key = registry
+            .register_materialized_build(manifest, &build)
+            .problem_key
+            .clone();
+
+        let quarantined = registry
+            .quarantine_artifact_by_problem_key(&key)
+            .expect("quarantine should be typed and successful")
+            .expect("materialized tree should be quarantined");
+        assert!(!build.written.crate_dir.exists());
+        assert!(quarantined.exists());
+        assert!(registry.get_by_problem_key(&key).is_some());
+        fs::remove_dir_all(quarantined).expect("test quarantine should be removable");
     }
 
     #[test]

@@ -13,7 +13,7 @@
 #[cfg(test)]
 mod tests {
     use crate::Utils::test_reporting::write_test_report;
-    use crate::numerical::BVP_Damp::BVP_traits::{VectorType, Vectors_type_casting};
+    use crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting;
     use crate::numerical::BVP_Damp::MatrixBackend;
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
         AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,

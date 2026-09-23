@@ -143,18 +143,24 @@ impl Coefficient {
         }
 
         // Large exact coefficients are not representable in the compact atom
-        // format. Approximate them as a bounded fixed-point rational instead of
-        // panicking, which keeps large symbolic pipelines progressing and is
-        // consistent with other View entrypoints that already quantize `f64`
-        // inputs to compact rationals.
-        const APPROX_SCALE: i64 = 1_000_000;
+        // format. Approximate them as an adaptive fixed-point rational instead
+        // of panicking. The old fixed 1e6 scale was harmless for rough
+        // symbolic work but introduced visible BVP parity errors when a mesh
+        // ratio such as `h/x` crossed this overflow path. Keep high precision
+        // for ordinary-sized coefficients while reducing the scale for very
+        // large values so the numerator still fits in `i64`.
         let ratio = (reduced_num as f64) / (reduced_den as f64);
         if !ratio.is_finite() {
             panic!("{context}: coefficient ratio became non-finite");
         }
-        let scaled = (ratio * APPROX_SCALE as f64).round();
+        const MAX_APPROX_SCALE: f64 = 1.0e15;
+        let scale = (i64::MAX as f64 / ratio.abs().max(1.0))
+            .min(MAX_APPROX_SCALE)
+            .max(1.0)
+            .floor();
+        let scaled = (ratio * scale).round();
         let clamped = scaled.clamp(i64::MIN as f64, i64::MAX as f64) as i64;
-        Coefficient::reduce(clamped, APPROX_SCALE)
+        Coefficient::reduce(clamped, scale as i64)
     }
 }
 
@@ -778,5 +784,18 @@ mod tests {
         let product = lhs * rhs;
         assert!(product.den > 0);
         assert!(!product.is_zero());
+    }
+
+    #[test]
+    fn coefficient_overflow_fallback_preserves_unit_scale_precision() {
+        let lhs = Coefficient::reduce(3_037_000_499, 3_037_000_500);
+        let product = lhs.clone() * lhs;
+        let expected = (3_037_000_499_f64 / 3_037_000_500_f64).powi(2);
+        let recovered = product.num as f64 / product.den as f64;
+
+        assert!(
+            (recovered - expected).abs() <= 1.0e-14,
+            "overflow fallback lost precision: expected={expected:.17e}, recovered={recovered:.17e}"
+        );
     }
 }

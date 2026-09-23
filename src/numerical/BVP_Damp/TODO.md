@@ -1,5 +1,11 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+Priority update, 2026-09-23: contribute real Jacobian fixtures to the shared
+[View/Lambdify cost investigation](../../symbolic/View/TODO.md) before further
+evaluator optimization. LSODE2 Atom-to-Expr callback measurements are not proof
+of a BVP Atom-native evaluator defect: the execution paths differ. Preserve
+existing routes and baselines; no solver or AOT changes in this planning pass.
+
 Review date: 2026-09-19. Status: architecture review plus an intermediate test
 suite migration. The numerical suite is not in its final physical layout yet;
 existing tests remain intact while descriptive module aliases and shared test
@@ -31,6 +37,72 @@ Every performance-sensitive refactor follows the same evidence order:
 
 Telemetry schemas and typed error propagation are part of the production code
 change, not follow-up polish.
+
+### 2026-09-21 AOT full-slot Banded handoff progress
+
+- [x] Carry an explicit `PreparedJacobianLayout::BandedCompact { kl, ku }`
+  marker in the owned manifest. The marker is part of artifact identity and
+  prevents a complete compact buffer from being interpreted as explicit NNZ
+  values.
+- [x] Preserve the marker in the Rust/C/Zig linked registries and validate the
+  exact `(kl + ku + 1) * n` callback length before runtime use.
+- [x] Route a linked Banded callback through compact-slot validation and direct
+  compact-to-`BandedAssembly` conversion. No dense matrix or triplet staging is
+  used at this boundary.
+- [x] Keep historical explicit-entry Banded artifacts and callbacks working;
+  they remain the compatibility/default route until the full-slot path has
+  solver-level parity evidence.
+- [x] Preserve the existing explicit-entry whole/chunk router. The release
+  stories already cover `whole`, `chunk4` and `Auto` for Sparse/Banded AOT,
+  including callback equivalence and observed job/chunk counts; see
+  `BVP_DAMP_STORY_AOT.md` and `BVP_DAMP_STORY_PERFORMANCE.md`.
+- [x] Add a solver-level compact-slot Banded correctness gate. The debug test
+  `compact_banded_solver_parity_rebind_and_telemetry` now exercises the real
+  linked Banded callback boundary, verifies compact storage shape and matrix
+  values, rebinds numeric parameters, checks that the new matrix owns a
+  different factor owner, and asserts separate residual/Jacobian telemetry.
+  Cross-toolchain materialized parity is covered by the separate ignored debug
+  gate below; the in-process fixture remains the fast solver-level gate.
+- [x] Share compact-manifest validation across the Rust, C and Zig loaders
+  (2026-09-21). Invalid matrix backend, bandwidth or full-slot storage metadata
+  is rejected before a dynamic library is opened. Dedicated C/Zig tests prove
+  the pre-load ordering; actual materialized compiler execution is covered by
+  a separate ignored debug toolchain parity gate.
+- [x] Add an explicit BVP artifact-builder entrypoint for AtomView-native
+  compact Banded output (2026-09-21). The compatibility builder continues to
+  emit historical explicit-entry artifacts; the new opt-in builder derives its
+  manifest from the actual prepared codegen layout and is covered by the
+  solver-level gate.
+- [x] Add a fallible native compact builder and reject incomplete AtomView
+  routes without an ExprLegacy fallback (2026-09-21). The debug correctness
+  test `bvp_native_compact_builder_rejects_incomplete_atom_route_without_fallback`
+  locks this boundary to `BvpBackendIntegrationError`.
+- [x] Route the BVP backend-comparison harness through the matrix-specific
+  Rust/C/Zig registration functions (2026-09-21). Banded stories no longer
+  accidentally exercise the sparse loader, so compact-manifest validation is
+  part of the same comparison lifecycle.
+- [x] Add a materialized Rust/C/Zig compact Banded parity gate (2026-09-21).
+  The ignored debug test
+  `bvp_atomview_native_compact_banded_materialized_cross_toolchain_parity`
+  builds and loads each available toolchain, invokes the typed residual and
+  full-slot Jacobian callbacks, and compares them with the ExprLegacy
+  baseline. It is a pre-release lifecycle gate; the large release matrix and
+  wall-clock baseline remain separate.
+- [x] Preserve AtomView-native Sparse coordinates in the retained generated
+  solver callback bridge (2026-09-21). The bridge previously asked the
+  Expr-compatible payload for its sparse structure even though AtomView
+  intentionally leaves the compatibility Expr vectors empty. That allocated a
+  zero-length Jacobian buffer and failed with a linked callback shape error.
+  The callback now consumes the prepared Atom-aware `sparse_structure()`;
+  Rust sequential/parallel, exact-example and TCC acceptance gates all pass.
+- [x] Define compact-slot ownership for future parallel/chunked callbacks
+  (2026-09-21, debug). `AtomAotBandedChunkOwnership` partitions the complete
+  `(kl + ku + 1) * cols` buffer into contiguous, non-overlapping ranges. The
+  boundary slots are owned by the range that contains them and therefore are
+  written exactly once as explicit zeroes. The contract has typed validation
+  and unit coverage for holes, overlap, empty requests and worker-count
+  capping. Wiring this policy into the generated callback executor remains a
+  separate implementation step; the current full-slot route is still whole.
 
 ## 0. Test Suite Architecture: Intermediate Migration State
 
@@ -89,7 +161,7 @@ size of a speedup is known. Proposed changes require isolated measurements.
 | P1 | BVP dense Lambdify locks the output matrix per nonzero; faer sparse Lambdify locks a triplet vector and reconstructs CSC each evaluation. See `symbolic_functions_BVP.rs`. | Prepare destination structure once and fill disjoint numeric buffers. Preserve runtime threshold semantics explicitly. |
 | P1 | `numeric_discretization::build_numeric_generated_solver_state` analytical Jacobian callback allocates `n_unknowns^2` entries and scans all of them before `from_vector`. `finite_difference_jacobian` also allocates dense storage plus quadratic triplet capacity. | Pure numerical Sparse is not sparse during assembly. Direct stencil assembly and structured FD deserve their own memory/performance gate. |
 | P1 | `VectorType` arithmetic returns new `Box<dyn VectorType>`; `to_DVectorType` owns a copy. Sparse subtraction and banded callback/solve adapters perform conversions. | Buffer ownership and borrowed views are stronger optimization candidates than the virtual call alone. |
-| P1 | BVP Atom assembly materializes residuals and nonzero derivatives back into Expr in `install_atom_discretized_system` and `calc_atomview_sparse_jacobian_with_bandwidth`. | Retain the packed representation through evaluation; measure preparation separately from callback execution. |
+| P1 | Native BVP Atom assembly keeps residuals and nonzero derivatives packed as Atom; explicit compatibility/AOT adapters may still materialize Expr. | Keep the native representation through evaluation; measure any compatibility projection separately from callback execution. |
 | P1 | Runtime `step`, matrix solves and callback wrappers contain panic/expect paths below public `try_*` entry points. | Typed setup errors do not yet guarantee typed numerical failures. Design a fallible callback/linear-solve boundary. |
 | P1 | Statistics use string maps; `linear_system` time includes factorization; `checkmem` returns dense-equivalent MiB, cast to integer under `jacobian memory, MB`. | Add typed raw telemetry, separate factor/solve durations and actual storage estimates before making architectural claims. |
 | P2 | Public solver fields, legacy method strings, matrix overrides and generated-backend options coexist. | Resolve one validated runtime plan at preparation boundaries and define cache invalidation. |
@@ -182,7 +254,14 @@ nonlinear algorithm.
   Jacobian in the shared `BvpPreparedRuntime` container. Live callbacks,
   mesh/layout and Banded-native ownership remain compatibility fields until
   their own migrations are complete; this is deliberately not hidden behind
-  the stage enum.
+  the stage enum. The next lifecycle slice is now implemented and debug-tested
+  (2026-09-21): numeric Jacobian replacement and factor publication use one
+  generation-aware resource boundary in both solvers. A newly published
+  Jacobian cannot retain or report the previous factor as current. This still
+  does not claim complete callback/mesh ownership. A coherent typed
+  plan/resource snapshot and stage-consistency gate were added on 2026-09-21;
+  the Damped generated-state handoff now clears the numeric Jacobian as well
+  as its factor when callbacks are regenerated.
 - [ ] Reuse factors while the algorithm intentionally reuses the same numeric
   Jacobian, even when a damping candidate changes state or residual.
 - [ ] Invalidate factors when numeric Jacobian values are replaced. Invalidate
@@ -365,8 +444,8 @@ nonlinear algorithm.
   slots. Populate values without sorting/reconstructing the pattern per call.
 - [ ] Preserve already-working Banded diagonal partitioning. Add caller-owned
   assembly and an explicit Sequential/small-work fallback.
-- [ ] Retain residual and derivative atoms from `DiscretizedBvpAtomSystem` and
-  `PreparedSparseAtomSystem`. Compile direct Atom callbacks without compulsory
+- [x] Retain residual and derivative atoms from `DiscretizedBvpAtomSystem` and
+  `PreparedSparseAtomSystem`. Direct Atom callbacks compile without compulsory
   Atom-to-Expr materialization; compatibility getters may materialize on demand.
 - [ ] Validate direct Atom numerical semantics: coefficient conversion,
   supported functions, domains, reassociation, non-finite values and typed
@@ -405,6 +484,32 @@ nonlinear algorithm.
   policies. A non-finite value must not silently disappear as a zero.
 - [ ] Feed existing AOT builders the prepared data through adapters. Keep
   artifact lifecycle/ABI changes outside the first callback migration.
+- [x] Add the first AtomView-native full-slot Banded ABI boundary
+  (2026-09-21). `BandedCompactValues` now represents the complete
+  `(kl + ku + 1) * cols` callback buffer, including boundary zeros;
+  `PreparedSparseAtomBvpCodegen::with_native_banded_layout` packs the Atom
+  payload once during preparation, and Rust/C/Zig emitters preserve the same
+  output length. Typed runtime metadata and manifest chunk lengths cover the
+  full buffer.
+- [x] Complete the opt-in full-slot handoff through the BVP registry and
+  solver callback (2026-09-21). An explicit compact-layout marker, rather
+  than `jacobian_nnz`, selects the ABI; Rust/C/Zig registration validates
+  `(kl + ku + 1) * cols`, and the Banded callback converts compact storage
+  directly to `BandedAssembly` without dense/triplet staging. The historical
+  explicit-entry `BandedValues` route remains the default compatibility path
+  until solver-level parity evidence is complete.
+- [x] Add the first solver-level correctness and invalidation story for
+  compact-slot Banded artifacts (2026-09-21). The in-process linked Rust gate
+  covers compact matrix assembly, numeric rebind, distinct factor ownership
+  and callback telemetry. Full-slot chunks stay out of the explicit-entry
+  router until a boundary-slot merge policy is specified.
+
+- [x] Extend the isolated cold AOT protocol with integer trajectory counters
+  (2026-09-21, debug). Each child observation now carries iterations, linear
+  solves, Jacobian rebuilds, refinements, residual calls and Jacobian requests
+  alongside stage timings. This makes the future Apple-to-Apple release table
+  reject comparisons with different solver trajectories instead of relying on
+  wall-clock alone.
 
 - [x] Add fallible Damped/Frozen preparation validation (2026-09-20). Typed
   `try_task_check()` rejects malformed dimensions, interval/tolerances, scheme,
@@ -798,6 +903,14 @@ Planned benchmark/stories (names are provisional, not runnable tests yet):
   12 Core machine. The process-isolated rerun keeps cold preparation separate
   from callback timings and confirms that the lazy Atom->Expr compatibility
   bridge restores `AtomView+tcc` AOT without reintroducing eager Expr materialization.
+- [x] Add a typed native band-storage boundary for AOT/runtime consumers
+  (2026-09-21): `BandedJacobianStructure` now validates dimensions, duplicate
+  slots, offsets and positions through `try_assemble_*`, and can produce the
+  complete compact `(kl + ku + 1) * n` storage including boundary slots.
+  Runtime tests compare this representation with `BandedAssembly::to_banded`.
+  The explicit-entry contract remains available for compatibility, while the
+  full-slot ABI is now wired as a separately marked opt-in layout across all
+  producers and consumers. It must not be inferred from `jacobian_nnz`.
 - [x] Audit BVP `.simplify()` calls in the symbolic preparation path. The
   ExprLegacy discretizer no longer simplifies each residual before applying
   boundary conditions and then simplifies the same row again; it performs the
@@ -1075,6 +1188,54 @@ numeric Jacobian/factor state when the next solve requires it.
   parameter-name ordering, missing values and atomic rebind failure. The typed
   path must not expose the internal synchronization primitive.
 
+### P0 Apple-to-Apple release protocol
+
+The isolated AOT protocol is now able to transport integer trajectory counters
+with every child observation, but its historical tuning family is still
+Sparse-oriented. It must not be used as the final production comparison until
+all rows share the same Banded layout and the same process-level conditions.
+
+- [x] Wire a separate canonical process-isolated Banded scenario shared by
+  Lambdify, Rust, C and Zig (2026-09-21, debug compile gate). The new
+  `aot_banded_apple_to_apple_release_protocol` keeps the historical Sparse
+  tuning test unchanged, passes the matrix backend into the child process and
+  uses the same cold/warm/callback tables and integer counters. The actual
+  release execution and baseline recording are still pending.
+- [ ] Keep cold E2E, warm solve and callback-only observations as separate
+  phases, with the same frontend, compiler profile, thread count, repetitions,
+  cooldown and artifact cleanup for every row.
+- [x] Add the first shared `AotStoryProtocol` (2026-09-22, debug). It
+  centralizes `n_steps`, cold/warm repetitions, cooldowns, artifact cleanup and
+  worker-thread policy, validates the values before a story starts, and exposes
+  one canonical summary line. The main combustion Sparse/Banded race stories
+  now use it; the measured solver path is unchanged.
+- [ ] Adopt `AotStoryProtocol` in every AOT story, including the isolated
+  child-process harness and callback-only matrix. A row is not comparable until
+  it records the resolved protocol rather than local repetition/cooldown
+  constants.
+- [x] Route the Lambdify-vs-C-tcc break-even story through the shared protocol
+  (2026-09-22, debug compile gate). The report now keeps the historical cold
+  first-solve column and adds a separate repeated `try_solver_prepared` warm
+  column with the configured cooldown. The break-even estimate uses warm
+  runtime gain rather than the first solve, so compiler/setup and steady-state
+  measurements cannot be conflated. The expensive release execution remains
+  pending.
+- [x] Apply an explicitly requested `worker_threads` value to isolated child
+  processes through `RAYON_NUM_THREADS` (2026-09-22, debug). The default `0`
+  remains inherited behavior; parent-process warm-pool control and complete
+  adoption by every story are still separate work.
+- [ ] Add explicit phase labels and integer trajectory counters to the common
+  report writer: cold E2E, warm solve and callback-only must never be merged
+  into one `total_ms` column.
+- [x] Persist iterations, linear solves, Jacobian rebuilds, refinements,
+  residual calls and Jacobian requests in each isolated child observation
+  (2026-09-21). The protocol now has enough trajectory data to reject an
+  apples-to-oranges speed comparison once the common Banded scenario is wired.
+- [x] Add the canonical isolated Banded matrix family and reuse it for
+  Lambdify, Rust, C and Zig rows (2026-09-21, debug compile gate). The
+  historical Sparse-oriented tuning family remains unchanged; only the new
+  Banded story is eligible for the final apples-to-apples release baseline.
+
 ## 20. P0: AtomView Parallel Policy, Prepared Ownership And Lifecycle (2026-09-20)
 
 This is the next correctness-first block for the pure Lambdify route. AOT is
@@ -1122,6 +1283,36 @@ revision metadata and solver-local factor owners.
   not only revision/fingerprint metadata. It must own or reference the
   prepared mesh/layout, callback bundle, Jacobian generation and factor
   generation through one typed boundary.
+- [x] Bind the shared resource owner to the complete prepared-plan fingerprint
+  (2026-09-21, debug). Damped/Frozen now publish the binding after generation,
+  refresh it only for an explicit numeric parameter rebind, and reject a
+  prepared solve when the resource owner and compatibility revision disagree.
+  This closes the stale-resource guard without duplicating public callback
+  boxes; actual callback/mesh ownership remains a separate API migration.
+- [x] Move the canonical prepared variable ordering and Banded bandwidth into
+  `BvpPreparedRuntime` (2026-09-21, debug). Damped/Frozen generated-state
+  handoff and production factor/Jacobian paths now publish/read this owner;
+  solver fields remain compatibility mirrors until callback and mesh ownership
+  are migrated. This is an ownership slice, not completion of `PreparedPlan`.
+- [x] Add a boundary-only callback identity guard (2026-09-21, debug).
+  Prepared-plan fingerprints now include the data identity of the historical
+  public residual/Jacobian trait objects, so direct `Box` replacement is
+  rejected before `try_solver_prepared` in both Damped and Frozen. No callback
+  is executed and no identity work is added to residual/Jacobian hot paths.
+  This is a compatibility safety net, not a substitute for closed callback
+  ownership; in-place mutable callback state still belongs to the future
+  prepared callback owner.
+- [x] Add the missing fallible Frozen mesh mutation boundary (2026-09-21,
+  debug). `try_set_mesh` updates interval, point count, mesh and resized guess
+  together, clears callback/layout/Jacobian/factor state, and rejects a
+  one-point mesh with a typed `InvalidProblem`; the legacy `task_check` and
+  `try_task_check` now agree that Frozen needs at least two points.
+- [x] Add the matching fallible Damped mesh boundary (2026-09-21, debug).
+  `try_set_mesh` validates the interval and the existing `n_steps > 1`
+  contract before mutating state; historical `set_mesh` is now only a thin
+  panic-compatible wrapper. Both strategies therefore expose the same typed
+  invalidation semantics while preserving their different interval/point
+  mesh conventions.
 - [ ] Keep Damped and Frozen numerical policies separate while sharing the
   prepared ownership and invalidation machinery. Compatibility fields may be
   projected into the plan, but the solve loop must not assemble its runtime
@@ -1130,11 +1321,21 @@ revision metadata and solver-local factor owners.
   `NumericalJacobianCurrent`, `FactorCurrent` and `Invalidated`, with typed
   transitions and no silent fallback to stale callbacks or factors.
 
+  Current status: the shared runtime already exposes these states through its
+  typed revision/resource snapshot and invalidates numeric Jacobian/factor
+  resources on layout replacement. The remaining work is to make the solver's
+  callback bundle and mesh owned by the same plan rather than guarded mirrors.
+
 ### P0 invalidation matrix
 
 - [ ] Close and test invalidation for parameter values/names, mesh, boundary
   conditions, state values, solver policy, matrix backend, evaluator policy,
   Jacobian structure and bandwidth/pattern changes.
+- [x] Extend the typed linear boundary to legacy Jacobian-owned operations
+  (2026-09-21, debug). `Jac::try_inv` and `Jac::try_solve_sys` classify
+  compatibility panics and dimension mismatches as `BvpLinearSolveError`; the
+  old infallible methods remain only for compatibility callers. Solver-local
+  factor and callback migration still has to use these boundaries everywhere.
 - [ ] Prove that numeric parameter rebinding preserves symbolic/Lambdify
   artifacts but never reuses a factor built from the previous numeric
   Jacobian.
@@ -1287,6 +1488,16 @@ stories are not part of this baseline.
 - [ ] Add fixed-CSC, band-slot and rebind rows to the same release baseline now
   that their debug correctness gates are green. Release numbers remain
   provisional until the full P0 lifecycle corpus is complete.
+
+- [x] Remove a false-green AOT diagnostic (2026-09-22, debug). Structured
+  block-tridiagonal rows now require a finite relative residual below `1e-8`
+  before they are labeled `ok`; the known `1.244e31` residual is reported as
+  `diag` and the Zig bootstrap explicitly keeps that non-correctness status.
+- [x] Localize and fix the Lane-Emden ExprLegacy/AtomView symbolic drift
+  (2026-09-22, debug). High-precision `f64` conversion and adaptive overflow
+  fallback reduced the callback gate from `5.039e-8 / 2.399e-7` to about
+  `2.11e-11 / 3.00e-11` for residual/Jacobian; the ignored localization test
+  now compares multiple states and enforces `1e-9` componentwise parity.
 
 ## 23. P1: Shared Linear Runtime And AtomView Hot Path (after P0)
 
@@ -1673,6 +1884,51 @@ fallible runtime errors, typed telemetry/logging, and correctness/performance
 tests. No AOT backend is production-ready until all four contracts have a
 matching gate.
 
+### AOT stage-comparison exit policy (2026-09-21)
+
+- [x] Keep the historical `ExprLegacy` AOT story columns immutable: symbolic
+  preparation, fixture/module generation, source emission, materialization,
+  compiler build and runtime link remain the comparison oracle.
+- [x] Add canonical typed AtomView aggregates for the same report vocabulary:
+  `symbolic_preparation`, `fixture_generation`, `compilation` and `linking`.
+  The aggregate is a view over typed sub-stages, not a second timer or a
+  string-keyed hot-path map.
+- [x] Propagate production handoff elapsed times into AtomView AOT telemetry:
+  external materialization -> `Materialization`, compiler process
+  compile/link -> `Build`, and runtime registration -> `Link`.
+- [x] Publish the typed stage values and integer callback/error counters at
+  the existing compatibility diagnostics boundary so story reports can show
+  both typed values and the historical solver diagnostics.
+- [x] Add a correctness test for the canonical bucket boundaries and extend
+  the AOT crate-build story with a typed AtomView stage table.
+- [ ] Run the dated release comparison on the same workload, matrix backend,
+  compiler and build profile. Require AtomView numerical residual/Jacobian and
+  solution parity before interpreting any timing result.
+- [ ] Remove or migrate ExprLegacy AOT only after AtomView is no slower on the
+  important cold stages and warm runtime, has equal-or-better artifact
+  lifecycle reliability, and passes the same toolchain matrix. Until then,
+  ExprLegacy remains a required correctness/performance oracle.
+
+### 2026-09-21 AOT diagnostic rerun findings
+
+- [x] Record dated debug reports for the direct generated-crate table,
+  combustion Banded end-to-end, Zig bootstrap smoke and oscillator comparison.
+  The canonical stdout files are under `test_reports/BVP_Damp_AOT/`; historical
+  STORY records remain unchanged.
+- [x] Fix the AtomView Banded linked-callback lifecycle mismatch that produced
+  an empty output buffer (`0 values; expected 20988`). Chunked Banded plans now
+  use the explicit-entry ABI; native compact Banded ABI is restricted to whole
+  Jacobian plans, and native Banded structure comes from Atom entries rather
+  than empty Expr compatibility caches.
+- [x] Verify that direct crate-build telemetry exposes nonzero typed cold
+  buckets. A crate-only test legitimately reports zero link time because no
+  runtime library is registered.
+- [ ] Repeat the same four stories in release with identical toolchains,
+  profiles, repetitions and cooldowns before declaring a new AOT performance
+  baseline or removing ExprLegacy.
+- [ ] Add a focused correctness gate for chunked AtomView Banded explicit-entry
+  callbacks and a separate gate for whole-plan compact slot callbacks.
+
 Progress (2026-09-21): the first non-invasive slice adds a typed
 `AtomAotPreparedPlan`, explicit Sparse/Banded layout metadata, fallible plan
 validation and an Atom codegen-bridge accessor. This is preparation plumbing,
@@ -1711,13 +1967,223 @@ source layout and apply Banded layout only for the requested matrix route,
 avoiding cross-backend identity ambiguity. Debug contract tests cover native
 Banded manifest construction and registry reuse by the manifest key.
 
+Progress (2026-09-21, telemetry propagation slice):
+`GeneratedBackendConfig::with_aot_telemetry_mode(Off|Counters|Detailed)` now
+propagates through damped/frozen requests and `Jacobian` into the Atom-native
+codegen bridge and `AtomAotPreparedPlan`. The plan records its validation cold
+stage in a typed snapshot; `Off` keeps the telemetry state unallocated. Real
+combustion preparation tests cover both `SparseCol` and `Banded`, verify empty
+Expr compatibility payloads and assert the Detailed snapshot. Compiler,
+linker and warm callback stages remain open and are not claimed by this slice.
+
+Progress (2026-09-21, owned-plan and stage-breakdown slice):
+AtomView BVP preparation now retains the validated `AtomAotPreparedPlan` in the
+prepared bridge, so telemetry snapshots no longer rebuild and revalidate the
+codegen payload. Existing typed Atom lowering breakdowns are also forwarded to
+the plan for `AtomPreparation`, `JacobianPreparation`, `Lowering` and
+`SourceEmission` stages. This is still a migration bridge: the public
+`BvpPreparedSparseAotProblem` carries both compatibility and native payload
+fields, and compiler/materialization/link/warm callback ownership remains open
+for the separate `ExprLegacyAotAdapter`/`AtomViewAotAdapter` split.
+
+Progress (2026-09-21, typed route-adapter slice):
+`aot_adapters.rs` now exposes distinct borrowed `ExprLegacyAotAdapter` and
+`AtomViewAotAdapter` variants behind `BvpAotAdapter`. The compatibility bridge
+can report an incomplete AtomView payload as a typed error instead of allowing
+callers to infer a route from unrelated optional fields. Sparse and Banded
+AtomView diagnostics exercise this boundary. The owning bridge is intentionally
+still retained for compatibility; the next migration step is to move manifest
+and artifact lifecycle entrypoints onto these adapters.
+
+Progress (2026-09-21, adapter manifest/module handoff slice):
+AtomView manifest creation now accepts the already owned plan, and BVP module
+and artifact preparation prefer the typed AtomView adapter before entering the
+legacy compatibility path. This removes a second plan validation from the
+canonical manifest handoff while preserving the old API as a fallback. Actual
+compiler materialization, link/load and warm callback ownership are still
+separate lifecycle work and have not been declared production-ready.
+
+Progress (2026-09-21, typed lifecycle logging slice):
+The AtomView plan now owns lifecycle logging hooks for planned, source-emitted
+and materialized artifact states. The disabled mode returns before invoking the
+logger; the diagnostic gate exercises real module and artifact-object creation
+without compiling an external toolchain. Build-start/success/failure,
+link/load, publication and warm callback aggregation remain pending at the
+generic artifact-manager boundary.
+
+Progress (2026-09-21, first typed warm-boundary slice):
+The prepared sparse provider now exposes fallible try_residual_into and
+try_jacobian_values_into entrypoints. They validate variable/input shape,
+parameter finiteness, output shape and finite callback values, and convert
+runtime callback panics or missing linked AOT registration into typed
+CallbackExecutionFailed/CompiledAotRuntimeUnavailable errors. The historical
+residual_into and jacobian_values_into methods remain explicit panic-style
+compatibility wrappers. AtomAotPreparedPlan also validates the flattened AOT
+input ABI and fixed residual/Jacobian output layouts before a compiler-specific
+callback is allowed to run. This is the first correctness gate; it does not
+yet remove assert-based checks from every low-level C/Zig loader closure.
+
+The AOT test taxonomy is now recorded separately in
+BVP_DAMP_STORY_AOT_TAXONOMY.md. Lambdify-vs-AOT oracle stories, AOT-only
+correctness, lifecycle, toolchain parity and performance stories are kept
+distinct so a successful Lambdify comparison cannot hide an AOT-only defect.
+
+Progress (2026-09-21, AOT-only contract slice):
+Added dedicated AOT-only AtomView tests for finite flattened inputs, fixed
+Sparse/Banded output layouts and warm callback telemetry. These tests do not
+solve through Lambdify and therefore cannot pass merely because the comparison
+oracle is healthy. The prepared provider also rejects missing or inconsistent
+numeric parameter bindings before entering a linked callback ABI.
+
+Progress (2026-09-21, typed callback/error telemetry slice):
+The linked C/Zig-compatible callback boundary now validates the expected
+residual/Jacobian output length before invoking the registered callback and
+reports panics, non-finite input/output and shape violations as typed errors.
+The prepared sparse provider exposes the same fallible contract and retains
+the old methods only as explicit compatibility wrappers. AOT runtime errors
+increment the typed telemetry error counter, while successful callbacks add
+no error-path work. This closes the first three-pass safety slice; it does not
+yet claim native Sparse/Banded AOT runtime ownership or full compiler/toolchain
+production readiness.
+
+The same typed boundary is now available for registered residual and sparse
+Jacobian chunk callbacks, including invalid chunk indices and chunk-local
+output lengths. Existing direct chunk dispatch remains a compatibility/internal
+path until the solver-facing parallel callbacks are migrated to propagate these
+results instead of converting failures back into panic-style callback behavior.
+
+Progress (2026-09-21, typed parallel dispatch slice):
+The prepared sparse provider can now carry an explicit
+`ParallelExecutorConfig`; its fallible AOT callbacks use typed whole/chunk
+dispatch and preserve fixed residual/CSC-value ordering while workers write to
+disjoint output slices. The dispatcher validates chunk ranges before slicing
+and propagates errors through Rayon joins. The historical infallible callback
+closures are still retained for compatibility and are not yet the final
+solver-owned runtime contract.
+
+Progress (2026-09-21, solver-owned typed validation bridge):
+The whole and chunk AOT calls used by the solver-owned legacy dispatch helper
+now pass through the same typed validator as the public fallible provider.
+This closes the previous bypass where a linked closure could write the wrong
+output length, non-finite values or panic without going through the AOT error
+classification boundary. The `Fun`/`Jac` traits are still infallible, so the
+last compatibility boundary converts a typed callback error into a panic with
+the typed detail; replacing that boundary with a fallible solver callback
+trait remains a separate API migration and is not claimed complete here.
+The retained infallible dispatch also validates chunk offsets and split
+boundaries before slicing, so malformed generated layouts report the same
+typed `ChunkLayout` detail instead of an opaque integer-underflow or slice
+bounds panic.
+
+Progress (2026-09-21, adaptive refinement callback slice):
+The Damped `Sci` grid-refinement path now uses `Fun::try_call` and propagates
+residual callback failures as `BvpBackendIntegrationError` instead of
+escaping through the old infallible callback. A dedicated test covers a
+deliberately failing refinement residual; the complete Damped solver test
+module passes with this boundary enabled.
+The same refinement entry now reports a missing adaptive grid method as
+`InvalidSolverConfiguration` rather than using `expect` on user-controlled
+solver settings.
+
+Progress (2026-09-21, AOT lifecycle lock hardening):
+Both Damped and Frozen generated-solver handoff paths now convert a poisoned
+AOT lifecycle mutex into the typed `PipelinePanicked` error instead of
+aborting through `expect`. Normal lock acquisition and serialization remain
+unchanged.
+
+Progress (2026-09-21, linked registry typed boundary):
+Dense, residual-only and sparse linked-backend registries now expose fallible
+`try_register_*`, `try_resolve_*` and `try_unregister_*` operations. A poisoned
+registry lock is classified as a typed registry failure before it reaches the
+solver handoff. C/Zig cdylib registration and sparse AOT build/rebuild
+orchestration use this boundary; the old registry names remain only as
+explicit compatibility wrappers for infallible legacy callers. The dedicated
+registry round-trip contract test passes. Remaining work is to migrate other
+infallible lookup sites where their enclosing API can propagate the error.
+
+Progress (2026-09-21, registration failure propagation):
+Rust, C and Zig generated-cdylib handoff now stop immediately when runtime
+registration fails and return `AutomaticAotBuildFailed` with the toolchain and
+registration detail. The previous behavior logged the failure and continued
+until it surfaced later as an ambiguous `AutomaticAotBuildRequested`. The
+generated handoff test mutex also recovers a poisoned guard so one failed AOT
+fixture cannot mask all subsequent tests. The post-build relink path keeps its
+own typed runtime check instead of reusing the pre-build backend gate; this is
+required because a freshly materialized artifact is not yet reflected in the
+old bundle selection. The complete generated handoff contract now passes
+(`18 passed`) in the debug suite.
+
+Progress (2026-09-21, common lifecycle/fault-injection slice): added
+`codegen_aot_lifecycle.rs` as the compiler-independent typed contract for
+artifact state (`Missing`, `Materialized`, `Partial`, `Stale`, `Ready`),
+lifecycle stage, failure kind and preserved partial diagnostics. The registry
+can inspect a materialized entry and quarantine any non-ready tree before a
+rebuild; it never overwrites a suspicious directory in place. Rust and the
+cross-toolchain driver now expose typed `execute_with_lifecycle` and retry
+helpers, with debug fault points for compiler, partial-artifact, lock and link
+failures. Unit gates cover stale/partial/ready inspection, quarantine and
+attempt-count preservation. This is a lifecycle safety slice, not yet a claim
+that the prepared plan owns every compiler/linker resource.
+
+Progress (2026-09-21, fixed-field AOT runtime telemetry slice): AOT telemetry
+now aggregates worker count/batches and known allocation/copy counts and byte
+totals without per-worker maps. Linked AtomView dispatch records the effective
+worker/chunk batch when parallel execution is selected. Compatibility map
+projection remains available only at the explicit diagnostics boundary; the
+disabled and warm callback paths still do not allocate a `HashMap`. Release
+price and real allocation instrumentation remain separate gates.
+
+Progress (2026-09-21, prepared Atom runtime ownership and cross-toolchain
+retry slice): `AtomAotPreparedPlan` now owns the selected artifact identity,
+linked sparse runtime and a monotonic binding generation. Rebinding first
+invalidates that owner and the solver callbacks, so a missing or replaced
+linked backend cannot leave the previous callback live. Rust, C and Zig
+materialized requests now share quarantine-before-rebuild retry orchestration
+with typed attempt count, inspection and recovery flags. This closes the
+artifact/link owner slice; mesh/BC ownership and the final solver-wide
+callback owner are still open.
+
+Progress (2026-09-22, bound callback lifecycle slice): the AtomView AOT plan
+now exposes owned `try_execute_bound_residual_callback` and
+`try_execute_bound_jacobian_callback` entrypoints. They require a `Linked`
+runtime state, use the backend owned by the plan, preserve typed callback
+errors and record warm telemetry. After invalidation they return
+`RuntimeNotLinked`; an external closure adapter remains available only as the
+lower-level ABI/test compatibility boundary. This proves that invalidation
+cuts off the old callback owner, while the complete solver-wide PreparedPlan
+ownership migration remains open.
+
+Progress (2026-09-22, typed evaluator identity slice): the AtomView AOT plan
+now has an explicit `with_evaluator_policy(Sequential|Parallel|Auto)` builder.
+The default remains `Unknown` until the resolved runtime actually selects a
+policy, so diagnostics do not invent execution semantics. The selected value
+is stored in the fixed-field telemetry identity and is rendered as text only
+at the compatibility diagnostics boundary.
+
+Progress (2026-09-22, compact-Banded owned callback parity slice): the debug
+contract now invokes a full compact `(kl + ku + 1) * cols` Jacobian through the
+`AtomAotPreparedPlan` owner, checks residual/Jacobian telemetry and verifies
+that invalidation makes the same callback unreachable. This complements the
+manifest and loader checks; cross-toolchain materialized parity remains a
+separate gate.
+
+Progress (2026-09-22, typed prepared-runtime state slice): the AtomView AOT
+owner now exposes explicit `Unbound`, `ArtifactOnly` and `Linked` states. A
+debug gate covers `Unbound -> ArtifactOnly -> Linked -> Unbound`, verifies that
+artifact materialization alone is not reported as an executable callback, and
+checks that replacing or invalidating a linked owner removes the old callback
+before the next generation is published. This is a lifecycle observability
+and correctness slice; the common `PreparedPlan` still does not own all mesh,
+callback-bundle and solver-factor resources.
+
 ### 27.1 Route and ownership contract
 
-- [ ] Introduce a typed `AtomAotPreparedPlan` (name may change) owning residual
+- [x] Introduce a typed `AtomAotPreparedPlan` owning residual
   atoms, sparse derivative atoms, Banded derivative atoms, ordered `Symbol`
-  input schema, parameter schema, matrix layout, chunking policy, compiler
-  profile and artifact identity. It must own the data required by both cold
-  code generation and warm linked callbacks.
+  input schema, parameter schema, matrix layout and chunking policy. It owns
+  the data required by both cold code generation and warm linked callbacks;
+  compiler profile and published artifact identity remain in the outer
+  manifest/registry lifecycle, where they can participate in build identity.
 - [ ] Keep `ExprLegacyAotAdapter` and `AtomViewAotAdapter` as distinct internal
   routes. Do not expand `BvpPreparedSparseAotProblem` with an optional mixture
   of `Expr` and `Atom`; that would hide which representation is active.
@@ -1726,9 +2192,10 @@ Banded manifest construction and registry reuse by the manifest key.
   compatibility Expr runtime plans before dispatching to Atom codegen. The
   remaining invalid-layout compatibility fallback is logged and is not yet a
   production exit-gate path.
-- [ ] Keep `Atom -> Expr` conversion only at explicit compatibility boundaries
-  and instrument it with a typed conversion counter. The canonical AtomView
-  AOT route must have zero such conversions after preparation.
+- [x] Keep `Atom -> Expr` conversion only at explicit compatibility boundaries
+  and keep the canonical AtomView AOT route at zero conversions after
+  preparation. The Atom plan and emitter gate do not materialize Expr; the
+  compatibility conversion counter remains available for adapters.
 - [ ] Make the prepared plan the owner of mesh/layout metadata, callbacks,
   generated output ordering, artifact fingerprint and linked runtime state.
   Numeric rebind, mesh/BC changes, matrix-policy changes and Jacobian-pattern
@@ -1742,22 +2209,27 @@ Banded manifest construction and registry reuse by the manifest key.
 - [x] Extend the common codegen output model with an explicit Banded values
   layout, including `kl`, `ku`, slot ordering and row/column ownership. Do not
   represent Banded output as dense staging or as an Expr-based sparse fallback.
-- [ ] Generate residual and Sparse Jacobian values directly from Atom views,
+- [x] Generate residual and Sparse Jacobian values directly from Atom views,
   preserving the existing fixed-CSC ordering and duplicate-coordinate rules.
-- [ ] Generate Banded Jacobian values directly from Atom views, preserving the
-  native band-slot contract and out-of-storage semantics. The current slice
-  preserves the explicit band metadata and contiguous values, but native
-  full-slot packing/out-of-storage behavior is still pending.
-- [ ] Make Rust, C and Zig emitters consume the same Atom-derived IR and output
-  manifest. ABI order must be explicit and identical: parameters followed by
-  unknown/state inputs, then residual or Jacobian output buffers.
-- [ ] Add a route marker to the prepared artifact and linked runtime so reports
+- [x] Generate Banded Jacobian values directly from Atom views, preserving the
+  native band-slot contract and out-of-storage semantics. The full-slot path
+  emits complete compact storage, including boundary zeros, while the
+  explicit-entry path remains available for compatibility.
+- [x] Make Rust, C and Zig emitters consume the same Atom-derived IR and output
+  manifest. ABI order is explicit and identical at the common `CodegenModule`
+  boundary: parameters followed by unknown/state inputs, then residual or
+  Jacobian output buffers. A debug gate now checks callback names and Banded
+  layout across all three source emitters; compiled toolchain parity remains a
+  separate exit-gate item.
+- [x] Add a route marker to the prepared artifact and linked runtime so reports
   can distinguish `AtomView-native`, `ExprLegacy`, and compatibility fallback.
-  A fallback must be visible and never silently labelled AtomView-native.
+  `PreparedProblemManifest::symbolic_route` now participates in the artifact
+  key, while BVP selection already exposes the same route to diagnostics. A
+  fallback must remain visible and never silently labelled AtomView-native.
 
 ### 27.3 Typed errors and safe runtime boundary
 
-- [ ] Add fallible `try_residual_into` and `try_jacobian_values_into` AOT
+- [x] Add fallible `try_residual_into` and `try_jacobian_values_into` AOT
   boundaries. Replace runtime `assert!`, `assert_eq!`, `unwrap` and `expect`
   on user/input/artifact state with typed errors.
 - [ ] Cover typed errors for missing or stale artifacts, wrong problem key,
@@ -1772,9 +2244,10 @@ Banded manifest construction and registry reuse by the manifest key.
 
 ### 27.4 AOT telemetry and logging
 
-- [ ] Add one typed AOT telemetry mode shared by AtomView and ExprLegacy:
-  `Off`, `Counters` and `Detailed`. `Off` must not allocate, start timers,
-  format strings or update maps in the hot path.
+- [x] Add one typed AOT telemetry mode for the AtomView prepared/runtime path:
+  `Off`, `Counters` and `Detailed`. `Off` does not allocate, start timers,
+  format strings or update maps in the hot path. Extending the same snapshot
+  ownership to ExprLegacy remains a compatibility-route follow-up.
 - [ ] Split cold telemetry into validation, Atom discretization, symbolic
   structure/Jacobian preparation, Atom lowering, optimization/temp reuse,
   source emission, materialization, compiler build, link/load, publication,
@@ -1799,8 +2272,10 @@ Banded manifest construction and registry reuse by the manifest key.
 
 ### 27.5 Correctness and story-test infrastructure
 
-- [ ] Add a no-conversion gate proving AtomView AOT preparation and warm
-  execution never call `atom_to_expr`; keep ExprLegacy as an independent oracle.
+- [x] Add a no-conversion gate proving AtomView AOT preparation and the typed
+  linked warm execution boundary never call `atom_to_expr`; keep ExprLegacy as
+  an independent oracle. The gate also checks that the historical Expr sparse
+  cache remains empty until an explicit compatibility accessor is requested.
 - [ ] Add componentwise residual and Jacobian parity at identical inputs and
   parameter bindings for ExprLegacy versus AtomView AOT.
 - [ ] Add fixed-CSC and Banded-slot parity, including ordering, duplicate
@@ -1816,14 +2291,207 @@ Banded manifest construction and registry reuse by the manifest key.
   control, never a large-AOT performance target.
 - [ ] Run the same stories for available Rust, C and Zig toolchains. Separate
   preparation/build/link time from warm residual/Jacobian/linear execution.
-- [ ] Save printed AOT story results in the dedicated test-report files with
-  canonical test name and timestamp. Preserve historical rows; append new
-  dated records rather than overwriting earlier AOT evidence.
+- [x] Save printed AOT story results in dedicated `BVP_Damp_AOT`,
+  `BVP_Damp_AOT_Race` and `BVP_Damp_AOT_Compare` report files with canonical test names and UTC
+  timestamps. The thread-local capture forwards output to `--nocapture` and
+  writes only after the test body exits, outside measured solver/AOT regions;
+  reruns replace only the current canonical record, while historical baseline
+  reports in the existing `bvp_damp` suite remain untouched.
 - [ ] Add failure-injection stories for compiler failure, partial artifact,
   stale publication, lock contention, link failure and quarantine/rebuild.
   Verify typed diagnostics and recovery without corrupting a valid artifact.
 
+Progress (2026-09-22, BVP artifact-state gate): the AOT-only contract suite
+now exercises missing/materialized/stale inspection, quarantine and retention
+of typed partial diagnostics in one report-captured test. Compiler/link/lock
+injection remains covered by lower-level Rust/driver tests but still needs the
+same BVP story-level report and cross-toolchain child-process evidence.
+
+Progress (2026-09-22, stale fault point): `AotFailureInjection` now has a
+distinct `StaleArtifact` case in the shared driver and Rust materializer,
+separate from `PartialArtifact`. A debug test verifies that the failure keeps
+the stale class, materialized stage and inspection payload; no compiler is
+spawned. Cross-toolchain retry and BVP report integration remain open.
+
+Progress (2026-09-22, cross-toolchain retry gate): the shared Rust/C/Zig driver
+now runs both `PartialArtifact` and `StaleArtifact` through the same two-attempt
+quarantine/retry matrix and preserves the root failure kind for every backend.
+This is a debug lifecycle gate; it does not claim that real compiler/linker
+failures have been injected in isolated child processes yet.
+
+Progress (2026-09-22, lifecycle failure telemetry gate): the BVP handoff now
+maps typed lifecycle failures to the prepared-plan stream, distinguishing build
+failure from link failure and preserving quarantine transitions reported by the
+common artifact diagnostics. A fixed-field telemetry test now guards the
+`BuildFailed`/`LinkFailed`/`Quarantined` counters and last-event semantics with
+timers disabled. Real compiler/linker failure injection in isolated BVP child
+processes remains a separate integration gate; this unit test does not claim
+that external tools were executed.
+
+Progress (2026-09-22, real missing-toolchain failure gate): the shared driver
+now has a debug test that materializes a real C AOT request, attempts to spawn a
+deliberately missing compiler executable in two isolated lifecycle attempts,
+quarantines the generated tree between attempts and verifies typed `Io` root
+diagnostics, retry count, cleanup and final artifact inspection. This covers
+the process-spawn failure without requiring gcc/tcc/zig; an actual compiler
+exit/link failure with a present toolchain remains a separate optional
+environment-dependent integration test.
+
+Progress (2026-09-22, P0 debug gate): the complete local debug slices are green:
+the AOT driver lifecycle/emitter module (8 tests), the shared PreparedPlan
+resource/invalidation module (11 tests), and the ExprLegacy/AtomView parity
+corpus (4 tests). The parity corpus checks final values, accepted/rejected
+damping decisions, Newton/refinement counters and event traces. This closes
+the debug correctness gate only; it does not replace the dated release
+apple-to-apple timing or external Rust/C/Zig numerical parity runs.
+
 ### 27.6 Production exit gate and order
+
+#### Progress (2026-09-21, typed linked-registry boundary)
+
+- [x] Add `LinkedAotRegistryError` and fallible `try_register_*`,
+  `try_resolve_*` and `try_unregister_*` APIs for dense, residual-only and
+  sparse linked backends. A poisoned registry lock is now reported as a typed
+  error instead of being an unavoidable process abort on the new boundary.
+- [x] Route C/Zig cdylib registration through the fallible registry API and
+  preserve the previous public names only as explicit compatibility wrappers.
+- [x] Keep the registry round-trip and callback-boundary correctness tests
+  green after the API split. A remaining test-hook panic is the deliberate
+  callback panic fixture caught by `catch_unwind`, not an uncaught runtime
+  failure.
+- [x] Migrate solver-facing `resolve_*`/`unregister_*` calls to the fallible
+  registry API where their enclosing function can propagate
+  `BvpBackendIntegrationError`; the remaining compatibility lookups are
+  confined to explicit tests and infallible legacy boundaries.
+
+#### Progress (2026-09-21, fault-injection and fixed-field diagnostics)
+
+- [x] Add common typed artifact inspection states (`Missing`, `Materialized`,
+  `Partial`, `Stale`, `Ready`) and preserve them in lifecycle failures.
+- [x] Add compiler, partial-artifact, lock and link fault points for Rust and
+  the cross-toolchain driver, including retry counts and quarantine/rebuild
+  tests for Rust/C/Zig materialization paths.
+- [x] Keep worker, chunk, known allocation and copy-byte telemetry in fixed
+  atomic fields; no worker-thread map is introduced on the warm callback path.
+- [ ] Connect compiler/link/quarantine transitions to every prepared-plan
+  telemetry stream and expose the complete cold/warm report in story tests.
+
+Progress (2026-09-22, typed route identity slice):
+`BvpAotTelemetrySnapshot` now carries fixed-field identity for frontend,
+matrix layout, evaluator policy and residual/Jacobian chunking. Atom-native
+plans populate the frontend, layout and chunking fields during preparation;
+the evaluator policy remains explicitly `Unknown` until the selected runtime
+policy is bound, rather than being guessed from a requested flag. A debug
+contract tests verify the AtomView+Banded+whole identity and its compatibility
+diagnostics projection. This is metadata correctness, not completion of worker
+aggregation or the common report.
+
+#### Progress (2026-09-21, common prepared ownership generations)
+
+- [x] Extend the shared Damped/Frozen prepared revision contract with typed
+  callback, artifact and linked-runtime generations. `try_solver_prepared` now
+  rejects a plan whose generated artifact or linked runtime is newer/older than
+  the captured plan, rather than relying only on the public-field fingerprint.
+- [x] Make generated-state publication start a new callback/artifact
+  generation before capturing the new prepared stamp. The old numeric factor,
+  callback identity and generated artifact therefore cannot be accepted as one
+  warm plan after regeneration.
+- [x] Add unit gates for artifact/link invalidation and for the distinction
+  between callback replacement and numeric factor lifecycle. The generation
+  contract is scalar and outside residual/Jacobian hot paths.
+- [x] Add `last_lifecycle_event` to the fixed-field AOT telemetry snapshot.
+  Lifecycle reports can now identify the last typed transition without a
+  hot-path string map; string rendering remains a diagnostics-boundary
+  compatibility projection.
+- [x] Connect the common BVP handoff to the typed lifecycle stream for
+  planned/cache-hit/cache-miss/build-started/build-succeeded/publication/
+  linked/runtime-ready transitions. Rust/C/Zig still have native materializer
+  adapters, but lifecycle state is recorded through one language-independent
+  telemetry contract.
+- [ ] Preserve `BuildFailed`/`Quarantined` transitions in the same BVP plan
+  telemetry when a materializer returns an error; the common codegen driver
+  already owns these typed diagnostics, so the remaining work is only to pass
+  the prepared telemetry sink through failure exits without duplicating
+  language-specific policy.
+- [ ] Complete the physical move of callback boxes, mesh ownership and linked
+  runtime handles into the common prepared owner. The current generation
+  contract intentionally precedes that source-compatible migration because
+  historical public callback fields still have many internal borrow sites.
+
+#### Progress (2026-09-21, strict AtomView AOT boundary and layout gate)
+
+- [x] Stop AtomView sparse Jacobian preparation from eagerly materializing the
+  historical `Vec<Expr>` cache. The old representation is now produced only
+  by `symbolic_jacobian_sparse_entries_owned`, an explicit compatibility
+  accessor used by retained ExprLegacy adapters.
+- [x] Preserve the ordinary AtomView Lambdify path after that split: its
+  callback compilation uses the packed Atom residual/Jacobian payload, while
+  ExprLegacy still validates its own sparse cache independently.
+- [x] Make native Banded AOT selection install `AtomAotMatrixLayout::Banded`
+  through the checked `with_banded_layout` boundary. A requested Banded route
+  can no longer carry a silently sparse layout.
+- [x] Add debug gates for native Sparse and Banded selection: the AtomView
+  route owns a typed plan, the compatibility accessor remains functional, and
+  native AOT telemetry reports `conversions == 0`.
+
+#### Progress (2026-09-21, typed AtomView warm callback execution boundary)
+
+- [x] Add `AtomAotPreparedPlan::try_execute_*_callback` methods. They own
+  flattened-input validation, output shape/finite checks and warm callback
+  telemetry; compiler-specific callback errors remain generic and typed at
+  the integration boundary.
+- [x] Route the linked AOT residual/Jacobian provider through that boundary
+  instead of duplicating validation and timer ownership in the provider.
+- [x] Add correctness gates for successful residual/Jacobian execution,
+  failed non-finite output and the rule that failed callbacks do not publish
+  successful warm-call counters.
+- [x] Report the actual linked chunk count in AOT telemetry. A parallel
+  chunked callback is no longer recorded as a misleading single whole call.
+- [ ] Extend the same execution-boundary gate to every Rust/C/Zig emitter and
+  verify the selected emitter's callback order against the fixed Sparse CSC
+  and Banded slot layouts.
+
+#### Progress (2026-09-21, fixed identity and native band-slot contract)
+
+- [x] Make the symbolic frontend part of `PreparedProblemManifest` identity:
+  `ExprLegacy`, `AtomViewNative` and `Generic` are typed values, and changing
+  the route changes the problem key. This prevents cross-frontend artifact
+  reuse even when dimensions and generated function names match.
+- [x] Reject duplicate Jacobian coordinates at the Atom-native preparation
+  boundary. Fixed CSC ordering is now a unique coordinate contract rather
+  than an implicit property of downstream triplet assembly.
+- [x] Add a cold `AtomAotBandedSlotMap` and typed packer for complete compact
+  LAPACK-style band storage, including boundary-zero slots. Its values are
+  compared componentwise with `BandedAssembly::to_banded()` and reject
+  duplicates, out-of-band coordinates and shape errors.
+- [x] Keep the current explicit-entry callback ABI unchanged while migrating
+  Rust/C/Zig consumers together. The full-slot map is now wired into generated
+  callbacks, linked registries and the BVP solver handoff as an explicit
+  opt-in layout; no existing artifact is silently reinterpreted.
+
+#### Progress (2026-09-21, Atom-native layout diagnostics and emitter gate)
+
+- [x] Add a distinct `JacobianEntryOutsideBand` error. A valid matrix
+  coordinate that does not fit `kl/ku` is no longer reported as if it were
+  outside the matrix shape.
+- [x] Validate Banded entry membership in `AtomAotPreparedPlan`, not only in
+  the convenience `with_banded_layout` builder, so callers cannot bypass the
+  storage contract by constructing the plan directly.
+- [x] Add typed validation for a parameter prefix larger than the flattened
+  Atom input schema via `ParameterCountOutOfRange`.
+- [x] Add a source-level Rust/C/Zig emitter gate over one Atom-native Banded
+  plan. It verifies that all emitters preserve the residual and Jacobian
+  callback names and therefore consume the same prepared layout metadata.
+- [x] Add fallible `try_codegen_module_with_breakdown_for_matrix_backend` and
+  `try_generated_aot_artifact_with_breakdown_for_matrix_backend` entrypoints.
+  They reject incomplete AtomView plans and invalid Banded widths before the
+  compatibility tuple-returning generation APIs can hide the problem.
+- [x] Make `BvpBackendIntegrationError` implement `Display` and `Error`, so
+  typed AOT/prepared/callback failures can cross CLI and library boundaries
+  without Debug-only formatting or compatibility panics.
+- [ ] Keep the compiled Rust/C/Zig callback execution gate separate: source
+  parity is not yet a claim that external toolchains have passed build, link,
+  ABI and numerical parity on the same artifact.
 
 1. Land the typed Atom plan and route marker without changing defaults.
 2. Add Atom-native Sparse and Banded layouts and prove no Expr conversion.
@@ -1846,3 +2514,278 @@ Banded manifest construction and registry reuse by the manifest key.
   disabled overhead is measured, and worker-thread aggregation is reliable.
 - [ ] Exit gate: historical ExprLegacy records remain intact and no AOT
   performance claim is made without dated release evidence.
+
+### 27.7 Legacy AOT migration policy
+
+This is an explicit policy, not permission to delete the reference path early.
+
+- [x] Keep ExprLegacy AOT as an independent correctness oracle and
+  compatibility route while AtomView-native AOT is being developed.
+- [x] Make AtomView route selection explicit. A complete native plan now owns
+  Atom payload, layout and typed AOT telemetry; an incomplete AtomView plan is
+  a typed preparation error and must not silently fall back to Expr.
+- [x] Keep Atom-to-Expr conversion behind an explicitly named compatibility
+  accessor. Native AtomView sparse preparation leaves the historical Expr
+  cache empty, and a debug regression test checks that the native plan reports
+  zero conversions.
+- [ ] Compare AtomView-native and ExprLegacy AOT on the same dated corpus,
+  toolchains, matrix layouts and parameter rebind cases. The comparison must
+  include correctness, lifecycle reliability, cold/warm stage timings,
+  allocations/copies, integer solver decisions and diagnostics, not only
+  wall-clock time.
+- [ ] Only after AtomView-native is demonstrably better across the supported
+  matrix may useful, proven Legacy AOT mechanisms be moved into the main
+  non-legacy modules. Remove redundant Legacy code only after parity gates,
+  release baselines and downstream compatibility checks are green; retain
+  the minimal Legacy oracle modules for future regression comparison.
+### 2026-09-21 AOT defaults and diagnostic table correction
+
+- [x] Make `GeneratedBackendConfig::default()` select the public production
+  defaults: AtomView symbolic preparation and C/tcc AOT. Keep ExprLegacy, Rust,
+  gcc and Zig as explicit comparison/compatibility choices.
+- [x] Make the canonical combustion end-to-end diagnostic use AtomView
+  Lambdify, not an implicit ExprLegacy baseline.
+- [x] Restore a separate cold lifecycle table with symbolic preparation, fixture
+  generation, compile, link, residual-call and Jacobian-call columns. Keep the
+  Rust compile-preset table separate from the canonical stage table.
+- [x] Route verbose AOT diagnostics through the dated `BVP_Damp_AOT` report
+  capture. The test report contains both correctness and stage tables, while
+  filesystem output remains outside measured solver intervals.
+- [ ] Rerun the full release baseline after this contract correction. The debug
+  one-run smoke is only a schema/correctness check; it is not a performance
+  baseline.
+
+### 27.8 AOT diagnostics follow-up (2026-09-21)
+
+- [x] Keep the Rust compile-preset report separate from the canonical
+  cross-toolchain stage report. The preset table measures Rust build profiles;
+  it must not be interpreted as the `tcc`/gcc/Zig lifecycle matrix.
+- [x] Publish the live AtomView AOT telemetry snapshot after the solve. The
+  solver now retains a shared typed handle and materializes the compatibility
+  diagnostics map only from `get_statistics()`, so residual/Jacobian counters
+  include warm callbacks rather than only cold preparation.
+- [x] Verify the one-run debug combustion gate: AtomView Lambdify, C-gcc,
+  C-tcc and Zig all preserve the same five-iteration/ten-linear-solve trace;
+  C-tcc and Zig differ from the AtomView baseline by approximately `1e-16`.
+- [ ] Rerun the complete release stage/cross-toolchain matrix and append it as
+  a new dated record without overwriting historical baselines. Only that run
+  can answer whether strict AOT is faster than AtomView Lambdify.
+
+## 28. Current Lambdify/AOT Picture And Next Evidence Order (2026-09-22)
+
+This is a dated synthesis of the available story-test records, not a new
+performance claim. Historical rows remain immutable. A result is comparable
+only when the frontend, matrix backend, problem size, mesh, compiler profile,
+thread policy, repetition protocol, cooldown and artifact lifecycle are the
+same. In particular, cold E2E, warm prepared solves and callback-only timings
+must not be combined into one wall-clock ranking.
+
+### 28.1 Lambdify: historical AtomView versus current AtomView
+
+- [x] Record the current interpretation from the dated Lambdify stage reports:
+  AtomView has a clear preparation advantage over ExprLegacy. On the recorded
+  combustion and oscillator cases, discretization, symbolic Jacobian assembly
+  and binding are generally cheaper, often substantially so.
+- [x] Record the correctness result: corresponding residuals, Jacobians,
+  solutions and integer solver trajectories agree within the gates used by the
+  corpus. No current release record justifies changing the numerical method
+  or relaxing correctness criteria.
+- [x] Record the runtime limitation: AtomView is not uniformly faster after
+  preparation. Residual and linear stages are usually comparable, while the
+  Banded warm Jacobian/evaluator stage is sometimes slower than ExprLegacy,
+  including the large combustion-3000 observations. This is the primary
+  unresolved Lambdify performance question.
+- [x] Preserve the two baselines separately: ExprLegacy must not regress
+  against its archived release rows, and AtomView must not regress against
+  its own previous dated rows. AtomView is not judged only against ExprLegacy.
+
+### 28.2 AOT: historical route versus current AtomView-native route
+
+- [x] Record the architectural result: the current route has explicit
+  AtomView preparation, typed layout/lifecycle metadata, BuildIfMissing versus
+  RequirePrebuilt semantics, fault diagnostics and cross-toolchain correctness
+  checks. ExprLegacy AOT remains a compatibility and regression oracle.
+- [x] Record the correctness result: current Rust/C/Zig/tcc rows that report
+  success preserve residual/Jacobian and final-solution parity at round-off
+  scale, with matching integer trajectory counters on the dated stories.
+- [x] Record the performance limitation: current data does not prove a global
+  AOT speedup over Lambdify. Compilation, linking, materialization and runtime
+  integration dominate cold E2E; RequirePrebuilt is not automatically faster
+  than prepared Lambdify in every protocol.
+- [x] Record the toolchain pattern without treating it as a universal ranking:
+  tcc is currently the fastest cold AOT route in the available records, while
+  Rust/gcc/Zig have materially different build costs. Chunking helps some
+  toolchains and can hurt narrow Banded work. These observations require the
+  common release protocol before becoming policy.
+- [ ] Complete the historical-to-current AOT comparison only with matched
+  records. Do not compare rows that differ in process isolation, compiler
+  profile, artifact cleanup, repetitions, cooldown or stage boundaries.
+
+### 28.3 Current comparison axes
+
+- [ ] Lambdify frontend axis: ExprLegacy versus AtomView, with preparation,
+  callback residual, callback Jacobian, solver stages and integer trajectory
+  counters reported independently.
+- [ ] AOT frontend/toolchain axis: AtomView-native versus retained ExprLegacy
+  oracle across Rust, C/tcc, gcc and Zig, with materialization, compile, link,
+  callback and solve stages kept separate.
+- [ ] Matrix axis: production faer Sparse and native Banded. Dense remains a
+  small correctness/control route and must not drive large-problem claims.
+- [ ] Execution axis: Sequential, explicit Parallel and Auto, including
+  effective task/chunk count, worker policy, allocations/copies and numerical
+  parity. A dispatch label alone is not evidence of useful parallel work.
+- [ ] Lifecycle axis: cold preparation/build, warm prepared rebind/repeated
+  solve, and callback-only execution. Each phase needs its own report row and
+  integer counters.
+
+### 28.4 Known anomalies and regression risks
+
+- [ ] Diagnose the AtomView Banded warm-Jacobian/evaluator slowdown before
+  optimizing unrelated linear-algebra code. The diagnostic must separate
+  evaluator work, band-slot writes, assembly allocation, dispatch/join and
+  solver-level Jacobian time; fused or overlapping scopes must be labeled.
+- [ ] Resolve the contradictory Frozen Banded repeated-solve observations
+  (approximately nine-to-ten percent difference between dated runs) with an
+  alternating-order, multi-repetition protocol before calling it a regression.
+- [ ] Explain non-monotonic chunking results, especially Banded+tcc cases where
+  chunking loses to whole execution. Report task granularity, worker count,
+  callback time and full solve time rather than assuming more chunks help.
+- [x] Complete the first release Auto callback-only matrix (2026-09-22).
+  AtomView Sparse/Banded rows cover Sequential, Parallel and Auto with a
+  warmed 24-thread pool, seven repetitions and Diagonal/EntryChunks Banded
+  layouts. Auto stays sequential at 16/64 and dispatches parallel at 256;
+  all rows are numerically identical, but parallel remains slower on this
+  low-cost tridiagonal fixture. This closes the release dispatch evidence
+  gate, not the production break-even decision.
+- [ ] Measure Auto break-even on larger expression cost, wider bands and
+  production-sized workloads before changing the default policy.
+- [ ] Audit telemetry stage semantics where unavailable values are represented
+  as zero or `NaN`; distinguish unavailable, not-applicable and measured-zero
+  values in the canonical report.
+
+### 28.5 Agreed implementation and evidence order
+
+The next work is deliberately staged. Each stage must add or update debug
+correctness tests, typed telemetry and dated report output before the next
+stage is started. Release runs are accumulated and executed only after the
+debug slices are green.
+
+1. **Auto plus callback-only matrix.** Complete the production Sparse/Banded
+   callback-only harness for Sequential, Parallel and Auto. Use identical
+   prepared callbacks and states, warm the worker pool outside measured
+   regions, report callback residual/Jacobian time, task/chunk counts,
+   allocations/copies and numerical parity. Add small, medium and large
+   workloads so the break-even point is visible rather than inferred.
+2. **End-to-end invalidation and failure injection.** Extend the common
+   prepared lifecycle gate across parameters, mesh, boundary conditions,
+   values, solver policy, evaluator policy, matrix backend and Jacobian
+   pattern. Inject stale/partial artifacts, compiler/link failures, lock
+   contention and rebind failures; prove that stale callbacks and factors are
+   never consumed and that typed partial diagnostics survive every failure.
+3. **Stable repeated performance baseline.** Run a process-isolated release
+   matrix with the same protocol for ExprLegacy/AtomView Lambdify and
+   AtomView/ExprLegacy AOT across Sparse/Banded and the supported toolchains.
+   Use alternating route order and enough repetitions for median/min/max or
+   mean/std, preserve all integer trajectory counters, and append dated rows
+   to the appropriate story files without replacing historical evidence.
+
+### 28.6 Exit criteria for the next optimization decision
+
+- [ ] No correctness or accepted/rejected/refinement trajectory drift in the
+  matched callback and lifecycle corpus.
+- [ ] No stale factor, callback, layout or artifact is observable after any
+  invalidation or injected failure.
+- [ ] Auto has a measured, workload-specific break-even rule for Sparse and
+  Banded; no default change is made from debug timings alone.
+- [ ] Every claimed improvement names frontend, backend, phase, policy,
+  repetitions and dated baseline, with stage telemetry explaining the change.
+- [ ] Only after these criteria are met optimize evaluator cost, workspace
+  reuse, chunking or linear-runtime ownership. Keep the ExprLegacy routes as
+  comparison modules until the AtomView-native route wins correctness,
+  lifecycle and matched performance evidence.
+
+### 28.7 First implementation slice: callback-only policy matrix (2026-09-22)
+
+- [x] Add the debug gate
+  `test_lambdify_callback_matrix::tests::atomview_callback_only_auto_policy_matrix_preserves_values_and_reports_dispatch`.
+  It evaluates one prepared Atom system through faer Sparse and native Banded
+  callbacks under Sequential, Parallel and Auto without entering the Newton
+  loop or measuring symbolic preparation.
+- [x] Keep callback parity and dispatch observability in the same gate. The
+  test checks residual/Jacobian values against one prepared reference,
+  verifies callback counts, observes actual sequential/parallel dispatch and
+  checks Banded evaluator/storage-write counts. Its report is written outside
+  the callback timers under `test_reports/BVP_Damp_Lambdify_Callback/`.
+- [x] Make the boundary of the first slice explicit: callback wall-clock is
+  diagnostic-only debug data; allocations and copies are not yet allocator
+  counters, and the test does not establish a release break-even threshold.
+- [x] Extend the gate with a warmed worker-pool protocol, both production
+  Banded chunking strategies and an ignored release repetition story
+  (2026-09-22). Rayon pool construction is outside timed callbacks; the report
+  records resolved worker count, chunking, dispatch counters and callback
+  repetitions. Debug coverage remains the fast correctness gate, while
+  `atomview_callback_only_auto_policy_matrix_release_story` is the explicit
+  release-only callback timing entrypoint.
+- [ ] Add production allocation/copy counters for callback output assembly,
+  Sparse fixed-CSC values, Banded storage writes and temporary parameter/state
+  buffers before interpreting callback timing differences.
+
+### 28.8 First end-to-end invalidation/failure-injection slice (2026-09-22)
+
+- [x] Add `prepared_lambdify_rejects_direct_callback_replacement_and_recovers`.
+  Across ExprLegacy/AtomView and Sparse/Banded, direct replacement of the
+  public residual or Jacobian callback is rejected before callback execution
+  with `PreparedRuntimeInvalidated`; explicit symbolic regeneration restores
+  the prepared solve path. This complements the existing mesh, BC, policy,
+  parameter, fixed-CSC and Banded-slot gates.
+- [x] Keep malformed residual/Jacobian shape and non-finite callback outputs
+  on the typed `try_*` boundary. The existing solver-level gates record these
+  failures separately from lifecycle invalidation, so a numerical callback
+  fault is not misclassified as a stale plan.
+- [ ] Add one shared end-to-end report that combines solver invalidation,
+  callback runtime failures and AOT artifact fault diagnostics without merging
+  their stage semantics. The report must preserve failure kind, stage,
+  attempted recovery and partial diagnostics.
+
+### 28.9 QoL and module boundaries (2026-09-22)
+
+- [x] Refresh the English and Russian user guides after the AtomView-default
+  change. The guides now describe the current test-suite layout, report files,
+  debug/release commands, and the explicit ExprLegacy compatibility route.
+- [x] Register the English BVP guide examples explicitly in `Cargo.toml` so
+  their names and paths are stable for users and downstream documentation.
+- [x] Move unit tests out of `generated_solver_handoff.rs`,
+  `NR_Damp_solver_damped.rs` and `NR_Damp_solver_frozen.rs` into dedicated
+  files under `tests/`. Test names and module paths remain compatible; this is
+  a navigation-only refactor with no solver-runtime changes.
+- [x] Document intentionally dormant BVP diagnostic/AOT helpers with narrow
+  `allow(dead_code)` annotations. Do not suppress warnings for active solver
+  paths or the whole crate.
+- [x] Split `aot_diagnostics.rs` by lifecycle phase into focused source files:
+  core preparation helpers, runtime/tuning helpers, symbolic diagnostics,
+  toolchain/build stories, acceptance stories and end-to-end stories. The
+  original `test_aot_diagnostics` module path and report namespace remain
+  unchanged.
+- [x] Split `aot_race_stress.rs` into core execution, protocol/formatting,
+  variant builders and story tests. The process-isolated protocol and all
+  test names remain unchanged.
+- [x] Move inline parser tests out of `task_parser_damped.rs` into
+  `tests/task_parser_damped_unit.rs`; parser production code is now below the
+  2,000-line QoL boundary while its module path remains compatible.
+- [x] Split the mixed linear-algebra compatibility module into focused
+  `traits/` fragments for linear errors, vectors, callbacks, matrices,
+  Jacobian adapters, compatibility types and tests. The root module keeps the
+  original namespace and imports, so downstream trait paths are unchanged.
+- [x] Split `generated_solver_handoff.rs` into lifecycle helpers, resolved
+  configuration, request types, symbolic generation, backend materialization,
+  AOT build/link handling and state projection. The public handoff API and
+  test module path remain unchanged.
+- [x] Split the remaining solver cores `NR_Damp_solver_damped.rs` and
+  `NR_Damp_solver_frozen.rs` into focused `damped_solver/` and
+  `frozen_solver/` fragments: options, statistics, generated-state adapters, preparation,
+  Newton/solve lifecycle and postprocessing. The root modules remain the
+  compatibility surfaces, while `NRBVP` names, invalidation order, telemetry
+  ownership and test module paths are unchanged.
+- [ ] Continue removing stale warnings outside BVP_Damp in separate subsystem
+  passes; this QoL slice intentionally does not mix unrelated numerical or
+  symbolic cleanup into the BVP refactor.

@@ -41,7 +41,8 @@ mod tests {
         AotBuildPolicy, AotExecutionPolicy, GeneratedBackendConfig,
     };
     use crate::numerical::BVP_Damp::test_common::{
-        SymbolicTestRoute, TEST_SUITE_ARCHITECTURE, story_repetitions, uniform_initial_guess,
+        AotStoryProtocol, SymbolicTestRoute, TEST_SUITE_ARCHITECTURE, sleep_ms, story_repetitions,
+        uniform_initial_guess,
     };
     use crate::symbolic::bvp::telemetry::{
         BvpDirectJacobianTelemetrySnapshot, BvpLambdifyExecutionPolicy, BvpLambdifyTelemetryMode,
@@ -54,6 +55,24 @@ mod tests {
     use std::fmt::Write as FmtWrite;
     use std::hint::black_box;
     use std::time::Instant;
+
+    macro_rules! println {
+        () => {
+            crate::Utils::test_reporting::capture_test_line(format_args!(""));
+        };
+        ($($arg:tt)*) => {
+            crate::Utils::test_reporting::capture_test_line(format_args!($($arg)*));
+        };
+    }
+
+    macro_rules! aot_compare_test_report {
+        ($name:ident) => {
+            let _test_report = crate::Utils::test_reporting::TestReportCapture::new(
+                "BVP_Damp_AOT_Compare",
+                concat!(module_path!(), "::", stringify!($name)),
+            );
+        };
+    }
 
     #[derive(Debug)]
     struct EndToEndRow {
@@ -362,6 +381,23 @@ mod tests {
             .expect("solver should expose a solution after solve");
         let max_abs_solution = solution.iter().copied().map(f64::abs).fold(0.0, f64::max);
         (solve_ms, max_abs_solution)
+    }
+
+    fn measure_prepared_warm_solves(
+        solver: &mut NRBVP,
+        repetitions: usize,
+        cooldown_ms: u64,
+    ) -> f64 {
+        let started = Instant::now();
+        for repetition in 0..repetitions {
+            solver
+                .try_solver_prepared()
+                .expect("prepared warm solve should succeed");
+            if repetition + 1 < repetitions {
+                sleep_ms(cooldown_ms);
+            }
+        }
+        started.elapsed().as_secs_f64() * 1_000.0 / repetitions as f64
     }
 
     fn oscillator_options_for_route(
@@ -812,6 +848,7 @@ mod tests {
     #[test]
     #[ignore = "diagnostic solver-facing compare for Lambdify vs AtomView C leaders on combustion-1000"]
     fn combustion_lambdify_vs_atomview_c_leaders_compare_1000() {
+        aot_compare_test_report!(combustion_lambdify_vs_atomview_c_leaders_compare_1000);
         let n_steps = 2_000usize;
         let iters = 6usize;
         let samples = 3usize;
@@ -1015,6 +1052,7 @@ mod tests {
     #[test]
     #[ignore = "diagnostic production-like end-to-end compare for Lambdify vs AtomView C leaders on combustion-1000"]
     fn combustion_production_like_end_to_end_compare_1000() {
+        aot_compare_test_report!(combustion_production_like_end_to_end_compare_1000);
         #[derive(Debug)]
         struct Row {
             variant: &'static str,
@@ -1127,16 +1165,26 @@ mod tests {
     #[test]
     #[ignore = "diagnostic break-even compare for Lambdify vs AtomView C-tcc on combustion-2000"]
     fn combustion_break_even_lambdify_vs_atomview_ctcc_2000() {
+        aot_compare_test_report!(combustion_break_even_lambdify_vs_atomview_ctcc_2000);
         #[derive(Debug)]
         struct Row {
             variant: &'static str,
             setup_ms: f64,
             solve_ms: f64,
+            warm_solve_ms: f64,
             total_one_solve_ms: f64,
             runtime_share: f64,
         }
 
-        let n_steps = 2000usize;
+        let protocol = AotStoryProtocol::from_env(2000, 5);
+        protocol
+            .validate()
+            .expect("AOT/Lambdify break-even protocol should be valid");
+        let n_steps = protocol.n_steps;
+        println!(
+            "[BVP break-even] protocol: {}; cold E2E and warm prepared solves are reported separately",
+            protocol.summary()
+        );
         let mut lambdify = make_combustion_solver(n_steps, lambdify_options());
         let mut tcc = make_combustion_solver(n_steps, atomview_tcc_options());
 
@@ -1146,6 +1194,11 @@ mod tests {
             .expect("break-even lambdify generate should succeed");
         let lambdify_setup_ms = lambdify_setup_begin.elapsed().as_secs_f64() * 1_000.0;
         let (lambdify_solve_ms, _) = solve_and_collect_solution(&mut lambdify);
+        let lambdify_warm_solve_ms = measure_prepared_warm_solves(
+            &mut lambdify,
+            protocol.warm_repetitions,
+            protocol.warm_cooldown_ms,
+        );
         let lambdify_solution = lambdify
             .get_result()
             .expect("lambdify break-even test should produce a solution")
@@ -1156,6 +1209,11 @@ mod tests {
             .expect("break-even AtomView+tcc generate should succeed");
         let tcc_setup_ms = tcc_setup_begin.elapsed().as_secs_f64() * 1_000.0;
         let (tcc_solve_ms, _) = solve_and_collect_solution(&mut tcc);
+        let tcc_warm_solve_ms = measure_prepared_warm_solves(
+            &mut tcc,
+            protocol.warm_repetitions,
+            protocol.warm_cooldown_ms,
+        );
         let tcc_solution = tcc
             .get_result()
             .expect("AtomView+tcc break-even test should produce a solution")
@@ -1174,7 +1232,7 @@ mod tests {
         let lambdify_total_one_solve_ms = lambdify_setup_ms + lambdify_solve_ms;
         let tcc_total_one_solve_ms = tcc_setup_ms + tcc_solve_ms;
         let extra_bootstrap_ms = (tcc_setup_ms - lambdify_setup_ms).max(0.0);
-        let runtime_gain_ms_per_solve = (lambdify_solve_ms - tcc_solve_ms).max(0.0);
+        let runtime_gain_ms_per_solve = (lambdify_warm_solve_ms - tcc_warm_solve_ms).max(0.0);
         let break_even_solves = if runtime_gain_ms_per_solve > 0.0 {
             (extra_bootstrap_ms / runtime_gain_ms_per_solve).ceil()
         } else {
@@ -1186,6 +1244,7 @@ mod tests {
                 variant: "Lambdify",
                 setup_ms: lambdify_setup_ms,
                 solve_ms: lambdify_solve_ms,
+                warm_solve_ms: lambdify_warm_solve_ms,
                 total_one_solve_ms: lambdify_total_one_solve_ms,
                 runtime_share: lambdify_solve_ms / lambdify_total_one_solve_ms,
             },
@@ -1193,6 +1252,7 @@ mod tests {
                 variant: "C-tcc",
                 setup_ms: tcc_setup_ms,
                 solve_ms: tcc_solve_ms,
+                warm_solve_ms: tcc_warm_solve_ms,
                 total_one_solve_ms: tcc_total_one_solve_ms,
                 runtime_share: tcc_solve_ms / tcc_total_one_solve_ms,
             },
@@ -1200,16 +1260,22 @@ mod tests {
 
         println!("[BVP break-even] combustion Lambdify vs AtomView+C-tcc, n_steps={n_steps}");
         println!(
-            "{:<12} | {:>12} | {:>12} | {:>18} | {:>14}",
-            "variant", "setup_ms", "solve_ms", "total_one_solve_ms", "runtime_share"
+            "{:<12} | {:>12} | {:>14} | {:>16} | {:>18} | {:>14}",
+            "variant",
+            "setup_ms",
+            "cold_solve_ms",
+            "warm_solve_ms",
+            "total_one_solve_ms",
+            "runtime_share"
         );
-        println!("{}", "-".repeat(82));
+        println!("{}", "-".repeat(104));
         for row in rows {
             println!(
-                "{:<12} | {:>12.3} | {:>12.3} | {:>18.3} | {:>13.3}%",
+                "{:<12} | {:>12.3} | {:>14.3} | {:>16.3} | {:>18.3} | {:>13.3}%",
                 row.variant,
                 row.setup_ms,
                 row.solve_ms,
+                row.warm_solve_ms,
                 row.total_one_solve_ms,
                 row.runtime_share * 100.0
             );
@@ -1221,7 +1287,7 @@ mod tests {
         );
         println!(
             "{:<24} | {:>16.3}",
-            "runtime_gain_ms_per_solve", runtime_gain_ms_per_solve
+            "warm_runtime_gain_ms_per_solve", runtime_gain_ms_per_solve
         );
         if break_even_solves.is_finite() {
             println!("{:<24} | {:>16.0}", "break_even_solves", break_even_solves);

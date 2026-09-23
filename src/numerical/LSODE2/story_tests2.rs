@@ -1,16 +1,26 @@
+use super::legacy_atomview_lambdify;
+use super::native_jacobian::{
+    NativeJacobianStorage, compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry,
+};
 use super::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2BackendConfig, Lsode2JacobianBackend,
     Lsode2LinearSolverBackend, Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2Solver,
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
+use crate::numerical::BDF::BDF_solver::BdfJacobian;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedResidualAotBackend, register_linked_residual_backend, unregister_linked_residual_backend,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
+use crate::symbolic::ivp_telemetry::{
+    IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot, IvpWarmStage,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
+    IvpSymbolicAssemblyBackend, SharedIvpParameterValues, SymbolicIvpProblemOptions,
+    build_symbolic_jacobian, prepare_symbolic_ivp_residual_problem,
 };
+use crate::symbolic::View::{ExpressionMetrics, inspect_exprs};
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
@@ -22,6 +32,15 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// Keep the existing stdout story tables while mirroring every verbose line to
+// the active dated report. File I/O happens only when TestReportCapture drops,
+// after the measured solver work has completed.
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::Utils::test_reporting::capture_test_line(format_args!($($arg)*));
+    };
+}
 
 mod three_body_story_tests;
 
@@ -37,6 +56,35 @@ fn exponential_decay_config() -> Lsode2ProblemConfig {
         1e-6,
         1e-8,
     )
+}
+
+#[test]
+fn lsode2_lambdify_telemetry_pretty_report_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_lambdify_telemetry_pretty_report_story",
+    );
+    let telemetry = IvpTelemetry::detailed();
+    let config = exponential_decay_config()
+        .with_native_banded_faithful_backend()
+        .with_faithful_bdf_solve(256, 256)
+        .with_telemetry(telemetry.clone());
+    let mut solver = Lsode2Solver::new(config).expect("telemetry story config should build");
+    solver
+        .solve_with_summary()
+        .expect("telemetry story solve should finish");
+
+    let snapshot = solver.telemetry_snapshot();
+    println!("[LSODE2 Lambdify telemetry] typed report follows");
+    println!("{}", snapshot.pretty_report());
+    assert_eq!(
+        snapshot.execution,
+        crate::symbolic::ivp_telemetry::IvpTelemetryExecution::Lambdify
+    );
+    assert!(snapshot.residual_requests > 0);
+    assert!(snapshot.residual_evaluations >= snapshot.residual_requests);
+    assert!(snapshot.jacobian_requests > 0);
+    assert!(snapshot.jacobian_evaluations >= snapshot.jacobian_requests);
 }
 
 struct ResidualBackendGuard {
@@ -278,6 +326,10 @@ fn solve_story_row_fallible(
 
 #[test]
 fn lsode2_exponential_decay_backend_story_table() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_exponential_decay_backend_story_table",
+    );
     let mut reference_solver = Lsode2Solver::new(exponential_decay_config())
         .expect("reference LSODE2 config should build");
     let reference = reference_solver
@@ -765,6 +817,10 @@ fn run_comprehensive_story_case(
 
 #[test]
 fn lsode2_comprehensive_multi_equation_backend_story_table() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_comprehensive_multi_equation_backend_story_table",
+    );
     let scenarios = [
         ComprehensiveScenario::NonStiffScalarDecay,
         ComprehensiveScenario::StiffScalarTracking,
@@ -2466,6 +2522,10 @@ fn lsode2_quality_dashboard_stiff_vs_nonstiff_auto_switch() {
 
 #[test]
 fn lsode2_nonstiff_adams_corpus_sparse_banded_dashboard() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_nonstiff_adams_corpus_sparse_banded_dashboard",
+    );
     const REPEATS: usize = 3;
     let scenarios = [
         ComprehensiveScenario::NonStiffScalarDecay,
@@ -2733,10 +2793,14 @@ fn numerical_closure_native_config(
 
 #[test]
 fn lsode2_symbolic_vs_numerical_closure_sparse_banded_dashboard() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_symbolic_vs_numerical_closure_sparse_banded_dashboard",
+    );
     const REPEATS: usize = 3;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let routes = [
-        ("Lambdify-AtomView", None),
+        ("Lambdify-AtomViewExprCompat", None),
         (
             "Numerical-AnalyticalJac",
             Some(Lsode2JacobianBackend::AnalyticClosure),
@@ -2858,6 +2922,10 @@ fn lsode2_symbolic_vs_numerical_closure_sparse_banded_dashboard() {
 
 #[test]
 fn lsode2_mixed_regime_ramp_auto_switch_diagnostic_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_mixed_regime_ramp_auto_switch_diagnostic_story",
+    );
     const REPEATS: usize = 3;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
 
@@ -3092,6 +3160,10 @@ fn lsode2_mixed_regime_ramp_native_switches_adams_to_bdf_acceptance() {
 
 #[test]
 fn lsode2_stiff_switch_acceptance_sparse_banded_executes_bdf() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_stiff_switch_acceptance_sparse_banded_executes_bdf",
+    );
     const REPEATS: usize = 3;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
 
@@ -3439,6 +3511,10 @@ fn run_combustion_story_sample(
 
 #[test]
 fn lsode2_combustion_like_multi_run_story_dashboard() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::tests::lsode2_combustion_like_multi_run_story_dashboard",
+    );
     const REPEATS: usize = 5;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let routes = ["Lambdify", "AOT-Ctcc"];
@@ -4139,6 +4215,22 @@ fn combustion_symbolic_matrix_config(
     }
 }
 
+fn combustion_symbolic_matrix_config_with_evaluator_policy(
+    matrix: BackendRaceMatrix,
+    assembly: Lsode2SymbolicAssemblyBackend,
+    evaluator_policy: IvpLambdifyExecutionPolicy,
+    telemetry: IvpTelemetry,
+) -> Lsode2ProblemConfig {
+    combustion_symbolic_matrix_config(
+        matrix,
+        assembly,
+        Lsode2SymbolicExecutionMode::LambdifyExpr,
+        None,
+    )
+    .with_lambdify_execution_policy(evaluator_policy)
+    .with_telemetry(telemetry)
+}
+
 fn push_combustion_sample(row: &mut BackendRaceRow, sample: CombustionStorySample) {
     row.runs_ok += 1;
     row.total_ms.push(sample.0);
@@ -4252,6 +4344,10 @@ fn print_compact_combustion_story_tables(title: &str, rows: &[BackendRaceRow]) {
 #[test]
 #[ignore = "release story: multi-run symbolic frontend comparison on the combustion workload"]
 fn lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard",
+    );
     const REPEATS: usize = 5;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let frontends = [
@@ -4259,7 +4355,10 @@ fn lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard() {
             Lsode2SymbolicAssemblyBackend::ExprLegacy,
             "Lambdify-ExprLegacy",
         ),
-        (Lsode2SymbolicAssemblyBackend::AtomView, "Lambdify-AtomView"),
+        (
+            Lsode2SymbolicAssemblyBackend::AtomView,
+            "Lambdify-AtomViewExprCompat",
+        ),
     ];
 
     let mut baselines = std::collections::BTreeMap::new();
@@ -4322,6 +4421,514 @@ fn lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard() {
             row.route,
             mean_diff
         );
+    }
+}
+
+#[test]
+#[ignore = "release canonical Lambdify evaluator-policy baseline on the archived combustion fixture"]
+fn lsode2_combustion_lambdify_evaluator_policy_canonical_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::lsode2_combustion_lambdify_evaluator_policy_canonical_story",
+    );
+    let repeats = std::env::var("LSODE2_COMBUSTION_POLICY_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3);
+    let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
+    let frontends = [
+        (Lsode2SymbolicAssemblyBackend::ExprLegacy, "ExprLegacy"),
+        (
+            Lsode2SymbolicAssemblyBackend::AtomView,
+            "AtomViewExprCompat",
+        ),
+    ];
+    let policies = [
+        ("Sequential", IvpLambdifyExecutionPolicy::Sequential),
+        (
+            "Parallel",
+            IvpLambdifyExecutionPolicy::Parallel { min_work: 1 },
+        ),
+        ("Auto", IvpLambdifyExecutionPolicy::Auto { min_work: 1 }),
+    ];
+
+    println!(
+        "[LSODE2 canonical Lambdify policy] same archived combustion fixture; repeats={repeats}; preparation, warm callbacks, solver wall-clock and integer trajectory counters are reported separately"
+    );
+    println!(
+        "matrix | frontend          | policy     | rep | prepare_ms | solve_ms | residual_ms | jacobian_ms | workers | parallel_dispatches | sequential_dispatches | solver_residual_calls | solver_jacobian_calls | evaluator_residual_calls | evaluator_jacobian_calls | jacobian_rebuilds | linear_solves | accepted | rejected | max_state_diff"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    let mut stage_rows = Vec::new();
+    for matrix in matrices {
+        let mut reference_state: Option<DVector<f64>> = None;
+        for (assembly, frontend_label) in frontends {
+            for (policy_label, policy) in policies {
+                for repetition in 1..=repeats {
+                    let telemetry = IvpTelemetry::detailed();
+                    let config = combustion_symbolic_matrix_config_with_evaluator_policy(
+                        matrix,
+                        assembly,
+                        policy,
+                        telemetry.clone(),
+                    );
+                    let prepare_started = Instant::now();
+                    let mut solver = Lsode2Solver::new(config)
+                        .expect("canonical combustion policy config should build");
+                    solver
+                        .prepare()
+                        .expect("canonical combustion policy preparation should succeed");
+                    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
+                    let solve_started = Instant::now();
+                    let summary = solver
+                        .solve_with_summary()
+                        .expect("canonical combustion policy solve should succeed");
+                    let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                    let final_state = summary
+                        .final_y
+                        .clone()
+                        .expect("canonical combustion policy should return final state");
+                    let max_state_diff = reference_state
+                        .as_ref()
+                        .map(|reference| {
+                            final_state
+                                .iter()
+                                .zip(reference.iter())
+                                .map(|(actual, expected)| (actual - expected).abs())
+                                .fold(0.0_f64, f64::max)
+                        })
+                        .unwrap_or(0.0);
+                    let snapshot: IvpTelemetrySnapshot = solver.telemetry_snapshot();
+                    let cold_ms = |stage: IvpColdStage| {
+                        snapshot.cold_stage(stage).elapsed.as_secs_f64() * 1_000.0
+                    };
+                    let warm_ms = |stage: IvpWarmStage| {
+                        snapshot.warm_stage(stage).elapsed.as_secs_f64() * 1_000.0
+                    };
+                    println!(
+                        "{:<6} | {:<17} | {:<10} | {:>3} | {:>10.3} | {:>8.3} | {:>11.3} | {:>11.3} | {:>7} | {:>19} | {:>21} | {:>21} | {:>22} | {:>24} | {:>24} | {:>17} | {:>13} | {:>8} | {:>8} | {:.3e}",
+                        matrix.label(),
+                        frontend_label,
+                        policy_label,
+                        repetition,
+                        prepare_ms,
+                        solve_ms,
+                        snapshot
+                            .warm_stage(IvpWarmStage::ResidualCallback)
+                            .elapsed
+                            .as_secs_f64()
+                            * 1_000.0,
+                        snapshot
+                            .warm_stage(IvpWarmStage::JacobianCallback)
+                            .elapsed
+                            .as_secs_f64()
+                            * 1_000.0,
+                        snapshot.lambdify_worker_count,
+                        snapshot.parallel_dispatches,
+                        snapshot.sequential_dispatches,
+                        if is_native_faithful_status(&summary.status) {
+                            summary.native_statistics.native_residual_calls
+                        } else {
+                            summary.statistics.residual_calls
+                        },
+                        if is_native_faithful_status(&summary.status) {
+                            summary.native_statistics.native_jacobian_calls
+                        } else {
+                            summary.statistics.jacobian_calls
+                        },
+                        snapshot.residual_evaluations,
+                        snapshot.jacobian_evaluations,
+                        snapshot.jacobian_rebuilds,
+                        snapshot.linear_solve_requests,
+                        snapshot.accepted_steps,
+                        snapshot.rejected_steps,
+                        max_state_diff,
+                    );
+                    stage_rows.push(format!(
+                        "{:<6} | {:<17} | {:<10} | {:>3} | {:>7.3} | {:>11.3} | {:>15.3} | {:>15.3} | {:>17.3} | {:>19.3} | {:>19.3} | {:>19.3} | {:>15.3} | {:>17.3} | {:>15.3} | {:>16.3}",
+                        matrix.label(),
+                        frontend_label,
+                        policy_label,
+                        repetition,
+                        cold_ms(IvpColdStage::SymbolicDifferentiation),
+                        cold_ms(IvpColdStage::Simplification),
+                        cold_ms(IvpColdStage::ExprToAtom),
+                        cold_ms(IvpColdStage::AtomToExpr),
+                        cold_ms(IvpColdStage::SparsePattern),
+                        cold_ms(IvpColdStage::ResidualLambdification),
+                        cold_ms(IvpColdStage::JacobianLambdification),
+                        warm_ms(IvpWarmStage::ArgumentBinding),
+                        warm_ms(IvpWarmStage::ResidualEvaluation),
+                        warm_ms(IvpWarmStage::ResidualOutputAssembly),
+                        warm_ms(IvpWarmStage::JacobianEvaluation),
+                        warm_ms(IvpWarmStage::JacobianOutputAssembly),
+                    ));
+                    assert!(final_state.iter().all(|value| value.is_finite()));
+                    assert!(snapshot.residual_evaluations > 0);
+                    assert!(snapshot.jacobian_evaluations > 0);
+                    assert!(snapshot.linear_solve_requests > 0);
+                    assert!(
+                        snapshot.warm_stage(IvpWarmStage::ResidualCallback).calls > 0,
+                        "detailed Lambdify telemetry must close the residual callback scope"
+                    );
+                    assert!(
+                        snapshot.warm_stage(IvpWarmStage::JacobianCallback).calls > 0,
+                        "detailed Lambdify telemetry must close the Jacobian callback scope"
+                    );
+                    assert_eq!(snapshot.lambdify_execution_policy, policy);
+                    if matches!(policy, IvpLambdifyExecutionPolicy::Sequential) {
+                        assert_eq!(snapshot.parallel_dispatches, 0);
+                    }
+                    assert!(max_state_diff <= 5.0e-6);
+                    if reference_state.is_none() {
+                        reference_state = Some(final_state);
+                    }
+                }
+            }
+        }
+    }
+    println!("");
+    println!(
+        "[LSODE2 canonical Lambdify policy] stage decomposition; argument_binding is combined residual+Jacobian binding"
+    );
+    println!(
+        "matrix | frontend          | policy     | rep | diff_ms | simplify_ms | expr_to_atom_ms | atom_to_expr_ms | sparse_pattern_ms | residual_lambdify_ms | jacobian_lambdify_ms | argument_binding_ms | residual_eval_ms | residual_output_ms | jacobian_eval_ms | jacobian_output_ms"
+    );
+    println!(
+        "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    for row in stage_rows {
+        println!("{row}");
+    }
+}
+
+#[test]
+#[ignore = "release Lambdify regression gate: historical AtomView versus AtomViewExprCompat"]
+fn lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::story_tests2::lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story",
+    );
+    let config = combustion_like_story_base_config();
+    let parameters = config.equation_parameters.as_deref();
+    let parameter_values = config.equation_parameter_values.clone();
+    let state = config.y0.clone();
+    let repetitions = std::env::var("LSODE2_ATOMVIEW_REGRESSION_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(20);
+    let warm_repetitions = repetitions.saturating_mul(1_000).max(1_000);
+
+    println!(
+        "[LSODE2 AtomView regression] historical HEAD adapter versus current ExprLegacy/AtomViewExprCompat; fixture=combustion-like; repetitions={repetitions}; callback_measurement_repetitions={warm_repetitions}; telemetry=off; AOT excluded"
+    );
+    println!(
+        "matrix | route                 | prepare_ms | residual_ns/call | jacobian_ns/call | residual_diff | jacobian_diff"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------"
+    );
+
+    for matrix in [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded] {
+        let storage = match matrix {
+            BackendRaceMatrix::Sparse => NativeJacobianStorage::SparseTriplets,
+            BackendRaceMatrix::Banded => NativeJacobianStorage::Banded { bandwidth: None },
+            BackendRaceMatrix::Dense => {
+                unreachable!("the regression gate covers Sparse and Banded only")
+            }
+        };
+        let legacy_started = Instant::now();
+        let mut legacy = legacy_atomview_lambdify::prepare(
+            &config.eq_system,
+            &config.values,
+            &config.arg,
+            parameters,
+            parameter_values.clone(),
+            storage,
+        );
+        let legacy_prepare_ms = legacy_started.elapsed().as_secs_f64() * 1_000.0;
+
+        let expr_started = Instant::now();
+        let mut expr_options = SymbolicIvpProblemOptions::new()
+            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::ExprLegacy)
+            .with_equation_parameters(parameters.map(|values| values.to_vec()).unwrap_or_default())
+            .with_telemetry(IvpTelemetry::disabled());
+        if let Some(values) = parameter_values.clone() {
+            expr_options = expr_options.with_equation_parameter_values(values);
+        }
+        let expr_residual = prepare_symbolic_ivp_residual_problem(
+            config.eq_system.clone(),
+            config.values.clone(),
+            config.arg.clone(),
+            expr_options,
+        )
+        .expect("current ExprLegacy residual preparation should succeed");
+        let expr_parameter_handle = expr_residual.parameter_values_handle();
+        let mut expr_jacobian =
+            compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+                &config.eq_system,
+                &config.values,
+                &config.arg,
+                parameters,
+                expr_parameter_handle,
+                storage,
+                IvpSymbolicAssemblyBackend::ExprLegacy,
+                IvpTelemetry::disabled(),
+            );
+        let expr_prepare_ms = expr_started.elapsed().as_secs_f64() * 1_000.0;
+
+        let compat_started = Instant::now();
+        let mut compat_options = SymbolicIvpProblemOptions::new()
+            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView)
+            .with_equation_parameters(parameters.map(|values| values.to_vec()).unwrap_or_default())
+            .with_telemetry(IvpTelemetry::disabled());
+        if let Some(values) = parameter_values.clone() {
+            compat_options = compat_options.with_equation_parameter_values(values);
+        }
+        let compat_residual = prepare_symbolic_ivp_residual_problem(
+            config.eq_system.clone(),
+            config.values.clone(),
+            config.arg.clone(),
+            compat_options,
+        )
+        .expect("current AtomViewExprCompat residual preparation should succeed");
+        let parameter_handle: Option<SharedIvpParameterValues> =
+            compat_residual.parameter_values_handle();
+        let mut compat_jacobian =
+            compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+                &config.eq_system,
+                &config.values,
+                &config.arg,
+                parameters,
+                parameter_handle,
+                storage,
+                IvpSymbolicAssemblyBackend::AtomView,
+                IvpTelemetry::disabled(),
+            );
+        let compat_prepare_ms = compat_started.elapsed().as_secs_f64() * 1_000.0;
+
+        let legacy_residual_value = (legacy.residual)(config.t0, &state);
+        let compat_residual_value = (compat_residual.residual)(config.t0, &state);
+        let residual_diff = legacy_residual_value
+            .iter()
+            .zip(compat_residual_value.iter())
+            .map(|(legacy, compat)| (legacy - compat).abs())
+            .fold(0.0_f64, f64::max);
+
+        let legacy_jacobian_value = (legacy.jacobian)(config.t0, &state);
+        let compat_jacobian_value = (compat_jacobian)(config.t0, &state);
+        let jacobian_diff = bdf_jacobian_max_diff(&legacy_jacobian_value, &compat_jacobian_value);
+        let expr_residual_value = (expr_residual.residual)(config.t0, &state);
+        let expr_jacobian_value = (expr_jacobian)(config.t0, &state);
+        let expr_residual_diff = legacy_residual_value
+            .iter()
+            .zip(expr_residual_value.iter())
+            .map(|(legacy, expr)| (legacy - expr).abs())
+            .fold(0.0_f64, f64::max);
+        let expr_jacobian_diff =
+            bdf_jacobian_max_diff(&legacy_jacobian_value, &expr_jacobian_value);
+
+        let legacy_residual_ns =
+            measure_residual_callback(&*legacy.residual, config.t0, &state, warm_repetitions);
+        let expr_residual_ns = measure_residual_callback(
+            &*expr_residual.residual,
+            config.t0,
+            &state,
+            warm_repetitions,
+        );
+        let compat_residual_ns = measure_residual_callback(
+            &*compat_residual.residual,
+            config.t0,
+            &state,
+            warm_repetitions,
+        );
+        let legacy_jacobian_ns =
+            measure_jacobian_callback(&mut *legacy.jacobian, config.t0, &state, warm_repetitions);
+        let expr_jacobian_ns =
+            measure_jacobian_callback(&mut *expr_jacobian, config.t0, &state, warm_repetitions);
+        let compat_jacobian_ns =
+            measure_jacobian_callback(&mut *compat_jacobian, config.t0, &state, warm_repetitions);
+
+        println!(
+            "{:<6} | {:<21} | {:>10.3} | {:>16.3} | {:>16.3} | {:>13.3e} | {:>13.3e}",
+            matrix.label(),
+            "historical-AtomView",
+            legacy_prepare_ms,
+            legacy_residual_ns,
+            legacy_jacobian_ns,
+            0.0_f64,
+            0.0_f64,
+        );
+        println!(
+            "{:<6} | {:<21} | {:>10.3} | {:>16.3} | {:>16.3} | {:>13.3e} | {:>13.3e}",
+            matrix.label(),
+            "ExprLegacy",
+            expr_prepare_ms,
+            expr_residual_ns,
+            expr_jacobian_ns,
+            expr_residual_diff,
+            expr_jacobian_diff,
+        );
+        println!(
+            "{:<6} | {:<21} | {:>10.3} | {:>16.3} | {:>16.3} | {:>13.3e} | {:>13.3e}",
+            matrix.label(),
+            "AtomViewExprCompat",
+            compat_prepare_ms,
+            compat_residual_ns,
+            compat_jacobian_ns,
+            residual_diff,
+            jacobian_diff,
+        );
+        assert!(expr_residual_diff <= 1.0e-9);
+        assert!(expr_jacobian_diff <= 1.0e-9);
+        assert!(residual_diff <= 1.0e-9);
+        assert!(jacobian_diff <= 1.0e-9);
+
+        let historical_shape = expr_shape_metrics(&legacy_atomview_lambdify::symbolic_jacobian(
+            &config.eq_system,
+            &config.values,
+        ));
+        let expr_shape = expr_shape_metrics(&build_symbolic_jacobian(
+            &config.eq_system,
+            &config.values,
+            IvpSymbolicAssemblyBackend::ExprLegacy,
+            &IvpTelemetry::disabled(),
+        ));
+        let compat_shape = expr_shape_metrics(&build_symbolic_jacobian(
+            &config.eq_system,
+            &config.values,
+            IvpSymbolicAssemblyBackend::AtomView,
+            &IvpTelemetry::disabled(),
+        ));
+        println!(
+            "[LSODE2 Jacobian Expr shape] matrix={}; dense_entries={}; nonzero | nodes | unique | repeated | depth | chars | add | mul | sub | div | pow | funcs | pow-1 | pow-frac",
+            matrix.label(),
+            config.eq_system.len() * config.values.len(),
+        );
+        for (route, shape) in [
+            ("historical-AtomView", historical_shape),
+            ("ExprLegacy", expr_shape),
+            ("AtomViewExprCompat", compat_shape),
+        ] {
+            println!(
+                "{:<21} | {:>6} | {:>5} | {:>6} | {:>8} | {:>5} | {:>5} | {:>4} | {:>4} | {:>3} | {:>3} | {:>4} | {:>5} | {:>5} | {:>8}",
+                route,
+                shape.nonzero_roots,
+                shape.tree_nodes,
+                shape.unique_subexpressions,
+                shape.repeated_subexpressions,
+                shape.max_depth,
+                shape.serialized_chars,
+                shape.operations.additions,
+                shape.operations.multiplications,
+                shape.operations.subtractions,
+                shape.operations.divisions,
+                shape.operations.powers,
+                shape.operations.functions,
+                shape.power_integer_negative,
+                shape.power_fractional,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ExprShapeMetrics {
+    nonzero_entries: usize,
+    nodes: usize,
+    max_depth: usize,
+    serialized_chars: usize,
+}
+
+fn expr_shape_metrics(jacobian: &[Vec<Expr>]) -> ExpressionMetrics {
+    // Keep zero structural entries out of the comparison, matching the old
+    // story metric. The diagnostic walk itself is intentionally outside the
+    // timed callback measurement.
+    let nonzero: Vec<Expr> = jacobian
+        .iter()
+        .flat_map(|row| row.iter())
+        .filter(|expr| !expr.is_zero())
+        .cloned()
+        .collect();
+    inspect_exprs(&nonzero)
+}
+
+fn measure_residual_callback(
+    callback: &dyn Fn(f64, &DVector<f64>) -> DVector<f64>,
+    t: f64,
+    state: &DVector<f64>,
+    repetitions: usize,
+) -> f64 {
+    for _ in 0..3 {
+        std::hint::black_box(callback(t, state));
+    }
+    let started = Instant::now();
+    for _ in 0..repetitions {
+        std::hint::black_box(callback(t, state));
+    }
+    started.elapsed().as_secs_f64() * 1_000_000_000.0 / repetitions as f64
+}
+
+fn measure_jacobian_callback(
+    callback: &mut dyn FnMut(f64, &DVector<f64>) -> BdfJacobian,
+    t: f64,
+    state: &DVector<f64>,
+    repetitions: usize,
+) -> f64 {
+    for _ in 0..3 {
+        std::hint::black_box(callback(t, state));
+    }
+    let started = Instant::now();
+    for _ in 0..repetitions {
+        std::hint::black_box(callback(t, state));
+    }
+    started.elapsed().as_secs_f64() * 1_000_000_000.0 / repetitions as f64
+}
+
+fn bdf_jacobian_max_diff(left: &BdfJacobian, right: &BdfJacobian) -> f64 {
+    match (left, right) {
+        (
+            BdfJacobian::SparseTriplets { triplets: left, .. },
+            BdfJacobian::SparseTriplets {
+                triplets: right, ..
+            },
+        ) => {
+            assert_eq!(
+                left.len(),
+                right.len(),
+                "historical/current sparse nnz differs"
+            );
+            left.iter()
+                .zip(right.iter())
+                .map(|(left, right)| {
+                    assert_eq!(left.row, right.row, "historical/current sparse row differs");
+                    assert_eq!(
+                        left.col, right.col,
+                        "historical/current sparse column differs"
+                    );
+                    (left.val - right.val).abs()
+                })
+                .fold(0.0_f64, f64::max)
+        }
+        (BdfJacobian::Banded(left), BdfJacobian::Banded(right)) => {
+            assert_eq!(
+                left.n(),
+                right.n(),
+                "historical/current banded size differs"
+            );
+            let mut max_diff = 0.0_f64;
+            for row in 0..left.n() {
+                for col in 0..left.n() {
+                    max_diff = max_diff.max((left[(row, col)] - right[(row, col)]).abs());
+                }
+            }
+            max_diff
+        }
+        _ => f64::INFINITY,
     }
 }
 
@@ -4625,7 +5232,7 @@ fn print_lsode2_warm_prebuilt_table(
     build_row: &Lsode2LifecycleRow,
     rows: &[(usize, usize, Lsode2LifecycleRow)],
 ) {
-    println!("[LSODE2 warm] Banded AtomView Lambdify vs tcc RequirePrebuilt setup row");
+    println!("[LSODE2 warm] Banded AtomViewExprCompat Lambdify vs tcc RequirePrebuilt setup row");
     println!(
         "phase | build_policy    | total_ms | prepare_ms | solve_ms | residual_ms | jacobian_ms | linear_ms | final_diff | status"
     );
@@ -4734,7 +5341,7 @@ fn print_lsode2_warm_prebuilt_table(
 }
 
 #[test]
-#[ignore = "release story: warm repeated-solve comparison with cooldown, LSODE2 Banded AtomView Lambdify vs strict tcc RequirePrebuilt"]
+#[ignore = "release story: warm repeated-solve comparison with cooldown, LSODE2 Banded AtomViewExprCompat Lambdify vs strict tcc RequirePrebuilt"]
 fn lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story() {
     let repetitions = lifecycle_repetitions("LSODE2_WARM_REPEATS", 5);
     let cooldown_ms = warm_cooldown_ms();
@@ -5269,7 +5876,7 @@ fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
         }
 
         print_large_ivp_chunking_tables(
-            &format!("AtomView Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
+            &format!("AtomViewExprCompat Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
             n,
             &rows,
         );
@@ -5377,7 +5984,7 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
             .final_y
             .expect("reference final state should exist")[0];
 
-        let mut baseline_row = BackendRaceRow::new(matrix.label(), "Lambdify-AtomView");
+        let mut baseline_row = BackendRaceRow::new(matrix.label(), "Lambdify-AtomViewExprCompat");
         for _ in 0..repeats {
             baseline_row.runs_total += 1;
             let config = combustion_symbolic_matrix_config(
@@ -5387,8 +5994,11 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
                 None,
             )
             .with_bdf_only_controller();
-            match run_combustion_story_sample_result("Lambdify-AtomView", config, baseline_final_a)
-            {
+            match run_combustion_story_sample_result(
+                "Lambdify-AtomViewExprCompat",
+                config,
+                baseline_final_a,
+            ) {
                 Ok(sample) => push_combustion_sample(&mut baseline_row, sample),
                 Err(err) => baseline_row.record_failure(err),
             }
@@ -5491,7 +6101,7 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
     }
 
     for row in rows {
-        if row.route == "Lambdify-AtomView" {
+        if row.route == "Lambdify-AtomViewExprCompat" {
             assert_eq!(
                 row.runs_ok, row.runs_total,
                 "{} baseline should complete all runs",

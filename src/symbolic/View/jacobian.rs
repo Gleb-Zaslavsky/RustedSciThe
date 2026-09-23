@@ -13,6 +13,7 @@ use super::{
     conversions::expr_to_atom,
     state::{Symbol, Workspace},
 };
+use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_engine::Expr;
 
 /// One nonzero sparse Jacobian entry produced by the View-native symbolic path.
@@ -132,6 +133,23 @@ impl PreparedSparseAtomSystem {
             .collect();
 
         rows.into_iter().flatten().collect()
+    }
+
+    /// Builds the sparse Jacobian and attributes the Atom differentiation
+    /// portion to the optional IVP telemetry stream.
+    ///
+    /// The public non-telemetry method remains the zero-overhead compatibility
+    /// path. `SparsePattern` at the caller remains an inclusive aggregate for
+    /// this operation; `SymbolicDifferentiation` is its typed child stage.
+    pub fn calc_sparse_jacobian_with_bandwidth_and_telemetry(
+        &self,
+        bandwidth: Option<(usize, usize)>,
+        telemetry: &IvpTelemetry,
+    ) -> Vec<SparseAtomJacobianEntry> {
+        let started = telemetry.start_cold_stage(IvpColdStage::SymbolicDifferentiation);
+        let result = self.calc_sparse_jacobian_with_bandwidth(bandwidth);
+        telemetry.record_cold_stage(IvpColdStage::SymbolicDifferentiation, started);
+        result
     }
 }
 

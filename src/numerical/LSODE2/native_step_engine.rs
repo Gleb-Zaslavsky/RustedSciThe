@@ -33,7 +33,7 @@ use super::linear_backends::{
 use super::native_executor::{Lsode2NativeCallbackExecutor, jacobian_abs_max};
 use super::native_jacobian::{
     NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle,
+    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -45,6 +45,9 @@ use super::step_cycle::{
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
 use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
 use crate::somelinalg::banded::storage::Banded;
+use crate::symbolic::ivp_telemetry::{
+    IvpTelemetry, IvpTelemetryExecution, IvpTelemetryMatrixBackend, IvpTelemetryRoute, IvpWarmStage,
+};
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
 };
@@ -148,6 +151,18 @@ impl Lsode2NativeStepEngine {
         config: &Lsode2ProblemConfig,
         method: Lsode2NativeStepMethod,
     ) -> Result<Option<Self>, IvpBackendError> {
+        config
+            .telemetry
+            .set_matrix_backend(match config.linear_system_structure {
+                Lsode2LinearSystemStructure::Dense => IvpTelemetryMatrixBackend::Dense,
+                Lsode2LinearSystemStructure::Sparse => IvpTelemetryMatrixBackend::Sparse,
+                Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
+            });
+        config.telemetry.set_problem_shape(
+            config.y0.len(),
+            config.eq_system.len(),
+            config.equation_parameters.as_ref().map_or(0, Vec::len),
+        );
         if !matches!(
             config.backend.jacobian_backend,
             Lsode2JacobianBackend::SymbolicGenerated
@@ -248,6 +263,9 @@ struct Lsode2NativeStepEngineImpl<L> {
     linear_backend: L,
     driver: Lsode2NonlinearStepDriver,
     fallback_stiffness_probe_interval: Option<usize>,
+    telemetry: IvpTelemetry,
+    residual_evaluator_instrumented: bool,
+    jacobian_evaluator_instrumented: bool,
 }
 
 impl<L> Lsode2NativeStepEngineImpl<L>
@@ -260,12 +278,29 @@ where
         linear_backend: L,
         jacobian_storage: NativeJacobianStorage,
     ) -> Result<Self, IvpBackendError> {
-        let (residual, jacobian): (
+        match config.backend.jacobian_backend {
+            Lsode2JacobianBackend::AnalyticClosure => {
+                config
+                    .telemetry
+                    .set_route(IvpTelemetryRoute::AnalyticalClosure);
+            }
+            Lsode2JacobianBackend::FiniteDifference => {
+                config
+                    .telemetry
+                    .set_route(IvpTelemetryRoute::FiniteDifference);
+            }
+            Lsode2JacobianBackend::SymbolicGenerated => {}
+        }
+        let (residual, jacobian, residual_evaluator_instrumented, jacobian_evaluator_instrumented): (
             Rc<NativeResidualFn>,
             Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
+            bool,
+            bool,
         ) = match config.backend.jacobian_backend {
             Lsode2JacobianBackend::SymbolicGenerated => {
                 let mut options = SymbolicIvpProblemOptions::new();
+                options = options.with_telemetry(config.telemetry.clone());
+                options = options.with_lambdify_execution_policy(config.lambdify_execution_policy);
                 if let Some(parameters) = config.equation_parameters.clone() {
                     options = options.with_equation_parameters(parameters);
                 }
@@ -293,6 +328,21 @@ where
                     config.backend.generated_backend.clone(),
                 )
                 .map_err(map_generated_backend_error)?;
+                let residual_evaluator_instrumented = prepared.problem.backend_kind
+                    == crate::symbolic::symbolic_ivp::IvpBackendKind::Lambdify;
+                config.telemetry.set_execution(
+                    if matches!(
+                        config.residual_jacobian_source,
+                        Lsode2ResidualJacobianSource::Symbolic {
+                            execution: Lsode2SymbolicExecutionMode::Aot { .. },
+                            ..
+                        }
+                    ) {
+                        IvpTelemetryExecution::Aot
+                    } else {
+                        IvpTelemetryExecution::Lambdify
+                    },
+                );
                 let residual_problem = Rc::new(prepared.into_problem());
                 let residual = {
                     let residual_problem = Rc::clone(&residual_problem);
@@ -329,19 +379,39 @@ where
                     ))
                 } else {
                     Rc::new(RefCell::new(
-                        compile_native_symbolic_jacobian_with_parameter_handle(
+                        compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
                             &config.eq_system,
                             &config.values,
                             config.arg.as_str(),
                             config.equation_parameters.as_deref(),
                             residual_problem.parameter_values_handle(),
                             jacobian_storage,
+                            match symbolic_assembly_backend {
+                                Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                                    IvpSymbolicAssemblyBackend::ExprLegacy
+                                }
+                                Lsode2SymbolicAssemblyBackend::AtomView => {
+                                    IvpSymbolicAssemblyBackend::AtomView
+                                }
+                            },
+                            config.telemetry.clone(),
                         ),
                     ))
                 };
-                (residual, jacobian)
+                (
+                    residual,
+                    jacobian,
+                    residual_evaluator_instrumented,
+                    !use_sparse_aot_jacobian,
+                )
             }
             Lsode2JacobianBackend::AnalyticClosure => {
+                config
+                    .telemetry
+                    .set_route(IvpTelemetryRoute::AnalyticalClosure);
+                config
+                    .telemetry
+                    .set_execution(IvpTelemetryExecution::Lambdify);
                 let callbacks = config
                     .analytical_callbacks
                     .as_ref()
@@ -360,9 +430,15 @@ where
                     BdfJacobian::from_dense((jacobian_callbacks.jacobian)(t, y))
                 })
                     as Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>));
-                (residual, jacobian)
+                (residual, jacobian, false, false)
             }
             Lsode2JacobianBackend::FiniteDifference => {
+                config
+                    .telemetry
+                    .set_route(IvpTelemetryRoute::FiniteDifference);
+                config
+                    .telemetry
+                    .set_execution(IvpTelemetryExecution::Lambdify);
                 let callbacks = config
                     .analytical_callbacks
                     .as_ref()
@@ -378,6 +454,7 @@ where
                         as Rc<NativeResidualFn>;
                 let residual_for_jac = Rc::clone(&residual);
                 let atol = config.atol.abs().max(1.0e-14);
+                let telemetry = config.telemetry.clone();
                 let jacobian = Rc::new(RefCell::new(Box::new(move |t: f64, y: &DVector<f64>| {
                     finite_difference_jacobian_from_residual(
                         residual_for_jac.as_ref(),
@@ -385,10 +462,11 @@ where
                         y,
                         atol,
                         jacobian_storage,
+                        &telemetry,
                     )
                 })
                     as Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>));
-                (residual, jacobian)
+                (residual, jacobian, false, false)
             }
         };
 
@@ -428,6 +506,9 @@ where
             fallback_stiffness_probe_interval: (config.controller.mode
                 == Lsode2ControllerMode::AutomaticAdamsBdf)
                 .then_some(config.controller.method_switch_probe_steps.max(1)),
+            telemetry: config.telemetry.clone(),
+            residual_evaluator_instrumented,
+            jacobian_evaluator_instrumented,
         })
     }
 
@@ -447,7 +528,7 @@ where
         let residual = Rc::clone(&self.residual);
         let residual_ctx_for_cb = Rc::clone(&residual_ctx);
         let jacobian = Rc::clone(&self.jacobian);
-        let mut executor = Lsode2NativeCallbackExecutor::new(
+        let mut executor = Lsode2NativeCallbackExecutor::new_with_telemetry(
             move |t: f64, y: &DVector<f64>| {
                 let fy = (residual)(t, y);
                 let ctx_guard = residual_ctx_for_cb.borrow();
@@ -468,14 +549,23 @@ where
             },
             move |t: f64, y: &DVector<f64>| (jacobian.borrow_mut())(t, y),
             self.linear_backend.clone(),
+            self.telemetry.clone(),
+        )
+        .with_evaluator_telemetry(
+            self.residual_evaluator_instrumented,
+            self.jacobian_evaluator_instrumented,
         );
 
         loop {
             self.refresh_first_derivative_if_requested()?;
-            let predicted = self
-                .driver
-                .begin_step()
-                .map_err(map_nonlinear_driver_error)?;
+            let predicted = {
+                let _predictor_scope = self
+                    .telemetry
+                    .scoped_warm_stage(IvpWarmStage::ControllerPredictor);
+                self.driver
+                    .begin_step()
+                    .map_err(map_nonlinear_driver_error)?
+            };
             if first_predictor_flags.is_none() {
                 first_predictor_flags = Some((
                     self.driver.cycle().jacobian_currency(),
@@ -486,26 +576,30 @@ where
             if first_predicted.is_none() {
                 first_predicted = Some(predicted.clone());
             }
-            let h_trial = predicted.h_trial;
-            let order = predicted.order;
-            let el1 = el1_for_step_method(self.driver.cycle().method(), order)?;
-            let hl0 = h_trial * el1;
-            let yh2 = self
-                .driver
-                .cycle()
-                .state()
-                .predicted_nordsieck()
-                .col(1)
-                .map_err(map_history_error)?
-                .to_vec();
-            *residual_ctx.borrow_mut() = Some(NativeStepResidualContext {
-                y_pred: DVector::from_vec(predicted.y_pred.clone()),
-                yh2: DVector::from_vec(yh2),
-                h_trial,
-                el1,
-            });
-
-            let mut y_candidate = DVector::from_vec(predicted.y_pred.clone());
+            let (h_trial, hl0, mut y_candidate) = {
+                let _setup_scope = self
+                    .telemetry
+                    .scoped_warm_stage(IvpWarmStage::ControllerStepSetup);
+                let h_trial = predicted.h_trial;
+                let order = predicted.order;
+                let el1 = el1_for_step_method(self.driver.cycle().method(), order)?;
+                let hl0 = h_trial * el1;
+                let yh2 = self
+                    .driver
+                    .cycle()
+                    .state()
+                    .predicted_nordsieck()
+                    .col(1)
+                    .map_err(map_history_error)?
+                    .to_vec();
+                *residual_ctx.borrow_mut() = Some(NativeStepResidualContext {
+                    y_pred: DVector::from_vec(predicted.y_pred.clone()),
+                    yh2: DVector::from_vec(yh2),
+                    h_trial,
+                    el1,
+                });
+                (h_trial, hl0, DVector::from_vec(predicted.y_pred.clone()))
+            };
             let mut force_refresh_on_next_correction = should_force_refresh_on_first_correction(
                 refresh_requested,
                 self.driver.cycle().ipup(),
@@ -513,17 +607,24 @@ where
 
             loop {
                 total_iterations += 1;
-                let outcome = self
-                    .driver
-                    .compute_apply_and_submit_correction_with_refresh_policy(
-                        &mut y_candidate,
-                        hl0,
-                        &mut executor,
-                        force_refresh_on_next_correction,
-                    )
-                    .map_err(map_nonlinear_driver_error)?;
+                let outcome = {
+                    let _iteration_scope = self
+                        .telemetry
+                        .scoped_warm_stage(IvpWarmStage::ControllerIteration);
+                    self.driver
+                        .compute_apply_and_submit_correction_with_refresh_policy(
+                            &mut y_candidate,
+                            hl0,
+                            &mut executor,
+                            force_refresh_on_next_correction,
+                        )
+                        .map_err(map_nonlinear_driver_error)?
+                };
                 force_refresh_on_next_correction = false;
 
+                let _outcome_scope = self
+                    .telemetry
+                    .scoped_warm_stage(IvpWarmStage::ControllerOutcome);
                 match &outcome {
                     Lsode2StepCycleOutcome::NonlinearContinue { .. } => continue,
                     Lsode2StepCycleOutcome::Rejected { retry, .. }
@@ -757,9 +858,10 @@ fn finite_difference_jacobian_from_residual(
     y: &DVector<f64>,
     atol: f64,
     storage: NativeJacobianStorage,
+    telemetry: &IvpTelemetry,
 ) -> BdfJacobian {
     let n = y.len();
-    let f0 = residual(t, y);
+    let f0 = evaluate_finite_difference_residual(residual, t, y, telemetry);
     let eps = f64::EPSILON.sqrt();
 
     match storage {
@@ -770,7 +872,7 @@ fn finite_difference_jacobian_from_residual(
                 let h = eps * yj.abs().max(atol).max(1.0);
                 let mut y_pert = y.clone_owned();
                 y_pert[col] += h;
-                let f_pert = residual(t, &y_pert);
+                let f_pert = evaluate_finite_difference_residual(residual, t, &y_pert, telemetry);
                 for row in 0..n {
                     dense[(row, col)] = (f_pert[row] - f0[row]) / h;
                 }
@@ -784,7 +886,7 @@ fn finite_difference_jacobian_from_residual(
                 let h = eps * yj.abs().max(atol).max(1.0);
                 let mut y_pert = y.clone_owned();
                 y_pert[col] += h;
-                let f_pert = residual(t, &y_pert);
+                let f_pert = evaluate_finite_difference_residual(residual, t, &y_pert, telemetry);
                 for row in 0..n {
                     let value = (f_pert[row] - f0[row]) / h;
                     if value != 0.0 {
@@ -796,7 +898,9 @@ fn finite_difference_jacobian_from_residual(
         }
         NativeJacobianStorage::Banded {
             bandwidth: Some((kl, ku)),
-        } => finite_difference_banded_jacobian_from_residual(residual, t, y, atol, kl, ku),
+        } => {
+            finite_difference_banded_jacobian_from_residual(residual, t, y, atol, kl, ku, telemetry)
+        }
         NativeJacobianStorage::Banded { bandwidth: None } => {
             let mut kl = 0usize;
             let mut ku = 0usize;
@@ -806,7 +910,7 @@ fn finite_difference_jacobian_from_residual(
                 let h = eps * yj.abs().max(atol).max(1.0);
                 let mut y_pert = y.clone_owned();
                 y_pert[col] += h;
-                let f_pert = residual(t, &y_pert);
+                let f_pert = evaluate_finite_difference_residual(residual, t, &y_pert, telemetry);
                 for row in 0..n {
                     let value = (f_pert[row] - f0[row]) / h;
                     if value != 0.0 {
@@ -835,9 +939,10 @@ fn finite_difference_banded_jacobian_from_residual(
     atol: f64,
     kl: usize,
     ku: usize,
+    telemetry: &IvpTelemetry,
 ) -> BdfJacobian {
     let n = y.len();
-    let f0 = residual(t, y);
+    let f0 = evaluate_finite_difference_residual(residual, t, y, telemetry);
     let eps = f64::EPSILON.sqrt();
     let mut banded = Banded::<f64>::zeros(n, kl, ku)
         .expect("finite-difference Jacobian bandwidth should define valid banded storage");
@@ -847,7 +952,7 @@ fn finite_difference_banded_jacobian_from_residual(
         let h = eps * yj.abs().max(atol).max(1.0);
         let mut y_pert = y.clone_owned();
         y_pert[col] += h;
-        let f_pert = residual(t, &y_pert);
+        let f_pert = evaluate_finite_difference_residual(residual, t, &y_pert, telemetry);
         let first_row = col.saturating_sub(ku);
         let last_row = (col + kl).min(n.saturating_sub(1));
         for row in first_row..=last_row {
@@ -859,6 +964,18 @@ fn finite_difference_banded_jacobian_from_residual(
     }
 
     BdfJacobian::Banded(banded)
+}
+
+fn evaluate_finite_difference_residual(
+    residual: &NativeResidualFn,
+    t: f64,
+    y: &DVector<f64>,
+    telemetry: &IvpTelemetry,
+) -> DVector<f64> {
+    let started = telemetry.start_warm_stage(IvpWarmStage::ResidualEvaluation);
+    let value = residual(t, y);
+    telemetry.record_residual_evaluation(started);
+    value
 }
 
 fn banded_jacobian_storage(config: &Lsode2ProblemConfig) -> NativeJacobianStorage {
@@ -1040,6 +1157,7 @@ mod tests {
             &y,
             1.0e-8,
             NativeJacobianStorage::SparseTriplets,
+            &IvpTelemetry::disabled(),
         );
 
         let BdfJacobian::SparseTriplets { n, triplets } = jacobian else {
@@ -1067,6 +1185,7 @@ mod tests {
             &y,
             1.0e-8,
             NativeJacobianStorage::Banded { bandwidth: None },
+            &IvpTelemetry::disabled(),
         );
 
         let BdfJacobian::Banded(banded) = jacobian else {
@@ -1099,6 +1218,7 @@ mod tests {
             NativeJacobianStorage::Banded {
                 bandwidth: Some((0, 0)),
             },
+            &IvpTelemetry::disabled(),
         );
 
         let BdfJacobian::Banded(banded) = jacobian else {

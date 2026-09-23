@@ -1308,6 +1308,7 @@ mod tests {
     /// between the numerical and exact solutions. The test asserts that this
     /// norm is below a specified tolerance to ensure the accuracy of the solution.
     //  #[test]
+    #[allow(dead_code)]
     fn test_BVP_Damp2() {
         // let ne=  (NonlinEquation::  Clairaut  ); //  Clairaut  LaneEmden5  ParachuteEquation
         for ne in NonlinEquation::iter() {

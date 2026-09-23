@@ -26,6 +26,7 @@ use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
+use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use nalgebra::{DMatrix, DVector};
@@ -320,7 +321,8 @@ impl Lsode2Solver {
                 Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
             },
             Lsode2ResidualJacobianSource::Analytical => IvpSymbolicAssemblyBackend::ExprLegacy,
-        });
+        })
+        .with_lambdify_execution_policy(config.lambdify_execution_policy);
         if let Some(parameters) = config.equation_parameters.clone() {
             options = options.with_equation_parameters(parameters);
         }
@@ -358,6 +360,14 @@ impl Lsode2Solver {
 
     pub fn config(&self) -> &Lsode2ProblemConfig {
         &self.config
+    }
+
+    /// Returns the typed opt-in telemetry snapshot for the current solve.
+    ///
+    /// The snapshot remains available after a typed solve error, which allows
+    /// callers to inspect the partial lifecycle leading to the failure.
+    pub fn telemetry_snapshot(&self) -> IvpTelemetrySnapshot {
+        self.config.telemetry.snapshot()
     }
 
     /// Prepares symbolic residual/Jacobian callbacks and linear backend wiring.

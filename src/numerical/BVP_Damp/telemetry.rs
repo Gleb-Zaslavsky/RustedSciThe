@@ -4,6 +4,10 @@
 //! The legacy map representation is produced only at the public compatibility
 //! boundary, where existing story tests and downstream callers still consume it.
 
+// Some recorder controls are intentionally available before every solver route
+// wires them into its public builder.
+#![allow(dead_code)]
+
 use crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan;
 use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use crate::symbolic::bvp::telemetry::BvpGenerationTelemetrySnapshot;
@@ -1338,8 +1342,14 @@ mod tests {
     #[test]
     fn begin_solve_resets_iteration_and_damping_scope_elapsed() {
         let recorder = BvpTelemetryRecorder::default();
-        recorder.finish_iteration_scope(recorder.start_iteration_scope());
-        recorder.finish_damping_trial_scope(recorder.start_damping_trial_scope());
+        let iteration_started = recorder.start_iteration_scope();
+        let damping_trial_started = recorder.start_damping_trial_scope();
+        // The assertion is about reset semantics, not timer resolution. A
+        // short pause makes the pre-reset sample deterministic in release
+        // builds where a back-to-back clock read may have zero granularity.
+        std::thread::sleep(Duration::from_millis(1));
+        recorder.finish_iteration_scope(iteration_started);
+        recorder.finish_damping_trial_scope(damping_trial_started);
 
         let before = recorder.scopes_snapshot(&BvpTimingSnapshot::default(), &recorder.snapshot());
         assert!(before.iteration.elapsed > Duration::ZERO);

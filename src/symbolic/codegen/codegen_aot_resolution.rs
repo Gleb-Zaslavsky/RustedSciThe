@@ -89,12 +89,15 @@ impl AotResolver {
                         backend_kind: crate::symbolic::codegen::codegen_provider_api::BackendKind::Aot,
                         matrix_backend:
                             crate::symbolic::codegen::codegen_provider_api::MatrixBackend::ValuesOnly,
+                        symbolic_route:
+                            crate::symbolic::codegen::codegen_manifest::PreparedSymbolicRoute::Generic,
                         io: crate::symbolic::codegen::codegen_manifest::ProblemIoManifest {
                             input_names: Vec::new(),
                             residual_len: 0,
                             jacobian_rows: 0,
                             jacobian_cols: 0,
                             jacobian_nnz: None,
+                            jacobian_layout: None,
                         },
                         functions: crate::symbolic::codegen::codegen_manifest::GeneratedFunctionsManifest {
                             residual_fn_name: String::new(),
@@ -131,12 +134,15 @@ impl AotResolver {
                         backend_kind: crate::symbolic::codegen::codegen_provider_api::BackendKind::Aot,
                         matrix_backend:
                             crate::symbolic::codegen::codegen_provider_api::MatrixBackend::ValuesOnly,
+                        symbolic_route:
+                            crate::symbolic::codegen::codegen_manifest::PreparedSymbolicRoute::Generic,
                         io: crate::symbolic::codegen::codegen_manifest::ProblemIoManifest {
                             input_names: Vec::new(),
                             residual_len: 0,
                             jacobian_rows: 0,
                             jacobian_cols: 0,
                             jacobian_nnz: None,
+                            jacobian_layout: None,
                         },
                         functions: crate::symbolic::codegen::codegen_manifest::GeneratedFunctionsManifest {
                             residual_fn_name: String::new(),

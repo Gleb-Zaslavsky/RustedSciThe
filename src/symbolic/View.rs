@@ -27,6 +27,7 @@ pub mod bvp_codegen;
 pub mod coefficient;
 pub mod conversions;
 pub mod derivative;
+pub mod diagnostics;
 pub mod evaluate;
 pub mod jacobian;
 pub mod lambdify;
@@ -43,6 +44,7 @@ pub mod transform;
 pub use atom::{Atom, AtomCore, AtomView};
 pub use coefficient::Coefficient;
 pub use derivative::{DerivativeError, try_derivative};
+pub use diagnostics::{ExpressionMetrics, OperationCounts, PowerClass, inspect_atoms, inspect_exprs};
 pub use evaluate::{
     EvaluationCache, EvaluationFn, EvaluationSymbolFn, ExactConstMap, ExactSymbolMap,
     FloatSymbolMap, FunctionMap, PreparedEvaluator, evaluate, evaluate_exact,

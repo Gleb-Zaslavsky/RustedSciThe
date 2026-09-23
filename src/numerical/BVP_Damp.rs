@@ -24,6 +24,10 @@ mod test_aot_diagnostics;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/aot_race_stress.rs"]
 mod test_aot_race_stress;
+/// AOT-only AtomView ABI, layout and warm-telemetry correctness gates
+#[cfg(test)]
+#[path = "BVP_Damp/tests/aot_runtime_contract.rs"]
+mod test_aot_runtime_contract;
 /// focused backend comparison diagnostics for solver-facing BVP generated pipelines
 #[cfg(test)]
 #[path = "BVP_Damp/tests/backend_compare.rs"]
@@ -48,6 +52,10 @@ mod test_frozen_runtime_story;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/lambdify_acceptance.rs"]
 mod test_lambdify_acceptance;
+/// callback-only Sparse/Banded Sequential/Parallel/Auto diagnostic matrix
+#[cfg(test)]
+#[path = "BVP_Damp/tests/lambdify_callback_matrix.rs"]
+mod test_lambdify_callback_matrix;
 /// broad pure-Lambdify frontend, matrix-backend and execution-policy correctness corpus
 #[cfg(test)]
 #[path = "BVP_Damp/tests/lambdify_cross_product.rs"]

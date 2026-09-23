@@ -14,6 +14,10 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_build::{
     CAotBuildProfile, CAotBuildRequest, CAotBuildResult, CAotCompileConfig, ExecutedCAotBuild,
 };
 use crate::symbolic::codegen::c_backend::codegen_c_aot_library::GeneratedCAotLibrary;
+use crate::symbolic::codegen::codegen_aot_lifecycle::{
+    AotArtifactInspection, AotFailureDiagnostics, AotFailureInjection, AotFailureKind,
+    AotLifecycleError, AotLifecycleStage, quarantine_generated_tree,
+};
 use crate::symbolic::codegen::codegen_provider_api::{
     PreparedBandedProblem, PreparedDenseProblem, PreparedProblem, PreparedSparseProblem,
 };
@@ -143,6 +147,63 @@ impl GeneratedAotBuildRequest {
             Self::Zig(request) => request.materialize().map(GeneratedAotBuildResult::Zig),
         }
     }
+
+    /// Materializes and executes a cross-toolchain build with quarantine
+    /// between attempts. Rust, C and Zig therefore share the same retry and
+    /// stale-tree contract while retaining their native build commands.
+    pub fn materialize_and_execute_with_retry(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let total = attempts.max(1);
+        let mut last_error = None;
+        let mut quarantine_attempted = false;
+        let mut cleanup_completed = false;
+
+        for attempt in 1..=total {
+            let build = self.materialize().map_err(|error| {
+                let mut diagnostics = AotFailureDiagnostics::new(
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::Io,
+                    &artifact_key,
+                    error.to_string(),
+                );
+                diagnostics.attempts = attempt;
+                AotLifecycleError::new(diagnostics)
+            })?;
+
+            match build.execute_with_lifecycle(&artifact_key, injection) {
+                Ok(result) => return Ok(result),
+                Err(mut error) => {
+                    error.diagnostics.attempts = attempt;
+                    if attempt < total {
+                        if let Some(inspection) = error.diagnostics.inspection.as_ref() {
+                            match quarantine_generated_tree(&inspection.crate_dir, &artifact_key) {
+                                Ok(Some(_)) => {
+                                    quarantine_attempted = true;
+                                    cleanup_completed = true;
+                                }
+                                Ok(None) => {}
+                                Err(quarantine_error) => return Err(quarantine_error),
+                            }
+                        }
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let mut error = last_error.expect("at least one typed build attempt exists");
+        error.diagnostics.attempts = total;
+        error.diagnostics.quarantine_attempted = quarantine_attempted;
+        error.diagnostics.cleanup_completed = cleanup_completed;
+        error.diagnostics.root_kind = Some(error.diagnostics.kind);
+        error.diagnostics.kind = AotFailureKind::RetryExhausted;
+        Err(error)
+    }
 }
 
 impl GeneratedAotBuildResult {
@@ -169,6 +230,104 @@ impl GeneratedAotBuildResult {
             Self::Zig(result) => result.execute().map(ExecutedGeneratedAotBuild::Zig),
         }
     }
+
+    /// Executes any supported toolchain through the common typed lifecycle
+    /// boundary. The three backends keep their native build commands and
+    /// output types, but failures expose one diagnostic schema.
+    pub fn execute_with_lifecycle(
+        &self,
+        artifact_key: impl Into<String>,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let (stage, kind, detail) = injected_failure(injection).unwrap_or((
+            AotLifecycleStage::Build,
+            AotFailureKind::Compiler,
+            "external AOT compiler failure",
+        ));
+        if injection != AotFailureInjection::None {
+            return Err(AotLifecycleError::new(
+                lifecycle_diagnostics_for_generated_result(self, artifact_key, stage, kind, detail),
+            ));
+        }
+
+        let executed = self.execute().map_err(|error| {
+            AotLifecycleError::new(lifecycle_diagnostics_for_generated_result(
+                self,
+                artifact_key.clone(),
+                AotLifecycleStage::Build,
+                AotFailureKind::Io,
+                error.to_string(),
+            ))
+        })?;
+        if !executed.succeeded() {
+            return Err(AotLifecycleError::new(
+                lifecycle_diagnostics_for_generated_result(
+                    self,
+                    artifact_key,
+                    AotLifecycleStage::Build,
+                    AotFailureKind::Compiler,
+                    executed_failure_detail(&executed),
+                ),
+            ));
+        }
+        Ok(executed)
+    }
+
+    /// Retries a cross-toolchain build while retaining the final attempt
+    /// count and typed failure class. Artifact quarantine is intentionally a
+    /// separate operation on the registry, so retries cannot accidentally
+    /// overwrite a suspicious tree.
+    pub fn execute_with_retry(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let total = attempts.max(1);
+        let mut last_error = None;
+        for _ in 0..total {
+            match self.execute_with_lifecycle(&artifact_key, injection) {
+                Ok(result) => return Ok(result),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let mut error = last_error.expect("at least one typed build attempt exists");
+        error.diagnostics.attempts = total;
+        error.diagnostics.root_kind = Some(error.diagnostics.kind);
+        error.diagnostics.kind = AotFailureKind::RetryExhausted;
+        Err(error)
+    }
+}
+
+fn executed_failure_detail(executed: &ExecutedGeneratedAotBuild) -> String {
+    match executed {
+        ExecutedGeneratedAotBuild::Rust(build) => format_failure_detail(
+            build.status_code,
+            &build.stderr,
+            "Rust compiler exited without a valid output artifact",
+        ),
+        ExecutedGeneratedAotBuild::C(build) => format_failure_detail(
+            build.status_code,
+            &build.stderr,
+            "C compiler/linker exited without a valid output artifact",
+        ),
+        ExecutedGeneratedAotBuild::Zig(build) => format_failure_detail(
+            build.status_code,
+            &build.stderr,
+            "Zig compiler/linker exited without a valid output artifact",
+        ),
+    }
+}
+
+fn format_failure_detail(status: Option<i32>, stderr: &str, fallback: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("{fallback}; status={status:?}")
+    } else {
+        format!("{fallback}; status={status:?}; stderr={stderr}")
+    }
 }
 
 impl ExecutedGeneratedAotBuild {
@@ -179,6 +338,76 @@ impl ExecutedGeneratedAotBuild {
             Self::Zig(build) => build.succeeded(),
         }
     }
+}
+
+fn injected_failure(
+    injection: AotFailureInjection,
+) -> Option<(AotLifecycleStage, AotFailureKind, &'static str)> {
+    match injection {
+        AotFailureInjection::None => None,
+        AotFailureInjection::Compiler => Some((
+            AotLifecycleStage::Build,
+            AotFailureKind::Compiler,
+            "compiler failure injected for lifecycle test",
+        )),
+        AotFailureInjection::PartialArtifact => Some((
+            AotLifecycleStage::Materialized,
+            AotFailureKind::PartialArtifact,
+            "partial artifact injected for lifecycle test",
+        )),
+        AotFailureInjection::StaleArtifact => Some((
+            AotLifecycleStage::Materialized,
+            AotFailureKind::StaleArtifact,
+            "stale artifact injected for lifecycle test",
+        )),
+        AotFailureInjection::Lock => Some((
+            AotLifecycleStage::Materialized,
+            AotFailureKind::Lock,
+            "artifact lock failure injected for lifecycle test",
+        )),
+        AotFailureInjection::Link => Some((
+            AotLifecycleStage::Link,
+            AotFailureKind::Link,
+            "link failure injected for lifecycle test",
+        )),
+    }
+}
+
+fn lifecycle_diagnostics_for_generated_result(
+    result: &GeneratedAotBuildResult,
+    artifact_key: String,
+    stage: AotLifecycleStage,
+    kind: AotFailureKind,
+    detail: impl Into<String>,
+) -> AotFailureDiagnostics {
+    let (crate_dir, marker, static_output, dynamic_output) = match result {
+        GeneratedAotBuildResult::Rust(result) => (
+            result.written.crate_dir.clone(),
+            result.written.manifest_rs.clone(),
+            result.expected_rlib.clone(),
+            result.expected_cdylib.clone(),
+        ),
+        GeneratedAotBuildResult::C(result) => (
+            result.written.library_dir.clone(),
+            result.written.manifest_h.clone(),
+            result.expected_so.clone(),
+            result.expected_so.clone(),
+        ),
+        GeneratedAotBuildResult::Zig(result) => (
+            result.written.library_dir.clone(),
+            result.written.build_zig.clone(),
+            result.expected_so.clone(),
+            result.expected_so.clone(),
+        ),
+    };
+    let mut diagnostics = AotFailureDiagnostics::new(stage, kind, artifact_key, detail);
+    diagnostics.inspection = Some(AotArtifactInspection::inspect(
+        crate_dir,
+        &marker,
+        &static_output,
+        &dynamic_output,
+    ));
+    diagnostics
 }
 
 /// Creates one backend-selected build request for a previously emitted artifact.
@@ -715,6 +944,7 @@ pub fn generated_zig_aot_library_from_prepared_problem(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::codegen::codegen_aot_lifecycle::AotArtifactState;
     use crate::symbolic::codegen::codegen_provider_api::{
         BackendKind, MatrixBackend, PreparedBandedProblem, PreparedDenseProblem,
         PreparedSparseProblem,
@@ -727,6 +957,7 @@ mod tests {
         SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
     };
     use crate::symbolic::symbolic_engine::Expr;
+    use tempfile::tempdir;
 
     #[test]
     fn dense_driver_builds_module_with_residual_and_dense_jacobian_blocks() {
@@ -824,6 +1055,188 @@ mod tests {
                 .module_source
                 .contains("pub fn eval_sparse_values")
         );
+    }
+
+    #[test]
+    fn generated_build_result_uses_common_typed_lifecycle_boundary() {
+        let residuals = vec![Expr::parse_expression("x + 1")];
+        let jacobian = vec![vec![Expr::parse_expression("1")]];
+        let vars = vec!["x"];
+        let prepared = PreparedProblem::dense(PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        ));
+        let artifact = generated_aot_artifact_from_prepared_problem(
+            "generated_driver_lifecycle_fixture",
+            "driver_lifecycle_module",
+            &prepared,
+            AotCodegenBackend::Rust,
+        );
+        let temp = tempdir().expect("temporary directory should exist");
+        let request = generated_aot_build_request_from_artifact(
+            artifact,
+            temp.path(),
+            AotBuildPreset::DevFastest,
+        );
+        let result = request
+            .materialize()
+            .expect("driver request should materialize");
+        let error = result
+            .execute_with_lifecycle("driver-lifecycle-key", AotFailureInjection::Link)
+            .expect_err("injected link failure should not spawn a compiler");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::Link);
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Link);
+        assert!(error.diagnostics.inspection.is_some());
+    }
+
+    #[test]
+    fn all_toolchains_share_quarantine_retry_diagnostics() {
+        let residuals = vec![Expr::parse_expression("x + 1")];
+        let jacobian = vec![vec![Expr::parse_expression("1")]];
+        let vars = vec!["x"];
+        let prepared = PreparedProblem::dense(PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        ));
+        let temp = tempdir().expect("temporary directory should exist");
+
+        for backend in [
+            AotCodegenBackend::Rust,
+            AotCodegenBackend::C,
+            AotCodegenBackend::Zig,
+        ] {
+            for injection in [
+                AotFailureInjection::PartialArtifact,
+                AotFailureInjection::StaleArtifact,
+                AotFailureInjection::Link,
+            ] {
+                let artifact = generated_aot_artifact_from_prepared_problem(
+                    &format!("generated_retry_{backend:?}_{injection:?}").to_lowercase(),
+                    "retry_module",
+                    &prepared,
+                    backend,
+                );
+                let request = generated_aot_build_request_from_artifact(
+                    artifact,
+                    temp.path(),
+                    AotBuildPreset::DevFastest,
+                );
+                let error = request
+                    .materialize_and_execute_with_retry(
+                        format!("retry-{backend:?}-{injection:?}"),
+                        2,
+                        injection,
+                    )
+                    .expect_err("artifact fault injection must exhaust retries");
+                let expected_kind = match injection {
+                    AotFailureInjection::PartialArtifact => AotFailureKind::PartialArtifact,
+                    AotFailureInjection::StaleArtifact => AotFailureKind::StaleArtifact,
+                    AotFailureInjection::Link => AotFailureKind::Link,
+                    _ => unreachable!("the matrix contains only selected lifecycle fault points"),
+                };
+                assert_eq!(error.diagnostics.kind, AotFailureKind::RetryExhausted);
+                assert_eq!(error.diagnostics.root_kind, Some(expected_kind));
+                assert_eq!(error.diagnostics.attempts, 2);
+                assert!(error.diagnostics.quarantine_attempted);
+                assert!(error.diagnostics.cleanup_completed);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_external_compiler_preserves_typed_retry_diagnostics() {
+        let residuals = vec![Expr::parse_expression("x + 1")];
+        let jacobian = vec![vec![Expr::parse_expression("1")]];
+        let vars = vec!["x"];
+        let prepared = PreparedProblem::dense(PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        ));
+        let artifact = generated_aot_artifact_from_prepared_problem(
+            "generated_missing_compiler_fixture",
+            "missing_compiler_module",
+            &prepared,
+            AotCodegenBackend::C,
+        );
+        let library = match artifact {
+            GeneratedAotArtifact::C(library) => library,
+            GeneratedAotArtifact::Rust(_) | GeneratedAotArtifact::Zig(_) => {
+                unreachable!("C backend must produce a C library")
+            }
+        };
+        let output_dir = tempdir().expect("temporary build directory");
+        let request = GeneratedAotBuildRequest::C(
+            CAotBuildRequest::new(library, output_dir.path(), CAotBuildProfile::Debug)
+                .with_compile_config(
+                    CAotCompileConfig::new()
+                        .with_compiler("__rustedscithe_missing_compiler_for_lifecycle_test__"),
+                ),
+        );
+
+        let error = request
+            .materialize_and_execute_with_retry(
+                "missing-compiler-fixture",
+                2,
+                AotFailureInjection::None,
+            )
+            .expect_err("missing external compiler must be reported as a typed lifecycle error");
+
+        assert_eq!(error.diagnostics.kind, AotFailureKind::RetryExhausted);
+        assert_eq!(error.diagnostics.root_kind, Some(AotFailureKind::Io));
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Build);
+        assert_eq!(error.diagnostics.attempts, 2);
+        assert!(error.diagnostics.quarantine_attempted);
+        assert!(error.diagnostics.cleanup_completed);
+        let inspection = error
+            .diagnostics
+            .inspection
+            .expect("final compiler failure should retain artifact inspection");
+        assert!(matches!(
+            inspection.state,
+            AotArtifactState::Materialized | AotArtifactState::Partial | AotArtifactState::Stale
+        ));
     }
 
     #[test]

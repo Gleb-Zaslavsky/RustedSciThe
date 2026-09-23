@@ -403,6 +403,7 @@ pub fn build_numeric_generated_solver_state(
         legacy_lambdify_telemetry: None,
         atom_lambdify_telemetry: None,
         direct_banded_jacobian_telemetry: None,
+        aot_telemetry: None,
         parameter_binding: None,
     })
 }

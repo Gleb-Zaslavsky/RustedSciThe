@@ -1,5 +1,6 @@
 use crate::numerical::BDF::BDF_solver::BdfJacobian;
 use crate::somelinalg::banded::storage::Banded;
+use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry, IvpWarmStage};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
@@ -74,7 +75,40 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
     parameter_values_handle: Option<SharedIvpParameterValues>,
     storage: NativeJacobianStorage,
 ) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> {
-    let symbolic_jacobian = build_symbolic_jacobian(equations, variables);
+    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+        equations,
+        variables,
+        time_arg,
+        equation_parameters,
+        parameter_values_handle,
+        storage,
+        IvpSymbolicAssemblyBackend::ExprLegacy,
+        IvpTelemetry::disabled(),
+    )
+}
+
+/// Telemetry-aware variant used by the native Lambdify route. The original
+/// function remains a compatibility wrapper for callers that do not collect
+/// diagnostics.
+pub fn compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+    equations: &[Expr],
+    variables: &[String],
+    time_arg: &str,
+    equation_parameters: Option<&[String]>,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    storage: NativeJacobianStorage,
+    symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
+    telemetry: IvpTelemetry,
+) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> {
+    let symbolic_started = telemetry.start_cold_stage(IvpColdStage::SymbolicJacobian);
+    let symbolic_jacobian = crate::symbolic::symbolic_ivp::build_symbolic_jacobian(
+        equations,
+        variables,
+        symbolic_assembly_backend,
+        &telemetry,
+    );
+    telemetry.record_cold_stage(IvpColdStage::SymbolicJacobian, symbolic_started);
+    telemetry.record_symbolic_jacobian_build();
     validate_parameter_handle(equation_parameters, parameter_values_handle.as_ref());
 
     let mut names = Vec::with_capacity(
@@ -89,34 +123,75 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
 
     let rows = symbolic_jacobian.len();
     let cols = symbolic_jacobian.first().map_or(0, |row| row.len());
-    let entries = compile_nonzero_entries(&symbolic_jacobian, &name_refs);
+    let compilation_started = telemetry.start_cold_stage(IvpColdStage::JacobianCompilation);
+    let entries = compile_nonzero_entries(&symbolic_jacobian, &name_refs, &telemetry);
+    telemetry.record_cold_stage(IvpColdStage::JacobianCompilation, compilation_started);
 
     match storage {
         NativeJacobianStorage::Dense => Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+            let callback_started = telemetry.start_warm_stage(IvpWarmStage::JacobianCallback);
+            let binding_started = telemetry.start_warm_stage(IvpWarmStage::ArgumentBinding);
+            let output_started = telemetry.start_warm_stage(IvpWarmStage::JacobianOutputAssembly);
             let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
             let args = build_args(t, parameter_values.as_ref(), y);
+            telemetry.record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+            telemetry.record_allocation(args.capacity() * std::mem::size_of::<f64>());
+            telemetry.record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
+            let evaluation_started = telemetry.start_warm_stage(IvpWarmStage::JacobianEvaluation);
             let mut matrix = nalgebra::DMatrix::<f64>::zeros(rows, cols);
             for (row, col, eval) in &entries {
                 matrix[(*row, *col)] = eval(&args);
             }
+            telemetry.record_warm_stage(IvpWarmStage::JacobianEvaluation, evaluation_started);
+            telemetry.record_scalar_evaluations(entries.len());
+            telemetry.record_allocation(rows * cols * std::mem::size_of::<f64>());
+            telemetry.record_warm_stage(IvpWarmStage::JacobianOutputAssembly, output_started);
+            telemetry.record_warm_stage(IvpWarmStage::JacobianCallback, callback_started);
+            telemetry.record_jacobian_evaluation_count();
             BdfJacobian::Dense(matrix)
         }),
         NativeJacobianStorage::SparseTriplets => {
             Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+                let callback_started = telemetry.start_warm_stage(IvpWarmStage::JacobianCallback);
+                let binding_started = telemetry.start_warm_stage(IvpWarmStage::ArgumentBinding);
+                let output_started =
+                    telemetry.start_warm_stage(IvpWarmStage::JacobianOutputAssembly);
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
                 let args = build_args(t, parameter_values.as_ref(), y);
+                telemetry.record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+                telemetry.record_allocation(args.capacity() * std::mem::size_of::<f64>());
+                telemetry.record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
+                let evaluation_started =
+                    telemetry.start_warm_stage(IvpWarmStage::JacobianEvaluation);
+                telemetry.record_scalar_evaluations(entries.len());
                 let triplets = entries
                     .iter()
                     .map(|(row, col, eval)| Triplet::new(*row, *col, eval(&args)))
                     .collect::<Vec<_>>();
+                telemetry.record_warm_stage(IvpWarmStage::JacobianEvaluation, evaluation_started);
+                telemetry.record_warm_stage(IvpWarmStage::JacobianOutputAssembly, output_started);
+                telemetry.record_allocation(
+                    triplets.len() * std::mem::size_of::<Triplet<usize, usize, f64>>(),
+                );
+                telemetry.record_warm_stage(IvpWarmStage::JacobianCallback, callback_started);
+                telemetry.record_jacobian_evaluation_count();
                 BdfJacobian::SparseTriplets { n: rows, triplets }
             })
         }
         NativeJacobianStorage::Banded { bandwidth } => {
             let (kl, ku) = bandwidth.unwrap_or_else(|| infer_bandwidth(rows, cols, &entries));
             Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
+                let callback_started = telemetry.start_warm_stage(IvpWarmStage::JacobianCallback);
+                let binding_started = telemetry.start_warm_stage(IvpWarmStage::ArgumentBinding);
+                let output_started =
+                    telemetry.start_warm_stage(IvpWarmStage::JacobianOutputAssembly);
                 let parameter_values = read_parameter_values(parameter_values_handle.as_ref());
                 let args = build_args(t, parameter_values.as_ref(), y);
+                telemetry.record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+                telemetry.record_allocation(args.capacity() * std::mem::size_of::<f64>());
+                telemetry.record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
+                let evaluation_started =
+                    telemetry.start_warm_stage(IvpWarmStage::JacobianEvaluation);
                 let mut banded = Banded::<f64>::zeros(rows, kl, ku)
                     .expect("symbolic Jacobian bandwidth should define valid banded storage");
                 for (row, col, eval) in &entries {
@@ -124,6 +199,12 @@ pub fn compile_native_symbolic_jacobian_with_parameter_handle(
                         .set(*row, *col, eval(&args))
                         .expect("compiled symbolic entry must fit inferred bandwidth");
                 }
+                telemetry.record_warm_stage(IvpWarmStage::JacobianEvaluation, evaluation_started);
+                telemetry.record_scalar_evaluations(entries.len());
+                telemetry.record_allocation(rows * (kl + ku + 1) * std::mem::size_of::<f64>());
+                telemetry.record_warm_stage(IvpWarmStage::JacobianOutputAssembly, output_started);
+                telemetry.record_warm_stage(IvpWarmStage::JacobianCallback, callback_started);
+                telemetry.record_jacobian_evaluation_count();
                 BdfJacobian::Banded(banded)
             })
         }
@@ -296,22 +377,12 @@ fn read_parameter_values(handle: Option<&SharedIvpParameterValues>) -> Option<DV
     })
 }
 
-fn build_symbolic_jacobian(equations: &[Expr], variables: &[String]) -> Vec<Vec<Expr>> {
-    equations
-        .iter()
-        .map(|expr| {
-            variables
-                .iter()
-                .map(|variable| expr.diff(variable).simplify())
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
 fn compile_nonzero_entries(
     symbolic_jacobian: &[Vec<Expr>],
     name_refs: &[&str],
+    telemetry: &IvpTelemetry,
 ) -> Vec<CompiledEntry> {
+    let lambdification_started = telemetry.start_cold_stage(IvpColdStage::JacobianLambdification);
     let mut entries = Vec::new();
     for (row, symbolic_row) in symbolic_jacobian.iter().enumerate() {
         for (col, expr) in symbolic_row.iter().enumerate() {
@@ -319,11 +390,15 @@ fn compile_nonzero_entries(
                 entries.push((
                     row,
                     col,
+                    // Lambdification is the cold part of the native callback;
+                    // the enclosing JacobianCompilation scope remains the
+                    // compatibility aggregate for existing reports.
                     Expr::lambdify_borrowed_thread_safe(expr, name_refs),
                 ));
             }
         }
     }
+    telemetry.record_cold_stage(IvpColdStage::JacobianLambdification, lambdification_started);
     entries
 }
 
@@ -543,6 +618,74 @@ mod tests {
             triplets
                 .iter()
                 .any(|entry| entry.row == 0 && entry.col == 1 && entry.val == 7.0)
+        );
+    }
+
+    #[test]
+    fn native_jacobian_atomview_matches_exprlegacy_and_reports_backend_stages() {
+        let equations = vec![
+            Expr::parse_expression("a*y1 + y2"),
+            Expr::parse_expression("y1*y1 - 3*y2"),
+        ];
+        let variables = vec!["y1".to_string(), "y2".to_string()];
+        let parameters = vec!["a".to_string()];
+        let values = Some(DVector::from_vec(vec![2.5]));
+        let state = DVector::from_vec(vec![1.25, -0.5]);
+
+        let mut expr_legacy = compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+            &equations,
+            &variables,
+            "t",
+            Some(&parameters),
+            values.clone().map(|values| Arc::new(RwLock::new(values))),
+            NativeJacobianStorage::SparseTriplets,
+            IvpSymbolicAssemblyBackend::ExprLegacy,
+            IvpTelemetry::counters(),
+        );
+        let atom_telemetry = IvpTelemetry::counters();
+        let mut atom_view = compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+            &equations,
+            &variables,
+            "t",
+            Some(&parameters),
+            values.map(|values| Arc::new(RwLock::new(values))),
+            NativeJacobianStorage::SparseTriplets,
+            IvpSymbolicAssemblyBackend::AtomView,
+            atom_telemetry.clone(),
+        );
+
+        let BdfJacobian::SparseTriplets {
+            triplets: expr_triplets,
+            ..
+        } = expr_legacy(0.0, &state)
+        else {
+            panic!("expected ExprLegacy sparse triplets");
+        };
+        let BdfJacobian::SparseTriplets {
+            triplets: atom_triplets,
+            ..
+        } = atom_view(0.0, &state)
+        else {
+            panic!("expected AtomView sparse triplets");
+        };
+
+        assert_eq!(expr_triplets.len(), atom_triplets.len());
+        for (expr_entry, atom_entry) in expr_triplets.iter().zip(atom_triplets.iter()) {
+            assert_eq!(
+                (expr_entry.row, expr_entry.col),
+                (atom_entry.row, atom_entry.col)
+            );
+            assert!((expr_entry.val - atom_entry.val).abs() < 1e-12);
+        }
+        let snapshot = atom_telemetry.snapshot();
+        assert!(snapshot.cold_stage(IvpColdStage::ExprToAtom).calls > 0);
+        assert!(snapshot.cold_stage(IvpColdStage::AtomToExpr).calls > 0);
+        assert!(snapshot.cold_stage(IvpColdStage::SparsePattern).calls > 0);
+        assert!(
+            snapshot
+                .cold_stage(IvpColdStage::JacobianLambdification)
+                .calls
+                > 0
         );
     }
 

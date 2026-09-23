@@ -13,7 +13,7 @@ This file is the short index for the BVP_Damp story ledger. The detailed entries
 
 Every new or rerun story entry must contain Recorded: YYYY-MM-DD, machine/core-count context, command, result, interpretation, and conclusion. An entry marked Recorded: undated is historical evidence only and is RERUN REQUIRED after the current architecture pass. A rerun supersedes the old block; the old block remains for auditability.
 
-Current date for this ledger pass: 2026-09-20.
+Current date for this ledger pass: 2026-09-22.
 
 ## Source-Of-Truth Rules
 
@@ -1421,3 +1421,52 @@ per-diagonal value collection and the eight-items-per-worker heuristic remain
 open optimization work; the next release story must compare Sequential,
 Parallel and Auto on small, combustion and imbalanced-band workloads.
 
+## 2026-09-22: release callback-policy, lifecycle and typed-boundary rerun
+
+### Release commands
+
+```powershell
+$env:BVP_LAMBDIFY_CALLBACK_REPETITIONS="7"
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_lambdify_callback_matrix -- --ignored --nocapture --test-threads=1
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_lambdify_lifecycle -- --nocapture --test-threads=1
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_lambdify_cross_product -- --nocapture --test-threads=1
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_aot_runtime_contract -- --nocapture --test-threads=1
+```
+
+### Results
+
+All fresh reports from approximately `19:49` completed successfully. The
+callback-only report used `build_profile=release`, seven repetitions and a
+warmed 24-thread Rayon pool. It covered AtomView `faer Sparse` and native
+`Banded`, `Sequential`, explicit `Parallel` and `Auto`, plus Banded
+`Diagonal` and `EntryChunks` layouts. Every row had zero residual/Jacobian
+drift and exactly seven residual and Jacobian calls.
+
+The lifecycle corpus also passed for both ExprLegacy/AtomView and
+Sparse/Banded. The reports confirm numeric rebind, mesh/BC/policy/public-state
+invalidation, fixed-CSC and Banded slot stability, factor rebuilds and direct
+callback replacement rejection. The new callback replacement gate proves that
+mutating the compatibility `fun` or `jac` field is rejected before execution
+and that `try_eq_generate` restores the prepared path. Raw evidence is kept in
+`test_reports/bvp_damp/` and
+`test_reports/BVP_Damp_Lambdify_Callback/`.
+
+The AOT runtime-contract group generated five reports. Those files were
+created by the previous capture utility and contain only header/timestamp
+because the tests emitted no captured lines, so they prove that the tests ran
+but are not independently sufficient pass/fail evidence. The reporting utility
+now adds `status: passed` or `status: failed` automatically; the next grouped
+run will make this contract explicit. The suite remains a correctness/lifecycle
+gate rather than an AOT build or performance result and covers typed
+parameter-binding rejection, compact Banded slot invalidation, artifact
+inspection/quarantine and protocol validation.
+
+### Interpretation
+
+The release callback matrix does not establish a Parallel speedup. On the
+tridiagonal fixture, `Auto` correctly stays sequential at dimensions `16` and
+`64`, then dispatches parallel work at `256`; the measured parallel callback is
+still slower than sequential at that size. This validates the dispatch and
+parity contract, but the break-even threshold remains a performance task for
+larger expression cost, wider bands and production-sized workloads. These
+release rows are appended evidence and do not replace historical baselines.

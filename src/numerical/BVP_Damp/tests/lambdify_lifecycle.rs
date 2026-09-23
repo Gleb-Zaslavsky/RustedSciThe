@@ -279,7 +279,9 @@ mod tests {
                     route.label()
                 );
 
-                solver.set_mesh(0.0, 1.0, 6);
+                solver
+                    .try_set_mesh(0.0, 1.0, 6)
+                    .expect("typed mesh mutation should be accepted");
                 expect_stale(&mut solver, "mesh");
                 solver
                     .try_eq_generate(None, None)
@@ -310,19 +312,26 @@ mod tests {
                 solver
                     .try_eq_generate(None, None)
                     .expect("restoring public compatibility input should succeed");
+                let original_guess = solver.initial_guess[(0, 0)];
+                solver.initial_guess[(0, 0)] = original_guess + 0.125;
+                expect_stale(&mut solver, "direct initial-guess mutation");
+                solver.initial_guess[(0, 0)] = original_guess;
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("restoring direct initial-guess mutation should succeed");
                 solver
                     .try_solver_prepared()
                     .expect("final regenerated runtime should be usable");
 
                 rows.push(format!(
-                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_mesh=typed; stale_bc=typed; stale_policy=typed; stale_public_values=typed",
+                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_mesh=typed; stale_bc=typed; stale_policy=typed; stale_public_values=typed; stale_initial_guess=typed",
                     route.label()
                 ));
             }
         }
 
         let report = format!(
-            "status: passed\n\nfixture: alpha*y-z, -z; initial n_steps=5; regenerated mesh n_steps=6\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind keeps prepared callbacks; mesh, boundary conditions, backend policy and direct public values mutation reject stale prepared solves with PreparedRuntimeInvalidated; regeneration restores solve path\nrows:\n{}\ninterpretation: numeric parameter values are runtime bindings and invalidate factors but not symbolic callbacks; structural compatibility changes require explicit regeneration.\n",
+            "status: passed\n\nfixture: alpha*y-z, -z; initial n_steps=5; regenerated mesh n_steps=6\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind keeps prepared callbacks; mesh, boundary conditions, backend policy, direct public values and direct initial-guess mutation reject stale prepared solves with PreparedRuntimeInvalidated; regeneration restores solve path\nrows:\n{}\ninterpretation: numeric parameter values are runtime bindings and invalidate factors but not symbolic callbacks; structural compatibility changes require explicit regeneration.\n",
             rows.join("\n")
         );
         if let Err(error) = write_test_report(
@@ -415,6 +424,78 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lambdify_rejects_direct_callback_replacement_and_recovers() {
+        let mut rows = Vec::new();
+
+        for frontend in [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ] {
+            for route in [MatrixRoute::Sparse, MatrixRoute::Banded] {
+                let mut solver = build_solver(route, frontend);
+                prepare(&mut solver);
+                solver
+                    .try_solver_prepared()
+                    .expect("initial prepared solve should succeed");
+                let expected_len = solver.y.len();
+
+                solver.fun = convert_to_fun(Box::new(move |_, _| {
+                    Box::new(DVector::from_element(expected_len, 0.0)) as Box<dyn VectorType>
+                }));
+                let residual_error = solver
+                    .try_solver_prepared()
+                    .expect_err("replaced residual callback must invalidate the prepared runtime");
+                assert!(matches!(
+                    residual_error,
+                    BvpBackendIntegrationError::PreparedRuntimeInvalidated { .. }
+                ));
+
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("residual callback regeneration should recover the runtime");
+                solver
+                    .try_solver_prepared()
+                    .expect("regenerated residual callback should be usable");
+
+                solver.jac = Some(convert_to_jac(Box::new(move |_, _| {
+                    Box::new(DMatrix::identity(expected_len, expected_len)) as Box<dyn MatrixType>
+                })));
+                let jacobian_error = solver
+                    .try_solver_prepared()
+                    .expect_err("replaced Jacobian callback must invalidate the prepared runtime");
+                assert!(matches!(
+                    jacobian_error,
+                    BvpBackendIntegrationError::PreparedRuntimeInvalidated { .. }
+                ));
+
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("Jacobian callback regeneration should recover the runtime");
+                solver
+                    .try_solver_prepared()
+                    .expect("regenerated Jacobian callback should be usable");
+
+                rows.push(format!(
+                    "frontend={frontend:?}; route={}; residual_callback=rejected; jacobian_callback=rejected; regeneration=accepted",
+                    route.label()
+                ));
+            }
+        }
+
+        let report = format!(
+            "status: passed\n\nfixture: alpha*y-z, -z; prepared Lambdify solve\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: direct public residual and Jacobian callback replacement is rejected before callback execution; explicit symbolic regeneration restores the prepared runtime\nrows:\n{}\ninterpretation: the compatibility callback fields remain mutable for legacy callers, but a prepared solve cannot silently consume a callback bundle different from the one used to build its plan. This is a debug lifecycle gate, not a performance measurement.\n",
+            rows.join("\n")
+        );
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "prepared_lambdify_rejects_direct_callback_replacement_and_recovers",
+            &report,
+        ) {
+            eprintln!("[BVP test report] unable to write callback invalidation report: {error}");
+        }
+    }
+
+    #[test]
     fn frozen_prepared_lambdify_rebind_and_structural_invalidation_matrix() {
         let mut rows = Vec::new();
 
@@ -458,19 +539,26 @@ mod tests {
                 solver
                     .try_eq_generate()
                     .expect("restoring Frozen public compatibility input should succeed");
+                let original_guess = solver.initial_guess[(0, 0)];
+                solver.initial_guess[(0, 0)] = original_guess + 0.125;
+                expect_frozen_stale(&mut solver, "direct initial-guess mutation");
+                solver.initial_guess[(0, 0)] = original_guess;
+                solver
+                    .try_eq_generate()
+                    .expect("restoring Frozen direct initial-guess mutation should succeed");
                 solver
                     .try_solver_prepared()
                     .expect("final Frozen prepared runtime should be usable");
 
                 rows.push(format!(
-                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_bc=typed; stale_policy=typed; stale_public_values=typed",
+                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_bc=typed; stale_policy=typed; stale_public_values=typed; stale_initial_guess=typed",
                     route.label()
                 ));
             }
         }
 
         let report = format!(
-            "status: passed\n\nfixture: alpha*y-z, -z; Frozen strategy; n_steps=5\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind preserves prepared callbacks; BC, backend policy and direct public values mutation reject stale Frozen solves; regeneration restores the prepared path\nrows:\n{}\ninterpretation: Frozen shares the typed prepared invalidation boundary with Damped. Frozen mesh mutation remains a separate API gap because no public set_mesh contract exists yet.\n",
+            "status: passed\n\nfixture: alpha*y-z, -z; Frozen strategy; n_steps=5\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind preserves prepared callbacks; BC, backend policy, direct public values and direct initial-guess mutation reject stale Frozen solves; regeneration restores the prepared path\nrows:\n{}\ninterpretation: Frozen shares the typed prepared invalidation boundary with Damped, including the fallible mesh and state-value boundaries.\n",
             rows.join("\n")
         );
         if let Err(error) = write_test_report(

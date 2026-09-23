@@ -32,7 +32,9 @@
 //! This module does **not** yet execute generated code or own any AOT bundle.
 //! It defines the runtime contract that future generated modules should match.
 
-use crate::somelinalg::banded::banded_assembly::BandedAssembly;
+use crate::somelinalg::banded::{
+    banded_assembly::BandedAssembly, error::BandedError, storage::Banded,
+};
 use crate::symbolic::codegen::codegen_orchestrator::rayon_overhead_baseline;
 use crate::symbolic::codegen::codegen_tasks::{
     BandedChunkingStrategy, BandedExprEntry, BandedJacobianTask, CodegenTask, CodegenTaskPlan,
@@ -420,6 +422,78 @@ pub struct BandedJacobianStructure {
     pub diagonal_positions: Vec<usize>,
 }
 
+/// Solver-facing metadata for a callback that already writes complete
+/// LAPACK-style compact band storage.
+///
+/// This is intentionally separate from [`BandedJacobianStructure`], whose
+/// values are the historical explicit-entry list.  A full-slot callback has
+/// no coordinate vectors and must be validated by its deterministic storage
+/// length instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandedCompactJacobianStructure {
+    pub rows: usize,
+    pub cols: usize,
+    pub kl: usize,
+    pub ku: usize,
+}
+
+impl BandedCompactJacobianStructure {
+    /// Returns the exact callback output length, including boundary slots.
+    pub fn storage_len(&self) -> Result<usize, BandedError> {
+        if self.rows == 0 || self.rows != self.cols {
+            return Err(BandedError::DimensionMismatch);
+        }
+        self.kl
+            .checked_add(self.ku)
+            .and_then(|width| width.checked_add(1))
+            .and_then(|width| width.checked_mul(self.cols))
+            .ok_or(BandedError::InvalidBand {
+                n: self.rows,
+                kl: self.kl,
+                ku: self.ku,
+            })
+    }
+
+    /// Validates and adopts callback-owned compact storage without copying it
+    /// into an intermediate assembly or sparse representation.
+    pub fn try_from_values(&self, values: Vec<f64>) -> Result<Banded<f64>, BandedError> {
+        let expected = self.storage_len()?;
+        if values.len() != expected {
+            return Err(BandedError::DimensionMismatch);
+        }
+        Banded::from_vec(self.rows, self.kl, self.ku, values)
+    }
+
+    /// Converts complete compact storage into the legacy solver-facing
+    /// `BandedAssembly` without passing through a dense matrix or triplets.
+    ///
+    /// The conversion is intentionally kept at this boundary because the
+    /// current BVP matrix wrapper owns `BandedAssembly`; the generated callback
+    /// itself still writes the final compact slot buffer directly.
+    pub fn try_to_assembly(&self, values: &[f64]) -> Result<BandedAssembly, BandedError> {
+        let expected = self.storage_len()?;
+        if values.len() != expected {
+            return Err(BandedError::DimensionMismatch);
+        }
+        let mut assembly = BandedAssembly::zeros(self.rows, self.kl, self.ku)?;
+        for offset in -(self.kl as isize)..=(self.ku as isize) {
+            let diagonal = assembly
+                .diag_mut(offset)
+                .ok_or(BandedError::DimensionMismatch)?;
+            let band_row = (self.ku as isize - offset) as usize;
+            let column_start = if offset >= 0 { offset as usize } else { 0 };
+            let source_start = band_row * self.cols + column_start;
+            let source_end = source_start + diagonal.len();
+            diagonal.copy_from_slice(
+                values
+                    .get(source_start..source_end)
+                    .ok_or(BandedError::DimensionMismatch)?,
+            );
+        }
+        Ok(assembly)
+    }
+}
+
 impl SparseJacobianStructure {
     /// Returns the number of explicitly stored non-zero entries.
     pub fn nnz(&self) -> usize {
@@ -457,18 +531,44 @@ impl BandedJacobianStructure {
         self.diagonal_offsets.len()
     }
 
-    /// Builds a native `BandedAssembly` from values written in the same
-    /// explicit order as this structure.
-    pub fn assemble_banded_assembly(&self, values: &[f64]) -> BandedAssembly {
-        assert_eq!(
-            values.len(),
-            self.nnz(),
-            "expected {} banded values, got {}",
-            self.nnz(),
-            values.len()
-        );
-        let mut asm = BandedAssembly::zeros(self.rows, self.kl, self.ku)
-            .expect("banded Jacobian structure must have valid dimensions");
+    /// Returns the size of the compact LAPACK-style storage used by the
+    /// native banded solver.
+    ///
+    /// The generated callback still returns only explicit Jacobian entries;
+    /// this method is the typed bridge for callers that need the full
+    /// `(kl + ku + 1) * n` storage, including boundary slots.
+    pub fn compact_storage_len(&self) -> Result<usize, BandedError> {
+        if self.rows == 0 || self.rows != self.cols {
+            return Err(BandedError::DimensionMismatch);
+        }
+        self.kl
+            .checked_add(self.ku)
+            .and_then(|width| width.checked_add(1))
+            .and_then(|width| width.checked_mul(self.rows))
+            .ok_or(BandedError::InvalidBand {
+                n: self.rows,
+                kl: self.kl,
+                ku: self.ku,
+            })
+    }
+
+    /// Fallibly assembles the explicit callback values into native diagonal
+    /// storage.  This is the typed production boundary; the older infallible
+    /// method below remains as a compatibility wrapper.
+    pub fn try_assemble_banded_assembly(
+        &self,
+        values: &[f64],
+    ) -> Result<BandedAssembly, BandedError> {
+        if values.len() != self.nnz()
+            || self.rows == 0
+            || self.rows != self.cols
+            || self.diagonal_offsets.len() != self.diagonal_positions.len()
+        {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let mut asm = BandedAssembly::zeros(self.rows, self.kl, self.ku)?;
+        let mut seen = Vec::with_capacity(self.nnz());
         for ((offset, position), value) in self
             .diagonal_offsets
             .iter()
@@ -476,12 +576,30 @@ impl BandedJacobianStructure {
             .zip(self.diagonal_positions.iter().copied())
             .zip(values.iter().copied())
         {
-            let diag = asm
-                .diag_mut(offset)
-                .expect("banded diagonal offset must stay within configured bandwidth");
+            let diag = asm.diag_mut(offset).ok_or(BandedError::DimensionMismatch)?;
+            if position >= diag.len() || seen.contains(&(offset, position)) {
+                return Err(BandedError::DimensionMismatch);
+            }
+            seen.push((offset, position));
             diag[position] = value;
         }
-        asm
+        Ok(asm)
+    }
+
+    /// Fallibly assembles callback values into the compact storage consumed
+    /// by the native banded factorization.
+    pub fn try_assemble_compact_banded_storage(
+        &self,
+        values: &[f64],
+    ) -> Result<Banded<f64>, BandedError> {
+        self.try_assemble_banded_assembly(values)?.to_banded()
+    }
+
+    /// Builds a native `BandedAssembly` from values written in the same
+    /// explicit order as this structure.
+    pub fn assemble_banded_assembly(&self, values: &[f64]) -> BandedAssembly {
+        self.try_assemble_banded_assembly(values)
+            .expect("banded Jacobian structure should assemble from valid values")
     }
 }
 
@@ -513,6 +631,32 @@ pub struct BandedJacobianRuntimePlan<'a> {
     pub chunks: Vec<BandedJacobianValuesChunkPlan<'a>>,
 }
 
+/// Solver-facing full-slot Banded runtime plan.
+///
+/// The plan is whole-block by design. Chunked full-slot routing is a separate
+/// concern because each chunk would need an explicit merge policy for the
+/// boundary slots. Keeping that policy out of this type prevents an accidental
+/// copy back to the explicit-entry ABI.
+#[derive(Debug, Clone, Copy)]
+pub struct BandedCompactJacobianRuntimePlan<'a> {
+    pub fn_name: &'a str,
+    pub input_names: &'a [&'a str],
+    pub structure: BandedCompactJacobianStructure,
+}
+
+impl<'a> BandedCompactJacobianRuntimePlan<'a> {
+    pub fn output_len(&self) -> Result<usize, BandedError> {
+        self.structure.storage_len()
+    }
+
+    pub fn try_assemble_compact_storage(
+        &self,
+        values: Vec<f64>,
+    ) -> Result<Banded<f64>, BandedError> {
+        self.structure.try_from_values(values)
+    }
+}
+
 impl<'a> SparseJacobianRuntimePlan<'a> {
     /// Returns the number of explicitly stored non-zero entries.
     pub fn nnz(&self) -> usize {
@@ -536,6 +680,14 @@ impl<'a> BandedJacobianRuntimePlan<'a> {
     /// explicit order expected by the chunk plans.
     pub fn assemble_banded_assembly(&self, values: &[f64]) -> BandedAssembly {
         self.structure.assemble_banded_assembly(values)
+    }
+
+    /// Fallibly assembles callback values into compact native banded storage.
+    pub fn try_assemble_compact_banded_storage(
+        &self,
+        values: &[f64],
+    ) -> Result<Banded<f64>, BandedError> {
+        self.structure.try_assemble_compact_banded_storage(values)
     }
 }
 
@@ -1135,6 +1287,103 @@ mod tests {
         assert_eq!(asm.get(0, 0).unwrap(), 20.0);
         assert_eq!(asm.get(0, 1).unwrap(), 30.0);
         assert_eq!(asm.get(1, 0).unwrap(), 10.0);
+    }
+
+    #[test]
+    fn banded_structure_exposes_compact_native_storage_with_boundary_slots() {
+        let structure = BandedJacobianStructure {
+            rows: 3,
+            cols: 3,
+            kl: 1,
+            ku: 1,
+            // Deliberately leave the boundary slots implicit.  Native
+            // storage must still contain the complete 3 x 3 band rectangle.
+            diagonal_offsets: vec![0, 1, -1, 0],
+            diagonal_positions: vec![0, 0, 0, 2],
+        };
+
+        let compact = structure
+            .try_assemble_compact_banded_storage(&[10.0, 20.0, 30.0, 40.0])
+            .unwrap();
+
+        assert_eq!(structure.compact_storage_len().unwrap(), 9);
+        assert_eq!(
+            compact.as_slice(),
+            &[0.0, 20.0, 0.0, 10.0, 0.0, 40.0, 30.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn compact_banded_runtime_plan_accepts_only_complete_storage() {
+        let input_names = ["y0", "y1", "y2"];
+        let plan = BandedCompactJacobianRuntimePlan {
+            fn_name: "eval_native_banded_values",
+            input_names: &input_names,
+            structure: BandedCompactJacobianStructure {
+                rows: 3,
+                cols: 3,
+                kl: 1,
+                ku: 1,
+            },
+        };
+
+        assert_eq!(plan.output_len().unwrap(), 9);
+        let compact = plan
+            .try_assemble_compact_storage(vec![0.0; 9])
+            .expect("complete compact callback output should be accepted");
+        assert_eq!(compact.as_slice().len(), 9);
+        let assembly = plan
+            .structure
+            .try_to_assembly(&[0.0, 1.0, 0.0, 2.0, 3.0, 4.0, 4.0, 5.0, 0.0])
+            .expect("compact storage should convert directly to banded assembly");
+        assert_eq!(assembly.get(0, 1).unwrap(), 1.0);
+        assert_eq!(assembly.get(1, 0).unwrap(), 4.0);
+        assert_eq!(assembly.get(2, 1).unwrap(), 5.0);
+        assert!(matches!(
+            plan.try_assemble_compact_storage(vec![0.0; 7]),
+            Err(BandedError::DimensionMismatch)
+        ));
+    }
+
+    #[test]
+    fn banded_structure_typed_assembly_rejects_invalid_metadata() {
+        let duplicate = BandedJacobianStructure {
+            rows: 2,
+            cols: 2,
+            kl: 1,
+            ku: 1,
+            diagonal_offsets: vec![0, 0],
+            diagonal_positions: vec![0, 0],
+        };
+        assert!(
+            duplicate
+                .try_assemble_compact_banded_storage(&[1.0, 2.0])
+                .is_err()
+        );
+
+        let out_of_band = BandedJacobianStructure {
+            rows: 2,
+            cols: 2,
+            kl: 0,
+            ku: 0,
+            diagonal_offsets: vec![1],
+            diagonal_positions: vec![0],
+        };
+        assert!(
+            out_of_band
+                .try_assemble_compact_banded_storage(&[1.0])
+                .is_err()
+        );
+
+        let rectangular = BandedJacobianStructure {
+            rows: 2,
+            cols: 3,
+            kl: 1,
+            ku: 1,
+            diagonal_offsets: vec![],
+            diagonal_positions: vec![],
+        };
+        assert!(rectangular.compact_storage_len().is_err());
     }
 
     #[test]

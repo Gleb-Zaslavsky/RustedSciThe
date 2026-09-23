@@ -15,6 +15,10 @@
 //! 6. use the resulting artifact paths/metadata to reconnect the compiled
 //!    backend to the rest of the application.
 
+use crate::symbolic::codegen::codegen_aot_lifecycle::{
+    AotArtifactInspection, AotFailureDiagnostics, AotFailureInjection, AotFailureKind,
+    AotLifecycleError, AotLifecycleStage, quarantine_generated_tree,
+};
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::{
     GeneratedAotCrate, WrittenAotCrate,
 };
@@ -315,6 +319,71 @@ impl AotBuildRequest {
         );
         Ok(result)
     }
+
+    /// Materializes and executes a build with an explicit quarantine boundary.
+    ///
+    /// A failed compiler/link step may leave a directory which contains a
+    /// marker or partial output but is not reusable. Before a retry this
+    /// method moves that tree aside and materializes a fresh crate at the
+    /// original path. The operation is intentionally cold-path only.
+    pub fn materialize_and_execute_with_retry(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let total = attempts.max(1);
+        let mut last_error = None;
+        let mut quarantine_attempted = false;
+        let mut cleanup_completed = false;
+
+        for attempt in 1..=total {
+            let build = self.materialize().map_err(|error| {
+                let mut diagnostics = AotFailureDiagnostics::new(
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::Io,
+                    &artifact_key,
+                    error.to_string(),
+                );
+                diagnostics.attempts = attempt;
+                AotLifecycleError::new(diagnostics)
+            })?;
+
+            match build.execute_with_lifecycle(&artifact_key, injection) {
+                Ok(result) => return Ok(result),
+                Err(mut error) => {
+                    error.diagnostics.attempts = attempt;
+                    if attempt < total {
+                        let inspection = AotArtifactInspection::inspect(
+                            &build.written.crate_dir,
+                            &build.written.manifest_rs,
+                            &build.expected_rlib,
+                            &build.expected_cdylib,
+                        );
+                        error.diagnostics.inspection = Some(inspection.clone());
+                        match quarantine_generated_tree(&build.written.crate_dir, &artifact_key) {
+                            Ok(Some(_)) => {
+                                quarantine_attempted = true;
+                                cleanup_completed = true;
+                            }
+                            Ok(None) => {}
+                            Err(quarantine_error) => return Err(quarantine_error),
+                        }
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let mut error = last_error.expect("at least one typed build attempt exists");
+        error.diagnostics.attempts = total;
+        error.diagnostics.quarantine_attempted = quarantine_attempted;
+        error.diagnostics.cleanup_completed = cleanup_completed;
+        error.diagnostics.root_kind = Some(error.diagnostics.kind);
+        error.diagnostics.kind = AotFailureKind::RetryExhausted;
+        Err(error)
+    }
 }
 
 impl AotBuildResult {
@@ -358,6 +427,122 @@ impl AotBuildResult {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    /// Executes the build through the typed lifecycle boundary.
+    ///
+    /// The compatibility `execute()` method remains available, but new
+    /// orchestration should use this method so compiler exit status, missing
+    /// outputs and injected lock/link failures all carry the same partial
+    /// artifact inspection. `injection` is also used by debug fault-injection
+    /// tests; the default `None` adds no work to callback execution.
+    pub fn execute_with_lifecycle(
+        &self,
+        artifact_key: impl Into<String>,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let inspection = || {
+            AotArtifactInspection::inspect(
+                &self.build_crate_dir(),
+                &self.build_manifest_path(),
+                &self.expected_rlib,
+                &self.expected_cdylib,
+            )
+        };
+        if injection != AotFailureInjection::None {
+            let (stage, kind, detail) = match injection {
+                AotFailureInjection::Compiler => (
+                    AotLifecycleStage::Build,
+                    AotFailureKind::Compiler,
+                    "compiler failure injected for lifecycle test",
+                ),
+                AotFailureInjection::PartialArtifact => (
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::PartialArtifact,
+                    "partial artifact injected for lifecycle test",
+                ),
+                AotFailureInjection::StaleArtifact => (
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::StaleArtifact,
+                    "stale artifact injected for lifecycle test",
+                ),
+                AotFailureInjection::Lock => (
+                    AotLifecycleStage::Materialized,
+                    AotFailureKind::Lock,
+                    "artifact lock failure injected for lifecycle test",
+                ),
+                AotFailureInjection::Link => (
+                    AotLifecycleStage::Link,
+                    AotFailureKind::Link,
+                    "link failure injected for lifecycle test",
+                ),
+                AotFailureInjection::None => unreachable!(),
+            };
+            let mut diagnostics = AotFailureDiagnostics::new(stage, kind, &artifact_key, detail);
+            diagnostics.inspection = Some(inspection());
+            return Err(AotLifecycleError::new(diagnostics));
+        }
+
+        let result = self.execute().map_err(|error| {
+            let mut diagnostics = AotFailureDiagnostics::new(
+                AotLifecycleStage::Build,
+                AotFailureKind::Io,
+                &artifact_key,
+                error.to_string(),
+            );
+            diagnostics.inspection = Some(inspection());
+            AotLifecycleError::new(diagnostics)
+        })?;
+        if !result.succeeded() {
+            let mut diagnostics = AotFailureDiagnostics::new(
+                AotLifecycleStage::Build,
+                AotFailureKind::Compiler,
+                &artifact_key,
+                format!(
+                    "compiler exited with status {:?}; stderr: {}",
+                    result.status_code,
+                    result.stderr.trim()
+                ),
+            );
+            diagnostics.inspection = Some(inspection());
+            return Err(AotLifecycleError::new(diagnostics));
+        }
+        Ok(result)
+    }
+
+    /// Retries a typed build without hiding the attempt count on failure.
+    /// The generated tree is not overwritten or silently reused by this
+    /// helper; callers should quarantine a non-ready inspection before a new
+    /// materialization.
+    pub fn execute_with_retry(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+    ) -> Result<ExecutedAotBuild, AotLifecycleError> {
+        let artifact_key = artifact_key.into();
+        let total = attempts.max(1);
+        let mut last_error = None;
+        for _ in 0..total {
+            match self.execute_with_lifecycle(&artifact_key, injection) {
+                Ok(result) => return Ok(result),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let mut error = last_error.expect("at least one typed build attempt exists");
+        error.diagnostics.attempts = total;
+        error.diagnostics.root_kind = Some(error.diagnostics.kind);
+        error.diagnostics.kind = AotFailureKind::RetryExhausted;
+        Err(error)
+    }
+
+    fn build_crate_dir(&self) -> &Path {
+        &self.written.crate_dir
+    }
+
+    fn build_manifest_path(&self) -> &Path {
+        &self.written.manifest_rs
     }
 }
 
@@ -513,6 +698,117 @@ mod tests {
         assert_eq!(
             result.cargo_command_line(),
             "rustup run nightly cargo build --release --timings"
+        );
+    }
+
+    #[test]
+    fn typed_fault_injection_preserves_partial_build_diagnostics() {
+        let prepared = sample_prepared_problem();
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_fault_fixture",
+            "generated_fault_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("temporary directory should exist");
+        let result = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+
+        let error = result
+            .execute_with_lifecycle("fault-key", AotFailureInjection::Compiler)
+            .expect_err("compiler injection must fail before spawning Cargo");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::Compiler);
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Build);
+        assert_eq!(error.diagnostics.artifact_key, "fault-key");
+        assert_eq!(
+            error
+                .diagnostics
+                .inspection
+                .expect("partial inspection should be retained")
+                .state,
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotArtifactState::Materialized
+        );
+    }
+
+    #[test]
+    fn stale_artifact_fault_is_distinct_from_partial_artifact() {
+        let prepared = sample_prepared_problem();
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_stale_fixture",
+            "generated_stale_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("temporary directory should exist");
+        let result = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+
+        let error = result
+            .execute_with_lifecycle("stale-key", AotFailureInjection::StaleArtifact)
+            .expect_err("stale artifact injection must fail before spawning Cargo");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::StaleArtifact);
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Materialized);
+        assert_eq!(error.diagnostics.attempts, 0);
+        assert!(error.diagnostics.inspection.is_some());
+    }
+
+    #[test]
+    fn typed_retry_reports_attempt_count_without_reusing_a_partial_build() {
+        let prepared = sample_prepared_problem();
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_retry_fixture",
+            "generated_retry_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("temporary directory should exist");
+        let result = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+
+        let error = result
+            .execute_with_retry("retry-key", 3, AotFailureInjection::Link)
+            .expect_err("link injection must exhaust retries");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::RetryExhausted);
+        assert_eq!(error.diagnostics.root_kind, Some(AotFailureKind::Link));
+        assert_eq!(error.diagnostics.attempts, 3);
+        assert!(error.diagnostics.inspection.is_some());
+    }
+
+    #[test]
+    fn materialized_retry_quarantines_the_previous_tree_before_rebuild() {
+        let prepared = sample_prepared_problem();
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_quarantine_retry_fixture",
+            "generated_quarantine_retry_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("temporary directory should exist");
+
+        let error = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize_and_execute_with_retry(
+                "quarantine-retry-key",
+                2,
+                AotFailureInjection::PartialArtifact,
+            )
+            .expect_err("fault injection must exhaust the rebuild attempts");
+
+        assert_eq!(error.diagnostics.kind, AotFailureKind::RetryExhausted);
+        assert_eq!(
+            error.diagnostics.root_kind,
+            Some(AotFailureKind::PartialArtifact)
+        );
+        assert_eq!(error.diagnostics.attempts, 2);
+        assert!(error.diagnostics.quarantine_attempted);
+        assert!(error.diagnostics.cleanup_completed);
+        assert!(
+            dir.path()
+                .read_dir()
+                .expect("temporary directory should be readable")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("generated_quarantine_retry_fixture.quarantine-"))
         );
     }
 }

@@ -11,6 +11,7 @@
 
 use super::statistics::Lsode2NativeStatistics;
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend, BdfLinearFactorization};
+use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpWarmStage};
 use nalgebra::DVector;
 use std::time::Instant;
 
@@ -72,6 +73,9 @@ pub struct Lsode2NativeCallbackExecutor<L> {
     cached_c: Option<f64>,
     cached_factorization: Option<Box<dyn BdfLinearFactorization>>,
     last_jacobian_abs_max: Option<f64>,
+    telemetry: IvpTelemetry,
+    residual_evaluator_instrumented: bool,
+    jacobian_evaluator_instrumented: bool,
 }
 
 impl<L> std::fmt::Debug for Lsode2NativeCallbackExecutor<L>
@@ -91,6 +95,19 @@ impl<L> Lsode2NativeCallbackExecutor<L> {
         R: FnMut(f64, &DVector<f64>) -> DVector<f64> + 'static,
         J: FnMut(f64, &DVector<f64>) -> BdfJacobian + 'static,
     {
+        Self::new_with_telemetry(residual, jacobian, linear_backend, IvpTelemetry::disabled())
+    }
+
+    pub fn new_with_telemetry<R, J>(
+        residual: R,
+        jacobian: J,
+        linear_backend: L,
+        telemetry: IvpTelemetry,
+    ) -> Self
+    where
+        R: FnMut(f64, &DVector<f64>) -> DVector<f64> + 'static,
+        J: FnMut(f64, &DVector<f64>) -> BdfJacobian + 'static,
+    {
         Self {
             residual: Box::new(residual),
             jacobian: Box::new(jacobian),
@@ -99,7 +116,24 @@ impl<L> Lsode2NativeCallbackExecutor<L> {
             cached_c: None,
             cached_factorization: None,
             last_jacobian_abs_max: None,
+            telemetry,
+            residual_evaluator_instrumented: false,
+            jacobian_evaluator_instrumented: false,
         }
+    }
+
+    /// Declares whether the callback closures already record evaluator-level
+    /// telemetry. The native executor always records solver requests; it only
+    /// records evaluator invocations here when the inner callback is not
+    /// instrumented, preventing double counting for prepared Lambdify routes.
+    pub fn with_evaluator_telemetry(
+        mut self,
+        residual_instrumented: bool,
+        jacobian_instrumented: bool,
+    ) -> Self {
+        self.residual_evaluator_instrumented = residual_instrumented;
+        self.jacobian_evaluator_instrumented = jacobian_instrumented;
+        self
     }
 }
 
@@ -113,10 +147,18 @@ where
         y: &DVector<f64>,
         statistics: &mut Lsode2NativeStatistics,
     ) -> Result<DVector<f64>, Lsode2NativeExecutorError> {
+        self.telemetry.record_residual_request();
         let started = Instant::now();
+        let telemetry_started = self
+            .telemetry
+            .start_warm_stage(IvpWarmStage::ResidualEvaluation);
         let residual = (self.residual)(t, y);
         statistics.record_native_residual_duration(started.elapsed());
+        if !self.residual_evaluator_instrumented {
+            self.telemetry.record_residual_evaluation(telemetry_started);
+        }
         if residual.len() != y.len() {
+            self.telemetry.record_error();
             return Err(Lsode2NativeExecutorError::ResidualDimensionMismatch {
                 expected: y.len(),
                 actual: residual.len(),
@@ -131,9 +173,16 @@ where
         y: &DVector<f64>,
         statistics: &mut Lsode2NativeStatistics,
     ) -> BdfJacobian {
+        self.telemetry.record_jacobian_request();
         let started = Instant::now();
+        let telemetry_started = self
+            .telemetry
+            .start_warm_stage(IvpWarmStage::JacobianEvaluation);
         let jacobian = (self.jacobian)(t, y);
         statistics.record_native_jacobian_duration(started.elapsed());
+        if !self.jacobian_evaluator_instrumented {
+            self.telemetry.record_jacobian_evaluation(telemetry_started);
+        }
         self.last_jacobian_abs_max = jacobian_abs_max(&jacobian);
         jacobian
     }
@@ -159,11 +208,23 @@ where
         c: f64,
         statistics: &mut Lsode2NativeStatistics,
     ) -> Result<(), Lsode2NativeExecutorError> {
+        self.telemetry.record_jacobian_rebuild();
         let jacobian = self.eval_jacobian(t, y, statistics);
+        self.telemetry.record_factorization_request();
+        let factorization_started = self.telemetry.start_warm_stage(IvpWarmStage::Factorization);
         let factorization = self
             .linear_backend
             .factor_shifted_jacobian(c, &jacobian)
-            .ok_or(Lsode2NativeExecutorError::LinearFactorizationFailed)?;
+            .ok_or(Lsode2NativeExecutorError::LinearFactorizationFailed);
+        self.telemetry
+            .record_warm_stage(IvpWarmStage::Factorization, factorization_started);
+        let factorization = match factorization {
+            Ok(factorization) => factorization,
+            Err(error) => {
+                self.telemetry.record_error();
+                return Err(error);
+            }
+        };
         self.cached_t = Some(t);
         self.cached_c = Some(c);
         self.cached_factorization = Some(factorization);
@@ -179,19 +240,40 @@ where
     ) -> Result<DVector<f64>, Lsode2NativeExecutorError> {
         self.cached_t = None;
         self.cached_c = Some(c);
-        self.cached_factorization = Some(
-            self.linear_backend
-                .factor_shifted_jacobian(c, jacobian)
-                .ok_or(Lsode2NativeExecutorError::LinearFactorizationFailed)?,
-        );
-        let started = Instant::now();
+        self.telemetry.record_factorization_request();
+        let factorization_started = self.telemetry.start_warm_stage(IvpWarmStage::Factorization);
+        let factorization = self
+            .linear_backend
+            .factor_shifted_jacobian(c, jacobian)
+            .ok_or(Lsode2NativeExecutorError::LinearFactorizationFailed);
+        self.telemetry
+            .record_warm_stage(IvpWarmStage::Factorization, factorization_started);
+        self.cached_factorization = Some(match factorization {
+            Ok(factorization) => factorization,
+            Err(error) => {
+                self.telemetry.record_error();
+                return Err(error);
+            }
+        });
+        self.telemetry.record_linear_solve_request();
+        let statistics_started = Instant::now();
+        let telemetry_started = self.telemetry.start_warm_stage(IvpWarmStage::RhsSolve);
         let solution = self
             .cached_factorization
             .as_ref()
             .expect("cached factorization should exist after successful factorization")
             .solve(rhs)
-            .ok_or(Lsode2NativeExecutorError::LinearSolveFailed)?;
-        statistics.record_native_linear_solve_duration(started.elapsed());
+            .ok_or(Lsode2NativeExecutorError::LinearSolveFailed);
+        self.telemetry
+            .record_warm_stage(IvpWarmStage::RhsSolve, telemetry_started);
+        let solution = match solution {
+            Ok(solution) => solution,
+            Err(error) => {
+                self.telemetry.record_error();
+                return Err(error);
+            }
+        };
+        statistics.record_native_linear_solve_duration(statistics_started.elapsed());
         Ok(solution)
     }
 
@@ -220,15 +302,28 @@ where
         }
         if !self.has_current_linearization(t, c) {
             self.refresh_linearization(t, y, c, statistics)?;
+        } else {
+            self.telemetry.record_step_using_current_jacobian();
         }
-        let started = Instant::now();
+        self.telemetry.record_linear_solve_request();
+        let statistics_started = Instant::now();
+        let telemetry_started = self.telemetry.start_warm_stage(IvpWarmStage::RhsSolve);
         let solution = self
             .cached_factorization
             .as_ref()
             .expect("cached factorization should exist after refresh")
             .solve(&rhs)
-            .ok_or(Lsode2NativeExecutorError::LinearSolveFailed)?;
-        statistics.record_native_linear_solve_duration(started.elapsed());
+            .ok_or(Lsode2NativeExecutorError::LinearSolveFailed);
+        self.telemetry
+            .record_warm_stage(IvpWarmStage::RhsSolve, telemetry_started);
+        let solution = match solution {
+            Ok(solution) => solution,
+            Err(error) => {
+                self.telemetry.record_error();
+                return Err(error);
+            }
+        };
+        statistics.record_native_linear_solve_duration(statistics_started.elapsed());
         Ok(solution)
     }
 
@@ -279,6 +374,40 @@ mod tests {
         assert_eq!(statistics.native_residual_calls, 1);
         assert_eq!(statistics.native_jacobian_calls, 1);
         assert_eq!(statistics.native_linear_solve_calls, 1);
+    }
+
+    #[test]
+    fn native_executor_telemetry_distinguishes_refresh_and_reuse() {
+        let telemetry = IvpTelemetry::counters();
+        let mut executor = Lsode2NativeCallbackExecutor::new_with_telemetry(
+            |_, y: &DVector<f64>| DVector::from_vec(vec![y[0] - 1.0]),
+            |_, _| BdfJacobian::SparseTriplets {
+                n: 1,
+                triplets: vec![Triplet::new(0, 0, 0.0)],
+            },
+            FaerSparseBdfLinearBackend::default(),
+            telemetry.clone(),
+        );
+        let mut statistics = Lsode2NativeStatistics::default();
+        let y = DVector::from_vec(vec![1.0 + 1.0e-5]);
+
+        executor
+            .compute_newton_correction(0.1, &y, 0.0, &mut statistics)
+            .expect("first correction should factorize");
+        executor
+            .compute_newton_correction(0.1, &y, 0.0, &mut statistics)
+            .expect("second correction should reuse the factorization");
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.residual_requests, 2);
+        assert_eq!(snapshot.jacobian_requests, 1);
+        assert_eq!(snapshot.jacobian_rebuilds, 1);
+        assert_eq!(snapshot.steps_using_current_jacobian, 1);
+        assert_eq!(snapshot.factorization_requests, 1);
+        assert_eq!(snapshot.linear_solve_requests, 2);
+        assert_eq!(snapshot.residual_evaluations, 2);
+        assert_eq!(snapshot.jacobian_evaluations, 1);
+        assert_eq!(snapshot.errors, 0);
     }
 
     #[test]
@@ -452,13 +581,15 @@ mod tests {
 
     #[test]
     fn native_executor_rejects_bad_residual_dimension() {
-        let mut executor = Lsode2NativeCallbackExecutor::new(
+        let telemetry = IvpTelemetry::counters();
+        let mut executor = Lsode2NativeCallbackExecutor::new_with_telemetry(
             |_, _| DVector::from_vec(vec![1.0, 2.0]),
             |_, _| BdfJacobian::SparseTriplets {
                 n: 1,
                 triplets: vec![],
             },
             FaerSparseBdfLinearBackend::default(),
+            telemetry.clone(),
         );
         let mut statistics = Lsode2NativeStatistics::default();
         let err = executor
@@ -473,5 +604,6 @@ mod tests {
             }
         ));
         assert_eq!(statistics.native_residual_calls, 1);
+        assert_eq!(telemetry.snapshot().errors, 1);
     }
 }

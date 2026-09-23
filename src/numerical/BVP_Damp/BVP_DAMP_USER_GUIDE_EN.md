@@ -195,7 +195,8 @@ The symbolic BVP pipeline has two assembly backends.
 `ExprLegacy` names the symbolic frontend and the historical runtime route is
 `ExprLegacy + Mutex`: symbolic `Expr` trees are differentiated and the legacy
 callback layer evaluates residual/Jacobian values through its mutex-protected
-structures. It remains valuable as a compatibility baseline.
+structures. It remains valuable as a compatibility baseline, but it is no
+longer the default production frontend for Sparse/Banded Lambdify.
 
 `AtomView` names the packed symbolic frontend and its production Lambdify
 runtime route is `AtomView + no-Mutex`: `Expr` is lowered to Atom once, then
@@ -674,7 +675,41 @@ The AOT examples deliberately demonstrate both phases of the artifact lifecycle:
 
 ## 15. Where to look next
 
-Basic correctness tests live in `BVP_Damp_tests.rs`. Heavier story and performance runs live in `BVP_Damp_tests3.rs` and `BVP_Damp_tests4.rs`. The running story-test ledger is [`BVP_DAMP_STORY_TESTS.md`](BVP_DAMP_STORY_TESTS.md).
+The BVP suite is split by purpose under `src/numerical/BVP_Damp/tests/`:
+
+- `basic_correctness.rs` and `classic_examples.rs` contain fast debug correctness
+  coverage.
+- `lambdify_acceptance.rs`, `lambdify_cross_product.rs`,
+  `lambdify_lifecycle.rs`, `parity_corpus.rs` and `parameter_rebind.rs` cover
+  AtomView/ExprLegacy, matrix backends, execution policies and invalidation.
+- `aot_diagnostics.rs`, `aot_runtime_contract.rs` and `aot_race_stress.rs` are
+  architecture and lifecycle stories; the expensive parts are normally
+  `#[ignore]`d and should be run explicitly.
+- `telemetry_story.rs`, `backend_compare.rs` and `frozen_runtime_story.rs`
+  contain focused diagnostics and performance stories.
+
+For example:
+
+```powershell
+cargo test --lib --no-default-features numerical::BVP_Damp::test_correctness -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_lambdify_lifecycle -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_parity_corpus -- --nocapture --test-threads=1
+cargo test --lib --no-default-features numerical::BVP_Damp::test_aot_runtime_contract -- --nocapture --test-threads=1
+```
+
+Ignored release stories are intentionally separate from debug correctness:
+
+```powershell
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_aot_diagnostics -- --ignored --nocapture --test-threads=1
+cargo test --release --lib --no-default-features numerical::BVP_Damp::test_aot_race_stress -- --ignored --nocapture --test-threads=1
+```
+
+Verbose tests mirror their captured output to `test_reports/BVP_Damp*`.
+Those reports are generated artifacts, not Cargo inputs, and include the test
+name, timestamp and pass/fail status. The running story-test ledger is
+[`BVP_DAMP_STORY_TESTS.md`](BVP_DAMP_STORY_TESTS.md); historical performance,
+correctness and AOT comparisons remain separated in their dedicated story
+documents.
 
 The lower-level codegen/performance layer is documented in [`../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md`](../../symbolic/codegen/tests/BVP_CODEGEN_STORY_TESTS.md). Use it when you need to distinguish solver-loop cost from generated callback cost.
 

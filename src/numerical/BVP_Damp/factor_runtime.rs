@@ -5,6 +5,10 @@
 //! built-in Dense/faer paths can own a prepared factor across repeated RHS
 //! solves. Native Banded keeps its existing `BandedMatrixType` cache.
 
+// The compatibility `solve` wrapper and inspection helpers are retained for
+// the next PreparedPlan migration slice and are not used by every route yet.
+#![allow(dead_code)]
+
 use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
 use crate::somelinalg::RustedLINPACK::lu_band_nalg::LU_nalgebra;
 use faer::col::Col;
