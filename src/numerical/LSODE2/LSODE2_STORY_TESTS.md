@@ -3155,3 +3155,253 @@ total wall-clock at this size, while their callback stages are substantially
 cheaper: chunked residual time is about 66-70% lower, Sparse Jacobian about
 25% lower, and Banded Jacobian is approximately tied. This confirms the
 current distinction between callback-only advantage and full-solve advantage.
+
+### AOT boundary and large warm-solver rerun recorded on 2026-09-25 17:13-17:49 UTC
+
+Source reports:
+
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_residual_boundary_isolation_exprlegacy_vs_atomview.md`
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_warm_solver_stage_performance_matrix.md`
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md`
+
+The residual boundary isolation is decisive. It invokes the same linked
+callback with reused argument/output buffers, once through the raw generated
+closure and once through the typed validation boundary:
+
+| frontend | dimension | raw ns/call | typed ns/call | typed boundary ns/call | raw Atom/Expr ratio |
+|---|---:|---:|---:|---:|---:|
+| ExprLegacy-AOT | 128 | 426.650 | 478.550 | 51.900 | 1.00x |
+| AtomView-AOT | 128 | 1956.250 | 2012.600 | 56.350 | 4.59x |
+| ExprLegacy-AOT | 256 | 845.000 | 982.850 | 137.850 | 1.00x |
+| AtomView-AOT | 256 | 3889.450 | 4035.000 | 145.550 | 4.60x |
+| ExprLegacy-AOT | 512 | 1675.950 | 1913.700 | 237.750 | 1.00x |
+| AtomView-AOT | 512 | 7819.150 | 8033.700 | 214.550 | 4.67x |
+
+All values were numerically identical. The typed boundary is therefore not
+the cause of the AOT regression: its absolute cost is comparable for both
+frontends. The next AOT optimization target is generated AtomView callback
+execution, including lowered instruction shape, argument/output writes and
+linked runtime dispatch. The `build_attempts=1/link_attempts=1` on AtomView
+versus zero on the ExprLegacy row affects preparation, but cannot explain this
+raw warm-callback gap.
+
+The larger warm full-solver matrix confirms that callback-only speed does not
+yet imply full-solve speed:
+
+| matrix | dimension | route | prepare ms | solve ms | total ms | residual ms | Jacobian ms | factor ms | RHS ms |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Sparse | 256 | AtomViewNative-Lambdify | 15.687 | 30.256 | 46.479 | 4.157 | 1.008 | 9.201 | 1.083 |
+| Sparse | 256 | AtomViewNative-AOT | 48.130 | 33.712 | 82.283 | 1.914 | 0.412 | 8.945 | 1.037 |
+| Banded | 256 | AtomViewNative-Lambdify | 13.781 | 21.111 | 35.323 | 4.173 | 1.005 | 1.559 | 0.838 |
+| Banded | 256 | AtomViewNative-AOT | 20.700 | 27.562 | 48.665 | 2.121 | 0.511 | 1.616 | 0.817 |
+| Sparse | 512 | AtomViewNative-Lambdify | 57.851 | 73.775 | 132.447 | 9.454 | 2.614 | 20.275 | 2.355 |
+| Sparse | 512 | AtomViewNative-AOT | 94.680 | 91.150 | 186.744 | 4.189 | 1.043 | 20.111 | 2.205 |
+| Banded | 512 | AtomViewNative-Lambdify | 44.922 | 56.932 | 102.739 | 9.468 | 2.606 | 3.331 | 1.884 |
+| Banded | 512 | AtomViewNative-AOT | 66.560 | 74.927 | 142.379 | 4.246 | 1.019 | 3.255 | 1.916 |
+
+At `512`, AOT reduces residual and Jacobian stages by roughly `56-61%`,
+while total wall-clock remains `41%` slower for Sparse and `39%` slower for
+Banded. Preparation is the largest visible penalty, and the pre-fix report
+also showed nearly doubled AOT evaluator counters (`881/551` versus
+`445/276` for Sparse and `Banded` respectively). This counter discrepancy was
+caused by both the generated wrapper and native executor recording the same
+evaluator invocation. The production code now assigns evaluator telemetry to
+the prepared wrapper exactly once. This paragraph describes the historical
+pre-fix capture; the corrected rerun is recorded below and is the valid
+counter baseline.
+
+The refreshed callback-only Auto matrix at dimensions `256/512` is consistent
+with the new policy: forced Parallel is slower at every checkpoint, while Auto
+selects Sequential (`0` parallel dispatches) and remains close to or slightly
+better than Sequential. The report now records the machine-calibrated
+`auto_min_work_per_job` threshold. This is a safe conservative decision, not a
+universal break-even result; the remaining validation is a worker-count and
+larger-workload sweep.
+
+### AOT counter-ownership fix rerun recorded on 2026-09-25
+
+The release rerun of `lsode2_aot_large_warm_solver_stage_performance_matrix`
+removed the earlier evaluator-counter artifact. Lambdify and AOT now report
+the same work: `400/238/393` residual/Jacobian/linear calls at dimension `256`
+and `445/276/436` at dimension `512`, with matching accepted and rejected
+steps. Numerical correctness also remains unchanged.
+
+The callback stages are materially faster in AOT, but this does not yet make
+the full solve faster. At dimension `512`, AOT is approximately `56-61%`
+faster for residual/Jacobian stages, while total wall-clock is still about
+`54%` slower for Sparse (`181.518 ms` versus `118.104 ms`) and `39%` slower
+for Banded (`137.111 ms` versus `98.836 ms`). Preparation accounts for most
+of the difference, and the remaining warm-solve gap must be split into
+controller, callback boundary, matrix assembly, factorization and RHS stages
+before another optimization is accepted.
+
+The Auto release capture used one Rayon worker. Auto therefore correctly made
+zero parallel dispatches and recorded `auto_min_work_per_job=268`; this is a
+valid sequential-fallback check, not a portable parallel break-even result.
+The crossover label is now reported as `none (Auto remained sequential)` in
+this situation. A separate multi-worker sweep is required before drawing a
+general conclusion about Parallel versus Auto.
+
+### AOT continuation and large-stage rerun recorded on 2026-09-26
+
+The reports recorded around `01:42-01:44 UTC` separate cold preparation from
+warm execution more clearly. They also establish an important lifecycle rule:
+`BuildIfMissing` does not inherently mean "compile every time". It pays for
+preparation/build/link only when the resolver cannot find a compatible
+artifact. Once the artifact is handed off, repeated `RequirePrebuilt` rows
+reuse it and preserve correctness and integer trajectory counters.
+
+The `BuildIfMissing -> RequirePrebuilt` lifecycle passed for Sparse and Banded.
+Sparse paid about `26.5 ms` on the build row and then measured about
+`2.6-3.1 ms` on the prebuilt rows; all rows had the same numerical result and
+`1087/574/1086` residual/Jacobian/linear counters. The Banded build row was
+already near `4 ms`, so its artifact/build-attempt status must be made explicit
+before interpreting it as a true cold compilation. It may have reused an
+existing compatible artifact or followed a different compact-Banded preparation
+path. The next gate must record artifact key, cache hit/miss, build attempts,
+link attempts and whether the producer and consumer are separate processes.
+
+The large callback matrix gives the current cold-stage split:
+
+| route | matrix | n=128 prepare ms | n=256 prepare ms | n=512 prepare ms | n=512 residual ms/call | n=512 Jacobian ms/call |
+|---|---|---:|---:|---:|---:|---:|
+| Lambdify AtomViewNative | Sparse | 12.223 | 36.905 | 134.580 | 0.022 | 0.008 |
+| AOT tcc AtomView | Sparse | 31.381 | 57.055 | 159.427 | 0.009 | 0.002 |
+| AOT tcc ExprLegacy | Sparse | 31.063 | 37.001 | 76.448 | 0.002 | 0.002 |
+| Lambdify AtomViewNative | Banded | 10.703 | 37.277 | 134.082 | 0.021 | 0.008 |
+| AOT tcc AtomView | Banded | 29.961 | 57.653 | 156.544 | 0.009 | 0.002 |
+
+Warm AOT callbacks remain substantially faster than Lambdify at the larger
+dimensions, but the cold AtomView Jacobian preparation dominates total time.
+For example, at `n=512` the AtomView AOT Jacobian preparation is about
+`124-125 ms` in the callback matrix, while the corresponding warm callback
+cost is only about `0.002 ms/call`. This is why a full-solve conclusion must
+always report cold E2E, warm solve and callback-only measurements separately.
+
+For parameterized problems the intended continuation is: keep the compiled
+artifact when parameter names/order, output layout and Jacobian sparsity
+pattern are unchanged; rebind only numeric values and refresh numeric runtime
+state. A change to parameter schema, mesh/layout, boundary structure or
+pattern must invalidate the artifact/factor and either rebuild or reject
+`RequirePrebuilt`. The current lifecycle stories prove in-process reuse, but
+not yet a persistent producer/consumer handoff with a parameter sweep. That is
+the next release baseline rather than treating every parameter solve as a new
+cold AOT problem.
+
+### AOT residual `Pow(base, 2)` lowering fix recorded on 2026-09-26
+
+The residual-only diagnostic was repeated with `RebuildAlways`, so the two
+frontends no longer depended on different process-local linked-artifact cache
+states. The original gap was not typed validation: at `n=128`, raw
+`AtomView-AOT` residual evaluation was about `2.0 us/call`, compared with about
+`0.45 us/call` for `ExprLegacy-AOT`. Source inspection showed one generic
+`pow` call per Atom quadratic residual row. Atom normalization had represented
+`y*y` canonically as `Pow(y, 2)`, whereas ExprLegacy emitted multiplication.
+
+The AOT lowering now preserves the Atom symbolic representation but emits a
+plain multiplication for exact integer power two. The short debug rerun gave
+approximately `0.51 us/call` for Atom and `0.44 us/call` for ExprLegacy, with
+zero raw-versus-typed output drift. The callback stage matrix also showed both
+routes near `0.002-0.003 ms/call` at `n=128`. This is a diagnostic confirmation,
+not yet the final release baseline; the required acceptance run is the same
+multi-sample `128/256/512` Sparse matrix used by the archived AOT records.
+
+The release acceptance rerun recorded at `2026-09-25T23:41-23:42 UTC` confirms
+the fix. Every generated Atom artifact reports `pow=0`; residual callbacks in
+the full matrix are approximately `0.001/0.001/0.003 ms/call` for
+`n=128/256/512`, while ExprLegacy reports `0.001/0.001/0.002 ms/call`.
+Jacobian callbacks remain equal after rounding and all rows preserve exact
+callback output parity (`max_diff=0`).
+
+The raw boundary diagnostic is noisier than the callback matrix: the latest
+run measured Atom versus ExprLegacy as `497/433 ns` at `n=128`, `1256/843 ns`
+at `n=256`, and `2082/1815 ns` at `n=512`; another same-protocol run measured
+`533/459`, `1058/1028`, and `2220/1795 ns`. Because the sign and size change
+between repeated release runs, these residual tails are not evidence of a
+remaining systematic multi-times slowdown. The persistent structural
+difference is source size: Atom artifacts are about `16-18%` larger, despite
+having no runtime `pow` calls. That is retained as a separate low-priority
+codegen optimization target, not mixed into the resolved power regression.
+
+### AOT gate matrix recorded on 2026-09-26 02:49-02:53 local time
+
+Fresh reports after the local `02:49` marker (approximately `23:49-23:53 UTC`)
+cover correctness, lifecycle, callback performance, warm solver stages,
+process isolation and chunking. They are kept as a new dated slice rather than
+replacing older baselines.
+
+#### Correctness and lifecycle
+
+The production Sparse/Banded trajectory gate passed with zero time and state
+drift and zero retry-event drift. The three-route Banded comparison matched at
+the integer level:
+
+| route | residual calls | Jacobian calls | linear solves | Jacobian rebuilds | accepted | rejected |
+|---|---:|---:|---:|---:|---:|---:|
+| ExprLegacy-AOT | 315 | 231 | 305 | 231 | 200 | 31 |
+| AtomViewNative-AOT | 315 | 231 | 305 | 231 | 200 | 31 |
+| AtomViewNative-Lambdify | 315 | 231 | 305 | 231 | 200 | 31 |
+
+Parameter rebind and repeated warm solve passed for every route and both
+layouts: rebound and fresh runs had zero state/time drift and identical
+`376/273/364` residual/Jacobian/linear counters. Sparse order, compact-Banded
+slots, `kl/ku`, structural-zero handling and non-finite typed-error behavior
+passed the layout gate. Chunked Sequential/Parallel/Auto callback values also
+had zero residual/Jacobian drift.
+
+These are correctness gates, not performance claims. They show that the
+current route does not select a stale callback or factor after rebind, but do
+not yet prove persistent producer/consumer artifact reuse across processes.
+
+#### AOT versus Lambdify
+
+At `n=512`, the fresh callback matrix measured AtomView-AOT at approximately
+`0.003 ms` residual and `0.002-0.003 ms` Jacobian per call, versus about
+`0.020-0.021 ms` and `0.007-0.008 ms` for AtomViewNative Lambdify. AOT wins
+the callback stage, but its preparation is still roughly `55-60 ms` while
+Lambdify preparation is roughly `34-36 ms` in that story.
+
+The warm solver matrix has the same split. At `n=256`, AOT reduced the
+residual/Jacobian stages from roughly `4.3/1.0 ms` to `0.8/0.4 ms` for both
+Sparse and Banded, while factorization and RHS stages stayed close. Cold full
+wall-clock remained preparation-bound: about `55.7 ms` AOT versus `30.6 ms`
+Lambdify for Sparse, and `25.5 ms` versus `22.0 ms` for Banded.
+
+After `BuildIfMissing`, the five measured Banded `RequirePrebuilt` runs averaged
+about `3.16 ms` versus `3.09 ms` for Lambdify, with maximum final-state drift
+`1.3e-14`. The `n=96` whole-versus-chunked story preserved counters
+`193/120/189`; chunking improved warm AOT modestly but did not remove the cold
+preparation penalty.
+
+#### AOT AtomView versus AOT ExprLegacy
+
+The latest seven-sample Sparse residual boundary isolation measured raw
+AtomView-AOT versus ExprLegacy-AOT at about `493/426 ns` (`n=128`),
+`970/838 ns` (`n=256`) and `1954/1668 ns` (`n=512`). Typed boundary cost was
+comparable and all outputs matched exactly. This is no longer the earlier
+multi-times `Pow` anomaly: generated Atom residuals report `pow=0` after exact
+`Pow(base, 2)` lowering. Atom source is still about `16-18%` larger, so a
+smaller code-size/lowering tail remains as low-priority debt.
+
+Trajectory, layout and lifecycle results are identical for AtomView-AOT and
+ExprLegacy-AOT. Compact-Banded ExprLegacy-AOT remains explicitly unsupported
+because that path currently requires AtomView assembly; therefore Banded AOT
+is not yet a complete frontend apple-to-apple comparison. The process-isolated
+warm matrix showed near-parity between Atom and Expr AOT callback/solve stages
+across available toolchains, but it uses a different wrapper protocol than the
+raw callback boundary story and must not be numerically merged with it.
+
+#### Remaining anomalies
+
+The strongest remaining anomaly is cold Zig compilation in the process
+harness: approximately `21.5 s` for ExprLegacy and `10.8 s` for AtomView on
+the same scalar Banded fixture, while warm solves stayed near the other
+toolchains. This is a toolchain/build anomaly, not a warm solver or numerical
+regression.
+
+The main production issue remains cold AtomView-AOT preparation/material
+generation, especially for Sparse. The next comparison must expose artifact
+provenance, cache hit/miss, Atom residual/Jacobian preparation, source
+generation, compile/link and publication in a producer/consumer process pair.
+Auto results in this slice remain sequential-fallback or callback-focused and
+are not a portable Parallel break-even baseline.

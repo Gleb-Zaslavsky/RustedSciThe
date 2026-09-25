@@ -246,6 +246,15 @@ fn min_work_per_job_from_baseline(baseline: RayonOverheadBaseline) -> usize {
         .max(1)
 }
 
+/// Returns the calibrated minimum useful work for one parallel runtime job.
+///
+/// This is shared with the IVP callback dispatcher so `Auto` uses the same
+/// machine-local calibration as generated BVP/AOT plans instead of carrying a
+/// second fixed worker threshold.
+pub fn machine_min_work_per_parallel_job() -> usize {
+    min_work_per_job_from_baseline(rayon_overhead_baseline())
+}
+
 fn work_per_group(total_work: usize, group_count: usize) -> usize {
     if group_count == 0 {
         0

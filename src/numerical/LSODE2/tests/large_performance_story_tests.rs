@@ -6,15 +6,15 @@
 //! by construction: it is a correctness control, not a production large-system
 //! route.
 
-use super::native_jacobian::{NativeJacobianStorage, try_prepare_native_atomview_jacobian_runtime};
+use super::native_jacobian::{try_prepare_native_atomview_jacobian_runtime, NativeJacobianStorage};
 use super::story_support::{
-    ChainMatrixRoute, chain_equations, chain_solver_config, chain_state, max_vector_diff,
-    prepare_chain_residual,
+    chain_equations, chain_solver_config, chain_state, max_vector_diff, prepare_chain_residual,
+    ChainMatrixRoute,
 };
 use super::{IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpWarmStage, Lsode2Solver};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    IvpSymbolicAssemblyBackend, PreparedNativeJacobianMetrics, build_symbolic_jacobian,
+    build_symbolic_jacobian, IvpSymbolicAssemblyBackend, PreparedNativeJacobianMetrics,
 };
 use nalgebra::DVector;
 use std::hint::black_box;
@@ -148,6 +148,11 @@ struct FullSolveRun {
     prepare_ms: f64,
     solve_ms: f64,
     total_ms: f64,
+    solver_preparation_ms: f64,
+    bridge_preparation_ms: f64,
+    native_callback_preparation_ms: f64,
+    solve_scope_ms: f64,
+    summary_scope_ms: f64,
     final_state: DVector<f64>,
     residual_ms: f64,
     jacobian_ms: f64,
@@ -201,6 +206,11 @@ fn run_full_case(
         prepare_ms,
         solve_ms,
         total_ms: total_started.elapsed().as_secs_f64() * 1.0e3,
+        solver_preparation_ms: cold_ms(&snapshot, IvpColdStage::SolverPreparation),
+        bridge_preparation_ms: cold_ms(&snapshot, IvpColdStage::BridgePreparation),
+        native_callback_preparation_ms: cold_ms(&snapshot, IvpColdStage::NativeCallbackPreparation),
+        solve_scope_ms: warm_ms(&snapshot, IvpWarmStage::Solve),
+        summary_scope_ms: warm_ms(&snapshot, IvpWarmStage::Summary),
         final_state,
         residual_ms: evaluations.residual_ms_total,
         jacobian_ms: evaluations.jacobian_ms_total,
@@ -322,7 +332,10 @@ fn lsode2_large_system_sparse_banded_total_and_stage_story() {
         "[LSODE2 large stage baseline] dimensions={dimensions:?}; repetitions={repetitions}; Dense excluded; BDF controller fixed; release run required"
     );
     reportln!(
-        "frontend | matrix | dimension | prepare_ms mean+/-std | solve_ms mean+/-std | total_ms mean+/-std | cold_expr_to_atom_ms | cold_diff_ms | cold_simplify_ms | cold_pattern_ms | cold_layout_ms | cold_res_lambdify_ms | cold_jac_lambdify_ms | warm_residual_ms | warm_jacobian_ms | warm_linear_ms | residual_calls | jacobian_calls | linear_solves | accepted | rejected | max_diff_vs_expr"
+        "[LSODE2 lifecycle scopes] preparation and solve scopes are inclusive; do not sum them with nested symbolic/callback stages"
+    );
+    reportln!(
+        "frontend | matrix | dimension | prepare_ms mean+/-std | solve_ms mean+/-std | total_ms mean+/-std | solver_preparation_ms | bridge_preparation_ms | native_callback_preparation_ms | solve_scope_ms | summary_scope_ms | cold_expr_to_atom_ms | cold_diff_ms | cold_simplify_ms | cold_pattern_ms | cold_layout_ms | cold_res_lambdify_ms | cold_jac_lambdify_ms | warm_residual_ms | warm_jacobian_ms | warm_linear_ms | residual_calls | jacobian_calls | linear_solves | accepted | rejected | max_diff_vs_expr"
     );
 
     for dimension in dimensions {
@@ -370,7 +383,7 @@ fn lsode2_large_system_sparse_banded_total_and_stage_story() {
                 let total = runs.iter().map(|run| run.total_ms).collect::<Vec<_>>();
                 let run = first;
                 reportln!(
-                    "{} | {} | {} | {:.3}+/-{:.3} | {:.3}+/-{:.3} | {:.3}+/-{:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {:.3e}",
+                    "{} | {} | {} | {:.3}+/-{:.3} | {:.3}+/-{:.3} | {:.3}+/-{:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {:.3e}",
                     if matches!(frontend, IvpSymbolicAssemblyBackend::ExprLegacy) {
                         "ExprLegacy"
                     } else {
@@ -384,6 +397,11 @@ fn lsode2_large_system_sparse_banded_total_and_stage_story() {
                     stddev(&solve, mean(&solve)),
                     mean(&total),
                     stddev(&total, mean(&total)),
+                    run.solver_preparation_ms,
+                    run.bridge_preparation_ms,
+                    run.native_callback_preparation_ms,
+                    run.solve_scope_ms,
+                    run.summary_scope_ms,
                     run.expr_to_atom_ms,
                     run.differentiation_ms,
                     run.simplify_ms,
@@ -418,6 +436,7 @@ struct CallbackPolicyRun {
     worker_count: usize,
     residual_calls: u64,
     jacobian_calls: u64,
+    auto_min_work_per_job: usize,
 }
 
 fn run_callback_policy_case(
@@ -516,6 +535,7 @@ fn run_callback_policy_case(
         worker_count: snapshot.lambdify_worker_count,
         residual_calls: snapshot.residual_evaluations,
         jacobian_calls: snapshot.jacobian_evaluations,
+        auto_min_work_per_job: snapshot.lambdify_auto_min_work_per_job,
     }
 }
 
@@ -554,7 +574,7 @@ fn lsode2_large_auto_break_even_story() {
         "[LSODE2 large Auto break-even] dimensions={dimensions:?}; checkpoints={checkpoints:?}; min_work={min_work}; AtomViewNative; Sparse/Banded; preparation excluded"
     );
     reportln!(
-        "matrix | dimension | policy | residual_ms@1 | residual_ms@4 | residual_ms@16 | residual_ms@64 | jacobian_ms@1 | jacobian_ms@4 | jacobian_ms@16 | jacobian_ms@64 | parallel_dispatches | sequential_dispatches | worker_count | residual_calls | jacobian_calls | residual_diff | jacobian_diff"
+        "matrix | dimension | policy | residual_ms@1 | residual_ms@4 | residual_ms@16 | residual_ms@64 | jacobian_ms@1 | jacobian_ms@4 | jacobian_ms@16 | jacobian_ms@64 | parallel_dispatches | sequential_dispatches | worker_count | auto_min_work_per_job | residual_calls | jacobian_calls | residual_diff | jacobian_diff"
     );
     reportln!(
         "--- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---:"
@@ -594,15 +614,19 @@ fn lsode2_large_auto_break_even_story() {
                         <= 1.0e-10
                 );
             }
-            let auto_break_even = checkpoints
-                .iter()
-                .enumerate()
-                .find(|(index, _)| {
-                    auto.residual_ms[*index] <= sequential.residual_ms[*index]
-                        && auto.jacobian_ms[*index] <= sequential.jacobian_ms[*index]
-                })
-                .map(|(_, checkpoint)| checkpoint.to_string())
-                .unwrap_or_else(|| "none".to_string());
+            let auto_break_even = if auto.parallel_dispatches == 0 {
+                "none (Auto remained sequential)".to_string()
+            } else {
+                checkpoints
+                    .iter()
+                    .enumerate()
+                    .find(|(index, _)| {
+                        auto.residual_ms[*index] <= sequential.residual_ms[*index]
+                            && auto.jacobian_ms[*index] <= sequential.jacobian_ms[*index]
+                    })
+                    .map(|(_, checkpoint)| checkpoint.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            };
             reportln!(
                 "[LSODE2 Auto crossover] matrix={} dimension={} first_both_stage_crossover={}",
                 matrix.label(),
@@ -615,7 +639,7 @@ fn lsode2_large_auto_break_even_story() {
                 let jacobian_diff =
                     max_slice_diff(&sequential.jacobian_reference, &run.jacobian_reference);
                 reportln!(
-                    "{} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {:.3e} | {:.3e}",
+                    "{} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {:.3e} | {:.3e}",
                     matrix.label(),
                     dimension,
                     run.policy.label(),
@@ -630,6 +654,7 @@ fn lsode2_large_auto_break_even_story() {
                     run.parallel_dispatches,
                     run.sequential_dispatches,
                     run.worker_count,
+                    run.auto_min_work_per_job,
                     run.residual_calls,
                     run.jacobian_calls,
                     residual_diff,

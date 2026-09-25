@@ -2155,6 +2155,8 @@ pub fn prepare_symbolic_ivp_residual_problem(
     let residual_started = telemetry.start_cold_stage(IvpColdStage::ResidualCompilation);
     let (try_residual, native_residual, native_atoms) = match options.symbolic_assembly_backend {
         IvpSymbolicAssemblyBackend::AtomView => {
+            let _atom_residual_preparation =
+                telemetry.scoped_cold_stage(IvpColdStage::AtomResidualPreparation);
             let atom_system = prepare_native_atom_system(
                 &equations,
                 time_arg.as_str(),

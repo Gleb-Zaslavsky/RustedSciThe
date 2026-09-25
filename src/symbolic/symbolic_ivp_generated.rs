@@ -1793,7 +1793,7 @@ fn perform_requested_build(
     let native_prepared = if problem.native_atoms().is_some() {
         Some(measure_cold_stage(
             &problem.telemetry,
-            IvpColdStage::AtomPreparation,
+            IvpColdStage::AtomJacobianPreparation,
             || {
                 prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
                     problem,
@@ -2436,7 +2436,7 @@ fn prepare_generated_symbolic_ivp_native_backend(
 ) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
     let native = measure_cold_stage(
         &baseline_problem.telemetry,
-        IvpColdStage::AtomPreparation,
+        IvpColdStage::AtomJacobianPreparation,
         || {
             prepared_atom_aot_problem_from_residual_problem(
                 baseline_problem,

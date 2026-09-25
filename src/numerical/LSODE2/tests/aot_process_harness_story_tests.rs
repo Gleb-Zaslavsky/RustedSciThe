@@ -16,7 +16,8 @@ use crate::symbolic::symbolic_ivp_generated::{
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 macro_rules! reportln {
@@ -58,6 +59,7 @@ impl HarnessPhase {
 enum HarnessRoute {
     LambdifyExprLegacy,
     LambdifyAtomViewNative,
+    AotExprLegacy(Lsode2AotToolchain),
     AotAtomView(Lsode2AotToolchain),
 }
 
@@ -66,6 +68,10 @@ impl HarnessRoute {
         match self {
             Self::LambdifyExprLegacy => "lambdify_exprlegacy",
             Self::LambdifyAtomViewNative => "lambdify_atomview_native",
+            Self::AotExprLegacy(Lsode2AotToolchain::Rust) => "aot_exprlegacy_rust",
+            Self::AotExprLegacy(Lsode2AotToolchain::CTcc) => "aot_exprlegacy_c_tcc",
+            Self::AotExprLegacy(Lsode2AotToolchain::CGcc) => "aot_exprlegacy_c_gcc",
+            Self::AotExprLegacy(Lsode2AotToolchain::Zig) => "aot_exprlegacy_zig",
             Self::AotAtomView(Lsode2AotToolchain::Rust) => "aot_atomview_rust",
             Self::AotAtomView(Lsode2AotToolchain::CTcc) => "aot_atomview_c_tcc",
             Self::AotAtomView(Lsode2AotToolchain::CGcc) => "aot_atomview_c_gcc",
@@ -77,6 +83,10 @@ impl HarnessRoute {
         Some(match value {
             "lambdify_exprlegacy" => Self::LambdifyExprLegacy,
             "lambdify_atomview_native" => Self::LambdifyAtomViewNative,
+            "aot_exprlegacy_rust" => Self::AotExprLegacy(Lsode2AotToolchain::Rust),
+            "aot_exprlegacy_c_tcc" => Self::AotExprLegacy(Lsode2AotToolchain::CTcc),
+            "aot_exprlegacy_c_gcc" => Self::AotExprLegacy(Lsode2AotToolchain::CGcc),
+            "aot_exprlegacy_zig" => Self::AotExprLegacy(Lsode2AotToolchain::Zig),
             "aot_atomview_rust" => Self::AotAtomView(Lsode2AotToolchain::Rust),
             "aot_atomview_c_tcc" => Self::AotAtomView(Lsode2AotToolchain::CTcc),
             "aot_atomview_c_gcc" => Self::AotAtomView(Lsode2AotToolchain::CGcc),
@@ -87,10 +97,30 @@ impl HarnessRoute {
 
     fn command(self) -> Option<&'static str> {
         match self {
-            Self::AotAtomView(Lsode2AotToolchain::CTcc) => Some("tcc"),
-            Self::AotAtomView(Lsode2AotToolchain::CGcc) => Some("gcc"),
-            Self::AotAtomView(Lsode2AotToolchain::Zig) => Some("zig"),
-            _ => None,
+            Self::AotExprLegacy(Lsode2AotToolchain::CTcc)
+            | Self::AotAtomView(Lsode2AotToolchain::CTcc) => Some("tcc"),
+            Self::AotExprLegacy(Lsode2AotToolchain::CGcc)
+            | Self::AotAtomView(Lsode2AotToolchain::CGcc) => Some("gcc"),
+            Self::AotExprLegacy(Lsode2AotToolchain::Zig)
+            | Self::AotAtomView(Lsode2AotToolchain::Zig) => Some("zig"),
+            Self::AotExprLegacy(Lsode2AotToolchain::Rust)
+            | Self::AotAtomView(Lsode2AotToolchain::Rust) => None,
+            Self::LambdifyExprLegacy | Self::LambdifyAtomViewNative => None,
+        }
+    }
+
+    fn aot_toolchain(self) -> Option<Lsode2AotToolchain> {
+        match self {
+            Self::AotExprLegacy(toolchain) | Self::AotAtomView(toolchain) => Some(toolchain),
+            Self::LambdifyExprLegacy | Self::LambdifyAtomViewNative => None,
+        }
+    }
+
+    fn aot_assembly(self) -> Option<Lsode2SymbolicAssemblyBackend> {
+        match self {
+            Self::AotExprLegacy(_) => Some(Lsode2SymbolicAssemblyBackend::ExprLegacy),
+            Self::AotAtomView(_) => Some(Lsode2SymbolicAssemblyBackend::AtomView),
+            Self::LambdifyExprLegacy | Self::LambdifyAtomViewNative => None,
         }
     }
 }
@@ -109,6 +139,53 @@ struct PhaseRecord {
     linear_solves: usize,
 }
 
+#[derive(Debug)]
+enum HarnessFailure {
+    Spawn(String),
+    Timeout {
+        route: &'static str,
+        phase: HarnessPhase,
+        timeout_ms: u64,
+    },
+    Child {
+        route: &'static str,
+        phase: HarnessPhase,
+        details: String,
+    },
+    Protocol(String),
+}
+
+impl std::fmt::Display for HarnessFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(message) => write!(formatter, "spawn failure: {message}"),
+            Self::Timeout {
+                route,
+                phase,
+                timeout_ms,
+            } => write!(
+                formatter,
+                "timeout: route={} phase={} timeout_ms={timeout_ms}",
+                route,
+                phase.as_str(),
+            ),
+            Self::Child {
+                route,
+                phase,
+                details,
+            } => write!(
+                formatter,
+                "child failure: route={} phase={} {details}",
+                route,
+                phase.as_str(),
+            ),
+            Self::Protocol(message) => write!(formatter, "protocol failure: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for HarnessFailure {}
+
 fn generated_config(
     output_parent: &Path,
     route: HarnessRoute,
@@ -118,10 +195,14 @@ fn generated_config(
         .with_build_policy(policy)
         .with_output_parent_dir(Some(output_parent.to_path_buf()));
     match route {
-        HarnessRoute::AotAtomView(Lsode2AotToolchain::Rust) => config.with_rust(),
-        HarnessRoute::AotAtomView(Lsode2AotToolchain::CTcc) => config.with_c_tcc(),
-        HarnessRoute::AotAtomView(Lsode2AotToolchain::CGcc) => config.with_c_gcc(),
-        HarnessRoute::AotAtomView(Lsode2AotToolchain::Zig) => config.with_zig(),
+        HarnessRoute::AotExprLegacy(Lsode2AotToolchain::Rust)
+        | HarnessRoute::AotAtomView(Lsode2AotToolchain::Rust) => config.with_rust(),
+        HarnessRoute::AotExprLegacy(Lsode2AotToolchain::CTcc)
+        | HarnessRoute::AotAtomView(Lsode2AotToolchain::CTcc) => config.with_c_tcc(),
+        HarnessRoute::AotExprLegacy(Lsode2AotToolchain::CGcc)
+        | HarnessRoute::AotAtomView(Lsode2AotToolchain::CGcc) => config.with_c_gcc(),
+        HarnessRoute::AotExprLegacy(Lsode2AotToolchain::Zig)
+        | HarnessRoute::AotAtomView(Lsode2AotToolchain::Zig) => config.with_zig(),
         HarnessRoute::LambdifyExprLegacy | HarnessRoute::LambdifyAtomViewNative => config,
     }
 }
@@ -131,7 +212,7 @@ fn build_solver(
     phase: HarnessPhase,
     output_parent: &Path,
 ) -> Result<Lsode2Solver, String> {
-    if let HarnessRoute::AotAtomView(toolchain) = route {
+    if let Some(toolchain) = route.aot_toolchain() {
         if !matches!(phase, HarnessPhase::Cold) {
             // A resolver is process-local today.  Warm/callback children
             // bootstrap the artifact outside the measured phase, then strict
@@ -145,7 +226,9 @@ fn build_solver(
             );
             let mut bootstrap = Lsode2Solver::new(trajectory_config(
                 Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
-                Lsode2SymbolicAssemblyBackend::AtomView,
+                route
+                    .aot_assembly()
+                    .expect("AOT route should select a symbolic assembly backend"),
                 Lsode2SymbolicExecutionMode::Aot {
                     toolchain,
                     profile: Lsode2AotProfile::Debug,
@@ -170,8 +253,10 @@ fn build_solver(
             Lsode2SymbolicExecutionMode::LambdifyExpr,
             None,
         ),
-        HarnessRoute::AotAtomView(toolchain) => (
-            Lsode2SymbolicAssemblyBackend::AtomView,
+        HarnessRoute::AotExprLegacy(toolchain) | HarnessRoute::AotAtomView(toolchain) => (
+            route
+                .aot_assembly()
+                .expect("AOT route should select a symbolic assembly backend"),
             Lsode2SymbolicExecutionMode::Aot {
                 toolchain,
                 profile: Lsode2AotProfile::Debug,
@@ -322,14 +407,23 @@ fn command_available(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn harness_timeout_ms() -> u64 {
+    std::env::var("LSODE2_AOT_HARNESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(120_000)
+}
+
 fn run_isolated(
     route: HarnessRoute,
     phase: HarnessPhase,
     output_parent: &Path,
     repetitions: usize,
-) -> Result<PhaseRecord, String> {
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let output = Command::new(executable)
+) -> Result<PhaseRecord, HarnessFailure> {
+    let executable = std::env::current_exe()
+        .map_err(|error| HarnessFailure::Spawn(error.to_string()))?;
+    let mut child = Command::new(executable)
         .arg("--exact")
         .arg(CHILD_TEST)
         .arg("--nocapture")
@@ -340,19 +434,55 @@ fn run_isolated(
         .env("LSODE2_AOT_HARNESS_OUTPUT", output_parent)
         .env("LSODE2_AOT_HARNESS_REPETITIONS", repetitions.to_string())
         .env("RAYON_NUM_THREADS", "1")
-        .output()
-        .map_err(|error| format!("failed to start child: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "child failed for {}/{}: status={} stdout={} stderr={}",
-            route.as_str(),
-            phase.as_str(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| HarnessFailure::Spawn(error.to_string()))?;
+    let timeout_ms = harness_timeout_ms();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HarnessFailure::Timeout {
+                    route: route.as_str(),
+                    phase,
+                    timeout_ms,
+                });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HarnessFailure::Child {
+                    route: route.as_str(),
+                    phase,
+                    details: format!("wait failure: {error}"),
+                });
+            }
+        }
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|error| HarnessFailure::Child {
+            route: route.as_str(),
+            phase,
+            details: format!("output collection failure after status {status}: {error}"),
+        })?;
+    if !status.success() {
+        return Err(HarnessFailure::Child {
+            route: route.as_str(),
+            phase,
+            details: format!(
+                "status={status} stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
-    parse_record(&String::from_utf8_lossy(&output.stdout))
+    parse_record(&String::from_utf8_lossy(&output.stdout)).map_err(HarnessFailure::Protocol)
 }
 
 fn run_parent_matrix(routes: &[HarnessRoute], repetitions: usize) {
@@ -378,6 +508,12 @@ fn run_parent_matrix(routes: &[HarnessRoute], repetitions: usize) {
             HarnessPhase::Warm,
             HarnessPhase::CallbackOnly,
         ] {
+            reportln!(
+                "[LSODE2 process-isolated progress] route={} phase={} timeout_ms={} started",
+                route.as_str(),
+                phase.as_str(),
+                harness_timeout_ms(),
+            );
             let record = run_isolated(route, phase, output_parent.path(), repetitions)
                 .unwrap_or_else(|error| {
                     panic!("isolated {} {}: {error}", route.as_str(), phase.as_str())
@@ -415,6 +551,7 @@ fn aot_process_isolated_harness_protocol_smoke() {
         &[
             HarnessRoute::LambdifyExprLegacy,
             HarnessRoute::LambdifyAtomViewNative,
+            HarnessRoute::AotExprLegacy(Lsode2AotToolchain::CTcc),
             HarnessRoute::AotAtomView(Lsode2AotToolchain::CTcc),
         ],
         1,
@@ -432,6 +569,10 @@ fn aot_process_isolated_release_apple_to_apple_matrix() {
         &[
             HarnessRoute::LambdifyExprLegacy,
             HarnessRoute::LambdifyAtomViewNative,
+            HarnessRoute::AotExprLegacy(Lsode2AotToolchain::Rust),
+            HarnessRoute::AotExprLegacy(Lsode2AotToolchain::CTcc),
+            HarnessRoute::AotExprLegacy(Lsode2AotToolchain::CGcc),
+            HarnessRoute::AotExprLegacy(Lsode2AotToolchain::Zig),
             HarnessRoute::AotAtomView(Lsode2AotToolchain::Rust),
             HarnessRoute::AotAtomView(Lsode2AotToolchain::CTcc),
             HarnessRoute::AotAtomView(Lsode2AotToolchain::CGcc),

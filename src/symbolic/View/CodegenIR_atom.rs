@@ -228,7 +228,26 @@ impl Lowerer {
         match view {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
+                // Atom differentiation can preserve explicit `x^1` nodes
+                // that Expr simplification removes earlier. Lowering those
+                // nodes to a runtime pow call is pure overhead and is
+                // especially costly in large generated residual blocks.
+                if matches!(exp, AtomView::Num(_)) && coeff_to_f64(exp) == 1.0 {
+                    return self.lower_view(base);
+                }
                 let tb = self.lower_view(base);
+                // Atom normalization folds repeated factors such as `y*y` into
+                // `Pow(y, 2)`. Keep that canonical form in the symbolic layer,
+                // but avoid a generic runtime pow call in AOT.
+                if matches!(exp, AtomView::Num(_)) && coeff_to_f64(exp) == 2.0 {
+                    let dst = self.fresh();
+                    self.instructions.push(Instr::Mul {
+                        dst,
+                        a: tb,
+                        b: tb,
+                    });
+                    return dst;
+                }
                 let te = self.lower_view(exp);
                 let dst = self.fresh();
                 self.instructions.push(Instr::Pow {
@@ -401,14 +420,26 @@ impl Lowerer {
             DagNodeKind::Num(value) => self.lower_const_value(*value),
             DagNodeKind::Pow(base, exp) => {
                 let tb = self.lower_dag_node(dag, *base);
-                let te = self.lower_dag_node(dag, *exp);
-                let dst = self.fresh();
-                self.instructions.push(Instr::Pow {
-                    dst,
-                    base: tb,
-                    exp: te,
-                });
-                dst
+                if matches!(&dag.nodes[*exp].kind, DagNodeKind::Num(value) if *value == 1.0) {
+                    tb
+                } else if matches!(&dag.nodes[*exp].kind, DagNodeKind::Num(value) if *value == 2.0) {
+                    let dst = self.fresh();
+                    self.instructions.push(Instr::Mul {
+                        dst,
+                        a: tb,
+                        b: tb,
+                    });
+                    dst
+                } else {
+                    let te = self.lower_dag_node(dag, *exp);
+                    let dst = self.fresh();
+                    self.instructions.push(Instr::Pow {
+                        dst,
+                        base: tb,
+                        exp: te,
+                    });
+                    dst
+                }
             }
             DagNodeKind::Mul(children) => self.lower_chain_from_nodes(dag, children, true),
             DagNodeKind::Add(children) => self.lower_chain_from_nodes(dag, children, false),
@@ -678,6 +709,34 @@ mod tests {
         regs[ir.output.0]
     }
 
+    fn eval_block(block: &LinearBlock, inputs: &[f64]) -> Vec<f64> {
+        let mut regs = vec![0f64; block.num_temps];
+        for instr in &block.instructions {
+            match *instr {
+                Instr::Const { dst, value } => regs[dst.0] = value,
+                Instr::Input { dst, index } => regs[dst.0] = inputs[index],
+                Instr::Add { dst, a, b } => regs[dst.0] = regs[a.0] + regs[b.0],
+                Instr::Sub { dst, a, b } => regs[dst.0] = regs[a.0] - regs[b.0],
+                Instr::Mul { dst, a, b } => regs[dst.0] = regs[a.0] * regs[b.0],
+                Instr::Div { dst, a, b } => regs[dst.0] = regs[a.0] / regs[b.0],
+                Instr::Pow { dst, base, exp } => regs[dst.0] = regs[base.0].powf(regs[exp.0]),
+                Instr::Exp { dst, x } => regs[dst.0] = regs[x.0].exp(),
+                Instr::Ln { dst, x } => regs[dst.0] = regs[x.0].ln(),
+                Instr::Sin { dst, x } => regs[dst.0] = regs[x.0].sin(),
+                Instr::Cos { dst, x } => regs[dst.0] = regs[x.0].cos(),
+                Instr::Tg { dst, x } => regs[dst.0] = regs[x.0].tan(),
+                Instr::Ctg { dst, x } => regs[dst.0] = 1.0 / regs[x.0].tan(),
+                Instr::ArcSin { dst, x } => regs[dst.0] = regs[x.0].asin(),
+                Instr::ArcCos { dst, x } => regs[dst.0] = regs[x.0].acos(),
+                Instr::ArcTg { dst, x } => regs[dst.0] = regs[x.0].atan(),
+                Instr::ArcCtg { dst, x } => {
+                    regs[dst.0] = std::f64::consts::FRAC_PI_2 - regs[x.0].atan()
+                }
+            }
+        }
+        block.outputs.iter().map(|temp| regs[temp.0]).collect()
+    }
+
     #[test]
     fn test_constant() {
         let expr = Atom::new_num(42);
@@ -740,6 +799,55 @@ mod tests {
         // After normalization Symbolica may fold this to (x+1)^2; either way
         // the result at x=3 must be 16.
         assert!((eval(&ir, &[3.0]) - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lowers_integer_power_one_without_runtime_pow() {
+        let expr = parse!("x^1").unwrap();
+        let x = symbol!("x");
+        let ir = Lowerer::new(&[x]).lower(expr.as_view());
+
+        assert!(
+            ir.instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, Instr::Pow { .. })),
+            "x^1 must not emit a runtime Pow instruction"
+        );
+        assert!((eval(&ir, &[3.25]) - 3.25).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn lowers_integer_power_two_without_runtime_pow() {
+        let expr = parse!("x^2").unwrap();
+        let x = symbol!("x");
+        let ir = Lowerer::new(&[x]).lower(expr.as_view());
+
+        assert!(
+            ir.instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, Instr::Pow { .. })),
+            "x^2 must lower to multiplication rather than runtime Pow"
+        );
+        assert!((eval(&ir, &[3.25]) - 3.25_f64.powi(2)).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn lowers_shared_integer_power_two_without_runtime_pow() {
+        let e1 = parse!("x^2").unwrap();
+        let e2 = parse!("x^2+y").unwrap();
+        let (x, y) = symbol!("x", "y");
+        let block = Lowerer::new(&[x, y]).lower_many(&[e1.as_view(), e2.as_view()]);
+
+        assert!(
+            block
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, Instr::Pow { .. })),
+            "lower_many must apply the integer-power fast path"
+        );
+        let values = eval_block(&block, &[3.25, 2.0]);
+        assert!((values[0] - 3.25_f64.powi(2)).abs() < 1.0e-12);
+        assert!((values[1] - (3.25_f64.powi(2) + 2.0)).abs() < 1.0e-12);
     }
 
     #[test]

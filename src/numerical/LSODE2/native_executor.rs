@@ -411,6 +411,33 @@ mod tests {
     }
 
     #[test]
+    fn native_executor_does_not_duplicate_instrumented_evaluator_counts() {
+        let telemetry = IvpTelemetry::counters();
+        let mut executor = Lsode2NativeCallbackExecutor::new_with_telemetry(
+            |_, y: &DVector<f64>| DVector::from_vec(vec![y[0] - 1.0]),
+            |_, _| BdfJacobian::SparseTriplets {
+                n: 1,
+                triplets: vec![Triplet::new(0, 0, 0.0)],
+            },
+            FaerSparseBdfLinearBackend::default(),
+            telemetry.clone(),
+        )
+        .with_evaluator_telemetry(true, true);
+        let mut statistics = Lsode2NativeStatistics::default();
+        let y = DVector::from_vec(vec![1.0 + 1.0e-5]);
+
+        executor
+            .compute_newton_correction(0.1, &y, 0.0, &mut statistics)
+            .expect("instrumented callback correction should succeed");
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.residual_requests, 1);
+        assert_eq!(snapshot.jacobian_requests, 1);
+        assert_eq!(snapshot.residual_evaluations, 0);
+        assert_eq!(snapshot.jacobian_evaluations, 0);
+    }
+
+    #[test]
     fn native_executor_reuses_cached_linearization_across_newton_iterations() {
         use std::cell::RefCell;
         use std::rc::Rc;

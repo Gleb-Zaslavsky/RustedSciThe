@@ -30,11 +30,12 @@ use super::history::Lsode2Tolerance;
 use super::linear_backends::{
     DenseLuBdfLinearBackend, FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend,
 };
-use super::native_executor::{Lsode2NativeCallbackExecutor, jacobian_abs_max};
+use super::native_executor::{jacobian_abs_max, Lsode2NativeCallbackExecutor};
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
     try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy,
+    NativeJacobianStorage,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -43,8 +44,8 @@ use super::step_control::{Lsode2RetryAction, Lsode2StepControlConfig};
 use super::step_cycle::{
     Lsode2PredictedStep, Lsode2StepCycle, Lsode2StepCycleOutcome, Lsode2StepMethod,
 };
+use crate::numerical::BDF::common::{norm, scale_func, NumberOrVec};
 use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfLinearBackend};
-use crate::numerical::BDF::common::{NumberOrVec, norm, scale_func};
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::ivp_telemetry::{
     IvpTelemetry, IvpTelemetryExecution, IvpTelemetryMatrixBackend, IvpTelemetryRoute, IvpWarmStage,
@@ -62,6 +63,20 @@ use std::rc::Rc;
 use std::time::Instant;
 
 type NativeResidualFn = dyn Fn(f64, &DVector<f64>) -> DVector<f64>;
+
+/// Prepared evaluator callbacks shared by fresh native step drivers.
+///
+/// The callbacks are immutable at the solver lifecycle level.  Jacobian
+/// evaluation remains internally mutable because the generated callback may
+/// carry scratch state, but solves themselves still create an independent
+/// driver and linear backend.
+#[derive(Clone)]
+pub(crate) struct PreparedNativeCallbacks {
+    residual: Rc<NativeResidualFn>,
+    jacobian: Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
+    residual_evaluator_instrumented: bool,
+    jacobian_evaluator_instrumented: bool,
+}
 
 #[derive(Debug, Clone)]
 struct NativeStepResidualContext {
@@ -205,6 +220,80 @@ impl Lsode2NativeStepEngine {
                     banded_jacobian_storage(config),
                 )?,
             )))),
+        }
+    }
+
+    pub(crate) fn prepare_callbacks_for_config(
+        config: &Lsode2ProblemConfig,
+    ) -> Result<Option<PreparedNativeCallbacks>, IvpBackendError> {
+        let engine =
+            Self::from_problem_config_with_method(config, Lsode2NativeStepMethod::BdfLike)?;
+        Ok(engine.map(Self::into_prepared_callbacks))
+    }
+
+    pub(crate) fn from_prepared_callbacks_with_method(
+        config: &Lsode2ProblemConfig,
+        method: Lsode2NativeStepMethod,
+        callbacks: &PreparedNativeCallbacks,
+    ) -> Result<Option<Self>, IvpBackendError> {
+        config
+            .telemetry
+            .set_matrix_backend(match config.linear_system_structure {
+                Lsode2LinearSystemStructure::Dense => IvpTelemetryMatrixBackend::Dense,
+                Lsode2LinearSystemStructure::Sparse => IvpTelemetryMatrixBackend::Sparse,
+                Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
+            });
+        config.telemetry.set_problem_shape(
+            config.y0.len(),
+            config.eq_system.len(),
+            config.equation_parameters.as_ref().map_or(0, Vec::len),
+        );
+        if !matches!(
+            config.backend.jacobian_backend,
+            Lsode2JacobianBackend::SymbolicGenerated
+                | Lsode2JacobianBackend::AnalyticClosure
+                | Lsode2JacobianBackend::FiniteDifference
+        ) {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message:
+                    "LSODE2 native step engine currently supports symbolic-generated and analytical Jacobians only"
+                        .to_string(),
+            });
+        }
+
+        match config.backend.linear_solver_backend {
+            Lsode2LinearSolverBackend::Dense => Ok(Some(Self::Dense(Box::new(
+                Lsode2NativeStepEngineImpl::from_prepared_callbacks(
+                    config,
+                    method,
+                    DenseLuBdfLinearBackend,
+                    callbacks,
+                )?,
+            )))),
+            Lsode2LinearSolverBackend::SparseFaer => Ok(Some(Self::Sparse(Box::new(
+                Lsode2NativeStepEngineImpl::from_prepared_callbacks(
+                    config,
+                    method,
+                    FaerSparseBdfLinearBackend::default(),
+                    callbacks,
+                )?,
+            )))),
+            Lsode2LinearSolverBackend::BandedFaithful => Ok(Some(Self::Banded(Box::new(
+                Lsode2NativeStepEngineImpl::from_prepared_callbacks(
+                    config,
+                    method,
+                    FaithfulBandedBdfLinearBackend::default(),
+                    callbacks,
+                )?,
+            )))),
+        }
+    }
+
+    fn into_prepared_callbacks(self) -> PreparedNativeCallbacks {
+        match self {
+            Self::Dense(engine) => engine.into_prepared_callbacks(),
+            Self::Sparse(engine) => engine.into_prepared_callbacks(),
+            Self::Banded(engine) => engine.into_prepared_callbacks(),
         }
     }
 
@@ -356,8 +445,11 @@ where
                     )
                 }
                 .map_err(map_generated_backend_error)?;
-                let residual_evaluator_instrumented = prepared.problem.backend_kind
-                    == crate::symbolic::symbolic_ivp::IvpBackendKind::Lambdify;
+                // Both prepared Lambdify and linked AOT residual wrappers own
+                // evaluator-level telemetry. The native executor still owns
+                // solver request counters, but must not add a second
+                // evaluator count for either generated route.
+                let residual_evaluator_instrumented = true;
                 config.telemetry.set_execution(
                     if matches!(
                         config.residual_jacobian_source,
@@ -441,7 +533,9 @@ where
                     residual,
                     jacobian,
                     residual_evaluator_instrumented,
-                    !use_sparse_aot_jacobian,
+                    // The symbolic Jacobian callback records its own
+                    // evaluator invocation for both Lambdify and AOT.
+                    true,
                 )
             }
             Lsode2JacobianBackend::AnalyticClosure => {
@@ -509,6 +603,43 @@ where
             }
         };
 
+        Self::from_callbacks(
+            config,
+            method,
+            linear_backend,
+            residual,
+            jacobian,
+            residual_evaluator_instrumented,
+            jacobian_evaluator_instrumented,
+        )
+    }
+
+    fn from_prepared_callbacks(
+        config: &Lsode2ProblemConfig,
+        method: Lsode2NativeStepMethod,
+        linear_backend: L,
+        callbacks: &PreparedNativeCallbacks,
+    ) -> Result<Self, IvpBackendError> {
+        Self::from_callbacks(
+            config,
+            method,
+            linear_backend,
+            Rc::clone(&callbacks.residual),
+            Rc::clone(&callbacks.jacobian),
+            callbacks.residual_evaluator_instrumented,
+            callbacks.jacobian_evaluator_instrumented,
+        )
+    }
+
+    fn from_callbacks(
+        config: &Lsode2ProblemConfig,
+        method: Lsode2NativeStepMethod,
+        linear_backend: L,
+        residual: Rc<NativeResidualFn>,
+        jacobian: Rc<RefCell<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>>,
+        residual_evaluator_instrumented: bool,
+        jacobian_evaluator_instrumented: bool,
+    ) -> Result<Self, IvpBackendError> {
         let h0 = initial_native_step_size(config, residual.as_ref());
         let max_order = method.max_order(config);
         let step_method = match method {
@@ -549,6 +680,15 @@ where
             residual_evaluator_instrumented,
             jacobian_evaluator_instrumented,
         })
+    }
+
+    fn into_prepared_callbacks(self) -> PreparedNativeCallbacks {
+        PreparedNativeCallbacks {
+            residual: self.residual,
+            jacobian: self.jacobian,
+            residual_evaluator_instrumented: self.residual_evaluator_instrumented,
+            jacobian_evaluator_instrumented: self.jacobian_evaluator_instrumented,
+        }
     }
 
     fn step_once(&mut self) -> Result<Lsode2NativeStepAttemptReport, IvpBackendError> {
@@ -1113,7 +1253,11 @@ fn initial_native_step_size(config: &Lsode2ProblemConfig, residual: &NativeResid
         })
         .abs()
         .max(f64::EPSILON);
-    if direction > 0.0 { mag } else { -mag }
+    if direction > 0.0 {
+        mag
+    } else {
+        -mag
+    }
 }
 
 fn map_generated_backend_error(
@@ -1386,13 +1530,11 @@ mod tests {
             .state_mut()
             .reset_after_repeated_error_failures()
             .unwrap();
-        assert!(
-            inner
-                .driver
-                .cycle()
-                .state()
-                .first_derivative_refresh_requested()
-        );
+        assert!(inner
+            .driver
+            .cycle()
+            .state()
+            .first_derivative_refresh_requested());
 
         inner.refresh_first_derivative_if_requested().unwrap();
 
@@ -1425,13 +1567,11 @@ mod tests {
             .unwrap();
         assert_eq!(retry.action, Lsode2RetryAction::RetryWithJacobianRefresh);
         assert_eq!(retry.order_new, 1);
-        assert!(
-            inner
-                .driver
-                .cycle()
-                .state()
-                .first_derivative_refresh_requested()
-        );
+        assert!(inner
+            .driver
+            .cycle()
+            .state()
+            .first_derivative_refresh_requested());
 
         inner.refresh_first_derivative_if_requested().unwrap();
 

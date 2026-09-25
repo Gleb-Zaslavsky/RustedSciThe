@@ -240,6 +240,13 @@ and use both as acceptance consumers of the shared View-level corpus.
   typed telemetry. Solver counters such as residual requests and Jacobian
   requests are expected to match across frontends; dispatch counters and warm
   evaluator timings expose the work hidden behind those equal solver traces.
+- [x] Make `Auto` use the shared machine-local Rayon dispatch calibration from
+  `symbolic::codegen`, rather than a second fixed worker-count heuristic. The
+  effective threshold is the larger of the user floor and the calibrated
+  minimum useful work per job; telemetry reports that threshold. This is a
+  safe dispatch-policy improvement, not a claim that one machine's threshold
+  is universal. Release break-even validation across worker counts remains
+  open below.
 - [x] Add debug correctness coverage proving that Sequential, forced Parallel,
   and Auto produce identical residual/Jacobian values and preserve the
   `AtomViewExprCompat` route identity.
@@ -396,6 +403,51 @@ and use both as acceptance consumers of the shared View-level corpus.
   candidate optimization must preserve residual/Jacobian parity and avoid
   regressions on real Sparse/Banded Jacobians; preparation wins alone are not
   sufficient.
+- [x] Cache prepared native residual/Jacobian callbacks in the solver lifecycle
+  instead of rebuilding the full native evaluator inside every `solve()`. Each
+  solve still owns a fresh mutable step driver and linear backend, while
+  parameter rebinding invalidates the callback cache. The cache is also used by
+  the native preflight path. This removes repeated warm `native_engine_setup`
+  work for repeated solves; the first cold preparation and numeric-rebind costs
+  remain explicit follow-up measurements, not hidden in the warm solve.
+- [x] Defer bridge `inner.try_generate()` for `NativeSolve` until an actual
+  native-to-bridge fallback. The old unconditional bridge preparation was
+  duplicated with native callback preparation and inflated cold `prepare_ms`
+  for both Lambdify and AOT routes. A debug solver gate asserts that native
+  preparation leaves `bridge_preparation` at zero.
+- [ ] Measure the cached lifecycle on repeated Sparse/Banded solves and on
+  parameter rebind. Require unchanged trajectory/counters and report cold
+  preparation separately from warm `native_engine_setup` before accepting a
+  release performance improvement.
+
+- [ ] AOT release gate after lazy bridge preparation: repeat the cold/warm
+  Sparse/Banded callback matrix, process-isolated Lambdify/ExprLegacy-AOT/
+  AtomView-AOT comparison, `BuildIfMissing -> RequirePrebuilt` lifecycle, and
+  toolchain matrix with at least five paired samples. Keep correctness and
+  integer counters in every row.
+- [x] Investigate the AtomView-AOT residual callback anomaly independently of
+  typed-boundary overhead. The fresh-artifact diagnostic isolated the cause:
+  Atom normalization intentionally folds repeated factors such as `y*y` into
+  `Pow(y, 2)`, while ExprLegacy keeps a multiplication. Atom AOT lowered that
+  canonical node to a generic runtime `pow` call, producing about `2.0 us`
+  versus `0.45 us` for ExprLegacy at `n=128`. The diagnostic now records
+  generated source shape outside timing and confirms the Atom artifact had one
+  `pow` per quadratic residual row.
+- [x] Lower exact Atom integer powers `x^1` and `x^2` without a generic AOT
+  `Pow` instruction. `x^2` remains canonical as `Pow` in the symbolic tree and
+  in the non-AOT evaluator; only the AOT IR emits `x*x`. Unit tests cover both
+  single-expression and shared `lower_many` paths. A fresh debug callback gate
+  reduced Atom raw residual cost at `n=128` to about `0.51 us`, close to the
+  ExprLegacy value of `0.44 us`, with zero callback value drift. The release
+  `128/256/512` acceptance run completed on 2026-09-25/26: callback rows now
+  round to the same `0.001-0.003 ms/call` range and contain no generated `pow`
+  calls. The residual-boundary rows still vary by run, with the largest stable
+  observed tail around `15%` at `n=512`; this is no longer the former several-
+  times regression, but remains a low-priority code-size/codegen debt.
+- [x] Split LSODE2 cold telemetry into Atom residual and Atom Jacobian/layout
+  preparation. The old `atom_prepare_ms` aggregate could include nested or
+  repeated scopes and was not a wall-clock stage; reports now expose
+  `atom_residual_prepare_ms` and `atom_jacobian_prepare_ms` separately.
 
 - [ ] Build one process-isolated release harness for the same problem, mesh,
   matrix backend, tolerances, controller family, thread policy, chunking policy,
@@ -744,15 +796,17 @@ and use both as acceptance consumers of the shared View-level corpus.
   prelinked gate exercises all compact slots through the faithful Banded
   solver; the older 1D explicit-values prelinked story remains unchanged as
   a compatibility oracle.
-- [ ] Add an end-to-end BuildIfMissing/RequirePrebuilt LSODE2 solve gate for
-  the compact-Banded artifact itself; the current solver gate intentionally
-  isolates solver handoff from external compiler startup.
-- [ ] Extend native AOT telemetry with binding, chunk, worker, copy/allocation
+- [x] Add an end-to-end BuildIfMissing/RequirePrebuilt LSODE2 solve gate for
+  the compact-Banded artifact itself. The release lifecycle story now runs the
+  real `Lsode2Solver` on both Sparse and compact-Banded routes; the separate
+  callback handoff gate remains useful as a lower-level diagnostic.
+- [x] Extend native AOT telemetry with binding, chunk, worker, copy/allocation
   and callback-failure details. Source-generation and publication buckets now
   exist, and linked residual/Dense/compact-Banded warm scopes cover binding,
   chunk dispatch, worker execution, copies, allocations and output writes.
-  The debug chunk policy gate is complete; a story-level AOT warm-value report
-  and solver-level aggregation remain.
+  The debug chunk policy gate is complete; the large warm-solver story now
+  prints the solver-level aggregation. A single consolidated lifecycle report
+  and allocation measurements remain open.
 - [x] Add native sparse compiler-spawn failure injection. The typed
   `AotBuildFailed` boundary now preserves retry classification, the generated
   command, Atom conversion/materialization/build counters, and the absence of
@@ -767,8 +821,10 @@ and use both as acceptance consumers of the shared View-level corpus.
 - [ ] Investigate the interrupted `combustion-like` AOT story reported at
   local `17:39` on 2026-09-24. It was stopped because the AOT path appeared
   to hang; this is an unfinished AOT run, not a Lambdify correctness or
-  performance failure. Add explicit stage progress, timeout/failure
-  classification and artifact diagnostics before rerunning it.
+  performance failure. The process-isolated harness now emits per-phase
+  progress, enforces `LSODE2_AOT_HARNESS_TIMEOUT_MS` (default 120 seconds),
+  and classifies spawn, timeout, child and protocol failures. Artifact-stage
+  progress for the in-process compiler path remains open.
 - [x] Make the sparse AtomView AOT route consume the same prepared Atom payload
   as direct Lambdify while preserving the current generated ABI and artifact
   lifecycle. Dense compatibility remains explicitly separate.
@@ -778,7 +834,12 @@ and use both as acceptance consumers of the shared View-level corpus.
   warm residual/Jacobian callback times on large Sparse/Banded chain systems,
   with callback counts and output sizes. The generated sparse result now
   exposes its immutable preparation telemetry so these stage rows do not rely
-  on a second ad-hoc timer.
+  on a second ad-hoc timer. The matrix includes ExprLegacy-AOT on Sparse and
+  AtomViewNative-AOT on compact-Banded. Compact-Banded currently rejects
+  ExprLegacy with a typed `AotBuildFailed` because its generated layout path
+  requires AtomView; the story reports that limitation explicitly instead of
+  manufacturing a comparison row. The AtomView Banded path asserts its
+  reported telemetry route. A fresh release capture is still required.
 - [x] Add a release-only AtomViewNative AOT toolchain callback matrix for
   `C/tcc`, `C/gcc`, Rust and Zig. Missing external commands are reported as
   skips; each available route uses the same equations, layout, state and
@@ -794,8 +855,55 @@ and use both as acceptance consumers of the shared View-level corpus.
   factorization and RHS stages, total wall-clock, and integer trajectory
   counters. The remaining lifecycle follow-up is the strict
   BuildIfMissing-to-RequirePrebuilt process-isolated variant.
+- [x] Localize the AOT residual boundary cost with the raw-versus-typed
+  callback story. On the 2026-09-25 release capture, the typed boundary added
+  only about `52-238 ns/call` for ExprLegacy and `56-215 ns/call` for
+  AtomView, while the raw AtomView callback was `4.6x` slower at dimensions
+  `128, 256, 512`. The dominant defect is therefore inside generated
+  AtomView-AOT execution/lowering, not typed validation or output-shape
+  checks.
+- [x] Stop double-counting generated evaluator invocations in the native
+  LSODE2 executor. Prepared Lambdify and AOT wrappers own evaluator-level
+  telemetry; the executor owns solver request counters. A debug regression gate
+  now proves that instrumented callbacks are not counted a second time.
+- [x] Rerun the large AOT warm-solver story after the counter-ownership fix.
+  The 2026-09-25 release capture now has identical work counters between
+  Lambdify and AOT (`400/238` at `256`, `445/276` at `512`) and identical
+  accepted/rejected trajectories. The callback stages are substantially faster
+  in AOT, but preparation and controller/solve overhead still make total AOT
+  wall-clock slower; this is now a real performance finding rather than a
+  telemetry artifact.
+- [ ] Split the remaining AOT solve gap into controller, callback boundary,
+  matrix assembly, factorization and RHS scopes. At `512`, AOT callback stages
+  are about `56-61%` faster while total solve remains about `23-33%` slower;
+  the current table does not localize that remaining overhead sufficiently.
+  The next release story now prints the existing controller, callback,
+  evaluator, output, factorization and RHS scopes in one solver-overhead table,
+  plus `solve_minus_controller_ms`; this is a diagnostic remainder, not a sum
+  of nested scopes. Matrix assembly remains coupled to backend factorization
+  until the linear backend contract is split safely. The telemetry now also
+  exposes `native_engine_setup` and `native_result_assembly`; the next debug
+  run should distinguish those coarse solver-boundary costs before any
+  performance change is accepted.
+- [x] Add low-intrusion inclusive lifecycle scopes for solver preparation,
+  bridge preparation, native callback preparation, complete solve, and result
+  summary. The AOT warm story prints these scopes separately; nested values are
+  intentionally diagnostic and must not be added as independent work.
+- [ ] Optimize the AtomView-AOT generated callback only after a new raw
+  boundary capture confirms the `4.6x` gap. Compare generated instruction
+  shape, argument/output writes, and linked runtime dispatch before changing
+  Atom lowering; numerical parity remains a hard gate.
 - [ ] Do not call AtomView-AOT production-ready until callback correctness,
   lifecycle errors, telemetry semantics, and repeated warm runs are aligned.
+
+- [x] Make the Auto crossover label conditional on actual Auto dispatch. If
+  Auto performed no parallel dispatches, the report now says
+  `none (Auto remained sequential)` instead of treating a sequential timing
+  comparison as evidence of parallel break-even.
+- [ ] Repeat the Auto matrix with multiple worker counts and larger callback
+  workloads. The 2026-09-25 run used one Rayon worker and therefore validates
+  only the conservative sequential fallback; it cannot establish a portable
+  parallel crossover.
 
 ## P2: API And Documentation
 
@@ -997,6 +1105,12 @@ control route and must not be added to the large-scale corpus.
   forced Parallel loses through `512`; Sparse Auto crosses at `1024`, while
   Banded Auto crosses at checkpoint `16` and is clearly ahead by `64`.
   This is a callback-only crossover; full-solve amortization remains open.
+- [x] Rerun the large callback-only Auto matrix after introducing the shared
+  machine-local Rayon calibration. The 2026-09-25 capture at dimensions
+  `256/512` kept Auto sequential (`0` parallel dispatches) because forced
+  Parallel was slower at every checkpoint. The report now includes the
+  calibrated `auto_min_work_per_job`; this is an observable conservative
+  decision, not a universal performance claim.
 - [ ] Add an evaluator threshold sweep for
   `Sequential`, forced `Parallel` and `Auto` over dimensions
   `16, 32, 64, 128, 256, 512, 1024` and `min_work` values such as
@@ -1401,6 +1515,14 @@ reviving the old generated path unchanged.
   an argument vector and output vector per call; do not introduce `RefCell` or
   `Mutex` as a shortcut. The replacement must preserve `Send + Sync` and
   support parallel callers with independent output buffers.
+- [x] Add a release-only residual boundary-isolation story for
+  `ExprLegacy-AOT` and `AtomView-AOT`. It measures the same linked callback
+  through the raw generated closure and the typed `try_residual_eval` boundary
+  with reused arguments/output buffers, so the residual regression can be
+  attributed to generated code versus wrapper validation before changing the
+  production path. The 2026-09-25 release result localized the AtomView raw
+  callback at about `4.6x` the ExprLegacy callback while typed boundary
+  overhead stayed comparable.
 - [ ] Measure estimated output allocations/copies separately from symbolic
   preparation and solver allocations before changing matrix/triplet ownership.
 
@@ -1461,23 +1583,40 @@ reviving the old generated path unchanged.
 
 ### P1: apple-to-apple release evidence
 
-- [x] Add one process-isolated harness protocol for Lambdify, AtomViewNative
-  AOT and the Rust/C/Zig toolchain enum. The parent only orchestrates child
-  processes; child records separate cold E2E, warm `RequirePrebuilt` solve and
-  callback-stage timings, with fixed scalar fixture, Banded layout, parameter,
-  initial state, one worker and explicit repetitions. The debug smoke gate is
+- [x] Add one process-isolated harness protocol for Lambdify, ExprLegacy-AOT,
+  AtomViewNative-AOT and the Rust/C/Zig toolchain enum. The parent only
+  orchestrates child processes; child records separate cold E2E, warm
+  `RequirePrebuilt` solve and callback-stage timings, with fixed scalar
+  fixture, Banded layout, parameter, initial state, one worker and explicit
+  repetitions. The debug smoke gate is
   `aot_process_isolated_harness_protocol_smoke`; its report is written under
   `test_reports/LSODE2_AOT`. Warm children bootstrap outside the measured
-  interval because the current resolver is process-local.
-- [ ] Run and archive the process-isolated release matrix for Lambdify, Rust
-  AOT, C/tcc, C/gcc and Zig. Keep compiler availability, artifact cleanup,
-  cooldown, timeout, profile, repetitions and matrix dimensions identical;
-  do not treat child process wall-clock as solver timing.
+  interval because the current resolver is process-local. Timeout/progress
+  classification is enabled for every route.
+- [ ] Run and archive the process-isolated release matrix for Lambdify,
+  ExprLegacy-AOT and AtomView-AOT across Rust, C/tcc, C/gcc and Zig. Keep
+  compiler availability, artifact cleanup, cooldown, timeout, profile,
+  repetitions and matrix dimensions identical; do not treat child process
+  wall-clock as solver timing.
 - [ ] Report cold E2E, warm `RequirePrebuilt` solve and callback-only timings
   independently. Include symbolic preparation, fixture generation,
   materialization, compile, link, binding, residual, Jacobian, linear solve,
   total wall-clock, integer trajectory counters, allocations/copies and
   numerical drift.
+- [ ] Add an explicit continuation/reuse matrix for parameterized tasks. A
+  numeric parameter rebind with unchanged parameter schema/order,
+  mesh/layout, boundary structure and Jacobian pattern must reuse the compiled
+  artifact and refresh only numeric runtime state. Record artifact key,
+  cache hit/miss, build/link attempts, reconnect versus compile, stale-factor
+  invalidation and per-solve counters. A schema/layout/pattern change must
+  invalidate or reject `RequirePrebuilt`; it must never silently reuse the old
+  callback or factor. Cover both same-process reuse and a separate producer /
+  consumer process handoff.
+- [ ] Clarify the compact-Banded `BuildIfMissing` cold row. The observed
+  near-zero Banded build row is not evidence of a cheap compilation until the
+  report proves whether it was a cache hit, an already materialized artifact,
+  or a genuinely cold build. Do not compare it with Sparse cold preparation
+  until build/link attempts and artifact provenance are reported uniformly.
 - [ ] Use small Dense only as a correctness/control case; use production
   Sparse and compact Banded for large cases. Start with the existing combustion
   and large diffusion/reaction fixtures, then add one wider-band or more
@@ -1488,6 +1627,39 @@ reviving the old generated path unchanged.
 - [ ] Preserve every historical ExprLegacy/AOT and AtomView/AOT row. New
   reports must be dated and profile-aware; a debug smoke report must never
   overwrite a release baseline.
+
+### Fresh release evidence recorded on 2026-09-26 02:49-02:53 local time
+
+- [x] Confirm production trajectory parity for ExprLegacy-AOT,
+  AtomViewNative-AOT and AtomViewNative-Lambdify on Sparse and Banded. The
+  fresh release reports show zero time/state drift, identical retry traces and
+  identical integer counters.
+- [x] Confirm parameter rebind, repeated warm solve, sparse order, compact
+  Banded slots and chunk-policy callback parity. Rebound/fresh counters match
+  and no stale callback/factor is observed.
+- [x] Re-run the AOT-vs-Lambdify callback and warm solver matrices after the
+  Pow lowering fix. AOT callbacks are materially faster at large dimensions,
+  while cold full-solve time remains preparation-bound.
+- [x] Re-run the AOT AtomView-vs-ExprLegacy residual boundary matrix. The
+  previous multi-times Atom residual anomaly is gone after exact `Pow(base, 2)`
+  lowering; the remaining roughly `16-18%` Atom source-size/tail difference is
+  a separate low-priority codegen target.
+- [x] Capture the first process-isolated apple-to-apple release matrix. Warm
+  AOT solve/callback stages are broadly near-parity across available
+  toolchains, but the matrix is still a fixed scalar Banded workload.
+- [x] Capture whole-versus-chunked warm AOT on Sparse/Banded. Chunking improves
+  warm stages modestly, but does not yet overcome cold preparation.
+- [ ] Explain and reduce cold preparation/materialization before claiming AOT
+  full-solve break-even. The fresh reports still show this as the dominant
+  production cost, especially for Sparse.
+- [ ] Finish process-isolated producer/consumer continuation with artifact
+  provenance, cache hit/miss, build/link attempts and parameter rebind.
+- [ ] Investigate the cold Zig build anomaly independently from warm callback
+  performance; do not use its compile time as evidence against AtomView runtime
+  correctness.
+- [ ] Add a multi-worker Auto/Parallel release sweep on larger Sparse/Banded
+  workloads. The current Auto captures are valid sequential fallback checks,
+  not a portable cross-machine break-even estimate.
 
 ### Exit gate and current stop condition
 

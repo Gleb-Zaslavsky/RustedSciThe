@@ -6,8 +6,8 @@
 //! a `HashMap` so stage names cannot allocate during callback execution.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Runtime policy for independent Lambdify residual/Jacobian entries.
@@ -28,8 +28,6 @@ pub enum IvpLambdifyExecutionPolicy {
 }
 
 impl IvpLambdifyExecutionPolicy {
-    const AUTO_WORK_PER_TASK: usize = 8;
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::Sequential => "sequential",
@@ -50,9 +48,14 @@ impl IvpLambdifyExecutionPolicy {
             Self::Parallel { min_work } => work >= min_work,
             Self::Auto { min_work } => {
                 let workers = rayon::current_num_threads().max(1);
+                let calibrated_min_work = crate::symbolic::codegen::codegen_orchestrator::
+                    machine_min_work_per_parallel_job();
+                let effective_min_work = min_work.max(calibrated_min_work);
+                let useful_tasks = parallel_tasks.min(workers);
                 workers > 1
-                    && parallel_tasks > 1
-                    && work >= min_work.max(workers.saturating_mul(Self::AUTO_WORK_PER_TASK))
+                    && useful_tasks > 1
+                    && work >= effective_min_work.saturating_mul(2)
+                    && work / useful_tasks >= effective_min_work
             }
         }
     }
@@ -232,10 +235,17 @@ pub enum IvpColdStage {
     AotLowering,
     AotSourceGeneration,
     AotPublication,
+    SolverPreparation,
+    BridgePreparation,
+    NativeCallbackPreparation,
+    /// Atom-native residual graph/evaluator preparation only.
+    AtomResidualPreparation,
+    /// Atom-native Jacobian/layout preparation only.
+    AtomJacobianPreparation,
 }
 
 impl IvpColdStage {
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 27;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -260,7 +270,12 @@ impl IvpColdStage {
             18 => Self::AotCacheLookup,
             19 => Self::AotLowering,
             20 => Self::AotSourceGeneration,
-            _ => Self::AotPublication,
+            21 => Self::AotPublication,
+            22 => Self::SolverPreparation,
+            23 => Self::BridgePreparation,
+            24 => Self::NativeCallbackPreparation,
+            25 => Self::AtomResidualPreparation,
+            _ => Self::AtomJacobianPreparation,
         }
     }
 
@@ -288,6 +303,11 @@ impl IvpColdStage {
             Self::AotLowering => "aot_lowering",
             Self::AotSourceGeneration => "aot_source_generation",
             Self::AotPublication => "aot_publication",
+            Self::SolverPreparation => "solver_preparation",
+            Self::BridgePreparation => "bridge_preparation",
+            Self::NativeCallbackPreparation => "native_callback_preparation",
+            Self::AtomResidualPreparation => "atom_residual_preparation",
+            Self::AtomJacobianPreparation => "atom_jacobian_preparation",
         }
     }
 }
@@ -323,10 +343,14 @@ pub enum IvpWarmStage {
     AotWorkerExecution,
     AotArgumentCopy,
     AotOutputWrite,
+    NativeEngineSetup,
+    NativeResultAssembly,
+    Solve,
+    Summary,
 }
 
 impl IvpWarmStage {
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 25;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -350,7 +374,11 @@ impl IvpWarmStage {
             17 => Self::AotChunkDispatch,
             18 => Self::AotWorkerExecution,
             19 => Self::AotArgumentCopy,
-            _ => Self::AotOutputWrite,
+            20 => Self::AotOutputWrite,
+            21 => Self::NativeEngineSetup,
+            22 => Self::NativeResultAssembly,
+            23 => Self::Solve,
+            _ => Self::Summary,
         }
     }
 
@@ -377,6 +405,10 @@ impl IvpWarmStage {
             Self::AotWorkerExecution => "aot_worker_execution",
             Self::AotArgumentCopy => "aot_argument_copy",
             Self::AotOutputWrite => "aot_output_write",
+            Self::NativeEngineSetup => "native_engine_setup",
+            Self::NativeResultAssembly => "native_result_assembly",
+            Self::Solve => "solve",
+            Self::Summary => "summary",
         }
     }
 }
@@ -397,6 +429,8 @@ pub struct IvpTelemetrySnapshot {
     pub lambdify_execution_policy: IvpLambdifyExecutionPolicy,
     /// Rayon worker count observed when the evaluator policy was selected.
     pub lambdify_worker_count: usize,
+    /// Machine-calibrated minimum work per Auto parallel job.
+    pub lambdify_auto_min_work_per_job: usize,
     pub matrix_backend: IvpTelemetryMatrixBackend,
     pub state_dimension: usize,
     pub residual_dimension: usize,
@@ -476,6 +510,11 @@ impl fmt::Display for IvpTelemetrySnapshot {
             formatter,
             "- lambdify_worker_count: `{}`",
             self.lambdify_worker_count
+        )?;
+        writeln!(
+            formatter,
+            "- lambdify_auto_min_work_per_job: `{}`",
+            self.lambdify_auto_min_work_per_job
         )?;
         writeln!(
             formatter,
@@ -594,6 +633,7 @@ struct IvpTelemetryInner {
     lambdify_execution_policy: AtomicU8,
     lambdify_execution_min_work: AtomicU64,
     lambdify_worker_count: AtomicU64,
+    lambdify_auto_min_work_per_job: AtomicU64,
     matrix_backend: AtomicU8,
     state_dimension: AtomicU64,
     residual_dimension: AtomicU64,
@@ -650,6 +690,7 @@ impl Default for IvpTelemetryInner {
             )),
             lambdify_execution_min_work: AtomicU64::new(0),
             lambdify_worker_count: AtomicU64::new(0),
+            lambdify_auto_min_work_per_job: AtomicU64::new(0),
             matrix_backend: AtomicU8::new(IvpTelemetryMatrixBackend::Unknown as u8),
             state_dimension: AtomicU64::new(0),
             residual_dimension: AtomicU64::new(0),
@@ -715,6 +756,25 @@ pub struct IvpTelemetryScope {
     telemetry: IvpTelemetry,
     stage: IvpWarmStage,
     started: Option<Instant>,
+}
+
+/// RAII guard for a detailed cold-stage scope.
+///
+/// Preparation frequently returns early on typed errors. Keeping the scope
+/// here makes partial preparation reports complete without adding error-path
+/// bookkeeping to every caller.
+#[must_use = "a telemetry scope must stay alive until the measured operation ends"]
+pub struct IvpColdTelemetryScope {
+    telemetry: IvpTelemetry,
+    stage: IvpColdStage,
+    started: Option<Instant>,
+}
+
+impl Drop for IvpColdTelemetryScope {
+    fn drop(&mut self) {
+        self.telemetry
+            .record_cold_stage(self.stage, self.started.take());
+    }
 }
 
 impl Drop for IvpTelemetryScope {
@@ -803,6 +863,17 @@ impl IvpTelemetry {
             inner
                 .lambdify_worker_count
                 .store(rayon::current_num_threads() as u64, Ordering::Relaxed);
+            let calibrated = match policy {
+                IvpLambdifyExecutionPolicy::Auto { .. } => {
+                    crate::symbolic::codegen::codegen_orchestrator::
+                        machine_min_work_per_parallel_job()
+                }
+                IvpLambdifyExecutionPolicy::Sequential
+                | IvpLambdifyExecutionPolicy::Parallel { .. } => 0,
+            };
+            inner
+                .lambdify_auto_min_work_per_job
+                .store(calibrated as u64, Ordering::Relaxed);
         }
     }
 
@@ -848,6 +919,14 @@ impl IvpTelemetry {
             telemetry: self.clone(),
             stage,
             started: self.start_warm_stage(stage),
+        }
+    }
+
+    pub fn scoped_cold_stage(&self, stage: IvpColdStage) -> IvpColdTelemetryScope {
+        IvpColdTelemetryScope {
+            telemetry: self.clone(),
+            stage,
+            started: self.start_cold_stage(stage),
         }
     }
 
@@ -1022,6 +1101,7 @@ impl IvpTelemetry {
                 execution: IvpTelemetryExecution::Lambdify,
                 lambdify_execution_policy: IvpLambdifyExecutionPolicy::Sequential,
                 lambdify_worker_count: 0,
+                lambdify_auto_min_work_per_job: 0,
                 matrix_backend: IvpTelemetryMatrixBackend::Unknown,
                 state_dimension: 0,
                 residual_dimension: 0,
@@ -1084,6 +1164,9 @@ impl IvpTelemetry {
                 inner.lambdify_execution_min_work.load(Ordering::Relaxed) as usize,
             ),
             lambdify_worker_count: inner.lambdify_worker_count.load(Ordering::Relaxed) as usize,
+            lambdify_auto_min_work_per_job: inner
+                .lambdify_auto_min_work_per_job
+                .load(Ordering::Relaxed) as usize,
             matrix_backend: decode_matrix_backend(inner.matrix_backend.load(Ordering::Relaxed)),
             state_dimension: inner.state_dimension.load(Ordering::Relaxed) as usize,
             residual_dimension: inner.residual_dimension.load(Ordering::Relaxed) as usize,
@@ -1360,6 +1443,14 @@ mod tests {
     #[test]
     fn aot_cold_stage_labels_are_stable_and_typed() {
         assert_eq!(IvpColdStage::AtomPreparation.label(), "atom_preparation");
+        assert_eq!(
+            IvpColdStage::AtomResidualPreparation.label(),
+            "atom_residual_preparation"
+        );
+        assert_eq!(
+            IvpColdStage::AtomJacobianPreparation.label(),
+            "atom_jacobian_preparation"
+        );
         assert_eq!(IvpColdStage::AotCacheLookup.label(), "aot_cache_lookup");
         assert_eq!(IvpColdStage::AotLowering.label(), "aot_lowering");
         assert_eq!(
@@ -1367,7 +1458,16 @@ mod tests {
             "aot_source_generation"
         );
         assert_eq!(IvpColdStage::AotPublication.label(), "aot_publication");
-        assert_eq!(IvpColdStage::COUNT, 22);
+        assert_eq!(IvpColdStage::SolverPreparation.label(), "solver_preparation");
+        assert_eq!(IvpColdStage::BridgePreparation.label(), "bridge_preparation");
+        assert_eq!(
+            IvpColdStage::NativeCallbackPreparation.label(),
+            "native_callback_preparation"
+        );
+        assert_eq!(IvpColdStage::COUNT, 27);
+        assert_eq!(IvpWarmStage::Solve.label(), "solve");
+        assert_eq!(IvpWarmStage::Summary.label(), "summary");
+        assert_eq!(IvpWarmStage::COUNT, 25);
     }
 
     #[test]
@@ -1383,6 +1483,19 @@ mod tests {
                 .calls,
             1
         );
+    }
+
+    #[test]
+    fn scoped_cold_stage_closes_on_drop() {
+        let telemetry = IvpTelemetry::detailed();
+        {
+            let _scope = telemetry.scoped_cold_stage(IvpColdStage::SolverPreparation);
+        }
+        let stage = telemetry
+            .snapshot()
+            .cold_stage(IvpColdStage::SolverPreparation);
+        assert_eq!(stage.calls, 1);
+        assert!(stage.elapsed >= Duration::ZERO);
     }
 
     #[test]
@@ -1406,40 +1519,27 @@ mod tests {
             IvpColdStage::ResidualLambdification,
             Duration::from_micros(2),
         );
-        telemetry.record_cold_stage_duration(
-            IvpColdStage::AotCacheLookup,
-            Duration::from_micros(5),
-        );
-        telemetry.record_cold_stage_duration(
-            IvpColdStage::AotLowering,
-            Duration::from_micros(6),
-        );
+        telemetry
+            .record_cold_stage_duration(IvpColdStage::AotCacheLookup, Duration::from_micros(5));
+        telemetry.record_cold_stage_duration(IvpColdStage::AotLowering, Duration::from_micros(6));
         telemetry.record_cold_stage_duration(
             IvpColdStage::AotSourceGeneration,
             Duration::from_micros(7),
         );
-        telemetry.record_cold_stage_duration(
-            IvpColdStage::AotPublication,
-            Duration::from_micros(8),
-        );
+        telemetry
+            .record_cold_stage_duration(IvpColdStage::AotPublication, Duration::from_micros(8));
         telemetry
             .record_warm_stage_duration(IvpWarmStage::ResidualEvaluation, Duration::from_micros(4));
         telemetry.record_warm_stage_duration(
             IvpWarmStage::ControllerPredictor,
             Duration::from_micros(1),
         );
-        telemetry.record_warm_stage_duration(
-            IvpWarmStage::AotWorkerExecution,
-            Duration::from_micros(9),
-        );
-        telemetry.record_warm_stage_duration(
-            IvpWarmStage::AotArgumentCopy,
-            Duration::from_micros(10),
-        );
-        telemetry.record_warm_stage_duration(
-            IvpWarmStage::AotOutputWrite,
-            Duration::from_micros(11),
-        );
+        telemetry
+            .record_warm_stage_duration(IvpWarmStage::AotWorkerExecution, Duration::from_micros(9));
+        telemetry
+            .record_warm_stage_duration(IvpWarmStage::AotArgumentCopy, Duration::from_micros(10));
+        telemetry
+            .record_warm_stage_duration(IvpWarmStage::AotOutputWrite, Duration::from_micros(11));
 
         let snapshot = telemetry.snapshot();
         assert!(snapshot.lambdify_worker_count >= 1);
@@ -1447,6 +1547,8 @@ mod tests {
         assert!(report.contains("route: `atom_view_expr_compat`"));
         assert!(report.contains("lambdify_execution_policy: `auto(min_work=32)`"));
         assert!(report.contains("lambdify_worker_count: `"));
+        assert!(snapshot.lambdify_auto_min_work_per_job >= 1);
+        assert!(report.contains("lambdify_auto_min_work_per_job: `"));
         assert!(report.contains("matrix_backend: `banded`"));
         assert!(report.contains("state_dimension: `4`"));
         assert!(report.contains("| `residual_requests` | 1 |"));
@@ -1457,11 +1559,16 @@ mod tests {
         assert!(report.contains("| `aot_lowering` | 1 | 0.006000 |"));
         assert!(report.contains("| `aot_source_generation` | 1 | 0.007000 |"));
         assert!(report.contains("| `aot_publication` | 1 | 0.008000 |"));
+        assert!(report.contains("| `solver_preparation` | 0 |"));
+        assert!(report.contains("| `bridge_preparation` | 0 |"));
+        assert!(report.contains("| `native_callback_preparation` | 0 |"));
         assert!(report.contains("| `residual_evaluation` | 1 | 0.004000 |"));
         assert!(report.contains("| `controller_predictor` | 1 | 0.001000 |"));
         assert!(report.contains("| `aot_worker_execution` | 1 | 0.009000 |"));
         assert!(report.contains("| `aot_argument_copy` | 1 | 0.010000 |"));
         assert!(report.contains("| `aot_output_write` | 1 | 0.011000 |"));
+        assert!(report.contains("| `solve` | 0 |"));
+        assert!(report.contains("| `summary` | 0 |"));
         assert!(report.contains("| `parallel_dispatches` | 1 |"));
         assert!(report.contains("| `sequential_dispatches` | 1 |"));
         assert!(report.contains("| `aot_build_attempts` | 0 |"));

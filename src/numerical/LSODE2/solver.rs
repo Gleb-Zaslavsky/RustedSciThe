@@ -11,24 +11,31 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
-    run_native_integration_for_method_with_policy,
+    run_native_integration_for_method_with_policy_and_optional_callbacks,
+    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
+    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
 };
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
+    NativeJacobianStorage,
 };
-use super::native_preflight::{Lsode2NativeStepProbeSummary, run_native_step_preflight};
-use super::native_step_engine::Lsode2NativeStepMethod;
+use super::native_preflight::{
+    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
+    Lsode2NativeStepProbeSummary,
+};
+use super::native_step_engine::{
+    Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
+};
 use super::statistics::Lsode2NativeStatistics;
+use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
+use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
+use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
+use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
-use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
-use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
-use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
-use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -278,6 +285,8 @@ pub struct Lsode2Solver {
     inner: BdfOdeSolver,
     algorithm: Lsode2AlgorithmController,
     backend_prepared: bool,
+    bridge_prepared: bool,
+    native_callbacks: Option<PreparedNativeCallbacks>,
     native_statistics: Lsode2NativeStatistics,
     native_step_probe: Option<Lsode2NativeStepProbeSummary>,
     native_integration_preview: Option<Lsode2NativeIntegrationSummary>,
@@ -346,6 +355,8 @@ impl Lsode2Solver {
             resolved_plan,
             inner,
             backend_prepared: false,
+            bridge_prepared: false,
+            native_callbacks: None,
             native_statistics: Lsode2NativeStatistics::default(),
             native_step_probe: None,
             native_integration_preview: None,
@@ -377,13 +388,46 @@ impl Lsode2Solver {
     /// prepared backend.
     pub fn prepare(&mut self) -> Result<(), Lsode2Error> {
         if !self.backend_prepared {
+            let _prepare_scope = self
+                .config
+                .telemetry
+                .scoped_cold_stage(IvpColdStage::SolverPreparation);
             let started = Instant::now();
-            self.inner.try_generate()?;
+            let bridge_required_before_solve = matches!(
+                self.config.native_execution,
+                Lsode2NativeExecutionConfig::BridgeSolve
+                    | Lsode2NativeExecutionConfig::Disabled
+                    | Lsode2NativeExecutionConfig::ProbeBeforeBridge { .. }
+            );
+            if bridge_required_before_solve {
+                self.prepare_bridge()?;
+            }
+            {
+                let _native_scope = self
+                    .config
+                    .telemetry
+                    .scoped_cold_stage(IvpColdStage::NativeCallbackPreparation);
+                self.native_callbacks =
+                    Lsode2NativeStepEngine::prepare_callbacks_for_config(&self.config)
+                        .map_err(Lsode2Error::from)?;
+            }
             self.native_statistics
                 .record_backend_prepare_duration(started.elapsed());
             self.native_statistics
                 .sync_from_bridge(&self.inner.get_statistics());
             self.backend_prepared = true;
+        }
+        Ok(())
+    }
+
+    fn prepare_bridge(&mut self) -> Result<(), Lsode2Error> {
+        if !self.bridge_prepared {
+            let _bridge_scope = self
+                .config
+                .telemetry
+                .scoped_cold_stage(IvpColdStage::BridgePreparation);
+            self.inner.try_generate()?;
+            self.bridge_prepared = true;
         }
         Ok(())
     }
@@ -406,12 +450,14 @@ impl Lsode2Solver {
                 max_step_attempts,
                 max_accepted_steps,
             } => {
+                self.prepare()?;
                 if self.should_run_switch_probe_before_full_native_solve(decision) {
                     self.run_switch_probe_before_full_native_solve(decision)?;
                     decision = self.algorithm_switch_decision_stateful();
                     self.algorithm.record_switch_decision(decision);
                     self.native_statistics.record_algorithm_decision(&decision);
                 }
+                let _solve_scope = self.config.telemetry.scoped_warm_stage(IvpWarmStage::Solve);
                 let started = Instant::now();
                 let limits =
                     Lsode2NativeIntegrationLimits::new(max_step_attempts, max_accepted_steps);
@@ -429,6 +475,10 @@ impl Lsode2Solver {
                 if let Some(solve_summary) = maybe_solve_summary {
                     self.native_step_probe =
                         Some(native_step_probe_from_integration_summary(&solve_summary));
+                    let _result_assembly_scope = self
+                        .config
+                        .telemetry
+                        .scoped_warm_stage(IvpWarmStage::NativeResultAssembly);
                     self.native_override_result =
                         Some(native_result_from_integration_summary(&solve_summary));
                     self.native_override_status = Some(
@@ -443,7 +493,7 @@ impl Lsode2Solver {
                 // Keep bridge path reachable as an explicit fallback when
                 // native faithful integration is unavailable for a given route.
                 run_bridge = true;
-                self.prepare()?;
+                self.prepare_bridge()?;
                 self.native_step_probe = self.run_native_step_probe()?;
             }
             Lsode2NativeExecutionConfig::BridgeSolve | Lsode2NativeExecutionConfig::Disabled => {
@@ -475,6 +525,7 @@ impl Lsode2Solver {
         }
 
         let started = Instant::now();
+        let _solve_scope = self.config.telemetry.scoped_warm_stage(IvpWarmStage::Solve);
         let bridge_accepted_before = self.native_statistics.bridge_accepted_steps;
         self.inner.main_loop();
         self.native_statistics
@@ -697,10 +748,11 @@ impl Lsode2Solver {
             let native_statistics = &mut self.native_statistics;
             let last_native_switch_telemetry = &mut self.last_native_switch_telemetry;
             let switch_telemetry_hints = self.switch_telemetry_hints;
-            run_native_integration_for_method_with_policy(
+            run_native_integration_for_method_with_policy_and_optional_callbacks(
                 config,
                 limits,
                 method,
+                self.native_callbacks.as_ref(),
                 |report, current| {
                     let family = method_family_from_native_step_method(current);
                     native_statistics
@@ -747,14 +799,31 @@ impl Lsode2Solver {
             )
             .map_err(Lsode2Error::from)?
         } else {
+            let callbacks = self.native_callbacks.as_ref();
             match method {
-                Lsode2NativeStepMethod::BdfLike => {
-                    run_native_integration(&self.config, limits).map_err(Lsode2Error::from)?
-                }
-                Lsode2NativeStepMethod::AdamsLike => {
-                    run_native_integration_for_method(&self.config, limits, method)
-                        .map_err(Lsode2Error::from)?
-                }
+                Lsode2NativeStepMethod::BdfLike => match callbacks {
+                    Some(callbacks) => run_native_integration_for_method_with_prepared_callbacks(
+                        &self.config,
+                        limits,
+                        method,
+                        callbacks,
+                    )
+                    .map_err(Lsode2Error::from)?,
+                    None => {
+                        run_native_integration(&self.config, limits).map_err(Lsode2Error::from)?
+                    }
+                },
+                Lsode2NativeStepMethod::AdamsLike => match callbacks {
+                    Some(callbacks) => run_native_integration_for_method_with_prepared_callbacks(
+                        &self.config,
+                        limits,
+                        method,
+                        callbacks,
+                    )
+                    .map_err(Lsode2Error::from)?,
+                    None => run_native_integration_for_method(&self.config, limits, method)
+                        .map_err(Lsode2Error::from)?,
+                },
             }
         };
         if let Some(summary) = &outcome.summary {
@@ -953,6 +1022,10 @@ impl Lsode2Solver {
     /// the internal `(t_result, y_result)` layout just to print final values and
     /// counters.
     pub fn summary(&self) -> Lsode2SolveSummary {
+        let _summary_scope = self
+            .config
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::Summary);
         let (t, y) = self.get_result();
         let final_t = (!t.is_empty()).then(|| t[t.len() - 1]);
         let final_y = (y.nrows() > 0).then(|| {
@@ -1015,13 +1088,21 @@ impl Lsode2Solver {
         self.config.equation_parameter_values = Some(values.clone());
         self.inner.set_parameter_values(values)?;
         self.backend_prepared = false;
+        self.bridge_prepared = false;
+        self.native_callbacks = None;
         Ok(())
     }
 
     fn run_native_step_probe(
         &mut self,
     ) -> Result<Option<Lsode2NativeStepProbeSummary>, Lsode2Error> {
-        let outcome = run_native_step_preflight(&self.config).map_err(Lsode2Error::from)?;
+        let outcome = match self.native_callbacks.as_ref() {
+            Some(callbacks) => {
+                run_native_step_preflight_with_prepared_callbacks(&self.config, callbacks)
+            }
+            None => run_native_step_preflight(&self.config),
+        }
+        .map_err(Lsode2Error::from)?;
         merge_native_statistics(&mut self.native_statistics, &outcome.statistics);
         if let Some(summary) = outcome.summary.as_ref() {
             if self.lsoda_probe_flow_enabled() {
@@ -1423,7 +1504,46 @@ mod tests {
     use crate::numerical::LSODE2::{
         Lsode2ControllerConfig, Lsode2MethodFamily, Lsode2SwitchReason,
     };
+    use crate::symbolic::ivp_telemetry::IvpTelemetry;
     use crate::symbolic::symbolic_engine::Expr;
+
+    #[test]
+    fn native_prepare_defers_bridge_generation_until_fallback() {
+        let telemetry = IvpTelemetry::detailed();
+        let config = Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.02,
+            1.0e-6,
+            1.0e-8,
+        )
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(64, 64)
+        .with_telemetry(telemetry.clone());
+        let mut solver = Lsode2Solver::new(config).expect("native test config should build");
+
+        solver.prepare().expect("native preparation should succeed");
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(
+            snapshot.cold_stage(IvpColdStage::SolverPreparation).calls,
+            1
+        );
+        assert_eq!(
+            snapshot
+                .cold_stage(IvpColdStage::NativeCallbackPreparation)
+                .calls,
+            1
+        );
+        assert_eq!(
+            snapshot.cold_stage(IvpColdStage::BridgePreparation).calls,
+            0
+        );
+    }
 
     #[test]
     fn evaluation_telemetry_uses_bridge_scope_for_bridge_bdf_counters() {

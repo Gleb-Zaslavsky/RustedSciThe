@@ -6,7 +6,11 @@
 
 use super::algorithm::Lsode2SwitchTelemetry;
 use super::config::Lsode2ProblemConfig;
-use super::native_integration::{Lsode2NativeIntegrationLimits, run_native_integration};
+use super::native_integration::{
+    Lsode2NativeIntegrationLimits, run_native_integration,
+    run_native_integration_for_method_with_prepared_callbacks,
+};
+use super::native_step_engine::{Lsode2NativeStepMethod, PreparedNativeCallbacks};
 use super::statistics::Lsode2NativeStatistics;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 
@@ -34,13 +38,35 @@ pub struct Lsode2NativePreflightOutcome {
 pub fn run_native_step_preflight(
     config: &Lsode2ProblemConfig,
 ) -> Result<Lsode2NativePreflightOutcome, IvpBackendError> {
-    let outcome = run_native_integration(
-        config,
-        Lsode2NativeIntegrationLimits::new(
-            max_native_preflight_step_attempts(),
-            max_native_preflight_accepted_steps(),
-        ),
-    )?;
+    let outcome = run_native_step_preflight_with_optional_callbacks(config, None)?;
+
+    Ok(outcome)
+}
+
+pub(crate) fn run_native_step_preflight_with_prepared_callbacks(
+    config: &Lsode2ProblemConfig,
+    callbacks: &PreparedNativeCallbacks,
+) -> Result<Lsode2NativePreflightOutcome, IvpBackendError> {
+    run_native_step_preflight_with_optional_callbacks(config, Some(callbacks))
+}
+
+fn run_native_step_preflight_with_optional_callbacks(
+    config: &Lsode2ProblemConfig,
+    callbacks: Option<&PreparedNativeCallbacks>,
+) -> Result<Lsode2NativePreflightOutcome, IvpBackendError> {
+    let limits = Lsode2NativeIntegrationLimits::new(
+        max_native_preflight_step_attempts(),
+        max_native_preflight_accepted_steps(),
+    );
+    let outcome = match callbacks {
+        Some(callbacks) => run_native_integration_for_method_with_prepared_callbacks(
+            config,
+            limits,
+            Lsode2NativeStepMethod::BdfLike,
+            callbacks,
+        )?,
+        None => run_native_integration(config, limits)?,
+    };
 
     Ok(Lsode2NativePreflightOutcome {
         summary: outcome.summary.map(|summary| Lsode2NativeStepProbeSummary {

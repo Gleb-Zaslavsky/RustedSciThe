@@ -10,6 +10,7 @@ use super::config::Lsode2ProblemConfig;
 use super::config::{Lsode2StopComparator, Lsode2StopCondition};
 use super::native_step_engine::{
     Lsode2NativeStepAttemptReport, Lsode2NativeStepEngine, Lsode2NativeStepMethod,
+    PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
 use crate::symbolic::ivp_telemetry::IvpWarmStage;
@@ -93,6 +94,65 @@ pub fn run_native_integration_for_method_with_policy<F>(
     config: &Lsode2ProblemConfig,
     limits: Lsode2NativeIntegrationLimits,
     method: Lsode2NativeStepMethod,
+    next_method_policy: F,
+) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
+where
+    F: FnMut(
+        &Lsode2NativeStepAttemptReport,
+        Lsode2NativeStepMethod,
+    ) -> Option<Lsode2NativeStepMethod>,
+{
+    run_native_integration_for_method_with_policy_and_optional_callbacks(
+        config,
+        limits,
+        method,
+        None,
+        next_method_policy,
+    )
+}
+
+pub(crate) fn run_native_integration_for_method_with_policy_and_optional_callbacks<F>(
+    config: &Lsode2ProblemConfig,
+    limits: Lsode2NativeIntegrationLimits,
+    method: Lsode2NativeStepMethod,
+    callbacks: Option<&PreparedNativeCallbacks>,
+    next_method_policy: F,
+) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
+where
+    F: FnMut(
+        &Lsode2NativeStepAttemptReport,
+        Lsode2NativeStepMethod,
+    ) -> Option<Lsode2NativeStepMethod>,
+{
+    run_native_integration_for_method_with_policy_and_callbacks(
+        config,
+        limits,
+        method,
+        callbacks,
+        next_method_policy,
+    )
+}
+
+pub(crate) fn run_native_integration_for_method_with_prepared_callbacks(
+    config: &Lsode2ProblemConfig,
+    limits: Lsode2NativeIntegrationLimits,
+    method: Lsode2NativeStepMethod,
+    callbacks: &PreparedNativeCallbacks,
+) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError> {
+    run_native_integration_for_method_with_policy_and_callbacks(
+        config,
+        limits,
+        method,
+        Some(callbacks),
+        |_, _| None,
+    )
+}
+
+fn run_native_integration_for_method_with_policy_and_callbacks<F>(
+    config: &Lsode2ProblemConfig,
+    limits: Lsode2NativeIntegrationLimits,
+    method: Lsode2NativeStepMethod,
+    callbacks: Option<&PreparedNativeCallbacks>,
     mut next_method_policy: F,
 ) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
 where
@@ -101,17 +161,28 @@ where
         Lsode2NativeStepMethod,
     ) -> Option<Lsode2NativeStepMethod>,
 {
-    let mut engine = match Lsode2NativeStepEngine::from_problem_config_with_method(config, method) {
-        Ok(Some(engine)) => engine,
-        Ok(None) => {
-            return Ok(Lsode2NativeIntegrationOutcome {
-                summary: None,
-                statistics: Lsode2NativeStatistics::default(),
-            });
-        }
-        Err(error) => {
-            config.telemetry.record_error();
-            return Err(error);
+    let mut engine = {
+        let _engine_setup_scope = config
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::NativeEngineSetup);
+        let engine_result = match callbacks {
+            Some(callbacks) => Lsode2NativeStepEngine::from_prepared_callbacks_with_method(
+                config, method, callbacks,
+            ),
+            None => Lsode2NativeStepEngine::from_problem_config_with_method(config, method),
+        };
+        match engine_result {
+            Ok(Some(engine)) => engine,
+            Ok(None) => {
+                return Ok(Lsode2NativeIntegrationOutcome {
+                    summary: None,
+                    statistics: Lsode2NativeStatistics::default(),
+                });
+            }
+            Err(error) => {
+                config.telemetry.record_error();
+                return Err(error);
+            }
         }
     };
     let _controller_scope = config.telemetry.scoped_warm_stage(IvpWarmStage::Controller);
