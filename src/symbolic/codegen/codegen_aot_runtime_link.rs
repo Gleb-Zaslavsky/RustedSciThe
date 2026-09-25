@@ -11,8 +11,10 @@
 //! selection into ordinary residual/Jacobian callbacks.
 
 use crate::symbolic::codegen::codegen_aot_registry::RegisteredAotArtifact;
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry, IvpWarmStage};
 use libloading::Library;
 use log::warn;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -245,6 +247,113 @@ impl LinkedDenseAotBackend {
         self.jacobian_chunks = jacobian_chunks;
         self
     }
+
+    /// Invokes the whole dense residual callback through the typed ABI
+    /// boundary shared by all linked matrix layouts.
+    pub fn try_residual_eval(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), LinkedAotCallbackError> {
+        invoke_linked_callback(
+            "residual",
+            self.residual_len,
+            &*self.residual_eval,
+            args,
+            out,
+        )
+    }
+
+    /// Invokes the whole row-major dense Jacobian callback through the typed
+    /// ABI boundary. Dense output is always a complete matrix, even when its
+    /// symbolic source contains structural zeros.
+    pub fn try_jacobian_eval(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), LinkedAotCallbackError> {
+        let expected = self
+            .shape
+            .0
+            .checked_mul(self.shape.1)
+            .ok_or_else(|| LinkedAotCallbackError::InvalidLayout {
+                stage: "Jacobian",
+                message: format!(
+                    "dense shape {}x{} overflows the output length type",
+                    self.shape.0, self.shape.1
+                ),
+            })?;
+        invoke_linked_callback(
+            "Jacobian",
+            expected,
+            &*self.jacobian_eval,
+            args,
+            out,
+        )
+    }
+
+    /// Invokes one dense Jacobian chunk through the typed ABI boundary.
+    pub fn try_jacobian_chunk_eval(
+        &self,
+        chunk_index: usize,
+        args: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), LinkedAotCallbackError> {
+        let chunk = self.jacobian_chunks.get(chunk_index).ok_or(
+            LinkedAotCallbackError::ChunkIndex {
+                stage: "Jacobian",
+                index: chunk_index,
+                count: self.jacobian_chunks.len(),
+            },
+        )?;
+        invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out)
+    }
+
+    pub fn try_residual_eval_with_policy(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+        policy: IvpLambdifyExecutionPolicy,
+        telemetry: &IvpTelemetry,
+    ) -> Result<(), LinkedAotCallbackError> {
+        if self.residual_chunks.is_empty() {
+            return self.try_residual_eval(args, out);
+        }
+        execute_chunked_callbacks(
+            "residual",
+            self.residual_chunks.as_slice(),
+            args,
+            out,
+            policy,
+            telemetry,
+            |chunk| chunk.output_offset,
+            |chunk| chunk.output_len,
+            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+        )
+    }
+
+    pub fn try_jacobian_eval_with_policy(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+        policy: IvpLambdifyExecutionPolicy,
+        telemetry: &IvpTelemetry,
+    ) -> Result<(), LinkedAotCallbackError> {
+        if self.jacobian_chunks.is_empty() {
+            return self.try_jacobian_eval(args, out);
+        }
+        execute_chunked_callbacks(
+            "Jacobian",
+            self.jacobian_chunks.as_slice(),
+            args,
+            out,
+            policy,
+            telemetry,
+            |chunk| chunk.value_offset,
+            |chunk| chunk.value_len,
+            |chunk, args, out| invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out),
+        )
+    }
 }
 
 /// Process-local linked residual-only backend.
@@ -279,6 +388,47 @@ impl LinkedResidualAotBackend {
     pub fn with_chunked_evaluators(mut self, residual_chunks: Vec<LinkedResidualChunk>) -> Self {
         self.residual_chunks = residual_chunks;
         self
+    }
+
+    /// Invokes the whole residual callback through the typed output boundary.
+    ///
+    /// The generated ABI itself remains unchanged, but callers no longer need
+    /// to invoke the raw closure and trust its output length implicitly.
+    pub fn try_residual_eval(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), LinkedAotCallbackError> {
+        invoke_linked_callback(
+            "residual",
+            self.residual_len,
+            &*self.residual_eval,
+            args,
+            out,
+        )
+    }
+
+    pub fn try_residual_eval_with_policy(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+        policy: IvpLambdifyExecutionPolicy,
+        telemetry: &IvpTelemetry,
+    ) -> Result<(), LinkedAotCallbackError> {
+        if self.residual_chunks.is_empty() {
+            return self.try_residual_eval(args, out);
+        }
+        execute_chunked_callbacks(
+            "residual",
+            self.residual_chunks.as_slice(),
+            args,
+            out,
+            policy,
+            telemetry,
+            |chunk| chunk.output_offset,
+            |chunk| chunk.output_len,
+            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+        )
     }
 }
 
@@ -553,6 +703,52 @@ impl LinkedSparseAotBackend {
         )?;
         invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out)
     }
+
+    pub fn try_residual_eval_with_policy(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+        policy: IvpLambdifyExecutionPolicy,
+        telemetry: &IvpTelemetry,
+    ) -> Result<(), LinkedAotCallbackError> {
+        if self.residual_chunks.is_empty() {
+            return self.try_residual_eval(args, out);
+        }
+        execute_chunked_callbacks(
+            "residual",
+            self.residual_chunks.as_slice(),
+            args,
+            out,
+            policy,
+            telemetry,
+            |chunk| chunk.output_offset,
+            |chunk| chunk.output_len,
+            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+        )
+    }
+
+    pub fn try_jacobian_values_eval_with_policy(
+        &self,
+        args: &[f64],
+        out: &mut [f64],
+        policy: IvpLambdifyExecutionPolicy,
+        telemetry: &IvpTelemetry,
+    ) -> Result<(), LinkedAotCallbackError> {
+        if self.jacobian_value_chunks.is_empty() {
+            return self.try_jacobian_values_eval(args, out);
+        }
+        execute_chunked_callbacks(
+            "Jacobian",
+            self.jacobian_value_chunks.as_slice(),
+            args,
+            out,
+            policy,
+            telemetry,
+            |chunk| chunk.value_offset,
+            |chunk| chunk.value_len,
+            |chunk, args, out| invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out),
+        )
+    }
 }
 
 pub(crate) fn invoke_linked_callback(
@@ -581,6 +777,98 @@ pub(crate) fn invoke_linked_callback(
     if let Some(index) = out.iter().position(|value| !value.is_finite()) {
         return Err(LinkedAotCallbackError::NonFiniteOutput { stage, index });
     }
+    Ok(())
+}
+
+fn execute_chunked_callbacks<C, O, L, E>(
+    stage: &'static str,
+    chunks: &[C],
+    args: &[f64],
+    out: &mut [f64],
+    policy: IvpLambdifyExecutionPolicy,
+    telemetry: &IvpTelemetry,
+    offset: O,
+    len: L,
+    eval: E,
+) -> Result<(), LinkedAotCallbackError>
+where
+    C: Sync,
+    O: Fn(&C) -> usize + Sync,
+    L: Fn(&C) -> usize + Sync,
+    E: Fn(&C, &[f64], &mut [f64]) -> Result<(), LinkedAotCallbackError> + Sync,
+{
+    let parallel = policy.should_parallel_with_tasks(out.len(), chunks.len());
+    telemetry.record_aot_chunk_dispatch(parallel, chunks.len());
+    let dispatch_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotChunkDispatch);
+
+    if parallel {
+        let results: Result<Vec<(usize, Vec<f64>)>, LinkedAotCallbackError> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let start = offset(chunk);
+                let length = len(chunk);
+                let end = start.checked_add(length).ok_or_else(|| {
+                    LinkedAotCallbackError::InvalidLayout {
+                        stage,
+                        message: format!("chunk range overflows: offset={start}, len={length}"),
+                    }
+                })?;
+                if end > out.len() {
+                    return Err(LinkedAotCallbackError::InvalidLayout {
+                        stage,
+                        message: format!(
+                            "chunk range [{start}, {end}) exceeds output length {}",
+                            out.len()
+                        ),
+                    });
+                }
+                telemetry.record_aot_worker_callback();
+                let worker_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
+                let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+                let mut local = vec![0.0; length];
+                telemetry.record_allocation(length * std::mem::size_of::<f64>());
+                let result = eval(chunk, args, local.as_mut_slice());
+                drop(output_scope);
+                drop(worker_scope);
+                result.map(|()| (start, local))
+            })
+            .collect();
+        let results = results?;
+        let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+        for (start, local) in results {
+            let end = start + local.len();
+            out[start..end].copy_from_slice(local.as_slice());
+            telemetry.record_copy_bytes(local.len() * std::mem::size_of::<f64>());
+        }
+        drop(output_scope);
+    } else {
+        for chunk in chunks {
+            let start = offset(chunk);
+            let length = len(chunk);
+            let end = start.checked_add(length).ok_or_else(|| {
+                LinkedAotCallbackError::InvalidLayout {
+                    stage,
+                    message: format!("chunk range overflows: offset={start}, len={length}"),
+                }
+            })?;
+            if end > out.len() {
+                return Err(LinkedAotCallbackError::InvalidLayout {
+                    stage,
+                    message: format!(
+                        "chunk range [{start}, {end}) exceeds output length {}",
+                        out.len()
+                    ),
+                });
+            }
+            telemetry.record_aot_worker_callback();
+            let worker_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
+            let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+            eval(chunk, args, &mut out[start..end])?;
+            drop(output_scope);
+            drop(worker_scope);
+        }
+    }
+    drop(dispatch_scope);
     Ok(())
 }
 
@@ -1232,6 +1520,299 @@ mod tests {
                 .expect("fallible registry lookup should succeed")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn chunked_dense_policies_preserve_outputs_and_report_worker_scopes() {
+        let backend = LinkedDenseAotBackend::new(
+            "chunked_dense_policy_gate",
+            4,
+            (2, 2),
+            Arc::new(|args, out| out.fill(args[0])),
+            Arc::new(|args, out| out.fill(args[0] + args[1])),
+        )
+        .with_chunked_evaluators(
+            vec![
+                LinkedResidualChunk::new(
+                    0,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0] + 1.0;
+                        out[1] = args[1] + 1.0;
+                    }),
+                ),
+                LinkedResidualChunk::new(
+                    2,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0] + 2.0;
+                        out[1] = args[1] + 2.0;
+                    }),
+                ),
+            ],
+            vec![
+                LinkedDenseJacobianChunk::new(
+                    0,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0];
+                        out[1] = args[1];
+                    }),
+                ),
+                LinkedDenseJacobianChunk::new(
+                    2,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0] + args[1];
+                        out[1] = args[0] - args[1];
+                    }),
+                ),
+            ],
+        );
+        let args = [3.0, 4.0];
+        let expected_residual = [4.0, 5.0, 5.0, 6.0];
+        let expected_jacobian = [3.0, 4.0, 7.0, -1.0];
+
+        for policy in [
+            IvpLambdifyExecutionPolicy::Sequential,
+            IvpLambdifyExecutionPolicy::Parallel { min_work: 1 },
+            IvpLambdifyExecutionPolicy::Auto { min_work: 1 },
+        ] {
+            let telemetry = IvpTelemetry::detailed();
+            let mut residual = vec![0.0; 4];
+            let mut jacobian = vec![0.0; 4];
+            backend
+                .try_residual_eval_with_policy(&args, &mut residual, policy, &telemetry)
+                .expect("chunked residual policy must succeed");
+            backend
+                .try_jacobian_eval_with_policy(&args, &mut jacobian, policy, &telemetry)
+                .expect("chunked Jacobian policy must succeed");
+
+            assert_eq!(residual, expected_residual, "policy={policy:?}");
+            assert_eq!(jacobian, expected_jacobian, "policy={policy:?}");
+
+            let snapshot = telemetry.snapshot();
+            assert_eq!(snapshot.aot_chunk_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_chunks, 4, "policy={policy:?}");
+            assert_eq!(snapshot.aot_worker_callbacks, 4, "policy={policy:?}");
+            assert_eq!(
+                snapshot.copied_bytes,
+                snapshot.aot_parallel_dispatches * 4 * std::mem::size_of::<f64>() as u64,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.allocated_bytes,
+                snapshot.aot_parallel_dispatches * 4 * std::mem::size_of::<f64>() as u64,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.warm_stage(IvpWarmStage::AotChunkDispatch).calls,
+                2,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.warm_stage(IvpWarmStage::AotWorkerExecution).calls,
+                4,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.warm_stage(IvpWarmStage::AotOutputWrite).calls,
+                4 + snapshot.aot_parallel_dispatches,
+                "policy={policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunked_compact_banded_policies_preserve_slot_order_and_telemetry() {
+        let backend = LinkedSparseAotBackend::new(
+            "chunked_banded_policy_gate",
+            4,
+            (2, 2),
+            4,
+            Arc::new(|args, out| out.fill(args[0])),
+            Arc::new(|args, out| out.fill(args[0] + args[1])),
+        )
+        .with_banded_compact_layout(2, 2, 1, 1)
+        .with_chunked_evaluators(
+            vec![
+                LinkedResidualChunk::new(
+                    0,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0];
+                        out[1] = args[1];
+                    }),
+                ),
+                LinkedResidualChunk::new(
+                    2,
+                    2,
+                    Arc::new(|args, out| {
+                        out[0] = args[0] + 10.0;
+                        out[1] = args[1] + 10.0;
+                    }),
+                ),
+            ],
+            vec![
+                LinkedSparseJacobianChunk::new(
+                    0,
+                    3,
+                    Arc::new(|args, out| {
+                        out[0] = args[0];
+                        out[1] = args[1];
+                        out[2] = args[0] + args[1];
+                    }),
+                ),
+                LinkedSparseJacobianChunk::new(
+                    3,
+                    3,
+                    Arc::new(|args, out| {
+                        out[0] = args[0] + 10.0;
+                        out[1] = args[1] + 10.0;
+                        out[2] = args[0] - args[1];
+                    }),
+                ),
+            ],
+        );
+        let args = [2.0, 5.0];
+        let expected_residual = [2.0, 5.0, 12.0, 15.0];
+        let expected_slots = [2.0, 5.0, 7.0, 12.0, 15.0, -3.0];
+
+        for policy in [
+            IvpLambdifyExecutionPolicy::Sequential,
+            IvpLambdifyExecutionPolicy::Parallel { min_work: 1 },
+            IvpLambdifyExecutionPolicy::Auto { min_work: 1 },
+        ] {
+            let telemetry = IvpTelemetry::detailed();
+            let mut residual = vec![0.0; 4];
+            let mut slots = vec![0.0; 6];
+            backend
+                .try_residual_eval_with_policy(&args, &mut residual, policy, &telemetry)
+                .expect("chunked compact-Banded residual must succeed");
+            backend
+                .try_jacobian_values_eval_with_policy(&args, &mut slots, policy, &telemetry)
+                .expect("chunked compact-Banded values must succeed");
+
+            assert_eq!(residual, expected_residual, "policy={policy:?}");
+            assert_eq!(slots, expected_slots, "policy={policy:?}");
+            assert_eq!(backend.jacobian_output_len().unwrap(), 6);
+
+            let snapshot = telemetry.snapshot();
+            assert_eq!(snapshot.aot_chunk_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_chunks, 4, "policy={policy:?}");
+            assert_eq!(snapshot.aot_worker_callbacks, 4, "policy={policy:?}");
+            assert_eq!(
+                snapshot.copied_bytes,
+                (snapshot.aot_parallel_dispatches > 0) as u64
+                    * 10
+                    * std::mem::size_of::<f64>() as u64,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.allocated_bytes,
+                (snapshot.aot_parallel_dispatches > 0) as u64
+                    * 10
+                    * std::mem::size_of::<f64>() as u64,
+                "policy={policy:?}"
+            );
+            assert_eq!(
+                snapshot.warm_stage(IvpWarmStage::AotChunkDispatch).calls,
+                2,
+                "policy={policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_dense_callback_boundary_reports_panics_nonfinite_and_shape_errors() {
+        let panicking = LinkedDenseAotBackend::new(
+            "linked_dense_panicking_callback",
+            1,
+            (1, 1),
+            Arc::new(|_, _| panic!("generated residual failure")),
+            Arc::new(|_, out| out[0] = 1.0),
+        );
+        let mut residual = vec![0.0; 1];
+        assert!(matches!(
+            panicking.try_residual_eval(&[1.0], &mut residual),
+            Err(LinkedAotCallbackError::Panicked { stage: "residual" })
+        ));
+
+        let nonfinite = LinkedDenseAotBackend::new(
+            "linked_dense_nonfinite_callback",
+            1,
+            (1, 1),
+            Arc::new(|_, out| out[0] = 1.0),
+            Arc::new(|_, out| out[0] = f64::INFINITY),
+        );
+        let mut jacobian = vec![0.0; 1];
+        assert!(matches!(
+            nonfinite.try_jacobian_eval(&[1.0], &mut jacobian),
+            Err(LinkedAotCallbackError::NonFiniteOutput {
+                stage: "Jacobian",
+                index: 0
+            })
+        ));
+
+        let wrong_shape = LinkedDenseAotBackend::new(
+            "linked_dense_wrong_shape",
+            2,
+            (2, 2),
+            Arc::new(|_, out| out.fill(0.0)),
+            Arc::new(|_, out| out.fill(0.0)),
+        );
+        assert_eq!(
+            wrong_shape.try_residual_eval(&[1.0], &mut [0.0; 1]),
+            Err(LinkedAotCallbackError::OutputLength {
+                stage: "residual",
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            wrong_shape.try_jacobian_eval(&[1.0], &mut [0.0; 3]),
+            Err(LinkedAotCallbackError::OutputLength {
+                stage: "Jacobian",
+                expected: 4,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            wrong_shape.try_residual_eval(&[f64::NAN], &mut [0.0; 2]),
+            Err(LinkedAotCallbackError::NonFiniteInput {
+                stage: "residual",
+                index: 0,
+            })
+        );
+
+        let chunked = LinkedDenseAotBackend::new(
+            "linked_dense_chunk_boundary",
+            2,
+            (2, 2),
+            Arc::new(|_, out| out.fill(0.0)),
+            Arc::new(|_, out| out.fill(0.0)),
+        )
+        .with_chunked_evaluators(
+            vec![],
+            vec![LinkedDenseJacobianChunk::new(
+                0,
+                1,
+                Arc::new(|args, out| out[0] = args[0] + 2.0),
+            )],
+        );
+        let mut chunk_output = vec![0.0; 1];
+        chunked
+            .try_jacobian_chunk_eval(0, &[3.0], &mut chunk_output)
+            .expect("valid dense Jacobian chunk should execute");
+        assert_eq!(chunk_output, vec![5.0]);
+        assert!(matches!(
+            chunked.try_jacobian_chunk_eval(4, &[3.0], &mut chunk_output),
+            Err(LinkedAotCallbackError::ChunkIndex {
+                stage: "Jacobian",
+                index: 4,
+                count: 1
+            })
+        ));
     }
 
     #[test]

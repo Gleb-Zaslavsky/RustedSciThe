@@ -97,12 +97,25 @@ impl PreparedSparseAtomSystem {
         &self,
         bandwidth: Option<(usize, usize)>,
     ) -> Vec<SparseAtomJacobianEntry> {
+        self.try_calc_sparse_jacobian_with_bandwidth(bandwidth)
+            .expect("sparse atom Jacobian build: malformed der(...) expression")
+    }
+
+    /// Fallible native variant used by typed IVP/BVP preparation boundaries.
+    ///
+    /// The infallible method above remains for established compatibility
+    /// callers, while new solver backends can surface malformed symbolic
+    /// derivatives as a normal preparation error instead of panicking.
+    pub fn try_calc_sparse_jacobian_with_bandwidth(
+        &self,
+        bandwidth: Option<(usize, usize)>,
+    ) -> Result<Vec<SparseAtomJacobianEntry>, String> {
         let n_vars = self.variable_symbols.len();
-        let rows: Vec<Vec<SparseAtomJacobianEntry>> = self
+        let rows: Result<Vec<Vec<SparseAtomJacobianEntry>>, String> = self
             .atoms
             .par_iter()
             .enumerate()
-            .map(|(row, atom)| {
+            .map(|(row, atom)| -> Result<Vec<SparseAtomJacobianEntry>, String> {
                 let (left, right) = band_window(row, n_vars, bandwidth);
                 Workspace::get_local().with(|ws| {
                     let relevant_cols =
@@ -117,7 +130,11 @@ impl PreparedSparseAtomSystem {
                                 ws,
                                 &mut partial,
                             )
-                            .expect("sparse atom Jacobian build: malformed der(...) expression");
+                            .map_err(|error| {
+                                format!(
+                                    "row {row}, column {col}: malformed symbolic derivative: {error}"
+                                )
+                            })?;
                         if has_nonzero {
                             entries.push(SparseAtomJacobianEntry {
                                 row,
@@ -127,12 +144,12 @@ impl PreparedSparseAtomSystem {
                             partial = ws.new_atom();
                         }
                     }
-                    entries
+                    Ok(entries)
                 })
             })
             .collect();
 
-        rows.into_iter().flatten().collect()
+        Ok(rows?.into_iter().flatten().collect())
     }
 
     /// Builds the sparse Jacobian and attributes the Atom differentiation

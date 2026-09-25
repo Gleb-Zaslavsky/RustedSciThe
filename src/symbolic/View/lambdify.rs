@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use super::{
     atom::Atom,
-    evaluate::{FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext},
+    evaluate::{
+        FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedFastPath,
+        PreparedVariableContext,
+    },
     state::Symbol,
 };
 use crate::wrap_symbol;
@@ -38,19 +41,40 @@ impl Atom {
         );
         let n_vars = vars.len();
 
-        Box::new(move |vals: &[f64]| {
-            assert_eq!(
-                vals.len(),
-                n_vars,
-                "lambdify: expected {} argument(s), got {}",
-                n_vars,
-                vals.len()
-            );
-
-            prepared
-                .evaluate_thread_local(vals)
-                .expect("lambdify: evaluation failed")
-        })
+        match prepared.fast_path() {
+            Some(PreparedFastPath::Constant(value)) => Box::new(move |vals: &[f64]| {
+                assert_eq!(
+                    vals.len(),
+                    n_vars,
+                    "lambdify: expected {} argument(s), got {}",
+                    n_vars,
+                    vals.len()
+                );
+                value
+            }),
+            Some(PreparedFastPath::Variable(index)) => Box::new(move |vals: &[f64]| {
+                assert_eq!(
+                    vals.len(),
+                    n_vars,
+                    "lambdify: expected {} argument(s), got {}",
+                    n_vars,
+                    vals.len()
+                );
+                vals[index]
+            }),
+            None => Box::new(move |vals: &[f64]| {
+                assert_eq!(
+                    vals.len(),
+                    n_vars,
+                    "lambdify: expected {} argument(s), got {}",
+                    n_vars,
+                    vals.len()
+                );
+                prepared
+                    .evaluate_thread_local(vals)
+                    .expect("lambdify: evaluation failed")
+            }),
+        }
     }
 }
 
@@ -84,18 +108,41 @@ pub(crate) fn lambdify_with_context_and_metrics(
     );
     let metrics = prepared.metrics();
     let n_vars = context.vars.len();
-    let callback = Box::new(move |vals: &[f64]| {
-        assert_eq!(
-            vals.len(),
-            n_vars,
-            "lambdify: expected {} argument(s), got {}",
-            n_vars,
-            vals.len()
-        );
-        prepared
-            .evaluate_thread_local(vals)
-            .expect("lambdify: evaluation failed")
-    });
+    let callback = match prepared.fast_path() {
+        Some(PreparedFastPath::Constant(value)) => Box::new(move |vals: &[f64]| {
+            assert_eq!(
+                vals.len(),
+                n_vars,
+                "lambdify: expected {} argument(s), got {}",
+                n_vars,
+                vals.len()
+            );
+            value
+        })
+            as Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+        Some(PreparedFastPath::Variable(index)) => Box::new(move |vals: &[f64]| {
+            assert_eq!(
+                vals.len(),
+                n_vars,
+                "lambdify: expected {} argument(s), got {}",
+                n_vars,
+                vals.len()
+            );
+            vals[index]
+        }),
+        None => Box::new(move |vals: &[f64]| {
+            assert_eq!(
+                vals.len(),
+                n_vars,
+                "lambdify: expected {} argument(s), got {}",
+                n_vars,
+                vals.len()
+            );
+            prepared
+                .evaluate_thread_local(vals)
+                .expect("lambdify: evaluation failed")
+        }),
+    };
     (callback, metrics)
 }
 

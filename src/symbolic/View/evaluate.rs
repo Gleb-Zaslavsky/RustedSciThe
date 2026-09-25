@@ -116,10 +116,61 @@ pub struct PreparedEvaluator {
     vars: Arc<[Symbol]>,
     var_atoms: Arc<[Atom]>,
     function_map: FunctionMap,
+    fast_path: Option<PreparedFastPath>,
     // BVP residual/Jacobian expressions normally contain only numeric nodes and
     // builtins.  Keep that fact so their hot callback path can skip the custom
     // function maps and cache bookkeeping entirely.
     plain_numeric: bool,
+}
+
+/// Direct callback forms that do not need the reusable IR workspace.
+///
+/// These are deliberately conservative. Constant Jacobian entries are common
+/// in large linearized chains, and paying for the general interpreter for a
+/// single constant node can dominate the callback itself. More involved
+/// expressions continue through the existing workspace-backed evaluator.
+#[derive(Clone, Copy)]
+pub(crate) enum PreparedFastPath {
+    Constant(f64),
+    Variable(usize),
+}
+
+#[derive(Clone, Copy)]
+enum PreparedInput<'a> {
+    Flat(&'a [f64]),
+    Ivp {
+        time: f64,
+        parameters: &'a [f64],
+        state: &'a [f64],
+    },
+}
+
+impl PreparedInput<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Flat(values) => values.len(),
+            Self::Ivp {
+                parameters, state, ..
+            } => 1 + parameters.len() + state.len(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> f64 {
+        match self {
+            Self::Flat(values) => values[index],
+            Self::Ivp {
+                time,
+                parameters,
+                state,
+            } => match index {
+                0 => *time,
+                index if index <= parameters.len() => parameters[index - 1],
+                index => state[index - parameters.len() - 1],
+            },
+        }
+    }
 }
 
 /// Compile-time shape of the prepared Atom evaluator.
@@ -200,6 +251,52 @@ enum PreparedNode {
     Pow { base: usize, exp: usize },
     Builtin { symbol: Symbol, arg: usize },
     Custom { symbol: Symbol, args: Box<[usize]> },
+}
+
+/// Detect constant and identity plans once during preparation.
+///
+/// Constant folding here is intentionally local to the prepared evaluator. It
+/// does not rewrite the symbolic Atom and therefore cannot change symbolic
+/// parity or the general lowering rules used by other backends.
+fn prepared_fast_path(nodes: &[PreparedNode], root: usize) -> Option<PreparedFastPath> {
+    if nodes.len() == 1 {
+        if let PreparedNode::Var(index) = nodes[0] {
+            return Some(PreparedFastPath::Variable(index));
+        }
+    }
+
+    Some(PreparedFastPath::Constant(constant_value(nodes, root)?))
+}
+
+fn constant_value(nodes: &[PreparedNode], index: usize) -> Option<f64> {
+    match &nodes[index] {
+        PreparedNode::Const(value) => Some(*value),
+        PreparedNode::Var(_) | PreparedNode::Custom { .. } => None,
+        PreparedNode::Add(args) => {
+            let mut value = 0.0;
+            for arg in args {
+                value += constant_value(nodes, *arg)?;
+            }
+            Some(value)
+        }
+        PreparedNode::Mul(args) => {
+            let mut value = 1.0;
+            for arg in args {
+                value *= constant_value(nodes, *arg)?;
+            }
+            Some(value)
+        }
+        PreparedNode::PowI { base, exponent } => Some(evaluate_integer_power(
+            constant_value(nodes, *base)?,
+            *exponent,
+        )),
+        PreparedNode::Pow { base, exp } => {
+            Some(constant_value(nodes, *base)?.powf(constant_value(nodes, *exp)?))
+        }
+        PreparedNode::Builtin { symbol, arg } => {
+            evaluate_builtin_function(*symbol, constant_value(nodes, *arg)?).ok()
+        }
+    }
 }
 
 impl FunctionMap {
@@ -298,6 +395,7 @@ impl PreparedEvaluator {
                 .nodes
                 .iter()
                 .all(|node| !matches!(node, PreparedNode::Custom { .. }));
+        let fast_path = prepared_fast_path(&compiler.nodes, root);
 
         Ok(Self {
             nodes: compiler.nodes,
@@ -305,6 +403,7 @@ impl PreparedEvaluator {
             vars: Arc::clone(&context.vars),
             var_atoms: Arc::clone(&context.var_atoms),
             function_map: function_map.clone(),
+            fast_path,
             plain_numeric,
         })
     }
@@ -334,6 +433,10 @@ impl PreparedEvaluator {
         metrics
     }
 
+    pub(crate) fn fast_path(&self) -> Option<PreparedFastPath> {
+        self.fast_path
+    }
+
     /// Evaluate the prepared plan using the function map captured at compile time.
     pub fn evaluate(&self, values: &[f64]) -> Result<f64, String> {
         self.evaluate_with_function_map(values, &self.function_map)
@@ -345,8 +448,11 @@ impl PreparedEvaluator {
         values: &[f64],
         function_map: &FunctionMap,
     ) -> Result<f64, String> {
+        if let Some(value) = self.evaluate_fast_flat(values)? {
+            return Ok(value);
+        }
         let mut workspace = EvaluationWorkspace::default();
-        self.evaluate_with_workspace(values, function_map, &mut workspace)
+        self.evaluate_with_workspace(PreparedInput::Flat(values), function_map, &mut workspace)
     }
 
     /// Evaluate using scratch storage local to the current worker thread.
@@ -355,13 +461,140 @@ impl PreparedEvaluator {
     /// allocating `evaluate` API, while prepared callback builders can opt into
     /// the reuse contract without exposing mutable evaluator state or a Mutex.
     pub(crate) fn evaluate_thread_local(&self, values: &[f64]) -> Result<f64, String> {
+        if let Some(value) = self.evaluate_fast_flat(values)? {
+            return Ok(value);
+        }
         EVALUATION_WORKSPACE.with(|workspace| {
             let mut workspace = workspace.borrow_mut();
             if self.plain_numeric {
-                self.evaluate_plain_numeric(values, &mut workspace)
+                self.evaluate_plain_numeric(PreparedInput::Flat(values), &mut workspace)
             } else {
-                self.evaluate_with_workspace(values, &self.function_map, &mut workspace)
+                self.evaluate_with_workspace(
+                    PreparedInput::Flat(values),
+                    &self.function_map,
+                    &mut workspace,
+                )
             }
+        })
+    }
+
+    /// Evaluate an IVP callback without flattening time, parameters and state
+    /// into a temporary argument vector. The prepared node indices retain the
+    /// public flat ABI, while this adapter resolves those indices directly
+    /// against the three borrowed input segments.
+    pub(crate) fn evaluate_thread_local_ivp(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+    ) -> Result<f64, String> {
+        if let Some(value) = self.evaluate_fast_ivp(time, parameters, state)? {
+            return Ok(value);
+        }
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            let input = PreparedInput::Ivp {
+                time,
+                parameters,
+                state,
+            };
+            if self.plain_numeric {
+                self.evaluate_plain_numeric_ivp(time, parameters, state, &mut workspace)
+            } else {
+                self.evaluate_with_workspace(input, &self.function_map, &mut workspace)
+            }
+        })
+    }
+
+    #[inline]
+    fn evaluate_fast_flat(&self, values: &[f64]) -> Result<Option<f64>, String> {
+        if values.len() != self.vars.len() {
+            return Err(format!(
+                "Prepared evaluator expected {} argument(s), got {}",
+                self.vars.len(),
+                values.len()
+            ));
+        }
+        Ok(match self.fast_path {
+            Some(PreparedFastPath::Constant(value)) => Some(value),
+            Some(PreparedFastPath::Variable(index)) => Some(values[index]),
+            None => None,
+        })
+    }
+
+    #[inline]
+    fn evaluate_fast_ivp(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+    ) -> Result<Option<f64>, String> {
+        let input_len = 1 + parameters.len() + state.len();
+        if input_len != self.vars.len() {
+            return Err(format!(
+                "Prepared evaluator expected {} argument(s), got {}",
+                self.vars.len(),
+                input_len
+            ));
+        }
+        Ok(match self.fast_path {
+            Some(PreparedFastPath::Constant(value)) => Some(value),
+            Some(PreparedFastPath::Variable(index)) => Some(match index {
+                0 => time,
+                index if index <= parameters.len() => parameters[index - 1],
+                index => state[index - parameters.len() - 1],
+            }),
+            None => None,
+        })
+    }
+
+    /// Evaluate a batch of IVP scalar plans while borrowing the worker-local
+    /// workspace only once.
+    ///
+    /// A Jacobian contains many independent scalar evaluators. Calling
+    /// `evaluate_thread_local_ivp` for every entry repeatedly entered the
+    /// `thread_local!`/`RefCell` boundary. The batch API keeps the same prepared
+    /// evaluator semantics but makes that boundary one-per-Jacobian callback.
+    pub(crate) fn evaluate_many_thread_local_ivp<'a, I>(
+        evaluators: I,
+        time: f64,
+        parameters: &'a [f64],
+        state: &'a [f64],
+        values: &mut [f64],
+    ) -> Result<(), (usize, String)>
+    where
+        I: IntoIterator<Item = &'a PreparedEvaluator>,
+    {
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            let input = PreparedInput::Ivp {
+                time,
+                parameters,
+                state,
+            };
+            for (index, evaluator) in evaluators.into_iter().enumerate() {
+                // Keep the batch path semantically identical to the single
+                // evaluator path. Constant and identity Jacobian entries are
+                // common in sparse diffusion/reaction systems; sending them
+                // through the general node interpreter defeats the prepared
+                // fast path and can dominate the whole callback.
+                let result = match evaluator.evaluate_fast_ivp(time, parameters, state) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) if evaluator.plain_numeric => evaluator
+                        .evaluate_plain_numeric_ivp(time, parameters, state, &mut workspace),
+                    Ok(None) => evaluator.evaluate_with_workspace(
+                        input,
+                        &evaluator.function_map,
+                        &mut workspace,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(value) => values[index] = value,
+                    Err(error) => return Err((index, error)),
+                }
+            }
+            Ok(())
         })
     }
 
@@ -371,14 +604,14 @@ impl PreparedEvaluator {
     /// fully general evaluator below.
     fn evaluate_plain_numeric(
         &self,
-        values: &[f64],
+        input: PreparedInput<'_>,
         workspace: &mut EvaluationWorkspace,
     ) -> Result<f64, String> {
-        if values.len() != self.vars.len() {
+        if input.len() != self.vars.len() {
             return Err(format!(
                 "Prepared evaluator expected {} argument(s), got {}",
                 self.vars.len(),
-                values.len()
+                input.len()
             ));
         }
 
@@ -387,7 +620,61 @@ impl PreparedEvaluator {
         for (index, node) in self.nodes.iter().enumerate() {
             results[index] = match node {
                 PreparedNode::Const(value) => *value,
-                PreparedNode::Var(var_index) => values[*var_index],
+                PreparedNode::Var(var_index) => input.get(*var_index),
+                PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
+                PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::PowI { base, exponent } => {
+                    evaluate_integer_power(results[*base], *exponent)
+                }
+                PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
+                PreparedNode::Builtin { symbol, arg } => {
+                    evaluate_builtin_function(*symbol, results[*arg])?
+                }
+                PreparedNode::Custom { symbol, .. } => {
+                    return Err(format!(
+                        "Custom function {} requires the general evaluator",
+                        symbol
+                    ));
+                }
+            };
+        }
+
+        Ok(results[self.root])
+    }
+
+    /// Evaluate the plain numeric subset against the borrowed IVP segments.
+    ///
+    /// The prepared node ABI still uses one flat index space, but the hot IVP
+    /// path does not need to materialize that flat input. Keeping the segment
+    /// dispatch here avoids matching on `PreparedInput` for every variable
+    /// node while preserving the same time/parameter/state ordering.
+    #[inline]
+    fn evaluate_plain_numeric_ivp(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, String> {
+        let input_len = 1 + parameters.len() + state.len();
+        if input_len != self.vars.len() {
+            return Err(format!(
+                "Prepared evaluator expected {} argument(s), got {}",
+                self.vars.len(),
+                input_len
+            ));
+        }
+
+        workspace.results.resize(self.nodes.len(), 0.0);
+        let results = &mut workspace.results;
+        for (index, node) in self.nodes.iter().enumerate() {
+            results[index] = match node {
+                PreparedNode::Const(value) => *value,
+                PreparedNode::Var(var_index) => match *var_index {
+                    0 => time,
+                    index if index <= parameters.len() => parameters[index - 1],
+                    index => state[index - parameters.len() - 1],
+                },
                 PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
                 PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
                 PreparedNode::PowI { base, exponent } => {
@@ -411,15 +698,15 @@ impl PreparedEvaluator {
 
     fn evaluate_with_workspace(
         &self,
-        values: &[f64],
+        input: PreparedInput<'_>,
         function_map: &FunctionMap,
         workspace: &mut EvaluationWorkspace,
     ) -> Result<f64, String> {
-        if values.len() != self.vars.len() {
+        if input.len() != self.vars.len() {
             return Err(format!(
                 "Prepared evaluator expected {} argument(s), got {}",
                 self.vars.len(),
-                values.len()
+                input.len()
             ));
         }
 
@@ -438,55 +725,52 @@ impl PreparedEvaluator {
         let mut atom_map_ready = false;
 
         for (index, node) in self.nodes.iter().enumerate() {
-            results[index] = match node {
-                PreparedNode::Const(value) => *value,
-                PreparedNode::Var(var_index) => values[*var_index],
-                PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
-                PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
-                PreparedNode::PowI { base, exponent } => {
-                    evaluate_integer_power(results[*base], *exponent)
-                }
-                PreparedNode::Pow { base, exp } => {
-                    let base_eval = results[*base];
-                    let exp_eval = results[*exp];
-                    base_eval.powf(exp_eval)
-                }
-                PreparedNode::Builtin { symbol, arg } => {
-                    evaluate_builtin_function(*symbol, results[*arg])?
-                }
-                PreparedNode::Custom { symbol, args } => {
-                    arg_buffer.clear();
-                    arg_buffer.extend(args.iter().map(|i| results[*i]));
-
-                    if let Some(fun) = function_map.get_symbol(symbol) {
-                        if !symbol_map_ready {
-                            self.vars
-                                .iter()
-                                .copied()
-                                .zip(values.iter().copied())
-                                .for_each(|(symbol, value)| {
-                                    symbol_map.insert(symbol, value);
-                                });
-                            symbol_map_ready = true;
-                        }
-                        fun(arg_buffer, symbol_map, function_map, cache)?
-                    } else if let Some(fun) = function_map.get(symbol) {
-                        if !atom_map_ready {
-                            self.var_atoms
-                                .iter()
-                                .cloned()
-                                .zip(values.iter().copied())
-                                .for_each(|(atom, value)| {
-                                    atom_map.insert(atom, value);
-                                });
-                            atom_map_ready = true;
-                        }
-                        fun(arg_buffer, atom_map, function_map, cache)?
-                    } else {
-                        return Err(format!("Missing function {}", symbol));
+            results[index] =
+                match node {
+                    PreparedNode::Const(value) => *value,
+                    PreparedNode::Var(var_index) => input.get(*var_index),
+                    PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
+                    PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                    PreparedNode::PowI { base, exponent } => {
+                        evaluate_integer_power(results[*base], *exponent)
                     }
-                }
-            };
+                    PreparedNode::Pow { base, exp } => {
+                        let base_eval = results[*base];
+                        let exp_eval = results[*exp];
+                        base_eval.powf(exp_eval)
+                    }
+                    PreparedNode::Builtin { symbol, arg } => {
+                        evaluate_builtin_function(*symbol, results[*arg])?
+                    }
+                    PreparedNode::Custom { symbol, args } => {
+                        arg_buffer.clear();
+                        arg_buffer.extend(args.iter().map(|i| results[*i]));
+
+                        if let Some(fun) = function_map.get_symbol(symbol) {
+                            if !symbol_map_ready {
+                                self.vars.iter().copied().enumerate().for_each(
+                                    |(index, symbol)| {
+                                        symbol_map.insert(symbol, input.get(index));
+                                    },
+                                );
+                                symbol_map_ready = true;
+                            }
+                            fun(arg_buffer, symbol_map, function_map, cache)?
+                        } else if let Some(fun) = function_map.get(symbol) {
+                            if !atom_map_ready {
+                                self.var_atoms.iter().cloned().enumerate().for_each(
+                                    |(index, atom)| {
+                                        atom_map.insert(atom, input.get(index));
+                                    },
+                                );
+                                atom_map_ready = true;
+                            }
+                            fun(arg_buffer, atom_map, function_map, cache)?
+                        } else {
+                            return Err(format!("Missing function {}", symbol));
+                        }
+                    }
+                };
         }
 
         Ok(results[self.root])
@@ -1236,6 +1520,95 @@ mod test {
         let value = evaluator.evaluate(&[4.0]).unwrap();
         let expected = 4.0_f64.powi(-1) + 4.0_f64.powi(3) + 4.0_f64.sqrt();
         assert!((value - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn prepared_evaluator_uses_direct_constant_and_identity_paths() {
+        let x = symbol!("x");
+        let constant =
+            prepare_evaluator(&parse!("2 + 3 * 4").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        assert!(matches!(
+            constant.fast_path,
+            Some(super::PreparedFastPath::Constant(value)) if value == 14.0
+        ));
+        assert_eq!(constant.evaluate_thread_local(&[99.0]).unwrap(), 14.0);
+
+        let identity = prepare_evaluator(&parse!("x").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        assert!(matches!(
+            identity.fast_path,
+            Some(super::PreparedFastPath::Variable(0))
+        ));
+        assert_eq!(identity.evaluate_thread_local(&[2.5]).unwrap(), 2.5);
+    }
+
+    #[test]
+    fn prepared_evaluator_ivp_path_matches_flat_abi_and_rejects_bad_shape() {
+        let expr = parse!("t + a*y + exp(z)").unwrap();
+        let t = symbol!("t");
+        let a = symbol!("a");
+        let y = symbol!("y");
+        let z = symbol!("z");
+        let evaluator = prepare_evaluator(&expr, &[t, a, y, z], &FunctionMap::new()).unwrap();
+
+        let time = 0.5;
+        let parameters = [2.0];
+        let state = [3.0, 4.0];
+        let ivp_value = evaluator
+            .evaluate_thread_local_ivp(time, &parameters, &state)
+            .unwrap();
+        let flat_value = evaluator
+            .evaluate(&[time, parameters[0], state[0], state[1]])
+            .unwrap();
+        assert!((ivp_value - flat_value).abs() <= 1.0e-12);
+
+        let error = evaluator
+            .evaluate_thread_local_ivp(time, &parameters, &[state[0]])
+            .unwrap_err();
+        assert!(error.contains("expected 4 argument(s), got 3"));
+    }
+
+    #[test]
+    fn prepared_evaluator_batch_keeps_constant_and_identity_fast_paths() {
+        let t = symbol!("t");
+        let y = symbol!("y");
+        let context = super::PreparedVariableContext::new(&[t, y]);
+        let constant = prepare_evaluator(&parse!("6").unwrap(), &[t, y], &FunctionMap::new())
+            .unwrap();
+        let identity = prepare_evaluator(&parse!("y").unwrap(), &[t, y], &FunctionMap::new())
+            .unwrap();
+        let general = prepare_evaluator(
+            &parse!("t + 2*y").unwrap(),
+            &[t, y],
+            &FunctionMap::new(),
+        )
+        .unwrap();
+
+        let mut values = [0.0; 3];
+        super::PreparedEvaluator::evaluate_many_thread_local_ivp(
+            [&constant, &identity, &general],
+            0.25,
+            &[],
+            &[3.0],
+            &mut values,
+        )
+        .unwrap();
+
+        assert_eq!(values[0], 6.0);
+        assert_eq!(values[1], 3.0);
+        assert!((values[2] - 6.25).abs() <= 1.0e-12);
+
+        // The shared-context constructor must produce the same values as the
+        // public constructor; this also guards the fast-path classification
+        // used by the production native Jacobian batch.
+        let context_constant =
+            super::PreparedEvaluator::new_with_context(&parse!("6").unwrap(), &context, &FunctionMap::new())
+                .unwrap();
+        assert_eq!(
+            context_constant
+                .evaluate_thread_local_ivp(0.25, &[], &[3.0])
+                .unwrap(),
+            6.0
+        );
     }
 
     #[test]

@@ -11,13 +11,15 @@ use super::{
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedResidualAotBackend, LinkedSparseAotBackend,
     register_linked_dense_backend, register_linked_residual_backend,
-    register_linked_sparse_backend, unregister_linked_dense_backend,
-    unregister_linked_residual_backend, unregister_linked_sparse_backend,
+    register_linked_sparse_backend, resolve_linked_residual_backend, resolve_linked_sparse_backend,
+    unregister_linked_dense_backend, unregister_linked_residual_backend,
+    unregister_linked_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::ivp_telemetry::IvpTelemetry;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpSymbolicAssemblyBackend, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
@@ -25,7 +27,7 @@ use crate::symbolic::symbolic_ivp::{
 };
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
-    prepare_generated_symbolic_ivp_sparse_backend,
+    prepare_generated_symbolic_ivp_banded_backend, prepare_generated_symbolic_ivp_sparse_backend,
 };
 use nalgebra::{DMatrix, DVector};
 use std::any::Any;
@@ -668,9 +670,15 @@ fn run_lambdify_vs_prelinked_aot_elementwise_equivalence(
     let residual_problem =
         prepare_symbolic_ivp_residual_problem(equations.clone(), variables, time_arg, options)
             .expect("residual-only symbolic problem should prepare");
-    let residual_problem_key = residual_problem
-        .prepare_residual_aot_problem(generated_backend.aot_options)
-        .problem_key();
+    let residual_problem_key = if assembly == Lsode2SymbolicAssemblyBackend::AtomView {
+        // LSODE2's AtomView AOT route shares the native sparse artifact for
+        // residuals and Jacobian values, including the Dense control case.
+        sparse_problem_key.clone()
+    } else {
+        residual_problem
+            .prepare_residual_aot_problem(generated_backend.aot_options)
+            .problem_key()
+    };
 
     let sparse_entries = sparse_structure
         .row_indices
@@ -862,10 +870,15 @@ fn run_prelinked_dense_aot_case(assembly: Lsode2SymbolicAssemblyBackend, key_tag
     .expect(
         "dense residual-only symbolic IVP problem should prepare for prelinked AOT parity test",
     );
-    let residual_problem_key = residual_problem
-        .prepare_residual_aot_problem(generated_backend.aot_options)
-        .problem_key();
-
+    let residual_problem_key = if assembly == Lsode2SymbolicAssemblyBackend::AtomView {
+        // LSODE2's AtomView AOT route shares the native sparse artifact for
+        // residuals and Jacobian values, including the Dense control case.
+        sparse_problem_key.clone()
+    } else {
+        residual_problem
+            .prepare_residual_aot_problem(generated_backend.aot_options)
+            .problem_key()
+    };
     register_linked_dense_backend(LinkedDenseAotBackend::new(
         problem_key.clone(),
         1,
@@ -974,17 +987,50 @@ fn run_prelinked_sparse_or_banded_aot_case(
     if let Some(values) = config.equation_parameter_values.clone() {
         options = options.with_equation_parameter_values(values);
     }
-    let prepared_sparse = prepare_generated_symbolic_ivp_sparse_backend(
-        config.eq_system.clone(),
-        config.values.clone(),
-        config.arg.clone(),
-        options,
-        {
-            let mut probe_backend = generated_backend.clone();
-            probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
-            probe_backend
-        },
-    )
+    let mut probe_backend = generated_backend.clone();
+    probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+    let prepared_sparse = if assembly == Lsode2SymbolicAssemblyBackend::AtomView {
+        match structure {
+            Lsode2LinearSystemStructure::Banded { kl, ku } if kl + ku > 0 => {
+                prepare_generated_symbolic_ivp_banded_backend(
+                    config.eq_system.clone(),
+                    config.values.clone(),
+                    config.arg.clone(),
+                    (kl, ku),
+                    options,
+                    probe_backend,
+                )
+            }
+            Lsode2LinearSystemStructure::Banded { .. } => {
+                // A zero-width band is normalized to the sparse route by
+                // LSODE2, so the prelinked probe must use the same key.
+                prepare_generated_symbolic_ivp_sparse_backend(
+                    config.eq_system.clone(),
+                    config.values.clone(),
+                    config.arg.clone(),
+                    options,
+                    probe_backend,
+                )
+            }
+            Lsode2LinearSystemStructure::Dense | Lsode2LinearSystemStructure::Sparse => {
+                prepare_generated_symbolic_ivp_sparse_backend(
+                    config.eq_system.clone(),
+                    config.values.clone(),
+                    config.arg.clone(),
+                    options,
+                    probe_backend,
+                )
+            }
+        }
+    } else {
+        prepare_generated_symbolic_ivp_sparse_backend(
+            config.eq_system.clone(),
+            config.values.clone(),
+            config.arg.clone(),
+            options,
+            probe_backend,
+        )
+    }
     .expect("sparse generated backend should prepare for LSODE2 AOT parity case");
     let sparse_problem_key = prepared_sparse.problem_key.clone();
     let nnz = prepared_sparse.jacobian_structure.nnz();
@@ -998,9 +1044,15 @@ fn run_prelinked_sparse_or_banded_aot_case(
             .with_symbolic_assembly_backend(to_ivp_assembly_backend(assembly)),
     )
     .expect("residual-only symbolic IVP problem should prepare for LSODE2 AOT parity case");
-    let residual_problem_key = residual_problem
-        .prepare_residual_aot_problem(generated_backend.aot_options)
-        .problem_key();
+    let residual_problem_key = if assembly == Lsode2SymbolicAssemblyBackend::AtomView {
+        // AtomView-native LSODE2 shares the sparse artifact between residual
+        // and Jacobian callbacks for both Sparse and compact-Banded storage.
+        sparse_problem_key.clone()
+    } else {
+        residual_problem
+            .prepare_residual_aot_problem(generated_backend.aot_options)
+            .problem_key()
+    };
 
     let jacobian_calls = Arc::new(AtomicUsize::new(0));
     let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
@@ -1261,6 +1313,164 @@ fn lsode2_atom_view_lambdify_solves_for_dense_sparse_and_banded_structures() {
         .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 })
         .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto);
     assert_exponential_decay_solve(banded);
+}
+
+#[test]
+fn lsode2_exprlegacy_and_atomview_native_solver_traces_match_in_debug() {
+    fn run_trace(
+        assembly: Lsode2SymbolicAssemblyBackend,
+        structure: Lsode2LinearSystemStructure,
+    ) -> super::Lsode2SolveSummary {
+        let source = Lsode2ResidualJacobianSource::Symbolic {
+            assembly,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        };
+        let config = exponential_decay_config()
+            .with_residual_jacobian_source(source)
+            .with_linear_system_structure(structure)
+            .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+            .with_controller(
+                Lsode2ControllerConfig::automatic_adams_bdf().with_method_switch_probe_steps(1),
+            )
+            .with_native_execution(Lsode2NativeExecutionConfig::native_solve(2048, 2048))
+            .with_telemetry(IvpTelemetry::counters());
+        let mut solver = Lsode2Solver::new(config).expect("trace parity config should build");
+        solver
+            .solve_with_summary()
+            .expect("trace parity solve should finish")
+    }
+
+    for structure in [
+        Lsode2LinearSystemStructure::Sparse,
+        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+    ] {
+        let legacy = run_trace(Lsode2SymbolicAssemblyBackend::ExprLegacy, structure);
+        let native = run_trace(Lsode2SymbolicAssemblyBackend::AtomView, structure);
+
+        assert_eq!(legacy.status, native.status);
+        assert_eq!(legacy.final_t, native.final_t);
+        let legacy_final = legacy
+            .final_y
+            .expect("ExprLegacy trace should have final state");
+        let native_final = native
+            .final_y
+            .expect("AtomViewNative trace should have final state");
+        assert_eq!(legacy_final.len(), native_final.len());
+        for (expected, actual) in legacy_final.iter().zip(native_final.iter()) {
+            assert!((expected - actual).abs() <= 1.0e-12);
+        }
+
+        let left = legacy.native_statistics;
+        let right = native.native_statistics;
+        assert_eq!(left.native_step_attempts, right.native_step_attempts);
+        assert_eq!(left.native_step_accepts, right.native_step_accepts);
+        assert_eq!(
+            left.native_step_rejects_error_test,
+            right.native_step_rejects_error_test
+        );
+        assert_eq!(
+            left.native_step_rejects_nonlinear,
+            right.native_step_rejects_nonlinear
+        );
+        assert_eq!(
+            left.native_jacobian_refresh_requests,
+            right.native_jacobian_refresh_requests
+        );
+        assert_eq!(
+            left.native_jcur_current_count,
+            right.native_jcur_current_count
+        );
+        assert_eq!(left.native_jcur_stale_count, right.native_jcur_stale_count);
+        assert_eq!(left.native_residual_calls, right.native_residual_calls);
+        assert_eq!(left.native_jacobian_calls, right.native_jacobian_calls);
+        assert_eq!(
+            left.native_linear_solve_calls,
+            right.native_linear_solve_calls
+        );
+        assert_eq!(left.executed_adams_count, right.executed_adams_count);
+        assert_eq!(left.executed_bdf_count, right.executed_bdf_count);
+        assert_eq!(left.fallback_decision_count, right.fallback_decision_count);
+
+        assert!(
+            left.native_step_accepts
+                + left.native_step_rejects_error_test
+                + left.native_step_rejects_nonlinear
+                > 0,
+            "trace parity fixture must execute at least one step"
+        );
+    }
+}
+
+#[test]
+fn lsode2_solver_and_evaluator_counters_have_explicit_ownership_in_debug() {
+    let cases = [
+        (
+            Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            Lsode2NativeExecutionConfig::BridgeSolve,
+            "ExprLegacy/bridge",
+        ),
+        (
+            Lsode2SymbolicAssemblyBackend::AtomView,
+            Lsode2NativeExecutionConfig::native_solve(2048, 2048),
+            "AtomViewNative/native",
+        ),
+    ];
+
+    for (assembly, execution, label) in cases {
+        let telemetry = IvpTelemetry::counters();
+        let config = exponential_decay_config()
+            .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+                assembly,
+                execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+            })
+            .with_linear_system_structure(Lsode2LinearSystemStructure::Sparse)
+            .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
+            .with_native_execution(execution)
+            .with_telemetry(telemetry.clone());
+        let mut solver = Lsode2Solver::new(config).expect("counter ownership config should build");
+        let summary = solver
+            .solve_with_summary()
+            .expect("counter ownership solve should finish");
+        let snapshot = telemetry.snapshot();
+
+        let (solver_residual_calls, solver_jacobian_calls) =
+            if matches!(execution, Lsode2NativeExecutionConfig::BridgeSolve) {
+                (
+                    summary.statistics.residual_calls,
+                    summary.statistics.jacobian_calls,
+                )
+            } else {
+                (
+                    summary.native_statistics.native_residual_calls,
+                    summary.native_statistics.native_jacobian_calls,
+                )
+            };
+
+        assert!(
+            solver_residual_calls > 0,
+            "{label} must report solver-level residual calls"
+        );
+        assert!(
+            solver_jacobian_calls > 0,
+            "{label} must report solver-level Jacobian calls"
+        );
+        assert!(
+            snapshot.residual_requests > 0 && snapshot.jacobian_requests > 0,
+            "{label} must report evaluator requests independently"
+        );
+        assert!(
+            snapshot.residual_evaluations > 0 && snapshot.jacobian_evaluations > 0,
+            "{label} must report evaluator evaluations independently"
+        );
+        assert!(
+            snapshot.residual_evaluations >= snapshot.residual_requests,
+            "{label} evaluator residual evaluations cannot be below requests"
+        );
+        assert!(
+            snapshot.jacobian_evaluations >= snapshot.jacobian_requests,
+            "{label} evaluator Jacobian evaluations cannot be below requests"
+        );
+    }
 }
 
 #[test]
@@ -3106,7 +3316,7 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
         SymbolicIvpProblemOptions::new().with_aot_options(generated_backend.aot_options),
     )
     .expect("residual problem should prepare");
-    let problem_key = residual_problem
+    let residual_problem_key = residual_problem
         .prepare_residual_aot_problem(generated_backend.aot_options)
         .problem_key();
     let mut sparse_probe_backend = generated_backend.clone();
@@ -3119,11 +3329,12 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
         sparse_probe_backend,
     )
     .expect("sparse generated backend should produce one stable problem key");
+    let problem_key = prepared_sparse.problem_key.clone();
     let residual_calls = Arc::new(AtomicUsize::new(0));
     let residual_calls_for_backend = Arc::clone(&residual_calls);
 
     register_linked_residual_backend(LinkedResidualAotBackend::new(
-        problem_key.clone(),
+        residual_problem_key.clone(),
         1,
         Arc::new(move |args: &[f64], out: &mut [f64]| {
             residual_calls_for_backend.fetch_add(1, Ordering::Relaxed);
@@ -3153,7 +3364,7 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
         y[(y.nrows() - 1, 0)]
     })();
 
-    unregister_linked_residual_backend(problem_key.as_str());
+    unregister_linked_residual_backend(residual_problem_key.as_str());
     unregister_linked_sparse_backend(prepared_sparse.problem_key.as_str());
 
     let expected = (-1.0_f64).exp();
@@ -3165,6 +3376,73 @@ fn lsode2_native_banded_path_can_use_prelinked_residual_aot_backend() {
         residual_calls.load(Ordering::Relaxed) > 0,
         "prelinked residual backend should be called during solve"
     );
+}
+
+#[test]
+fn lsode2_native_atomview_aot_require_prebuilt_reconnects_shared_runtime() {
+    let dir = tempfile::tempdir().expect("temporary AOT directory should exist");
+    let build_backend = SymbolicIvpGeneratedBackendConfig::defaults()
+        .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+            profile:
+                crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Debug,
+        })
+        .with_output_parent_dir(Some(dir.path().to_path_buf()));
+    let config_probe =
+        exponential_decay_config().with_native_sparse_faer_generated_backend(build_backend.clone());
+
+    let prepared = prepare_generated_symbolic_ivp_sparse_backend(
+        config_probe.eq_system.clone(),
+        config_probe.values.clone(),
+        config_probe.arg.clone(),
+        SymbolicIvpProblemOptions::new()
+            .with_aot_options(build_backend.aot_options)
+            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView),
+        build_backend.clone(),
+    )
+    .expect("the first AtomView build should publish one shared artifact");
+    let resolver = prepared
+        .updated_resolver
+        .clone()
+        .expect("the first build should return its resolver");
+    let problem_key = prepared.problem_key.clone();
+
+    // The next native engine must be able to reconnect both residual and
+    // Jacobian callbacks from the resolver after the process-local registry
+    // has been cleared. This exercises the actual LSODE2 preparation path,
+    // not only the lower-level generated-backend helper.
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(problem_key.as_str());
+
+    let require_backend = build_backend
+        .with_resolver(Some(resolver))
+        .with_build_policy(SymbolicIvpAotBuildPolicy::RequirePrebuilt);
+    let mut config = exponential_decay_config()
+        .with_native_sparse_faer_generated_backend(require_backend)
+        .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: super::Lsode2AotToolchain::Rust,
+                profile: super::Lsode2AotProfile::Debug,
+            },
+        });
+    config.backend.generated_backend = config
+        .backend
+        .generated_backend
+        .clone()
+        .with_build_policy(SymbolicIvpAotBuildPolicy::RequirePrebuilt);
+
+    let mut engine =
+        super::native_step_engine::Lsode2NativeStepEngine::from_problem_config(&config)
+            .expect("RequirePrebuilt should reconnect the shared LSODE2 runtime")
+            .expect("native sparse engine should be selected");
+    let _ = engine
+        .step_once()
+        .expect("reconnected AtomView callbacks should execute one native step");
+    assert!(resolve_linked_sparse_backend(problem_key.as_str()).is_some());
+    assert!(resolve_linked_residual_backend(problem_key.as_str()).is_some());
+
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(problem_key.as_str());
 }
 
 #[test]
@@ -3324,25 +3602,10 @@ fn lsode2_native_sparse_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_ba
     .expect("sparse generated preparation (AtomView) should produce a stable problem key");
     let problem_key = prepared_sparse.problem_key.clone();
     let nnz = prepared_sparse.jacobian_structure.nnz();
-    let residual_problem = prepare_symbolic_ivp_residual_problem(
-        config.eq_system.clone(),
-        config.values.clone(),
-        config.arg.clone(),
-        SymbolicIvpProblemOptions::new()
-            .with_aot_options(config.backend.generated_backend.aot_options)
-            .with_symbolic_assembly_backend(
-                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
-            ),
-    )
-    .expect("residual-only symbolic IVP problem (AtomView) should prepare");
-    let residual_problem_key = residual_problem
-        .prepare_residual_aot_problem(config.backend.generated_backend.aot_options)
-        .problem_key();
-
     let jacobian_calls = Arc::new(AtomicUsize::new(0));
     let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
     register_linked_residual_backend(LinkedResidualAotBackend::new(
-        residual_problem_key.clone(),
+        problem_key.clone(),
         1,
         Arc::new(move |args: &[f64], out: &mut [f64]| {
             assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
@@ -3378,7 +3641,7 @@ fn lsode2_native_sparse_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_ba
     })();
 
     unregister_linked_sparse_backend(problem_key.as_str());
-    unregister_linked_residual_backend(residual_problem_key.as_str());
+    unregister_linked_residual_backend(problem_key.as_str());
 
     let expected = (-1.0_f64).exp();
     assert!(
@@ -3433,28 +3696,13 @@ fn lsode2_native_banded_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_ba
         options,
         probe_backend,
     )
-    .expect("banded sparse-generated preparation (AtomView) should produce a stable problem key");
+    .expect("sparse generated preparation (AtomView) should produce a stable problem key");
     let problem_key = prepared_sparse.problem_key.clone();
     let nnz = prepared_sparse.jacobian_structure.nnz();
-    let residual_problem = prepare_symbolic_ivp_residual_problem(
-        config.eq_system.clone(),
-        config.values.clone(),
-        config.arg.clone(),
-        SymbolicIvpProblemOptions::new()
-            .with_aot_options(config.backend.generated_backend.aot_options)
-            .with_symbolic_assembly_backend(
-                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
-            ),
-    )
-    .expect("residual-only symbolic IVP problem (AtomView, banded) should prepare");
-    let residual_problem_key = residual_problem
-        .prepare_residual_aot_problem(config.backend.generated_backend.aot_options)
-        .problem_key();
-
     let jacobian_calls = Arc::new(AtomicUsize::new(0));
     let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
     register_linked_residual_backend(LinkedResidualAotBackend::new(
-        residual_problem_key.clone(),
+        problem_key.clone(),
         1,
         Arc::new(move |args: &[f64], out: &mut [f64]| {
             assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
@@ -3490,7 +3738,7 @@ fn lsode2_native_banded_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_ba
     })();
 
     unregister_linked_sparse_backend(problem_key.as_str());
-    unregister_linked_residual_backend(residual_problem_key.as_str());
+    unregister_linked_residual_backend(problem_key.as_str());
 
     let expected = (-1.0_f64).exp();
     assert!(
@@ -3500,6 +3748,133 @@ fn lsode2_native_banded_symbolic_aot_atom_view_uses_prelinked_sparse_jacobian_ba
     assert!(
         jacobian_calls.load(Ordering::Relaxed) > 0,
         "prelinked sparse AOT Jacobian evaluator (AtomView, banded) should be called by LSODE2 solve"
+    );
+}
+
+#[test]
+fn lsode2_native_banded_symbolic_aot_atom_view_uses_compact_banded_callback() {
+    let generated_backend = SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+        .with_crate_name_override(Some(
+            "generated_lsode2_prelinked_banded_compact_jacobian_atom".to_string(),
+        ))
+        .with_module_name_override(Some(
+            "generated_lsode2_prelinked_banded_compact_jacobian_atom".to_string(),
+        ));
+    let mut probe_backend = generated_backend.clone();
+    probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
+
+    let mut config = Lsode2ProblemConfig::new(
+        vec![Expr::parse_expression("-y1"), Expr::parse_expression("-y2")],
+        vec!["y1".to_string(), "y2".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 2.0]),
+        1.0,
+        0.02,
+        1e-6,
+        1e-8,
+    )
+    .with_native_banded_faithful_generated_backend(generated_backend.clone())
+    .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+        assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+        execution: Lsode2SymbolicExecutionMode::Aot {
+            toolchain: super::Lsode2AotToolchain::CTcc,
+            profile: super::Lsode2AotProfile::Release,
+        },
+    })
+    .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 });
+    config.backend.generated_backend = generated_backend.clone();
+
+    let mut options = SymbolicIvpProblemOptions::new()
+        .with_aot_options(generated_backend.aot_options)
+        .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView);
+    if let Some(parameters) = config.equation_parameters.clone() {
+        options = options.with_equation_parameters(parameters);
+    }
+    if let Some(values) = config.equation_parameter_values.clone() {
+        options = options.with_equation_parameter_values(values);
+    }
+
+    let prepared_banded = prepare_generated_symbolic_ivp_banded_backend(
+        config.eq_system.clone(),
+        config.values.clone(),
+        config.arg.clone(),
+        (1, 1),
+        options,
+        probe_backend,
+    )
+    .expect("compact-Banded preparation should produce a stable problem key");
+    let problem_key = prepared_banded.problem_key.clone();
+
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls_for_backend = Arc::clone(&jacobian_calls);
+    register_linked_residual_backend(LinkedResidualAotBackend::new(
+        problem_key.clone(),
+        2,
+        Arc::new(move |args: &[f64], out: &mut [f64]| {
+            assert!(args.len() >= 2, "IVP residual AOT args should be [t, y...]");
+            assert_eq!(out.len(), 2);
+            out[0] = -args[1];
+            out[1] = -args[2];
+        }),
+    ));
+    register_linked_sparse_backend(
+        LinkedSparseAotBackend::new(
+            problem_key.clone(),
+            2,
+            (1, 1),
+            2,
+            Arc::new(move |args: &[f64], out: &mut [f64]| {
+                assert!(args.len() >= 2, "IVP Jacobian AOT args should be [t, y...]");
+                assert_eq!(
+                    out.len(),
+                    6,
+                    "compact Banded callback must expose all slots"
+                );
+                out.fill(0.0);
+                out[2] = -1.0;
+                out[3] = -1.0;
+            }),
+            Arc::new(move |_args: &[f64], out: &mut [f64]| {
+                jacobian_calls_for_backend.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(
+                    out.len(),
+                    6,
+                    "compact Banded callback must expose all slots"
+                );
+                out.fill(0.0);
+                out[2] = -1.0;
+                out[3] = -1.0;
+            }),
+        )
+        .with_banded_compact_layout(2, 2, 1, 1),
+    );
+
+    let y_final = (|| {
+        let mut solver =
+            Lsode2Solver::new(config).expect("LSODE2 compact-Banded symbolic AOT should build");
+        solver
+            .solve()
+            .expect("LSODE2 compact-Banded symbolic AOT solve should finish");
+        let (_, y) = solver.get_result();
+        (y[(y.nrows() - 1, 0)], y[(y.nrows() - 1, 1)])
+    })();
+
+    unregister_linked_sparse_backend(problem_key.as_str());
+    unregister_linked_residual_backend(problem_key.as_str());
+
+    let expected = (-1.0_f64).exp();
+    assert!(
+        (y_final.0 - expected).abs() < 1e-4 && (y_final.1 - 2.0 * expected).abs() < 1e-4,
+        "compact-Banded AOT Jacobian solve mismatch: got=({:e}, {:e}), expected=({:e}, {:e})",
+        y_final.0,
+        y_final.1,
+        expected,
+        2.0 * expected
+    );
+    assert!(
+        jacobian_calls.load(Ordering::Relaxed) > 0,
+        "compact-Banded AOT Jacobian callback should be called by LSODE2 solve"
     );
 }
 
@@ -3614,7 +3989,7 @@ fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
     let structures = [
         Lsode2LinearSystemStructure::Dense,
         Lsode2LinearSystemStructure::Sparse,
-        Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
+        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
     ];
 
     // Lambdify parity surface: all assembly/structure combinations should solve.
@@ -3647,7 +4022,7 @@ fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
         );
         run_prelinked_sparse_or_banded_aot_case(
             assembly,
-            Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
+            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
             &format!("{session_tag}_{assembly_tag}_banded"),
         );
     }

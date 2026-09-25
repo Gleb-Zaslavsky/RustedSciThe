@@ -167,6 +167,9 @@ impl PreparedSparseAtomBvpCodegen {
 
     fn jacobian_codegen_layout(&self, slots: usize) -> CodegenOutputLayout {
         match self.matrix_layout {
+            AtomAotMatrixLayout::Dense { rows, cols } => {
+                CodegenOutputLayout::Matrix { rows, cols }
+            }
             AtomAotMatrixLayout::SparseCsc { rows, cols, .. } => {
                 CodegenOutputLayout::SparseValues {
                     rows,

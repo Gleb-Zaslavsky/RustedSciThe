@@ -32,8 +32,9 @@ use super::linear_backends::{
 };
 use super::native_executor::{Lsode2NativeCallbackExecutor, jacobian_abs_max};
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
+    try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy,
 };
 use super::nonlinear_driver::Lsode2NonlinearStepDriver;
 use super::state::{Lsode2RuntimeState, Lsode2RuntimeStateSnapshot};
@@ -51,7 +52,10 @@ use crate::symbolic::ivp_telemetry::{
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
 };
-use crate::symbolic::symbolic_ivp_generated::prepare_generated_symbolic_ivp_residual_problem;
+use crate::symbolic::symbolic_ivp_generated::{
+    prepare_generated_symbolic_ivp_banded_residual_problem,
+    prepare_generated_symbolic_ivp_residual_problem,
+};
 use nalgebra::{DMatrix, DVector};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -320,13 +324,37 @@ where
                     Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
                 });
 
-                let prepared = prepare_generated_symbolic_ivp_residual_problem(
-                    config.eq_system.clone(),
-                    config.values.clone(),
-                    config.arg.clone(),
-                    options,
-                    config.backend.generated_backend.clone(),
-                )
+                let prepared = if symbolic_assembly_backend
+                    == Lsode2SymbolicAssemblyBackend::AtomView
+                {
+                    match jacobian_storage {
+                        NativeJacobianStorage::Banded {
+                            bandwidth: Some((kl, ku)),
+                        } => prepare_generated_symbolic_ivp_banded_residual_problem(
+                            config.eq_system.clone(),
+                            config.values.clone(),
+                            config.arg.clone(),
+                            (kl, ku),
+                            options,
+                            config.backend.generated_backend.clone(),
+                        ),
+                        _ => prepare_generated_symbolic_ivp_residual_problem(
+                            config.eq_system.clone(),
+                            config.values.clone(),
+                            config.arg.clone(),
+                            options,
+                            config.backend.generated_backend.clone(),
+                        ),
+                    }
+                } else {
+                    prepare_generated_symbolic_ivp_residual_problem(
+                        config.eq_system.clone(),
+                        config.values.clone(),
+                        config.arg.clone(),
+                        options,
+                        config.backend.generated_backend.clone(),
+                    )
+                }
                 .map_err(map_generated_backend_error)?;
                 let residual_evaluator_instrumented = prepared.problem.backend_kind
                     == crate::symbolic::symbolic_ivp::IvpBackendKind::Lambdify;
@@ -358,7 +386,7 @@ where
                 );
                 let jacobian = if use_sparse_aot_jacobian {
                     Rc::new(RefCell::new(
-                        compile_native_sparse_aot_jacobian_with_parameter_handle(
+                        compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry(
                             &config.eq_system,
                             &config.values,
                             config.arg.as_str(),
@@ -375,28 +403,39 @@ where
                                     IvpSymbolicAssemblyBackend::AtomView
                                 }
                             },
+                            config.telemetry.clone(),
                         )?,
                     ))
                 } else {
-                    Rc::new(RefCell::new(
-                        compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
-                            &config.eq_system,
-                            &config.values,
-                            config.arg.as_str(),
-                            config.equation_parameters.as_deref(),
-                            residual_problem.parameter_values_handle(),
-                            jacobian_storage,
-                            match symbolic_assembly_backend {
-                                Lsode2SymbolicAssemblyBackend::ExprLegacy => {
-                                    IvpSymbolicAssemblyBackend::ExprLegacy
-                                }
-                                Lsode2SymbolicAssemblyBackend::AtomView => {
-                                    IvpSymbolicAssemblyBackend::AtomView
-                                }
-                            },
-                            config.telemetry.clone(),
-                        ),
-                    ))
+                    let parameter_values_handle = residual_problem.parameter_values_handle();
+                    let callback = match symbolic_assembly_backend {
+                        Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                            compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy(
+                                &config.eq_system,
+                                &config.values,
+                                config.arg.as_str(),
+                                config.equation_parameters.as_deref(),
+                                parameter_values_handle,
+                                jacobian_storage,
+                                IvpSymbolicAssemblyBackend::ExprLegacy,
+                                config.telemetry.clone(),
+                                config.lambdify_execution_policy,
+                            )
+                        }
+                        Lsode2SymbolicAssemblyBackend::AtomView => {
+                            try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy(
+                                &config.eq_system,
+                                &config.values,
+                                config.arg.as_str(),
+                                config.equation_parameters.as_deref(),
+                                parameter_values_handle,
+                                jacobian_storage,
+                                config.telemetry.clone(),
+                                config.lambdify_execution_policy,
+                            )?
+                        }
+                    };
+                    Rc::new(RefCell::new(callback))
                 };
                 (
                     residual,

@@ -37,11 +37,11 @@ mod normalization_examples;
 pub mod normalize;
 #[cfg(test)]
 mod operation_corpus_tests;
-#[cfg(test)]
-mod scalar_jacobian_story_tests;
 pub mod parser;
 mod pipeline_examples;
 pub mod printer;
+#[cfg(test)]
+mod scalar_jacobian_story_tests;
 pub mod state;
 pub mod transform;
 

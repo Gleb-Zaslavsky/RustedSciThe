@@ -186,6 +186,9 @@ impl PreparedProblemManifest {
                 jacobian_cols: cols,
                 jacobian_nnz: Some(plan.matrix_layout().value_count()),
                 jacobian_layout: Some(match plan.matrix_layout() {
+                    crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Dense { .. } => {
+                        PreparedJacobianLayout::Dense
+                    }
                     crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::SparseCsc { .. } => {
                         PreparedJacobianLayout::SparseExplicit
                     }

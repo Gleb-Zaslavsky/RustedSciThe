@@ -60,10 +60,7 @@ fn scalar_jacobian_lowering_story_preserves_values_and_reports_stages() {
             "nested_fractional_power",
             "exp(x^0.5) * (1+x)^3 / (2+x^2)^1.5",
         ),
-        (
-            "transcendental_rational",
-            "sin(x^2) * exp(0.2*x) / (1+x^3)",
-        ),
+        ("transcendental_rational", "sin(x^2) * exp(0.2*x) / (1+x^3)"),
     ];
 
     report_println!(
@@ -96,7 +93,11 @@ fn scalar_jacobian_lowering_story_preserves_values_and_reports_stages() {
             &[vec!["x".to_string()]],
         );
         let entries = prepared.calc_sparse_jacobian_with_bandwidth(None);
-        assert_eq!(entries.len(), 1, "{case} should have one nonzero derivative");
+        assert_eq!(
+            entries.len(),
+            1,
+            "{case} should have one nonzero derivative"
+        );
         let atom_prepare_ms = atom_prepare_started.elapsed().as_secs_f64() * 1_000.0;
         let atom = entries[0].value.clone();
         let atom_shape = inspect_atoms(std::slice::from_ref(&atom));
@@ -116,8 +117,14 @@ fn scalar_jacobian_lowering_story_preserves_values_and_reports_stages() {
 
         let compat_diff = (compat_value - legacy_value).abs();
         let native_diff = (native_value - legacy_value).abs();
-        assert!(compat_diff <= 1.0e-9, "{case}/AtomViewExprCompat drifted by {compat_diff:e}");
-        assert!(native_diff <= 1.0e-9, "{case}/AtomNative drifted by {native_diff:e}");
+        assert!(
+            compat_diff <= 1.0e-9,
+            "{case}/AtomViewExprCompat drifted by {compat_diff:e}"
+        );
+        assert!(
+            native_diff <= 1.0e-9,
+            "{case}/AtomNative drifted by {native_diff:e}"
+        );
 
         report_println!(
             "{case} | ExprLegacy | {:>11} | {:>12} | {:>6} | {:>8} | {:>5} | {:>10.3} | {:>18.3} | {:>12.3} | {:>9.3e}",

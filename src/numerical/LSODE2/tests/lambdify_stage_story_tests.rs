@@ -49,21 +49,21 @@ impl MatrixRoute {
 #[derive(Clone, Copy)]
 enum Frontend {
     ExprLegacy,
-    AtomViewExprCompat,
+    AtomViewNative,
 }
 
 impl Frontend {
     fn label(self) -> &'static str {
         match self {
             Self::ExprLegacy => "ExprLegacy",
-            Self::AtomViewExprCompat => "AtomViewExprCompat",
+            Self::AtomViewNative => "AtomViewNative",
         }
     }
 
     fn assembly(self) -> Lsode2SymbolicAssemblyBackend {
         match self {
             Self::ExprLegacy => Lsode2SymbolicAssemblyBackend::ExprLegacy,
-            Self::AtomViewExprCompat => Lsode2SymbolicAssemblyBackend::AtomView,
+            Self::AtomViewNative => Lsode2SymbolicAssemblyBackend::AtomView,
         }
     }
 }
@@ -462,9 +462,9 @@ fn lsode2_lambdify_frontend_stage_breakdown_story() {
         .unwrap_or_else(|| vec![32, 128]);
     let routes = [
         (Frontend::ExprLegacy, MatrixRoute::Sparse),
-        (Frontend::AtomViewExprCompat, MatrixRoute::Sparse),
+        (Frontend::AtomViewNative, MatrixRoute::Sparse),
         (Frontend::ExprLegacy, MatrixRoute::Banded),
-        (Frontend::AtomViewExprCompat, MatrixRoute::Banded),
+        (Frontend::AtomViewNative, MatrixRoute::Banded),
     ];
     let mut runs = Vec::with_capacity(dimensions.len() * routes.len());
 
@@ -638,7 +638,7 @@ fn lsode2_lambdify_large_sparse_banded_frontend_policy_story() {
             LinearPolicy::Auto,
         ),
         (
-            Frontend::AtomViewExprCompat,
+            Frontend::AtomViewNative,
             MatrixRoute::Sparse,
             LinearPolicy::Auto,
         ),
@@ -648,7 +648,7 @@ fn lsode2_lambdify_large_sparse_banded_frontend_policy_story() {
             LinearPolicy::Auto,
         ),
         (
-            Frontend::AtomViewExprCompat,
+            Frontend::AtomViewNative,
             MatrixRoute::Banded,
             LinearPolicy::Auto,
         ),
@@ -663,12 +663,12 @@ fn lsode2_lambdify_large_sparse_banded_frontend_policy_story() {
             LinearPolicy::Force,
         ),
         (
-            Frontend::AtomViewExprCompat,
+            Frontend::AtomViewNative,
             MatrixRoute::Sparse,
             LinearPolicy::Force,
         ),
         (
-            Frontend::AtomViewExprCompat,
+            Frontend::AtomViewNative,
             MatrixRoute::Banded,
             LinearPolicy::Force,
         ),
@@ -766,7 +766,7 @@ fn lsode2_lambdify_evaluator_policy_matrix_story() {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|repeats| *repeats > 0)
         .unwrap_or(3);
-    let frontends = [Frontend::ExprLegacy, Frontend::AtomViewExprCompat];
+    let frontends = [Frontend::ExprLegacy, Frontend::AtomViewNative];
     let matrices = [MatrixRoute::Sparse, MatrixRoute::Banded];
     let policies = [
         EvaluatorPolicy::Sequential,
@@ -891,7 +891,7 @@ fn run_callback_only_case(
         SymbolicIvpProblemOptions::new()
             .with_symbolic_assembly_backend(match frontend {
                 Frontend::ExprLegacy => IvpSymbolicAssemblyBackend::ExprLegacy,
-                Frontend::AtomViewExprCompat => IvpSymbolicAssemblyBackend::AtomView,
+                Frontend::AtomViewNative => IvpSymbolicAssemblyBackend::AtomView,
             })
             .with_equation_parameters(vec![
                 "k".to_string(),
@@ -977,7 +977,7 @@ fn lsode2_lambdify_callback_only_policy_story() {
     ];
 
     reportln!(
-        "[LSODE2 Lambdify callback-only] preparation excluded; dimensions={dimensions:?}; repetitions={repetitions}; ExprLegacy vs AtomViewExprCompat"
+        "[LSODE2 Lambdify callback-only] preparation excluded; dimensions={dimensions:?}; repetitions={repetitions}; ExprLegacy vs AtomViewNative"
     );
     reportln!(
         "frontend | dim | evaluator_policy | repetitions | residual_ms | jacobian_ms | parallel_dispatches | sequential_dispatches | worker_count | residual_calls | jacobian_calls | max_residual_diff | max_jacobian_diff | checksum"
@@ -987,7 +987,7 @@ fn lsode2_lambdify_callback_only_policy_story() {
     );
 
     for dimension in dimensions {
-        for frontend in [Frontend::ExprLegacy, Frontend::AtomViewExprCompat] {
+        for frontend in [Frontend::ExprLegacy, Frontend::AtomViewNative] {
             let mut reference: Option<CallbackOnlyRun> = None;
             for evaluator_policy in policies {
                 let run =

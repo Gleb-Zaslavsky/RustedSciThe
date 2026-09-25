@@ -43,8 +43,6 @@ macro_rules! println {
     };
 }
 
-mod three_body_story_tests;
-
 fn exponential_decay_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
         vec![Expr::parse_expression("-y")],
@@ -57,35 +55,6 @@ fn exponential_decay_config() -> Lsode2ProblemConfig {
         1e-6,
         1e-8,
     )
-}
-
-#[test]
-fn lsode2_lambdify_telemetry_pretty_report_story() {
-    let _report = crate::Utils::test_reporting::TestReportCapture::new(
-        "LSODE2_Lambdify",
-        "numerical::LSODE2::story_tests2::tests::lsode2_lambdify_telemetry_pretty_report_story",
-    );
-    let telemetry = IvpTelemetry::detailed();
-    let config = exponential_decay_config()
-        .with_native_banded_faithful_backend()
-        .with_faithful_bdf_solve(256, 256)
-        .with_telemetry(telemetry.clone());
-    let mut solver = Lsode2Solver::new(config).expect("telemetry story config should build");
-    solver
-        .solve_with_summary()
-        .expect("telemetry story solve should finish");
-
-    let snapshot = solver.telemetry_snapshot();
-    println!("[LSODE2 Lambdify telemetry] typed report follows");
-    println!("{}", snapshot.pretty_report());
-    assert_eq!(
-        snapshot.execution,
-        crate::symbolic::ivp_telemetry::IvpTelemetryExecution::Lambdify
-    );
-    assert!(snapshot.residual_requests > 0);
-    assert!(snapshot.residual_evaluations >= snapshot.residual_requests);
-    assert!(snapshot.jacobian_requests > 0);
-    assert!(snapshot.jacobian_evaluations >= snapshot.jacobian_requests);
 }
 
 struct ResidualBackendGuard {
@@ -148,7 +117,7 @@ struct StoryRow {
     status: String,
 }
 
-fn short_error(message: &str) -> String {
+pub(super) fn short_error(message: &str) -> String {
     const LIMIT: usize = 240;
     let flat = message.replace(['\r', '\n'], " ");
     if flat.len() <= LIMIT {
@@ -325,8 +294,7 @@ fn solve_story_row_fallible(
     }
 }
 
-#[test]
-fn lsode2_exponential_decay_backend_story_table() {
+pub(super) fn run_lsode2_exponential_decay_backend_story_table() {
     let _report = crate::Utils::test_reporting::TestReportCapture::new(
         "LSODE2_Lambdify",
         "numerical::LSODE2::story_tests2::tests::lsode2_exponential_decay_backend_story_table",
@@ -1241,9 +1209,7 @@ fn run_aot_story_row(
     }
 }
 
-#[test]
-//#[ignore = "heavy AOT toolchain stage story (dense/sparse/banded; cold+warm)"]
-fn lsode2_aot_toolchain_stage_story_table() {
+pub(super) fn run_lsode2_aot_toolchain_stage_story_table() {
     const REPEATS: usize = 3;
     let matrices = [
         AotStoryMatrix::Dense,
@@ -1586,16 +1552,16 @@ impl BackendRaceMatrix {
 }
 
 #[derive(Default)]
-struct RaceStats {
+pub(super) struct RaceStats {
     values: Vec<f64>,
 }
 
 impl RaceStats {
-    fn push(&mut self, value: f64) {
+    pub(super) fn push(&mut self, value: f64) {
         self.values.push(value);
     }
 
-    fn summary(&self) -> Option<(f64, f64, f64, f64)> {
+    pub(super) fn summary(&self) -> Option<(f64, f64, f64, f64)> {
         if self.values.is_empty() {
             return None;
         }
@@ -1621,29 +1587,29 @@ impl RaceStats {
     }
 }
 
-struct BackendRaceRow {
-    matrix: &'static str,
-    route: &'static str,
-    counter_scope: Option<&'static str>,
-    runs_ok: usize,
-    runs_total: usize,
-    first_failure: Option<String>,
-    total_ms: RaceStats,
-    prepare_ms: RaceStats,
-    solve_ms: RaceStats,
-    final_diff: RaceStats,
-    residual_calls: RaceStats,
-    jacobian_calls: RaceStats,
-    nlu_or_native_linear: RaceStats,
-    residual_ms: RaceStats,
-    jacobian_ms: RaceStats,
-    linear_ms: RaceStats,
-    accepted_steps: RaceStats,
-    rejected_steps: RaceStats,
+pub(super) struct BackendRaceRow {
+    pub(super) matrix: &'static str,
+    pub(super) route: &'static str,
+    pub(super) counter_scope: Option<&'static str>,
+    pub(super) runs_ok: usize,
+    pub(super) runs_total: usize,
+    pub(super) first_failure: Option<String>,
+    pub(super) total_ms: RaceStats,
+    pub(super) prepare_ms: RaceStats,
+    pub(super) solve_ms: RaceStats,
+    pub(super) final_diff: RaceStats,
+    pub(super) residual_calls: RaceStats,
+    pub(super) jacobian_calls: RaceStats,
+    pub(super) nlu_or_native_linear: RaceStats,
+    pub(super) residual_ms: RaceStats,
+    pub(super) jacobian_ms: RaceStats,
+    pub(super) linear_ms: RaceStats,
+    pub(super) accepted_steps: RaceStats,
+    pub(super) rejected_steps: RaceStats,
 }
 
 impl BackendRaceRow {
-    fn new(matrix: &'static str, route: &'static str) -> Self {
+    pub(super) fn new(matrix: &'static str, route: &'static str) -> Self {
         Self {
             matrix,
             route,
@@ -1666,13 +1632,13 @@ impl BackendRaceRow {
         }
     }
 
-    fn record_failure(&mut self, message: impl AsRef<str>) {
+    pub(super) fn record_failure(&mut self, message: impl AsRef<str>) {
         if self.first_failure.is_none() {
             self.first_failure = Some(short_error(message.as_ref()));
         }
     }
 
-    fn status_label(&self) -> String {
+    pub(super) fn status_label(&self) -> String {
         let base = if self.runs_total == 0 {
             "not_run".to_string()
         } else if self.runs_ok == self.runs_total {
@@ -1711,7 +1677,7 @@ fn unique_story_run_tag(prefix: &str) -> String {
     format!("{prefix}_pid{}_{}", std::process::id(), nanos)
 }
 
-fn unique_story_short_tag() -> String {
+pub(super) fn unique_story_short_tag() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -2072,8 +2038,7 @@ fn lsode2_multi_run_backend_race_by_weight_class() {
     }
 }
 
-#[test]
-fn lsode2_parallel_chunking_story_by_weight_class() {
+pub(super) fn run_lsode2_parallel_chunking_story_by_weight_class() {
     const REPEATS: usize = 5;
     const CHUNKS_PER_WORKER: usize = 2;
     let matrices = [
@@ -2801,7 +2766,7 @@ fn lsode2_symbolic_vs_numerical_closure_sparse_banded_dashboard() {
     const REPEATS: usize = 3;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let routes = [
-        ("Lambdify-AtomViewExprCompat", None),
+        ("Lambdify-AtomViewNative", None),
         (
             "Numerical-AnalyticalJac",
             Some(Lsode2JacobianBackend::AnalyticClosure),
@@ -3510,8 +3475,7 @@ fn run_combustion_story_sample(
     run_combustion_story_sample_result(route, config, baseline_final_a).ok()
 }
 
-#[test]
-fn lsode2_combustion_like_multi_run_story_dashboard() {
+pub(super) fn run_lsode2_combustion_like_multi_run_story_dashboard() {
     let _report = crate::Utils::test_reporting::TestReportCapture::new(
         "LSODE2_Lambdify",
         "numerical::LSODE2::story_tests2::tests::lsode2_combustion_like_multi_run_story_dashboard",
@@ -3730,8 +3694,7 @@ fn lsode2_combustion_like_multi_run_story_dashboard() {
     }
 }
 
-#[test]
-fn lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard() {
+pub(super) fn run_lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard() {
     const REPEATS: usize = 5;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let routes = [
@@ -3926,8 +3889,7 @@ fn lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard() {
     }
 }
 
-#[test]
-fn lsode2_parallel_chunking_cold_stage_story_by_weight_class() {
+pub(super) fn run_lsode2_parallel_chunking_cold_stage_story_by_weight_class() {
     const REPEATS: usize = 3;
     const CHUNKS_PER_WORKER: usize = 2;
     let matrices = [
@@ -4065,8 +4027,7 @@ fn lsode2_parallel_chunking_cold_stage_story_by_weight_class() {
     );
 }
 
-#[test]
-fn lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard() {
+pub(super) fn run_lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard() {
     const REPEATS: usize = 3;
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let routes = [
@@ -4358,7 +4319,7 @@ fn lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard() {
         ),
         (
             Lsode2SymbolicAssemblyBackend::AtomView,
-            "Lambdify-AtomViewExprCompat",
+            "Lambdify-AtomViewNative",
         ),
     ];
 
@@ -4440,10 +4401,7 @@ fn lsode2_combustion_lambdify_evaluator_policy_canonical_story() {
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let frontends = [
         (Lsode2SymbolicAssemblyBackend::ExprLegacy, "ExprLegacy"),
-        (
-            Lsode2SymbolicAssemblyBackend::AtomView,
-            "AtomViewExprCompat",
-        ),
+        (Lsode2SymbolicAssemblyBackend::AtomView, "AtomViewNative"),
     ];
     let policies = [
         ("Sequential", IvpLambdifyExecutionPolicy::Sequential),
@@ -4645,7 +4603,7 @@ fn lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story() {
     let compat_symbolic = build_symbolic_jacobian(
         &config.eq_system,
         &config.values,
-        IvpSymbolicAssemblyBackend::AtomView,
+        IvpSymbolicAssemblyBackend::AtomViewExprCompat,
         &IvpTelemetry::disabled(),
     );
     let scalar_names = story_jacobian_name_refs(&config);
@@ -4748,7 +4706,7 @@ fn lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story() {
 
         let compat_started = Instant::now();
         let mut compat_options = SymbolicIvpProblemOptions::new()
-            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView)
+            .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomViewExprCompat)
             .with_equation_parameters(parameters.map(|values| values.to_vec()).unwrap_or_default())
             .with_telemetry(IvpTelemetry::disabled());
         if let Some(values) = parameter_values.clone() {
@@ -4771,7 +4729,7 @@ fn lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story() {
                 parameters,
                 parameter_handle,
                 storage,
-                IvpSymbolicAssemblyBackend::AtomView,
+                IvpSymbolicAssemblyBackend::AtomViewExprCompat,
                 IvpTelemetry::disabled(),
             );
         let compat_prepare_ms = compat_started.elapsed().as_secs_f64() * 1_000.0;
@@ -4866,7 +4824,7 @@ fn lsode2_atomview_legacy_vs_exprcompat_lambdify_regression_story() {
         let compat_shape = expr_shape_metrics(&build_symbolic_jacobian(
             &config.eq_system,
             &config.values,
-            IvpSymbolicAssemblyBackend::AtomView,
+            IvpSymbolicAssemblyBackend::AtomViewExprCompat,
             &IvpTelemetry::disabled(),
         ));
         println!(
@@ -4922,7 +4880,7 @@ fn lsode2_atomview_exprcompat_large_real_jacobian_shape_story() {
     let workloads = [
         (
             "three-body",
-            three_body_story_tests::three_body_story_base_config(),
+            super::aot_three_body_story_tests::three_body_story_base_config(),
         ),
         (
             "diffusion-chain",
@@ -4962,7 +4920,7 @@ fn lsode2_atomview_exprcompat_large_real_jacobian_shape_story() {
                 build_symbolic_jacobian(
                     &config.eq_system,
                     &config.values,
-                    IvpSymbolicAssemblyBackend::AtomView,
+                    IvpSymbolicAssemblyBackend::AtomViewExprCompat,
                     &IvpTelemetry::disabled(),
                 ),
             ),
@@ -5034,7 +4992,7 @@ fn lsode2_atomview_exprcompat_real_closure_lowering_cost_story() {
     let workloads = [
         (
             "three-body",
-            three_body_story_tests::three_body_story_base_config(),
+            super::aot_three_body_story_tests::three_body_story_base_config(),
         ),
         (
             "diffusion-chain",
@@ -5072,7 +5030,7 @@ fn lsode2_atomview_exprcompat_real_closure_lowering_cost_story() {
                 "AtomViewExprCompat" => build_symbolic_jacobian(
                     &config.eq_system,
                     &config.values,
-                    IvpSymbolicAssemblyBackend::AtomView,
+                    IvpSymbolicAssemblyBackend::AtomViewExprCompat,
                     &IvpTelemetry::disabled(),
                 ),
                 _ => unreachable!("real closure route is fixed"),
@@ -5140,7 +5098,7 @@ fn lsode2_view_three_boundary_real_jacobian_release_story() {
     let workloads = [
         (
             "three-body",
-            three_body_story_tests::three_body_story_base_config(),
+            super::aot_three_body_story_tests::three_body_story_base_config(),
         ),
         (
             "diffusion-chain",
@@ -5651,9 +5609,7 @@ fn lifecycle_repetitions(env_name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-#[test]
-#[ignore = "release story: LSODE2 combustion AtomView tcc BuildIfMissing followed by strict RequirePrebuilt reuse"]
-fn lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story() {
+pub(super) fn run_lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story() {
     let strict_repeats = lifecycle_repetitions("LSODE2_PREBUILT_REPEATS", 3);
     let matrices = [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded];
     let mut rows = Vec::new();
@@ -5743,7 +5699,7 @@ fn print_lsode2_warm_prebuilt_table(
     build_row: &Lsode2LifecycleRow,
     rows: &[(usize, usize, Lsode2LifecycleRow)],
 ) {
-    println!("[LSODE2 warm] Banded AtomViewExprCompat Lambdify vs tcc RequirePrebuilt setup row");
+    println!("[LSODE2 warm] Banded AtomViewNative Lambdify vs tcc RequirePrebuilt setup row");
     println!(
         "phase | build_policy    | total_ms | prepare_ms | solve_ms | residual_ms | jacobian_ms | linear_ms | final_diff | status"
     );
@@ -5851,9 +5807,7 @@ fn print_lsode2_warm_prebuilt_table(
     }
 }
 
-#[test]
-#[ignore = "release story: warm repeated-solve comparison with cooldown, LSODE2 Banded AtomViewExprCompat Lambdify vs strict tcc RequirePrebuilt"]
-fn lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story() {
+pub(super) fn run_lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story() {
     let repetitions = lifecycle_repetitions("LSODE2_WARM_REPEATS", 5);
     let cooldown_ms = warm_cooldown_ms();
     let matrix = BackendRaceMatrix::Banded;
@@ -6284,9 +6238,7 @@ fn print_large_ivp_chunking_tables(title: &str, n: usize, rows: &[LargeIvpChunki
     }
 }
 
-#[test]
-#[ignore = "release story: larger LSODE2 generated IVP checks whether tcc callback chunking can amortize"]
-fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
+pub(super) fn run_lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
     let dims = large_ivp_chunking_dims();
     let repeats = large_ivp_chunking_repeats();
     let target_chunks = large_ivp_chunking_chunks();
@@ -6387,7 +6339,7 @@ fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
         }
 
         print_large_ivp_chunking_tables(
-            &format!("AtomViewExprCompat Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
+            &format!("AtomViewNative Lambdify vs tcc whole/chunk{target_chunks} warm prebuilt"),
             n,
             &rows,
         );
@@ -6408,8 +6360,7 @@ fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
     }
 }
 
-#[test]
-fn lsode2_cold_aot_story_config_forces_rebuild_always() {
+pub(super) fn run_lsode2_cold_aot_story_config_forces_rebuild_always() {
     for matrix in [BackendRaceMatrix::Sparse, BackendRaceMatrix::Banded] {
         for toolchain in [
             AotStoryToolchain::CTcc,
@@ -6436,9 +6387,7 @@ fn lsode2_cold_aot_story_config_forces_rebuild_always() {
     }
 }
 
-#[test]
-#[ignore = "release story: cold AOT toolchain/chunking matrix compiles many generated artifacts"]
-fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
+pub(super) fn run_lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
     const DEFAULT_REPEATS: usize = 3;
     let repeats = std::env::var("LSODE2_AOT_COLD_REPEATS")
         .ok()
@@ -6495,7 +6444,7 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
             .final_y
             .expect("reference final state should exist")[0];
 
-        let mut baseline_row = BackendRaceRow::new(matrix.label(), "Lambdify-AtomViewExprCompat");
+        let mut baseline_row = BackendRaceRow::new(matrix.label(), "Lambdify-AtomViewNative");
         for _ in 0..repeats {
             baseline_row.runs_total += 1;
             let config = combustion_symbolic_matrix_config(
@@ -6506,7 +6455,7 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
             )
             .with_bdf_only_controller();
             match run_combustion_story_sample_result(
-                "Lambdify-AtomViewExprCompat",
+                "Lambdify-AtomViewNative",
                 config,
                 baseline_final_a,
             ) {
@@ -6612,7 +6561,7 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
     }
 
     for row in rows {
-        if row.route == "Lambdify-AtomViewExprCompat" {
+        if row.route == "Lambdify-AtomViewNative" {
             assert_eq!(
                 row.runs_ok, row.runs_total,
                 "{} baseline should complete all runs",

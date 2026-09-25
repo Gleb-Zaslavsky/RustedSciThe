@@ -56,7 +56,76 @@ mod stiff_parity_tests;
 mod story_tests2;
 
 #[cfg(test)]
-mod lambdify_stress_story_tests;
+#[path = "LSODE2/tests/lambdify_stage_story_tests.rs"]
+mod lambdify_stage_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/story_support.rs"]
+mod story_support;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/large_system_story_tests.rs"]
+mod large_system_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/large_performance_story_tests.rs"]
+mod large_performance_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/evaluator_policy_story_tests.rs"]
+mod evaluator_policy_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/telemetry_stage_story_tests.rs"]
+mod telemetry_stage_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/lifecycle_story_tests.rs"]
+mod lifecycle_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/correctness_story_tests.rs"]
+mod correctness_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_correctness_story_tests.rs"]
+mod aot_correctness_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_residual_story_tests.rs"]
+mod aot_residual_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_lifecycle_story_tests.rs"]
+mod aot_lifecycle_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_chunking_story_tests.rs"]
+mod aot_chunking_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_toolchain_story_tests.rs"]
+mod aot_toolchain_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_layout_parity_story_tests.rs"]
+mod aot_layout_parity_story_tests;
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_performance_story_tests.rs"]
+mod aot_performance_story_tests;
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_process_harness_story_tests.rs"]
+mod aot_process_harness_story_tests;
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_trajectory_parity_story_tests.rs"]
+mod aot_trajectory_parity_story_tests;
+#[cfg(test)]
+#[path = "LSODE2/tests/aot_warm_rebind_story_tests.rs"]
+mod aot_warm_rebind_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/three_body_story_tests.rs"]
+mod aot_three_body_story_tests;
 
 #[cfg(test)]
 mod legacy_atomview_lambdify;

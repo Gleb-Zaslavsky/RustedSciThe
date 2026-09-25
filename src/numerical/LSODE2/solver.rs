@@ -16,8 +16,8 @@ use super::native_integration::{
     run_native_integration_for_method_with_policy,
 };
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle,
-    compile_native_symbolic_jacobian_with_parameter_handle,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
 };
 use super::native_preflight::{Lsode2NativeStepProbeSummary, run_native_step_preflight};
 use super::native_step_engine::Lsode2NativeStepMethod;
@@ -214,13 +214,12 @@ impl Lsode2EvaluationTelemetry {
         statistics: &IvpBackendStatistics,
         native: &Lsode2NativeStatistics,
     ) -> Self {
-        let native_has_activity = native.native_step_attempts > 0
-            || native.native_residual_calls > 0
-            || native.native_jacobian_calls > 0
-            || native.native_linear_solve_calls > 0;
         let native_status =
             status == "finished_native_faithful" || status == "finished_native_faithful_partial";
-        if native_status || native_has_activity {
+        // BridgeSolve may execute a bounded native probe before delegating the
+        // actual solve to BDF. Probe activity is diagnostic context, not the
+        // user-facing evaluation scope for the completed solve.
+        if native_status {
             return Self {
                 scope: Lsode2TelemetryScope::NativeFaithfulInnerLoop,
                 residual_evaluations: native.native_residual_calls,
@@ -1368,6 +1367,8 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
         Lsode2ResidualJacobianSource::Symbolic { assembly, .. } => assembly,
         Lsode2ResidualJacobianSource::Analytical => Lsode2SymbolicAssemblyBackend::ExprLegacy,
     };
+    let telemetry = config.telemetry.clone();
+    let execution_policy = config.lambdify_execution_policy;
     let use_sparse_aot_jacobian = matches!(
         config.residual_jacobian_source,
         Lsode2ResidualJacobianSource::Symbolic {
@@ -1377,7 +1378,7 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
     );
     inner.set_bdf_native_jacobian_factory(move |parameter_values_handle| {
         if use_sparse_aot_jacobian {
-            compile_native_sparse_aot_jacobian_with_parameter_handle(
+            compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry(
                 &equations,
                 &variables,
                 time_arg.as_str(),
@@ -1392,16 +1393,25 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
                     }
                     Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
                 },
+                telemetry.clone(),
             )
             .expect("LSODE2 AOT sparse Jacobian backend should prepare compiled callbacks")
         } else {
-            compile_native_symbolic_jacobian_with_parameter_handle(
+            compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy(
                 &equations,
                 &variables,
                 time_arg.as_str(),
                 equation_parameters.as_deref(),
                 parameter_values_handle,
                 storage,
+                match symbolic_assembly_backend {
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                        IvpSymbolicAssemblyBackend::ExprLegacy
+                    }
+                    Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
+                },
+                telemetry.clone(),
+                execution_policy,
             )
         }
     });

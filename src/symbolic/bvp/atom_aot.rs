@@ -30,6 +30,9 @@ use std::sync::Arc;
 /// Output storage contract owned by an AtomView AOT plan.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum AtomAotMatrixLayout {
+    /// Row-major dense callback layout. The prepared symbolic entries remain
+    /// sparse, while code generation emits the complete matrix buffer.
+    Dense { rows: usize, cols: usize },
     /// Fixed coordinate/value ordering for a CSC-compatible sparse callback.
     SparseCsc {
         rows: usize,
@@ -309,7 +312,8 @@ impl AtomAotMatrixLayout {
     /// Matrix dimensions carried by the generated callback contract.
     pub const fn shape(&self) -> (usize, usize) {
         match *self {
-            Self::SparseCsc { rows, cols, .. }
+            Self::Dense { rows, cols }
+            | Self::SparseCsc { rows, cols, .. }
             | Self::Banded { rows, cols, .. }
             | Self::BandedCompact { rows, cols, .. } => (rows, cols),
         }
@@ -318,6 +322,7 @@ impl AtomAotMatrixLayout {
     /// Number of values emitted by the Jacobian callback.
     pub const fn value_count(&self) -> usize {
         match *self {
+            Self::Dense { rows, cols } => rows * cols,
             Self::SparseCsc { nnz, .. } => nnz,
             Self::Banded { slots, .. } | Self::BandedCompact { slots, .. } => slots,
         }
@@ -637,6 +642,7 @@ pub struct AtomAotPreparedPlan {
 
 fn telemetry_matrix_layout(layout: AtomAotMatrixLayout) -> TelemetryMatrixLayout {
     match layout {
+        AtomAotMatrixLayout::Dense { .. } => TelemetryMatrixLayout::Dense,
         AtomAotMatrixLayout::SparseCsc { .. } => TelemetryMatrixLayout::SparseCsc,
         AtomAotMatrixLayout::Banded { .. } => TelemetryMatrixLayout::Banded,
         AtomAotMatrixLayout::BandedCompact { .. } => TelemetryMatrixLayout::BandedCompact,
@@ -766,7 +772,11 @@ impl AtomAotPreparedPlan {
         )
         .inspect_err(|_| telemetry.record_error())?;
         let compact_banded = matches!(matrix_layout, AtomAotMatrixLayout::BandedCompact { .. });
-        let value_count_matches = if compact_banded {
+        let value_count_matches = if matches!(matrix_layout, AtomAotMatrixLayout::Dense { .. }) {
+            // Dense output is a complete buffer; the prepared entries remain
+            // the canonical sparse symbolic representation.
+            jacobian_entries.len() <= matrix_layout.value_count()
+        } else if compact_banded {
             jacobian_entries.len() <= matrix_layout.value_count()
         } else {
             matrix_layout.value_count() == jacobian_entries.len()
@@ -861,6 +871,7 @@ impl AtomAotPreparedPlan {
     /// The distinction is in the callback value count and codegen layout.
     pub fn native_banded_slot_map(&self) -> Option<AtomAotBandedSlotMap> {
         match self.matrix_layout {
+            AtomAotMatrixLayout::Dense { .. } => None,
             AtomAotMatrixLayout::Banded {
                 rows, cols, kl, ku, ..
             }

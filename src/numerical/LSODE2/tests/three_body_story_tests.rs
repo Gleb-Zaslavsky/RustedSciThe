@@ -1,11 +1,15 @@
+use super::story_tests2::{BackendRaceRow, RaceStats, short_error, unique_story_short_tag};
 use super::*;
 use crate::numerical::LSODE2::{Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure};
 use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
+use crate::symbolic::symbolic_engine::Expr;
+use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::process::Command;
+use std::time::Instant;
 
 fn command_available(command: &str) -> bool {
     let probe = if cfg!(windows) { "where" } else { "which" };
@@ -419,6 +423,10 @@ fn run_three_body_story_sample_result(
 #[test]
 #[ignore = "release story: three-body LSODE2 compares Lambdify vs tcc whole and chunked runtime"]
 fn lsode2_three_body_problem_backend_story_dashboard() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_three_body_story_tests::lsode2_three_body_problem_backend_story_dashboard",
+    );
     const REPEATS: usize = 4;
     let routes = [
         (

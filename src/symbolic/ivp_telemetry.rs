@@ -151,6 +151,52 @@ impl IvpTelemetryExecution {
     }
 }
 
+/// Typed lifecycle events for generated IVP AOT diagnostics.
+///
+/// Events are emitted only on cold lifecycle paths. The logger does not retain
+/// them, so disabled logging has no event-buffer allocation and the callback
+/// hot path never touches this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IvpAotLifecycleEvent {
+    Planned,
+    CacheHit,
+    CacheMiss,
+    SourceEmitted,
+    Materialized,
+    BuildStarted,
+    BuildSucceeded,
+    BuildFailed,
+    LinkFailed,
+    LinkStarted,
+    Linked,
+    Published,
+    RuntimeReady,
+    Retry,
+    Quarantined,
+}
+
+impl IvpAotLifecycleEvent {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::CacheHit => "cache_hit",
+            Self::CacheMiss => "cache_miss",
+            Self::SourceEmitted => "source_emitted",
+            Self::Materialized => "materialized",
+            Self::BuildStarted => "build_started",
+            Self::BuildSucceeded => "build_succeeded",
+            Self::BuildFailed => "build_failed",
+            Self::LinkFailed => "link_failed",
+            Self::LinkStarted => "link_started",
+            Self::Linked => "linked",
+            Self::Published => "published",
+            Self::RuntimeReady => "runtime_ready",
+            Self::Retry => "retry",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
 /// Cold preparation stages measured by [`IvpTelemetry`].
 ///
 /// `SymbolicJacobian` is an aggregate around the backend-specific children
@@ -181,10 +227,15 @@ pub enum IvpColdStage {
     AotMaterialization,
     AotBuild,
     AotLink,
+    AtomPreparation,
+    AotCacheLookup,
+    AotLowering,
+    AotSourceGeneration,
+    AotPublication,
 }
 
 impl IvpColdStage {
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 22;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -204,7 +255,12 @@ impl IvpColdStage {
             13 => Self::BackendBinding,
             14 => Self::AotMaterialization,
             15 => Self::AotBuild,
-            _ => Self::AotLink,
+            16 => Self::AotLink,
+            17 => Self::AtomPreparation,
+            18 => Self::AotCacheLookup,
+            19 => Self::AotLowering,
+            20 => Self::AotSourceGeneration,
+            _ => Self::AotPublication,
         }
     }
 
@@ -227,6 +283,11 @@ impl IvpColdStage {
             Self::AotMaterialization => "aot_materialization",
             Self::AotBuild => "aot_build",
             Self::AotLink => "aot_link",
+            Self::AtomPreparation => "atom_preparation",
+            Self::AotCacheLookup => "aot_cache_lookup",
+            Self::AotLowering => "aot_lowering",
+            Self::AotSourceGeneration => "aot_source_generation",
+            Self::AotPublication => "aot_publication",
         }
     }
 }
@@ -258,10 +319,14 @@ pub enum IvpWarmStage {
     ControllerMethodSwitch,
     ResidualCallback,
     JacobianCallback,
+    AotChunkDispatch,
+    AotWorkerExecution,
+    AotArgumentCopy,
+    AotOutputWrite,
 }
 
 impl IvpWarmStage {
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 21;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -281,7 +346,11 @@ impl IvpWarmStage {
             13 => Self::ControllerMethodPolicy,
             14 => Self::ControllerMethodSwitch,
             15 => Self::ResidualCallback,
-            _ => Self::JacobianCallback,
+            16 => Self::JacobianCallback,
+            17 => Self::AotChunkDispatch,
+            18 => Self::AotWorkerExecution,
+            19 => Self::AotArgumentCopy,
+            _ => Self::AotOutputWrite,
         }
     }
 
@@ -304,6 +373,10 @@ impl IvpWarmStage {
             Self::ControllerMethodSwitch => "controller_method_switch",
             Self::ResidualCallback => "residual_callback_inclusive",
             Self::JacobianCallback => "jacobian_callback_inclusive",
+            Self::AotChunkDispatch => "aot_chunk_dispatch",
+            Self::AotWorkerExecution => "aot_worker_execution",
+            Self::AotArgumentCopy => "aot_argument_copy",
+            Self::AotOutputWrite => "aot_output_write",
         }
     }
 }
@@ -351,6 +424,21 @@ pub struct IvpTelemetrySnapshot {
     pub errors: u64,
     pub parallel_dispatches: u64,
     pub sequential_dispatches: u64,
+    pub aot_resolution_hits: u64,
+    pub aot_resolution_misses: u64,
+    pub aot_reconnects: u64,
+    pub aot_build_attempts: u64,
+    pub aot_build_retries: u64,
+    pub aot_build_successes: u64,
+    pub aot_build_failures: u64,
+    pub aot_link_attempts: u64,
+    pub aot_link_successes: u64,
+    pub aot_link_failures: u64,
+    pub aot_runtime_ready: u64,
+    pub aot_chunk_dispatches: u64,
+    pub aot_parallel_dispatches: u64,
+    pub aot_chunks: u64,
+    pub aot_worker_callbacks: u64,
 }
 
 impl IvpTelemetrySnapshot {
@@ -431,6 +519,21 @@ impl fmt::Display for IvpTelemetrySnapshot {
             ("errors", self.errors),
             ("parallel_dispatches", self.parallel_dispatches),
             ("sequential_dispatches", self.sequential_dispatches),
+            ("aot_resolution_hits", self.aot_resolution_hits),
+            ("aot_resolution_misses", self.aot_resolution_misses),
+            ("aot_reconnects", self.aot_reconnects),
+            ("aot_build_attempts", self.aot_build_attempts),
+            ("aot_build_retries", self.aot_build_retries),
+            ("aot_build_successes", self.aot_build_successes),
+            ("aot_build_failures", self.aot_build_failures),
+            ("aot_link_attempts", self.aot_link_attempts),
+            ("aot_link_successes", self.aot_link_successes),
+            ("aot_link_failures", self.aot_link_failures),
+            ("aot_runtime_ready", self.aot_runtime_ready),
+            ("aot_chunk_dispatches", self.aot_chunk_dispatches),
+            ("aot_parallel_dispatches", self.aot_parallel_dispatches),
+            ("aot_chunks", self.aot_chunks),
+            ("aot_worker_callbacks", self.aot_worker_callbacks),
         ] {
             writeln!(formatter, "| `{name}` | {value} |")?;
         }
@@ -520,6 +623,21 @@ struct IvpTelemetryInner {
     errors: AtomicU64,
     parallel_dispatches: AtomicU64,
     sequential_dispatches: AtomicU64,
+    aot_resolution_hits: AtomicU64,
+    aot_resolution_misses: AtomicU64,
+    aot_reconnects: AtomicU64,
+    aot_build_attempts: AtomicU64,
+    aot_build_retries: AtomicU64,
+    aot_build_successes: AtomicU64,
+    aot_build_failures: AtomicU64,
+    aot_link_attempts: AtomicU64,
+    aot_link_successes: AtomicU64,
+    aot_link_failures: AtomicU64,
+    aot_runtime_ready: AtomicU64,
+    aot_chunk_dispatches: AtomicU64,
+    aot_parallel_dispatches: AtomicU64,
+    aot_chunks: AtomicU64,
+    aot_worker_callbacks: AtomicU64,
 }
 
 impl Default for IvpTelemetryInner {
@@ -561,6 +679,21 @@ impl Default for IvpTelemetryInner {
             errors: AtomicU64::new(0),
             parallel_dispatches: AtomicU64::new(0),
             sequential_dispatches: AtomicU64::new(0),
+            aot_resolution_hits: AtomicU64::new(0),
+            aot_resolution_misses: AtomicU64::new(0),
+            aot_reconnects: AtomicU64::new(0),
+            aot_build_attempts: AtomicU64::new(0),
+            aot_build_retries: AtomicU64::new(0),
+            aot_build_successes: AtomicU64::new(0),
+            aot_build_failures: AtomicU64::new(0),
+            aot_link_attempts: AtomicU64::new(0),
+            aot_link_successes: AtomicU64::new(0),
+            aot_link_failures: AtomicU64::new(0),
+            aot_runtime_ready: AtomicU64::new(0),
+            aot_chunk_dispatches: AtomicU64::new(0),
+            aot_parallel_dispatches: AtomicU64::new(0),
+            aot_chunks: AtomicU64::new(0),
+            aot_worker_callbacks: AtomicU64::new(0),
         }
     }
 }
@@ -622,6 +755,29 @@ impl IvpTelemetry {
 
     pub fn mode(&self) -> IvpTelemetryMode {
         self.mode
+    }
+
+    /// Emits one typed, opt-in cold lifecycle event.
+    ///
+    /// `log` performs the level check before formatting the dynamic fields.
+    /// This method is intentionally not used from residual/Jacobian callbacks.
+    pub fn log_aot_event(
+        &self,
+        event: IvpAotLifecycleEvent,
+        route: &'static str,
+        problem_key: &str,
+        detail: &str,
+    ) {
+        if log::log_enabled!(target: "rustedscithe::symbolic::aot", log::Level::Debug) {
+            log::debug!(
+                target: "rustedscithe::symbolic::aot",
+                "symbolic IVP AOT lifecycle event={} route={} problem_key={} detail={}",
+                event.label(),
+                route,
+                problem_key,
+                detail
+            );
+        }
     }
 
     pub fn set_route(&self, route: IvpTelemetryRoute) {
@@ -803,6 +959,61 @@ impl IvpTelemetry {
         }
     }
 
+    pub fn record_aot_resolution(&self, hit: bool) {
+        if hit {
+            self.record_counter(|inner| &inner.aot_resolution_hits);
+        } else {
+            self.record_counter(|inner| &inner.aot_resolution_misses);
+        }
+    }
+
+    pub fn record_aot_reconnect(&self) {
+        self.record_counter(|inner| &inner.aot_reconnects);
+    }
+
+    pub fn record_aot_build_attempt(&self, retry: bool) {
+        self.record_counter(|inner| &inner.aot_build_attempts);
+        if retry {
+            self.record_counter(|inner| &inner.aot_build_retries);
+        }
+    }
+
+    pub fn record_aot_build_result(&self, success: bool) {
+        if success {
+            self.record_counter(|inner| &inner.aot_build_successes);
+        } else {
+            self.record_counter(|inner| &inner.aot_build_failures);
+        }
+    }
+
+    pub fn record_aot_link_attempt(&self) {
+        self.record_counter(|inner| &inner.aot_link_attempts);
+    }
+
+    pub fn record_aot_link_result(&self, success: bool) {
+        if success {
+            self.record_counter(|inner| &inner.aot_link_successes);
+        } else {
+            self.record_counter(|inner| &inner.aot_link_failures);
+        }
+    }
+
+    pub fn record_aot_runtime_ready(&self) {
+        self.record_counter(|inner| &inner.aot_runtime_ready);
+    }
+
+    pub fn record_aot_chunk_dispatch(&self, parallel: bool, chunks: usize) {
+        self.record_counter(|inner| &inner.aot_chunk_dispatches);
+        if parallel {
+            self.record_counter(|inner| &inner.aot_parallel_dispatches);
+        }
+        self.add_counter(|inner| &inner.aot_chunks, chunks as u64);
+    }
+
+    pub fn record_aot_worker_callback(&self) {
+        self.record_counter(|inner| &inner.aot_worker_callbacks);
+    }
+
     pub fn snapshot(&self) -> IvpTelemetrySnapshot {
         let Some(inner) = &self.inner else {
             return IvpTelemetrySnapshot {
@@ -838,6 +1049,21 @@ impl IvpTelemetry {
                 errors: 0,
                 parallel_dispatches: 0,
                 sequential_dispatches: 0,
+                aot_resolution_hits: 0,
+                aot_resolution_misses: 0,
+                aot_reconnects: 0,
+                aot_build_attempts: 0,
+                aot_build_retries: 0,
+                aot_build_successes: 0,
+                aot_build_failures: 0,
+                aot_link_attempts: 0,
+                aot_link_successes: 0,
+                aot_link_failures: 0,
+                aot_runtime_ready: 0,
+                aot_chunk_dispatches: 0,
+                aot_parallel_dispatches: 0,
+                aot_chunks: 0,
+                aot_worker_callbacks: 0,
             };
         };
 
@@ -887,6 +1113,21 @@ impl IvpTelemetry {
             errors: inner.errors.load(Ordering::Relaxed),
             parallel_dispatches: inner.parallel_dispatches.load(Ordering::Relaxed),
             sequential_dispatches: inner.sequential_dispatches.load(Ordering::Relaxed),
+            aot_resolution_hits: inner.aot_resolution_hits.load(Ordering::Relaxed),
+            aot_resolution_misses: inner.aot_resolution_misses.load(Ordering::Relaxed),
+            aot_reconnects: inner.aot_reconnects.load(Ordering::Relaxed),
+            aot_build_attempts: inner.aot_build_attempts.load(Ordering::Relaxed),
+            aot_build_retries: inner.aot_build_retries.load(Ordering::Relaxed),
+            aot_build_successes: inner.aot_build_successes.load(Ordering::Relaxed),
+            aot_build_failures: inner.aot_build_failures.load(Ordering::Relaxed),
+            aot_link_attempts: inner.aot_link_attempts.load(Ordering::Relaxed),
+            aot_link_successes: inner.aot_link_successes.load(Ordering::Relaxed),
+            aot_link_failures: inner.aot_link_failures.load(Ordering::Relaxed),
+            aot_runtime_ready: inner.aot_runtime_ready.load(Ordering::Relaxed),
+            aot_chunk_dispatches: inner.aot_chunk_dispatches.load(Ordering::Relaxed),
+            aot_parallel_dispatches: inner.aot_parallel_dispatches.load(Ordering::Relaxed),
+            aot_chunks: inner.aot_chunks.load(Ordering::Relaxed),
+            aot_worker_callbacks: inner.aot_worker_callbacks.load(Ordering::Relaxed),
         }
     }
 
@@ -1040,6 +1281,62 @@ mod tests {
     }
 
     #[test]
+    fn aot_lifecycle_counters_are_typed_and_disabled_without_storage() {
+        let telemetry = IvpTelemetry::counters();
+        telemetry.record_aot_resolution(true);
+        telemetry.record_aot_resolution(false);
+        telemetry.record_aot_reconnect();
+        telemetry.record_aot_build_attempt(false);
+        telemetry.record_aot_build_attempt(true);
+        telemetry.record_aot_build_result(true);
+        telemetry.record_aot_build_result(false);
+        telemetry.record_aot_link_attempt();
+        telemetry.record_aot_link_result(true);
+        telemetry.record_aot_link_result(false);
+        telemetry.record_aot_runtime_ready();
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.aot_resolution_hits, 1);
+        assert_eq!(snapshot.aot_resolution_misses, 1);
+        assert_eq!(snapshot.aot_reconnects, 1);
+        assert_eq!(snapshot.aot_build_attempts, 2);
+        assert_eq!(snapshot.aot_build_retries, 1);
+        assert_eq!(snapshot.aot_build_successes, 1);
+        assert_eq!(snapshot.aot_build_failures, 1);
+        assert_eq!(snapshot.aot_link_attempts, 1);
+        assert_eq!(snapshot.aot_link_successes, 1);
+        assert_eq!(snapshot.aot_link_failures, 1);
+        assert_eq!(snapshot.aot_runtime_ready, 1);
+
+        let disabled = IvpTelemetry::disabled();
+        disabled.record_aot_build_attempt(false);
+        disabled.record_aot_runtime_ready();
+        let disabled_snapshot = disabled.snapshot();
+        assert_eq!(disabled_snapshot.aot_build_attempts, 0);
+        assert_eq!(disabled_snapshot.aot_runtime_ready, 0);
+    }
+
+    #[test]
+    fn aot_lifecycle_events_are_typed_and_safe_when_logging_is_disabled() {
+        assert_eq!(IvpAotLifecycleEvent::BuildStarted.label(), "build_started");
+        assert_eq!(IvpAotLifecycleEvent::Retry.label(), "retry");
+        assert_eq!(IvpAotLifecycleEvent::Linked.label(), "linked");
+        assert_eq!(IvpAotLifecycleEvent::RuntimeReady.label(), "runtime_ready");
+        assert_eq!(IvpAotLifecycleEvent::Quarantined.label(), "quarantined");
+
+        // Logging is independently opt-in; this must not allocate telemetry
+        // storage or alter the Off snapshot when no logger is configured.
+        let telemetry = IvpTelemetry::disabled();
+        telemetry.log_aot_event(
+            IvpAotLifecycleEvent::BuildFailed,
+            "sparse-atom-native",
+            "key",
+            "compiler failure",
+        );
+        assert_eq!(telemetry.snapshot().mode, IvpTelemetryMode::Off);
+    }
+
+    #[test]
     fn detailed_telemetry_keeps_typed_stage_breakdown_and_route() {
         let telemetry = IvpTelemetry::detailed();
         telemetry.set_route(IvpTelemetryRoute::AtomViewExprCompat);
@@ -1058,6 +1355,19 @@ mod tests {
             snapshot.warm_stage(IvpWarmStage::ArgumentBinding).elapsed,
             Duration::from_micros(11)
         );
+    }
+
+    #[test]
+    fn aot_cold_stage_labels_are_stable_and_typed() {
+        assert_eq!(IvpColdStage::AtomPreparation.label(), "atom_preparation");
+        assert_eq!(IvpColdStage::AotCacheLookup.label(), "aot_cache_lookup");
+        assert_eq!(IvpColdStage::AotLowering.label(), "aot_lowering");
+        assert_eq!(
+            IvpColdStage::AotSourceGeneration.label(),
+            "aot_source_generation"
+        );
+        assert_eq!(IvpColdStage::AotPublication.label(), "aot_publication");
+        assert_eq!(IvpColdStage::COUNT, 22);
     }
 
     #[test]
@@ -1096,11 +1406,39 @@ mod tests {
             IvpColdStage::ResidualLambdification,
             Duration::from_micros(2),
         );
+        telemetry.record_cold_stage_duration(
+            IvpColdStage::AotCacheLookup,
+            Duration::from_micros(5),
+        );
+        telemetry.record_cold_stage_duration(
+            IvpColdStage::AotLowering,
+            Duration::from_micros(6),
+        );
+        telemetry.record_cold_stage_duration(
+            IvpColdStage::AotSourceGeneration,
+            Duration::from_micros(7),
+        );
+        telemetry.record_cold_stage_duration(
+            IvpColdStage::AotPublication,
+            Duration::from_micros(8),
+        );
         telemetry
             .record_warm_stage_duration(IvpWarmStage::ResidualEvaluation, Duration::from_micros(4));
         telemetry.record_warm_stage_duration(
             IvpWarmStage::ControllerPredictor,
             Duration::from_micros(1),
+        );
+        telemetry.record_warm_stage_duration(
+            IvpWarmStage::AotWorkerExecution,
+            Duration::from_micros(9),
+        );
+        telemetry.record_warm_stage_duration(
+            IvpWarmStage::AotArgumentCopy,
+            Duration::from_micros(10),
+        );
+        telemetry.record_warm_stage_duration(
+            IvpWarmStage::AotOutputWrite,
+            Duration::from_micros(11),
         );
 
         let snapshot = telemetry.snapshot();
@@ -1115,9 +1453,17 @@ mod tests {
         assert!(report.contains("| `symbolic_jacobian` | 1 | 0.012000 |"));
         assert!(report.contains("| `symbolic_differentiation` | 1 | 0.003000 |"));
         assert!(report.contains("| `residual_lambdification` | 1 | 0.002000 |"));
+        assert!(report.contains("| `aot_cache_lookup` | 1 | 0.005000 |"));
+        assert!(report.contains("| `aot_lowering` | 1 | 0.006000 |"));
+        assert!(report.contains("| `aot_source_generation` | 1 | 0.007000 |"));
+        assert!(report.contains("| `aot_publication` | 1 | 0.008000 |"));
         assert!(report.contains("| `residual_evaluation` | 1 | 0.004000 |"));
         assert!(report.contains("| `controller_predictor` | 1 | 0.001000 |"));
+        assert!(report.contains("| `aot_worker_execution` | 1 | 0.009000 |"));
+        assert!(report.contains("| `aot_argument_copy` | 1 | 0.010000 |"));
+        assert!(report.contains("| `aot_output_write` | 1 | 0.011000 |"));
         assert!(report.contains("| `parallel_dispatches` | 1 |"));
         assert!(report.contains("| `sequential_dispatches` | 1 |"));
+        assert!(report.contains("| `aot_build_attempts` | 0 |"));
     }
 }

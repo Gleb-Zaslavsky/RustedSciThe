@@ -2793,7 +2793,31 @@ debug slices are green.
   comparison modules until the AtomView-native route wins correctness,
   lifecycle and matched performance evidence.
 
-### 28.7 First implementation slice: callback-only policy matrix (2026-09-22)
+### 28.7 AtomView refactor checkpoint (2026-09-23, release evidence)
+
+Commit `ead446a` (`AtomView refactor stage 2`) is the current rollback and
+comparison checkpoint. The implementation is considered close to the desired
+production shape: AtomView preparation is substantially cheaper on the large
+combustion fixture, Sparse callback execution is materially faster than
+ExprLegacy, and all recorded residual/Jacobian parity gates remain green.
+
+The dated release evidence records the following boundary:
+
+- combustion, `n_steps=3000`, `18000x18000`, Sparse callback: AtomView
+  `1.053 ms` versus ExprLegacy `3.915 ms`;
+- the same Banded callback: AtomView `9.280 ms` versus ExprLegacy `8.223 ms`;
+- cold Banded preparation: AtomView `153.497 ms` versus ExprLegacy
+  `675.869 ms`;
+- residual parity remained at approximately `4.25e-17`.
+
+This checkpoint is not a claim that every AtomView stage is optimal. It means
+that future changes must preserve correctness and cold-preparation gains, must
+not regress the AtomView dated baseline, and must localize any Banded warm-path
+change into evaluator work, slot writes, assembly, dispatch or solver stages.
+The next performance work must start from this commit and retain ExprLegacy as
+the comparison oracle.
+
+### 28.8 First implementation slice: callback-only policy matrix (2026-09-22)
 
 - [x] Add the debug gate
   `test_lambdify_callback_matrix::tests::atomview_callback_only_auto_policy_matrix_preserves_values_and_reports_dispatch`.
@@ -2878,3 +2902,23 @@ debug slices are green.
 - [ ] Continue removing stale warnings outside BVP_Damp in separate subsystem
   passes; this QoL slice intentionally does not mix unrelated numerical or
   symbolic cleanup into the BVP refactor.
+
+## Baseline Acceptance Policy (2026-09-23)
+
+- [ ] Treat correctness and solver-trajectory parity as mandatory gates:
+  residual/Jacobian values, final solution, accepted/rejected steps, Newton
+  iterations, Jacobian rebuilds, linear solves, refinements and factor-cache
+  behavior must remain valid.
+- [ ] Use callback-level measurements as the primary criterion for evaluator
+  changes. Full-solve wall-clock is an integral control signal, not a sole
+  reason to accept or reject a symbolic optimization.
+- [ ] Prefer a safe neutral result over a risky speedup. A small local
+  Banded warm-path overhead of roughly `1 ms` or about `10-15%` is acceptable
+  when cold preparation, correctness and lifecycle remain sound; it must stay
+  visible as a dated route-specific baseline.
+- [ ] The current large BVP evidence shows no general AtomView regression:
+  Sparse callback execution and cold preparation are substantially better than
+  ExprLegacy, while Banded warm execution is the isolated follow-up target.
+- [ ] Every optimization must preserve the current rollback checkpoint
+  `ead446a`, the ExprLegacy oracle and the historical AtomView comparison
+  route. No change is production-accepted from a single noisy run.

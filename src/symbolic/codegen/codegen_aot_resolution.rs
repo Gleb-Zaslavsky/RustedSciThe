@@ -11,6 +11,7 @@
 //! - do we already know about a generated AOT backend for it,
 //! - and does the expected static artifact appear to exist on disk?
 
+use crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleError;
 use crate::symbolic::codegen::codegen_aot_registry::{AotRegistry, RegisteredAotArtifact};
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::codegen_provider_api::PreparedProblem;
@@ -64,6 +65,18 @@ impl AotResolver {
     /// safety checks to [`AotRegistry::cleanup_artifact_by_problem_key`].
     pub fn cleanup_artifact_by_problem_key(&mut self, problem_key: &str) -> std::io::Result<bool> {
         self.registry.cleanup_artifact_by_problem_key(problem_key)
+    }
+
+    /// Quarantines a registered artifact while retaining its registry entry.
+    ///
+    /// The resolver will therefore report `RegisteredButNotBuilt` until a new
+    /// build is materialized and published. This is used by lifecycle code to
+    /// distinguish a stale publication from a completely unknown artifact.
+    pub fn quarantine_artifact_by_problem_key(
+        &self,
+        problem_key: &str,
+    ) -> Result<Option<std::path::PathBuf>, AotLifecycleError> {
+        self.registry.quarantine_artifact_by_problem_key(problem_key)
     }
 
     /// Resolves an AOT backend by manifest.

@@ -10,11 +10,224 @@ When a release run is performed, paste the important tables under the correspond
 test and fill in `Analysis`. A table without a hypothesis is only expensive console
 art; this file is meant to keep the experiments legible months later.
 
+## Test Source Layout
+
+New thematic tests live under `src/numerical/LSODE2/tests/`. The current debug
+modules are `large_system_story_tests.rs`, `evaluator_policy_story_tests.rs`,
+`lifecycle_story_tests.rs`, `lambdify_stage_story_tests.rs`,
+`telemetry_stage_story_tests.rs`, `correctness_story_tests.rs` and
+`three_body_story_tests.rs`. The latter is
+still attached to the compatibility `story_tests2` module because it consumes
+historical race-table helpers, but its source and report capture are now in the
+dedicated test directory. The old `story_tests.rs` and `story_tests2.rs` remain
+compatibility containers until each block has a dedicated home.
+
 Current source of truth: runs marked `CPU 12 Core` were produced on the newer
 12-core / 64 GB machine and should be used for current performance conclusions.
 Older `CPU 4 Core` tables are intentionally kept as historical comparison data:
 they are useful for seeing how chunking, hot callbacks and linear algebra scale
 across machines, but they are no longer the primary baseline.
+
+## Release Correctness Gate: 2026-09-24 13:44 Local
+
+The ten reports with local timestamp `13:44` were run in release mode (user
+confirmed). All passed. This is a correctness/lifecycle gate, not a timing
+baseline: the current report writer records the UTC timestamp and status but
+does not yet encode the Cargo profile, so the release profile is recorded here
+explicitly.
+
+The gate covers trajectory and public algorithm snapshot parity, bridge/native
+counter-scope attribution, callback failure recovery, binding-scope closure,
+parameter invalidation at cardinalities 32/128/256, non-finite and typed-shape
+errors, structural-zero and maximum-bandwidth layouts, fixed Sparse ordering,
+and compact Banded slots. The important release values are:
+
+- `ExprLegacy` versus `AtomViewNative`: exact trajectory parity with
+  `315/231/305` residual/Jacobian/linear counters, `200` accepted and `31`
+  rejected steps; algorithm snapshot `bdf_only`, `fixed_controller`, order
+  `1`, maximum order `5`.
+- Bridge/native scope gate: bridge `1024/1/11` and native `315/231/305` are
+  intentionally reported as different execution scopes, not normalized.
+- Layout gates: wider boundary case has `10` Sparse nonzeros, `kl=ku=1` and
+  `12` compact Banded slots; all Dense/Sparse/Banded values match.
+- Failure/invalidation gates: typed errors and recovery pass; valid parameter
+  rebind invalidates prepared state, and rebound-versus-fresh difference is
+  `0.000e0`.
+
+The corresponding raw reports are the ten canonical
+`numerical__LSODE2__correctness_story_tests__...md` files in
+`test_reports/LSODE2_Lambdify`, recorded at `2026-09-24T10:44Z`.
+
+## Large-System Release Gates: 2026-09-24 14:13/14:15 Local
+
+The two new ignored stories were run by the user in release mode. The report
+writer stores UTC timestamps, while the local execution times are recorded
+here explicitly. The canonical reports are:
+
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md`,
+  recorded at `2026-09-24T11:13:55.976Z` (`14:13` local).
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md`,
+  recorded at `2026-09-24T11:15:09.666Z` (`14:15` local).
+
+The first story uses dimensions `128, 256, 512`, three repetitions, identical
+controller/counters and Sparse/Banded backends. The second uses dimensions
+`128, 256, 512, 1024`, checkpoints `1/4/16/64`, and `min_work=64`. Dense is
+excluded from both production-shaped experiments.
+
+### Large total and stage result
+
+- Correctness is green: ExprLegacy and AtomViewNative have identical integer
+  trajectories at every dimension/backend and roundoff-level final-state
+  differences.
+- Banded is the faster production storage on this corpus. At dimension `512`,
+  ExprLegacy is `108.054 ms` versus Sparse `125.304 ms`; AtomViewNative is
+  `110.486 ms` versus Sparse `125.589 ms`.
+- AtomViewNative full-solve wall-clock is close to ExprLegacy at larger sizes:
+  about `+1-3%` at `256/512`. At `128`, the gap is larger (`+17.0%` Sparse
+  and `+11.2%` Banded), so the small case remains a startup-overhead gate.
+- AtomViewNative preparation is slightly cheaper at `256/512`, but the work
+  is redistributed: ExprLegacy reports differentiation/simplification,
+  while AtomViewNative reports `ExprToAtom`/Sparse-pattern preparation. These
+  are alternative stage decompositions and must not be summed as duplicate
+  work.
+- Warm evaluator work remains the main AtomViewNative optimization target:
+  at `512`, residual is about `34%` slower and Jacobian about `132%` slower
+  than ExprLegacy, while the linear stage is nearly equal. Full-solve parity
+  is therefore caused by controller/linear work dominating this corpus, not
+  by callback parity.
+
+### Jacobian overhead localization
+
+The diagnostic story
+`lsode2_large_jacobian_shape_diagnostic_story` was run in debug at dimensions
+`128` and `512`, with callback timing intentionally excluded. At `512` both
+routes have `1534` nonzero entries, but the simplified Expr route contains
+`6654` expression nodes while the direct Atom route contains `6142` prepared
+evaluator nodes (`4.34` versus `4.00` nodes per entry). The same relationship
+holds at `128` (`1662` versus `1534` nodes). Therefore the `132%` warm Jacobian
+gap is not explained by a larger Atom derivative tree or by extra sparsity
+entries.
+
+The first concrete hot-path defect was per-entry evaluator dispatch: every
+Native scalar Jacobian entry independently entered the thread-local `RefCell`
+workspace. Native sequential Jacobian evaluation now batches all entries
+through one workspace borrow per callback. The release capture below measures
+the result; Parallel worker-local dispatch remains a separate optimization axis
+and was deliberately not changed in this pass.
+
+### Jacobian batch-workspace optimization capture: 2026-09-24 14:41 Local
+
+The required release rerun was completed after the sequential batch evaluator
+change. The canonical report is
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md`,
+recorded at `2026-09-24T11:41:42.345Z`. The older `14:13` rows above remain the
+pre-optimization baseline; they are intentionally not overwritten.
+
+- At dimension `512`, AtomViewNative warm Jacobian time fell from `6.007 ms`
+  to `3.957 ms` for Sparse (`-34.2%`) and from `5.732 ms` to `3.610 ms` for
+  Banded (`-37.0%`). The gap against ExprLegacy is now about `+55.4%` and
+  `+44.8%`, respectively, rather than the previous approximately `132%`.
+- The change is visible in full solves as well: AtomViewNative moved from
+  `125.589` to `123.338 ms` for Sparse and from `110.486` to `105.013 ms` for
+  Banded at `512`. It is now about `+3.4%` and `+4.7%` against ExprLegacy on
+  that size.
+- Integer trajectory counters are unchanged at every dimension/backend, and
+  all reported final-state differences remain at roundoff level. This rules
+  out a numerical shortcut or changed controller path as the source of the
+  speedup.
+- The residual callback remains the next separate target: at `512` it is
+  `11.253 ms` versus `8.130 ms` for Sparse and `11.381 ms` versus `7.629 ms`
+  for Banded. This pass changed Jacobian workspace ownership only, so the
+  residual gap must not be attributed to it.
+
+The result validates the first diagnosis: repeated per-entry
+`thread_local!`/`RefCell` workspace entry was a substantial part of the former
+Jacobian overhead. The release gate is green, but the optimization is not yet
+complete because the worker-thread/Parallel path and residual evaluator still
+need independent measurements.
+
+### Residual overhead localization: 2026-09-24 14:50 Local debug
+
+After applying the same batch-workspace ownership to the sequential residual
+path, the debug callback-stage story was rerun and written to
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__large_system_story_tests__atomview_native_large_chain_matches_exprlegacy_callbacks.md`
+(`2026-09-24T11:50:56.120Z`). This is a correctness/diagnostic capture, not a
+release baseline.
+
+- At dimension `256`, Native `ResidualEvaluation` was about `0.085 ms` versus
+  `0.042 ms` for ExprLegacy, while `ResidualOutputAssembly` rounded to `0 ms`.
+  This excludes output `DVector` construction as the dominant explanation.
+- The batch change removes repeated TLS/workspace entry, but each Native
+  residual component still interprets its own prepared `PreparedNode` vector.
+  ExprLegacy instead executes a recursively built closure tree from the same
+  flattened argument buffer. The remaining difference is therefore evaluator
+  instruction/dispatch cost, not symbolic correctness or parameter binding.
+- The next release capture must decide whether this residual gap is material
+  after the safe batch change. If it is, the next diagnostic is a residual
+  operation/node fingerprint; no Atom IR rewrite is accepted from this debug
+  result alone.
+
+### IVP segment specialization: 2026-09-24 14:58 Local debug
+
+The next safe pass specialized the plain-numeric IVP evaluator. It keeps the
+same flat input ABI, but resolves variable index `0` as time, the parameter
+range from the borrowed parameter slice, and the remaining indices from the
+borrowed state slice without constructing or matching a `PreparedInput` value
+for every node. Custom-function evaluation and the Parallel worker path were
+not changed.
+
+The canonical debug report was refreshed at
+`2026-09-24T11:58:21.244Z`:
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__large_system_story_tests__atomview_native_large_chain_matches_exprlegacy_callbacks.md`.
+The direct evaluator gate and the full `symbolic_ivp` unit suite pass, with
+zero residual/Jacobian drift and unchanged callback counts. In this debug run,
+dimension `256` measured Native residual evaluation at about `0.088 ms` versus
+`0.033 ms` for ExprLegacy; this is not a release result and is too noisy to
+classify as an improvement or regression. Output assembly remained rounded to
+zero, so the remaining candidate is still the prepared-node instruction loop.
+
+The release large-stage rerun must be performed only after the pending
+Lambdify test batch is complete. Historical release rows remain unchanged and
+are the comparison baseline.
+
+### Auto break-even result
+
+- Callback correctness is exact: Sequential, forced Parallel and Auto agree
+  on residual/Jacobian values and execute the same `64/64` requests.
+- Forced Parallel loses clearly to Sequential through `512`; worker startup
+  and dispatch overhead are not amortized there.
+- A crossover appears at `1024`: Sparse Auto is faster than Sequential by
+  checkpoint `1` and remains ahead at `64`; Banded Auto first becomes no
+  slower for both stages at checkpoint `16` and is ahead at `64`.
+- These are callback-only break-even results with preparation excluded. They
+  do not yet establish full-solve amortized break-even; that requires adding
+  cold preparation and the actual callback counts of a complete integration.
+
+The two story definitions are:
+
+1. `numerical::LSODE2::large_performance_story_tests::lsode2_large_system_sparse_banded_total_and_stage_story`
+   compares ExprLegacy and AtomViewNative on the common diffusion/reaction
+   chain at large dimensions. It reports preparation, symbolic differentiation,
+   simplification, Sparse/layout planning, lambdification, residual, Jacobian,
+   linear and total wall-clock stages plus integer trajectory counters.
+2. `numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_story`
+   compares Sequential, forced Parallel and Auto on production Sparse/Banded
+   callback runtimes at cumulative checkpoints `1`, `4`, `16`, `64`. It reports
+   dispatches, workers, callback counts and the first observed Auto crossover.
+
+Release commands:
+
+```powershell
+cargo test --release --lib --no-default-features numerical::LSODE2::large_performance_story_tests::lsode2_large_system_sparse_banded_total_and_stage_story -- --ignored --nocapture --test-threads=1
+
+cargo test --release --lib --no-default-features numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_story -- --ignored --nocapture --test-threads=1
+```
+
+The dimensions and repetitions can be controlled without code changes:
+`LSODE2_LARGE_STAGE_DIMENSIONS`, `LSODE2_LARGE_STAGE_REPETITIONS`,
+`LSODE2_AUTO_DIMENSIONS` and `LSODE2_AUTO_MIN_WORK`. Dense is excluded by
+construction. The release captures above are the current large-system
+baseline; older records remain unchanged for regression review.
 
 ## Executive Summary
 
@@ -136,6 +349,23 @@ The report currently does not encode whether the binary was built in debug or
 release mode. It is therefore a fresh correctness and diagnostic baseline, not
 yet the final performance baseline. Add the profile marker and repeat the full
 corpus before using these numbers for optimization claims.
+
+### `lsode2_debug_evaluation_counter_scope_is_explicit_and_not_mixed`
+
+This debug gate keeps two valid but different counter contracts visible. The
+bridge route reports `bridge_bdf_callbacks`, meaning residual/Jacobian counts
+are BDF-level callback evaluations. The faithful route reports
+`native_faithful_inner_loop`, meaning counts belong to the native nonlinear
+inner loop. The report also prints evaluator callback requests separately from
+solver-level counters. This is the required interpretation for observations
+such as `776/387` versus `780/387`: they must be attributed before any future
+normalization, not compared as if they were the same event.
+
+The trajectory parity gate also prints the public algorithm snapshot. For the
+fixed BDF fixture the two frontends match in controller mode, active/mused/mcur
+family, preferred/executed family, switch reason and BDF order metadata. This
+is a final-snapshot check; an automatic Adams/BDF multi-point switch trace is
+still a separate correctness task.
 
 ### `lsode2_lambdify_prepared_parameter_rebind_detailed_story`
 
@@ -2064,7 +2294,7 @@ remaining gaps are now narrow:
 
 ### `lsode2_three_body_problem_backend_story_dashboard`
 
-File: `src/numerical/LSODE2/story_tests2/three_body_story_tests.rs`
+File: `src/numerical/LSODE2/tests/three_body_story_tests.rs`
 
 Hypothesis: for the long three-body integration, Banded should beat Sparse on
 the hot solve path, AOT should beat Lambdify on the same physical problem, and
@@ -2382,3 +2612,546 @@ Because the new report observes 24 Rayon workers and a different telemetry
 protocol, it must not be used for a direct regression percentage. The stable
 next comparison is a repeated release run with identical worker policy,
 telemetry mode, repetitions and cooldown.
+
+## Release Stage Baseline And Regression Gates: 2026-09-24 01:27 Local
+
+The following release reports were produced by the same release test pass and
+are recorded here rather than treated as console-only output:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__lambdify_stress_story_tests__lsode2_lambdify_frontend_stage_breakdown_story.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_combustion_lambdify_evaluator_policy_canonical_story.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_view_three_boundary_real_jacobian_release_story.md
+```
+
+The detailed stage story used `build_profile=release`, dimensions `32` and
+`128`, the same task per route, AOT excluded, and sequential callback
+evaluation. At dimension `128`, the comparable warm rows were:
+
+```text
+matrix | frontend        | argument_binding_ms | residual_eval_ms | jacobian_eval_ms | jacobian_output_ms | factorization_ms | rhs_solve_ms | controller_ms
+Sparse | ExprLegacy      |              0.130 |             1.664 |            0.402 |              0.454 |            4.013 |        0.612 |         8.501
+Sparse | AtomViewNative  |              3.332 |             2.384 |            0.905 |              0.005 |            4.066 |        0.580 |         9.722
+Banded | ExprLegacy      |              0.103 |             1.658 |            0.379 |              0.426 |            0.769 |        0.434 |         5.118
+Banded | AtomViewNative  |              3.623 |             2.588 |            0.987 |              0.028 |            0.813 |        0.450 |         6.827
+```
+
+These rows are inclusive/non-additive where the report marks a parent scope;
+they must not be summed into a second total. The apparent Native
+`argument_binding` cost is currently suspect: the implementation started that
+scope before parameter capture and closed it after scalar evaluation. The
+2026-09-24 code pass moves the end of the scope immediately after binding, so
+the next release run is required before assigning this time to parameter
+binding itself.
+
+The compact solve comparison from the same fixture was:
+
+```text
+matrix | ExprLegacy prepare/solve_ms | AtomViewNative prepare/solve_ms | trajectory
+Sparse | 4.577 / 16.572             | 5.250 / 19.126                 | identical
+Banded | 4.307 / 13.095             | 4.978 / 16.023                 | identical
+```
+
+The integer trajectory is therefore not the explanation: residual/Jacobian
+calls, factorization count and linear solves match. The actionable runtime
+candidate is Native evaluator/binding overhead; factorization and RHS solve
+are already close, while direct Jacobian output assembly is substantially
+cheaper in Native.
+
+### Diffusion-chain AtomNative gate
+
+The real-Jacobian release report is also a separate regression gate, not noise
+to be averaged away:
+
+```text
+workload        | route       | nonzero | symbolic_ms | atom_convert_ms | closure_ms | eval_ns/call
+diffusion-chain | ExprLegacy  |     382 |       1.057 |           0.000 |      0.027 |       488.950
+diffusion-chain | AtomNative  |     382 |       0.000 |           0.168 |      6.320 |      1928.150
+```
+
+The earlier and latest captures vary in the absolute Native value, but both
+identify the same suspicious workload-specific regression. The gate remains
+open until the native evaluator path is isolated into argument binding,
+prepared-node execution and closure dispatch. No global AtomNative speed claim
+is allowed from the faster three-body result alone.
+
+### Diffusion-chain gate after constant/identity evaluator fast paths (2026-09-24 18:13 local)
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_view_three_boundary_real_jacobian_release_story.md`
+
+The release rerun used the same callback-only fixture, `382` nonzeros,
+`2000` repetitions, and excluded matrix assembly and the linear solve:
+
+```text
+workload        | ExprLegacy ns/call | AtomViewExprCompat ns/call | AtomNative ns/call
+diffusion-chain |             492.200 |                     489.650 |             493.500
+```
+
+The former `4020` versus `496` result was therefore a genuine evaluator-path
+regression, not measurement noise, and is now removed for this fixture. The
+new Native result is within `0.3%` of ExprLegacy and remains numerically exact
+in the recorded comparison (`max_diff=0`). The corresponding preparation and
+closure measurements are `0.188 ms` and `6.132 ms` for Native versus
+`1.291 ms` and `0.029 ms` for ExprLegacy; these are setup costs, not the
+per-call evaluator regression.
+
+The fix is deliberately conservative: `PreparedEvaluator` recognizes only
+constant and direct-variable plans during preparation, and `Atom::lambdify`
+uses a direct arity-checked callback for those plans. General expressions
+still use the existing prepared IR and workspace path. The three-body release
+control remains valid (`2751` Native versus `4093` ExprLegacy ns/call), so the
+change did not trade away the complex-expression fast path. Residual callback
+parity and more complicated evaluator shapes remain separate gates.
+
+### Solver/evaluator counter discrepancy
+
+The canonical combustion policy report records the same numerical route while
+exposing two counter domains:
+
+```text
+domain              | residuals | Jacobians | linear solves
+solver/controller   |       776 |       387 |           774
+evaluator telemetry |       780 |       387 |             -
+```
+
+This is not yet a correctness failure, but it is an unresolved accounting
+contract. The story keeps both values explicitly. Before optimization is
+accepted, the callbacks responsible for the four extra residual observations
+must be identified and the report must explain whether they are predictor,
+preflight or post-step evaluations.
+
+The corresponding callback-policy report also confirms that forced Parallel
+is not viable for this workload, while Auto remains sequential. This finding
+is independent from the Native evaluator regression and must not be hidden by
+the binding fix.
+
+## Debug Correctness Gates: 2026-09-24
+
+The first dedicated correctness pass is now separated from performance
+stories. These tests run in debug and do not make release timing claims:
+
+```text
+numerical::LSODE2::correctness_story_tests::lsode2_debug_trajectory_parity_exprlegacy_vs_atomview_native
+numerical::LSODE2::correctness_story_tests::lsode2_debug_parameter_rebind_invalidates_prepared_solver_state
+numerical::LSODE2::correctness_story_tests::lsode2_debug_nonfinite_callbacks_and_typed_shape_errors
+numerical::LSODE2::correctness_story_tests::lsode2_debug_sparse_order_and_banded_slots_are_stable
+numerical::LSODE2::correctness_story_tests::lsode2_debug_high_cardinality_parameter_rebind_is_parity_safe
+numerical::LSODE2::correctness_story_tests::lsode2_debug_structural_jacobian_layout_corpus_is_componentwise_stable
+numerical::LSODE2::correctness_story_tests::lsode2_debug_wider_boundary_sparse_and_banded_layouts_match_dense
+numerical::LSODE2::correctness_story_tests::lsode2_debug_native_callback_failure_injection_closes_scopes_and_recovers
+numerical::LSODE2::correctness_story_tests::lsode2_debug_exprlegacy_and_native_binding_scopes_close_on_poison
+```
+
+The dated files are stored under `test_reports/LSODE2_Lambdify` using the
+canonical test names. The trajectory gate compares the complete BDF time grid
+and state matrix, residual/Jacobian/linear counters, and accepted/rejected
+steps. On the 2026-09-24 debug capture both routes produced `315` residual
+calls, `231` Jacobian calls, `305` linear solves, `200` accepted steps and
+`31` rejected steps with zero time-grid and state drift.
+
+The invalidation gate proves that a wrong-length parameter update is a typed
+error and does not invalidate a current preparation, while a valid rebind does
+invalidate it. The rebound solve is compared with a fresh solver and has zero
+time-grid and final-state drift. The non-finite gate records the current
+contract explicitly: NaN, infinities, overflow and underflow inputs are
+panic-free typed callback results, while wrong state/output shapes are typed
+errors. The layout gate fixes the Sparse triplet order
+`(0,0),(0,1),(1,0),(1,1)` and compact Banded `kl=1`, `ku=1`, six-slot
+storage, with componentwise value parity.
+
+The high-cardinality gate covers `32`, `128` and `256` symbolic parameters for
+both `ExprLegacy` and `AtomViewNative`. A wrong-length rebind is typed and
+leaves the old callback state unchanged; a valid rebind matches a freshly
+prepared problem exactly. The fixture uses one shallow equation per parameter,
+so it measures parameter lifecycle rather than parser recursion depth.
+
+The structural gate covers diagonal, a true structural-zero row (`y0-y0`) and
+maximum-bandwidth Jacobians. The separate wider-boundary gate covers a 4x4
+tridiagonal system with ten fixed Sparse entries, `kl=ku=1` and twelve
+compact Banded slots. Both gates compare Dense values, fixed Sparse ordering
+and compact Banded values componentwise.
+
+The callback failure-injection gate runs after successful preparation. It
+checks typed wrong-state and wrong-output errors for Sparse and Banded,
+poisoned parameter state, exactly-once error accounting and callback-scope
+closure on the evaluator path. A valid callback remains usable after every
+recoverable buffer error. The intentional poison panic is isolated inside a
+test thread; the public callback itself remains panic-free.
+
+The binding-scope parity gate covers both `ExprLegacy` and `AtomViewNative`.
+For each route it checks one successful residual, one poisoned parameter read
+and, for Native, one invalid-state callback. The 2026-09-24 report records
+`ExprLegacy: callback=2, binding=2, errors=1` and
+`AtomViewNative: callback=3, binding=2, errors=2`; this confirms that binding
+does not absorb scalar evaluation time and that every started outer scope is
+closed exactly once. Explicit Adams/BDF order/switch traces remain open
+follow-up coverage.
+
+## Large Callback Stage Gate: 2026-09-24
+
+`numerical::LSODE2::large_system_story_tests::atomview_native_large_chain_matches_exprlegacy_callbacks`
+is now both a correctness and stage-scaling gate. It compares the same
+parameterized chain at dimensions `32`, `128` and `256` for `ExprLegacy` and
+`AtomViewNative`; Dense is intentionally excluded. The test writes the full
+table to `test_reports/LSODE2_Lambdify` and prints the same table through the
+test capture layer.
+
+Each row contains preparation wall-clock, residual/Jacobian callback
+wall-clock, `Expr -> Atom`, differentiation, simplification, sparse-pattern,
+layout, residual/Jacobian compilation and lambdification stages. Warm columns
+contain argument binding, residual/Jacobian evaluation, output assembly,
+callback counts, scalar evaluations, copies and allocated bytes. Residual and
+Jacobian parity is asserted componentwise.
+
+The debug capture passed with zero residual drift and approximately
+`3.553e-15` Jacobian drift at every dimension. The stage table already shows
+that Native symbolic preparation scales differently from ExprLegacy: at
+`32/128/256`, Native `Expr -> Atom` is approximately `2.015/5.773/11.625 ms`
+and Native sparse-pattern work is `2.144/7.836/26.100 ms`. These are debug
+diagnostics, not release performance claims; the next release gate must repeat
+the same dimensions and protocol before accepting a scaling conclusion.
+## Release Baseline: Native Lambdify and Large-System Gates
+
+### Captures recorded on 2026-09-24 at 03:04-03:05 local time
+
+This section records the fresh release reports written by the current Lambdify
+test suite. The reports are retained verbatim in
+`test_reports/LSODE2_Lambdify`; this section is the indexed interpretation,
+not a replacement for the raw measurements.
+
+#### 1. Combustion frontend dashboard
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard.md`
+
+The same combustion fixture, trajectory and counters were used for every row:
+
+| matrix | route | total ms | prepare ms | solve ms | residual ms | Jacobian ms | linear ms | final diff |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Sparse | ExprLegacy | 2.60 | 0.12 | 2.48 | 0.192 | 0.122 | 0.143 | 0 |
+| Sparse | AtomViewNative | 3.31 | 0.24 | 3.06 | 0.194 | 0.127 | 0.168 | 5.84e-12 |
+| Banded | ExprLegacy | 3.82 | 0.11 | 3.71 | 0.195 | 0.118 | 0.054 | 0 |
+| Banded | AtomViewNative | 3.61 | 0.18 | 3.42 | 0.186 | 0.115 | 0.055 | 6.19e-12 |
+
+All four routes completed `5/5` runs with identical integer trajectory counters:
+`776` residual calls, `387` Jacobian calls, `774` linear solves, `363`
+accepted steps and `24` rejected steps. Native is moderately slower on Sparse
+for this small complete solve, while it is slightly faster on Banded. The
+callback stages themselves are close; the remaining difference is not a
+correctness or trajectory change.
+
+#### 2. Real three-boundary Jacobian callback
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_view_three_boundary_real_jacobian_release_story.md`
+
+This is a callback-only gate with matrix assembly and linear solve excluded:
+
+| workload | ExprLegacy ns/call | AtomViewExprCompat ns/call | AtomNative ns/call |
+|---|---:|---:|---:|
+| three-body, 42 nonzeros | 3846 | 4632 | 2866 |
+| diffusion-chain, 382 nonzeros | 496 | 492 | 4020 |
+
+All value differences remained within the recorded tolerance. Native is faster
+on the three-body Jacobian, but the diffusion-chain result is an approximately
+`8.1x` regression and remains an explicit performance gate. It must not be
+discarded as noise; the next optimization pass must explain its lowering and
+evaluation path before the Native route can be declared uniformly improved.
+
+### Large-system stage scaling recorded on 2026-09-24
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__lambdify_stress_story_tests__lsode2_lambdify_frontend_stage_breakdown_story.md`
+
+The release stage breakdown uses identical tasks at dimensions `128`, `256`
+and `512`, with AOT excluded and callback evaluation set to Sequential. The
+integer trajectory remains matched at every dimension. Representative total
+times are:
+
+| matrix | dimension | ExprLegacy prepare/solve ms | AtomViewNative prepare/solve ms |
+|---|---:|---:|---:|
+| Sparse | 128 | 5.666 / 17.422 | 5.336 / 19.346 |
+| Sparse | 256 | 13.987 / 39.650 | 13.828 / 40.927 |
+| Sparse | 512 | 46.613 / 102.698 | 44.074 / 98.976 |
+| Banded | 128 | 4.595 / 13.582 | 5.227 / 15.304 |
+| Banded | 256 | 13.906 / 32.161 | 14.691 / 32.898 |
+| Banded | 512 | 44.819 / 89.895 | 44.332 / 86.657 |
+
+The small and medium cases favor ExprLegacy, but the largest measured case
+favors Native in both matrix routes. This is not a license to remove the
+ExprLegacy baseline: it establishes that Native scaling is already competitive
+at `512`, while the diffusion-chain callback anomaly and evaluator accounting
+still require investigation.
+
+The separate large callback report also includes the post-binding stages. At
+dimensions `32`, `128` and `256`, Native argument binding is reported as
+`0.000 ms` (below the displayed precision), while ExprLegacy is about
+`0.001 ms`. This rules out argument binding as the source of the Native
+regression. The relevant remaining stages are evaluator execution and output
+assembly; the callback report keeps them separate from symbolic preparation.
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__large_system_story_tests__atomview_native_large_chain_matches_exprlegacy_callbacks.md`
+
+The callback-only stage split is:
+
+| dimension | route | prepare ms | residual wall ms | Jacobian wall ms | binding ms | residual eval ms | Jacobian eval ms | allocated bytes |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 32 | ExprLegacy | 1.365 | 0.008 | 0.009 | 0.001 | 0.006 | 0.004 | 17696 |
+| 32 | AtomViewNative | 1.197 | 0.019 | 0.017 | 0.000 | 0.013 | 0.005 | 8192 |
+| 128 | ExprLegacy | 4.601 | 0.008 | 0.090 | 0.001 | 0.006 | 0.036 | 267296 |
+| 128 | AtomViewNative | 4.334 | 0.008 | 0.037 | 0.000 | 0.007 | 0.019 | 131072 |
+| 256 | ExprLegacy | 13.738 | 0.032 | 0.414 | 0.001 | 0.030 | 0.131 | 1058848 |
+| 256 | AtomViewNative | 11.259 | 0.015 | 0.112 | 0.000 | 0.014 | 0.053 | 524288 |
+
+The post-binding timings show no Native binding penalty. At `128` and `256`,
+Native is also faster in the isolated Jacobian evaluator, while its complete
+callback wall time at `32` is higher because fixed Native setup dominates the
+small workload. All residual/Jacobian drifts are zero or roundoff-level and
+the callback counters are one residual plus one Jacobian call per row.
+
+### Large Native layout correctness recorded on 2026-09-24
+
+Source report:
+
+`test_reports/LSODE2_Lambdify/numerical__LSODE2__large_system_story_tests__atomview_native_large_chain_sparse_banded_layout_parity.md`
+
+The caller-owned Native layout gate passed for dimensions `512` and `1024`:
+
+| dimension | structural nnz | band kl/ku | sparse-vs-banded difference |
+|---:|---:|---:|---:|
+| 512 | 1534 | 1/1 | 0 |
+| 1024 | 3070 | 1/1 | 0 |
+
+Both sparse and banded callbacks were exercised once per dimension. This
+confirms stable sparse ordering and band slots for the large-chain fixture;
+performance conclusions remain in the stage and callback reports above.
+
+### Baseline decision
+
+These captures are accepted as dated correctness and performance gates. The
+next optimization target is not broad numerical-method refactoring. It is the
+Native evaluator path, in this order: normalize evaluator/solver counters,
+diagnose the diffusion-chain callback regression, then reassess parallel
+break-even on a workload large enough to amortize worker dispatch. Any change
+must preserve the matched trajectory, final-state tolerance, Sparse ordering,
+and Banded slots recorded here.
+
+## Fresh Lambdify Release Capture: 2026-09-24 17:39 Local
+
+The following reports were recorded at approximately `2026-09-24T14:39Z`.
+They are the current Lambdify baseline; the interrupted combustion-like AOT
+run is intentionally excluded.
+
+All completed reports passed. The combustion dashboard completed `5/5` runs
+for ExprLegacy and AtomViewNative on both Sparse and Banded. Every route had
+the same integer trajectory: `776` residual calls, `387` Jacobian calls,
+`774` linear solves, `363` accepted steps and `24` rejected steps. Native
+final-state drift was `5.84e-12` on Sparse and `6.19e-12` on Banded.
+
+The large release stage story used identical BDF settings and dimensions for
+both frontends:
+
+| matrix | dimension | ExprLegacy total ms | AtomViewNative total ms | Native delta |
+|---|---:|---:|---:|---:|
+| Sparse | 128 | 18.256 | 19.106 | +4.7% |
+| Banded | 128 | 14.061 | 14.515 | +3.2% |
+| Sparse | 256 | 41.083 | 42.905 | +4.4% |
+| Banded | 256 | 34.203 | 34.266 | +0.2% |
+| Sparse | 512 | 117.346 | 114.007 | -2.8% |
+| Banded | 512 | 100.261 | 96.407 | -3.8% |
+
+All integer counters and trajectories matched. At dimension 512, preparation
+also favored Native (`41.451` versus `44.030` ms Sparse and `40.633` versus
+`43.572` ms Banded). Warm callback stages still favored ExprLegacy: Native
+residual/Jacobian time was `10.254/3.766` ms versus `8.174/2.677` ms Sparse,
+and `9.389/3.772` versus `7.678/2.413` ms Banded. Thus the total-solve win
+at 512 is real, but it is not yet universal callback parity.
+
+The large callback report shows no Native argument-binding penalty: binding is
+below `0.001` ms at dimensions `32`, `128` and `256`, with fewer Native
+allocations and zero reported copies. The separate real-Jacobian gate remains
+workload-dependent: Native is faster on three-body (`2751` versus `4093`
+ns/call). The diffusion-chain anomaly was subsequently isolated and fixed;
+the fresh release gate reports `493.5` versus `492.2` ns/call Native versus
+ExprLegacy with zero value drift. The earlier `4020` versus `496` row remains
+in the historical section above for auditability, but is no longer the active
+baseline.
+
+The fresh large Auto matrix is numerically correct for Sparse and Banded at
+dimensions `128`, `256`, `512` and `1024`, with zero callback drift and equal
+counters, but reports `first_both_stage_crossover=none` for every case. Auto
+occasionally improves residual time at 1024, but does not improve residual and
+Jacobian together. Older crossover rows remain historical and are not replaced.
+
+Source reports:
+
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md`
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_system_story_tests__atomview_native_large_chain_matches_exprlegacy_callbacks.md`
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md`
+- `test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard.md`
+
+Baseline decision: correctness, trajectory parity, Sparse ordering and Banded
+slots are accepted. The next performance gates are the diffusion-chain Native
+evaluator anomaly, warm residual/Jacobian execution, and a revised Auto policy.
+No AOT conclusion is drawn from this capture.
+
+### AOT callback and warm-solver performance gate recorded on 2026-09-24 22:02 UTC
+
+Source reports:
+
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_callback_stage_performance_matrix.md`
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_warm_solver_stage_performance_matrix.md`
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_chunking_policy_callback_break_even_story.md`
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_toolchain_callback_performance_matrix.md`
+
+All four release-oriented AOT performance stories passed. Dense was excluded;
+the production comparison used Sparse and compact-Banded chain systems.
+
+#### Callback-only result
+
+At dimension `512`, AtomViewNative AOT with tcc measured approximately
+`0.009 ms` residual and `0.002 ms` Jacobian per call, versus `0.019-0.020 ms`
+and `0.010 ms` for AtomViewNative Lambdify. The AOT callback path is therefore
+substantially cheaper once prepared. Its cold preparation remained more
+expensive: about `54-60 ms` for AOT versus `34-35 ms` for Lambdify in this
+matrix, excluding the separate full-solver lifecycle question.
+
+The cold-stage split identifies the AOT cost as Atom preparation, sparse-pattern
+materialization, source/build and link. For the tcc rows at dimension `512`,
+Atom preparation was about `2.4-2.5 ms`, materialization about `1.3-2.6 ms`,
+build about `11.7-12.7 ms`, and link about `0.5-1.1 ms`. The toolchain callback
+matrix showed similar warm callback times for tcc, gcc, Rust and Zig at
+dimensions `128` and `256`; because build/link were `0` in that matrix, it is a
+callback comparison, not a cold compiler comparison.
+
+#### Chunking and Auto result
+
+For dimension `512`, chunk size `16`, and `200` repetitions, Sequential was
+the fastest policy:
+
+| policy | residual ms/call | Jacobian ms/call | parallel dispatches |
+|---|---:|---:|---:|
+| Sequential | 0.017194 | 0.026242 | 0 |
+| Parallel | 0.032623 | 0.079845 | 400 |
+| Auto | 0.023840 | 0.074879 | 400 |
+
+Parallel was approximately `1.9x` slower for residuals and `3.0x` slower for
+Jacobians. Auto selected Parallel and was consequently slower as well. This is
+not evidence that parallel AOT is universally unhelpful, but it proves that the
+current threshold does not break even for this workload and must not be used as
+the default without a broader dimension/work-weight sweep.
+
+#### Warm full-solver result and gate status
+
+The numerical trajectory stayed stable: Sparse and Banded accepted/rejected
+counts and linear-solve counts matched between Lambdify and AOT, and the final
+state remained finite and equal at displayed precision. Warm solve time was
+close for Sparse (`15.7-15.8 ms` at `128/256`), while AOT Banded was slower by
+about `17-25%` in the measured cases. Total time remains dominated by the
+preparation side at these dimensions.
+
+This table is not yet an apple-to-apple full-solver performance verdict:
+AtomViewNative AOT reported approximately twice the residual/Jacobian callback
+counts (`834/507` versus `421/254` at `128`, and `793/475` versus `400/238`
+at `256`) despite matching accepted steps and linear solves. The counter
+discrepancy must be localized and normalized before interpreting the AOT warm
+solver timings or declaring AOT production-ready.
+
+**Conclusion:** AOT has a confirmed warm callback advantage and cross-toolchain
+callback parity, while Sequential remains the current performance reference for
+chunked execution. Correctness passed; remaining blockers are shared callback
+counter semantics, a stable process-isolated cold/warm comparison, and a real
+Auto break-even matrix on larger Sparse/Banded workloads.
+
+### Diffusion-chain evaluator anomaly correction recorded on 2026-09-25
+
+The historical `diffusion-chain` row with approximately `4020 ns/call` for
+AtomNative versus `496 ns/call` for ExprLegacy was reproduced as a real native
+evaluator overhead, not measurement noise. The cause was narrower than the
+symbolic pipeline: the sequential batch evaluator used by the native callback
+did not consult the prepared constant/identity fast path and routed every
+Jacobian entry through the general Atom node interpreter.
+
+The fix applies the same fast-path decision in the batch path and is covered by
+`prepared_evaluator_batch_keeps_constant_and_identity_fast_paths`. The live
+LSODE2 debug gate on the unchanged diffusion-chain fixture now reports:
+
+| workload | route | nonzero | eval ns/call | max diff |
+|---|---|---:|---:|---:|
+| diffusion-chain | ExprLegacy | 382 | 2713.0 | 0.000e0 |
+| diffusion-chain | AtomNative | 382 | 2688.4 | 0.000e0 |
+
+This is a debug correctness/performance confirmation, not a replacement for
+the dated release baseline. The anomaly is closed as a correctness and
+attribution issue; a fresh release rerun remains required before claiming a
+stable production speedup. The separate three-body AtomNative overhead is a
+different evaluator-shape workload and remains open independently.
+
+### AOT warm lifecycle rerun recorded on 2026-09-25 06:32 UTC
+
+Source report:
+
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_lifecycle_story_tests__lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story.md`
+
+The Banded combustion lifecycle was rerun in release with five alternating
+Lambdify and strict `RequirePrebuilt` repetitions after a 1000 ms cooldown.
+All rows remained correct; the maximum final-state difference was
+`1.620e-14`. The two latest runs are mutually consistent, but they are not
+close to the older warm record in absolute wall-clock: the older record was
+`2.760 ms` Lambdify and `3.354 ms` RequirePrebuilt, while the latest runs are
+approximately `3.29-3.40 ms` and `3.58-3.67 ms`. The older record remains
+the historical baseline, and this capture is kept separately as a potential
+regression or environment/protocol shift rather than silently replacing it.
+
+| route | total ms mean+/-std | prepare ms | solve ms | Jacobian ms |
+|---|---:|---:|---:|---:|
+| Lambdify | 3.398+/-0.243 | 0.301+/-0.027 | 3.082+/-0.225 | 0.170+/-0.006 |
+| tcc RequirePrebuilt | 3.673+/-0.260 | 0.489+/-0.013 | 3.166+/-0.265 | 0.134+/-0.014 |
+
+The compiled callback still has a materially faster Jacobian stage, about 21%
+below Lambdify, but full warm wall-clock remains about 8% slower and
+preparation about 62% slower within this latest run. Relative to the older
+baseline, the absolute route gap narrowed mainly because Lambdify grew more
+than RequirePrebuilt; this is not yet evidence of a code improvement. The
+setup `BuildIfMissing` row moved from
+`35.727 ms` in the preceding run to `26.635 ms`; this cold difference is
+environment/compiler variance and is not treated as a production regression.
+The small fixture therefore still does not reach full-solve break-even.
+
+### AOT large-chain chunking rerun recorded on 2026-09-25 06:33 UTC
+
+Source report:
+
+- `test_reports/LSODE2_AOT/numerical__LSODE2__aot_chunking_story_tests__lsode2_large_chain_tcc_chunking_sparse_banded_warm_story.md`
+
+The `n=96` release matrix compared Lambdify, warm tcc whole, and warm tcc
+chunked callbacks for Sparse and Banded routes. Every route passed all three
+repetitions, final `L_inf` drift was zero, and counters were identical
+(`193` residual calls, `120` Jacobian calls, `189` linear solves).
+
+| matrix | route | total ms | solve ms | residual ms | Jacobian ms | linear ms |
+|---|---|---:|---:|---:|---:|---:|
+| Sparse | Lambdify | 7.862+/-0.094 | 5.399+/-0.054 | 0.337+/-0.010 | 0.072+/-0.001 | 0.211+/-0.013 |
+| Sparse | tcc whole | 9.794+/-0.232 | 6.235+/-0.267 | 0.120+/-0.009 | 0.059+/-0.005 | 0.227+/-0.021 |
+| Sparse | tcc chunk | 9.719+/-0.185 | 6.059+/-0.189 | 0.113+/-0.003 | 0.054+/-0.001 | 0.203+/-0.001 |
+| Banded | Lambdify | 6.393+/-0.073 | 3.945+/-0.151 | 0.358+/-0.029 | 0.057+/-0.004 | 0.169+/-0.012 |
+| Banded | tcc whole | 8.153+/-0.539 | 4.416+/-0.156 | 0.107+/-0.000 | 0.060+/-0.001 | 0.156+/-0.002 |
+| Banded | tcc chunk | 7.851+/-0.116 | 4.311+/-0.069 | 0.107+/-0.003 | 0.061+/-0.004 | 0.155+/-0.003 |
+
+Chunking gives a small warm-solve improvement over whole AOT: about 2.8% for
+Sparse and 2.4% for Banded. The total Banded reduction is about 3.7%, while
+the Sparse total reduction is below 1%; these are promising but not yet a
+stable break-even claim because preparation variance is comparable to the
+observed total difference. Both AOT routes remain slower than Lambdify in
+total wall-clock at this size, while their callback stages are substantially
+cheaper: chunked residual time is about 66-70% lower, Sparse Jacobian about
+25% lower, and Banded Jacobian is approximately tied. This confirms the
+current distinction between callback-only advantage and full-solve advantage.

@@ -56,9 +56,10 @@ its own correctness and release-performance gates.
 
 ## Confirmed Technical Debt
 
-- [ ] `symbolic_ivp::build_symbolic_jacobian(AtomView)` differentiates through
-  `PreparedSparseAtomSystem`, then converts every nonzero `Atom` back to
-  `Expr`, fills a dense `Vec<Vec<Expr>>`, and Lambdifies that tree again.
+- [x] Public IVP `AtomView` preparation no longer calls
+  `symbolic_ivp::build_symbolic_jacobian` and does not materialize `Atom -> Expr`
+  for Lambdify. The old builder remains only for `ExprLegacy` and the explicit
+  `AtomViewExprCompat`/AOT compatibility adapters.
 - [ ] IVP Lambdify callbacks clone parameter values under `RwLock`, allocate a
   flattened `time + parameters + state` vector, and allocate owned result
   vectors/matrices on every call.
