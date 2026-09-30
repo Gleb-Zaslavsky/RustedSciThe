@@ -47,3 +47,57 @@ fn lsode2_lambdify_telemetry_pretty_report_story() {
     assert!(snapshot.jacobian_requests > 0);
     assert!(snapshot.jacobian_evaluations >= snapshot.jacobian_requests);
 }
+
+#[test]
+fn lsode2_telemetry_schema_contract_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::telemetry_stage_story_tests::lsode2_telemetry_schema_contract_story",
+    );
+    let report = IvpTelemetry::detailed().snapshot().pretty_report();
+    let required_labels = [
+        "validation",
+        "parameter_binding",
+        "expr_to_atom",
+        "layout_planning",
+        "aot_materialization",
+        "aot_build",
+        "aot_link",
+        "aot_cache_lookup",
+        "aot_publication",
+        "parallel_calibration",
+        "argument_binding",
+        "residual_evaluation",
+        "jacobian_evaluation",
+        "residual_output_assembly",
+        "jacobian_output_assembly",
+        "aot_chunk_dispatch",
+        "aot_worker_execution",
+        "aot_argument_copy",
+        "aot_output_write",
+        "controller",
+        "controller_iteration_inclusive",
+        "factorization",
+        "rhs_solve",
+        "copies",
+        "copied_bytes",
+        "allocated_bytes",
+        "parallel_dispatches",
+        "aot_resolution_hits",
+        "aot_resolution_misses",
+        "aot_build_attempts",
+        "aot_link_attempts",
+        "residual_requests",
+        "residual_evaluations",
+        "jacobian_requests",
+        "jacobian_evaluations",
+    ];
+    for label in required_labels {
+        assert!(
+            report.contains(label),
+            "telemetry report is missing `{label}`"
+        );
+    }
+    println!("[LSODE2 telemetry schema] required cold/warm stages and counters present");
+    println!("{report}");
+}

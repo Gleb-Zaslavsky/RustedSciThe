@@ -171,7 +171,9 @@ pub fn dense_ir_blocks(plan: &DenseJacobianRuntimePlan<'_>) -> Vec<(usize, Linea
     plan.chunks
         .iter()
         .map(|chunk| {
-            let block = generated_block_from_dense_chunk(chunk);
+            // Runtime IR writes contiguous row-major values, unlike generated
+            // source which can elide structural zeros using output offsets.
+            let block = GeneratedBlock::from_task_plan(&chunk.plan);
             (chunk.value_offset, block.ir)
         })
         .collect()

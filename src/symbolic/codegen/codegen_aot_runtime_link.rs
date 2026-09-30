@@ -243,6 +243,9 @@ impl LinkedDenseAotBackend {
         residual_chunks: Vec<LinkedResidualChunk>,
         jacobian_chunks: Vec<LinkedDenseJacobianChunk>,
     ) -> Self {
+        // Do not calibrate Rayon while publishing a linked backend. The
+        // selected execution policy owns calibration, so Sequential AOT
+        // publication remains free of unrelated one-time work.
         self.residual_chunks = residual_chunks;
         self.jacobian_chunks = jacobian_chunks;
         self
@@ -272,24 +275,16 @@ impl LinkedDenseAotBackend {
         args: &[f64],
         out: &mut [f64],
     ) -> Result<(), LinkedAotCallbackError> {
-        let expected = self
-            .shape
-            .0
-            .checked_mul(self.shape.1)
-            .ok_or_else(|| LinkedAotCallbackError::InvalidLayout {
+        let expected = self.shape.0.checked_mul(self.shape.1).ok_or_else(|| {
+            LinkedAotCallbackError::InvalidLayout {
                 stage: "Jacobian",
                 message: format!(
                     "dense shape {}x{} overflows the output length type",
                     self.shape.0, self.shape.1
                 ),
-            })?;
-        invoke_linked_callback(
-            "Jacobian",
-            expected,
-            &*self.jacobian_eval,
-            args,
-            out,
-        )
+            }
+        })?;
+        invoke_linked_callback("Jacobian", expected, &*self.jacobian_eval, args, out)
     }
 
     /// Invokes one dense Jacobian chunk through the typed ABI boundary.
@@ -299,13 +294,14 @@ impl LinkedDenseAotBackend {
         args: &[f64],
         out: &mut [f64],
     ) -> Result<(), LinkedAotCallbackError> {
-        let chunk = self.jacobian_chunks.get(chunk_index).ok_or(
-            LinkedAotCallbackError::ChunkIndex {
-                stage: "Jacobian",
-                index: chunk_index,
-                count: self.jacobian_chunks.len(),
-            },
-        )?;
+        let chunk =
+            self.jacobian_chunks
+                .get(chunk_index)
+                .ok_or(LinkedAotCallbackError::ChunkIndex {
+                    stage: "Jacobian",
+                    index: chunk_index,
+                    count: self.jacobian_chunks.len(),
+                })?;
         invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out)
     }
 
@@ -328,7 +324,9 @@ impl LinkedDenseAotBackend {
             telemetry,
             |chunk| chunk.output_offset,
             |chunk| chunk.output_len,
-            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+            |chunk, args, out| {
+                invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out)
+            },
         )
     }
 
@@ -351,7 +349,9 @@ impl LinkedDenseAotBackend {
             telemetry,
             |chunk| chunk.value_offset,
             |chunk| chunk.value_len,
-            |chunk, args, out| invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out),
+            |chunk, args, out| {
+                invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out)
+            },
         )
     }
 }
@@ -386,6 +386,8 @@ impl LinkedResidualAotBackend {
 
     /// Adds optional chunked evaluators that can be used by runtime execution policies.
     pub fn with_chunked_evaluators(mut self, residual_chunks: Vec<LinkedResidualChunk>) -> Self {
+        // Calibration is performed by the selected Auto policy, not by
+        // residual-only backend registration.
         self.residual_chunks = residual_chunks;
         self
     }
@@ -427,7 +429,9 @@ impl LinkedResidualAotBackend {
             telemetry,
             |chunk| chunk.output_offset,
             |chunk| chunk.output_len,
-            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+            |chunk, args, out| {
+                invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out)
+            },
         )
     }
 }
@@ -597,6 +601,8 @@ impl LinkedSparseAotBackend {
         residual_chunks: Vec<LinkedResidualChunk>,
         jacobian_value_chunks: Vec<LinkedSparseJacobianChunk>,
     ) -> Self {
+        // Calibration is performed by the selected Auto policy, not by
+        // sparse/banded backend registration.
         self.residual_chunks = residual_chunks;
         self.jacobian_value_chunks = jacobian_value_chunks;
         self
@@ -723,7 +729,9 @@ impl LinkedSparseAotBackend {
             telemetry,
             |chunk| chunk.output_offset,
             |chunk| chunk.output_len,
-            |chunk, args, out| invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out),
+            |chunk, args, out| {
+                invoke_linked_callback("residual chunk", chunk.output_len, &*chunk.eval, args, out)
+            },
         )
     }
 
@@ -746,7 +754,9 @@ impl LinkedSparseAotBackend {
             telemetry,
             |chunk| chunk.value_offset,
             |chunk| chunk.value_len,
-            |chunk, args, out| invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out),
+            |chunk, args, out| {
+                invoke_linked_callback("Jacobian chunk", chunk.value_len, &*chunk.eval, args, out)
+            },
         )
     }
 }
@@ -845,12 +855,13 @@ where
         for chunk in chunks {
             let start = offset(chunk);
             let length = len(chunk);
-            let end = start.checked_add(length).ok_or_else(|| {
-                LinkedAotCallbackError::InvalidLayout {
-                    stage,
-                    message: format!("chunk range overflows: offset={start}, len={length}"),
-                }
-            })?;
+            let end =
+                start
+                    .checked_add(length)
+                    .ok_or_else(|| LinkedAotCallbackError::InvalidLayout {
+                        stage,
+                        message: format!("chunk range overflows: offset={start}, len={length}"),
+                    })?;
             if end > out.len() {
                 return Err(LinkedAotCallbackError::InvalidLayout {
                     stage,
@@ -885,6 +896,72 @@ fn linked_residual_registry() -> &'static Mutex<BTreeMap<String, LinkedResidualA
 fn linked_dense_registry() -> &'static Mutex<BTreeMap<String, LinkedDenseAotBackend>> {
     static REGISTRY: OnceLock<Mutex<BTreeMap<String, LinkedDenseAotBackend>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Read-only view of the process-global linked backend registries.
+///
+/// Entries may intentionally outlive an individual solver so another solver
+/// can reconnect by problem key. This snapshot makes that retention observable
+/// without exposing mutable registry state or adding work to callback paths.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkedAotRuntimeRegistrySnapshot {
+    pub sparse_problem_keys: Vec<String>,
+    pub residual_problem_keys: Vec<String>,
+    pub dense_problem_keys: Vec<String>,
+}
+
+impl LinkedAotRuntimeRegistrySnapshot {
+    pub fn total_entries(&self) -> usize {
+        self.sparse_problem_keys.len()
+            + self.residual_problem_keys.len()
+            + self.dense_problem_keys.len()
+    }
+
+    pub fn contains_problem_key(&self, problem_key: &str) -> bool {
+        self.sparse_problem_keys
+            .iter()
+            .any(|key| key == problem_key)
+            || self
+                .residual_problem_keys
+                .iter()
+                .any(|key| key == problem_key)
+            || self.dense_problem_keys.iter().any(|key| key == problem_key)
+    }
+}
+
+/// Captures the registered process-global AOT keys for lifecycle diagnostics.
+///
+/// This function is deliberately separate from callback resolution and is not
+/// used by production hot paths. Each backend-kind map is locked separately,
+/// so concurrent registration can make the combined view non-atomic.
+pub fn try_linked_aot_runtime_registry_snapshot()
+-> Result<LinkedAotRuntimeRegistrySnapshot, LinkedAotRegistryError> {
+    let sparse_problem_keys = linked_sparse_registry()
+        .lock()
+        .map_err(|_| LinkedAotRegistryError::LockPoisoned { registry: "sparse" })?
+        .keys()
+        .cloned()
+        .collect();
+    let residual_problem_keys = linked_residual_registry()
+        .lock()
+        .map_err(|_| LinkedAotRegistryError::LockPoisoned {
+            registry: "residual",
+        })?
+        .keys()
+        .cloned()
+        .collect();
+    let dense_problem_keys = linked_dense_registry()
+        .lock()
+        .map_err(|_| LinkedAotRegistryError::LockPoisoned { registry: "dense" })?
+        .keys()
+        .cloned()
+        .collect();
+
+    Ok(LinkedAotRuntimeRegistrySnapshot {
+        sparse_problem_keys,
+        residual_problem_keys,
+        dense_problem_keys,
+    })
 }
 
 /// Fallibly registers one linked dense AOT backend in the current process.
@@ -1489,6 +1566,22 @@ mod tests {
 
         unregister_linked_dense_backend(key);
         assert!(resolve_linked_dense_backend(key).is_none());
+    }
+
+    #[test]
+    fn linked_runtime_registry_snapshot_tracks_registration_without_mutating_it() {
+        let key = "linked_runtime_registry_snapshot_tracks_registration";
+        let backend = LinkedResidualAotBackend::new(key, 1, Arc::new(|_, out| out[0] = 1.0));
+        try_register_linked_residual_backend(backend)
+            .expect("test backend registration should succeed");
+        let registered = try_linked_aot_runtime_registry_snapshot()
+            .expect("registry snapshot should succeed after registration");
+        assert!(registered.contains_problem_key(key));
+
+        try_unregister_linked_residual_backend(key).expect("test backend removal should succeed");
+        let removed = try_linked_aot_runtime_registry_snapshot()
+            .expect("registry snapshot should succeed after removal");
+        assert!(!removed.contains_problem_key(key));
     }
 
     #[test]

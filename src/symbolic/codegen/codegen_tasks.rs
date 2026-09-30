@@ -514,6 +514,9 @@ pub struct BandedJacobianTask<'a> {
     pub shape: (usize, usize),
     pub kl: usize,
     pub ku: usize,
+    /// Emits complete LAPACK-style compact storage, including boundary slots.
+    /// The default compatibility path remains explicit-entry Banded output.
+    pub compact: bool,
     pub entries: &'a [BandedExprEntry<'a>],
     pub variables: &'a [&'a str],
     pub params: Option<&'a [&'a str]>,
@@ -528,6 +531,7 @@ pub struct BandedJacobianChunkTask<'a> {
     pub shape: (usize, usize),
     pub kl: usize,
     pub ku: usize,
+    pub compact: bool,
     pub diagonal_range: std::ops::RangeInclusive<isize>,
     pub entries: Vec<BandedExprEntry<'a>>,
     pub variables: &'a [&'a str],
@@ -715,12 +719,22 @@ impl<'a> BandedJacobianTask<'a> {
                 .collect(),
             // Generated banded code still writes one flat contiguous values
             // slice, but the band contract is explicit in the layout.
-            layout: CodegenOutputLayout::BandedValues {
-                rows: self.shape.0,
-                cols: self.shape.1,
-                kl: self.kl,
-                ku: self.ku,
-                slots: self.entries.len(),
+            layout: if self.compact {
+                CodegenOutputLayout::BandedCompactValues {
+                    rows: self.shape.0,
+                    cols: self.shape.1,
+                    kl: self.kl,
+                    ku: self.ku,
+                    slots: self.entries.len(),
+                }
+            } else {
+                CodegenOutputLayout::BandedValues {
+                    rows: self.shape.0,
+                    cols: self.shape.1,
+                    kl: self.kl,
+                    ku: self.ku,
+                    slots: self.entries.len(),
+                }
             },
         }
     }
@@ -783,6 +797,7 @@ impl<'a> BandedJacobianTask<'a> {
                     shape: self.shape,
                     kl: self.kl,
                     ku: self.ku,
+                    compact: self.compact,
                     diagonal_range: diag_start..=diag_end,
                     entries,
                     variables: self.variables,
@@ -870,12 +885,22 @@ impl<'a> BandedJacobianChunkTask<'a> {
                     coordinate: Some((entry.row, entry.col)),
                 })
                 .collect(),
-            layout: CodegenOutputLayout::BandedValues {
-                rows: self.shape.0,
-                cols: self.shape.1,
-                kl: self.kl,
-                ku: self.ku,
-                slots: self.entries.len(),
+            layout: if self.compact {
+                CodegenOutputLayout::BandedCompactValues {
+                    rows: self.shape.0,
+                    cols: self.shape.1,
+                    kl: self.kl,
+                    ku: self.ku,
+                    slots: self.entries.len(),
+                }
+            } else {
+                CodegenOutputLayout::BandedValues {
+                    rows: self.shape.0,
+                    cols: self.shape.1,
+                    kl: self.kl,
+                    ku: self.ku,
+                    slots: self.entries.len(),
+                }
             },
         }
     }
@@ -1337,6 +1362,7 @@ mod tests {
             shape: (2, 2),
             kl: 0,
             ku: 1,
+            compact: false,
             entries: &entries,
             variables: &["y0", "y1"],
             params: None,
@@ -1357,6 +1383,85 @@ mod tests {
         );
         assert_eq!(plan.outputs[0].coordinate, Some((0, 0)));
         assert_eq!(plan.outputs[1].coordinate, Some((0, 1)));
+    }
+
+    #[test]
+    fn compact_banded_plan_uses_complete_lapack_slot_layout() {
+        let zero = Expr::Const(0.0);
+        let lower = Expr::Var("lower".to_string());
+        let diagonal = Expr::Var("diagonal".to_string());
+        let upper = Expr::Var("upper".to_string());
+        let entries = vec![
+            BandedExprEntry {
+                row: 0,
+                col: 0,
+                diag_offset: 1,
+                diag_position: 0,
+                expr: &zero,
+            },
+            BandedExprEntry {
+                row: 0,
+                col: 0,
+                diag_offset: 0,
+                diag_position: 0,
+                expr: &diagonal,
+            },
+            BandedExprEntry {
+                row: 1,
+                col: 0,
+                diag_offset: -1,
+                diag_position: 0,
+                expr: &lower,
+            },
+            BandedExprEntry {
+                row: 0,
+                col: 1,
+                diag_offset: 1,
+                diag_position: 1,
+                expr: &upper,
+            },
+            BandedExprEntry {
+                row: 1,
+                col: 1,
+                diag_offset: 0,
+                diag_position: 1,
+                expr: &diagonal,
+            },
+            BandedExprEntry {
+                row: 0,
+                col: 1,
+                diag_offset: -1,
+                diag_position: 1,
+                expr: &zero,
+            },
+        ];
+        let task = BandedJacobianTask {
+            fn_name: "eval_banded_values",
+            shape: (2, 2),
+            kl: 1,
+            ku: 1,
+            compact: true,
+            entries: &entries,
+            variables: &["y0", "y1"],
+            params: None,
+        };
+
+        let plan = task.plan();
+        assert_eq!(
+            plan.layout,
+            CodegenOutputLayout::BandedCompactValues {
+                rows: 2,
+                cols: 2,
+                kl: 1,
+                ku: 1,
+                slots: 6,
+            }
+        );
+        assert_eq!(plan.outputs.len(), 6);
+        assert_eq!(
+            task.runtime_plan(BandedChunkingStrategy::Whole).compact,
+            true
+        );
     }
 
     #[test]
@@ -1392,6 +1497,7 @@ mod tests {
             shape: (2, 2),
             kl: 0,
             ku: 1,
+            compact: false,
             entries: &entries,
             variables: &["y0", "y1"],
             params: None,
@@ -1459,6 +1565,7 @@ mod tests {
             shape: (2, 2),
             kl: 1,
             ku: 1,
+            compact: false,
             entries: &entries,
             variables: &["y0", "y1"],
             params: None,

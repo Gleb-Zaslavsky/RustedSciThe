@@ -147,17 +147,7 @@ struct StageBreakdownRun {
 }
 
 fn chain_equations(dimension: usize) -> Vec<Expr> {
-    (0..dimension)
-        .map(|index| {
-            let left = (index > 0).then(|| format!("y{}", index - 1));
-            let right = (index + 1 < dimension).then(|| format!("y{}", index + 1));
-            let left = left.as_deref().unwrap_or("0");
-            let right = right.as_deref().unwrap_or("0");
-            Expr::parse_expression(&format!(
-                "-k*y{index} + d*({left} - 2*y{index} + {right}) + q*exp(-t) - nl*y{index}*y{index}"
-            ))
-        })
-        .collect()
+    super::workload_fixtures::diffusion_chain(dimension).equations
 }
 
 fn stress_config(
@@ -347,6 +337,9 @@ const COLD_STAGE_BREAKDOWN: &[IvpColdStage] = &[
     IvpColdStage::Validation,
     IvpColdStage::ParameterBinding,
     IvpColdStage::ExprToAtom,
+    IvpColdStage::AtomDependencyAnalysis,
+    IvpColdStage::NativeJacobianEvaluatorPreparation,
+    IvpColdStage::AotInputAbiPreparation,
     IvpColdStage::SymbolicJacobian,
     IvpColdStage::SymbolicDifferentiation,
     IvpColdStage::Simplification,

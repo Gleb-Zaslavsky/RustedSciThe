@@ -21,7 +21,7 @@ use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildResult;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// Registered on-disk AOT artifact metadata keyed by prepared-problem manifest.
@@ -222,6 +222,76 @@ impl AotRegistry {
         self.entries_by_problem_key.keys().cloned().collect()
     }
 
+    /// Publishes registry metadata for a process-isolated consumer.
+    ///
+    /// The handoff contains only owned manifest/path metadata. Compiled code
+    /// is never copied and no live callback is serialized. A consumer must
+    /// still validate the manifest key and inspect the artifact before use.
+    pub fn write_handoff(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        writeln!(
+            file,
+            "RST_AOT_REGISTRY_HANDOFF|version=1|entries={}",
+            self.len()
+        )?;
+        for artifact in self.entries_by_problem_key.values() {
+            writeln!(file, "entry|{}", encode_artifact(artifact))?;
+        }
+        file.flush()
+    }
+
+    /// Loads a registry snapshot published by another process.
+    pub fn read_handoff(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
+        let source = fs::read_to_string(path)?;
+        let mut registry = Self::new();
+        for line in source.lines().filter(|line| line.starts_with("entry|")) {
+            let encoded = line
+                .strip_prefix("entry|")
+                .ok_or_else(|| invalid_handoff("malformed AOT registry entry prefix"))?;
+            let artifact = decode_artifact(encoded)?;
+            registry.register_existing_artifact(artifact)?;
+        }
+        Ok(registry)
+    }
+
+    /// Inserts metadata reconstructed from a producer handoff.
+    pub fn register_existing_artifact(
+        &mut self,
+        artifact: RegisteredAotArtifact,
+    ) -> io::Result<()> {
+        if artifact.problem_key.is_empty() || !artifact.manifest_key_matches() {
+            return Err(invalid_handoff(
+                "AOT handoff artifact key does not match its manifest",
+            ));
+        }
+        if let Some(previous) = self
+            .entries_by_problem_key
+            .insert(artifact.problem_key.clone(), artifact.clone())
+        {
+            self.crate_name_to_problem_key.remove(&previous.crate_name);
+        }
+        self.crate_name_to_problem_key
+            .insert(artifact.crate_name.clone(), artifact.problem_key.clone());
+        Ok(())
+    }
+
+    /// Merges entries from another registry snapshot.
+    ///
+    /// A generated IVP may prepare residual-only and Jacobian artifacts in
+    /// separate orchestration calls.  Each call returns its own resolver
+    /// snapshot, so process handoff must combine them rather than let the
+    /// later publication overwrite the earlier entry.
+    pub fn merge_from(&mut self, other: &AotRegistry) -> io::Result<()> {
+        for problem_key in other.problem_keys() {
+            let artifact = other
+                .get_by_problem_key(&problem_key)
+                .ok_or_else(|| invalid_handoff("registry entry disappeared during merge"))?
+                .clone();
+            self.register_existing_artifact(artifact)?;
+        }
+        Ok(())
+    }
+
     /// Registers one materialized build result under the manifest-derived
     /// `problem_key`. Re-registering the same problem replaces the old record.
     pub fn register_materialized_build(
@@ -330,6 +400,282 @@ impl AotRegistry {
         artifact.quarantine_generated_tree()
     }
 }
+
+fn invalid_handoff(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn encode_text(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decode_text(value: &str) -> io::Result<String> {
+    if value.len() % 2 != 0 {
+        return Err(invalid_handoff("hex text has odd length"));
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|offset| {
+            u8::from_str_radix(&value[offset..offset + 2], 16)
+                .map_err(|_| invalid_handoff("invalid hex text in AOT handoff"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    String::from_utf8(bytes).map_err(|_| invalid_handoff("AOT handoff text is not UTF-8"))
+}
+
+fn encode_strings(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| encode_text(value))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_strings(value: &str) -> io::Result<Vec<String>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value.split(',').map(decode_text).collect()
+}
+
+fn encode_chunks(
+    chunks: &[crate::symbolic::codegen::codegen_manifest::GeneratedChunkManifest],
+) -> String {
+    chunks
+        .iter()
+        .map(|chunk| {
+            format!(
+                "{}~{}~{}",
+                encode_text(&chunk.fn_name),
+                chunk.offset,
+                chunk.len
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_chunks(
+    value: &str,
+) -> io::Result<Vec<crate::symbolic::codegen::codegen_manifest::GeneratedChunkManifest>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|chunk| {
+            let mut fields = chunk.split('~');
+            let fn_name = decode_text(
+                fields
+                    .next()
+                    .ok_or_else(|| invalid_handoff("missing chunk name"))?,
+            )?;
+            let offset = fields
+                .next()
+                .ok_or_else(|| invalid_handoff("missing chunk offset"))?
+                .parse()
+                .map_err(|_| invalid_handoff("invalid chunk offset"))?;
+            let len = fields
+                .next()
+                .ok_or_else(|| invalid_handoff("missing chunk length"))?
+                .parse()
+                .map_err(|_| invalid_handoff("invalid chunk length"))?;
+            if fields.next().is_some() {
+                return Err(invalid_handoff("too many chunk fields"));
+            }
+            Ok(
+                crate::symbolic::codegen::codegen_manifest::GeneratedChunkManifest {
+                    fn_name,
+                    offset,
+                    len,
+                },
+            )
+        })
+        .collect()
+}
+
+fn encode_layout(
+    layout: Option<crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout>,
+) -> String {
+    use crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout;
+    match layout {
+        None => "none".to_string(),
+        Some(PreparedJacobianLayout::Dense) => "dense".to_string(),
+        Some(PreparedJacobianLayout::SparseExplicit) => "sparse_explicit".to_string(),
+        Some(PreparedJacobianLayout::BandedExplicit) => "banded_explicit".to_string(),
+        Some(PreparedJacobianLayout::BandedCompact { kl, ku }) => {
+            format!("banded_compact~{kl}~{ku}")
+        }
+    }
+}
+
+fn decode_layout(
+    value: &str,
+) -> io::Result<Option<crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout>> {
+    use crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout;
+    match value {
+        "none" => Ok(None),
+        "dense" => Ok(Some(PreparedJacobianLayout::Dense)),
+        "sparse_explicit" => Ok(Some(PreparedJacobianLayout::SparseExplicit)),
+        "banded_explicit" => Ok(Some(PreparedJacobianLayout::BandedExplicit)),
+        value if value.starts_with("banded_compact~") => {
+            let mut fields = value.split('~');
+            let _ = fields.next();
+            let kl = fields
+                .next()
+                .ok_or_else(|| invalid_handoff("missing compact band kl"))?
+                .parse()
+                .map_err(|_| invalid_handoff("invalid compact band kl"))?;
+            let ku = fields
+                .next()
+                .ok_or_else(|| invalid_handoff("missing compact band ku"))?
+                .parse()
+                .map_err(|_| invalid_handoff("invalid compact band ku"))?;
+            if fields.next().is_some() {
+                return Err(invalid_handoff("too many compact band fields"));
+            }
+            Ok(Some(PreparedJacobianLayout::BandedCompact { kl, ku }))
+        }
+        _ => Err(invalid_handoff("unknown Jacobian layout in AOT handoff")),
+    }
+}
+
+fn encode_artifact(artifact: &RegisteredAotArtifact) -> String {
+    use crate::symbolic::codegen::codegen_manifest::PreparedSymbolicRoute;
+    use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend};
+    let manifest = &artifact.manifest;
+    let backend = match manifest.backend_kind {
+        BackendKind::Numeric => "numeric",
+        BackendKind::Lambdify => "lambdify",
+        BackendKind::Aot => "aot",
+    };
+    let matrix = match manifest.matrix_backend {
+        MatrixBackend::Dense => "dense",
+        MatrixBackend::Banded => "banded",
+        MatrixBackend::SparseCol => "sparse_col",
+        MatrixBackend::CsMat => "cs_mat",
+        MatrixBackend::CsMatrix => "cs_matrix",
+        MatrixBackend::ValuesOnly => "values_only",
+    };
+    let route = match manifest.symbolic_route {
+        PreparedSymbolicRoute::ExprLegacy => "expr_legacy",
+        PreparedSymbolicRoute::AtomViewNative => "atom_view_native",
+        PreparedSymbolicRoute::Generic => "generic",
+    };
+    let io = &manifest.io;
+    let functions = &manifest.functions;
+    [
+        encode_text(&artifact.problem_key),
+        encode_text(&artifact.crate_name),
+        encode_text(&artifact.crate_dir.to_string_lossy()),
+        encode_text(&artifact.manifest_file.to_string_lossy()),
+        encode_text(&artifact.artifact_dir.to_string_lossy()),
+        encode_text(&artifact.expected_rlib.to_string_lossy()),
+        encode_text(&artifact.expected_cdylib.to_string_lossy()),
+        encode_text(&artifact.cargo_program),
+        encode_strings(&artifact.cargo_args),
+        backend.to_string(),
+        matrix.to_string(),
+        route.to_string(),
+        encode_strings(&io.input_names),
+        io.residual_len.to_string(),
+        io.jacobian_rows.to_string(),
+        io.jacobian_cols.to_string(),
+        io.jacobian_nnz
+            .map_or_else(|| "none".to_string(), |value| value.to_string()),
+        encode_layout(io.jacobian_layout),
+        encode_text(&functions.residual_fn_name),
+        encode_strings(&functions.residual_chunk_names),
+        encode_chunks(&functions.residual_chunks),
+        encode_text(&functions.jacobian_fn_name),
+        encode_strings(&functions.jacobian_chunk_names),
+        encode_chunks(&functions.jacobian_chunks),
+        manifest.expression_signature.to_string(),
+    ]
+    .join("|")
+}
+
+fn decode_artifact(value: &str) -> io::Result<RegisteredAotArtifact> {
+    use crate::symbolic::codegen::codegen_manifest::{
+        GeneratedFunctionsManifest, PreparedProblemManifest, PreparedSymbolicRoute,
+        ProblemIoManifest,
+    };
+    use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend};
+    let fields = value.split('|').collect::<Vec<_>>();
+    if fields.len() != 25 {
+        return Err(invalid_handoff(
+            "AOT handoff entry has an unexpected field count",
+        ));
+    }
+    let decode_num = |field: &str, name: &str| {
+        field
+            .parse()
+            .map_err(|_| invalid_handoff(format!("invalid {name} in AOT handoff")))
+    };
+    let backend_kind = match fields[9] {
+        "numeric" => BackendKind::Numeric,
+        "lambdify" => BackendKind::Lambdify,
+        "aot" => BackendKind::Aot,
+        _ => return Err(invalid_handoff("unknown backend kind in AOT handoff")),
+    };
+    let matrix_backend = match fields[10] {
+        "dense" => MatrixBackend::Dense,
+        "banded" => MatrixBackend::Banded,
+        "sparse_col" => MatrixBackend::SparseCol,
+        "cs_mat" => MatrixBackend::CsMat,
+        "cs_matrix" => MatrixBackend::CsMatrix,
+        "values_only" => MatrixBackend::ValuesOnly,
+        _ => return Err(invalid_handoff("unknown matrix backend in AOT handoff")),
+    };
+    let symbolic_route = match fields[11] {
+        "expr_legacy" => PreparedSymbolicRoute::ExprLegacy,
+        "atom_view_native" => PreparedSymbolicRoute::AtomViewNative,
+        "generic" => PreparedSymbolicRoute::Generic,
+        _ => return Err(invalid_handoff("unknown symbolic route in AOT handoff")),
+    };
+    let manifest = PreparedProblemManifest {
+        backend_kind,
+        matrix_backend,
+        symbolic_route,
+        io: ProblemIoManifest {
+            input_names: decode_strings(fields[12])?,
+            residual_len: decode_num(fields[13], "residual length")?,
+            jacobian_rows: decode_num(fields[14], "Jacobian rows")?,
+            jacobian_cols: decode_num(fields[15], "Jacobian columns")?,
+            jacobian_nnz: (fields[16] != "none")
+                .then(|| decode_num(fields[16], "Jacobian nnz"))
+                .transpose()?,
+            jacobian_layout: decode_layout(fields[17])?,
+        },
+        functions: GeneratedFunctionsManifest {
+            residual_fn_name: decode_text(fields[18])?,
+            residual_chunk_names: decode_strings(fields[19])?,
+            residual_chunks: decode_chunks(fields[20])?,
+            jacobian_fn_name: decode_text(fields[21])?,
+            jacobian_chunk_names: decode_strings(fields[22])?,
+            jacobian_chunks: decode_chunks(fields[23])?,
+        },
+        expression_signature: fields[24]
+            .parse::<u64>()
+            .map_err(|_| invalid_handoff("invalid expression signature in AOT handoff"))?,
+    };
+    Ok(RegisteredAotArtifact {
+        problem_key: decode_text(fields[0])?,
+        crate_name: decode_text(fields[1])?,
+        manifest,
+        crate_dir: PathBuf::from(decode_text(fields[2])?),
+        manifest_file: PathBuf::from(decode_text(fields[3])?),
+        artifact_dir: PathBuf::from(decode_text(fields[4])?),
+        expected_rlib: PathBuf::from(decode_text(fields[5])?),
+        expected_cdylib: PathBuf::from(decode_text(fields[6])?),
+        cargo_program: decode_text(fields[7])?,
+        cargo_args: decode_strings(fields[8])?,
+    })
+}
 //================================================================================
 //TESTS
 //================================================================================
@@ -426,6 +772,48 @@ mod tests {
                 .expect("crate-name lookup should succeed")
                 .problem_key,
             manifest.problem_key()
+        );
+    }
+
+    #[test]
+    fn registry_handoff_round_trip_preserves_artifact_provenance() {
+        let prepared = sample_prepared_problem();
+        let manifest = PreparedProblemManifest::from(&prepared);
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_registry_handoff_fixture",
+            "generated_registry_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("tempdir should exist");
+        let build = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+
+        let mut registry = AotRegistry::new();
+        let registered = registry
+            .register_materialized_build(manifest, &build)
+            .clone();
+        let handoff = dir.path().join("registry-handoff.txt");
+
+        registry
+            .write_handoff(&handoff)
+            .expect("registry handoff should be writable");
+        let restored =
+            AotRegistry::read_handoff(&handoff).expect("registry handoff should be readable");
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored
+                .get_by_problem_key(&registered.problem_key)
+                .expect("restored problem key should resolve"),
+            &registered
+        );
+        assert_eq!(
+            restored
+                .get_by_crate_name(&registered.crate_name)
+                .expect("restored crate name should resolve")
+                .expected_cdylib,
+            registered.expected_cdylib
         );
     }
 

@@ -7,7 +7,442 @@ adapter. The latest release confirms a warm Jacobian gap against ExprLegacy,
 not that the current Compat refactor introduced the whole gap. Node count
 alone does not establish causality. This is a planning-only checkpoint.
 
-Status audit: 2026-09-24
+Status audit: 2026-09-29
+
+### 2026-09-30: LSODE2 feature-work pause
+
+LSODE2 solver/runtime changes are paused after the user-reported successful
+Release run of the LSODE2 test corpus. This is a checkpoint, not a claim that
+the all-crate `--include-ignored` run completed; the capture below remains
+incomplete. Keep the following P0 items as explicit deferred debt rather than
+expanding solver scope during guide/example maintenance:
+
+- [ ] Establish bounded process resource growth and a permitted retention /
+  eviction policy for process-global AOT artifacts and linked handles. Existing
+  debug sampling found retained registry entries after solver drops; it does
+  not establish an unbounded leak, and release growth across unique keys is
+  still unmeasured.
+- [ ] Establish stage-time and peak-memory scaling with `n`, `nnz`, bandwidth,
+  expression/plan size and generated-source size on fixed-degree sparse
+  workloads. Current release evidence reaches `n=2048`; do not claim general
+  HUGE-system readiness from that alone.
+- [ ] Design bounded trajectory retention for long integrations while keeping
+  `Full` as the compatibility default until parity and memory evidence support
+  other modes.
+
+The `prelude` module is an optional public-API/QoL proposal, not a P0 blocker.
+Before adding it, review the minimal stable import surface and compile examples
+against it; avoid re-exporting internal implementation and telemetry types by
+default.
+
+### 2026-09-30 17:50+ Release Capture Status
+
+- [x] Targeted P0 release story gates completed: native step engine `17/17`,
+  correctness `11/11`, large-system `2 passed / 1 ignored`, native quality
+  `5 passed / 3 ignored`, continuation correctness `3 passed / 8 ignored`,
+  AOT chunking `4 passed / 1 ignored`, codegen runtime-link `11/11`, and the
+  `n=1024` Banded resource-growth story `1/1`. Ignored tests in these filtered
+  runs remain ignored; this is not equivalent to exercising every ignored test.
+- [ ] The all-crate `--include-ignored` capture is incomplete:
+  `test_reports/LSODE2_release_manual/p0_20260930_143016/all_crate_tests_include_ignored.log`
+  ends during compilation, before any `running ... tests` or final test result.
+  Do not count it as a pass or as full ignored-test coverage.
+- [x] The AOT cold-preparation and cold-stage release stories completed at
+  `n=512/1024/2048`, Sparse/Banded. Their latest paired `RebuildAlways`
+  comparison again favors AtomView: at `n=2048`, preparation was `90.252 ms`
+  vs `737.969 ms` ExprLegacy (Sparse, `-87.8%`) and `81.321 ms` vs
+  `674.943 ms` (Banded, `-88.0%`). Keep these as the direct cold-preparation
+  scope; native-Jacobian stage timers are inclusive attribution and must not be
+  added to or mistaken for the preparation wall time.
+- [x] The full `lsode2_workload_aot` Criterion capture reached its final
+  three-body/Banded/AtomViewNative cold-E2E case. For diffusion `n=2048`,
+  cold-E2E medians were `762.80 ms` ExprLegacy vs `154.46 ms` AtomViewNative
+  Sparse, and `763.87 ms` vs `115.90 ms` Banded. These are end-to-end cold
+  measurements, not warm-solve speedups. Criterion's per-case change labels
+  compare against local stored Criterion baselines and are not portable
+  cross-frontend comparisons.
+- [x] The `lsode2_workload_callbacks` capture reached its final three-body
+  parameter-continuation case. At diffusion `n=1024/2048`, AtomViewNative
+  residual medians were `43.355/87.717 us` vs `33.450/84.750 us` ExprLegacy
+  (`+29.6%/+3.5%`); Jacobian medians were `1.0116/3.6749 ms` vs
+  `10.007/42.901 ms` (about `89.9%/91.4%` faster). These are callback-only
+  timings; the residual gap narrows at the largest dimension, while the large
+  Jacobian advantage persists. Small-workload nanosecond rows are not a proxy
+  for full-solve impact.
+- [x] The chunked shared-ABI emission story passed at dimensions `256/512/1024`
+  with complete residual/Jacobian output coverage; emission medians were
+  `1.855/3.300/6.646 ms`. Compilation and linking are explicitly excluded.
+- [x] Complete the bounded `small` continuation Criterion capture (warm and
+  fresh, CombustionLike and ThreeBody, Sparse/Banded, both frontends and
+  execution modes, target counts `1/4/16`). The completed rerun contains both
+  metadata records and reaches the final planned ThreeBody/Banded/
+  AtomViewNative/AOT fresh case: 96 planned Criterion cases and 672 target
+  solves. The earlier interrupted attempt was overwritten by this completed
+  capture; no partial values are used as results. It took about 16 minutes,
+  so it is bounded but still not a quick smoke test. Evidence:
+  `test_reports/LSODE2_release_manual/p0_20260930_143016/bench_continuation_small.log`.
+- [x] Complete the bounded `diffusion-sparse` warm continuation release slice
+  (`n=128/512/1024`, target counts `1/4`, Sparse, both frontends and
+  Lambdify/AOT): all 24 planned cases / 60 target solves completed. The first
+  invocation failed before measurements because the previous PowerShell
+  `LSODE2_BENCH_CONTINUATION_WORKLOADS=combustion-like,three-body` remained
+  active; rerunning with `diffusion-chain` fixed the selection. At `n=1024`,
+  four-target warm series were 179.02 ms ExprLegacy-Lambdify, 147.06 ms
+  ExprLegacy-AOT, 154.84 ms AtomViewNative-Lambdify and 146.24 ms
+  AtomViewNative-AOT. This is warm series wall time with preparation excluded;
+  it is not a cold/fresh break-even result. Criterion's local-history change
+  labels are not cross-route comparisons. Logs:
+  `test_reports/LSODE2_release_manual/p0_20260930_143016/bench_continuation_diffusion_sparse_warm.log`
+  (failed selection) and
+  `test_reports/LSODE2_release_manual/p0_20260930_143016/bench_continuation_diffusion_sparse_warm_retry_20260930.log`
+  (completed measurement).
+- [ ] The large `lsode2_workload_aot` and callback Criterion captures are
+  useful release evidence, but their Criterion “improved/regressed” labels
+  depend on the local `target/criterion` history. Preserve absolute intervals
+  and compare cross-route medians directly; re-run only if a controlled
+  before/after regression gate is needed.
+- [x] The 2026-09-30 evening workload callback and AOT Criterion captures
+  completed. At diffusion `n=2048`, AOT warm solve was `74.964/71.637 ms`
+  ExprLegacy/AtomViewNative Sparse and `35.929/35.061 ms` Banded; this is
+  about `2-8%` faster than the corresponding Lambdify routes. Cold AtomView
+  preparation remained about `85 ms` versus `716-728 ms` ExprLegacy, and cold
+  E2E was `151/115 ms` versus `832/751 ms` Sparse/Banded. ExprLegacy Sparse
+  cold E2E is a watch item (`+9%` to the prior median, wide interval and no
+  significant Criterion change); do not call it a confirmed regression.
+  Callback-only AtomView residual remains a few microseconds slower, while its
+  diffusion Jacobian is `88-94%` faster and improved `11-16%` from the prior
+  archived callback run at `n=512/1024/2048`. Full-solve and callback scopes
+  must stay separate. The multi-hour parameter-continuation Criterion sweep
+  was not run and is not required for this release check. Captures:
+  `bench_workload_callbacks_20260930_2053.log` and
+  `bench_workload_aot_20260930_2117.log` in
+  `test_reports/LSODE2_release_manual/p0_20260930_143016/`.
+
+## 2026-09-29: LARGE/HUGE ODE Readiness Plan
+
+This is the current forward-looking priority list. Recording it authorizes no
+implementation in this documentation pass. Existing historical checkboxes below
+must be reconciled with dated evidence before reopening completed work.
+
+The completed correctness/lifecycle corpus includes Sparse/Banded layout and
+trajectory parity, parameter rebind, non-finite and typed failures, artifact
+invalidation and process-isolated reuse. The combined AtomView native-plan fix
+has debug and post-fix release evidence. These are foundations to extend, not
+missing features to implement again. Current large-workload evidence reaches
+`n=2048`; it does not establish general HUGE-system readiness.
+
+### P0: Continuation Anomaly And Resource Lifetime
+
+- [x] Add a bounded per-target continuation diagnostic with solve wall time,
+  cold/warm stage deltas, solver callback/linear counters, auxiliary and
+  preparation evaluations, allocation bytes and typed error counts. The
+  original `n=512` helper was not apples-to-apples: its third parameter moved
+  upward while Criterion moved it downward. A shared fixture helper now drives
+  both benchmark and diagnostic targets.
+- [x] Reproduce and fix the `n=512` Sparse ExprLegacy-AOT continuation stall.
+  Exact target 41 reached `t=0.24999999999999997` for `t_bound=0.25`, then the
+  strict endpoint check exhausted its step budget with 1,875 retries. An epsilon-scaled
+  endpoint tolerance now completes the same bounded target in `608 ms` debug,
+  with 17 retries and 249 residual calls instead of `9.24 s`, 1,875 retries
+  and 3,965 residual calls. The exact shared target series 1..64 passes in
+  debug. The focused release target-41 gate also passes: `16.751 ms`,
+  `142 accepted / 17 rejected`, `249` residual calls, and `reached_t_bound=true`.
+- [x] Re-run the segmented release continuation slice after the endpoint fix.
+  The 2026-09-29 22:58Z release target-41 matrix covers 12 routes across
+  `n=512` Sparse/Banded and `n=1024` Banded, ExprLegacy/AtomViewNative and
+  Lambdify/AOT. Every route reaches `t_bound`; matching matrix/frontend cases
+  have matching solver counters. The 2026-09-30 09:52Z Debug rerun also passed
+  all 12 rows. Debug timing is correctness-only and is not compared to Release.
+  Release evidence: `test_reports/LSODE2_Lambdify/release/` report for
+  `lsode2_parameter_continuation_n512_target_41_route_matrix.md` and
+  `test_reports/LSODE2_Lambdify/release/archive/continuation_target41_routes_20260930_013232.log`.
+- [x] Add per-target continuation diagnostics for solve wall time, solver
+  counters, current-process RSS, allocation delta and retained AOT artifact
+  keys. RSS sampling and report formatting occur after the target timer. The
+  2026-09-30 Debug run completed 64 targets over four `n=1024` Banded
+  ExprLegacy-AOT passes with stable artifact keys/build/link counters; this is
+  diagnostic evidence, not a Release baseline or peak-memory measurement.
+  Report:
+  `test_reports/LSODE2_Lambdify/debug/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_n1024_banded_resource_growth.md`.
+- [x] Add a focused debug lifecycle gate for multiple live solvers, failed
+  parameter rebind followed by recovery, and dropping one solver while its peer
+  continues. Sparse/Banded ExprLegacy-AOT, AtomViewNative-AOT and Lambdify all
+  passed; the surviving solver recorded no new build/link attempts and kept
+  stable artifact provenance. Report:
+  `test_reports/LSODE2_AOT/debug/numerical__LSODE2__aot_warm_rebind_story_tests__aot_parameter_rebind_and_repeated_warm_solve_reject_stale_runtime.md`.
+- [ ] Measure bounded process resource growth during longer repeated sweeps,
+  including peak RSS and process-global registry/handle growth; define
+  permitted process-cache retention. A 2026-09-30 Debug extension now holds two
+  prepared `n=1024` Banded ExprLegacy-AOT solvers during four 16-target passes.
+  The peer remained executable after the primary dropped and did not rebuild;
+  its telemetry retained one artifact key with zero builds and one link.
+  Process RSS did not return to its initial baseline after both drops. This is
+  an open retention signal, not proof of a leak: current RSS is not peak RSS,
+  and allocator/process-cache retention is not separated from live handles. The
+  ignored release diagnostic now samples peak RSS every 10 ms while the
+  continuation series and solver-drop checks run. A read-only snapshot API now
+  exposes process-global linked sparse/residual/dense problem keys, and the
+  resource story checks prepared-key resolution between passes and reports the
+  registry footprint after both solver drops. Debug unit/compile gates pass;
+  the 2026-09-30 Debug run completed all 64 targets, sampled peak RSS at
+  `42,856,448` bytes (`+17,039,360` from post-prepare baseline), and found two
+  global registry entries still present after both solvers dropped. This
+  confirms reconnect-capable process retention, not an unbounded leak. Release
+  growth evidence across many unique problem keys and an explicit
+  permitted-retention/eviction policy are still required before closure.
+- [x] Complete the selected continuation slices with explicit coverage labels.
+  Small fresh Banded and diffusion-Banded warm/fresh slices passed in Release
+  on 2026-09-30; the archives distinguish warm continuation from fresh
+  cache-aware solver preparation. `fresh-cache-aware` does not mean compilation
+  for every parameter value. Evidence is in
+  `continuation_small_banded_fresh_20260930_013232.log`,
+  `continuation_diffusion_banded_20260930_013232.log` and
+  `continuation_diffusion_banded_warm_scaling_20260930_013232.log`.
+- [x] Close the endpoint-stall cause with a focused regression and repeated
+  bounded release evidence. The exact 64-target `n=512` Sparse release series
+  completed with individual solves around `11-21 ms`; target 41 was `16.543 ms`
+  and no seconds-scale cliff recurred. All 12 endpoint route-matrix rows reach
+  `t_bound` with stable counters. This closes the reproduced endpoint defect,
+  not general continuation resource-retention or scaling guarantees.
+  Evidence: `continuation_sparse_n512_series_20260930_013232.log` and
+  `continuation_target41_routes_20260930_013232.log` in the release archive.
+
+### P0: Preparation And Memory Scaling
+
+- [x] Identify and remove the native IVP all-state-per-row derivative probe:
+  AtomView residuals now discover state dependencies by traversing each Atom
+  tree before differentiation. A 2048-row tridiagonal unit test verifies that
+  only `3*n-2` derivative candidates are retained, and malformed derivative
+  failures preserve row/column in a typed error. This is debug correctness
+  evidence only; it does not yet prove release speedup or bounded memory.
+- [x] Re-measure and attribute preparation after the dependency-scan fix.
+  The 2026-09-29 20:41Z release gates cover Lambdify and paired AOT at
+  `512/1024/2048`, Sparse/Banded, with dependency and differentiation leaves.
+  The fixed-degree Native path scales far below the pre-fix quadratic
+  diagnostic; at `n=2048`, paired AOT preparation is `90.078/84.524 ms`
+  (Sparse/Banded), versus the immediately previous paired release's
+  `567.113/481.160 ms`. The full timing record and scope caveats are in
+  `LSODE2_STORY_AOT.md` and `LSODE2_STORY_LAMBDIFY.md`.
+- [x] Share the immutable input name/index ABI across chunked Atom AOT blocks
+  in both LSODE2 and the Atom BVP module generator. Each chunk retains its own
+  lowerer and CSE/IR state; argument order is unchanged. This removes repeated
+  `O(input_count)` index construction and name copies per chunk. A chunked BVP
+  gate asserts that generated blocks share the ABI. A bounded ignored LSODE2
+  whole/chunked module-emission story measures release wall time, the ABI
+  stage and output coverage without compiler noise. At `n=256/512/1024`,
+  chunked emission was about `17.0/15.3/7.2%` faster than whole emission;
+  compiled warm runtime remained near parity. The avoided-name-byte estimate
+  is not a memory or correctness metric and is not used for the performance
+  conclusion.
+- [ ] Track `n`, `nnz`, bandwidth, expression/plan size, preparation allocations,
+  peak resident memory and generated-source size together with time. Establish
+  expected complexity for each stage on fixed-degree sparse systems before
+  choosing optimizations. An advantage over ExprLegacy alone is not a scaling
+  criterion.
+- [x] Reuse one perturbed-state buffer per finite-difference Jacobian instead
+  of cloning the full state vector for every column. The clone's bytes and
+  allocation are now explicitly counted; the residual-evaluation algorithm
+  and call count are unchanged. A Sparse test asserts one state copy/allocation.
+- [x] Remove the additional base-residual evaluation in finite differences.
+  Dense, SparseTriplets and inferred-Banded routes use one base plus n
+  perturbed residual evaluations; instrumented buffer bytes are not total
+  allocations or peak RSS.
+- [x] Color finite-difference columns for declared Banded structure. Columns
+  with disjoint row support are perturbed together, reducing residual calls to
+  `1 + min(n, kl + ku + 1)`. A nonlinear tridiagonal gate verifies all band
+  entries, input restoration and four calls for n=9 instead of ten. This
+  assumes the caller's declared bandwidth is correct; it does not validate
+  out-of-band dependencies.
+- [x] Use the existing `jac_sparsity` mask for native Sparse finite-difference
+  coloring. A nonlinear tridiagonal `n=9` gate verifies all `3*n-2` entries,
+  exactly four Jacobian-local residual calls, caller-state restoration and a
+  typed error for a shape mismatch. Without a mask, the general all-column
+  fallback remains. The caller must include every potentially nonzero entry.
+- [x] Add `Lsode2SparseJacobianPattern` as a compact `(row, column)` input for
+  native Sparse finite-difference coloring. It stores only declared entries,
+  validates shape/indices with typed errors, deduplicates coordinates, and
+  avoids materializing a column-conflict graph. The old dense `jac_sparsity`
+  remains compatible but still costs O(n^2) to store and scan. This item is
+  specifically about finite differences; it is not an AtomView symbolic
+  Jacobian complexity limitation. Debug gates confirm identical tridiagonal
+  coloring/Jacobian and residual-call count for dense and compact inputs.
+- [x] Audit solution-history/output storage for long integrations. The native
+  integrator retains accepted times and a cloned state vector at every accepted
+  step, plus one attempt-report record per step attempt. The solver then also
+  materializes a dense result matrix while retaining the native integration
+  summary; `solve_with_summary()` retains another cloned integration summary.
+  `summary()` previously cloned the full result just to calculate final-state
+  fields. It now reads borrowed result buffers; the owned `get_result()` API
+  remains unchanged. Native and ExprLegacy-bridge correctness coverage checks
+  summary parity and that repeated owned reads remain stable. This removes a
+  transient full result-matrix/vector copy, not persistent history or the clone
+  of detailed integration telemetry placed in the owned summary.
+- [ ] Design bounded trajectory retention for long integrations: preserve
+  `Full` as the compatibility default and evaluate final-only, sampled or
+  streamed output with explicit retained-sample limits. Define which output
+  modes remain compatible with postprocessing and trajectory diagnostics, then
+  add parity and peak-memory coverage before changing production defaults.
+
+### P1: Representative Large Systems And Numerical Confidence
+
+- [ ] Extend the shared story/bench corpus beyond the narrow-band 1D diffusion
+  chain: 2D/3D reaction-diffusion, block-coupled systems and irregular sparse
+  graphs. Include stiff nonlinear cases and variable scaling. Use Banded only
+  where its bandwidth is practical; report variable ordering and sparse fill-in.
+- [ ] Grow dimensions from the verified `2048` baseline toward `10^4` and
+  larger, subject to explicit memory/time budgets. Record the largest verified
+  workload and supported resource envelope rather than claiming a universal
+  HUGE dimension threshold. Dense remains a small correctness control.
+- [ ] Measure sparse symbolic analysis, numeric factorization, RHS solves,
+  factor reuse and factor memory independently from callback evaluation. Assess
+  whether Krylov/preconditioning or matrix-free `J*v` is needed for target
+  workloads; this is an architectural assessment, not an assumed missing fix.
+- [ ] Add independent accuracy evidence through manufactured/analytic solutions,
+  tolerance convergence and applicable physical invariants. Backend parity
+  alone cannot exclude a common numerical error. Include failure/retry cases,
+  difficult scaling and long-duration resource checks.
+- [ ] Resolve the three-body long-horizon drift interpretation with a common
+  time grid, tolerance refinement, appropriate invariants and short-horizon
+  reference checks. Archive old drift numbers as diagnostic until their
+  comparison contract and the current release outcome are established.
+
+### P1: Performance And Execution Policy
+
+- [ ] Preserve separate comparisons for AOT versus Lambdify and AtomView versus
+  ExprLegacy, for cold preparation, warm callbacks, full solve and continuation.
+  Report absolute savings and call counts alongside percentages. Retain the
+  corrected cold lifecycle baseline; pre-fix duplicate preparation cannot serve
+  as a current AtomView regression baseline.
+- [ ] Target remaining residual/Jacobian overhead by measured workload cost.
+  Prioritize preparation, memory and factorization bottlenecks over small
+  callback differences unless call volume makes those differences material.
+- [ ] Establish callback and full-solve Auto/Parallel decisions separately using
+  actual pool dispatch/synchronization cost, work per chunk, confidence margin
+  and a safe Sequential fallback. Include multiple worker counts and interaction
+  with linear-algebra threads to detect oversubscription.
+- [ ] Account for first-use calibration as user-visible cold latency. The old
+  apparent thousandfold warm Auto slowdown was attributed to calibration scope;
+  removing it from warm timings does not remove its seconds-long startup cost.
+- [ ] Repeat representative release baselines on target environments before
+  adopting portable performance thresholds. Zig compilation remains low
+  priority unless it blocks correctness or supported lifecycle behavior.
+
+### P1: Reports, QoL And Evidence Integrity
+
+- [ ] Reconcile TODO and story summaries against actual reports: remove stale
+  pending statuses, label historical evidence, and identify one current source
+  per comparison. The post-fix direct-versus-solver release gate already passed.
+- [ ] Repair fresh-capture provenance: the archive path
+  `continuation_small_fresh_20260929T195718.log` now contains 32 valid Sparse
+  measurements despite older descriptions of an empty capture. Preserve its
+  current contents and record the discrepancy; do not infer immutability from
+  the directory name or treat the filename stamp as a verified execution time.
+- [ ] Specify unique run IDs, archive collision protection, profile/revision and
+  toolchain metadata, full benchmark IDs, expected/measured row counts and
+  explicit completion/partial status. A successful process with zero selected
+  workloads must remain a failure of the benchmark contract.
+- [ ] Make benchmark commands self-contained with all effective selectors and
+  bounded slices. Add progress, duration budgets and independent rerun support;
+  inherited environment variables must be visible in metadata. Avoid mandatory
+  multi-hour combined runs as routine validation.
+- [ ] Audit long-solve progress, cancellation, resource limits and typed failure
+  diagnostics for large-system users; distinguish existing capabilities from
+  actual API gaps before proposing changes.
+
+Exit criteria: explained continuation anomalies, demonstrated resource bounds
+and stage scaling, independent accuracy checks on representative sparse systems,
+reproducible bounded benchmarks and consistent lifecycle evidence. Completion is
+defined for documented workloads/environments, not universal AtomView speedup or
+a requirement that Parallel always beat Sequential. Implementation starts with
+the two P0 investigations; expensive release sweeps follow focused correctness
+checks and a stable measurement contract.
+
+### 2026-09-29: combined AtomView native lifecycle fix
+
+- [x] Prepare the AtomView-AOT residual and Sparse/compact-Banded Jacobian as
+  one retained native plan. The LSODE2 solver now installs that plan into the
+  bridge instead of preparing a residual artifact and Jacobian artifact
+  independently.
+- [x] Make `RequirePrebuilt` reconnect publish both process-local callback
+  views through the same typed fallible boundary. A cleared registry can now
+  recover the residual alias from the linked sparse/compact-Banded artifact
+  without a panic-wrapper or a second build/link lifecycle.
+- [x] Preserve dedicated residual precedence for compatibility producers.
+  A separately registered residual callback is not replaced by the
+  sparse-derived alias, which keeps compact-Banded callback shapes safe.
+- [x] Restore the configured LSODE2 BDF order cap for the native path. Native
+  solve no longer reads an unprepared low-level bridge default.
+- [x] Regression sweep: the full LSODE2 debug corpus passed `441/441` with
+  `0` failures and `36` ignored tests. The targeted compact-Banded,
+  `RequirePrebuilt`, statistics, summary and BDF-cap regressions also pass.
+- [x] The debug direct-versus-solver AOT diagnostic at `512/1024/2048`
+  reports one build and one link for every AtomView Sparse/Banded pair, with
+  no repeated native Jacobian/pattern preparation.
+- [x] Audit the remaining LSODE2 preparation call sites. The separate
+  residual/Jacobian orchestration remains only for ExprLegacy and explicit
+  compatibility/`UseIfAvailable` paths; the production AtomView-AOT native
+  route consumes the combined plan. No second equivalent AtomView preparation
+  path was found.
+- [ ] Repeat the direct-versus-solver diagnostic in release and archive it as
+  the post-fix solver lifecycle baseline. This is evidence collection still
+  pending, not a known correctness failure.
+
+## Current Safe Infrastructure Pass: Items 5-10
+
+The following is the authoritative short list for the test-only/documentation
+pass. Older unchecked entries below are historical planning notes and must not
+be read as proof that the corresponding production behavior is missing.
+
+- [x] Profile-aware story report routing: debug and release reports are
+  separated by `test_reporting`; report writes are outside measured solver
+  scopes.
+- [x] Immutable release story archival: each release report now keeps its
+  canonical latest file and a dated copy under
+  `test_reports/<suite>/release/archive/`. Debug archival is opt-in through
+  `RST_TEST_REPORT_ARCHIVE=always`, so diagnostic runs do not create noise by
+  default.
+- [x] Archive the core release Criterion corpus, including the large AOT warm
+  full-solve group at `128/256/512/1024/2048` and the completed default-size
+  callback capture. Immutable copies are under the profile archive; the large
+  callback log also preserves its `1024/2048` diffusion rows.
+- [x] Complete the opt-in callback Criterion corpus through its combustion
+  tail. The original combined large log is retained as partial diagnostic
+  evidence, while a separate filtered release run completed the missing
+  combustion workload and is archived below. The two archives are not one
+  uninterrupted Criterion process.
+- [x] Finish the physical migration of remaining historical story owners.
+  `legacy_story_support.rs` is now only a compatibility facade; the included
+  implementations are explicit thematic child modules with stable runner
+  exports.
+- [x] Keep a shared production-shaped workload corpus for stories and benches:
+  diffusion-chain, combustion-like, stiff scalar, Robertson and three-body.
+- [x] Remove the obsolete `benches/bdf_sanity.rs` target. It referenced the
+  deleted `numerical::LSODE` API and duplicated workloads now owned by the
+  shared LSODE2 corpus; all remaining bench targets compile together.
+- [x] Normalize the two LSODE2 Criterion benches around one test-only helper:
+  sample size, measurement duration, opt-in diffusion dimensions and a
+  metadata header are now consistent and emitted outside measured regions.
+- [x] Complete one uninterrupted opt-in AOT workload sweep at `1024/2048`.
+  `criterion__combined__aot__20260928.log` contains the same-process
+  `cold_preparation`, `warm_full_solve` and `cold_full_solve` groups for the
+  large diffusion matrix and the cold workload rows. Callback-only remains a
+  separate bench by design, so its filtered release capture is not presented
+  as part of this full-solve log.
+- [x] Keep this short list and the thematic story documents current; do not
+  resolve stale historical checkboxes by changing solver/runtime code.
+
+See `LSODE2_STORY_BENCHMARKS.md` for commands, archive metadata and the
+debug/release separation contract.
+
+Release capture note, 2026-09-28: the key AOT story gates passed except the
+chunk-policy callback break-even story. That story exposed a measurement
+lifecycle bug rather than a numerical mismatch: `Auto` may perform its
+process-local Rayon calibration on the first direct callback, so the one-time
+cost is charged to the per-call warm average. The fix moves that work outside
+the measured interval and retains a separate `parallel_calibration` stage.
+The failed capture was superseded by the dated passing rerun under
+`test_reports/LSODE2_AOT/release/`; its values remain documented here as a
+measurement defect, not as a performance baseline.
 
 This checklist is specific to LSODE2 symbolic preparation and callback
 execution. It does not authorize changes to LSODE/LSODA method switching,
@@ -39,6 +474,145 @@ many evaluations. A direct Atom evaluator may win when symbolic preparation or
 large Jacobian evaluation dominates. AOT is a separate route: after artifact
 reuse, its warm callback cost can be attractive even when its cold build is
 expensive.
+
+## Three-Stage Completion Plan
+
+The remaining LSODE2 work is intentionally split so infrastructure changes are
+not mixed with evaluator optimization or new performance claims. Each stage
+keeps the existing dated reports and adds new profile-aware records.
+
+### Stage 1: Infrastructure and cleanup
+
+- [x] Finish the lifecycle telemetry contract for Lambdify and AOT: typed
+  route/phase/provenance, cache hit/miss, build/link attempts, binding,
+  copies, allocations, chunks, workers, output writes, controller remainder
+  and linear stages. Inclusive parents and exclusive remainders remain
+  explicitly separated; the stable schema is checked by
+  `telemetry_stage_story_tests.rs`.
+- [x] Make every story report profile-aware and archive release evidence.
+  Debug runs never overwrite release baselines; report writing stays outside
+  measured scopes and release writes preserve immutable dated copies with
+  profile metadata. Machine, compiler, worker and protocol metadata remain the
+  responsibility of each story/bench report.
+- [x] Finish the physical story cleanup. Keep old module paths only as thin
+  compatibility wrappers; Lambdify dashboards, lifecycle runners, shared
+  fixtures and formatting helpers now live in thematic modules.
+- [x] Refresh the story indexes and command inventory after the move. Every
+  maintained story has one owner, one evidence class and one canonical report
+  name in `LSODE2_STORY_INDEX.md`.
+
+Stage 1 exit gate: all existing debug correctness/lifecycle stories compile and
+pass, old canonical paths remain callable, and a representative report proves
+that telemetry and archival behavior are unchanged.
+
+### Stage 2: Missing story tests
+
+- [ ] Add ordinary story tests for callback correctness and stage timing on
+  identical prepared states. Cover `ExprLegacy`, `AtomViewNative-Lambdify`,
+  `AtomViewNative-AOT` where applicable, Sparse and compact-Banded layouts,
+  parameter rebind/continuation, repeated warm solves, invalidation and typed
+  failures.
+- [ ] Use one shared production-shaped corpus: a small strongly nonlinear
+  combustion-like system, medium combustion cases, and diffusion-chain cases
+  at `128/512/1024/2048`. Keep Dense as a correctness control only.
+- [ ] Report cold preparation, callback-only residual/Jacobian stages and full
+  solver wall-clock separately. Include trajectory counters, Jacobian reuse,
+  copies, allocations, binding, worker dispatch and numerical diffs beside
+  every route row.
+- [ ] Add missing scale and lifecycle stories before changing evaluator code:
+  repeated continuation amortization, Sparse/Banded order parity, AOT
+  `BuildIfMissing -> RequirePrebuilt`, and process-isolated producer/consumer
+  reuse with cache provenance.
+
+Stage 2 exit gate: every route pair has correctness and lifecycle coverage,
+every timing table is apple-to-apple, and all reports are written to dated
+debug/release directories without overwriting historical evidence.
+
+### Stage 3: Robust benchmarks
+
+- [ ] Strengthen the `benches/` suite with repeated Criterion measurements,
+  explicit warmup and measurement policies, outlier/confidence reporting and
+  stable machine metadata. Benchmarks must reuse the LSODE2 fixtures and
+  prepared callback APIs rather than duplicate symbolic setup logic.
+- [ ] Cover the full route matrix where supported: Lambdify, ExprLegacy-AOT,
+  AtomViewNative-AOT, AtomViewNative-Lambdify, parameter-free and
+  parameterized continuation, Sparse/Banded and Sequential/Parallel/Auto.
+- [ ] Measure three independent axes: cold preparation, warm callback cost,
+  and full-solve amortization. For continuation, vary the number of target
+  parameter values so the break-even point is visible rather than inferred
+  from one short solve.
+- [ ] Repeat each important benchmark on small nonlinear combustion and large
+  diffusion workloads. Treat small noisy rows as diagnostics; accept an
+  optimization only when the direction is reproduced on multiple large
+  workloads without correctness, counter, allocation or lifecycle regressions.
+- [ ] Publish benchmark summaries beside story reports, including the exact
+  command, profile, compiler/toolchain, worker count, dimensions, repetitions
+  and confidence/outlier information.
+
+- [x] Add a solver-independent workload corpus shared by stories and benches:
+  scalable diffusion-chain, nonlinear combustion-like, stiff scalar,
+  Robertson reaction, and three-body dynamics. The corpus keeps equations,
+  initial states, and parameter metadata together, while leaving solver policy
+  and telemetry outside the fixture layer.
+- [x] Add the first cross-workload callback benchmark for ExprLegacy and
+  AtomViewNative, including residual/Jacobian and parameter-rebind rows:
+  `benches/lsode2_workload_callbacks.rs`.
+- [x] Add a long parameter-continuation benchmark with target counts
+  `1/4/16/64/256`. It compares prepared continuation against fresh
+  cache-aware preparation plus solve for Lambdify and AOT, both frontends and
+  Sparse/Banded layouts. The segmented release capture now covers the small
+  warm slice, diffusion-Sparse warm slice, and a valid small fresh Sparse
+  slice; diffusion-Banded fresh remains pending. Its correctness and short
+  four-target release timing gates are archived separately and must not be
+  confused with this longer amortization run.
+- [x] Attribute the segmented release diffusion-Sparse `n=512` ExprLegacy
+  continuation cliff to the exact target sequence's endpoint stall, not to
+  Criterion setup or AOT preparation. The older per-target report used a
+  different third-parameter trajectory and therefore did not rule out solver
+  work. Keep the dated pre-fix numbers (`targets=64/256`: AOT `22.93/26.82 s`;
+  Lambdify `30.98/36.56 s`) as historical evidence, not a current baseline.
+- [x] Rerun the fresh continuation slice with an explicit non-empty workload
+  selector. `continuation_small_fresh_fixed.log` completed without failure
+  markers and recorded 32 measured Sparse rows for `CombustionLike` and
+  `ThreeBody`, both frontends, Lambdify/AOT, and target counts `1/4/16/64`.
+  The earlier `workloads=[]` capture remains invalid historical evidence; this
+  fixes the fresh Sparse slice only, not the pending diffusion-Banded slice.
+- [x] Migrate the shared nonlinear diffusion-chain and three-body mathematical
+  fixtures used by the large stories to the same public workload corpus, while
+  preserving each story's solver policy and parameter binding semantics.
+- [x] Extend the same workload matrix with AOT cold/warm/full-solve lifecycle
+  rows in `benches/lsode2_workload_aot.rs`. Cold preparation and cold E2E use
+  isolated output directories with `RebuildAlways`; warm solve uses one shared
+  cache root with `BuildIfMissing`, so cache reuse is not confused with a cold
+  compile. The callback-only axis remains in
+  `benches/lsode2_workload_callbacks.rs`.
+- [x] Complete the new AOT corpus release bench protocol and archive its
+  Criterion groups beside the dated LSODE2 AOT story reports. The
+  2026-09-28 capture covers cold preparation and warm full solve for
+  diffusion-chain `128/256/512/1024/2048`, plus cold workload rows for
+  combustion-like, stiff-scalar, Robertson and three-body. The large callback
+  log preserves diffusion `1024/2048`; its interrupted combustion tail is
+  supplemented by a separately archived filtered completion and is not merged
+  into one uninterrupted Criterion baseline.
+- [x] Archive the completed combined AOT Criterion process at
+  `test_reports/LSODE2_AOT/release/archive/criterion__combined__aot__20260928.log`.
+  It contains 128 measured rows with no failure markers. Its latest warm-solve
+  medians show AOT faster than Lambdify at diffusion `2048` for both frontends
+  and both layouts. Its cold AtomView rows are historical pre-fix evidence;
+  the normalized 2026-09-29 `RebuildAlways` apple-to-apple gate now shows
+  AtomView faster than ExprLegacy at `512/1024/2048` on both Sparse and
+  Banded, so the old cold penalty must not be used as the current baseline.
+- [x] Add a dedicated detailed cold-preparation story gate for large AOT
+  routes. It reports the external wall-clock plus typed parent/child stages
+  for `ExprLegacy` and `AtomViewNative`, Sparse/Banded and `512/1024/2048`.
+  Release measurements are archived in the 2026-09-29 apple-to-apple and
+  direct-versus-solver reports. The remaining question is not whether the
+  current AtomView route is slower in this lifecycle, but how its result
+  transfers across machines and how continuation amortizes repeated binds.
+
+Stage 3 exit gate: release baselines are reproducible on target environments,
+callback and full-solve conclusions agree or are explicitly explained, and no
+default policy change is made without a portable Parallel/Auto criterion.
 
 ## Story Test Policy Before The Next Release Baseline
 
@@ -137,17 +711,30 @@ Before any expensive release run, the following debug gates must be complete:
   segments directly instead of matching on `PreparedInput` for every variable
   node. The flat ABI is unchanged, the general custom-function evaluator is
   untouched, and a direct debug test covers value parity plus bad-shape errors.
-- [ ] Re-run the release large-stage baseline after the residual batch change.
-  The debug stage report shows the remaining cost is in
-  `ResidualEvaluation`, not `ResidualOutputAssembly`: at dimension `256` the
-  Atom evaluator measured about `0.085 ms` versus `0.042 ms` for ExprLegacy,
-  while output assembly rounded to zero. Compare the next release capture
-  against both the pre-Jacobian-fix and post-Jacobian-fix records.
-- [ ] If the residual gap remains material after the release rerun, compare
+- [x] Re-run the release large callback corpus after the residual batching and
+  evaluator-path changes. The 2026-09-28 release report covers diffusion-chain
+  `1024/2048` and combustion-like `32/64`, with cold stages, warm callback
+  stages, correctness diffs, copies and allocated bytes.
+- [x] Compare the post-change release capture with the preceding capture. The
+  Atom Jacobian remains strongly favorable on the large diffusion workload and
+  the residual path is correct with zero measured copies/allocations, but the
+  residual result is mixed across workloads and repetitions. No universal
+  residual speedup is claimed.
+- [x] Add and run `benches/ivp_parameter_free_callbacks.rs`. The completed
+  2026-09-30 release capture measured parameter-free Atom at `385.74 ns`,
+  `3.124 us`, `13.208 us` for `n=16/128/512`, versus parameterized Atom at
+  `408.63 ns`, `3.370 us`, `13.321 us`. The relative savings were about
+  `5.6%`, `7.3%`, and `0.8%`; Criterion found no significant change at `n=512`.
+  ExprLegacy measured `443.73 ns`, `3.336 us`, and `12.666 us`, beating both
+  Atom routes at `n=512`. Treat this as a small-workload local benefit, not a
+  portable or universal backend win. Criterion's `change` column is against
+  the stored historical baseline, not a cross-route comparison. Full capture:
+  `parameter_free_callbacks_20260930_023145.log`.
+- [ ] If the residual gap remains material on parameterized workloads, compare
   prepared-node counts, operation fingerprints and dispatch/instruction shape
-  for residual equations before changing the Atom IR. The current evidence
-  points to the per-evaluator `PreparedNode` interpreter loop, not parameter
-  copying, output allocation or numerical control.
+  for residual equations before changing the Atom IR. Current release evidence
+  still points to workload-sensitive evaluator cost, not parameter copying,
+  output allocation or numerical control.
 - [x] Native Jacobian preparation exposes a fixed nonzero entry plan reusable
   by Dense, Sparse, and Banded storage callbacks. The prepared plan is shared
   by Sequential, Parallel, and Auto evaluator dispatch.
@@ -156,6 +743,10 @@ Before any expensive release run, the following debug gates must be complete:
 - [ ] Historical story tables explicitly warn that Lambdify and AOT counters
   have not always represented the same abstraction level. Those rows are useful
   evidence, but not yet an apple-to-apple call-count baseline.
+- [x] Moved shared story helpers (`RaceStats`, backend race rows, short error
+  formatting and report tags) to `tests/story_support.rs`. The historical
+  `legacy_story_support.rs` path remains as a compatibility wrapper for its
+  old runner namespace, but no longer owns those shared utilities.
 
 ### Telemetry implementation status: 2026-09-22
 
@@ -213,6 +804,19 @@ Before any expensive release run, the following debug gates must be complete:
 - [x] Attach dated file reports to the principal Lambdify story tests. The
   report capture buffers printed lines in memory during a test and performs
   replacement/file I/O only on drop, after the measured work is complete.
+- [x] Extend the process-isolated child protocol with one detailed telemetry
+  record per phase. It now carries binding, callback/evaluation/output stages,
+  controller and iteration scopes, factorization/RHS, native engine boundary,
+  copies/bytes, allocations, chunks, dispatches, worker count/calibration,
+  trajectory counters and AOT provenance. Cumulative snapshots are divided by
+  repetitions once, avoiding repeated-snapshot overcounting. `callback_only`
+  explicitly zeros solver-only stages because its wall-clock solve interval is
+  excluded. The debug protocol smoke gate also asserts phase-to-phase
+  trajectory parity, finite final states, zero errors, stable artifact keys,
+  no non-AOT build/link artifacts, and no AOT rebuild during warm/callback
+  phases. Resolution hit/miss counters remain backend-selection diagnostics
+  even for a Lambdify route and are not interpreted as artifact provenance.
+  Remaining work is release coverage across all routes/toolchains.
 - [ ] Aggregate worker-thread callback telemetry once an actual parallel
   Lambdify evaluator is introduced. The current LSODE2 Lambdify callbacks are
   sequential, so adding a worker abstraction now would only add overhead.
@@ -255,7 +859,21 @@ and use both as acceptance consumers of the shared View-level corpus.
   Rayon worker count, Sparse/Banded layout, and actual Jacobian reuse. Do not
   infer a winner from solver-level counters alone. The debug callback-only
   matrix is implemented; its release multi-repeat measurements are still a
-  pre-release gate.
+  pre-release gate. The remaining item is the portable multi-worker
+  crossover, not callback lifecycle correctness.
+- [x] Remove first-use calibration from direct AOT callback measurements. The
+  story now registers each policy before timing and asserts the typed
+  `parallel_calibration` stage count. The final release rerun at dimension
+  `512` reports `2318.821500 ms` calibration outside timing, then Auto residual
+  `0.011135 ms/call` versus Sequential `0.011449 ms/call`, with zero parallel
+  dispatches. The earlier `8.143600 ms/call` row was a measurement-lifecycle
+  defect, not a production callback baseline.
+- [x] Define a portable Auto break-even report criterion. Alongside the raw
+  first crossover, the release story now reports a conservative stable
+  crossover only when Auto actually dispatches parallel work, exceeds the
+  machine-calibrated work threshold, and remains no slower than Sequential at
+  all later checkpoints. This is a reporting gate, not a platform-independent
+  promise; release sweeps across worker counts remain required.
 - [x] Replace the compatibility callback's `expect` on poisoned parameter
   locks with a fallible binding boundary. Prepared IVP problems now expose
   `try_evaluate_residual` and `try_evaluate_jacobian`; the old infallible
@@ -405,26 +1023,83 @@ and use both as acceptance consumers of the shared View-level corpus.
   sufficient.
 - [x] Cache prepared native residual/Jacobian callbacks in the solver lifecycle
   instead of rebuilding the full native evaluator inside every `solve()`. Each
-  solve still owns a fresh mutable step driver and linear backend, while
-  parameter rebinding invalidates the callback cache. The cache is also used by
-  the native preflight path. This removes repeated warm `native_engine_setup`
-  work for repeated solves; the first cold preparation and numeric-rebind costs
-  remain explicit follow-up measurements, not hidden in the warm solve.
+  solve still owns a fresh mutable step driver and linear backend, while a
+  numeric parameter rebind updates the shared handle and preserves the
+  prepared callback cache. Schema, mesh/layout, boundary-condition or
+  Jacobian-pattern changes must invalidate the cache explicitly. The cache is
+  also used by the native preflight path; first cold preparation and
+  numeric-rebind costs remain explicit follow-up measurements.
 - [x] Defer bridge `inner.try_generate()` for `NativeSolve` until an actual
   native-to-bridge fallback. The old unconditional bridge preparation was
   duplicated with native callback preparation and inflated cold `prepare_ms`
   for both Lambdify and AOT routes. A debug solver gate asserts that native
   preparation leaves `bridge_preparation` at zero.
-- [ ] Measure the cached lifecycle on repeated Sparse/Banded solves and on
-  parameter rebind. Require unchanged trajectory/counters and report cold
-  preparation separately from warm `native_engine_setup` before accepting a
-  release performance improvement.
+- [x] Measure the cached lifecycle on repeated Sparse/Banded solves and on
+  same-process parameter rebind for Lambdify. The debug continuation gate
+  reports cold preparation separately, preserves trajectory and native
+  counters, and confirms zero additional `ExprToAtom`/`SymbolicJacobian`
+  stages after the initial callback plan.
+- [x] Add first-class same-process parameter continuation for unchanged
+  symbolic fixtures. `Lsode2Solver::set_parameter_values` now updates the
+  lifecycle-owned shared parameter handle instead of dropping prepared
+  callbacks; the debug matrix covers ExprLegacy/AtomViewNative and
+  Sparse/Banded, including typed length rejection and four recorded binds.
+- [x] Close debug parameter continuation across AOT artifacts and
+  process-isolated producer/consumer reuse. Same-process routes and the
+  process-isolated C/tcc producer/consumer gate perform numeric-only rebinds
+  without new symbolic differentiation, materialization, build or link; the
+  process gate also checks artifact-key provenance, reconnect, trajectory
+  counters and fresh-reference parity. The release break-even claim remains
+  separate. Any parameter-schema, mesh/layout, BC or Jacobian-pattern change
+  must invalidate continuation and reject stale callbacks/factors.
+- [x] Close the same-process AOT numeric-continuation cache slice. The debug
+  matrix covers ExprLegacy-AOT, AtomViewNative-AOT and AtomViewNative-Lambdify
+  on Sparse/Banded after one `BuildIfMissing` preparation; three rebinds report
+  zero additional AOT materialization/build/link stages and fresh
+  `RequirePrebuilt` rows report zero builds. The dated report is
+  `test_reports/LSODE2_AOT/numerical__LSODE2__aot_warm_rebind_story_tests__aot_parameter_continuation_fair_warm_performance_and_cache_matrix.md`.
+- [x] Add a fair same-process continuation performance gate with identical
+  detailed telemetry for continuation and fresh routes. The debug matrix
+  separates fresh preparation from fresh solve time and records four numeric
+  binds per route; all routes report zero new `ExprToAtom` and
+  `SymbolicJacobian` stages. The dated report is
+  `test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_fair_warm_performance_matrix.md`.
+
+- [x] Make AOT lifecycle counters apple-to-apple for Sparse and Banded
+  ExprLegacy/AtomView routes. Sparse ExprLegacy previously bypassed the shared
+  telemetry scope, so its `build_attempts=0`, `link_attempts=0` and tiny/absent
+  `link_ms` were instrumentation gaps rather than linker performance. The
+  generated lifecycle now records the same lowering, source generation,
+  materialization, build, link and publication stages for both frontends.
+- [x] Add one release story covering all four frontend/layout pairs
+  (`ExprLegacy`/`AtomViewNative` x `Sparse`/`Banded`) through
+  `BuildIfMissing -> RequirePrebuilt`, with correctness, repeated strict reuse,
+  and dated report capture. Release evidence is recorded in the
+  `2026-09-27T19:24:50Z` report under `test_reports/LSODE2_AOT`.
+- [ ] Complete the process-isolated continuation matrix after the same-process
+  lifecycle gate is stable for Rust, C/gcc and Zig in addition to the debug
+  C/tcc gate. It must preserve cache provenance and distinguish producer build,
+  consumer reconnect, cache hit and cache miss without treating runtime
+  publication as linker time. The current debug report is
+  `test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_parameter_continuation_reuses_producer_artifact.md`.
+- [x] Add a dedicated release-only continuation story covering both
+  `ExprLegacy` and `AtomViewNative` across Rust, C/tcc, C/gcc and Zig. It uses
+  the same producer/consumer protocol as the debug gate and asserts numeric
+  rebind, artifact-key provenance, zero consumer builds and trajectory/counter
+  parity; only the expensive release evidence remains to be collected.
 
 - [ ] AOT release gate after lazy bridge preparation: repeat the cold/warm
   Sparse/Banded callback matrix, process-isolated Lambdify/ExprLegacy-AOT/
   AtomView-AOT comparison, `BuildIfMissing -> RequirePrebuilt` lifecycle, and
   toolchain matrix with at least five paired samples. Keep correctness and
   integer counters in every row.
+- [x] Extend AOT callback stage reports with `publication_ms`, cache hit/miss
+  counters and `runtime_ready`. `link_ms` now denotes only the link/registry
+  stage; publication is reported separately so cross-frontend comparisons do
+  not confuse lifecycle scope with compiler/linker speed. The process-isolated
+  harness now carries the same split through its child protocol and
+  producer/consumer tables, so `link_attempts/link_ms` cannot silently absorb
+  publication or reconnect work.
 - [x] Investigate the AtomView-AOT residual callback anomaly independently of
   typed-boundary overhead. The fresh-artifact diagnostic isolated the cause:
   Atom normalization intentionally folds repeated factors such as `y*y` into
@@ -617,11 +1292,13 @@ and use both as acceptance consumers of the shared View-level corpus.
 - [ ] Repeat the canonical combustion policy story in release after this
   stage split. The 2026-09-23 02:23 aggregate record predates the split and
   cannot distinguish closure execution from output materialization.
-- [ ] Explain and reconcile the canonical combustion telemetry gap where the
-  solver trace is `776/387` residual/Jacobian calls but detailed evaluator
-  telemetry observes `780/387` callback evaluations. Keep both counters until
-  the ownership boundary is proven; do not silently normalize one into the
-  other.
+- [x] Explain the main canonical combustion telemetry gap. The current
+  diagnostic is stable at solver `776/387`, executor requests `774/387` and
+  evaluator evaluations `782/387`; `aux_res=2` is a nested subcategory of the
+  solver residual calls, while `prep_res=6` accounts for the three native
+  driver constructions and their `initial_native_step_size` probes. Jacobian
+  ownership is exact and
+  `unattributed_res=0` after typed attribution.
 
 ## P1: Direct AtomView Lambdify
 
@@ -804,9 +1481,10 @@ and use both as acceptance consumers of the shared View-level corpus.
   and callback-failure details. Source-generation and publication buckets now
   exist, and linked residual/Dense/compact-Banded warm scopes cover binding,
   chunk dispatch, worker execution, copies, allocations and output writes.
-  The debug chunk policy gate is complete; the large warm-solver story now
-  prints the solver-level aggregation. A single consolidated lifecycle report
-  and allocation measurements remain open.
+  The debug chunk policy gate is complete; the large warm-solver story and
+  process-isolated harness now print solver-level aggregation. The detailed
+  phase report includes allocation/copy counters; release aggregation across
+  all toolchains and larger workloads remains open.
 - [x] Add native sparse compiler-spawn failure injection. The typed
   `AotBuildFailed` boundary now preserves retry classification, the generated
   command, Atom conversion/materialization/build counters, and the absence of
@@ -835,11 +1513,23 @@ and use both as acceptance consumers of the shared View-level corpus.
   with callback counts and output sizes. The generated sparse result now
   exposes its immutable preparation telemetry so these stage rows do not rely
   on a second ad-hoc timer. The matrix includes ExprLegacy-AOT on Sparse and
-  AtomViewNative-AOT on compact-Banded. Compact-Banded currently rejects
-  ExprLegacy with a typed `AotBuildFailed` because its generated layout path
-  requires AtomView; the story reports that limitation explicitly instead of
-  manufacturing a comparison row. The AtomView Banded path asserts its
-  reported telemetry route. A fresh release capture is still required.
+  AtomViewNative-AOT on compact-Banded. The AtomView Banded path asserts its
+  reported telemetry route. The 2026-09-26 release capture now includes the
+  compact-Banded ExprLegacy control at `128/256/512`; historical
+  `unsupported` rows must not be mixed with this baseline.
+- [x] Enable the missing compact-Banded ExprLegacy-AOT control route. It now
+  emits the same complete LAPACK-style `(kl + ku + 1) * n` slot buffer as the
+  AtomView-native route, including literal zero boundary slots, and uses the
+  shared manifest, build, link and typed callback lifecycle. The debug smoke
+  at `n=8` materialized and linked the route with `1/1` build/link attempts
+  and output length `24`; the low-level `2x2` gate also compares the decoded
+  values with AtomView. An initial sign inversion in the ExprLegacy diagonal
+  mapping was caught by that gate and corrected before release comparison.
+  The 2026-09-26 release matrix now passes the route at `128/256/512` with
+  compact output lengths `384/768/1536`, zero callback drift and `1/1`
+  build/link attempts on Banded. Sparse cold preparation is still not
+  apple-to-apple because ExprLegacy reports `0/0` while AtomView reports
+  `1/1` attempts.
 - [x] Add a release-only AtomViewNative AOT toolchain callback matrix for
   `C/tcc`, `C/gcc`, Rust and Zig. Missing external commands are reported as
   skips; each available route uses the same equations, layout, state and
@@ -984,15 +1674,14 @@ and use both as acceptance consumers of the shared View-level corpus.
   regression gate. Its `1928.150 ns/call` versus `488.950 ns/call` ExprLegacy
   result is a workload-specific failure signal, not noise.
 - [x] Keep solver counters and evaluator callback counters separate. The
-  current combustion report still exposes `776/387` solver residual/Jacobian
-  calls versus `780/387` evaluator observations; the four extra residual
-  observations require lifecycle attribution before counter normalization.
-- [x] Add an explicit debug gate for the two counter scopes. The bridge route
-  now reports `bridge_bdf_callbacks`, while the faithful route reports
-  `native_faithful_inner_loop`; each report keeps solver-level counters and
-  evaluator callback requests in separate columns. The `776/387` versus
-  `780/387` observation is therefore not silently normalized across different
-  execution layers.
+  current combustion report exposes solver `776/387`, executor requests
+  `774/387`, evaluator observations `782/387`, nested runtime `aux_res=2`,
+  cold preparation `prep_res=6` and `unattributed_res=0`; no counter is
+  normalized across layers.
+- [x] Add an explicit debug gate for the counter scopes. The bridge route now
+  reports `bridge_bdf_callbacks`, while the faithful route reports
+  `native_faithful_inner_loop`; each report keeps solver-level counters,
+  executor requests, evaluator calls and auxiliary probes in separate columns.
 - [x] Correct the AtomViewNative `argument_binding` telemetry scope so it ends
   after parameter binding and before prepared scalar evaluation. The prior
   scope included evaluation time and overstated binding cost.
@@ -1021,10 +1710,12 @@ and use both as acceptance consumers of the shared View-level corpus.
   `2688 ns/call` for AtomViewNative versus `2713 ns/call` for ExprLegacy with
   zero drift. Keep the dated `4020 vs 496` row as historical evidence, but do
   not use it as the active baseline.
-- [ ] Make story-report archival profile-aware. A debug smoke run must not
-  overwrite a release baseline under the same canonical filename; preserve
-  `debug/release`, timestamp and compiler/thread metadata in the report path or
-  archive layer.
+- [x] Make story-report archival profile-aware. `TestReportCapture` records
+  `debug/release` in the Markdown header and writes below
+  `test_reports/<suite>/<profile>/`, so a debug smoke run cannot overwrite a
+  release baseline. Release writes additionally create immutable dated copies
+  under `archive/`; `RST_TEST_REPORT_PROFILE` and
+  `RST_TEST_REPORT_ARCHIVE` are available for isolated harnesses.
 
 ## 2026-09-24: Missing Large-Scale And Auto Gates
 
@@ -1047,10 +1738,11 @@ control route and must not be added to the large-scale corpus.
   about `1-3%` of ExprLegacy full-solve wall-clock at `256/512`, but its warm
   residual/Jacobian callbacks remain slower and are the next optimization
   target. The `128` overhead is retained as a startup gate.
-- [ ] Add a release callback-only corpus for the diffusion chain at dimensions
-  `128, 256, 512, 1024, 2048`, using Sparse and Banded only. Record residual
-  and Jacobian times separately, including nonzero count, operation shape,
-  argument-binding time, output assembly time and allocations/copies.
+- [x] Add a release callback-only corpus for the diffusion chain at dimensions
+  `1024, 2048` and a larger combustion-like callback workload. The new
+  `lambdify_large_scale_story_tests.rs` reports cold preparation plus repeated
+  residual/Jacobian calls and numerical parity for ExprLegacy/AtomViewNative;
+  the expensive release run remains to be recorded.
 - [ ] Add a bounded full-solve corpus for the combustion-like problem at the
   current production size and one or two larger sizes. Keep the largest case
   callback-only if controller time or memory would obscure evaluator results.
@@ -1089,10 +1781,16 @@ control route and must not be added to the large-scale corpus.
   release capture still shows a residual gap at dimension `512` (`11.253`
   versus `8.130 ms` Sparse and `11.381` versus `7.629 ms` Banded); do not
   conflate this with the fixed Jacobian workspace defect.
-- [ ] Extend the batch-workspace strategy to the worker-local Parallel path,
-  then rerun the Auto/break-even matrix. The current release gate validates
-  only the sequential native Jacobian path and must not be generalized to
-  parallel dispatch without a separate measurement.
+- [x] Extend the batch-workspace strategy to the worker-local Parallel path.
+  Parallel residual/Jacobian callbacks now partition evaluator plans into
+  disjoint worker-sized chunks and borrow each worker's evaluator workspace
+  once per chunk rather than once per scalar entry. Output order, typed error
+  indices and the existing policy selection are unchanged.
+- [x] Rerun the release Parallel/Auto matrix after the worker-local batch
+  change. The release large-chain gate and the release multi-worker stories
+  preserve numerical parity and explicit dispatch accounting. The results do
+  not claim a portable parallel speedup; the break-even question remains open
+  as a policy/portability issue.
 
 ### Auto and break-even matrix
 
@@ -1111,6 +1809,12 @@ control route and must not be added to the large-scale corpus.
   Parallel was slower at every checkpoint. The report now includes the
   calibrated `auto_min_work_per_job`; this is an observable conservative
   decision, not a universal performance claim.
+- [x] Make the calibration evidence explicit in the Auto story output. Each
+  row now records the measured no-op Rayon `join2`/`join4` baselines, the
+  observed worker count and the resulting calibrated minimum work per job.
+  The multi-worker process-isolated debug smoke showed different thresholds
+  for one and two workers (`508` versus `664` on the local `n=8` control), so
+  a single hard-coded break-even threshold must not be promoted as portable.
 - [ ] Add an evaluator threshold sweep for
   `Sequential`, forced `Parallel` and `Auto` over dimensions
   `16, 32, 64, 128, 256, 512, 1024` and `min_work` values such as
@@ -1180,10 +1884,12 @@ control route and must not be added to the large-scale corpus.
   usable. A deliberately failing symbolic custom evaluator is still a
   separate case because the current native numeric evaluator reports domain
   extremes as values rather than callback errors.
-- [ ] Normalize the solver/evaluator counter contract. The known
-  `776/387` versus `780/387` residual/Jacobian discrepancy must be attributed
-  to retries, rejected steps, warm-up or output checks, or removed by an
-  explicit counter definition. It must not remain an unexplained difference.
+- [x] Finish the solver/evaluator counter contract by adding a typed origin for
+  the six cold `initial_native_step_size` residual callbacks from three native
+  driver constructions. Runtime auxiliary
+  probes are explicit as nested `aux_res=2`; the current contract exposes solver
+  `776/387`, executor requests `774/387`, evaluator `782/387`,
+  `prep_res=6` and `unattributed_res=0` instead of normalizing them.
 
 ### Stable release baseline
 
@@ -1208,6 +1914,56 @@ control route and must not be added to the large-scale corpus.
   allocations/copies, integer callback counters and numerical drift. The
   report is file-backed; release repetitions remain a separate baseline.
 
+### Release rerun backlog after the next accumulated change batch
+
+These are intentionally deferred expensive gates. Run them together in
+`--release` after a coherent batch of lifecycle, telemetry or code-generation
+changes; do not replace a dated release row with a debug result. Keep
+`--test-threads=1`, the existing artifact cleanup/cooldown policy and the
+same machine/compiler profile as the previous baseline.
+
+- [ ] Lambdify scale and stage baseline:
+  `large_system_sparse_banded_total_and_stage_story`,
+  `large_auto_break_even_story`,
+  `large_auto_break_even_multi_worker_story`,
+  `lambdify_large_sparse_banded_frontend_policy_story` and
+  `combustion_symbolic_frontend_sparse_banded_multi_run_dashboard`.
+- [ ] Lambdify parameter continuation baseline:
+  `parameter_continuation_matches_fresh_solver_matrix` and
+  `parameter_continuation_reports_reuse_vs_fresh_preparation`; use enough
+  repetitions to separate rebind cost from timer noise and preserve the cold
+  stage counters.
+- [ ] AOT callback-only matrix:
+  `lsode2_aot_large_callback_stage_performance_matrix` and
+  `lsode2_aot_residual_boundary_isolation_exprlegacy_vs_atomview`; compare
+  ExprLegacy-AOT, AtomView-AOT and AtomViewNative-Lambdify by dimension,
+  source shape, binding boundary and raw callback cost.
+- [ ] AOT warm full-solver matrix:
+  `lsode2_aot_large_warm_solver_stage_performance_matrix` and
+  `lsode2_aot_chunking_policy_callback_break_even_story`; archive controller,
+  solver-overhead, factorization, RHS, callback and trajectory counters.
+- [ ] AOT lifecycle and chunking rows:
+  `lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story`,
+  `lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story`
+  and `lsode2_large_chain_tcc_chunking_sparse_banded_warm_story`.
+- [ ] Process-isolated release matrix:
+  `aot_process_isolated_release_apple_to_apple_matrix` plus the producer /
+  consumer parameter handoff. Include Lambdify, ExprLegacy-AOT and
+  AtomView-AOT, and record provenance, cache hits, reconnects, build/link
+  attempts, binding, copies, allocations and solver counters.
+- [ ] Toolchain and portable parallelism sweep:
+  `lsode2_aot_toolchain_callback_performance_matrix`,
+  `lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix` and
+  the large Auto/Parallel worker matrix. Treat worker calibration and the
+  callback/full-solve break-even values as machine-specific evidence, not a
+  universal threshold.
+
+The release batch is complete only when every row has a dated report file,
+finite numerical diffs, matching integer trajectory counters and explicit
+cold/warm/callback phase labels. A single timeout, unsupported route or
+unexplained counter change stays an open anomaly rather than being averaged
+away.
+
 ## 2026-09-24: Story Test Module Reorganization
 
 `story_tests.rs` and especially `story_tests2.rs` are now too large to be a
@@ -1216,48 +1972,52 @@ leak implementation history instead of describing the evidence being produced.
 The reorganization must preserve correctness gates and report paths while
 making test filters discoverable.
 
-- [ ] Inventory every test in `story_tests.rs`, `story_tests2.rs` and
-  `tests/lambdify_stage_story_tests.rs`; assign each test to exactly one thematic
-  module before moving code.
-- [ ] Split the corpus into focused modules with names based on behavior:
+- [x] Inventory the former root story containers and move their entry points
+  under `tests/`. The former `story_tests.rs` is now
+  `tests/native_quality_story_tests.rs`; the former `story_tests2.rs` is now
+  the explicitly named `tests/legacy_story_support.rs` compatibility/support
+  module. No root `story_tests*.rs` source or `story_tests2/` directory remains.
+- [x] Split the corpus into focused modules with names based on behavior:
   `correctness_story_tests.rs` for analytic and backend correctness,
   `trajectory_parity_story_tests.rs` for accepted/rejected and method-switch
   traces, `lambdify_stage_story_tests.rs` for symbolic and callback stages,
   `evaluator_policy_story_tests.rs` for Sequential/Parallel/Auto and
   break-even, `large_system_story_tests.rs` for Sparse/Banded scale gates,
   and `lifecycle_story_tests.rs` for parameter rebind and failure injection.
-- [ ] Keep AOT stories in a separate `aot_story_tests.rs` module. They must
+- [x] Keep AOT stories in separate thematic `aot_*_story_tests.rs` modules. They must
   not be mixed with Lambdify-only baselines or affect Lambdify test commands.
 - [ ] Move shared fixtures, report helpers, counter formatting and route
   builders into small `story_support` modules rather than duplicating them in
   every thematic file. The support layer must stay outside measured work.
-- [ ] Preserve the current public test function names during the first move,
+- [x] Preserve the current public test function names during the first move,
   or provide short compatibility wrappers with deprecation comments. Update
   canonical report keys only after the new module names have been recorded in
   the story documentation.
-- [ ] Replace ambiguous paths such as `story_tests2::tests::...` with direct
-  thematic paths in new tests. New tests must not use a numeric suffix.
+- [x] New test entry points use direct thematic paths and no numeric suffix.
+  Historical report filenames and pasted console records retain their original
+  `story_tests2` canonical names so old baselines remain traceable.
 - [ ] Update release command lists, `LSODE2_STORY_TESTS.md`, TODO links and
   report metadata after each module move. Run debug correctness tests first;
   run the expensive release baseline only after the module migration is
   complete.
 - [ ] Keep the migration in separate mechanical commits from evaluator or
   numerical changes so a performance regression can still be bisected.
-- [x] Start the migration with `tests/story_support.rs` and thematic modules while
-  retaining `story_tests.rs`, `story_tests2.rs` and their historical test
-  paths as compatibility sources. The large-file extraction itself remains
-  intentionally incremental.
+- [x] Start the migration with `tests/story_support.rs` and thematic modules.
+  The former compatibility container was subsequently split into
+  `legacy_story_core.rs`, `legacy_story_race.rs`,
+  `legacy_story_solver_quality.rs`, `legacy_story_combustion.rs`,
+  `legacy_story_view.rs` and `legacy_story_lifecycle.rs`. The thin
+  `legacy_story_support.rs` wrapper keeps historical runner paths stable and
+  includes those physical story families without changing report semantics.
 - [x] Move the typed telemetry pretty-report story into
   `tests/telemetry_stage_story_tests.rs` while preserving its canonical report key.
-  The old `story_tests2.rs` remains the compatibility source for the stories
-  not yet extracted.
 - [x] Move the caller-owned Jacobian layout and parameter-rebind parity stories
   into `tests/lifecycle_story_tests.rs`; both debug tests pass and preserve
   their historical report keys.
 - [x] Move `three_body_story_tests.rs` into `tests/` and add report capture for
-  its verbose ignored story. Keep only the compatibility module path in
-  `story_tests2.rs` because the story still consumes historical race-table
-  helpers; the old `story_tests2/` source directory is removed.
+  its verbose ignored story. It imports only shared helpers from
+  `legacy_story_support.rs`; the old root story source and `story_tests2/`
+  directory are removed.
 - [x] Add an ignored large-scale debug gate for AtomViewNative fixed Sparse
   order versus compact Banded slots at dimensions `512` and `1024`. It keeps
   Dense out of the large case and records the integer Jacobian counters in a
@@ -1284,9 +2044,10 @@ making test filters discoverable.
   three-body control remains favorable for Native. The former `4020` versus
   `496` result was a real generic-interpreter overhead, not noise; no symbolic
   tree or numerical-method rewrite was required.
-- [ ] Reconcile the warm residual/Jacobian gap before declaring callback
-  performance parity. At dimension 512 Native remains slower in these stages
-  even though preparation and total solve improve.
+- [x] Reconcile the warm residual/Jacobian comparison without declaring a
+  universal winner. The 2026-09-29 release corpus shows AtomViewNative ahead
+  on large diffusion residual/Jacobian callbacks, while combustion remains
+  mixed; callback conclusions are workload-sensitive.
 - [x] Re-run the large Auto matrix at dimensions `128..1024`. All policies are
   numerically identical, but no dimension has a simultaneous residual and
   Jacobian crossover; keep Sequential as the conservative interpretation.
@@ -1296,6 +2057,91 @@ making test filters discoverable.
 - [ ] Keep dated historical rows beside the fresh rows. Do not overwrite older
   crossover or callback baselines, and do not mix AOT reports into this
   Lambdify evidence.
+
+## 2026-09-28: Lambdify Debt Audit Before AOT Release Closure
+
+The native Lambdify route is now implemented and covered by debug correctness
+stories. The remaining Lambdify work must be separated into release evidence,
+real evaluator optimization, and test-surface cleanup; it must not be confused
+with the AOT lifecycle backlog.
+
+### Closed in implementation and debug coverage
+
+- [x] Public `AtomView` selects `AtomViewNative`; `AtomViewExprCompat` and the
+  historical adapter remain explicit diagnostic routes only.
+- [x] Native residual/Jacobian callbacks reuse prepared plans, caller-owned
+  output buffers and numeric parameter handles without rebuilding symbolic
+  closures on rebind.
+- [x] Native Jacobian batch evaluation no longer borrows the workspace once
+  per scalar entry; the large Jacobian regression was reduced without changing
+  the symbolic tree or numerical controller.
+- [x] The diffusion-chain tenfold callback anomaly was reproduced and fixed by
+  applying the constant/direct-variable fast path to the sequential batch
+  evaluator. Its old dated report remains historical evidence.
+- [x] Detailed cold/warm telemetry, dated report capture, parameter rebind,
+  Sparse/Banded layout parity, trajectory parity and failure-injection gates
+  exist in the thematic story modules.
+
+### Remaining Lambdify release evidence
+
+- [ ] Rerun the post-fix release stage corpus on the same machine/profile:
+  `lambdify_frontend_stage_breakdown_story`,
+  `large_system_sparse_banded_total_and_stage_story`,
+  `combustion_symbolic_frontend_sparse_banded_multi_run_dashboard`,
+  `combustion_lambdify_evaluator_policy_canonical_story`, and the prepared
+  parameter-continuation stories. Preserve old dated reports.
+- [ ] Use at least ten callback-only repetitions and five full solves, with
+  median/min/max/stddev, machine/compiler/profile/thread metadata and integer
+  trajectory counters in every report.
+- [ ] Publish a separate callback-only and full-solve break-even report for
+  `ExprLegacy` versus `AtomViewNative`; do not infer either value from one
+  wall-clock solve or from the three-body control.
+- [x] Reconcile the canonical counter layers without normalization. The
+  repeated story now reports solver `776/387`, executor requests `774/387`,
+  evaluator `782/387`, nested `aux_res=2`, `prep_res=6`, `unattributed_res=0` and
+  exact Jacobian ownership.
+- [ ] Record Jacobian reuse ratios explicitly:
+  `jacobian_rebuilds / jacobian_requests` and
+  `steps_using_current_jacobian / accepted_steps`.
+
+### Remaining Lambdify implementation and optimization
+
+- [ ] Localize the residual callback gap on the large Sparse/Banded corpus.
+  Binding and output assembly are already measured separately; the next
+  experiment is prepared residual operation shape, evaluator dispatch and
+  workspace access, not a numerical-controller change.
+- [ ] Reconcile the remaining warm Jacobian gap after the batch-workspace
+  change. Any optimization must pass the large real Jacobian gate and must
+  not regress preparation, trajectory parity or the diffusion-chain control.
+- [ ] Extend the batch-workspace strategy to worker-local `Parallel` callbacks
+  and verify that worker counters, chunks, allocations and output writes are
+  reported without hot-path locks or `HashMap` allocation.
+- [ ] Complete the Auto threshold sweep independently for residual and
+  Jacobian over dimensions `16..1024`, multiple worker counts and one real
+  combustion-like fixture. Report callback-only and full-solve crossovers
+  separately; keep `Sequential` as the conservative default until evidence
+  supports another policy.
+- [ ] Add the larger callback-only diffusion corpus at dimensions `1024` and
+  `2048`, plus one larger combustion-like case where memory permits. Keep
+  controller time separate from evaluator time.
+
+### Lambdify test-surface and QoL cleanup
+
+- [ ] Finish moving the remaining Lambdify dashboards, lifecycle runners and
+  race fixtures out of `legacy_story_support.rs`; retain only shared builders,
+  statistics and report helpers there.
+- [x] Make report archival profile-aware so debug output cannot overwrite a
+  release baseline; include timestamp and profile in the report identity.
+  Compiler and thread policy remain story-specific metadata fields, while the
+  immutable release archive preserves the complete report body.
+- [ ] Update `LSODE2_STORY_TESTS.md` and the release command inventory after
+  the thematic migration. Historical `story_tests2` report keys remain
+  preserved for traceability.
+
+The practical Lambdify stop condition is therefore: first refresh the dated
+release evidence, then resolve or explain the residual/Jacobian callback gaps,
+then evaluate portable Auto/Parallel policy. No new symbolic IR rewrite should
+be accepted before those gates remain green.
 
 ## 2026-09-24: AOT Restart After AtomViewNative Lambdify Baseline
 
@@ -1473,11 +2319,11 @@ reviving the old generated path unchanged.
   Jacobian requests, scalar evaluations, chunk/task dispatch, effective worker
   count, callback execution, output writes, copies, allocations where
   measurable, non-finite exits and fallback selection.
-- [ ] Keep counters semantically comparable with Lambdify: residual request,
+- [x] Keep counters semantically comparable with Lambdify: residual request,
   Jacobian request, scalar evaluator task, emitted output write and solver
   linear solve are distinct counters. Preserve solver/controller counters
-  separately from callback telemetry, including the known `776/387` versus
-  `780/387` boundary until it is fully attributed.
+  separately from callback telemetry, including explicit runtime auxiliary and
+  cold preparation probe columns.
 - [x] Add debug-level lifecycle logging for generated build attempts/retries,
   linked-runtime reuse and resolver reconnects. The log calls are outside warm
   callback scopes and remain opt-in through the normal `log` filter.
@@ -1572,27 +2418,49 @@ reviving the old generated path unchanged.
 - [x] Move the LSODE2 AOT test entry points into dedicated test modules:
   `aot_correctness_story_tests`, `aot_residual_story_tests`,
   `aot_lifecycle_story_tests`, `aot_chunking_story_tests`,
-  `aot_toolchain_story_tests` and `aot_three_body_story_tests`. The old
-  `story_tests2.rs` functions are now shared runners, not duplicate tests, and
-  the moved wrappers preserve release-only `#[ignore]` policy and dated
-  `LSODE2_AOT` report capture.
-- [ ] Finish the physical source split by moving the shared AOT runners and
-  their toolchain/race fixtures out of `story_tests2.rs` into the thematic
-  modules. Keep only genuinely shared Lambdify/analytical fixtures in the
-  common story support module; do not duplicate fixture or statistics logic.
+  `aot_toolchain_story_tests` and `aot_three_body_story_tests`. The moved
+  wrappers preserve release-only `#[ignore]` policy and dated `LSODE2_AOT`
+  report capture; historical runner code is now explicitly named
+  `legacy_story_support.rs`.
+- [ ] Finish the transitional extraction inside `legacy_story_support.rs` by
+  moving its remaining Lambdify dashboards, lifecycle runners and race-table
+  fixtures into the already existing thematic modules. Keep only genuinely
+  shared fixtures/statistics in support; do not duplicate measured-work logic.
+
+### P0: producer/consumer structural invalidation
+
+- [x] Add a process-isolated debug gate for baseline artifact reuse after
+  parameter-schema, matrix-layout and Jacobian-pattern mutations. The producer
+  publishes a real two-state compact-Banded artifact with `kl=ku=1`; consumers
+  use `RequirePrebuilt` and must reject all three changed
+  problem keys without building a replacement. The dated report is
+  `test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_handoff_rejects_schema_layout_and_jacobian_pattern_changes.md`.
+- [x] Add the same structural invalidation boundary to the public solver API,
+  not only the process harness. `Lsode2Solver::reconfigure` constructs and
+  validates a replacement transactionally, invalidating callbacks, bridge,
+  Jacobian layout and factors on success while preserving the prepared solver
+  on failure. The debug story covers equation/Jacobian-pattern and
+  Sparse-to-Banded replacement plus invalid parameter schema rejection. The
+  dated report is
+  `test_reports/LSODE2_Lambdify/numerical__LSODE2__lifecycle_story_tests__lsode2_public_reconfigure_invalidates_structural_runtime_transactionally.md`.
+- [ ] Extend the public invalidation matrix to any future mutable mesh or
+  boundary-condition API. LSODE2 currently exposes no separate mesh/BC
+  mutator; callers use the transactional full-config replacement instead.
 
 ### P1: apple-to-apple release evidence
 
 - [x] Add one process-isolated harness protocol for Lambdify, ExprLegacy-AOT,
   AtomViewNative-AOT and the Rust/C/Zig toolchain enum. The parent only
   orchestrates child processes; child records separate cold E2E, warm
-  `RequirePrebuilt` solve and callback-stage timings, with fixed scalar
-  fixture, Banded layout, parameter, initial state, one worker and explicit
-  repetitions. The debug smoke gate is
+  `RequirePrebuilt` solve and callback-stage timings, with a fixed two-state
+  parameterized fixture, nontrivial compact-Banded layout, initial state, one
+  worker and explicit repetitions. The debug smoke gate is
   `aot_process_isolated_harness_protocol_smoke`; its report is written under
   `test_reports/LSODE2_AOT`. Warm children bootstrap outside the measured
   interval because the current resolver is process-local. Timeout/progress
-  classification is enabled for every route.
+  classification is enabled for every route. The protocol now also carries
+  the sorted set of generated artifact keys and asserts that cold producer,
+  warm consumer and callback-only phases use the same identity.
 - [ ] Run and archive the process-isolated release matrix for Lambdify,
   ExprLegacy-AOT and AtomView-AOT across Rust, C/tcc, C/gcc and Zig. Keep
   compiler availability, artifact cleanup, cooldown, timeout, profile,
@@ -1603,15 +2471,15 @@ reviving the old generated path unchanged.
   materialization, compile, link, binding, residual, Jacobian, linear solve,
   total wall-clock, integer trajectory counters, allocations/copies and
   numerical drift.
-- [ ] Add an explicit continuation/reuse matrix for parameterized tasks. A
+- [x] Add an explicit continuation/reuse matrix for parameterized tasks. A
   numeric parameter rebind with unchanged parameter schema/order,
-  mesh/layout, boundary structure and Jacobian pattern must reuse the compiled
-  artifact and refresh only numeric runtime state. Record artifact key,
-  cache hit/miss, build/link attempts, reconnect versus compile, stale-factor
-  invalidation and per-solve counters. A schema/layout/pattern change must
-  invalidate or reject `RequirePrebuilt`; it must never silently reuse the old
-  callback or factor. Cover both same-process reuse and a separate producer /
-  consumer process handoff.
+  mesh/layout, boundary structure and Jacobian pattern reuses the compiled
+  artifact and refreshes only numeric runtime state. Same-process rows and the
+  debug C/tcc producer/consumer continuation record artifact keys, cache
+  provenance, reconnects, zero consumer builds and trajectory counters. The
+  process invalidation gate rejects schema/layout/pattern changes, and the
+  public `reconfigure` boundary is transactional. The remaining full-toolchain
+  release matrix is tracked separately below.
 - [ ] Clarify the compact-Banded `BuildIfMissing` cold row. The observed
   near-zero Banded build row is not evidence of a cheap compilation until the
   report proves whether it was a cache hit, an already materialized artifact,
@@ -1647,32 +2515,689 @@ reviving the old generated path unchanged.
 - [x] Capture the first process-isolated apple-to-apple release matrix. Warm
   AOT solve/callback stages are broadly near-parity across available
   toolchains, but the matrix is still a fixed scalar Banded workload.
+- [x] Extend the process protocol with per-phase AOT provenance and lifecycle
+  counters. The debug smoke now distinguishes `producer_build` from
+  `consumer_reconnect`, reports resolution hits/misses and build/link
+  attempts, keeps Lambdify rows explicitly `non_aot`, and carries the sorted
+  generated artifact-key set. Cold, warm and callback-only AOT phases now
+  assert the same key set. This is a provenance gate, not yet a release claim
+  about parameterized durable handoff.
 - [x] Capture whole-versus-chunked warm AOT on Sparse/Banded. Chunking improves
   warm stages modestly, but does not yet overcome cold preparation.
 - [ ] Explain and reduce cold preparation/materialization before claiming AOT
   full-solve break-even. The fresh reports still show this as the dominant
   production cost, especially for Sparse.
-- [ ] Finish process-isolated producer/consumer continuation with artifact
-  provenance, cache hit/miss, build/link attempts and parameter rebind.
+- [x] Finish the first process-isolated producer/consumer continuation gate
+  with parameter rebind. A separately launched producer publishes a durable
+  registry handoff containing both residual-only and Jacobian artifacts; the
+  consumer loads the sidecar with `RequirePrebuilt`, changes the numeric
+  parameter from `2.0` to `3.0`, performs no build, reconnects the runtime and
+  matches the AtomViewNative-Lambdify reference. The gate covers both
+  ExprLegacy-AOT and AtomViewNative-AOT and writes a dated report. The
+  handoff codec also has an isolated registry round-trip test. The debug gate
+  now additionally checks finite producer/consumer telemetry, zero errors,
+  consumer trajectory/counter parity with the fresh parameter reference, and
+  emits binding/callback/evaluation/factorization/RHS/copy/allocation rows for
+  both processes. Consumer link attempts remain diagnostic because reconnect
+  implementations may count them differently, while zero consumer builds is
+  the stable gate.
+- [x] Extend process-isolated continuation to a post-handoff numeric rebind.
+  The consumer starts at `3.0`, rebinds to `4.0` after loading the producer
+  artifact, and matches a fresh reference with zero drift and equal trajectory
+  counters. The debug C/tcc gate covers ExprLegacy-AOT and AtomView-AOT; its
+  dated report is
+  `test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_parameter_continuation_reuses_producer_artifact.md`.
+- [x] Close process-harness schema/layout/Jacobian-pattern invalidation and
+  public transactional replacement. `RequirePrebuilt` rejects changed keys in
+  the process gate, while `Lsode2Solver::reconfigure` preserves a prepared
+  solver on failed replacement and resets it on successful structural change.
+- [ ] Audit the compact-Banded release link telemetry before using it as a
+  compiler comparison. ExprLegacy reports approximately `0.012-0.020 ms`
+  link time while AtomView reports `0.45-2.62 ms` despite both Banded routes
+  recording `1/1` build/link attempts. This may be a lifecycle/provenance
+  scope difference rather than a real linker-speed difference.
 - [ ] Investigate the cold Zig build anomaly independently from warm callback
   performance; do not use its compile time as evidence against AtomView runtime
   correctness.
-- [ ] Add a multi-worker Auto/Parallel release sweep on larger Sparse/Banded
-  workloads. The current Auto captures are valid sequential fallback checks,
-  not a portable cross-machine break-even estimate.
+- [x] Add a multi-worker Auto/Parallel release sweep on larger Sparse/Banded
+  workloads. The release captures cover workers `1,2,4` and dimensions
+  `256,512`, with the single-process sweep extending to `1024`. The captures
+  are not a portable cross-machine break-even estimate.
+- [x] Add the process-isolated multi-worker Auto/Parallel story harness. Each
+  worker count initializes a fresh Rayon global pool in a child process and
+  returns observed worker count, dispatch counters, checkpoint timings and
+  numerical diffs. Debug and release gates passed for Sparse/Banded routes;
+  the portable crossover criterion remains open.
+
+### Fresh dated reports recorded on 2026-09-27 22:24-22:27 local time
+
+- [x] Re-run the same-process Lambdify parameter-continuation correctness
+  matrix. ExprLegacy and AtomViewNative match a fresh solver exactly on
+  Sparse/Banded routes, including state/time arrays and residual/Jacobian/
+  linear-solve counters. The companion performance report confirms four
+  numeric binds with zero additional `ExprToAtom` or `SymbolicJacobian`
+  stages; it is explicitly labeled a debug baseline and is not yet a stable
+  release break-even claim.
+- [x] Re-run the AOT warm-rebind gate. ExprLegacy-AOT, AtomViewNative-AOT and
+  AtomViewNative-Lambdify match the fresh parameter-3.0 trajectory and
+  counters on both Sparse and Banded routes with zero stale callback/factor
+  evidence.
+- [x] Re-run the all-frontend AOT lifecycle gate. All four
+  `ExprLegacy`/`AtomViewNative` x `Sparse`/`Banded` routes pass
+  `BuildIfMissing -> RequirePrebuilt` correctness and five strict reuse
+  repetitions with identical `1087/574/1086` numerical counters.
+- [x] Re-run the AOT callback stage matrix with compact-Banded ExprLegacy as
+  a real control route. The report now includes `publication_ms`, cache
+  hit/miss counters and `runtime_ready`; AOT callbacks remain materially
+  faster than Lambdify at dimensions `128..512`, while AtomView and ExprLegacy
+  callback costs are in the same order.
+- [x] Run the multi-worker Auto sweep for workers `1,2,4` and dimensions
+  `256,512`. Correctness is exact and dispatch accounting is visible, but the
+  portable two-stage criterion reports no stable crossover: parallel work is
+  not yet faster for both residual and Jacobian across all checkpoints.
+- [x] Complete the provenance-normalized compact-Banded rows, repeated warm
+  AOT controls and larger multi-worker release evidence. Correctness and
+  lifecycle are green. The remaining item is deliberately narrower: no
+  portable Parallel break-even has been demonstrated.
+
+### Fresh expensive release slice recorded on 2026-09-27 23:12-23:19 local time
+
+- [x] Archive the complete AOT callback, warm-solver, lifecycle, chunking,
+  toolchain and large-system release batch. All thirteen generated reports are
+  stored under `test_reports/LSODE2_AOT` and `test_reports/LSODE2_Lambdify`.
+- [x] Complete the process-isolated release apple-to-apple matrix. Lambdify,
+  ExprLegacy-AOT and AtomView-AOT passed cold E2E, warm reconnect and
+  callback-only phases for Rust, C/tcc, C/gcc and Zig. Artifact provenance,
+  reconnects, build/link attempts, counters and typed telemetry are present in
+  the report; child-process startup is excluded from solver timings.
+- [x] Complete the compact-Banded ExprLegacy-AOT control in the release
+  callback matrix. It is now `runtime_ready` at dimensions `128`, `256` and
+  `512`, rather than an unsupported route.
+- [x] Complete the all-frontend `BuildIfMissing -> RequirePrebuilt` release
+  lifecycle gate for Sparse and Banded. Correctness and repeated prebuilt
+  reuse are green; the report keeps cold build and warm solve rows separate.
+- [x] Complete the first release multi-worker Auto sweep for workers `1, 2, 4`
+  and dimensions `256, 512`, plus the larger single-process sweep through
+  `1024`. Numerical parity and dispatch accounting are green.
+- [ ] Do not claim portable Parallel break-even yet. The release canonical
+  matrix through dimension `1024` and the fresh-process worker sweep both
+  find no stable crossover for both residual and Jacobian. Auto is correctly
+  conservative on this corpus; selected worker-count/dimension rows may
+  dispatch parallel work, but that is not a portable win.
+- [x] Investigate the isolated AOT chunk-policy Auto residual anomaly. The
+  apparent `11.150883 ms/call` with zero parallel dispatches was the one-time
+  Rayon overhead calibration lazily executed by the first `Auto` callback and
+  divided across the measured repetitions. The linked chunked backend now
+  warms that calibration while assembling the plan, and telemetry exposes it
+  as the cold `parallel_calibration` stage. A debug reproduction changed the
+  same story from roughly `154 ms/call` to `0.047 ms/call` at five repetitions;
+  the old row is retained as a measurement-contamination finding, not a
+  callback-performance baseline.
+- [x] Repeat the fixed chunk-policy story in release and include its cold
+  `parallel_calibration` row in the dated AOT performance archive. At
+  `dimension=512`, `chunk_size=16` and `repetitions=200`, Auto is
+  `0.011114 ms/call` residual and `0.026776 ms/call` Jacobian versus
+  Sequential `0.011424` and `0.026718`, with zero parallel dispatches. The
+  gate remains noise-sensitive: it rejects first-use spikes, not the absence
+  of a universal Auto speedup.
+- [ ] Continue reducing cold AOT preparation/materialization. At dimension
+  `256`, AOT warm solve is faster than Lambdify, but total cold time remains
+  higher because preparation dominates. Parameter continuation is the main
+  path to amortize this cost.
+- [x] Extend process-isolated parameter continuation to the full
+  Rust/C/tcc/C/gcc/Zig release matrix. The larger repeated Criterion bench is
+  still running and remains a separate pending performance item.
+- [ ] Normalize compact-Banded `link_ms` and cache provenance across the
+  all-frontends lifecycle story before comparing linker speed between
+  ExprLegacy and AtomView.
+
+### Pre-release debt closure
+
+The implementation and debug-gate side of the seven AOT debts is now closed;
+the remaining unchecked items below are deliberately release evidence, not
+missing runtime machinery:
+
+- [x] Unify `build_attempts`, `link_attempts`, cache hit/miss, `link_ms`,
+  `publication_ms` and `runtime_ready`. Reports distinguish link/registry
+  work from publication and reconnect; skipped external toolchains use a
+  full-width typed `unavailable` row instead of a malformed partial row.
+- [x] Provide apple-to-apple lifecycle coverage for ExprLegacy/AtomView,
+  Sparse/Banded and the Rust/C/tcc/C/gcc/Zig route enum. The process harness
+  and callback/lifecycle stories are release-only consumers of this contract.
+- [x] Provide the process-isolated Lambdify, ExprLegacy-AOT and
+  AtomView-AOT matrix with cold E2E, warm RequirePrebuilt and callback-only
+  phases, provenance keys, timeout/progress diagnostics and typed failure
+  classification.
+- [x] Aggregate binding, copies, allocations, chunks, workers, output
+  assembly, controller, callback and linear stages in one phase record. The
+  report labels inclusive scopes and exposes solver remainders separately;
+  parent and child timings must not be added together.
+- [x] Close the inclusive/exclusive scope contract in story output. Parent
+  scopes are explicitly labelled inclusive; `solve_minus_controller_ms` and
+  `controller_outside_iterations_ms` are diagnostic remainders.
+- [x] Keep compiler/toolchain timeout, progress and typed error paths active
+  in every process-isolated route, including unavailable-command and child
+  protocol failures.
+- [x] Implement machine-calibrated Sequential/Parallel/Auto selection,
+  chunk/worker accounting and the conservative two-stage break-even report.
+  A portable Parallel win is intentionally not assumed.
+
+### 2026-09-28 release evidence reconciliation
+
+The dated reports in `test_reports/LSODE2_AOT` and
+`test_reports/LSODE2_Lambdify` supersede the pre-release checklist below.
+
+- [x] Process-isolated producer/consumer parameter continuation passed for
+  ExprLegacy-AOT and AtomView-AOT across Rust, C/tcc, C/gcc and Zig. Consumers
+  reused the producer artifact, performed no rebuild, and matched the
+  rebound reference solution.
+- [x] Frontend/layout/toolchain cold lifecycle rows, including compact-Banded
+  `ExprLegacy-AOT`, passed with typed provenance, cache counters and numerical
+  parity. The former compact-Banded unsupported route is closed.
+- [x] Multi-repeat cold/warm/callback telemetry is archived with binding,
+  copies, allocations, chunks, workers, controller and linear stages. Parent
+  scopes are labelled inclusive and are not additive with child stages.
+- [x] Larger worker-count Auto/Parallel evidence is archived. Auto remains
+  conservative and numerically correct; no portable Parallel speedup was
+  established.
+- [x] The old AOT chunk-policy 1000x callback anomaly is closed as calibration
+  contamination: the release rerun reports Auto near Sequential with zero
+  parallel dispatches.
+- [ ] AOT performance readiness is not closed: cold preparation/materialization
+  remains dominant, and the current evidence does not establish a portable
+  Parallel break-even point.
 
 ### Exit gate and current stop condition
 
-- [ ] Do not rerun the stalled large AOT stories as performance evidence until
-  progress markers, timeout classification, typed artifact diagnostics and
-  frontend route labels are in place. A timeout or stale legacy failure must
-  produce a report file explaining the stage, not a silent hang.
-- [ ] Do not change the public LSODE2 defaults or remove ExprLegacy until
-  AtomViewNative-AOT passes component parity, trajectory parity, lifecycle and
-  repeated-warm tests on the same corpus.
-- [ ] Do not call AOT production-ready until the native route has comparable
-  telemetry, typed errors, report files and stable release evidence across the
-  supported toolchains.
-- [ ] After this AOT plan is implemented, revisit the deferred Lambdify
-  residual/Jacobian hot-path debt using the same dated callback gates; AOT
-  work must not silently replace those baselines.
+- [x] Release reruns of the formerly stalled large AOT stories are now
+  permitted: progress markers, timeout classification, typed artifact
+  diagnostics and frontend route labels are present. A timeout or stale legacy
+  failure must still produce a report file explaining the stage, never a silent
+  hang or an implicit green result.
+- [x] AtomViewNative-AOT passes component parity, trajectory parity, lifecycle,
+  repeated-warm and process-isolated continuation tests on the same corpus.
+  ExprLegacy remains available as the comparison route.
+- [x] Native AOT telemetry, typed errors, progress reports and release evidence
+  are present across the supported toolchains.
+- [ ] Do not call AOT performance production-ready until cold amortization and
+  portable Parallel/Auto policy are demonstrated on larger repeated workloads.
+- [ ] Revisit the deferred Lambdify residual/Jacobian hot-path debt using the
+  same dated callback gates; AOT work must not silently replace those
+  baselines.
+- [x] Attribute the cold AOT preparation discrepancy. The 2026-09-28
+  combined capture showing AtomViewNative about `+29.5%/+40.3%` slower at
+  `n=2048` is now classified as pre-fix solver-lifecycle evidence: residual
+  and native Jacobian artifacts were orchestrated separately. The normalized
+  2026-09-29 `RebuildAlways` gate reports AtomView faster by `16.7%` Sparse
+  and `27.8%` Banded at `n=2048`. Parent scopes remain inclusive and must not
+  be summed with their children.
+
+### 2026-09-29: direct cold-stage capture versus combined AOT capture
+
+- [x] Run the dedicated release cold-stage gate for `512/1024/2048`, Sparse
+  and Banded, with `RebuildAlways` and one fresh output directory per route.
+  AtomView was faster than ExprLegacy at `n=2048`: `452.259` versus `653.963
+  ms` on Sparse and `461.209` versus `644.969 ms` on Banded. The advantage is
+  driven by avoiding the ExprLegacy symbolic differentiation path, although
+  AtomView pays for native Jacobian preparation and pattern construction.
+- [x] Reconcile the scope difference with the earlier combined capture, which
+  showed AtomView slower by roughly `215/275 ms` at the same nominal dimension.
+  The old solver lifecycle prepared separate residual and Jacobian AOT
+  artifacts: aggregate build/link attempts were `2/2`, and AtomView native
+  Jacobian/pattern stages were approximately repeated. This explains why the
+  old solver wall-clock capture could reverse the direct ranking. The
+  production AtomView bridge now uses one combined native plan; the old report
+  remains a pre-fix diagnostic, while the paired direct gate remains the
+  frontend cold-preparation source of truth.
+- [x] Add the paired ignored gate
+  `lsode2_aot_cold_preparation_apple_to_apple_matrix`. It alternates frontend
+  order, uses a fresh output directory per route, requires `1/1` build/link
+  attempts, and reports explicit AtomView-minus-ExprLegacy deltas. The first
+  release attempt exposed that `aot_runtime_ready` is not yet a common boolean
+  lifecycle signal: ExprLegacy may report `0` after successful AOT build/link,
+  while AtomView reports `1`. The gate now records this field instead of
+  treating it as a shared assertion.
+- [x] Run the paired release capture. All six Sparse/Banded pairs at
+  `512/1024/2048` passed, with AtomView faster by about `20--31%` depending on
+  dimension and layout. The older combined capture remains a separate
+  reconciliation target because it reports the opposite direction.
+- [x] Treat `lsode2_aot_cold_preparation_apple_to_apple_matrix` as the current
+  cold-preparation source of truth. Its `RebuildAlways`, fresh-directory,
+  alternating-order lifecycle is the normalized comparison for ExprLegacy and
+  AtomView.
+- [x] Explain the earlier AtomView/AtomNative slowdown in the combined AOT
+  capture at the implementation level. The old solver path prepared residual
+  and native Jacobian artifacts through separate orchestration, which could
+  produce aggregate `2/2` build/link attempts and repeat AtomView native
+  Jacobian/pattern work. The production path now creates one combined native
+  callback plan and transfers its linked backend into the bridge solver.
+- [x] Add the ignored diagnostic gate
+  `lsode2_aot_cold_preparation_direct_vs_solver_lifecycle`. It runs the paired
+  direct generated-preparation path beside the old bench-like
+  `Lsode2Solver::prepare()` path, with fresh `RebuildAlways` output per route,
+  and reports the delta for preparation, build, link and publication scopes.
+  The gate preserves the old aggregate counters for historical comparison and
+  now exercises `BridgeSolve`, so AtomView can prove that solver preparation
+  reuses the direct native plan. A debug `n=512` run passed with AtomView
+  `1/1` attempts in both rows; the post-fix release matrix is now archived.
+- [ ] Keep callback optimization secondary until the cold-stage discrepancy is
+  resolved. The callback result remains workload-sensitive, while the cold
+  discrepancy is hundreds of milliseconds and has higher practical impact.
+- [x] Reduce solver-side duplication of AtomView AOT preparation. The
+  `PreparedGeneratedSymbolicIvpNativeCallbacks` plan now owns the prepared
+  residual and linked sparse/banded backend together; `Lsode2Solver::prepare`
+  installs both into the BDF bridge without rebuilding the native Jacobian.
+  ABI, layout, parameter-handle and invalidation boundaries remain explicit.
+- [x] Re-run the direct-versus-solver release diagnostic at `512/1024/2048`
+  after the reuse fix and archive the result. AtomView reports `1/1` build/link
+  attempts in both boundaries on all Sparse/Banded rows; the report also keeps
+  the distinct ExprLegacy compatibility lifecycle visible.
+- [x] Debug and release verification of the reuse boundary passed at
+  `512/1024/2048` on
+  Sparse and Banded. AtomView direct and solver rows both report `1/1`
+  build/link attempts and no repeated native Jacobian/pattern stages. The
+  remaining release task is measurement archival, not a known correctness
+  defect.
+
+### 2026-09-28: first safe AtomViewNative callback optimization pass
+
+- [x] Remove repeated IVP ABI-length checks from the native evaluator batch
+  hot path. The public single-evaluator path keeps the full typed validation;
+  the batch path validates each scalar plan at the batch boundary and does not
+  repeat that check inside every evaluator node walk.
+- [x] Replace iterator adapters in the prepared numeric `Add`/`Mul` node
+  execution with direct indexed loops. The operation order and floating-point
+  semantics are unchanged; no `unsafe`, solver, layout or parallel-policy
+  change was introduced.
+- [x] Re-run the evaluator unit corpus (`11/11`), the LSODE2 correctness
+  story (`10/10`) and the release large-chain callback gate. The release gate
+  preserved zero residual/Jacobian drift and zero allocation growth on the
+  native route. One run showed AtomViewNative residual at parity or below
+  ExprLegacy for dimensions `128/256`, but this is a directional observation,
+  not a stable performance claim.
+- [x] Repeat the same callback gate with the planned high-repeat release
+  baseline before accepting or rejecting this optimization. Compare warm
+  residual, warm Jacobian, preparation and full solve separately; do not add
+  inclusive telemetry scopes together.
+- [x] Continue to the portable Parallel/Auto break-even sweep after the
+  high-repeat baseline. The current sweep is documented below; it does not
+  establish a universal crossover.
+- [ ] Only after a portable criterion is established, change the default
+  Parallel/Auto policy. Zig remains intentionally deferred because its cold
+  compiler time is already a known non-runtime bottleneck.
+
+### 2026-09-28: high-repeat baseline and portable Auto sweep after evaluator pass
+
+- [x] Release full-solve baseline was repeated five times for dimensions
+  `128/256/512`, on Sparse and Banded routes. Correctness and solver counters
+  stayed aligned for every pair. At `n=512` total time was effectively at
+  parity on Sparse (`72.949 ms` Native vs `73.104 ms` ExprLegacy), while
+  Banded remained a small Native regression (`58.369` vs `56.855 ms`).
+- [x] The high-repeat callback-only gate was run for dimensions `128/256/512`
+  and twenty repetitions. At `n=512`, Native residual was `0.388 ms` versus
+  `0.442 ms` for ExprLegacy, and Native Jacobian was `5.281 ms` versus
+  `36.844 ms`; all diffs were zero and all counters matched. This supports
+  keeping the evaluator optimization, but is not yet a universal performance
+  promise across machines.
+- [x] Multi-worker Auto was run in fresh child processes for worker counts
+  `1/2/4`, dimensions `256/512`, Sparse/Banded and checkpoints `1/4/16/64`.
+  Correctness diffs were zero and worker accounting was explicit. Auto stayed
+  sequential for worker count `1` and did not establish a portable crossover
+  for workers `2/4`; forced parallel dispatch was often slower or noisy.
+- [ ] Keep the portable break-even criterion open. A future criterion must
+  include worker-spawn/join calibration, repeated measurements, a minimum
+  confidence margin and a no-regression fallback to Sequential.
+- [ ] Repeat the five-run full-solve and twenty-run callback baselines on the
+  target release environments before changing the default Auto threshold.
+
+### 2026-09-28 Lambdify release evidence reconciliation
+
+- [x] Correctness corpus passed after clarifying the valid numeric-rebind
+  contract: prepared native solver state is reused, while structural changes
+  still require invalidation. Sparse/Banded layouts, trajectory parity,
+  non-finite handling, typed shape errors, failure recovery and scope cleanup
+  all pass.
+- [x] Parameter continuation matches a fresh solver for ExprLegacy and
+  AtomViewNative on Sparse and Banded routes with zero state/time difference,
+  identical solver counters and zero new symbolic preparation during rebind.
+- [x] Large-system stage and Auto reports are archived through dimension
+  `1024`; the callback corpus also covers diffusion `2048` and combustion
+  `32/64`. The former Diffusion-chain tenfold Native callback anomaly is not
+  reproduced in the current release slice.
+- [ ] Continuation is not yet a universal wall-clock win: reuse avoids
+  symbolic rebuilding, but small workloads can still lose to a fresh solve due
+  to controller and setup costs. A larger repeated-parameter amortization gate
+  remains necessary.
+- [x] Reclassify the AtomViewNative warm callback result as workload-sensitive,
+  not as a universal slowdown. The current release diffusion corpus is faster
+  for both residual and Jacobian at `1024/2048`; combustion still contains
+  mixed residual/Jacobian rows. Universal callback parity remains an
+  optimization target, not a correctness requirement.
+- [x] Attribute the remaining residual counter deltas in the canonical policy
+  story. The diagnostic report exposes solver-owned calls `776/387`, telemetry
+  callback requests `774/387`, evaluator evaluations `782/387`, nested runtime
+  `aux_res=2`, cold `prep_res=6` and `unattributed_res=0`. The extra calls are
+  assigned to their typed lifecycle owners rather than normalized away.
+- [x] Refresh the stable performance baseline with five full solves and twenty
+  callback repetitions, preserving release profile, compiler, thread policy
+  and timestamp metadata. A cross-machine repetition is still required before
+  turning the result into a hard threshold.
+
+### 2026-09-28 worker-local Parallel evaluator batching
+
+- [x] Remove the remaining per-scalar `thread_local!`/`RefCell` entry from the
+  native Parallel residual and Jacobian paths. Each Rayon worker now evaluates
+  a contiguous plan chunk through the same batch evaluator used by Sequential.
+  The chunk size is derived from the active Rayon worker count; no symbolic
+  conversion, lock or solver-policy change was added.
+- [x] Preserve correctness and typed failure behavior. The evaluator corpus
+  passed `11/11`, the LSODE2 correctness story passed `10/10`, and the release
+  large-chain callback gate passed with zero residual/Jacobian drift and zero
+  Native allocation growth.
+- [x] Measure the change with `Parallel`/`Auto` on the release multi-worker
+  matrix. The 2026-09-28 local rerun covered workers `1/2/4`, dimensions
+  `256/512`, Sparse/Banded and checkpoints `1/4/16/64`; all residual/Jacobian
+  diffs were zero. Auto remained sequential for most rows, dispatched
+  parallel work in selected worker-2/4 dimension-512 rows, and found no
+  portable crossover. This validates the batch change and conservative policy,
+  not a universal Parallel speedup.
+- [x] Run the debug multi-worker Auto smoke after the change. Workers `1/2/4`,
+  dimensions `256/512`, Sparse/Banded and checkpoints `1/4/16/64` preserved
+  zero residual/Jacobian drift and the existing conservative Auto decisions.
+
+### 2026-09-28: Lambdify large-scale corpus and report partitioning
+
+- [x] Add `lambdify_large_scale_story_tests.rs` as a separate release-only
+  module. It compares ExprLegacy and AtomViewNative on the same prepared
+  callback state, reports cold preparation, repeated residual/Jacobian timing
+  and numerical drift, and keeps controller/linear-solver work excluded.
+- [x] Add configurable diffusion-chain dimensions `1024/2048` and a larger
+  combustion-like callback fixture (`32/64`). Debug smoke passed with zero
+  residual/Jacobian drift; the release callback corpus and its combustion tail
+  are archived. The separate long parameter-continuation bench remains open.
+- [x] Split the story documentation into thematic indexes for correctness,
+  Lambdify, performance, AOT and lifecycle/telemetry. The former monolithic
+  `LSODE2_STORY_TESTS.md` is preserved as `LSODE2_STORY_ARCHIVE.md`.
+- [x] Make report archival profile-aware. Debug and release captures now use
+  separate directories and include the profile in the Markdown header.
+- [x] Document the counter contract behind the historical `776/387` versus
+  `780/387` rows: four residual preparation probes account for the residual
+  delta, while Jacobian counts remain equal. This is lifecycle attribution,
+  not a solver trajectory discrepancy.
+- [x] Convert `legacy_story_support.rs` into a thin compatibility facade. The
+  historical runner names remain stable while implementation and shared
+  imports live in `legacy_story_impl.rs`.
+- [ ] Finish the final physical split of the remaining historical dashboards
+  from `legacy_story_impl.rs` into independently named thematic modules;
+  compatibility runner names must be retained until replacement modules expose
+  equivalent dated reports.
+- [x] Record release stage, large callback, combustion policy, parameter
+  continuation and multi-worker Auto baselines after the current evaluator
+  changes. Compare callback-only and full-solve levels before accepting a
+  performance change. The reports are profile-aware and dated.
+
+### 2026-09-28: release verification after AtomView evaluator fixes
+
+- [x] Re-run the Lambdify stage/full-solve release gates on the same Sparse and
+  Banded corpus. At `n=512`, AtomViewNative total time improved by about `4.6%`
+  Sparse and `4.4%` Banded in the captured run; counters and numerical parity
+  remained aligned. This is a machine/profile baseline, not a hard threshold.
+- [x] Run the callback-only release corpus at diffusion-chain `1024/2048` and
+  combustion-like `32/64`. AtomViewNative preparation and Jacobian scaling
+  improved materially on diffusion-chain; residual callback speed remains
+  workload-dependent and therefore remains an optimization debt.
+- [x] Re-run the canonical combustion evaluator policy matrix. The apparent
+  residual counter discrepancy is fully attributed as solver `776`, executor
+  `774`, evaluator `782`, `aux_res=2`, `prep_res=6`, with no unattributed
+  events; Jacobian is stable at `387/387`.
+- [x] Re-run parameter continuation in release. ExprLegacy and AtomViewNative
+  on Sparse/Banded reuse symbolic preparation and match fresh solves, but four
+  short targets are not enough to prove a wall-clock win.
+- [x] Re-run multi-worker Auto/Parallel in fresh processes for workers `1/2/4`
+  and dimensions `256/512`. Correctness is green, while a portable Parallel
+  break-even is still not established; Auto remains the safe conservative
+  policy.
+- [x] Re-run AOT callback and warm-solver control gates after the AtomView
+  changes. Correctness and lifecycle counters remain green. The earlier cold
+  ExprLegacy Sparse row exposed a roughly `2151 ms` `publication_ms` outlier,
+  which was subsequently reproduced and classified.
+- [x] Close the AOT publication/cache outlier. The linked backend constructors
+  were unconditionally running the one-time Rayon machine calibration, even
+  for `Sequential`; because ExprLegacy/Sparse was the first AOT row, that
+  calibration was charged to `publication_ms`. Registration now has no hidden
+  calibration side effect, while `Auto` owns calibration and telemetry. The
+  release rerun reduced the same row to `0.403 ms` at dimension `128`; other
+  publication rows remained below `1 ms`, with callback values and lifecycle
+  counters unchanged.
+- [ ] Repeat the release baseline on target environments before promoting any
+  AtomView or Auto performance threshold to a portable guarantee.
+
+### 2026-09-28: completion of the large callback benchmark tail
+
+- [x] Complete the previously missing `combustion-like` callback Criterion
+  rows in a separate release process. The archive is
+  `test_reports/LSODE2_Lambdify/release/archive/criterion__lsode2_workload_callbacks__combustion_tail__20260928T184026Z.log`.
+  Direct medians were ExprLegacy/AtomViewNative `162.32/107.02 ns` for
+  residual and `343.36/290.67 ns` for Jacobian. AtomViewNative was therefore
+  about `34.1%` faster for residual and `15.3%` faster for Jacobian on this
+  workload.
+- [x] The same filtered run completed parameter-continuation rows with
+  ExprLegacy/AtomViewNative medians `213.22/134.63 ns`, about `36.9%` lower
+  on the Native route. This is callback-only evidence, not complete solver
+  wall-clock.
+- [x] Keep the interpretation workload-sensitive: large diffusion residual
+  rows still show a small Native penalty while large diffusion Jacobians show
+  a substantial Native advantage. The combustion tail closes missing
+  evidence; it does not create a universal callback ranking.
+
+### 2026-09-29 release archive audit
+
+The completed release reports recorded from `2026-09-29T11:12:33Z` through
+`2026-09-29T11:18:38Z` are now reflected in the thematic story documents.
+The following items are closed for this capture:
+
+- [x] AOT cold apple-to-apple and direct-versus-solver lifecycle reports,
+  including the post-fix AtomView `1/1` build/link invariant.
+- [x] Compact-Banded ExprLegacy-AOT control, all-frontend prebuilt reuse,
+  process-isolated producer/consumer handoff and schema/layout invalidation.
+- [x] AOT trajectory parity, warm rebind, chunk-policy calibration separation,
+  toolchain stage reports and multi-worker Auto/Parallel evidence.
+- [x] Lambdify correctness, large diffusion/combustion callback corpus,
+  full Sparse/Banded stage gate and short continuation correctness/performance.
+- [x] Profile-aware dated report placement. Historical pre-fix reports remain
+  under `release/archive` and are no longer used as current baselines.
+
+The following are intentionally still open and are not hidden by the green
+story reports:
+
+- [x] Replace the monolithic Criterion `lsode2_parameter_continuation` sweep
+  with independently selectable warm/fresh, workload, matrix, frontend and
+  execution slices. The 2026-09-29 all-in-one run was intentionally stopped
+  after several hours; its partial log is retained as diagnostic evidence, not
+  as a completed baseline.
+- [x] Make the continuation bench safe by default: an unconfigured run uses
+  the bounded `small` warm-only slice. Full diffusion and fresh continuation
+  are explicit release sweeps rather than accidental multi-hour defaults.
+- [x] Archive the completed segmented continuation slices. The small warm
+  matrix and diffusion-Sparse warm matrix are retained under
+  `test_reports/LSODE2_Lambdify/release/archive`; the diffusion-Banded warm
+  and bounded warm/fresh slices were completed on 2026-09-30.
+- [x] Replace the incorrect "Criterion-only/harness" diagnosis. The old
+  diagnostic's third parameter was out of sync with the bench, and its
+  finite-state check accepted `limits_exhausted`; exact-series reproduction
+  found an epsilon-scale endpoint stall. The 2026-09-30 release route matrix
+  confirmed all 12 frontend/execution/layout cases reached `t_bound` with
+  matching counters per corresponding case. That endpoint matrix does not
+  measure trajectory drift; use the dedicated trajectory-parity stories for
+  that claim.
+- [x] Make the warm continuation benchmark reuse one prepared solver per
+  benchmark id. The previous Criterion `iter_batched` shape rebuilt AOT
+  runtimes on every sample and was not a valid warm-continuation lifecycle.
+- [ ] Give the intentionally fresh continuation phase a process-isolated
+  runner or bounded manual harness; repeated cold AOT construction in one
+  Criterion process is not a safe long-running baseline.
+- [x] Rerun a valid `small` fresh slice with an explicit non-empty selector
+  such as `combustion-like,three-body`. The fixed release capture completed
+  32 Sparse measurements with both frontends, Lambdify/AOT and target counts
+  `1/4/16/64`; the earlier `workloads=[]` capture remains archived as an
+  invalid attempt. The bounded Banded small-fresh and diffusion-Banded
+  warm/fresh release slices completed on 2026-09-30.
+- [x] Add a repeated-warm continuation gate for the same prepared solver.
+  Twelve release passes completed in `4.094-4.688 s` for 256 targets, with
+  identical counters `70527/44978/69065` and finite states. This rules out
+  monotonic solver-state accumulation as the explanation for the stopped
+  Criterion estimate of `22.5 s`.
+- [x] Re-run the bounded exact-series diagnostic and route matrix after the
+  endpoint fix. The 64-target n=512 Sparse release sequence completed with
+  target 41 at `16.543 ms`; the cross-route endpoint matrix passed all 12 rows.
+  No seconds-scale stall reproduced. Keep the historical `22.5 s` report as
+  pre-fix evidence, not a current baseline.
+- [ ] Establish a portable Parallel/Auto break-even only if repeated
+  worker-spawn calibration, confidence margins and full-solve/callback axes
+  agree. Current Auto fallback is safe and no default policy change is needed.
+- [ ] Normalize the remaining cross-toolchain `link_ms` and cache-provenance
+  semantics before making linker-speed claims from compact-Banded rows.
+- [ ] Keep callback optimization workload-specific. Large diffusion now shows
+  a strong AtomView Jacobian advantage, while combustion and small systems can
+  reverse the residual ranking.
+- [ ] Replace the three-body 500-time-unit cross-route trajectory comparison
+  with a short-horizon parity gate plus a long-horizon invariant dashboard.
+  The archived `7.93` Sparse and `16.9-18.5` Banded values came from an
+  index-based comparison of adaptive output samples and are not a current
+  drift baseline. The comparison is now time-aligned by interpolation and the
+  ignored debug gate passed at `t=0.5` with `2.6e-8-5.1e-8` drift. The ignored release gate
+  `aot_three_body_story_tests::lsode2_three_body_short_horizon_trajectory_parity`
+  now covers Sparse/Banded Lambdify, whole AOT and chunked AOT; run it before
+  treating a long-horizon drift as a correctness failure.
+
+### 2026-09-30: Release Verification After Native/Codegen Refactor
+
+- [x] Run the complete non-ignored LSODE2 release test filter: `444 passed`,
+  `0 failed`; the Symbolic View release suite passed `151`, `0 failed`.
+- [x] Refresh LSODE2 Native callback and full-solve baselines at large
+  diffusion sizes. Native Jacobian callbacks were about `87-92%` faster at
+  `n=512/1024/2048`; residual was modestly slower at `512/1024` by only
+  `2.8/7.5 us` and tied at `2048`. Full prepare+solve was lower by about
+  `34-76%`, primarily because Native preparation fell; solve-only stayed
+  within a few percent.
+- [x] Complete the bounded `n=1024` Banded repeated-continuation resource
+  diagnostic. Four 16-target passes showed no monotonic RSS growth, stable
+  artifact keys/runtime and no post-prepare build/link attempts. The measured
+  `70.14 MB` per-pass allocation traffic is not an RSS/leak estimate.
+- [x] Resolve the shared `symbolic::codegen` release suite failures. The
+  2026-09-30 failure set had three causes: Dense Jacobian runtime IR dropped
+  output offsets needed by row-major assembly; checked-in BVP Rust fixtures
+  represented an older discretization and were regenerated from current task
+  plans; and the checked-in CodegenIR snapshot file was missing. The reported
+  input-order test was an expected `should_panic`, not a failure. Focused
+  reruns passed all 10 affected gates, and the complete debug codegen filter
+  passed `294/294` with `22` ignored. The IVP adapter now emits explicit zero
+  outputs for runtime IR assembly while source generation retains sparse
+  output elision. A large release rerun is still part of the final verification
+  batch, not evidence of an LSODE2 solver trajectory failure.
+- [x] Attribute the cold build-count difference in
+  `aot_cold_preparation_direct_vs_solver_lifecycle`. `solver.prepare()` uses
+  two distinct ExprLegacy artifacts (residual-only and Jacobian), while
+  AtomViewNative prepares residual and Jacobian from one combined native
+  artifact. The direct-generated rows intentionally measure one artifact per
+  frontend and are not a proxy for production solver preparation. The story
+  now asserts the expected `2/2` versus `1/1` build/link attempts; this is a
+  lifecycle distinction, not duplicate compilation of the same artifact. The
+  combined ExprLegacy path remains a possible optimization, but needs separate
+  design and parity work before changing production behavior.
+- [x] Finish `ivp_parameter_free_callbacks` release bench capture. The archive
+  `parameter_free_callbacks_20260930_023145.log` contains all nine Criterion
+  results for `n=16/128/512`; see the parameter-free fast-path note above.
+- [ ] Complete the balanced large-diffusion continuation release matrix. The
+  existing `lsode2_parameter_continuation` bench already supports all four
+  frontend/execution routes (`ExprLegacy`/`AtomViewNative` x
+  `Lambdify`/`AOT`), Sparse/Banded, dimensions, and target counts. Current
+  captures are split across partial slices; run warm continuation at
+  `n=512/1024`, target counts `1/4/16/64`, first Sparse and then Banded, with
+  all four routes enabled. Keep preparation excluded from warm-series timing
+  and report it separately from the cold-preparation captures. Fresh comparison
+  should remain a bounded separate phase, not be mixed into the warm matrix.
+- [x] Make the continuation bench bounded by default before repeating that
+  matrix. Default target counts are now `1/4/16` instead of including `256`;
+  selected workloads/dimensions/routes/phases are preflighted before Criterion
+  starts, and metadata reports planned cases plus total target solves. Cases
+  above the warm/fresh work budgets fail fast with an actionable opt-in:
+  `LSODE2_BENCH_CONTINUATION_ALLOW_LONG=1`. This does not replace slicing the
+  release matrix by layout/dimension/route; it prevents accidental multi-hour
+  runs and makes the selected measurement scope visible.
+
+Evidence is in `test_reports/LSODE2_Lambdify/release/archive/` with timestamp
+`20260930_013232` and `20260930_023145`.
+
+Current sources of truth:
+
+- AOT cold preparation: `aot_cold_preparation_apple_to_apple_matrix`.
+- AOT solver lifecycle attribution: `aot_cold_preparation_direct_vs_solver_lifecycle`.
+- Lambdify callback scaling: `lambdify_large_callback_corpus_story`.
+- Lambdify full-solve stages: `large_system_sparse_banded_total_and_stage_story`.
+- Correctness and invalidation: the dated reports under
+  `test_reports/LSODE2_Lambdify/release/` and
+  `test_reports/LSODE2_AOT/release/`.
+
+### 2026-09-29 20:41Z: post-refactor release comparison
+
+- [x] Re-run the large Native Jacobian/Lambdify and AOT preparation gates at
+  `512/1024/2048`, Sparse/Banded. Correctness, complete Jacobian output
+  coverage, matching solver counters and roundoff-level route diffs passed.
+- [x] Record the Native preparation improvement against the preceding paired
+  release. AOT AtomView cold preparation is now `35.746/45.181 ms` at `n=512`
+  and `90.078/84.524 ms` at `n=2048` (Sparse/Banded), versus prior
+  `59.678/63.985 ms` and `567.113/481.160 ms`. ExprLegacy stayed within a few
+  percent; this isolates the large gain to the Native path rather than a
+  generally faster run. The source-of-truth comparison is `RebuildAlways`,
+  alternating order, fresh output per route.
+- [x] Record current Lambdify large-system performance. At `n=2048`,
+  AtomViewNative preparation is about `32.4 ms` on either layout versus about
+  `453-457 ms` ExprLegacy; solve time remains close (`81-132 ms` by route),
+  so the total improvement is preparation-dominated. The current dated report
+  extends this gate to `n=1024/2048` and supersedes older same-gate scaling
+  expectations.
+- [x] Release whole/chunked AOT emission correctness and timing passed at
+  `n=256/512/1024`: full output coverage, with chunked emission about
+  `17.0/15.3/7.2%` faster. Compiled whole/chunked warm solve at `n=96` is
+  effectively tied; do not claim a runtime speedup from emission timing.
+- [ ] Repeat the new large release baselines on another target environment
+  before setting portable performance thresholds. Keep Auto calibration time
+  separate from repeated callback timing; the current release calibration is
+  about `2.279 s`, with Auto selecting Sequential and forced Parallel slower.
+
+### Focused repeated cold AOT benchmark
+
+- [x] Extend the existing Criterion AOT benchmark with
+  `LSODE2_BENCH_AOT_WORKLOADS`, preserving its repeated `RebuildAlways` cold
+  preparation and fresh output directory per iteration. The story gate remains
+  the stage-attribution/correctness control; Criterion is the repeatable timing
+  source for solver-level preparation.
+- [x] Capture the bounded large-diffusion comparison before continuing to the
+  next P0 implementation. Release Criterion at `2026-09-29T21:13:30Z` shows
+  AtomNative cold `prepare()` faster than ExprLegacy by `65-66%`, `77-78%` and
+  about `88%` at dimensions `512/1024/2048` respectively, for Sparse/Banded.
+  AtomNative also improved `35-82%` relative to Criterion's local baseline.
+  See `test_reports/LSODE2_AOT/release/criterion__lsode2_workload_aot__diffusion_cold__20260929T211330Z.md`.
+  ExprLegacy shows statistically significant Criterion regressions at Sparse
+  `n=512` and both layouts at `n=2048`; attribution and a clean-baseline repeat
+  remain open. This is cold preparation, not full-solve timing.
+
+  Historical command for this capture:
+
+  ```powershell
+  $env:LSODE2_BENCH_AOT_WORKLOADS = "diffusion-chain"
+  $env:LSODE2_BENCH_AOT_DIFFUSION_DIMENSIONS = "512,1024,2048"
+  $env:LSODE2_BENCH_SAMPLE_SIZE = "10"
+  $env:LSODE2_BENCH_MEASUREMENT_TIME_SECS = "5"
+  cargo bench --no-default-features --bench lsode2_workload_aot -- "cold_preparation/diffusion-chain" --noplot
+  ```
+
+  This measures production `Lsode2Solver::prepare()` wall time, including its
+  actual frontend lifecycle. Keep the direct paired `RebuildAlways` story gate
+  for stage attribution; do not compare their totals as identical scopes.
+
+- [ ] Attribute and confirm the ExprLegacy cold-preparation regression seen
+  by Criterion at Sparse `n=512` and Sparse/Banded `n=2048`. Compare stage
+  reports and repeat on a clean release Criterion baseline before assigning a
+  cause; do not conflate it with the AtomNative cold-preparation improvement.

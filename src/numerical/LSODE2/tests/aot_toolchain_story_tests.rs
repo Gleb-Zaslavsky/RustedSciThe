@@ -6,7 +6,7 @@ fn lsode2_aot_toolchain_stage_story_table() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_toolchain_story_tests::lsode2_aot_toolchain_stage_story_table",
     );
-    super::story_tests2::run_lsode2_aot_toolchain_stage_story_table();
+    super::legacy_story_support::run_lsode2_aot_toolchain_stage_story_table();
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn lsode2_cold_aot_story_config_forces_rebuild_always() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_toolchain_story_tests::lsode2_cold_aot_story_config_forces_rebuild_always",
     );
-    super::story_tests2::run_lsode2_cold_aot_story_config_forces_rebuild_always();
+    super::legacy_story_support::run_lsode2_cold_aot_story_config_forces_rebuild_always();
 }
 
 #[test]
@@ -25,5 +25,5 @@ fn lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_toolchain_story_tests::lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix",
     );
-    super::story_tests2::run_lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix();
+    super::legacy_story_support::run_lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix();
 }

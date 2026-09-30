@@ -2,15 +2,20 @@
 //!
 //! Reports are written after the measured operation has finished. The helper
 //! is intentionally outside solver code so file-system work cannot enter a
-//! solver timer or a production hot path. Each canonical test name maps to a
-//! single report file; a later run replaces that file and records a new UTC
-//! timestamp.
+//! solver timer or a production hot path. Each profile-qualified canonical
+//! test name maps to a single canonical report file; a later run replaces that
+//! profile's file and records a new UTC timestamp. Release writes also keep an
+//! immutable copy below the profile's `archive/` directory.
 
 use chrono::{SecondsFormat, Utc};
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static ACTIVE_CAPTURE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -19,8 +24,12 @@ thread_local! {
 /// Writes one dated report for a named test and returns the resulting path.
 ///
 /// RST_TEST_REPORT_DIR can override the repository-local test_reports
-/// directory. The suite and test name are sanitized before becoming path
-/// components, so Rust module paths remain safe on Windows and Unix.
+/// directory. Reports are partitioned by the Cargo profile (`debug` or
+/// `release`) so a smoke run cannot replace a release baseline. Release
+/// reports are additionally copied to `profile/archive/` with a UTC timestamp.
+/// Set `RST_TEST_REPORT_ARCHIVE=always` to archive debug reports too, or use
+/// `never` to disable archival for a local run. The optional
+/// RST_TEST_REPORT_PROFILE override is useful for process-isolated harnesses.
 pub fn write_test_report(
     suite: &str,
     canonical_test_name: &str,
@@ -41,26 +50,91 @@ pub fn write_test_report_in(
 ) -> io::Result<PathBuf> {
     let suite = sanitize_component(suite);
     let test_name = sanitize_component(canonical_test_name);
-    let directory = root.join(&suite);
+    let profile = report_profile();
+    write_test_report_in_profile(
+        root,
+        &suite,
+        &test_name,
+        profile,
+        canonical_test_name,
+        body,
+        archive_enabled(profile),
+    )
+}
+
+fn write_test_report_in_profile(
+    root: &Path,
+    suite: &str,
+    test_name: &str,
+    profile: &str,
+    canonical_test_name: &str,
+    body: &str,
+    archive: bool,
+) -> io::Result<PathBuf> {
+    let directory = root.join(&suite).join(profile);
     fs::create_dir_all(&directory)?;
 
     let path = directory.join(format!("{test_name}.md"));
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let payload = format!(
-        "# Test report: {canonical_test_name}\n\n- suite: {suite}\n- recorded_at_utc: {timestamp}\n- canonical_test: {canonical_test_name}\n\n{body}\n"
+        "# Test report: {canonical_test_name}\n\n- suite: {suite}\n- profile: {profile}\n- recorded_at_utc: {timestamp}\n- canonical_test: {canonical_test_name}\n\n{body}\n"
     );
 
     // Write through a sibling temporary file so a reader never observes a
     // partially written report. Windows cannot rename over an existing
     // destination, therefore remove only this report's old file before the
     // final rename.
-    let temporary = directory.join(format!(".{test_name}.tmp-{}", std::process::id()));
-    fs::write(&temporary, payload)?;
+    let temporary = directory.join(format!(".{test_name}.tmp-{}", report_suffix()));
+    fs::write(&temporary, &payload)?;
     if path.exists() {
         fs::remove_file(&path)?;
     }
     fs::rename(&temporary, &path)?;
+
+    if archive {
+        write_immutable_archive(&directory, test_name, &timestamp, payload.as_bytes())?;
+    }
+
     Ok(path)
+}
+
+fn write_immutable_archive(
+    directory: &Path,
+    test_name: &str,
+    timestamp: &str,
+    payload: &[u8],
+) -> io::Result<()> {
+    let archive_directory = directory.join("archive");
+    fs::create_dir_all(&archive_directory)?;
+    let archive_stamp = timestamp.replace(':', "-");
+    let base_name = format!("{test_name}__{archive_stamp}");
+
+    for collision in 0..1000u32 {
+        let suffix = if collision == 0 {
+            String::new()
+        } else {
+            format!("__{collision}")
+        };
+        let path = archive_directory.join(format!("{base_name}{suffix}.md"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(payload)?;
+                file.flush()?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "too many report archive filename collisions",
+    ))
 }
 
 /// Captures verbose test output and writes it as a dated report on drop.
@@ -170,9 +244,45 @@ fn sanitize_component(value: &str) -> String {
     }
 }
 
+fn report_profile() -> &'static str {
+    if let Ok(profile) = std::env::var("RST_TEST_REPORT_PROFILE") {
+        if profile.eq_ignore_ascii_case("release") {
+            return "release";
+        }
+        if profile.eq_ignore_ascii_case("debug") {
+            return "debug";
+        }
+    }
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+fn archive_enabled(profile: &str) -> bool {
+    match std::env::var("RST_TEST_REPORT_ARCHIVE") {
+        Ok(value) if value.eq_ignore_ascii_case("always") => true,
+        Ok(value) if value.eq_ignore_ascii_case("never") => false,
+        Ok(value) if value.eq_ignore_ascii_case("debug") => profile == "debug",
+        Ok(value) if value.eq_ignore_ascii_case("release") => profile == "release",
+        Ok(value) if value.eq_ignore_ascii_case("true") => true,
+        Ok(value) if value.eq_ignore_ascii_case("false") => false,
+        _ => profile == "release",
+    }
+}
+
+fn report_suffix() -> String {
+    let sequence = REPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{sequence}", std::process::id())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TestReportCapture, capture_test_line, sanitize_component, write_test_report_in};
+    use super::{
+        TestReportCapture, capture_test_line, sanitize_component, write_test_report_in,
+        write_test_report_in_profile,
+    };
     use std::fs;
 
     #[test]
@@ -203,10 +313,52 @@ mod tests {
             let _capture = TestReportCapture::new_in(&root, "BVP_Damp_AOT", "module::tests::aot");
             capture_test_line(format_args!("AOT row: {}", 7));
         }
-        let report = root.join("BVP_Damp_AOT").join("module__tests__aot.md");
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let report = root
+            .join("BVP_Damp_AOT")
+            .join(profile)
+            .join("module__tests__aot.md");
         let contents = fs::read_to_string(report).expect("captured report should exist");
         assert!(contents.contains("status: passed"));
         assert!(contents.contains("AOT row: 7"));
+        assert!(contents.contains("- profile: "));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn release_report_keeps_an_immutable_archive_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "rustedscithe-test-report-archive-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let canonical = write_test_report_in_profile(
+            &root,
+            "LSODE2_AOT",
+            "module__tests__aot",
+            "release",
+            "module::tests::aot",
+            "release row",
+            true,
+        )
+        .expect("release report should be written");
+        let archive_directory = canonical.parent().unwrap().join("archive");
+        let archived: Vec<_> = fs::read_dir(&archive_directory)
+            .expect("archive directory should exist")
+            .map(|entry| entry.expect("archive entry should be readable").path())
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            fs::read_to_string(&archived[0])
+                .unwrap()
+                .contains("release row")
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 }

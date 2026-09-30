@@ -18,7 +18,7 @@ use crate::symbolic::View::conversions::{atom_to_expr, expr_to_atom};
 use crate::symbolic::View::evaluate::{
     FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext,
 };
-use crate::symbolic::View::jacobian::PreparedSparseAtomSystem;
+use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianError};
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedResidualAotBackend,
@@ -104,6 +104,12 @@ pub enum IvpBackendError {
     GeneratedBackendFailure { message: String },
     /// Native AtomView preparation failed before a callback was published.
     AtomPreparationFailure { stage: String, message: String },
+    /// Native symbolic differentiation failed at a specific Jacobian entry.
+    AtomDifferentiationFailure {
+        row: usize,
+        col: usize,
+        source: crate::symbolic::View::DerivativeError,
+    },
     /// Native AtomView callback received an invalid state vector.
     InvalidStateShape { expected: usize, actual: usize },
     /// A caller-owned output buffer has the wrong length for the prepared
@@ -121,6 +127,13 @@ pub enum IvpBackendError {
         expected_cols: usize,
         actual_rows: usize,
         actual_cols: usize,
+    },
+    /// A compact sparse Jacobian pattern contains a coordinate outside its
+    /// declared square shape.
+    InvalidSparsePatternEntry {
+        row: usize,
+        col: usize,
+        dimension: usize,
     },
     /// A caller selected an output API that does not match the prepared
     /// Jacobian storage plan.
@@ -163,6 +176,10 @@ impl fmt::Display for IvpBackendError {
             Self::AtomPreparationFailure { stage, message } => {
                 write!(f, "AtomView preparation failed during {stage}: {message}")
             }
+            Self::AtomDifferentiationFailure { row, col, source } => write!(
+                f,
+                "AtomView Jacobian differentiation failed at row {row}, column {col}: {source}"
+            ),
             Self::InvalidStateShape { expected, actual } => {
                 write!(f, "IVP state has length {actual}, expected {expected}")
             }
@@ -183,6 +200,14 @@ impl fmt::Display for IvpBackendError {
             } => write!(
                 f,
                 "IVP {stage} matrix has shape {actual_rows}x{actual_cols}, expected {expected_rows}x{expected_cols}"
+            ),
+            Self::InvalidSparsePatternEntry {
+                row,
+                col,
+                dimension,
+            } => write!(
+                f,
+                "IVP sparse Jacobian pattern entry ({row}, {col}) is outside {dimension}x{dimension}"
             ),
             Self::InvalidJacobianStorage { expected, actual } => write!(
                 f,
@@ -209,7 +234,14 @@ impl fmt::Display for IvpBackendError {
     }
 }
 
-impl std::error::Error for IvpBackendError {}
+impl std::error::Error for IvpBackendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AtomDifferentiationFailure { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Backend used to evaluate one prepared IVP problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -258,6 +290,7 @@ pub(crate) struct PreparedNativeAtomJacobianEntry {
 pub(crate) struct PreparedNativeAtomJacobian {
     pub(crate) rows: usize,
     pub(crate) cols: usize,
+    pub(crate) expected_input_len: usize,
     pub(crate) entries: Arc<[PreparedNativeAtomJacobianEntry]>,
 }
 
@@ -308,6 +341,7 @@ impl PreparedNativeAtomJacobian {
 pub(crate) struct PreparedNativeAtomResidual {
     evaluators: Arc<[PreparedEvaluator]>,
     expected_state_len: usize,
+    expected_input_len: usize,
     parameter_values_handle: Option<SharedIvpParameterValues>,
     telemetry: IvpTelemetry,
     execution_policy: IvpLambdifyExecutionPolicy,
@@ -351,59 +385,27 @@ impl PreparedNativeAtomResidual {
             .telemetry
             .start_warm_stage(IvpWarmStage::ArgumentBinding);
         let mut binding_recorded = false;
-        let evaluation = with_shared_parameter_values(
-            self.parameter_values_handle.as_ref(),
-            || {
+        let mut evaluate = |parameters: &[f64]| self.evaluate_values(t, parameters, y, out);
+        // Most large callback gates are parameter-free. Avoid entering the
+        // shared RwLock adapter on that hot path; parameterized continuation
+        // still uses the original lock-protected branch below.
+        let evaluation = match self.parameter_values_handle.as_ref() {
+            Some(handle) => with_shared_parameter_values(
+                Some(handle),
+                || {
+                    self.telemetry
+                        .record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
+                    binding_recorded = true;
+                },
+                evaluate,
+            ),
+            None => {
                 self.telemetry
                     .record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
                 binding_recorded = true;
-            },
-            |parameters| {
-                let parallel = self
-                    .execution_policy
-                    .should_parallel_with_tasks(self.evaluators.len(), self.evaluators.len());
-                self.telemetry.record_lambdify_dispatch(parallel);
-                self.telemetry
-                    .record_scalar_evaluations(self.evaluators.len());
-                let evaluation_started = self
-                    .telemetry
-                    .start_warm_stage(IvpWarmStage::ResidualEvaluation);
-                let evaluation = if parallel {
-                    self.evaluators
-                        .par_iter()
-                        .zip(out.par_iter_mut())
-                        .enumerate()
-                        .try_for_each(|(index, (evaluator, value))| {
-                            evaluator
-                                .evaluate_thread_local_ivp(t, parameters, y.as_slice())
-                                .map(|evaluated| *value = evaluated)
-                                .map_err(|message| IvpBackendError::AtomEvaluationFailure {
-                                    stage: "residual".to_string(),
-                                    index,
-                                    message,
-                                })
-                        })
-                } else {
-                    PreparedEvaluator::evaluate_many_thread_local_ivp(
-                        self.evaluators.iter(),
-                        t,
-                        parameters,
-                        y.as_slice(),
-                        out,
-                    )
-                    .map_err(|(index, message)| {
-                        IvpBackendError::AtomEvaluationFailure {
-                            stage: "residual".to_string(),
-                            index,
-                            message,
-                        }
-                    })
-                };
-                self.telemetry
-                    .record_warm_stage(IvpWarmStage::ResidualEvaluation, evaluation_started);
-                evaluation
-            },
-        );
+                evaluate(&[])
+            }
+        };
         if !binding_recorded {
             self.telemetry
                 .record_warm_stage(IvpWarmStage::ArgumentBinding, binding_started);
@@ -424,6 +426,69 @@ impl PreparedNativeAtomResidual {
             .record_warm_stage(IvpWarmStage::ResidualCallback, callback_started);
         self.telemetry.record_residual_evaluation_count();
         Ok(())
+    }
+
+    fn evaluate_values(
+        &self,
+        t: f64,
+        parameters: &[f64],
+        y: &DVector<f64>,
+        out: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        let parallel = self
+            .execution_policy
+            .should_parallel_with_tasks(self.evaluators.len(), self.evaluators.len());
+        self.telemetry.record_lambdify_dispatch(parallel);
+        self.telemetry
+            .record_scalar_evaluations(self.evaluators.len());
+        let evaluation_started = self
+            .telemetry
+            .start_warm_stage(IvpWarmStage::ResidualEvaluation);
+        let evaluation = if parallel {
+            let worker_count = rayon::current_num_threads().max(1);
+            let chunk_size = (self.evaluators.len() + worker_count - 1)
+                .checked_div(worker_count)
+                .unwrap_or(1)
+                .max(1);
+            self.evaluators
+                .par_chunks(chunk_size)
+                .zip(out.par_chunks_mut(chunk_size))
+                .enumerate()
+                .try_for_each(|(chunk_index, (evaluators, values))| {
+                    PreparedEvaluator::evaluate_many_thread_local_ivp(
+                        evaluators.iter(),
+                        t,
+                        parameters,
+                        y.as_slice(),
+                        self.expected_input_len,
+                        values,
+                    )
+                    .map_err(|(index, message)| {
+                        IvpBackendError::AtomEvaluationFailure {
+                            stage: "residual".to_string(),
+                            index: chunk_index * chunk_size + index,
+                            message,
+                        }
+                    })
+                })
+        } else {
+            PreparedEvaluator::evaluate_many_thread_local_ivp(
+                self.evaluators.iter(),
+                t,
+                parameters,
+                y.as_slice(),
+                self.expected_input_len,
+                out,
+            )
+            .map_err(|(index, message)| IvpBackendError::AtomEvaluationFailure {
+                stage: "residual".to_string(),
+                index,
+                message,
+            })
+        };
+        self.telemetry
+            .record_warm_stage(IvpWarmStage::ResidualEvaluation, evaluation_started);
+        evaluation
     }
 
     fn evaluate(&self, t: f64, y: &DVector<f64>) -> Result<DVector<f64>, IvpBackendError> {
@@ -789,19 +854,17 @@ impl PreparedLinkedDense {
         let copy_scope = self
             .telemetry
             .scoped_warm_stage(IvpWarmStage::AotArgumentCopy);
-        if let Err(error) = build_linked_args_into(
-            t,
-            y,
-            self.parameter_values_handle.as_ref(),
-            args,
-        ) {
+        if let Err(error) =
+            build_linked_args_into(t, y, self.parameter_values_handle.as_ref(), args)
+        {
             self.telemetry.record_error();
             drop(copy_scope);
             drop(binding_scope);
             drop(callback_scope);
             return Err(error);
         }
-        self.telemetry.record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+        self.telemetry
+            .record_copy_bytes(args.len() * std::mem::size_of::<f64>());
         drop(copy_scope);
         drop(binding_scope);
 
@@ -829,7 +892,8 @@ impl PreparedLinkedDense {
                 out[(row, col)] = values[row * cols + col];
             }
         }
-        self.telemetry.record_copy_bytes(values.len() * std::mem::size_of::<f64>());
+        self.telemetry
+            .record_copy_bytes(values.len() * std::mem::size_of::<f64>());
         drop(output_scope);
         self.telemetry.record_jacobian_evaluation_count();
         drop(callback_scope);
@@ -888,18 +952,16 @@ impl PreparedLinkedResidual {
         let copy_scope = self
             .telemetry
             .scoped_warm_stage(IvpWarmStage::AotArgumentCopy);
-        if let Err(error) = build_linked_args_into(
-            t,
-            y,
-            self.parameter_values_handle.as_ref(),
-            args,
-        ) {
+        if let Err(error) =
+            build_linked_args_into(t, y, self.parameter_values_handle.as_ref(), args)
+        {
             self.telemetry.record_error();
             drop(copy_scope);
             drop(binding_scope);
             return Err(error);
         }
-        self.telemetry.record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+        self.telemetry
+            .record_copy_bytes(args.len() * std::mem::size_of::<f64>());
         drop(copy_scope);
         drop(binding_scope);
 
@@ -1296,12 +1358,7 @@ impl PreparedSymbolicIvpProblem {
         let try_residual: Arc<IvpTryResidualEval> = Arc::new(move |t, y| {
             let mut out = vec![0.0; residual_len];
             let mut args = Vec::new();
-            residual_runtime_for_closure.evaluate_into(
-                t,
-                y,
-                out.as_mut_slice(),
-                &mut args,
-            )?;
+            residual_runtime_for_closure.evaluate_into(t, y, out.as_mut_slice(), &mut args)?;
             Ok(DVector::from_vec(out))
         });
         let dense_runtime_for_closure = linked_dense_runtime.clone();
@@ -1462,6 +1519,7 @@ pub(crate) fn prepare_native_atom_jacobian(
     equation_parameters: Option<&[String]>,
     telemetry: &IvpTelemetry,
 ) -> Result<PreparedNativeAtomJacobian, IvpBackendError> {
+    let preparation_started = telemetry.start_cold_stage(IvpColdStage::AtomJacobianPreparation);
     let system = prepare_native_atom_system(
         equations,
         time_arg,
@@ -1469,7 +1527,9 @@ pub(crate) fn prepare_native_atom_jacobian(
         equation_parameters,
         telemetry,
     );
-    prepare_native_atom_jacobian_from_system(&system, variables, telemetry)
+    let result = prepare_native_atom_jacobian_from_system(&system, variables, telemetry);
+    telemetry.record_cold_stage(IvpColdStage::AtomJacobianPreparation, preparation_started);
+    result
 }
 
 fn prepare_native_atom_system(
@@ -1505,20 +1565,31 @@ fn prepare_native_atom_jacobian_from_system(
 ) -> Result<PreparedNativeAtomJacobian, IvpBackendError> {
     let rows = system.atoms.len();
     let cols = variables.len();
-    let variables_for_all_discrete = vec![variables.to_vec(); rows];
+    let dependency_started = telemetry.start_cold_stage(IvpColdStage::AtomDependencyAnalysis);
     let prepared =
-        PreparedSparseAtomSystem::from_atoms(&system.atoms, variables, &variables_for_all_discrete);
-    let sparse_started = telemetry.start_cold_stage(IvpColdStage::SparsePattern);
+        PreparedSparseAtomSystem::from_atoms_discovering_dependencies(&system.atoms, variables);
+    telemetry.record_cold_stage(IvpColdStage::AtomDependencyAnalysis, dependency_started);
+    let differentiation_started = telemetry.start_cold_stage(IvpColdStage::SymbolicDifferentiation);
     let sparse_entries = prepared
         .try_calc_sparse_jacobian_with_bandwidth(None)
-        .map_err(|message| IvpBackendError::AtomPreparationFailure {
-            stage: "symbolic differentiation".to_string(),
-            message,
-        });
-    telemetry.record_cold_stage(IvpColdStage::SparsePattern, sparse_started);
+        .map_err(
+            |error: SparseAtomJacobianError| IvpBackendError::AtomDifferentiationFailure {
+                row: error.row,
+                col: error.col,
+                source: error.source,
+            },
+        );
+    telemetry.record_cold_stage(
+        IvpColdStage::SymbolicDifferentiation,
+        differentiation_started,
+    );
+    if sparse_entries.is_err() {
+        telemetry.record_error();
+    }
     let sparse_entries = sparse_entries?;
 
-    let lambdification_started = telemetry.start_cold_stage(IvpColdStage::JacobianLambdification);
+    let evaluator_started =
+        telemetry.start_cold_stage(IvpColdStage::NativeJacobianEvaluatorPreparation);
     let compiled = sparse_entries
         .into_iter()
         .map(|entry| {
@@ -1534,11 +1605,15 @@ fn prepare_native_atom_jacobian_from_system(
                 })
         })
         .collect::<Result<Vec<_>, _>>();
-    telemetry.record_cold_stage(IvpColdStage::JacobianLambdification, lambdification_started);
+    telemetry.record_cold_stage(
+        IvpColdStage::NativeJacobianEvaluatorPreparation,
+        evaluator_started,
+    );
 
     Ok(PreparedNativeAtomJacobian {
         rows,
         cols,
+        expected_input_len: system.context.vars.len(),
         entries: compiled?.into(),
     })
 }
@@ -1592,6 +1667,7 @@ fn compile_native_atom_residual_from_system(
     Ok(Arc::new(PreparedNativeAtomResidual {
         evaluators: compiled,
         expected_state_len: variables.len(),
+        expected_input_len: system.context.vars.len(),
         parameter_values_handle,
         telemetry,
         execution_policy,
@@ -1633,20 +1709,35 @@ fn compile_native_atom_dense_jacobian(
                 let evaluation_started =
                     telemetry.start_warm_stage(IvpWarmStage::JacobianEvaluation);
                 let values = if parallel {
-                    plan.entries
-                        .par_iter()
+                    let mut values = vec![0.0; plan.entries.len()];
+                    let worker_count = rayon::current_num_threads().max(1);
+                    let chunk_size = (plan.entries.len() + worker_count - 1)
+                        .checked_div(worker_count)
+                        .unwrap_or(1)
+                        .max(1);
+                    let evaluation = plan
+                        .entries
+                        .par_chunks(chunk_size)
+                        .zip(values.par_chunks_mut(chunk_size))
                         .enumerate()
-                        .map(|(index, entry)| {
-                            entry
-                                .evaluator
-                                .evaluate_thread_local_ivp(t, parameters, y.as_slice())
-                                .map_err(|message| IvpBackendError::AtomEvaluationFailure {
+                        .try_for_each(|(chunk_index, (entries, values))| {
+                            PreparedEvaluator::evaluate_many_thread_local_ivp(
+                                entries.iter().map(|entry| &entry.evaluator),
+                                t,
+                                parameters,
+                                y.as_slice(),
+                                plan.expected_input_len,
+                                values,
+                            )
+                            .map_err(|(index, message)| {
+                                IvpBackendError::AtomEvaluationFailure {
                                     stage: "Jacobian".to_string(),
-                                    index,
+                                    index: chunk_index * chunk_size + index,
                                     message,
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()
+                                }
+                            })
+                        });
+                    evaluation.map(|()| values)
                 } else {
                     plan.entries
                         .iter()

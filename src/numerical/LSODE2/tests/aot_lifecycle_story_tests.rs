@@ -6,7 +6,7 @@ fn lsode2_exponential_decay_backend_story_table() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_lifecycle_story_tests::lsode2_exponential_decay_backend_story_table",
     );
-    super::story_tests2::run_lsode2_exponential_decay_backend_story_table();
+    super::legacy_story_support::run_lsode2_exponential_decay_backend_story_table();
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn lsode2_combustion_like_multi_run_story_dashboard() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_lifecycle_story_tests::lsode2_combustion_like_multi_run_story_dashboard",
     );
-    super::story_tests2::run_lsode2_combustion_like_multi_run_story_dashboard();
+    super::legacy_story_support::run_lsode2_combustion_like_multi_run_story_dashboard();
 }
 
 #[test]
@@ -25,7 +25,17 @@ fn lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_stor
         "LSODE2_AOT",
         "numerical::LSODE2::aot_lifecycle_story_tests::lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story",
     );
-    super::story_tests2::run_lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story();
+    super::legacy_story_support::run_lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story();
+}
+
+#[test]
+#[ignore = "release story: all ExprLegacy/AtomView Sparse/Banded routes through BuildIfMissing and RequirePrebuilt"]
+fn lsode2_combustion_sparse_banded_all_frontends_tcc_build_then_require_prebuilt_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_lifecycle_story_tests::lsode2_combustion_sparse_banded_all_frontends_tcc_build_then_require_prebuilt_story",
+    );
+    super::legacy_story_support::run_lsode2_combustion_sparse_banded_all_frontends_tcc_build_then_require_prebuilt_story();
 }
 
 #[test]
@@ -35,5 +45,5 @@ fn lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_stor
         "LSODE2_AOT",
         "numerical::LSODE2::aot_lifecycle_story_tests::lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story",
     );
-    super::story_tests2::run_lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story();
+    super::legacy_story_support::run_lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story();
 }

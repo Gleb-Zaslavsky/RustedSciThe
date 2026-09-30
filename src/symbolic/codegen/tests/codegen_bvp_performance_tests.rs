@@ -210,6 +210,267 @@ fn build_real_bvp_damp1_case(n_steps: usize) -> Jacobian {
     jac
 }
 
+#[test]
+#[ignore = "explicitly regenerate checked-in BVP codegen fixtures"]
+fn regenerate_real_bvp_codegen_fixtures() {
+    use std::fmt::Write as _;
+
+    fn append_bindings(
+        source: &mut String,
+        bindings_module: &str,
+        generated_module: &str,
+        n_steps: usize,
+        arrays: &[(&str, &[String])],
+    ) {
+        writeln!(source, "\npub mod {bindings_module} {{").unwrap();
+        writeln!(source, "    use super::{generated_module};").unwrap();
+        writeln!(source, "    pub const N_STEPS: usize = {n_steps};").unwrap();
+        for (name, functions) in arrays {
+            writeln!(
+                source,
+                "    pub const {name}: [fn(&[f64], &mut [f64]); {}] = [",
+                functions.len()
+            )
+            .unwrap();
+            for function in *functions {
+                writeln!(source, "        {generated_module}::{function},").unwrap();
+            }
+            source.push_str("    ];\n\n");
+        }
+        source.push_str("}\n");
+    }
+
+    fn names(chunks: impl Iterator<Item = String>) -> Vec<String> {
+        chunks.collect()
+    }
+
+    fn tasks(
+        n_steps: usize,
+        residual_chunk: usize,
+        sparse_rows: usize,
+        module_name: &str,
+        residual_name: &str,
+        sparse_name: &str,
+    ) -> (CodegenModule, Vec<String>, Vec<String>) {
+        let jac = build_real_bvp_damp1_case(n_steps);
+        let variables_owned = jac.variable_string.clone();
+        let variables: Vec<&str> = variables_owned.iter().map(String::as_str).collect();
+        let entries_owned = jac.symbolic_jacobian_sparse_entries_owned();
+        let entries = borrowed_sparse_entries(&entries_owned);
+        let residual_task = ResidualTask {
+            fn_name: residual_name,
+            residuals: &jac.vector_of_functions,
+            variables: &variables,
+            params: None,
+        };
+        let residual = residual_task.runtime_plan(ResidualChunkingStrategy::ByOutputCount {
+            max_outputs_per_chunk: residual_chunk,
+        });
+        let sparse_task = SparseJacobianTask {
+            fn_name: sparse_name,
+            shape: (jac.vector_of_functions.len(), jac.vector_of_variables.len()),
+            entries: &entries,
+            variables: &variables,
+            params: None,
+        };
+        let sparse = sparse_task.runtime_plan(SparseChunkingStrategy::ByRowCount {
+            rows_per_chunk: sparse_rows,
+        });
+        let residual_names = names(residual.chunks.iter().map(|chunk| chunk.fn_name.clone()));
+        let sparse_names = names(sparse.chunks.iter().map(|chunk| chunk.fn_name.clone()));
+        let mut module = CodegenModule::new(module_name);
+        for chunk in &residual.chunks {
+            module.push_residual_block_plan(&chunk.plan);
+        }
+        for chunk in &sparse.chunks {
+            module.push_sparse_values_plan(&chunk.plan);
+        }
+        (module, residual_names, sparse_names)
+    }
+
+    fn write_fixture(file: &str, source: String) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/symbolic/codegen/testing_fixtures")
+            .join(file);
+        std::fs::write(path, source).expect("generated fixture should be writable");
+    }
+
+    let (module, _, _) = tasks(
+        8,
+        8,
+        1,
+        "generated_bvp_fixture",
+        "fixture_bvp_residual",
+        "fixture_bvp_sparse_values",
+    );
+    write_fixture(
+        "test_codegen_generated_bvp_fixtures.rs",
+        module.emit_source(),
+    );
+
+    let (module, residual, sparse) = tasks(
+        32,
+        8,
+        1,
+        "generated_bvp_large_fixture",
+        "fixture_bvp32_residual",
+        "fixture_bvp32_sparse_values",
+    );
+    let mut source = module.emit_source();
+    append_bindings(
+        &mut source,
+        "generated_bvp_large_fixture_bindings",
+        "generated_bvp_large_fixture",
+        32,
+        &[
+            ("RESIDUAL_CHUNKS", &residual),
+            ("SPARSE_VALUE_CHUNKS", &sparse),
+        ],
+    );
+    write_fixture("test_codegen_generated_bvp_large_fixtures.rs", source);
+
+    let (module, residual, sparse) = tasks(
+        128,
+        64,
+        64,
+        "generated_bvp_huge_fixture",
+        "fixture_bvp128_residual",
+        "fixture_bvp128_sparse_values",
+    );
+    let mut source = module.emit_source();
+    append_bindings(
+        &mut source,
+        "generated_bvp_huge_fixture_bindings",
+        "generated_bvp_huge_fixture",
+        128,
+        &[
+            ("RESIDUAL_CHUNKS", &residual),
+            ("SPARSE_VALUE_CHUNKS", &sparse),
+        ],
+    );
+    write_fixture("test_codegen_generated_bvp_huge_fixtures.rs", source);
+
+    let jac = build_real_bvp_damp1_case(32);
+    let variables_owned = jac.variable_string.clone();
+    let variables: Vec<&str> = variables_owned.iter().map(String::as_str).collect();
+    let entries_owned = jac.symbolic_jacobian_sparse_entries_owned();
+    let entries = borrowed_sparse_entries(&entries_owned);
+    let mut module = CodegenModule::new("generated_bvp_large_chunk_variants");
+    let mut arrays = Vec::new();
+    for outputs in [4usize, 8, 16] {
+        let task = ResidualTask {
+            fn_name: match outputs {
+                4 => "fixture_bvp32_residual_o4",
+                8 => "fixture_bvp32_residual_o8",
+                _ => "fixture_bvp32_residual_o16",
+            },
+            residuals: &jac.vector_of_functions,
+            variables: &variables,
+            params: None,
+        };
+        let plan = task.runtime_plan(ResidualChunkingStrategy::ByOutputCount {
+            max_outputs_per_chunk: outputs,
+        });
+        let residual = names(plan.chunks.iter().map(|chunk| chunk.fn_name.clone()));
+        for chunk in &plan.chunks {
+            module.push_residual_block_plan(&chunk.plan);
+        }
+        arrays.push((
+            match outputs {
+                4 => "RESIDUAL_O4",
+                8 => "RESIDUAL_O8",
+                _ => "RESIDUAL_O16",
+            },
+            residual,
+        ));
+    }
+    for rows in [4usize, 8, 16] {
+        let task = SparseJacobianTask {
+            fn_name: match rows {
+                4 => "fixture_bvp32_sparse_r4",
+                8 => "fixture_bvp32_sparse_r8",
+                _ => "fixture_bvp32_sparse_r16",
+            },
+            shape: (jac.vector_of_functions.len(), jac.vector_of_variables.len()),
+            entries: &entries,
+            variables: &variables,
+            params: None,
+        };
+        let plan = task.runtime_plan(SparseChunkingStrategy::ByRowCount {
+            rows_per_chunk: rows,
+        });
+        let sparse = names(plan.chunks.iter().map(|chunk| chunk.fn_name.clone()));
+        for chunk in &plan.chunks {
+            module.push_sparse_values_plan(&chunk.plan);
+        }
+        arrays.push((
+            match rows {
+                4 => "SPARSE_R4",
+                8 => "SPARSE_R8",
+                _ => "SPARSE_R16",
+            },
+            sparse,
+        ));
+    }
+    let mut source = module.emit_source();
+    let borrowed_arrays: Vec<(&str, &[String])> = arrays
+        .iter()
+        .map(|(name, functions)| (*name, functions.as_slice()))
+        .collect();
+    append_bindings(
+        &mut source,
+        "generated_bvp_large_chunk_variant_bindings",
+        "generated_bvp_large_chunk_variants",
+        32,
+        &borrowed_arrays,
+    );
+    write_fixture("test_codegen_generated_bvp_large_chunk_variants.rs", source);
+
+    let mut module = CodegenModule::new("generated_bvp_large_superblock_variants");
+    let residual_task = ResidualTask {
+        fn_name: "fixture_bvp32_residual_t2",
+        residuals: &jac.vector_of_functions,
+        variables: &variables,
+        params: None,
+    };
+    let residual_plan = residual_task
+        .runtime_plan(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 2 });
+    let residual = names(
+        residual_plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.fn_name.clone()),
+    );
+    for chunk in &residual_plan.chunks {
+        module.push_residual_block_plan(&chunk.plan);
+    }
+    let sparse_task = SparseJacobianTask {
+        fn_name: "fixture_bvp32_sparse_t2",
+        shape: (jac.vector_of_functions.len(), jac.vector_of_variables.len()),
+        entries: &entries,
+        variables: &variables,
+        params: None,
+    };
+    let sparse_plan =
+        sparse_task.runtime_plan(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 2 });
+    let sparse = names(sparse_plan.chunks.iter().map(|chunk| chunk.fn_name.clone()));
+    for chunk in &sparse_plan.chunks {
+        module.push_sparse_values_plan(&chunk.plan);
+    }
+    let mut source = module.emit_source();
+    append_bindings(
+        &mut source,
+        "generated_bvp_large_superblock_variant_bindings",
+        "generated_bvp_large_superblock_variants",
+        32,
+        &[("RESIDUAL_T2", &residual), ("SPARSE_T2", &sparse)],
+    );
+    write_fixture(
+        "test_codegen_generated_bvp_large_superblock_variants.rs",
+        source,
+    );
+}
+
 fn borrowed_sparse_entries(owned_entries: &[(usize, usize, Expr)]) -> Vec<SparseExprEntry<'_>> {
     owned_entries
         .iter()

@@ -654,6 +654,49 @@ output parent directory, а не перезаписывает DLL/cdylib, кот
 длинных диагностических сессиях, старые isolated rebuild directories можно
 чистить позже, когда ни один процесс их уже не держит.
 
+## Параметрическое продолжение: меняем значения, переиспользуем подготовленные callbacks
+
+Для параметризованной символьной модели перечислите имена параметров в том
+порядке, в котором они используются, и задайте начальные значения:
+
+```rust
+let config = Lsode2ProblemConfig::new(
+    vec![Expr::parse_expression("-k*y")],
+    vec!["y".to_string()],
+    "t".to_string(),
+    0.0,
+    DVector::from_vec(vec![1.0]),
+    1.0,
+    0.05,
+    1e-8,
+    1e-10,
+)
+.with_equation_parameters(vec!["k".to_string()])
+.with_equation_parameter_values(DVector::from_vec(vec![1.0]));
+```
+
+Создайте один `Lsode2Solver`, а между расчётами меняйте только численный
+вектор параметров:
+
+```rust
+let mut solver = Lsode2Solver::new(config)?;
+for k in [1.0, 2.0, 4.0] {
+    solver.set_parameter_values(DVector::from_vec(vec![k]))?;
+    solver.solve()?;
+    let (_, states) = solver.get_result();
+    println!("k={k}: y(1)={:.6e}", states[(states.nrows() - 1, 0)]);
+}
+```
+
+Подготовленные символьные callbacks переиспользуются; в AOT также повторно
+используется готовый артефакт, поэтому для каждого значения не выполняются
+заново символьная подготовка или компиляция. Однако каждый вызов `solve()`
+начинает новую интеграцию с настроенных `t0` и `y0`: параметрическое
+продолжение не переносит предыдущую траекторию или историю интегратора.
+Количество и порядок значений должны соответствовать объявленной схеме
+параметров. Запускаемые примеры: `lsode2_parameter_continuation_lambdify` и
+`lsode2_parameter_continuation_aot`.
+
 ## Параллелизм/чанкинг в AOT: как это связано с производительностью
 
 В generated backend есть `aot_options`, где задаётся стратегия «нарезки» residual/Jacobian на куски. Это влияет на размер функций, стоимость компиляции и поведение runtime-плана. Для residual используются стратегии вроде `Whole`, `ByTargetChunkCount`, `ByOutputCount`; для dense Jacobian — `Whole`, `ByTargetChunkCount`, `ByRowCount`.
@@ -805,9 +848,13 @@ plot: false
 
 ## Где смотреть дальше в репозитории
 
-За быстрыми живыми примерами идите в `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs` и `examples/lsode2_task_shell_guide.rs`.
+За практическими примерами идите в `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_continuation_lambdify.rs`, `examples/lsode2_parameter_continuation_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs` и `examples/lsode2_task_shell_guide.rs`.
 
-Если нужен профиль производительности и корректности на уровне сценариев, смотрите `story_tests.rs` и `story_tests2.rs`. Если нужна математика parity относительно ODEPACK-логики, смотрите `parity_micro.rs`, `stiff_parity_tests.rs`, `nonstiff_parity_tests.rs` и `MIRRORING_CHECKLIST.md`.
+Сценарные проверки корректности и производительности распределены по темам в
+`src/numerical/LSODE2/tests/` (например, `correctness_story_tests.rs`,
+`parameter_continuation_story_tests.rs` и модули `aot_*_story_tests.rs`). Для
+численного parity с логикой ODEPACK смотрите `parity_micro.rs`,
+`stiff_parity_tests.rs` и `nonstiff_parity_tests.rs` в модуле LSODE2.
 
 Когда эти уровни разделены (guide для эксплуатации, story для поведения end-to-end, parity для математической эквивалентности), LSODE2 перестаёт выглядеть сложным. Он становится предсказуемым инженерным инструментом, который можно осознанно настраивать под конкретную задачу.
 ## Update: AOT/Lambdify parallel chunking

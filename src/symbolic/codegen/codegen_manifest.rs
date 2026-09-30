@@ -461,7 +461,14 @@ impl<'a> From<&PreparedBandedProblem<'a>> for PreparedProblemManifest {
                 jacobian_rows: problem.jacobian_plan.structure.rows,
                 jacobian_cols: problem.jacobian_plan.structure.cols,
                 jacobian_nnz: Some(problem.jacobian_plan.structure.nnz()),
-                jacobian_layout: Some(PreparedJacobianLayout::BandedExplicit),
+                jacobian_layout: Some(if problem.jacobian_plan.compact {
+                    PreparedJacobianLayout::BandedCompact {
+                        kl: problem.jacobian_plan.structure.kl,
+                        ku: problem.jacobian_plan.structure.ku,
+                    }
+                } else {
+                    PreparedJacobianLayout::BandedExplicit
+                }),
             },
             functions: GeneratedFunctionsManifest {
                 residual_fn_name: problem.residual_plan.fn_name.to_string(),

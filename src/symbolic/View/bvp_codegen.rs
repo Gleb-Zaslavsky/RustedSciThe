@@ -25,6 +25,7 @@ use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, SparseChunkingStrategy};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// Atom-native sparse BVP codegen problem ready for direct IR/module emission.
 #[derive(Clone, Debug)]
@@ -69,6 +70,7 @@ pub struct AtomBvpCodegenPrepBreakdown {
 /// Fine-grained module-lowering breakdown for atom-native sparse BVP codegen.
 #[derive(Clone, Debug, Default)]
 pub struct AtomBvpCodegenModuleBreakdown {
+    pub input_abi_prepare_ms: f64,
     pub residual_view_collect_ms: f64,
     pub residual_lower_many_ms: f64,
     pub residual_peephole_ms: f64,
@@ -167,9 +169,7 @@ impl PreparedSparseAtomBvpCodegen {
 
     fn jacobian_codegen_layout(&self, slots: usize) -> CodegenOutputLayout {
         match self.matrix_layout {
-            AtomAotMatrixLayout::Dense { rows, cols } => {
-                CodegenOutputLayout::Matrix { rows, cols }
-            }
+            AtomAotMatrixLayout::Dense { rows, cols } => CodegenOutputLayout::Matrix { rows, cols },
             AtomAotMatrixLayout::SparseCsc { rows, cols, .. } => {
                 CodegenOutputLayout::SparseValues {
                     rows,
@@ -370,6 +370,16 @@ impl PreparedSparseAtomBvpCodegen {
     ) -> (CodegenModule, AtomBvpCodegenModuleBreakdown) {
         let mut module = CodegenModule::new(module_name);
         let mut breakdown = AtomBvpCodegenModuleBreakdown::default();
+        let abi_started = std::time::Instant::now();
+        let shared_vars: Arc<[String]> = self.input_names.clone().into();
+        let shared_var_index = Arc::new(
+            self.input_symbols
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| (symbol.id, index))
+                .collect(),
+        );
+        breakdown.input_abi_prepare_ms = abi_started.elapsed().as_secs_f64() * 1_000.0;
 
         let residual_blocks = self
             .residual_chunks
@@ -388,11 +398,11 @@ impl PreparedSparseAtomBvpCodegen {
                     .collect::<Vec<_>>();
                 let residual_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
                 let (block, atom_breakdown) =
-                    GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
+                    GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
                         fn_name,
                         &views,
-                        &self.input_names,
-                        &self.input_symbols,
+                        Arc::clone(&shared_vars),
+                        Arc::clone(&shared_var_index),
                         Some(CodegenOutputLayout::Vector { len: views.len() }),
                         optimization_profile,
                         reuse_policy,
@@ -416,11 +426,11 @@ impl PreparedSparseAtomBvpCodegen {
                 .collect::<Vec<_>>();
             let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
             let (block, atom_breakdown) =
-                GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
+                GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
                     self.jacobian_fn_name.clone(),
                     &views,
-                    &self.input_names,
-                    &self.input_symbols,
+                    Arc::clone(&shared_vars),
+                    Arc::clone(&shared_var_index),
                     Some(self.jacobian_codegen_layout(views.len())),
                     optimization_profile,
                     reuse_policy,
@@ -444,11 +454,11 @@ impl PreparedSparseAtomBvpCodegen {
                         .collect::<Vec<_>>();
                     let sparse_view_collect_ms = collect_begin.elapsed().as_secs_f64() * 1_000.0;
                     let (block, atom_breakdown) =
-                        GeneratedBlock::from_atom_views_with_symbols_with_breakdown_and_profile(
+                        GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
                             fn_name,
                             &views,
-                            &self.input_names,
-                            &self.input_symbols,
+                            Arc::clone(&shared_vars),
+                            Arc::clone(&shared_var_index),
                             Some(self.jacobian_codegen_layout(entries.len())),
                             optimization_profile,
                             reuse_policy,
@@ -705,7 +715,18 @@ mod tests {
             },
         );
 
-        let source = prepared.codegen_module("generated_atom_bvp").emit_source();
+        let module = prepared.codegen_module("generated_atom_bvp");
+        assert!(
+            module.blocks().len() > 1,
+            "fixture should exercise chunking"
+        );
+        assert!(
+            module
+                .blocks()
+                .windows(2)
+                .all(|blocks| blocks[0].shares_input_abi_with(&blocks[1]))
+        );
+        let source = module.emit_source();
         assert!(source.contains("pub mod generated_atom_bvp"));
         assert!(source.contains("eval_bvp_residual_chunk_0"));
         assert!(source.contains("eval_bvp_sparse_values_chunk_0"));

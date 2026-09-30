@@ -37,27 +37,39 @@ pub mod state;
 pub mod statistics;
 pub mod step_control;
 pub mod step_cycle;
+pub mod workload_fixtures;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
-mod story_tests;
-#[cfg(test)]
 mod tests2;
 
+#[cfg(test)]
+#[path = "LSODE2/tests/native_quality_story_tests.rs"]
+mod native_quality_story_tests;
 #[cfg(test)]
 mod nonstiff_parity_tests;
 #[cfg(test)]
 mod parity_micro;
 #[cfg(test)]
 mod stiff_parity_tests;
+
 #[cfg(test)]
-mod story_tests2;
+#[path = "LSODE2/tests/legacy_story_impl.rs"]
+mod legacy_story_impl;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/legacy_story_support.rs"]
+mod legacy_story_support;
 
 #[cfg(test)]
 #[path = "LSODE2/tests/lambdify_stage_story_tests.rs"]
 mod lambdify_stage_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/lambdify_large_scale_story_tests.rs"]
+mod lambdify_large_scale_story_tests;
 
 #[cfg(test)]
 #[path = "LSODE2/tests/story_support.rs"]
@@ -82,6 +94,10 @@ mod telemetry_stage_story_tests;
 #[cfg(test)]
 #[path = "LSODE2/tests/lifecycle_story_tests.rs"]
 mod lifecycle_story_tests;
+
+#[cfg(test)]
+#[path = "LSODE2/tests/parameter_continuation_story_tests.rs"]
+mod parameter_continuation_story_tests;
 
 #[cfg(test)]
 #[path = "LSODE2/tests/correctness_story_tests.rs"]
@@ -153,8 +169,8 @@ pub use config::{
     Lsode2LinearSolverBackend, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
     Lsode2LinearSystemStructure, Lsode2Method, Lsode2NativeExecutionConfig,
     Lsode2NumericProblemOptions, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
-    Lsode2ResolvedPlan, Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
-    Lsode2SymbolicExecutionMode,
+    Lsode2ResolvedPlan, Lsode2SparseJacobianPattern, Lsode2StopComparator, Lsode2StopCondition,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 pub use correction::{
     Lsode2CorrectionAssessment, Lsode2CorrectionControlConfig, Lsode2CorrectionController,

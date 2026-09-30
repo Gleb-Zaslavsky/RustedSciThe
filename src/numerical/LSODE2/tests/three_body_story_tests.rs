@@ -1,11 +1,10 @@
-use super::story_tests2::{BackendRaceRow, RaceStats, short_error, unique_story_short_tag};
+use super::story_support::{BackendRaceRow, RaceStats, short_error, unique_story_short_tag};
 use super::*;
 use crate::numerical::LSODE2::{Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure};
 use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
-use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::process::Command;
@@ -21,87 +20,34 @@ fn command_available(command: &str) -> bool {
 }
 
 pub(super) fn three_body_story_base_config() -> Lsode2ProblemConfig {
-    let k = 39.47841760435743;
-    let m0 = 1.0;
-    let m1 = 0.5;
-    let m2 = 0.75;
+    three_body_story_base_config_with_horizon(500.0, 0.001)
+}
 
-    let params: HashMap<String, f64> = HashMap::from([
-        ("k".to_string(), k),
-        ("m0".to_string(), m0),
-        ("m1".to_string(), m1),
-        ("m2".to_string(), m2),
-    ]);
-
-    let r01 = Expr::parse_expression("((x0 - x1)^2 + (y0 - y1)^2)^0.5");
-    let r02 = Expr::parse_expression("((x0 - x2)^2 + (y0 - y2)^2)^0.5");
-    let r12 = Expr::parse_expression("((x1 - x2)^2 + (y1 - y2)^2)^0.5");
-
-    let eq_vx0 = Expr::parse_expression("-k * (m1*(x0 - x1)/R01^3 + m2*(x0 - x2)/R02^3)")
-        .substitute_variable("R01", &r01)
-        .substitute_variable("R02", &r02)
-        .set_variable_from_map(&params);
-    let eq_vy0 = Expr::parse_expression("-k * (m1*(y0 - y1)/R01^3 + m2*(y0 - y2)/R02^3)")
-        .substitute_variable("R01", &r01)
-        .substitute_variable("R02", &r02)
-        .set_variable_from_map(&params);
-    let eq_vx1 = Expr::parse_expression("-k * (m0*(x1 - x0)/R01^3 + m2*(x1 - x2)/R12^3)")
-        .substitute_variable("R01", &r01)
-        .substitute_variable("R12", &r12)
-        .set_variable_from_map(&params);
-    let eq_vy1 = Expr::parse_expression("-k * (m0*(y1 - y0)/R01^3 + m2*(y1 - y2)/R12^3)")
-        .substitute_variable("R01", &r01)
-        .substitute_variable("R12", &r12)
-        .set_variable_from_map(&params);
-    let eq_vx2 = Expr::parse_expression("-k * (m0*(x2 - x0)/R02^3 + m1*(x2 - x1)/R12^3)")
-        .substitute_variable("R02", &r02)
-        .substitute_variable("R12", &r12)
-        .set_variable_from_map(&params);
-    let eq_vy2 = Expr::parse_expression("-k * (m0*(y2 - y0)/R02^3 + m1*(y2 - y1)/R12^3)")
-        .substitute_variable("R02", &r02)
-        .substitute_variable("R12", &r12)
-        .set_variable_from_map(&params);
-
-    let eq_sys = vec![
-        Expr::parse_expression("vx0"),
-        eq_vx0,
-        Expr::parse_expression("vy0"),
-        eq_vy0,
-        Expr::parse_expression("vx1"),
-        eq_vx1,
-        Expr::parse_expression("vy1"),
-        eq_vy1,
-        Expr::parse_expression("vx2"),
-        eq_vx2,
-        Expr::parse_expression("vy2"),
-        eq_vy2,
-    ];
-
-    let unknowns = vec![
-        "x0".to_string(),
-        "vx0".to_string(),
-        "y0".to_string(),
-        "vy0".to_string(),
-        "x1".to_string(),
-        "vx1".to_string(),
-        "y1".to_string(),
-        "vy1".to_string(),
-        "x2".to_string(),
-        "vx2".to_string(),
-        "y2".to_string(),
-        "vy2".to_string(),
-    ];
+fn three_body_story_base_config_with_horizon(
+    final_time: f64,
+    max_step: f64,
+) -> Lsode2ProblemConfig {
+    let workload = crate::numerical::LSODE2::workload_fixtures::three_body();
+    let params: HashMap<String, f64> = workload
+        .parameter_names
+        .iter()
+        .cloned()
+        .zip(workload.parameter_values.iter().copied())
+        .collect();
+    let eq_sys = workload
+        .equations
+        .into_iter()
+        .map(|equation| equation.set_variable_from_map(&params))
+        .collect();
 
     Lsode2ProblemConfig::new(
         eq_sys,
-        unknowns,
-        "t".to_string(),
+        workload.variables,
+        workload.time_variable,
         0.0,
-        DVector::from_vec(vec![
-            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 5.0, 0.0, -0.4, 33.0, 0.0,
-        ]),
-        500.0,
-        0.001,
+        workload.initial_state,
+        final_time,
+        max_step,
         1e-10,
         1e-12,
     )
@@ -186,23 +132,52 @@ fn three_body_story_physics_checks(solution: &DMatrix<f64>, times: &DVector<f64>
     assert!(max_cm_position_drift.is_finite());
 }
 
-fn three_body_story_trajectory_drift(solution: &DMatrix<f64>, baseline: &DMatrix<f64>) -> f64 {
-    let cols = solution.ncols().min(baseline.ncols());
+fn three_body_story_trajectory_drift(
+    solution: &DMatrix<f64>,
+    times: &DVector<f64>,
+    baseline: &DMatrix<f64>,
+    baseline_times: &DVector<f64>,
+) -> f64 {
     let rows = solution.nrows().min(baseline.nrows());
-    if cols == 0 || rows == 0 {
+    if rows == 0 || times.is_empty() || baseline_times.is_empty() {
         return f64::NAN;
     }
 
     let mut max_drift = 0.0_f64;
-    for col in 0..cols {
+    let mut solution_col = 0;
+    let mut compared = 0;
+    for baseline_col in 0..baseline_times.len().min(baseline.ncols()) {
+        let target_time = baseline_times[baseline_col];
+        while solution_col + 1 < times.len()
+            && solution_col + 1 < solution.ncols()
+            && times[solution_col + 1] < target_time
+        {
+            solution_col += 1;
+        }
+        if solution_col + 1 >= times.len() || solution_col + 1 >= solution.ncols() {
+            break;
+        }
+        if times[solution_col] > target_time {
+            continue;
+        }
+        let left_time = times[solution_col];
+        let right_time = times[solution_col + 1];
+        let span = right_time - left_time;
+        if span <= 0.0 {
+            continue;
+        }
+        let alpha = ((target_time - left_time) / span).clamp(0.0, 1.0);
         let mut sum_sq = 0.0_f64;
         for row in 0..rows {
-            let delta = solution[(row, col)] - baseline[(row, col)];
+            let interpolated = solution[(row, solution_col)]
+                + alpha * (solution[(row, solution_col + 1)] - solution[(row, solution_col)]);
+            let delta = interpolated - baseline[(row, baseline_col)];
             sum_sq += delta * delta;
         }
         max_drift = max_drift.max(sum_sq.sqrt());
+        compared += 1;
     }
-    max_drift
+    if compared == 0 { f64::NAN } else { max_drift }
 }
 
 fn three_body_story_config(
@@ -210,7 +185,17 @@ fn three_body_story_config(
     route: &'static str,
     output_dir: &str,
 ) -> Option<Lsode2ProblemConfig> {
-    let base = three_body_story_base_config();
+    three_body_story_config_with_horizon(matrix, route, output_dir, 500.0, 0.001)
+}
+
+fn three_body_story_config_with_horizon(
+    matrix: &'static str,
+    route: &'static str,
+    output_dir: &str,
+    final_time: f64,
+    max_step: f64,
+) -> Option<Lsode2ProblemConfig> {
+    let base = three_body_story_base_config_with_horizon(final_time, max_step);
     let source = match route {
         "Lambdify" => Lsode2ResidualJacobianSource::Symbolic {
             assembly: Lsode2SymbolicAssemblyBackend::AtomView,
@@ -254,6 +239,69 @@ fn three_body_story_config(
         .with_faithful_bdf_solve(250_000, 250_000);
 
     Some(config)
+}
+
+#[test]
+#[ignore = "release correctness: short-horizon three-body trajectory parity"]
+fn lsode2_three_body_short_horizon_trajectory_parity() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_three_body_story_tests::lsode2_three_body_short_horizon_trajectory_parity",
+    );
+    const FINAL_TIME: f64 = 0.5;
+    const MAX_STEP: f64 = 0.001;
+    const TOLERANCE: f64 = 1.0e-4;
+    let baseline_cfg = three_body_story_config_with_horizon(
+        "Sparse",
+        "Lambdify",
+        "target/lsode2-three-body-short/lambdify",
+        FINAL_TIME,
+        MAX_STEP,
+    )
+    .expect("short-horizon baseline config should build");
+    let mut baseline_solver =
+        Lsode2Solver::new(baseline_cfg).expect("short-horizon baseline should construct");
+    baseline_solver
+        .prepare()
+        .expect("short-horizon baseline prepare should succeed");
+    baseline_solver
+        .solve_with_summary()
+        .expect("short-horizon baseline solve should succeed");
+    let (baseline_times, baseline_solution) = baseline_solver.get_result();
+    let baseline_solution = baseline_solution.transpose();
+    three_body_story_physics_checks(&baseline_solution, &baseline_times);
+
+    let routes = [
+        ("Sparse", "AOT-Ctcc-Whole"),
+        ("Sparse", "AOT-Ctcc-Chunk4"),
+        ("Banded", "Lambdify"),
+        ("Banded", "AOT-Ctcc-Whole"),
+        ("Banded", "AOT-Ctcc-Chunk4"),
+    ];
+    println!(
+        "[LSODE2 three-body short parity] final_time={FINAL_TIME}; max_step={MAX_STEP}; baseline_samples={}",
+        baseline_times.len()
+    );
+    println!("matrix | route | samples | max_trajectory_drift | status");
+    println!("-------------------------------------------------------------");
+    for (matrix, route) in routes {
+        let output_dir = format!("target/lsode2-three-body-short/{matrix}/{route}");
+        let config =
+            three_body_story_config_with_horizon(matrix, route, &output_dir, FINAL_TIME, MAX_STEP)
+                .expect("short-horizon route config should build");
+        let sample =
+            run_three_body_story_sample_result(route, config, &baseline_solution, &baseline_times)
+                .expect("short-horizon route should solve");
+        let drift = sample.trajectory_drift;
+        println!(
+            "{matrix} | {route} | {} | {drift:.3e} | ok",
+            baseline_times.len()
+        );
+        assert!(
+            drift <= TOLERANCE,
+            "short-horizon trajectory drift too large for {matrix}/{route}: {drift:e}"
+        );
+    }
 }
 
 fn three_body_story_chunking_summary(config: &Lsode2ProblemConfig) -> String {
@@ -373,6 +421,7 @@ fn run_three_body_story_sample_result(
     route: &'static str,
     config: Lsode2ProblemConfig,
     baseline_solution: &DMatrix<f64>,
+    baseline_times: &DVector<f64>,
 ) -> Result<ThreeBodyStorySample, String> {
     let started_total = Instant::now();
     let mut solver = Lsode2Solver::new(config).map_err(|err| short_error(&err.to_string()))?;
@@ -391,10 +440,11 @@ fn run_three_body_story_sample_result(
     let (times, solution) = solver.get_result();
     let solution = solution.transpose();
     three_body_story_physics_checks(&solution, &times);
-    let trajectory_drift = three_body_story_trajectory_drift(&solution, baseline_solution);
+    let trajectory_drift =
+        three_body_story_trajectory_drift(&solution, &times, baseline_solution, baseline_times);
     if solution.ncols() != baseline_solution.ncols() {
         eprintln!(
-            "[LSODE2 three-body] diagnostic note: {} produced {} samples vs baseline {} samples; trajectory_drift uses the common prefix",
+            "[LSODE2 three-body] diagnostic note: {} produced {} samples vs baseline {} samples; trajectory_drift is time-aligned by interpolation",
             route,
             solution.ncols(),
             baseline_solution.ncols()
@@ -528,7 +578,12 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
                     "[LSODE2 three-body] matrix={matrix} route={route} chunking_plan={}",
                     three_body_story_chunking_summary(&cfg)
                 );
-                let _ = run_three_body_story_sample_result(route, cfg, &baseline_solution);
+                let _ = run_three_body_story_sample_result(
+                    route,
+                    cfg,
+                    &baseline_solution,
+                    &baseline_times,
+                );
             }
         }
         for rep in 0..REPEATS {
@@ -549,7 +604,12 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
                 "[LSODE2 three-body] matrix={matrix} route={route} chunking_plan={}",
                 three_body_story_chunking_summary(&cfg)
             );
-            match run_three_body_story_sample_result(route, cfg, &baseline_solution) {
+            match run_three_body_story_sample_result(
+                route,
+                cfg,
+                &baseline_solution,
+                &baseline_times,
+            ) {
                 Ok(sample) => {
                     row.runs_ok += 1;
                     row.counter_scope = Some(sample.counter_scope);

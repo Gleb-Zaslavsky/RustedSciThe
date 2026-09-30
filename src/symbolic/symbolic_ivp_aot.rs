@@ -17,7 +17,9 @@ use crate::symbolic::View::state::Symbol;
 use crate::symbolic::bvp::atom_aot::{
     AtomAotBandedSlotMap, AtomAotMatrixLayout, AtomAotPreparedPlan,
 };
-use crate::symbolic::codegen::CodegenIR::{CodegenModule, GeneratedBlock};
+use crate::symbolic::codegen::CodegenIR::{
+    AtomOptimizationProfile, AtomTempReusePolicy, CodegenModule, GeneratedBlock,
+};
 use crate::symbolic::codegen::c_backend::codegen_c_aot_library::GeneratedCAotLibrary;
 use crate::symbolic::codegen::codegen_aot_driver::{
     AotBuildPreset, AotCodegenBackend, GeneratedAotArtifact, GeneratedAotBuildResult,
@@ -35,6 +37,7 @@ use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::GeneratedZigAotLibrary;
+use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, PreparedSymbolicIvpAotProblem, PreparedSymbolicIvpProblem,
     PreparedSymbolicIvpResidualAotProblem, PreparedSymbolicIvpResidualProblem,
@@ -43,6 +46,7 @@ use crate::symbolic::symbolic_ivp::{
 use log::info;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Owned AtomView-native IVP AOT payload.
 ///
@@ -356,25 +360,39 @@ fn prepared_atom_aot_problem_from_atoms_with_layout_and_telemetry(
     requested_layout: AtomAotMatrixLayout,
     telemetry: Option<&crate::symbolic::ivp_telemetry::IvpTelemetry>,
 ) -> Result<PreparedSymbolicIvpAtomAotProblem, IvpBackendError> {
-    let variables_for_all_discrete = vec![variables.to_vec(); residuals.len()];
+    let dependency_started = telemetry.map(|telemetry| {
+        telemetry
+            .start_cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::AtomDependencyAnalysis)
+    });
     let sparse_system =
-        PreparedSparseAtomSystem::from_atoms(&residuals, variables, &variables_for_all_discrete);
-    let sparse_started = telemetry.map(|telemetry| {
-        telemetry.start_cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SparsePattern)
+        PreparedSparseAtomSystem::from_atoms_discovering_dependencies(residuals, variables);
+    if let Some(telemetry) = telemetry {
+        telemetry.record_cold_stage(
+            crate::symbolic::ivp_telemetry::IvpColdStage::AtomDependencyAnalysis,
+            dependency_started.flatten(),
+        );
+    }
+    let differentiation_started = telemetry.map(|telemetry| {
+        telemetry
+            .start_cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation)
     });
     let jacobian_entries = sparse_system
         .try_calc_sparse_jacobian_with_bandwidth(None)
-        .map_err(|message| IvpBackendError::AtomPreparationFailure {
-            stage: "AOT AtomView Jacobian".to_string(),
-            message,
+        .map_err(|error| IvpBackendError::AtomDifferentiationFailure {
+            row: error.row,
+            col: error.col,
+            source: error.source,
         });
-    let jacobian_entries = jacobian_entries?;
     if let Some(telemetry) = telemetry {
         telemetry.record_cold_stage(
-            crate::symbolic::ivp_telemetry::IvpColdStage::SparsePattern,
-            sparse_started.flatten(),
+            crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation,
+            differentiation_started.flatten(),
         );
+        if jacobian_entries.is_err() {
+            telemetry.record_error();
+        }
     }
+    let jacobian_entries = jacobian_entries?;
 
     let mut input_names =
         Vec::with_capacity(1 + variables.len() + equation_parameters.map_or(0, <[String]>::len));
@@ -503,8 +521,22 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
     problem: &PreparedSymbolicIvpAtomAotProblem,
     backend: AotCodegenBackend,
 ) -> Result<GeneratedAotArtifact, IvpBackendError> {
-    let vars = problem.plan.input_names().to_vec();
+    let abi_started = problem
+        .telemetry
+        .as_ref()
+        .map(|telemetry| telemetry.start_cold_stage(IvpColdStage::AotInputAbiPreparation));
+    let vars: Arc<[String]> = problem.plan.input_names().to_vec().into();
     let symbols = problem.plan.input_symbols().to_vec();
+    let var_index_map = Arc::new(
+        symbols
+            .iter()
+            .enumerate()
+            .map(|(index, symbol)| (symbol.id, index))
+            .collect(),
+    );
+    if let (Some(telemetry), Some(started)) = (&problem.telemetry, abi_started) {
+        telemetry.record_cold_stage(IvpColdStage::AotInputAbiPreparation, started);
+    }
     let residual_views = problem
         .plan
         .residuals()
@@ -600,13 +632,18 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
         } else {
             format!("{}_chunk_{index}", problem.residual_fn_name)
         };
-        module.push_generated_block(GeneratedBlock::from_atom_views_with_symbols(
-            fn_name,
-            &residual_views[start..end],
-            &vars,
-            &symbols,
-            Some(CodegenOutputLayout::Vector { len: end - start }),
-        ));
+        module.push_generated_block(
+            GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
+                fn_name,
+                &residual_views[start..end],
+                Arc::clone(&vars),
+                Arc::clone(&var_index_map),
+                Some(CodegenOutputLayout::Vector { len: end - start }),
+                AtomOptimizationProfile::Full,
+                AtomTempReusePolicy::Auto,
+            )
+            .0,
+        );
     }
     // A dense callback owns one complete row-major matrix buffer. It is not a
     // sparse value slice, so keep the ABI as one full block even if a caller
@@ -622,43 +659,48 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
         } else {
             format!("{}_chunk_{index}", problem.jacobian_fn_name)
         };
-        module.push_generated_block(GeneratedBlock::from_atom_views_with_symbols(
-            fn_name,
-            &jacobian_views[start..end],
-            &vars,
-            &symbols,
-            Some(match jacobian_layout {
-                CodegenOutputLayout::SparseValues { .. } => CodegenOutputLayout::SparseValues {
-                    rows: jacobian_rows,
-                    cols: jacobian_cols,
-                    nnz: end - start,
-                },
-                CodegenOutputLayout::BandedValues {
-                    rows, cols, kl, ku, ..
-                } => CodegenOutputLayout::BandedValues {
-                    rows,
-                    cols,
-                    kl,
-                    ku,
-                    slots: end - start,
-                },
-                CodegenOutputLayout::BandedCompactValues {
-                    rows, cols, kl, ku, ..
-                } => CodegenOutputLayout::BandedCompactValues {
-                    rows,
-                    cols,
-                    kl,
-                    ku,
-                    slots: end - start,
-                },
-                CodegenOutputLayout::Matrix { rows, cols } => {
-                    CodegenOutputLayout::Matrix { rows, cols }
-                }
-                CodegenOutputLayout::Vector { .. } => {
-                    unreachable!("native IVP Jacobian layout cannot be a vector")
-                }
-            }),
-        ));
+        module.push_generated_block(
+            GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
+                fn_name,
+                &jacobian_views[start..end],
+                Arc::clone(&vars),
+                Arc::clone(&var_index_map),
+                Some(match jacobian_layout {
+                    CodegenOutputLayout::SparseValues { .. } => CodegenOutputLayout::SparseValues {
+                        rows: jacobian_rows,
+                        cols: jacobian_cols,
+                        nnz: end - start,
+                    },
+                    CodegenOutputLayout::BandedValues {
+                        rows, cols, kl, ku, ..
+                    } => CodegenOutputLayout::BandedValues {
+                        rows,
+                        cols,
+                        kl,
+                        ku,
+                        slots: end - start,
+                    },
+                    CodegenOutputLayout::BandedCompactValues {
+                        rows, cols, kl, ku, ..
+                    } => CodegenOutputLayout::BandedCompactValues {
+                        rows,
+                        cols,
+                        kl,
+                        ku,
+                        slots: end - start,
+                    },
+                    CodegenOutputLayout::Matrix { rows, cols } => {
+                        CodegenOutputLayout::Matrix { rows, cols }
+                    }
+                    CodegenOutputLayout::Vector { .. } => {
+                        unreachable!("native IVP Jacobian layout cannot be a vector")
+                    }
+                }),
+                AtomOptimizationProfile::Full,
+                AtomTempReusePolicy::Auto,
+            )
+            .0,
+        );
     }
     let manifest = problem.manifest();
     info!(

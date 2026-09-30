@@ -3,14 +3,15 @@
 use super::aot_trajectory_parity_story_tests::trajectory_config;
 use super::solver::Lsode2EvaluationTelemetry;
 use super::{
-    IvpTelemetry, Lsode2AotProfile, Lsode2AotToolchain, Lsode2LinearSystemStructure, Lsode2Solver,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    IvpColdStage, IvpTelemetry, Lsode2AotProfile, Lsode2AotToolchain, Lsode2LinearSystemStructure,
+    Lsode2Solver, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
 use nalgebra::{DMatrix, DVector};
+use std::time::Instant;
 use tempfile::tempdir;
 
 macro_rules! reportln {
@@ -67,6 +68,17 @@ fn telemetry_delta(
         accepted_steps: after.accepted_steps.saturating_sub(before.accepted_steps),
         rejected_steps: after.rejected_steps.saturating_sub(before.rejected_steps),
     }
+}
+
+fn cold_stage_delta(
+    after: &super::IvpTelemetrySnapshot,
+    before: &super::IvpTelemetrySnapshot,
+    stage: IvpColdStage,
+) -> u64 {
+    after
+        .cold_stage(stage)
+        .calls
+        .saturating_sub(before.cold_stage(stage).calls)
 }
 
 #[test]
@@ -160,12 +172,13 @@ fn aot_parameter_rebind_and_repeated_warm_solve_reject_stale_runtime() {
                     SymbolicIvpAotBuildPolicy::RequirePrebuilt,
                 )
             });
+            let fresh_telemetry = IvpTelemetry::detailed();
             let mut fresh_solver = Lsode2Solver::new(parameterized_config(
                 structure,
                 assembly,
                 execution,
                 fresh_generated,
-                IvpTelemetry::detailed(),
+                fresh_telemetry.clone(),
                 3.0,
             ))
             .expect("fresh parameterized solver should construct");
@@ -227,6 +240,185 @@ fn aot_parameter_rebind_and_repeated_warm_solve_reject_stale_runtime() {
             assert_eq!(
                 rebound_summary.algorithm, fresh_summary.algorithm,
                 "{matrix}/{route} rebind/fresh algorithm trajectory"
+            );
+
+            // A linked runtime may be shared through the process registry.
+            // Dropping one prepared owner must not invalidate another live solver.
+            drop(rebound_solver);
+            let before_survivor_rebind = fresh_telemetry.snapshot();
+            fresh_solver
+                .set_parameter_values(DVector::from_vec(vec![2.5]))
+                .expect("surviving solver parameter rebind should succeed");
+            let survivor_summary = fresh_solver
+                .solve_with_summary()
+                .expect("surviving solver should remain executable after peer drop");
+            let after_survivor_rebind = fresh_telemetry.snapshot();
+            let survivor_finite = survivor_summary
+                .final_y
+                .as_ref()
+                .is_some_and(|state| state.iter().all(|value| value.is_finite()));
+            let build_delta = after_survivor_rebind
+                .aot_build_attempts
+                .saturating_sub(before_survivor_rebind.aot_build_attempts);
+            let link_delta = after_survivor_rebind
+                .aot_link_attempts
+                .saturating_sub(before_survivor_rebind.aot_link_attempts);
+            reportln!(
+                "[LSODE2 live-runtime lifecycle] matrix={matrix} route={route} peer_dropped=true survivor_finite={survivor_finite} build_delta={build_delta} link_delta={link_delta} artifact_keys_stable={}",
+                before_survivor_rebind.aot_artifact_keys == after_survivor_rebind.aot_artifact_keys
+            );
+            assert!(
+                survivor_finite,
+                "{matrix}/{route} survivor state must be finite"
+            );
+            assert_eq!(build_delta, 0, "{matrix}/{route} survivor must not rebuild");
+            assert_eq!(link_delta, 0, "{matrix}/{route} survivor must not relink");
+            assert_eq!(
+                before_survivor_rebind.aot_artifact_keys, after_survivor_rebind.aot_artifact_keys,
+                "{matrix}/{route} numeric rebind must preserve artifact provenance"
+            );
+            assert_eq!(
+                before_survivor_rebind.errors, after_survivor_rebind.errors,
+                "{matrix}/{route} survivor lifecycle must not record errors"
+            );
+        }
+    }
+}
+
+#[test]
+fn aot_parameter_continuation_fair_warm_performance_and_cache_matrix() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_warm_rebind_story_tests::aot_parameter_continuation_fair_warm_performance_and_cache_matrix",
+    );
+    let output_parent = tempdir().expect("AOT output directory should exist");
+    let targets = [1.5, 2.0, 2.5];
+
+    reportln!(
+        "[LSODE2 AOT continuation fair performance] BuildIfMissing once; identical detailed telemetry; numeric rebind must not rebuild"
+    );
+    reportln!(
+        "matrix | route | targets | continuation_ms | fresh_prepare_ms | fresh_solve_ms | fresh_total_ms | continuation_builds | continuation_links | continuation_materialization | fresh_builds | status"
+    );
+
+    for (matrix, structure) in [
+        ("Sparse", Lsode2LinearSystemStructure::Sparse),
+        (
+            "Banded",
+            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        ),
+    ] {
+        for (route, assembly, execution, is_aot) in [
+            (
+                "ExprLegacy-AOT",
+                Lsode2SymbolicAssemblyBackend::ExprLegacy,
+                Lsode2SymbolicExecutionMode::Aot {
+                    toolchain: Lsode2AotToolchain::CTcc,
+                    profile: Lsode2AotProfile::Debug,
+                },
+                true,
+            ),
+            (
+                "AtomViewNative-AOT",
+                Lsode2SymbolicAssemblyBackend::AtomView,
+                Lsode2SymbolicExecutionMode::Aot {
+                    toolchain: Lsode2AotToolchain::CTcc,
+                    profile: Lsode2AotProfile::Debug,
+                },
+                true,
+            ),
+            (
+                "AtomViewNative-Lambdify",
+                Lsode2SymbolicAssemblyBackend::AtomView,
+                Lsode2SymbolicExecutionMode::LambdifyExpr,
+                false,
+            ),
+        ] {
+            let continuation_telemetry = IvpTelemetry::detailed();
+            let mut continuation = Lsode2Solver::new(parameterized_config(
+                structure,
+                assembly,
+                execution,
+                is_aot.then(|| {
+                    generated_config(
+                        output_parent.path(),
+                        SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                            profile: AotBuildProfile::Debug,
+                        },
+                    )
+                }),
+                continuation_telemetry.clone(),
+                1.0,
+            ))
+            .expect("continuation solver should construct");
+            continuation
+                .solve_with_summary()
+                .expect("initial continuation solve should succeed");
+            let before = continuation_telemetry.snapshot();
+            let continuation_started = Instant::now();
+            for parameter in targets {
+                continuation
+                    .set_parameter_values(DVector::from_vec(vec![parameter]))
+                    .expect("AOT numeric rebind should succeed");
+                continuation
+                    .solve_with_summary()
+                    .expect("continued AOT solve should succeed");
+            }
+            let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1.0e3;
+            let after = continuation_telemetry.snapshot();
+
+            let fresh_telemetry = IvpTelemetry::detailed();
+            let mut fresh_prepare_ms = 0.0;
+            let mut fresh_solve_ms = 0.0;
+            for parameter in targets {
+                let prepare_started = Instant::now();
+                let mut fresh = Lsode2Solver::new(parameterized_config(
+                    structure,
+                    assembly,
+                    execution,
+                    is_aot.then(|| {
+                        generated_config(
+                            output_parent.path(),
+                            SymbolicIvpAotBuildPolicy::RequirePrebuilt,
+                        )
+                    }),
+                    fresh_telemetry.clone(),
+                    parameter,
+                ))
+                .expect("fresh continuation solver should construct");
+                fresh_prepare_ms += prepare_started.elapsed().as_secs_f64() * 1.0e3;
+
+                let solve_started = Instant::now();
+                fresh
+                    .solve_with_summary()
+                    .expect("fresh continuation solve should succeed");
+                fresh_solve_ms += solve_started.elapsed().as_secs_f64() * 1.0e3;
+            }
+            let fresh_snapshot = fresh_telemetry.snapshot();
+            let continuation_builds = cold_stage_delta(&after, &before, IvpColdStage::AotBuild);
+            let continuation_links = cold_stage_delta(&after, &before, IvpColdStage::AotLink);
+            let continuation_materialization =
+                cold_stage_delta(&after, &before, IvpColdStage::AotMaterialization);
+            let fresh_builds = fresh_snapshot.cold_stage(IvpColdStage::AotBuild).calls;
+            let fresh_total_ms = fresh_prepare_ms + fresh_solve_ms;
+
+            reportln!(
+                "{matrix} | {route} | {} | {continuation_ms:.3} | {fresh_prepare_ms:.3} | {fresh_solve_ms:.3} | {fresh_total_ms:.3} | {continuation_builds} | {continuation_links} | {continuation_materialization} | {fresh_builds} | ok",
+                targets.len(),
+            );
+            assert_eq!(
+                continuation_builds, 0,
+                "{matrix}/{route} continuation build"
+            );
+            assert_eq!(continuation_links, 0, "{matrix}/{route} continuation link");
+            assert_eq!(
+                continuation_materialization, 0,
+                "{matrix}/{route} continuation materialization"
+            );
+            assert_eq!(fresh_builds, 0, "{matrix}/{route} RequirePrebuilt build");
+            assert_eq!(
+                after.errors, before.errors,
+                "{matrix}/{route} continuation errors"
             );
         }
     }

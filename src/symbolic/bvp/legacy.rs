@@ -730,6 +730,7 @@ impl BvpPreparedSparseAotProblem {
 /// - and rendering the final source string.
 #[derive(Clone, Debug, Default)]
 pub struct BvpGeneratedAotCrateBreakdown {
+    pub atom_input_abi_prepare_ms: f64,
     pub jacobian_prepare_ms: f64,
     pub atom_sparse_lookup_prepare_ms: f64,
     pub atom_sparse_jacobian_build_ms: f64,
@@ -2371,6 +2372,7 @@ impl BvpPreparedSparseAotProblem {
                     .map(|entry| entry.diag_position)
                     .collect(),
             },
+            compact: false,
             chunks,
         }
     }
@@ -2653,7 +2655,8 @@ impl BvpPreparedSparseAotProblem {
                 record_aot_stage_ms(
                     plan,
                     BvpAotColdStage::Lowering,
-                    atom_module_breakdown.residual_view_collect_ms
+                    atom_module_breakdown.input_abi_prepare_ms
+                        + atom_module_breakdown.residual_view_collect_ms
                         + atom_module_breakdown.residual_lower_many_ms
                         + atom_module_breakdown.residual_peephole_ms
                         + atom_module_breakdown.residual_reuse_temps_ms
@@ -2682,6 +2685,7 @@ impl BvpPreparedSparseAotProblem {
 
             let breakdown = BvpGeneratedAotCrateBreakdown {
                 jacobian_prepare_ms,
+                atom_input_abi_prepare_ms: atom_module_breakdown.input_abi_prepare_ms,
                 atom_sparse_lookup_prepare_ms: atom_breakdown.sparse_lookup_prepare_ms,
                 atom_sparse_jacobian_build_ms: atom_breakdown.sparse_jacobian_build_ms,
                 atom_finalize_codegen_plan_ms: atom_breakdown.finalize_codegen_plan_ms,
@@ -2737,6 +2741,7 @@ impl BvpPreparedSparseAotProblem {
 
         let breakdown = BvpGeneratedAotCrateBreakdown {
             jacobian_prepare_ms: 0.0,
+            atom_input_abi_prepare_ms: 0.0,
             atom_sparse_lookup_prepare_ms: 0.0,
             atom_sparse_jacobian_build_ms: 0.0,
             atom_finalize_codegen_plan_ms: 0.0,
@@ -3154,6 +3159,7 @@ impl BvpPreparedSparseAotProblem {
                 }
                 let breakdown = BvpGeneratedAotCrateBreakdown {
                     jacobian_prepare_ms,
+                    atom_input_abi_prepare_ms: atom_module_breakdown.input_abi_prepare_ms,
                     atom_sparse_lookup_prepare_ms: atom_breakdown.sparse_lookup_prepare_ms,
                     atom_sparse_jacobian_build_ms: atom_breakdown.sparse_jacobian_build_ms,
                     atom_finalize_codegen_plan_ms: atom_breakdown.finalize_codegen_plan_ms,

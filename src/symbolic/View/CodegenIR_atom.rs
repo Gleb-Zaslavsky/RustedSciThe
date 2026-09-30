@@ -7,6 +7,7 @@
 
 use ahash::{AHasher, HashMap, HashMapExt};
 use std::hash::Hasher;
+use std::sync::Arc;
 
 use super::{
     atom::AtomView,
@@ -29,7 +30,7 @@ pub struct Lowerer {
     next_temp: usize,
     cse_policy: AtomCsePolicy,
     /// Symbol id → input slot index.
-    var_index_map: HashMap<u32, usize>,
+    var_index_map: Arc<HashMap<u32, usize>>,
     input_cache: HashMap<usize, Temp>,
     const_cache: HashMap<u64, Temp>,
     exact_view_cache: HashMap<(*const u8, usize), Temp>,
@@ -124,7 +125,15 @@ impl Lowerer {
     /// Disabling CSE is meant for diagnostics and benchmarking. The default
     /// production route keeps CSE enabled.
     pub fn new_with_cse_policy(vars: &[Symbol], cse_policy: AtomCsePolicy) -> Self {
-        let var_index_map = vars.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+        let var_index_map = Arc::new(vars.iter().enumerate().map(|(i, s)| (s.id, i)).collect());
+        Self::new_with_shared_index(var_index_map, cse_policy)
+    }
+
+    /// Build a block-local lowerer sharing an immutable input ABI index.
+    pub(crate) fn new_with_shared_index(
+        var_index_map: Arc<HashMap<u32, usize>>,
+        cse_policy: AtomCsePolicy,
+    ) -> Self {
         Self {
             instructions: Vec::new(),
             next_temp: 0,
@@ -241,11 +250,7 @@ impl Lowerer {
                 // but avoid a generic runtime pow call in AOT.
                 if matches!(exp, AtomView::Num(_)) && coeff_to_f64(exp) == 2.0 {
                     let dst = self.fresh();
-                    self.instructions.push(Instr::Mul {
-                        dst,
-                        a: tb,
-                        b: tb,
-                    });
+                    self.instructions.push(Instr::Mul { dst, a: tb, b: tb });
                     return dst;
                 }
                 let te = self.lower_view(exp);
@@ -422,13 +427,10 @@ impl Lowerer {
                 let tb = self.lower_dag_node(dag, *base);
                 if matches!(&dag.nodes[*exp].kind, DagNodeKind::Num(value) if *value == 1.0) {
                     tb
-                } else if matches!(&dag.nodes[*exp].kind, DagNodeKind::Num(value) if *value == 2.0) {
+                } else if matches!(&dag.nodes[*exp].kind, DagNodeKind::Num(value) if *value == 2.0)
+                {
                     let dst = self.fresh();
-                    self.instructions.push(Instr::Mul {
-                        dst,
-                        a: tb,
-                        b: tb,
-                    });
+                    self.instructions.push(Instr::Mul { dst, a: tb, b: tb });
                     dst
                 } else {
                     let te = self.lower_dag_node(dag, *exp);

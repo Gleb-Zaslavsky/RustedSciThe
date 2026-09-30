@@ -6,18 +6,22 @@
 //! by construction: it is a correctness control, not a production large-system
 //! route.
 
-use super::native_jacobian::{try_prepare_native_atomview_jacobian_runtime, NativeJacobianStorage};
+use super::native_jacobian::{NativeJacobianStorage, try_prepare_native_atomview_jacobian_runtime};
 use super::story_support::{
-    chain_equations, chain_solver_config, chain_state, max_vector_diff, prepare_chain_residual,
-    ChainMatrixRoute,
+    ChainMatrixRoute, chain_equations, chain_solver_config, chain_state, max_vector_diff,
+    prepare_chain_residual,
 };
 use super::{IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpWarmStage, Lsode2Solver};
+use crate::symbolic::codegen::codegen_orchestrator::{
+    machine_min_work_per_parallel_job, rayon_overhead_baseline,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
-    build_symbolic_jacobian, IvpSymbolicAssemblyBackend, PreparedNativeJacobianMetrics,
+    IvpSymbolicAssemblyBackend, PreparedNativeJacobianMetrics, build_symbolic_jacobian,
 };
 use nalgebra::DVector;
 use std::hint::black_box;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -437,6 +441,9 @@ struct CallbackPolicyRun {
     residual_calls: u64,
     jacobian_calls: u64,
     auto_min_work_per_job: usize,
+    rayon_join2_ns: f64,
+    rayon_join4_ns: f64,
+    calibrated_min_work_per_job: usize,
 }
 
 fn run_callback_policy_case(
@@ -524,6 +531,7 @@ fn run_callback_policy_case(
     }
     black_box((residual_total, &sparse_values, &banded_values));
     let snapshot = telemetry.snapshot();
+    let overhead = rayon_overhead_baseline();
     CallbackPolicyRun {
         policy,
         residual_ms,
@@ -536,6 +544,9 @@ fn run_callback_policy_case(
         residual_calls: snapshot.residual_evaluations,
         jacobian_calls: snapshot.jacobian_evaluations,
         auto_min_work_per_job: snapshot.lambdify_auto_min_work_per_job,
+        rayon_join2_ns: overhead.join2_ns,
+        rayon_join4_ns: overhead.join4_ns,
+        calibrated_min_work_per_job: machine_min_work_per_parallel_job(),
     }
 }
 
@@ -570,11 +581,16 @@ fn lsode2_large_auto_break_even_story() {
     let dimensions = dimensions_from_env("LSODE2_AUTO_DIMENSIONS", &[128, 256, 512, 1024]);
     let checkpoints = [1usize, 4, 16, 64];
     let min_work = usize_from_env("LSODE2_AUTO_MIN_WORK", 64);
+    let overhead = rayon_overhead_baseline();
     reportln!(
-        "[LSODE2 large Auto break-even] dimensions={dimensions:?}; checkpoints={checkpoints:?}; min_work={min_work}; AtomViewNative; Sparse/Banded; preparation excluded"
+        "[LSODE2 large Auto break-even] dimensions={dimensions:?}; checkpoints={checkpoints:?}; min_work={min_work}; AtomViewNative; Sparse/Banded; preparation excluded; calibration_workers={}; rayon_join2_ns={:.3}; rayon_join4_ns={:.3}; calibrated_min_work_per_job={}",
+        overhead.workers,
+        overhead.join2_ns,
+        overhead.join4_ns,
+        machine_min_work_per_parallel_job(),
     );
     reportln!(
-        "matrix | dimension | policy | residual_ms@1 | residual_ms@4 | residual_ms@16 | residual_ms@64 | jacobian_ms@1 | jacobian_ms@4 | jacobian_ms@16 | jacobian_ms@64 | parallel_dispatches | sequential_dispatches | worker_count | auto_min_work_per_job | residual_calls | jacobian_calls | residual_diff | jacobian_diff"
+        "matrix | dimension | policy | residual_ms@1 | residual_ms@4 | residual_ms@16 | residual_ms@64 | jacobian_ms@1 | jacobian_ms@4 | jacobian_ms@16 | jacobian_ms@64 | parallel_dispatches | sequential_dispatches | worker_count | auto_min_work_per_job | calibrated_min_work_per_job | rayon_join2_ns | rayon_join4_ns | residual_calls | jacobian_calls | residual_diff | jacobian_diff"
     );
     reportln!(
         "--- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---:"
@@ -614,24 +630,15 @@ fn lsode2_large_auto_break_even_story() {
                         <= 1.0e-10
                 );
             }
-            let auto_break_even = if auto.parallel_dispatches == 0 {
-                "none (Auto remained sequential)".to_string()
-            } else {
-                checkpoints
-                    .iter()
-                    .enumerate()
-                    .find(|(index, _)| {
-                        auto.residual_ms[*index] <= sequential.residual_ms[*index]
-                            && auto.jacobian_ms[*index] <= sequential.jacobian_ms[*index]
-                    })
-                    .map(|(_, checkpoint)| checkpoint.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            };
+            let auto_break_even = auto_crossover_label(sequential, auto, &checkpoints);
+            let portable_break_even =
+                portable_auto_crossover_label(sequential, auto, &checkpoints, dimension);
             reportln!(
-                "[LSODE2 Auto crossover] matrix={} dimension={} first_both_stage_crossover={}",
+                "[LSODE2 Auto crossover] matrix={} dimension={} raw_first_both_stage_crossover={} portable_stable_crossover={}",
                 matrix.label(),
                 dimension,
-                auto_break_even
+                auto_break_even,
+                portable_break_even
             );
             for run in &runs {
                 let residual_diff =
@@ -639,7 +646,7 @@ fn lsode2_large_auto_break_even_story() {
                 let jacobian_diff =
                     max_slice_diff(&sequential.jacobian_reference, &run.jacobian_reference);
                 reportln!(
-                    "{} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {:.3e} | {:.3e}",
+                    "{} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {:.3} | {:.3} | {} | {} | {:.3e} | {:.3e}",
                     matrix.label(),
                     dimension,
                     run.policy.label(),
@@ -655,6 +662,9 @@ fn lsode2_large_auto_break_even_story() {
                     run.sequential_dispatches,
                     run.worker_count,
                     run.auto_min_work_per_job,
+                    run.calibrated_min_work_per_job,
+                    run.rayon_join2_ns,
+                    run.rayon_join4_ns,
                     run.residual_calls,
                     run.jacobian_calls,
                     residual_diff,
@@ -664,5 +674,271 @@ fn lsode2_large_auto_break_even_story() {
                 assert_eq!(run.jacobian_calls, *checkpoints.last().unwrap() as u64);
             }
         }
+    }
+}
+
+const AUTO_WORKER_CHILD_TEST: &str =
+    "numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_worker_child";
+
+fn auto_crossover_label(
+    sequential: &CallbackPolicyRun,
+    auto: &CallbackPolicyRun,
+    checkpoints: &[usize],
+) -> String {
+    if auto.parallel_dispatches == 0 {
+        return "none (Auto remained sequential)".to_string();
+    }
+    checkpoints
+        .iter()
+        .enumerate()
+        .find(|(index, _)| {
+            auto.residual_ms[*index] <= sequential.residual_ms[*index]
+                && auto.jacobian_ms[*index] <= sequential.jacobian_ms[*index]
+        })
+        .map(|(_, checkpoint)| checkpoint.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn portable_auto_crossover_label(
+    sequential: &CallbackPolicyRun,
+    auto: &CallbackPolicyRun,
+    checkpoints: &[usize],
+    dimension: usize,
+) -> String {
+    if auto.parallel_dispatches == 0 {
+        return "none (Auto remained sequential)".to_string();
+    }
+    let minimum_work = auto
+        .calibrated_min_work_per_job
+        .saturating_mul(auto.worker_count.max(2));
+    checkpoints
+        .iter()
+        .enumerate()
+        .find(|(index, checkpoint)| {
+            let work = dimension.saturating_mul(**checkpoint);
+            work >= minimum_work
+                && auto.residual_ms[*index] <= sequential.residual_ms[*index]
+                && auto.jacobian_ms[*index] <= sequential.jacobian_ms[*index]
+                && (0..checkpoints.len()).skip(*index).all(|later| {
+                    auto.residual_ms[later] <= sequential.residual_ms[later]
+                        && auto.jacobian_ms[later] <= sequential.jacobian_ms[later]
+                })
+        })
+        .map(|(_, checkpoint)| checkpoint.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn worker_counts_from_env() -> Vec<usize> {
+    std::env::var("LSODE2_AUTO_WORKER_COUNTS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|count| *count > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|counts| !counts.is_empty())
+        .unwrap_or_else(|| vec![1, 2, 4])
+}
+
+fn run_auto_worker_child(
+    worker_count: usize,
+    dimensions: &[usize],
+    checkpoints: &[usize],
+    min_work: usize,
+) {
+    for &dimension in dimensions {
+        for matrix in [ChainMatrixRoute::Sparse, ChainMatrixRoute::Banded] {
+            let runs = [
+                run_callback_policy_case(
+                    dimension,
+                    matrix,
+                    IvpLambdifyExecutionPolicy::Sequential,
+                    checkpoints,
+                ),
+                run_callback_policy_case(
+                    dimension,
+                    matrix,
+                    IvpLambdifyExecutionPolicy::Parallel { min_work: 1 },
+                    checkpoints,
+                ),
+                run_callback_policy_case(
+                    dimension,
+                    matrix,
+                    IvpLambdifyExecutionPolicy::Auto { min_work },
+                    checkpoints,
+                ),
+            ];
+            let sequential = &runs[0];
+            let auto = &runs[2];
+            assert_eq!(
+                auto.worker_count, worker_count,
+                "telemetry must report the worker count selected for the child process"
+            );
+            for run in &runs[1..] {
+                assert!(
+                    max_slice_diff(&sequential.residual_reference, &run.residual_reference)
+                        <= 1.0e-10
+                );
+                assert!(
+                    max_slice_diff(&sequential.jacobian_reference, &run.jacobian_reference)
+                        <= 1.0e-10
+                );
+                assert_eq!(
+                    run.residual_calls,
+                    checkpoints.last().copied().unwrap() as u64
+                );
+                assert_eq!(
+                    run.jacobian_calls,
+                    checkpoints.last().copied().unwrap() as u64
+                );
+            }
+            let residual_diff =
+                max_slice_diff(&sequential.residual_reference, &auto.residual_reference);
+            let jacobian_diff =
+                max_slice_diff(&sequential.jacobian_reference, &auto.jacobian_reference);
+            println!(
+                "RST_AUTO_WORKER|workers={worker_count}|matrix={}|dimension={dimension}|auto_crossover={}|portable_crossover={}|sequential_residual_ms={:.6},{:.6},{:.6},{:.6}|auto_residual_ms={:.6},{:.6},{:.6},{:.6}|sequential_jacobian_ms={:.6},{:.6},{:.6},{:.6}|auto_jacobian_ms={:.6},{:.6},{:.6},{:.6}|parallel_dispatches={}|sequential_dispatches={}|worker_count_observed={}|auto_min_work_per_job={}|calibrated_min_work_per_job={}|rayon_join2_ns={:.3}|rayon_join4_ns={:.3}|residual_calls={}|jacobian_calls={}|residual_diff={:.3e}|jacobian_diff={:.3e}",
+                matrix.label(),
+                auto_crossover_label(sequential, auto, checkpoints),
+                portable_auto_crossover_label(sequential, auto, checkpoints, dimension),
+                sequential.residual_ms[0],
+                sequential.residual_ms[1],
+                sequential.residual_ms[2],
+                sequential.residual_ms[3],
+                auto.residual_ms[0],
+                auto.residual_ms[1],
+                auto.residual_ms[2],
+                auto.residual_ms[3],
+                sequential.jacobian_ms[0],
+                sequential.jacobian_ms[1],
+                sequential.jacobian_ms[2],
+                sequential.jacobian_ms[3],
+                auto.jacobian_ms[0],
+                auto.jacobian_ms[1],
+                auto.jacobian_ms[2],
+                auto.jacobian_ms[3],
+                auto.parallel_dispatches,
+                auto.sequential_dispatches,
+                auto.worker_count,
+                auto.auto_min_work_per_job,
+                auto.calibrated_min_work_per_job,
+                auto.rayon_join2_ns,
+                auto.rayon_join4_ns,
+                auto.residual_calls,
+                auto.jacobian_calls,
+                residual_diff,
+                jacobian_diff,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "child process for the multi-worker Auto break-even story"]
+fn lsode2_large_auto_break_even_worker_child() {
+    if std::env::var_os("LSODE2_AUTO_WORKER_CHILD").is_none() {
+        return;
+    }
+    let worker_count = usize_from_env("LSODE2_AUTO_WORKER_COUNT", 1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build_global()
+        .expect("worker child must initialize its requested Rayon pool before callbacks");
+    let dimensions = dimensions_from_env("LSODE2_AUTO_DIMENSIONS", &[256, 512]);
+    let checkpoints = [1usize, 4, 16, 64];
+    let min_work = usize_from_env("LSODE2_AUTO_MIN_WORK", 64);
+    run_auto_worker_child(worker_count, &dimensions, &checkpoints, min_work);
+}
+
+#[test]
+#[ignore = "release multi-worker Auto/Parallel break-even matrix; run explicitly with --ignored"]
+fn lsode2_large_auto_break_even_multi_worker_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_multi_worker_story",
+    );
+    let workers = worker_counts_from_env();
+    let dimensions = dimensions_from_env("LSODE2_AUTO_DIMENSIONS", &[256, 512]);
+    let min_work = usize_from_env("LSODE2_AUTO_MIN_WORK", 64);
+    reportln!(
+        "[LSODE2 multi-worker Auto break-even] workers={workers:?}; dimensions={dimensions:?}; checkpoints=[1,4,16,64]; min_work={min_work}; each worker count is a fresh child process"
+    );
+    reportln!(
+        "workers | matrix | dimension | raw_auto_crossover | portable_auto_crossover | sequential_residual_ms@1,@4,@16,@64 | auto_residual_ms@1,@4,@16,@64 | sequential_jacobian_ms@1,@4,@16,@64 | auto_jacobian_ms@1,@4,@16,@64 | parallel_dispatches | sequential_dispatches | observed_workers | auto_min_work | calibrated_min_work | rayon_join2_ns | rayon_join4_ns | residual_calls | jacobian_calls | residual_diff | jacobian_diff"
+    );
+
+    for worker_count in workers {
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = Command::new(executable)
+            .arg("--exact")
+            .arg(AUTO_WORKER_CHILD_TEST)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("LSODE2_AUTO_WORKER_CHILD", "1")
+            .env("LSODE2_AUTO_WORKER_COUNT", worker_count.to_string())
+            .env(
+                "LSODE2_AUTO_DIMENSIONS",
+                dimensions
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .env("LSODE2_AUTO_MIN_WORK", min_work.to_string())
+            .env("RAYON_NUM_THREADS", worker_count.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("multi-worker Auto child should start");
+        assert!(
+            output.status.success(),
+            "multi-worker Auto child failed for workers={worker_count}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut rows = 0usize;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(index) = line.find("RST_AUTO_WORKER|") {
+                let row = &line[index + "RST_AUTO_WORKER|".len()..];
+                let fields = row
+                    .split('|')
+                    .filter_map(|field| field.split_once('='))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let field = |name: &str| fields.get(name).copied().unwrap_or("missing");
+                assert_eq!(field("workers").parse::<usize>().ok(), Some(worker_count));
+                reportln!(
+                    "{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
+                    field("workers"),
+                    field("matrix"),
+                    field("dimension"),
+                    field("auto_crossover"),
+                    field("portable_crossover"),
+                    field("sequential_residual_ms"),
+                    field("auto_residual_ms"),
+                    field("sequential_jacobian_ms"),
+                    field("auto_jacobian_ms"),
+                    field("parallel_dispatches"),
+                    field("sequential_dispatches"),
+                    field("worker_count_observed"),
+                    field("auto_min_work_per_job"),
+                    field("calibrated_min_work_per_job"),
+                    field("rayon_join2_ns"),
+                    field("rayon_join4_ns"),
+                    field("residual_calls"),
+                    field("jacobian_calls"),
+                    field("residual_diff"),
+                    field("jacobian_diff"),
+                );
+                rows += 1;
+            }
+        }
+        assert_eq!(
+            rows,
+            dimensions.len() * 2,
+            "worker child must return one row per dimension and matrix"
+        );
     }
 }

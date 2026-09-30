@@ -536,6 +536,7 @@ mod tests {
             shape: (2, 2),
             kl: 1,
             ku: 0,
+            compact: false,
             entries: &entries,
             variables: &vars,
             params: Some(&params),

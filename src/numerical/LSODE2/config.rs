@@ -28,6 +28,33 @@ pub struct Lsode2AnalyticalCallbacks {
     pub jacobian: Lsode2AnalyticalJacobianCallback,
 }
 
+/// Compact structural Jacobian pattern for Sparse finite-difference coloring.
+///
+/// Storage is proportional to the number of declared structural nonzeros,
+/// rather than the square of the state dimension. The pattern is a structural
+/// promise: every potentially nonzero derivative must be listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lsode2SparseJacobianPattern {
+    dimension: usize,
+    entries: Vec<(usize, usize)>,
+}
+
+impl Lsode2SparseJacobianPattern {
+    pub fn new(dimension: usize, mut entries: Vec<(usize, usize)>) -> Self {
+        entries.sort_unstable();
+        entries.dedup();
+        Self { dimension, entries }
+    }
+
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    pub fn entries(&self) -> &[(usize, usize)] {
+        &self.entries
+    }
+}
+
 /// User-facing setup for a pure numerical LSODE2 IVP.
 ///
 /// This keeps the numerical route free from symbolic `Expr` placeholders at
@@ -796,7 +823,14 @@ pub struct Lsode2ProblemConfig {
     pub max_step: f64,
     pub rtol: f64,
     pub atol: f64,
+    /// Optional dense Jacobian structure mask. For native Sparse finite
+    /// differences, nonzero entries declare the structural pattern used for
+    /// column coloring; the mask must include every potentially nonzero
+    /// derivative. Supplying this dense mask costs O(n^2) storage.
     pub jac_sparsity: Option<DMatrix<f64>>,
+    /// Optional compact structural pattern for native Sparse finite
+    /// differences. Prefer this over `jac_sparsity` for large systems.
+    pub sparse_jacobian_pattern: Option<Lsode2SparseJacobianPattern>,
     pub vectorized: bool,
     pub first_step: Option<f64>,
     pub stop_conditions: Vec<Lsode2StopCondition>,
@@ -840,6 +874,7 @@ impl Lsode2ProblemConfig {
             rtol,
             atol,
             jac_sparsity: None,
+            sparse_jacobian_pattern: None,
             vectorized: false,
             first_step: None,
             stop_conditions: Vec::new(),
@@ -1412,8 +1447,22 @@ impl Lsode2ProblemConfig {
         self
     }
 
+    /// Supplies the Jacobian structure mask used by backend adapters and by
+    /// native Sparse finite-difference coloring. A too-narrow mask can omit
+    /// real derivatives; use `None` when the sparsity structure is unknown.
     pub fn with_jac_sparsity(mut self, jac_sparsity: Option<DMatrix<f64>>) -> Self {
         self.jac_sparsity = jac_sparsity;
+        self
+    }
+
+    /// Supplies a compact Sparse Jacobian pattern for native finite
+    /// differences. Coordinates are `(row, column)` and must include every
+    /// potentially nonzero derivative.
+    pub fn with_sparse_jacobian_pattern(
+        mut self,
+        pattern: Option<Lsode2SparseJacobianPattern>,
+    ) -> Self {
+        self.sparse_jacobian_pattern = pattern;
         self
     }
 

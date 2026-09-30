@@ -537,7 +537,17 @@ impl PreparedEvaluator {
                 input_len
             ));
         }
-        Ok(match self.fast_path {
+        Ok(self.evaluate_fast_ivp_unchecked(time, parameters, state))
+    }
+
+    #[inline]
+    fn evaluate_fast_ivp_unchecked(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+    ) -> Option<f64> {
+        match self.fast_path {
             Some(PreparedFastPath::Constant(value)) => Some(value),
             Some(PreparedFastPath::Variable(index)) => Some(match index {
                 0 => time,
@@ -545,7 +555,7 @@ impl PreparedEvaluator {
                 index => state[index - parameters.len() - 1],
             }),
             None => None,
-        })
+        }
     }
 
     /// Evaluate a batch of IVP scalar plans while borrowing the worker-local
@@ -560,6 +570,7 @@ impl PreparedEvaluator {
         time: f64,
         parameters: &'a [f64],
         state: &'a [f64],
+        expected_input_len: usize,
         values: &mut [f64],
     ) -> Result<(), (usize, String)>
     where
@@ -572,22 +583,36 @@ impl PreparedEvaluator {
                 parameters,
                 state,
             };
+            let input_len = input.len();
+            if input_len != expected_input_len {
+                return Err((
+                    0,
+                    format!(
+                        "Prepared evaluator batch expected {} argument(s), got {}",
+                        expected_input_len, input_len
+                    ),
+                ));
+            }
             for (index, evaluator) in evaluators.into_iter().enumerate() {
                 // Keep the batch path semantically identical to the single
                 // evaluator path. Constant and identity Jacobian entries are
                 // common in sparse diffusion/reaction systems; sending them
                 // through the general node interpreter defeats the prepared
                 // fast path and can dominate the whole callback.
-                let result = match evaluator.evaluate_fast_ivp(time, parameters, state) {
-                    Ok(Some(value)) => Ok(value),
-                    Ok(None) if evaluator.plain_numeric => evaluator
-                        .evaluate_plain_numeric_ivp(time, parameters, state, &mut workspace),
-                    Ok(None) => evaluator.evaluate_with_workspace(
+                let result = match evaluator.evaluate_fast_ivp_unchecked(time, parameters, state) {
+                    Some(value) => Ok(value),
+                    None if evaluator.plain_numeric => evaluator
+                        .evaluate_plain_numeric_ivp_unchecked(
+                            time,
+                            parameters,
+                            state,
+                            &mut workspace,
+                        ),
+                    None => evaluator.evaluate_with_workspace(
                         input,
                         &evaluator.function_map,
                         &mut workspace,
                     ),
-                    Err(error) => Err(error),
                 };
                 match result {
                     Ok(value) => values[index] = value,
@@ -621,8 +646,20 @@ impl PreparedEvaluator {
             results[index] = match node {
                 PreparedNode::Const(value) => *value,
                 PreparedNode::Var(var_index) => input.get(*var_index),
-                PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
-                PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::Add(args) => {
+                    let mut value = 0.0;
+                    for &arg in args.iter() {
+                        value += results[arg];
+                    }
+                    value
+                }
+                PreparedNode::Mul(args) => {
+                    let mut value = 1.0;
+                    for &arg in args.iter() {
+                        value *= results[arg];
+                    }
+                    value
+                }
                 PreparedNode::PowI { base, exponent } => {
                     evaluate_integer_power(results[*base], *exponent)
                 }
@@ -665,6 +702,17 @@ impl PreparedEvaluator {
             ));
         }
 
+        self.evaluate_plain_numeric_ivp_unchecked(time, parameters, state, workspace)
+    }
+
+    #[inline]
+    fn evaluate_plain_numeric_ivp_unchecked(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, String> {
         workspace.results.resize(self.nodes.len(), 0.0);
         let results = &mut workspace.results;
         for (index, node) in self.nodes.iter().enumerate() {
@@ -675,8 +723,20 @@ impl PreparedEvaluator {
                     index if index <= parameters.len() => parameters[index - 1],
                     index => state[index - parameters.len() - 1],
                 },
-                PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
-                PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                PreparedNode::Add(args) => {
+                    let mut value = 0.0;
+                    for &arg in args.iter() {
+                        value += results[arg];
+                    }
+                    value
+                }
+                PreparedNode::Mul(args) => {
+                    let mut value = 1.0;
+                    for &arg in args.iter() {
+                        value *= results[arg];
+                    }
+                    value
+                }
                 PreparedNode::PowI { base, exponent } => {
                     evaluate_integer_power(results[*base], *exponent)
                 }
@@ -729,8 +789,20 @@ impl PreparedEvaluator {
                 match node {
                     PreparedNode::Const(value) => *value,
                     PreparedNode::Var(var_index) => input.get(*var_index),
-                    PreparedNode::Add(args) => args.iter().map(|i| results[*i]).sum(),
-                    PreparedNode::Mul(args) => args.iter().map(|i| results[*i]).product(),
+                    PreparedNode::Add(args) => {
+                        let mut value = 0.0;
+                        for &arg in args.iter() {
+                            value += results[arg];
+                        }
+                        value
+                    }
+                    PreparedNode::Mul(args) => {
+                        let mut value = 1.0;
+                        for &arg in args.iter() {
+                            value *= results[arg];
+                        }
+                        value
+                    }
                     PreparedNode::PowI { base, exponent } => {
                         evaluate_integer_power(results[*base], *exponent)
                     }
@@ -1572,16 +1644,12 @@ mod test {
         let t = symbol!("t");
         let y = symbol!("y");
         let context = super::PreparedVariableContext::new(&[t, y]);
-        let constant = prepare_evaluator(&parse!("6").unwrap(), &[t, y], &FunctionMap::new())
-            .unwrap();
-        let identity = prepare_evaluator(&parse!("y").unwrap(), &[t, y], &FunctionMap::new())
-            .unwrap();
-        let general = prepare_evaluator(
-            &parse!("t + 2*y").unwrap(),
-            &[t, y],
-            &FunctionMap::new(),
-        )
-        .unwrap();
+        let constant =
+            prepare_evaluator(&parse!("6").unwrap(), &[t, y], &FunctionMap::new()).unwrap();
+        let identity =
+            prepare_evaluator(&parse!("y").unwrap(), &[t, y], &FunctionMap::new()).unwrap();
+        let general =
+            prepare_evaluator(&parse!("t + 2*y").unwrap(), &[t, y], &FunctionMap::new()).unwrap();
 
         let mut values = [0.0; 3];
         super::PreparedEvaluator::evaluate_many_thread_local_ivp(
@@ -1589,6 +1657,7 @@ mod test {
             0.25,
             &[],
             &[3.0],
+            2,
             &mut values,
         )
         .unwrap();
@@ -1600,15 +1669,30 @@ mod test {
         // The shared-context constructor must produce the same values as the
         // public constructor; this also guards the fast-path classification
         // used by the production native Jacobian batch.
-        let context_constant =
-            super::PreparedEvaluator::new_with_context(&parse!("6").unwrap(), &context, &FunctionMap::new())
-                .unwrap();
+        let context_constant = super::PreparedEvaluator::new_with_context(
+            &parse!("6").unwrap(),
+            &context,
+            &FunctionMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             context_constant
                 .evaluate_thread_local_ivp(0.25, &[], &[3.0])
                 .unwrap(),
             6.0
         );
+
+        let error = super::PreparedEvaluator::evaluate_many_thread_local_ivp(
+            [&constant, &identity, &general],
+            0.25,
+            &[],
+            &[3.0],
+            3,
+            &mut values,
+        )
+        .unwrap_err();
+        assert_eq!(error.0, 0);
+        assert!(error.1.contains("batch expected 3 argument(s), got 2"));
     }
 
     #[test]

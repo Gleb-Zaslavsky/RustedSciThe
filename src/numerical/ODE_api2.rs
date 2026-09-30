@@ -9,7 +9,7 @@
 
 use crate::Utils::plots::plots;
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
-use crate::numerical::BE::{BE, BeSolverOptions};
+use crate::numerical::BE::{BE, BeError, BeSolverOptions};
 use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::NonStiff_api::nonstiffODE;
 use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions, RadauStatistics};
@@ -150,6 +150,7 @@ impl UniversalIvpStatistics {
 #[derive(Debug)]
 pub enum UniversalOdeError {
     Backend(IvpBackendError),
+    BackwardEuler(BeError),
     Lsode2(Lsode2Error),
     UnsupportedGeneratedBackendForMethod { method: String },
 }
@@ -158,6 +159,7 @@ impl std::fmt::Display for UniversalOdeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(err) => write!(f, "{err}"),
+            Self::BackwardEuler(err) => write!(f, "{err}"),
             Self::Lsode2(err) => write!(f, "{err}"),
             Self::UnsupportedGeneratedBackendForMethod { method } => {
                 write!(
@@ -169,11 +171,26 @@ impl std::fmt::Display for UniversalOdeError {
     }
 }
 
-impl std::error::Error for UniversalOdeError {}
+impl std::error::Error for UniversalOdeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Backend(err) => Some(err),
+            Self::BackwardEuler(err) => Some(err),
+            Self::Lsode2(err) => Some(err),
+            Self::UnsupportedGeneratedBackendForMethod { .. } => None,
+        }
+    }
+}
 
 impl From<IvpBackendError> for UniversalOdeError {
     fn from(value: IvpBackendError) -> Self {
         Self::Backend(value)
+    }
+}
+
+impl From<BeError> for UniversalOdeError {
+    fn from(value: BeError) -> Self {
+        Self::BackwardEuler(value)
     }
 }
 
@@ -644,7 +661,7 @@ impl UniversalODESolver {
                 if let Some(config) = self.generated_backend_config.clone() {
                     options = options.with_generated_backend_config(config);
                 }
-                let mut solver = BE::new_with_options(options);
+                let mut solver = BE::try_new_with_options(options)?;
                 if let Some(rhs) = self.native_residual.clone() {
                     let jac = self.native_jacobian.clone();
                     solver.set_native_ode_callbacks(
@@ -656,7 +673,7 @@ impl UniversalODESolver {
                     solver.set_stop_condition(stop_condition);
                 }
                 if let Some(tol) = self.neighborhood_check {
-                    solver.set_neighborhood_check(tol);
+                    solver.try_set_neighborhood_check(tol)?;
                 }
                 SolverInstance::BE(solver)
             }
@@ -754,7 +771,7 @@ impl UniversalODESolver {
             SolverInstance::NonStiff(solver) => Some(solver.get_status().clone()),
             SolverInstance::Radau(solver) => Some(solver.get_status().clone()),
             SolverInstance::BDF(solver) => Some(solver.get_status().clone()),
-            SolverInstance::BE(solver) => Some(solver.get_status().clone()),
+            SolverInstance::BE(solver) => Some(solver.get_status()),
             SolverInstance::LSODE2(solver) => Some(solver.status().to_string()),
         }
     }

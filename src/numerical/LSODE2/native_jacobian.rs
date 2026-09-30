@@ -1,7 +1,10 @@
 use crate::numerical::BDF::BDF_solver::BdfJacobian;
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::View::evaluate::PreparedEvaluator;
-use crate::symbolic::codegen::codegen_aot_runtime_link::LinkedJacobianLayout;
+use crate::symbolic::codegen::codegen_aot_runtime_link::{
+    LinkedJacobianLayout, LinkedSparseAotBackend,
+};
+use crate::symbolic::codegen::codegen_runtime_api::SparseJacobianStructure;
 use crate::symbolic::ivp_telemetry::{
     IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpWarmStage,
 };
@@ -660,22 +663,31 @@ fn evaluate_native_atom_values_into(
             telemetry.record_scalar_evaluations(plan.entries.len());
             let evaluation_started = telemetry.start_warm_stage(IvpWarmStage::JacobianEvaluation);
             let evaluation = if parallel {
+                let worker_count = rayon::current_num_threads().max(1);
+                let chunk_size = (plan.entries.len() + worker_count - 1)
+                    .checked_div(worker_count)
+                    .unwrap_or(1)
+                    .max(1);
                 plan.entries
-                    .par_iter()
+                    .par_chunks(chunk_size)
+                    .zip(values.par_chunks_mut(chunk_size))
                     .enumerate()
-                    .zip(values.par_iter_mut())
-                    .try_for_each(|((index, entry), value)| {
-                        entry
-                            .evaluator
-                            .evaluate_thread_local_ivp(t, parameters, y.as_slice())
-                            .map(|evaluated| {
-                                *value = evaluated;
-                            })
-                            .map_err(|message| IvpBackendError::AtomEvaluationFailure {
+                    .try_for_each(|(chunk_index, (entries, values))| {
+                        PreparedEvaluator::evaluate_many_thread_local_ivp(
+                            entries.iter().map(|entry| &entry.evaluator),
+                            t,
+                            parameters,
+                            y.as_slice(),
+                            plan.expected_input_len,
+                            values,
+                        )
+                        .map_err(|(index, message)| {
+                            IvpBackendError::AtomEvaluationFailure {
                                 stage: "Jacobian".to_string(),
-                                index,
+                                index: chunk_index * chunk_size + index,
                                 message,
-                            })
+                            }
+                        })
                     })
             } else {
                 PreparedEvaluator::evaluate_many_thread_local_ivp(
@@ -683,6 +695,7 @@ fn evaluate_native_atom_values_into(
                     t,
                     parameters,
                     y.as_slice(),
+                    plan.expected_input_len,
                     values,
                 )
                 .map_err(|(index, message)| {
@@ -960,6 +973,7 @@ pub fn compile_native_sparse_aot_jacobian_callback_with_telemetry(
     // where the old separate Jacobian artifact contract is still supported.
     let generated_backend =
         lsode2_sparse_jacobian_artifact_config(generated_backend, symbolic_assembly_backend);
+    let handoff_path = generated_backend.handoff_path.clone();
     let options = SymbolicIvpProblemOptions::new()
         .with_equation_parameters(equation_parameters.unwrap_or(&[]).to_vec())
         .with_equation_parameter_values(
@@ -993,11 +1007,20 @@ pub fn compile_native_sparse_aot_jacobian_callback_with_telemetry(
         message: err.to_string(),
     })?;
 
-    if prepared.selected_backend != SelectedSymbolicIvpBackendKind::AotCompiled {
-        return Err(IvpBackendError::GeneratedBackendFailure {
-            message: "LSODE2 sparse/banded AOT Jacobian path expected a compiled sparse backend"
-                .to_string(),
-        });
+    if let Some(handoff_path) = handoff_path.as_ref() {
+        let resolver = prepared.updated_resolver.as_ref().ok_or_else(|| {
+            IvpBackendError::GeneratedBackendFailure {
+                message: "AOT producer did not publish an updated resolver".to_string(),
+            }
+        })?;
+        resolver.merge_handoff(handoff_path).map_err(|err| {
+            IvpBackendError::GeneratedBackendFailure {
+                message: format!(
+                    "AOT producer handoff publication failed at {}: {err}",
+                    handoff_path.display()
+                ),
+            }
+        })?;
     }
 
     let linked = prepared
@@ -1008,16 +1031,44 @@ pub fn compile_native_sparse_aot_jacobian_callback_with_telemetry(
                     .to_string(),
         })?;
 
+    if prepared.selected_backend != SelectedSymbolicIvpBackendKind::AotCompiled {
+        return Err(IvpBackendError::GeneratedBackendFailure {
+            message: "LSODE2 sparse/banded AOT Jacobian path expected a compiled sparse backend"
+                .to_string(),
+        });
+    }
+
+    compile_native_sparse_aot_jacobian_from_linked_backend(
+        linked,
+        prepared.jacobian_structure,
+        equation_parameters,
+        parameter_values_handle,
+        storage,
+        telemetry,
+    )
+}
+
+/// Build the solver-facing Jacobian callback from an already linked combined
+/// AtomView artifact.  This is intentionally separate from the orchestration
+/// function above so LSODE2 can reuse the backend prepared by the residual
+/// lifecycle without repeating symbolic/layout/build work.
+pub(crate) fn compile_native_sparse_aot_jacobian_from_linked_backend(
+    linked: LinkedSparseAotBackend,
+    jacobian_structure: SparseJacobianStructure,
+    equation_parameters: Option<&[String]>,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    storage: NativeJacobianStorage,
+    telemetry: IvpTelemetry,
+) -> Result<Box<NativeJacobianCallback>, IvpBackendError> {
     try_validate_parameter_handle(equation_parameters, parameter_values_handle.as_ref())?;
 
-    let rows = prepared.jacobian_structure.rows;
-    let cols = prepared.jacobian_structure.cols;
-    let pattern = prepared
-        .jacobian_structure
+    let rows = jacobian_structure.rows;
+    let cols = jacobian_structure.cols;
+    let pattern = jacobian_structure
         .row_indices
         .iter()
         .copied()
-        .zip(prepared.jacobian_structure.col_indices.iter().copied())
+        .zip(jacobian_structure.col_indices.iter().copied())
         .collect::<Vec<_>>();
 
     match storage {
@@ -1246,6 +1297,37 @@ pub fn compile_native_sparse_aot_jacobian_callback_with_telemetry(
             }
         }
     }
+}
+
+/// Compatibility adapter for the historical solver-facing infallible Jacobian
+/// callback.  Preparation is still shared; only the final callback ABI keeps
+/// its legacy NaN-on-error behavior.
+pub(crate) fn compile_native_sparse_aot_jacobian_from_linked_backend_compat(
+    linked: LinkedSparseAotBackend,
+    jacobian_structure: SparseJacobianStructure,
+    equation_parameters: Option<&[String]>,
+    parameter_values_handle: Option<SharedIvpParameterValues>,
+    storage: NativeJacobianStorage,
+    telemetry: IvpTelemetry,
+) -> Result<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>, IvpBackendError> {
+    let mut callback = compile_native_sparse_aot_jacobian_from_linked_backend(
+        linked,
+        jacobian_structure,
+        equation_parameters,
+        parameter_values_handle,
+        storage,
+        telemetry,
+    )?;
+    Ok(Box::new(move |t, y| match callback(t, y) {
+        Ok(jacobian) => jacobian,
+        Err(error) => {
+            log::warn!(
+                target: "rusted_scithe::lsode2::native_jacobian",
+                "compiled AOT Jacobian compatibility callback failed: {error}"
+            );
+            BdfJacobian::Dense(DMatrix::from_element(0, 0, f64::NAN))
+        }
+    }))
 }
 
 fn with_lsode2_sparse_jacobian_artifact_suffix(
@@ -1834,13 +1916,13 @@ mod tests {
         let snapshot = atom_telemetry.snapshot();
         assert!(snapshot.cold_stage(IvpColdStage::ExprToAtom).calls > 0);
         assert_eq!(snapshot.cold_stage(IvpColdStage::AtomToExpr).calls, 0);
-        assert!(snapshot.cold_stage(IvpColdStage::SparsePattern).calls > 0);
-        assert!(
-            snapshot
-                .cold_stage(IvpColdStage::JacobianLambdification)
-                .calls
-                > 0
-        );
+        for stage in [
+            IvpColdStage::AtomDependencyAnalysis,
+            IvpColdStage::SymbolicDifferentiation,
+            IvpColdStage::NativeJacobianEvaluatorPreparation,
+        ] {
+            assert_eq!(snapshot.cold_stage(stage).calls, 1, "{stage:?}");
+        }
     }
 
     #[test]

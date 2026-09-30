@@ -23,7 +23,7 @@
 //!   `residual-dominated`, `jacobian-dominated`, or `mixed`.
 
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver};
-use crate::numerical::BE::{BE, BeSolverOptions};
+use crate::numerical::BE::{BeSolverOptions, BE};
 use crate::symbolic::codegen::tests::codegen_test_support::command_exists;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
@@ -223,10 +223,12 @@ fn apply_variant_to_bdf_options(
 ) -> BdfSolverOptions {
     match variant {
         IvpBackendVariant::Lambdify => options,
-        IvpBackendVariant::CGcc => options
-            .with_dense_generated_backend_c_gcc(compare_output_dir("bdf", scenario, variant)),
-        IvpBackendVariant::CTcc => options
-            .with_dense_generated_backend_c_tcc(compare_output_dir("bdf", scenario, variant)),
+        IvpBackendVariant::CGcc => {
+            options.with_dense_generated_backend_c_gcc(compare_output_dir("bdf", scenario, variant))
+        }
+        IvpBackendVariant::CTcc => {
+            options.with_dense_generated_backend_c_tcc(compare_output_dir("bdf", scenario, variant))
+        }
         IvpBackendVariant::Zig => {
             options.with_dense_generated_backend_zig(compare_output_dir("bdf", scenario, variant))
         }
@@ -263,7 +265,7 @@ fn run_be_variant(
     let start = Instant::now();
     solver.solve();
     let total = start.elapsed();
-    let status = solver.get_status().clone();
+    let status = solver.get_status();
     let statistics = solver.get_statistics();
     let (_, maybe_y) = solver.get_result();
     let y = maybe_y.ok_or_else(|| "BE solver did not produce result matrix".to_string())?;
@@ -336,12 +338,7 @@ fn print_ivp_compare_table(
     }
     println!(
         "{:<12} | {:>10} | {:>10} | {:>14} | {:>14} | {:>12}",
-        "variant",
-        "setup_ms",
-        "solve_ms",
-        "residual_ms(avg)",
-        "jacobian_ms(avg)",
-        "steps"
+        "variant", "setup_ms", "solve_ms", "residual_ms(avg)", "jacobian_ms(avg)", "steps"
     );
     println!("{}", "-".repeat(84));
     for row in summaries {
@@ -371,10 +368,17 @@ fn print_ivp_compare_table(
             row.statistics.bdf_nlu_total
         );
     }
-    if let Some(best_total) = summaries.iter().min_by(|lhs, rhs| lhs.total.cmp(&rhs.total)) {
+    if let Some(best_total) = summaries
+        .iter()
+        .min_by(|lhs, rhs| lhs.total.cmp(&rhs.total))
+    {
         let best_solve = summaries
             .iter()
-            .min_by(|lhs, rhs| lhs.statistics.solve_ms_total.total_cmp(&rhs.statistics.solve_ms_total))
+            .min_by(|lhs, rhs| {
+                lhs.statistics
+                    .solve_ms_total
+                    .total_cmp(&rhs.statistics.solve_ms_total)
+            })
             .expect("summary rows should be non-empty");
         let baseline = summaries
             .iter()
@@ -411,7 +415,13 @@ fn run_be_compare_for_scenario(scenario: &IvpScenario) {
 
     for variant in variants {
         let (total, statistics, solution, status) = run_be_variant(scenario, variant)
-            .unwrap_or_else(|err| panic!("BE {} failed for {}: {err}", variant.label(), scenario.label));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "BE {} failed for {}: {err}",
+                    variant.label(),
+                    scenario.label
+                )
+            });
         let diff = if let Some(reference) = baseline_solution.as_ref() {
             max_abs_diff(&solution, reference)
         } else {
@@ -438,7 +448,13 @@ fn run_bdf_compare_for_scenario(scenario: &IvpScenario) {
 
     for variant in variants {
         let (total, statistics, solution, status) = run_bdf_variant(scenario, variant)
-            .unwrap_or_else(|err| panic!("BDF {} failed for {}: {err}", variant.label(), scenario.label));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "BDF {} failed for {}: {err}",
+                    variant.label(),
+                    scenario.label
+                )
+            });
         let diff = if let Some(reference) = baseline_solution.as_ref() {
             max_abs_diff(&solution, reference)
         } else {

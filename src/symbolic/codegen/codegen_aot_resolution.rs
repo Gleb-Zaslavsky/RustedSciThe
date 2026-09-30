@@ -59,6 +59,31 @@ impl AotResolver {
         &self.registry
     }
 
+    /// Publishes this resolver snapshot for a process-isolated consumer.
+    pub fn write_handoff(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.registry.write_handoff(path)
+    }
+
+    /// Merges this resolver snapshot into an existing process handoff.
+    ///
+    /// Missing handoffs are treated as empty snapshots; malformed existing
+    /// handoffs are rejected instead of silently dropping provenance.
+    pub fn merge_handoff(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let mut merged = if path.exists() {
+            AotRegistry::read_handoff(path)?
+        } else {
+            AotRegistry::new()
+        };
+        merged.merge_from(&self.registry)?;
+        merged.write_handoff(path)
+    }
+
+    /// Reconnects a resolver from producer-published artifact metadata.
+    pub fn read_handoff(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        Ok(Self::new(AotRegistry::read_handoff(path)?))
+    }
+
     /// Safely removes the generated on-disk tree for a registered artifact.
     ///
     /// This mutates only this resolver snapshot and delegates all filesystem
@@ -76,7 +101,8 @@ impl AotResolver {
         &self,
         problem_key: &str,
     ) -> Result<Option<std::path::PathBuf>, AotLifecycleError> {
-        self.registry.quarantine_artifact_by_problem_key(problem_key)
+        self.registry
+            .quarantine_artifact_by_problem_key(problem_key)
     }
 
     /// Resolves an AOT backend by manifest.

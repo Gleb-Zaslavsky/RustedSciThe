@@ -628,6 +628,7 @@ pub struct BandedJacobianRuntimePlan<'a> {
     pub fn_name: &'a str,
     pub input_names: Vec<&'a str>,
     pub structure: BandedJacobianStructure,
+    pub compact: bool,
     pub chunks: Vec<BandedJacobianValuesChunkPlan<'a>>,
 }
 
@@ -752,6 +753,7 @@ impl<'a> BandedJacobianTask<'a> {
                     .map(|entry| entry.diag_position)
                     .collect(),
             },
+            compact: self.compact,
             chunks,
         }
     }
@@ -1253,6 +1255,7 @@ mod tests {
             shape: (2, 2),
             kl: 1,
             ku: 1,
+            compact: false,
             entries: &entries,
             variables: &["y0", "y1"],
             params: None,

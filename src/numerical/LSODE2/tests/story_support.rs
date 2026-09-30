@@ -9,34 +9,148 @@ use super::{
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry};
-use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpSymbolicAssemblyBackend, PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
     SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
 };
 use nalgebra::DVector;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn chain_equations(dimension: usize) -> Vec<Expr> {
-    (0..dimension)
-        .map(|index| {
-            let left = (index > 0)
-                .then(|| format!("y{}", index - 1))
-                .unwrap_or_else(|| "0".to_string());
-            let right = (index + 1 < dimension)
-                .then(|| format!("y{}", index + 1))
-                .unwrap_or_else(|| "0".to_string());
-            Expr::parse_expression(&format!(
-                "-k*y{index} + d*({left} - 2*y{index} + {right}) + q*exp(-t) - nl*y{index}*y{index}"
-            ))
-        })
-        .collect()
+pub(crate) fn short_error(message: &str) -> String {
+    const LIMIT: usize = 240;
+    let flat = message.replace(['\r', '\n'], " ");
+    if flat.len() <= LIMIT {
+        flat
+    } else {
+        format!("{}...", &flat[..LIMIT])
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct RaceStats {
+    values: Vec<f64>,
+}
+
+impl RaceStats {
+    pub(crate) fn push(&mut self, value: f64) {
+        self.values.push(value);
+    }
+
+    pub(crate) fn summary(&self) -> Option<(f64, f64, f64, f64)> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let n = self.values.len() as f64;
+        let mean = self.values.iter().copied().sum::<f64>() / n;
+        let var = self
+            .values
+            .iter()
+            .map(|value| {
+                let delta = *value - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / n;
+        Some((
+            mean,
+            var.sqrt(),
+            self.values.iter().copied().fold(f64::INFINITY, f64::min),
+            self.values
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max),
+        ))
+    }
+}
+
+pub(crate) struct BackendRaceRow {
+    pub(crate) matrix: &'static str,
+    pub(crate) route: &'static str,
+    pub(crate) counter_scope: Option<&'static str>,
+    pub(crate) runs_ok: usize,
+    pub(crate) runs_total: usize,
+    pub(crate) first_failure: Option<String>,
+    pub(crate) total_ms: RaceStats,
+    pub(crate) prepare_ms: RaceStats,
+    pub(crate) solve_ms: RaceStats,
+    pub(crate) final_diff: RaceStats,
+    pub(crate) residual_calls: RaceStats,
+    pub(crate) jacobian_calls: RaceStats,
+    pub(crate) nlu_or_native_linear: RaceStats,
+    pub(crate) residual_ms: RaceStats,
+    pub(crate) jacobian_ms: RaceStats,
+    pub(crate) linear_ms: RaceStats,
+    pub(crate) accepted_steps: RaceStats,
+    pub(crate) rejected_steps: RaceStats,
+}
+
+impl BackendRaceRow {
+    pub(crate) fn new(matrix: &'static str, route: &'static str) -> Self {
+        Self {
+            matrix,
+            route,
+            counter_scope: None,
+            runs_ok: 0,
+            runs_total: 0,
+            first_failure: None,
+            total_ms: RaceStats::default(),
+            prepare_ms: RaceStats::default(),
+            solve_ms: RaceStats::default(),
+            final_diff: RaceStats::default(),
+            residual_calls: RaceStats::default(),
+            jacobian_calls: RaceStats::default(),
+            nlu_or_native_linear: RaceStats::default(),
+            residual_ms: RaceStats::default(),
+            jacobian_ms: RaceStats::default(),
+            linear_ms: RaceStats::default(),
+            accepted_steps: RaceStats::default(),
+            rejected_steps: RaceStats::default(),
+        }
+    }
+
+    pub(crate) fn record_failure(&mut self, message: impl AsRef<str>) {
+        if self.first_failure.is_none() {
+            self.first_failure = Some(short_error(message.as_ref()));
+        }
+    }
+
+    pub(crate) fn status_label(&self) -> String {
+        let base = if self.runs_total == 0 {
+            "not_run".to_string()
+        } else if self.runs_ok == self.runs_total {
+            format!("ok {}/{}", self.runs_ok, self.runs_total)
+        } else if self.runs_ok == 0 {
+            format!("failed {}/{}", self.runs_ok, self.runs_total)
+        } else {
+            format!("partial {}/{}", self.runs_ok, self.runs_total)
+        };
+        match &self.first_failure {
+            Some(first_failure) if self.runs_ok < self.runs_total => {
+                format!("{base}, first_failure={first_failure}")
+            }
+            // A post-run diagnostic (for example a long-horizon drift) can be
+            // recorded after every individual solve succeeded. Do not report
+            // such a row as clean, because that hides the diagnostic entirely.
+            Some(first_failure) => format!("diagnostic {base}, note={first_failure}"),
+            _ => base,
+        }
+    }
+}
+
+pub(crate) fn unique_story_short_tag() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), nanos & 0xFFFFF)
+}
+
+pub(crate) fn chain_equations(dimension: usize) -> Vec<crate::symbolic::symbolic_engine::Expr> {
+    super::workload_fixtures::diffusion_chain(dimension).equations
 }
 
 pub(crate) fn chain_state(dimension: usize) -> DVector<f64> {
-    DVector::from_iterator(
-        dimension,
-        (0..dimension).map(|index| 0.2 + 0.01 * (index % 11) as f64),
-    )
+    super::workload_fixtures::diffusion_chain(dimension).initial_state
 }
 
 pub(crate) fn prepare_chain(

@@ -6,8 +6,8 @@
 //! a `HashMap` so stage names cannot allocate during callback execution.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Runtime policy for independent Lambdify residual/Jacobian entries.
@@ -204,8 +204,8 @@ impl IvpAotLifecycleEvent {
 ///
 /// `SymbolicJacobian` is an aggregate around the backend-specific children
 /// (`SymbolicDifferentiation`, `Simplification`, `ExprToAtom`, `SparsePattern`
-/// and `AtomToExpr`). For AtomView, `SparsePattern` is itself an inclusive
-/// aggregate around the parallel sparse builder and its differentiation child.
+/// and `AtomToExpr`). Native AtomView preparation reports dependency analysis,
+/// differentiation and evaluator construction as separate cold stages.
 /// `ResidualCompilation` and `JacobianCompilation` likewise
 /// contain their corresponding lambdification stage. These are inclusive
 /// scopes; child timings must not be summed with their parent as independent
@@ -242,10 +242,18 @@ pub enum IvpColdStage {
     AtomResidualPreparation,
     /// Atom-native Jacobian/layout preparation only.
     AtomJacobianPreparation,
+    /// One-time machine calibration used by the `Auto` execution policy.
+    ParallelCalibration,
+    /// Cold traversal that identifies state variables used by each residual.
+    AtomDependencyAnalysis,
+    /// Construction of native evaluators for differentiated Atom entries.
+    NativeJacobianEvaluatorPreparation,
+    /// One-time input name/index ABI built for a generated Atom AOT module.
+    AotInputAbiPreparation,
 }
 
 impl IvpColdStage {
-    pub const COUNT: usize = 27;
+    pub const COUNT: usize = 31;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -275,7 +283,11 @@ impl IvpColdStage {
             23 => Self::BridgePreparation,
             24 => Self::NativeCallbackPreparation,
             25 => Self::AtomResidualPreparation,
-            _ => Self::AtomJacobianPreparation,
+            26 => Self::AtomJacobianPreparation,
+            27 => Self::ParallelCalibration,
+            28 => Self::AtomDependencyAnalysis,
+            29 => Self::NativeJacobianEvaluatorPreparation,
+            _ => Self::AotInputAbiPreparation,
         }
     }
 
@@ -308,6 +320,10 @@ impl IvpColdStage {
             Self::NativeCallbackPreparation => "native_callback_preparation",
             Self::AtomResidualPreparation => "atom_residual_preparation",
             Self::AtomJacobianPreparation => "atom_jacobian_preparation",
+            Self::ParallelCalibration => "parallel_calibration",
+            Self::AtomDependencyAnalysis => "atom_dependency_analysis",
+            Self::NativeJacobianEvaluatorPreparation => "native_jacobian_evaluator_preparation",
+            Self::AotInputAbiPreparation => "aot_input_abi_preparation",
         }
     }
 }
@@ -439,8 +455,16 @@ pub struct IvpTelemetrySnapshot {
     pub warm: [IvpStageTiming; IvpWarmStage::COUNT],
     pub residual_requests: u64,
     pub residual_evaluations: u64,
+    /// Residual callbacks used by solver housekeeping rather than Newton
+    /// executor requests (for example, first-derivative refresh).
+    pub residual_auxiliary_evaluations: u64,
+    /// Residual callbacks used while constructing a native step driver,
+    /// before the solver starts its first iteration.
+    pub residual_preparation_evaluations: u64,
     pub jacobian_requests: u64,
     pub jacobian_evaluations: u64,
+    /// Jacobian callbacks used by controller probes outside Newton refresh.
+    pub jacobian_auxiliary_evaluations: u64,
     pub symbolic_jacobian_builds: u64,
     pub jacobian_rebuilds: u64,
     pub factorization_requests: u64,
@@ -469,6 +493,11 @@ pub struct IvpTelemetrySnapshot {
     pub aot_link_successes: u64,
     pub aot_link_failures: u64,
     pub aot_runtime_ready: u64,
+    /// Unique generated artifact keys observed during cold preparation.
+    ///
+    /// This is lifecycle metadata, not a callback counter. It is collected
+    /// only by `log_aot_event`, so it never adds locking to the hot path.
+    pub aot_artifact_keys: Vec<String>,
     pub aot_chunk_dispatches: u64,
     pub aot_parallel_dispatches: u64,
     pub aot_chunks: u64,
@@ -536,8 +565,20 @@ impl fmt::Display for IvpTelemetrySnapshot {
         for (name, value) in [
             ("residual_requests", self.residual_requests),
             ("residual_evaluations", self.residual_evaluations),
+            (
+                "residual_auxiliary_evaluations",
+                self.residual_auxiliary_evaluations,
+            ),
+            (
+                "residual_preparation_evaluations",
+                self.residual_preparation_evaluations,
+            ),
             ("jacobian_requests", self.jacobian_requests),
             ("jacobian_evaluations", self.jacobian_evaluations),
+            (
+                "jacobian_auxiliary_evaluations",
+                self.jacobian_auxiliary_evaluations,
+            ),
             ("symbolic_jacobian_builds", self.symbolic_jacobian_builds),
             ("jacobian_rebuilds", self.jacobian_rebuilds),
             ("factorization_requests", self.factorization_requests),
@@ -575,6 +616,16 @@ impl fmt::Display for IvpTelemetrySnapshot {
             ("aot_worker_callbacks", self.aot_worker_callbacks),
         ] {
             writeln!(formatter, "| `{name}` | {value} |")?;
+        }
+        writeln!(formatter, "")?;
+        writeln!(formatter, "## AOT Artifact Keys")?;
+        writeln!(formatter, "")?;
+        if self.aot_artifact_keys.is_empty() {
+            writeln!(formatter, "- none")?;
+        } else {
+            for key in &self.aot_artifact_keys {
+                writeln!(formatter, "- `{key}`")?;
+            }
         }
         write_stage_report(formatter, "Cold stages", &self.cold, cold_stage_label)?;
         write_stage_report(formatter, "Warm stages", &self.warm, warm_stage_label)
@@ -644,8 +695,11 @@ struct IvpTelemetryInner {
     warm_nanos: [AtomicU64; IvpWarmStage::COUNT],
     residual_requests: AtomicU64,
     residual_evaluations: AtomicU64,
+    residual_auxiliary_evaluations: AtomicU64,
+    residual_preparation_evaluations: AtomicU64,
     jacobian_requests: AtomicU64,
     jacobian_evaluations: AtomicU64,
+    jacobian_auxiliary_evaluations: AtomicU64,
     symbolic_jacobian_builds: AtomicU64,
     jacobian_rebuilds: AtomicU64,
     factorization_requests: AtomicU64,
@@ -674,6 +728,7 @@ struct IvpTelemetryInner {
     aot_link_successes: AtomicU64,
     aot_link_failures: AtomicU64,
     aot_runtime_ready: AtomicU64,
+    aot_artifact_keys: Mutex<Vec<String>>,
     aot_chunk_dispatches: AtomicU64,
     aot_parallel_dispatches: AtomicU64,
     aot_chunks: AtomicU64,
@@ -701,8 +756,11 @@ impl Default for IvpTelemetryInner {
             warm_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
             residual_requests: AtomicU64::new(0),
             residual_evaluations: AtomicU64::new(0),
+            residual_auxiliary_evaluations: AtomicU64::new(0),
+            residual_preparation_evaluations: AtomicU64::new(0),
             jacobian_requests: AtomicU64::new(0),
             jacobian_evaluations: AtomicU64::new(0),
+            jacobian_auxiliary_evaluations: AtomicU64::new(0),
             symbolic_jacobian_builds: AtomicU64::new(0),
             jacobian_rebuilds: AtomicU64::new(0),
             factorization_requests: AtomicU64::new(0),
@@ -731,6 +789,7 @@ impl Default for IvpTelemetryInner {
             aot_link_successes: AtomicU64::new(0),
             aot_link_failures: AtomicU64::new(0),
             aot_runtime_ready: AtomicU64::new(0),
+            aot_artifact_keys: Mutex::new(Vec::new()),
             aot_chunk_dispatches: AtomicU64::new(0),
             aot_parallel_dispatches: AtomicU64::new(0),
             aot_chunks: AtomicU64::new(0),
@@ -828,6 +887,14 @@ impl IvpTelemetry {
         problem_key: &str,
         detail: &str,
     ) {
+        if let Some(inner) = &self.inner {
+            if let Ok(mut keys) = inner.aot_artifact_keys.lock() {
+                if !keys.iter().any(|key| key == problem_key) {
+                    keys.push(problem_key.to_owned());
+                    keys.sort_unstable();
+                }
+            }
+        }
         if log::log_enabled!(target: "rustedscithe::symbolic::aot", log::Level::Debug) {
             log::debug!(
                 target: "rustedscithe::symbolic::aot",
@@ -865,8 +932,11 @@ impl IvpTelemetry {
                 .store(rayon::current_num_threads() as u64, Ordering::Relaxed);
             let calibrated = match policy {
                 IvpLambdifyExecutionPolicy::Auto { .. } => {
-                    crate::symbolic::codegen::codegen_orchestrator::
-                        machine_min_work_per_parallel_job()
+                    let started = self.start_cold_stage(IvpColdStage::ParallelCalibration);
+                    let calibrated = crate::symbolic::codegen::codegen_orchestrator::
+                        machine_min_work_per_parallel_job();
+                    self.record_cold_stage(IvpColdStage::ParallelCalibration, started);
+                    calibrated
                 }
                 IvpLambdifyExecutionPolicy::Sequential
                 | IvpLambdifyExecutionPolicy::Parallel { .. } => 0,
@@ -959,6 +1029,17 @@ impl IvpTelemetry {
         self.record_counter(|inner| &inner.residual_evaluations);
     }
 
+    /// Records a residual callback made by solver housekeeping outside the
+    /// Newton executor request stream.
+    pub fn record_residual_auxiliary_evaluation(&self) {
+        self.record_counter(|inner| &inner.residual_auxiliary_evaluations);
+    }
+
+    /// Records a residual callback used to initialize a native step driver.
+    pub fn record_residual_preparation_evaluation(&self) {
+        self.record_counter(|inner| &inner.residual_preparation_evaluations);
+    }
+
     pub fn record_jacobian_request(&self) {
         self.record_counter(|inner| &inner.jacobian_requests);
     }
@@ -970,6 +1051,12 @@ impl IvpTelemetry {
 
     pub fn record_jacobian_evaluation_count(&self) {
         self.record_counter(|inner| &inner.jacobian_evaluations);
+    }
+
+    /// Records a Jacobian callback made by a controller probe outside the
+    /// Newton executor request stream.
+    pub fn record_jacobian_auxiliary_evaluation(&self) {
+        self.record_counter(|inner| &inner.jacobian_auxiliary_evaluations);
     }
 
     pub fn record_symbolic_jacobian_build(&self) {
@@ -1110,8 +1197,11 @@ impl IvpTelemetry {
                 warm: [IvpStageTiming::default(); IvpWarmStage::COUNT],
                 residual_requests: 0,
                 residual_evaluations: 0,
+                residual_auxiliary_evaluations: 0,
+                residual_preparation_evaluations: 0,
                 jacobian_requests: 0,
                 jacobian_evaluations: 0,
+                jacobian_auxiliary_evaluations: 0,
                 symbolic_jacobian_builds: 0,
                 jacobian_rebuilds: 0,
                 factorization_requests: 0,
@@ -1140,6 +1230,7 @@ impl IvpTelemetry {
                 aot_link_successes: 0,
                 aot_link_failures: 0,
                 aot_runtime_ready: 0,
+                aot_artifact_keys: Vec::new(),
                 aot_chunk_dispatches: 0,
                 aot_parallel_dispatches: 0,
                 aot_chunks: 0,
@@ -1175,8 +1266,17 @@ impl IvpTelemetry {
             warm,
             residual_requests: inner.residual_requests.load(Ordering::Relaxed),
             residual_evaluations: inner.residual_evaluations.load(Ordering::Relaxed),
+            residual_auxiliary_evaluations: inner
+                .residual_auxiliary_evaluations
+                .load(Ordering::Relaxed),
+            residual_preparation_evaluations: inner
+                .residual_preparation_evaluations
+                .load(Ordering::Relaxed),
             jacobian_requests: inner.jacobian_requests.load(Ordering::Relaxed),
             jacobian_evaluations: inner.jacobian_evaluations.load(Ordering::Relaxed),
+            jacobian_auxiliary_evaluations: inner
+                .jacobian_auxiliary_evaluations
+                .load(Ordering::Relaxed),
             symbolic_jacobian_builds: inner.symbolic_jacobian_builds.load(Ordering::Relaxed),
             jacobian_rebuilds: inner.jacobian_rebuilds.load(Ordering::Relaxed),
             factorization_requests: inner.factorization_requests.load(Ordering::Relaxed),
@@ -1207,6 +1307,11 @@ impl IvpTelemetry {
             aot_link_successes: inner.aot_link_successes.load(Ordering::Relaxed),
             aot_link_failures: inner.aot_link_failures.load(Ordering::Relaxed),
             aot_runtime_ready: inner.aot_runtime_ready.load(Ordering::Relaxed),
+            aot_artifact_keys: inner
+                .aot_artifact_keys
+                .lock()
+                .map(|keys| keys.clone())
+                .unwrap_or_default(),
             aot_chunk_dispatches: inner.aot_chunk_dispatches.load(Ordering::Relaxed),
             aot_parallel_dispatches: inner.aot_parallel_dispatches.load(Ordering::Relaxed),
             aot_chunks: inner.aot_chunks.load(Ordering::Relaxed),
@@ -1329,11 +1434,13 @@ mod tests {
     fn disabled_telemetry_has_no_measurements() {
         let telemetry = IvpTelemetry::disabled();
         telemetry.record_residual_request();
+        telemetry.record_residual_preparation_evaluation();
         telemetry
             .record_cold_stage_duration(IvpColdStage::SymbolicJacobian, Duration::from_secs(1));
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.mode, IvpTelemetryMode::Off);
         assert_eq!(snapshot.residual_requests, 0);
+        assert_eq!(snapshot.residual_preparation_evaluations, 0);
         assert_eq!(
             snapshot.cold_stage(IvpColdStage::SymbolicJacobian),
             IvpStageTiming::default()
@@ -1345,12 +1452,14 @@ mod tests {
         let telemetry = IvpTelemetry::counters();
         telemetry.record_residual_request();
         telemetry.record_residual_evaluation(None);
+        telemetry.record_residual_preparation_evaluation();
         telemetry.record_jacobian_request();
         telemetry.record_symbolic_jacobian_build();
         telemetry.record_scalar_evaluations(12);
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.residual_requests, 1);
         assert_eq!(snapshot.residual_evaluations, 1);
+        assert_eq!(snapshot.residual_preparation_evaluations, 1);
         assert_eq!(snapshot.jacobian_requests, 1);
         assert_eq!(snapshot.symbolic_jacobian_builds, 1);
         assert_eq!(snapshot.jacobian_rebuilds, 0);
@@ -1409,14 +1518,39 @@ mod tests {
 
         // Logging is independently opt-in; this must not allocate telemetry
         // storage or alter the Off snapshot when no logger is configured.
-        let telemetry = IvpTelemetry::disabled();
+        let telemetry = IvpTelemetry::counters();
         telemetry.log_aot_event(
+            IvpAotLifecycleEvent::BuildFailed,
+            "sparse-atom-native",
+            "b-key",
+            "compiler failure",
+        );
+        telemetry.log_aot_event(
+            IvpAotLifecycleEvent::Linked,
+            "sparse-atom-native",
+            "a-key",
+            "linked",
+        );
+        telemetry.log_aot_event(
+            IvpAotLifecycleEvent::Published,
+            "sparse-atom-native",
+            "b-key",
+            "published",
+        );
+        assert_eq!(
+            telemetry.snapshot().aot_artifact_keys,
+            vec!["a-key".to_string(), "b-key".to_string()]
+        );
+
+        let disabled = IvpTelemetry::disabled();
+        disabled.log_aot_event(
             IvpAotLifecycleEvent::BuildFailed,
             "sparse-atom-native",
             "key",
             "compiler failure",
         );
-        assert_eq!(telemetry.snapshot().mode, IvpTelemetryMode::Off);
+        assert_eq!(disabled.snapshot().mode, IvpTelemetryMode::Off);
+        assert!(disabled.snapshot().aot_artifact_keys.is_empty());
     }
 
     #[test]
@@ -1458,13 +1592,35 @@ mod tests {
             "aot_source_generation"
         );
         assert_eq!(IvpColdStage::AotPublication.label(), "aot_publication");
-        assert_eq!(IvpColdStage::SolverPreparation.label(), "solver_preparation");
-        assert_eq!(IvpColdStage::BridgePreparation.label(), "bridge_preparation");
+        assert_eq!(
+            IvpColdStage::SolverPreparation.label(),
+            "solver_preparation"
+        );
+        assert_eq!(
+            IvpColdStage::BridgePreparation.label(),
+            "bridge_preparation"
+        );
         assert_eq!(
             IvpColdStage::NativeCallbackPreparation.label(),
             "native_callback_preparation"
         );
-        assert_eq!(IvpColdStage::COUNT, 27);
+        assert_eq!(
+            IvpColdStage::ParallelCalibration.label(),
+            "parallel_calibration"
+        );
+        assert_eq!(
+            IvpColdStage::AtomDependencyAnalysis.label(),
+            "atom_dependency_analysis"
+        );
+        assert_eq!(
+            IvpColdStage::NativeJacobianEvaluatorPreparation.label(),
+            "native_jacobian_evaluator_preparation"
+        );
+        assert_eq!(
+            IvpColdStage::AotInputAbiPreparation.label(),
+            "aot_input_abi_preparation"
+        );
+        assert_eq!(IvpColdStage::COUNT, 31);
         assert_eq!(IvpWarmStage::Solve.label(), "solve");
         assert_eq!(IvpWarmStage::Summary.label(), "summary");
         assert_eq!(IvpWarmStage::COUNT, 25);
@@ -1547,8 +1703,14 @@ mod tests {
         assert!(report.contains("route: `atom_view_expr_compat`"));
         assert!(report.contains("lambdify_execution_policy: `auto(min_work=32)`"));
         assert!(report.contains("lambdify_worker_count: `"));
+        assert!(report.contains("## AOT Artifact Keys"));
         assert!(snapshot.lambdify_auto_min_work_per_job >= 1);
         assert!(report.contains("lambdify_auto_min_work_per_job: `"));
+        assert_eq!(
+            snapshot.cold_stage(IvpColdStage::ParallelCalibration).calls,
+            1
+        );
+        assert!(report.contains("| `parallel_calibration` | 1 |"));
         assert!(report.contains("matrix_backend: `banded`"));
         assert!(report.contains("state_dimension: `4`"));
         assert!(report.contains("| `residual_requests` | 1 |"));

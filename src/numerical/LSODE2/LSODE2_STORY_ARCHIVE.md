@@ -12,15 +12,19 @@ art; this file is meant to keep the experiments legible months later.
 
 ## Test Source Layout
 
-New thematic tests live under `src/numerical/LSODE2/tests/`. The current debug
-modules are `large_system_story_tests.rs`, `evaluator_policy_story_tests.rs`,
+All story sources now live under `src/numerical/LSODE2/tests/`. The thematic
+modules include `large_system_story_tests.rs`, `evaluator_policy_story_tests.rs`,
 `lifecycle_story_tests.rs`, `lambdify_stage_story_tests.rs`,
-`telemetry_stage_story_tests.rs`, `correctness_story_tests.rs` and
-`three_body_story_tests.rs`. The latter is
-still attached to the compatibility `story_tests2` module because it consumes
-historical race-table helpers, but its source and report capture are now in the
-dedicated test directory. The old `story_tests.rs` and `story_tests2.rs` remain
-compatibility containers until each block has a dedicated home.
+`telemetry_stage_story_tests.rs`, `correctness_story_tests.rs`, the AOT-specific
+modules and `three_body_story_tests.rs`. The former root files were physically
+renamed to `native_quality_story_tests.rs` and the thin
+`legacy_story_support.rs` compatibility wrapper; no root `story_tests*.rs`
+source remains. Historical dashboards and shared race fixtures are physically
+split across `legacy_story_core.rs`, `legacy_story_race.rs`,
+`legacy_story_solver_quality.rs`, `legacy_story_combustion.rs`,
+`legacy_story_view.rs` and `legacy_story_lifecycle.rs`, while the wrapper keeps
+historical runner paths stable. Historical report filenames that contain
+`story_tests2` are retained as immutable baseline keys.
 
 Current source of truth: runs marked `CPU 12 Core` were produced on the newer
 12-core / 64 GB machine and should be used for current performance conclusions.
@@ -32,9 +36,8 @@ across machines, but they are no longer the primary baseline.
 
 The ten reports with local timestamp `13:44` were run in release mode (user
 confirmed). All passed. This is a correctness/lifecycle gate, not a timing
-baseline: the current report writer records the UTC timestamp and status but
-does not yet encode the Cargo profile, so the release profile is recorded here
-explicitly.
+baseline. Current reports encode the profile and release writes are also kept
+under the profile-specific `archive/` directory.
 
 The gate covers trajectory and public algorithm snapshot parity, bridge/native
 counter-scope attribution, callback failure recovery, binding-scope closure,
@@ -214,6 +217,12 @@ The two story definitions are:
    compares Sequential, forced Parallel and Auto on production Sparse/Banded
    callback runtimes at cumulative checkpoints `1`, `4`, `16`, `64`. It reports
    dispatches, workers, callback counts and the first observed Auto crossover.
+3. `numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_multi_worker_story`
+   launches a fresh child process for each requested Rayon worker count and
+   reports the no-op `join2`/`join4` calibration, observed workers, Auto
+   threshold and callback crossover. This isolates global Rayon initialization
+   and makes the machine-specific dispatch cost visible instead of hiding it
+   inside a single parent-process wall-clock number.
 
 Release commands:
 
@@ -221,13 +230,18 @@ Release commands:
 cargo test --release --lib --no-default-features numerical::LSODE2::large_performance_story_tests::lsode2_large_system_sparse_banded_total_and_stage_story -- --ignored --nocapture --test-threads=1
 
 cargo test --release --lib --no-default-features numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_story -- --ignored --nocapture --test-threads=1
+
+cargo test --release --lib --no-default-features numerical::LSODE2::large_performance_story_tests::lsode2_large_auto_break_even_multi_worker_story -- --ignored --nocapture --test-threads=1
 ```
 
 The dimensions and repetitions can be controlled without code changes:
 `LSODE2_LARGE_STAGE_DIMENSIONS`, `LSODE2_LARGE_STAGE_REPETITIONS`,
-`LSODE2_AUTO_DIMENSIONS` and `LSODE2_AUTO_MIN_WORK`. Dense is excluded by
-construction. The release captures above are the current large-system
-baseline; older records remain unchanged for regression review.
+`LSODE2_AUTO_DIMENSIONS`, `LSODE2_AUTO_MIN_WORK` and
+`LSODE2_AUTO_WORKER_COUNTS`. Dense is excluded by construction. The release
+captures above are the current large-system baseline; older records remain
+unchanged for regression review. The multi-worker story is the required gate
+before assigning a portable default: calibration values are expected to vary
+with worker count and machine.
 
 ## Executive Summary
 
@@ -251,6 +265,16 @@ when hardware, compiler versions or backend internals change.
    later strict `RequirePrebuilt` runs reuse it with sub-millisecond preparation
    and roundoff-level solution differences. Evidence:
    `lsode2_combustion_sparse_banded_atomview_tcc_build_then_require_prebuilt_story`.
+
+The process-isolated continuation gate is now also green for a parameterized
+fixture. `aot_process_isolated_producer_consumer_parameter_handoff` launches a
+producer with parameter `2.0`, publishes a sidecar containing both residual and
+Jacobian artifact provenance, then launches a fresh consumer with parameter
+`3.0` under `RequirePrebuilt`. ExprLegacy-AOT and AtomViewNative-AOT both reuse
+the same artifact keys, perform zero builds, reconnect successfully and match
+the AtomViewNative-Lambdify reference. Link-attempt counters remain diagnostic
+because a consumer may reconnect an already registered process-local runtime
+without incrementing that counter.
 
 4. Warm `tcc RequirePrebuilt` is correct and low-overhead, but it is not yet a
    clear total wall-clock win on the small Banded combustion fixture. It has a
@@ -358,8 +382,9 @@ are BDF-level callback evaluations. The faithful route reports
 `native_faithful_inner_loop`, meaning counts belong to the native nonlinear
 inner loop. The report also prints evaluator callback requests separately from
 solver-level counters. This is the required interpretation for observations
-such as `776/387` versus `780/387`: they must be attributed before any future
-normalization, not compared as if they were the same event.
+such as solver `776/387` versus evaluator `782/387`: executor requests,
+runtime auxiliary probes and cold preparation probes must be attributed before
+any future normalization, not compared as if they were the same event.
 
 The trajectory parity gate also prints the public algorithm snapshot. For the
 fixed BDF fixture the two frontends match in controller mode, active/mused/mcur
@@ -2600,12 +2625,13 @@ Sparse | 3.09 ms              | 15.70 ms            | 3.03 ms         | 3.74 ms 
 Banded | 4.11 ms              | 17.92 ms            | 3.62 ms         | 4.33 ms                       | 16.94 ms                    | 4.23 ms
 ```
 
-Forced `Parallel` dispatches all callback batches (`780` parallel dispatches)
-but is much slower at this workload. `Auto` correctly remains sequential.
-Solver-level counters match the historical dashboard (`776/387/774`), while
-detailed evaluator telemetry reports `780/387` callback evaluations. This
-semantic difference is visible in separate `solver_*` and `evaluator_*`
-columns and remains a telemetry follow-up, not a numerical failure.
+Forced `Parallel` dispatches all callback batches but is much slower at this
+workload. `Auto` correctly remains sequential. The fresh repeated diagnostic
+keeps the layers separate: solver counters are `776/387`, executor requests
+are `774/387`, evaluator calls are `782/387`, nested runtime `aux_res=2`, and
+cold preparation probes are typed as `prep_res=6`; `unattributed_res=0`.
+Jacobian ownership is exact. This is an accounting result, not a numerical
+failure.
 
 The older archived CPU-12 row showed different AtomView ordering and timings.
 Because the new report observes 24 Rayon workers and a different telemetry
@@ -3281,12 +3307,13 @@ always report cold E2E, warm solve and callback-only measurements separately.
 For parameterized problems the intended continuation is: keep the compiled
 artifact when parameter names/order, output layout and Jacobian sparsity
 pattern are unchanged; rebind only numeric values and refresh numeric runtime
-state. A change to parameter schema, mesh/layout, boundary structure or
-pattern must invalidate the artifact/factor and either rebuild or reject
-`RequirePrebuilt`. The current lifecycle stories prove in-process reuse, but
-not yet a persistent producer/consumer handoff with a parameter sweep. That is
-the next release baseline rather than treating every parameter solve as a new
-cold AOT problem.
+state. The debug process-isolated gate now proves this across a producer at
+parameter `2.0` and a fresh consumer at `3.0` for both AOT frontends, with
+zero consumer builds and roundoff-level agreement with Lambdify. A change to
+parameter schema, mesh/layout, boundary structure or pattern must still
+invalidate the artifact/factor and either rebuild or reject `RequirePrebuilt`.
+That invalidation matrix remains the next lifecycle baseline rather than
+treating every parameter solve as a new cold AOT problem.
 
 ### AOT residual `Pow(base, 2)` lowering fix recorded on 2026-09-26
 
@@ -3384,9 +3411,9 @@ multi-times `Pow` anomaly: generated Atom residuals report `pow=0` after exact
 smaller code-size/lowering tail remains as low-priority debt.
 
 Trajectory, layout and lifecycle results are identical for AtomView-AOT and
-ExprLegacy-AOT. Compact-Banded ExprLegacy-AOT remains explicitly unsupported
-because that path currently requires AtomView assembly; therefore Banded AOT
-is not yet a complete frontend apple-to-apple comparison. The process-isolated
+ExprLegacy-AOT. Compact-Banded ExprLegacy-AOT is now implemented and passes
+the release matrix at `128/256/512`; the older `unsupported` rows above are
+historical and must not be mixed with the new baseline. The process-isolated
 warm matrix showed near-parity between Atom and Expr AOT callback/solve stages
 across available toolchains, but it uses a different wrapper protocol than the
 raw callback boundary story and must not be numerically merged with it.
@@ -3405,3 +3432,601 @@ provenance, cache hit/miss, Atom residual/Jacobian preparation, source
 generation, compile/link and publication in a producer/consumer process pair.
 Auto results in this slice remain sequential-fallback or callback-focused and
 are not a portable Parallel break-even baseline.
+
+### 2026-09-26 03:15 local: compact-Banded ExprLegacy-AOT debug control
+
+The callback performance story was rerun in debug with a deliberately small
+`n=8` chain and two callback repetitions before scheduling an expensive release
+matrix. The old `unsupported` row was replaced by a real
+`Banded / ExprLegacy / tcc` route. It materialized and linked successfully with
+`build_attempts=1`, `link_attempts=1`, residual length `8`, and compact Jacobian
+output length `24 = (kl + ku + 1) * n`.
+
+The compact ExprLegacy route emits literal zero boundary slots and therefore
+uses the same complete LAPACK-style ABI as AtomView-native. The debug smoke
+passed alongside Sparse ExprLegacy, Sparse/Banded AtomView AOT and Lambdify;
+this was a lifecycle/layout gate, not a performance baseline. The low-level
+`2x2` control gate caught and corrected an inverted diagonal sign in the first
+ExprLegacy slot mapping; both frontend gates now decode the same matrix values.
+
+The subsequent release matrix confirms compact ExprLegacy output lengths
+`384/768/1536` at `n=128/256/512`, with one build and one link attempt per
+Banded row and zero callback drift. Warm callback timings were effectively
+tied (`0.001-0.003 ms` residual and `0.000-0.002 ms` Jacobian per call in
+this run). Cold preparation was mixed: at `n=512`, ExprLegacy Banded was
+`79.464 ms` versus AtomView `61.805 ms`, while at `n=256` it was `37.889 ms`
+versus `32.996 ms`; at `n=128` ExprLegacy was slightly faster (`26.627`
+versus `28.898 ms`). These are single-run observations, not a stable frontend
+ranking. Sparse remains non-apple-to-apple because ExprLegacy reported `0/0`
+build/link attempts while AtomView reported `1/1`.
+
+### 2026-09-26: process-harness provenance protocol smoke
+
+The process-isolated harness smoke now prints provenance per phase and the
+numeric lifecycle counters used to justify it. On the scalar Banded fixture,
+each AOT cold phase was classified as `producer_build` with one build and one
+link attempt; each warm and callback-only phase was classified as
+`consumer_reconnect` with resolver hits and no new build. Lambdify rows are
+reported as `non_aot`, rather than being mistaken for AOT cache misses. The
+same smoke passed for ExprLegacy-AOT and AtomView-AOT with matching
+`319/231/305` residual/Jacobian/linear counters and zero numerical failures.
+
+This closes the protocol observability gap, not the full continuation claim:
+the smoke now reports the durable generated artifact identity and asserts
+that cold, warm and callback-only phases use the same key set. The remaining
+release gate was a parameter rebind between separately launched producer and
+consumer processes, including a numeric change from `2.0` to `3.0`; the
+schema/layout invalidation case remains open.
+
+### 2026-09-26: multi-worker Auto/Parallel process-isolated debug gate
+
+The new multi-worker story launches one fresh child process per requested
+worker count, initializes Rayon before any symbolic callback, and records the
+observed worker count rather than trusting an environment variable. A debug
+run at `n=8`, workers `1,2`, passed for Sparse and compact-Banded with zero
+residual/Jacobian drift and `64/64` callback counts. Auto remained sequential
+for this intentionally small workload, so this is a harness/correctness gate,
+not a break-even claim. The release sweep on larger dimensions is still
+required to establish portable Parallel/Auto crossover values.
+
+### 2026-09-26 release: compact-Banded control and process handoff
+
+The release callback matrix now includes the compact-Banded ExprLegacy-AOT
+control alongside AtomView-AOT and AtomViewNative Lambdify. ExprLegacy-AOT
+passed at dimensions `128`, `256` and `512`; its compact Jacobian lengths were
+`384`, `768` and `1536`, and callback values matched the AtomView route. The
+generated Expr source was smaller than AtomView source (`68` vs `79 KB` at
+`128`, `285` vs `331 KB` at `512`), while callback timings stayed in the same
+sub-millisecond range.
+
+The Banded cold-preparation result is mixed rather than a universal frontend
+win. ExprLegacy was slower at `256/512` (`37.889/79.464 ms`) than AtomView
+(`32.996/61.805 ms`), but slightly faster at `128` (`26.627` versus
+`28.898 ms`). Both routes had `1/1` build/link attempts in these rows. The
+reported ExprLegacy `link_ms` values were unusually small (`0.012-0.020 ms`)
+compared with AtomView (`0.45-2.62 ms`), so link-stage semantics still need a
+provenance audit before this becomes a compiler-performance conclusion.
+
+The process-isolated producer/consumer parameter handoff also passed in
+release. For both `aot_exprlegacy_c_tcc` and `aot_atomview_c_tcc`, the
+consumer reused the producer artifact key, performed zero consumer builds,
+reconnected successfully, and matched the reference at parameter `3.0`.
+Producer/consumer preparation was `24.349/0.571 ms` for ExprLegacy and
+`11.134/0.579 ms` for AtomView; all routes preserved `319/231/305`
+residual/Jacobian/linear counters and zero numerical drift. This closes the
+first parameterized C/tcc continuation gate, not the full Rust/C/gcc/Zig
+apple-to-apple matrix or schema/layout invalidation gate.
+
+### 2026-09-27 debug: consolidated process telemetry
+
+The process-isolated harness now transports the complete typed telemetry
+snapshot instead of only solve/callback time and AOT cache counters. Each
+phase reports argument binding, residual/Jacobian callback and evaluation,
+output assembly, factorization, RHS, controller/iteration, native engine
+boundary, copies/bytes, allocations, chunks, dispatches, worker calibration,
+trajectory counters and artifact provenance.
+
+The harness also corrected repeated-run aggregation: snapshots are cumulative,
+so the final snapshot is divided by the repetition count once rather than
+summing every cumulative snapshot. `callback_only` explicitly reports zero
+solver-only stages because its solver wall-clock interval is excluded; callback
+binding/evaluation/output telemetry remains visible. This separates callback
+cost from solver overhead without changing the numerical execution path.
+
+The debug smoke gate now asserts that cold, warm, and callback-only phases have
+identical integer solver traces and final states, no typed errors, stable AOT
+artifact keys, and no rebuilds after the cold phase. Resolution hit/miss values
+on Lambdify rows are backend-selection diagnostics, not artifact provenance;
+only build/link/reconnect counters are used for the non-AOT provenance gate.
+Release coverage across all toolchains and worker policies remains separate.
+
+### 2026-09-27 debug: same-process parameter continuation
+
+`parameter_continuation_story_tests` now covers the solver-level Lambdify
+continuation contract for `ExprLegacy` and `AtomViewNative` on both Sparse and
+compact-Banded routes. Each rebinding changes only numeric values for the
+unchanged `(a,b)` parameter schema; a wrong-length vector is rejected before
+the callback plan is touched.
+
+The continuation result matched a fresh solver exactly in time grid, state,
+native residual/Jacobian/linear counters and algorithm snapshot. The reuse
+performance gate recorded four `parameter_binds` per route and zero new
+`ExprToAtom` or `SymbolicJacobian` cold stages. The debug report is stored in
+`test_reports/LSODE2_Lambdify` under the two dated
+`parameter_continuation_story_tests` reports. AOT artifact continuation and
+process-isolated schema/layout invalidation remain open follow-up work.
+
+### 2026-09-27: fresh continuation, AOT lifecycle and Auto reports
+
+The six fresh reports recorded locally between `22:24` and `22:27` were all
+successful. Their exact report paths are kept here so the results remain tied
+to file-backed output rather than only to a console summary:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_matches_fresh_solver_matrix.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_reports_reuse_vs_fresh_preparation.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_multi_worker_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_lifecycle_story_tests__lsode2_combustion_sparse_banded_all_frontends_tcc_build_then_require_prebuilt_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_callback_stage_performance_matrix.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_warm_rebind_story_tests__aot_parameter_rebind_and_repeated_warm_solve_reject_stale_runtime.md
+```
+
+The Lambdify continuation correctness matrix covers three parameter pairs,
+`ExprLegacy` and `AtomViewNative`, and Sparse/Banded layouts. Every continued
+solve matches a fresh solver with zero state/time drift and identical
+residual/Jacobian/linear counters. The invalid parameter cardinality is
+rejected before the prepared callback plan is changed.
+
+The companion continuation timing report records four numeric binds per route
+and zero additional `ExprToAtom` or `SymbolicJacobian` stages. Its
+`continuation_ms` versus `fresh_ms` values are diagnostic only: it is explicitly
+a debug baseline, and continuation uses detailed telemetry while the fresh
+comparison disables it. A release break-even conclusion requires equal
+telemetry settings, larger workloads and repeated samples.
+
+The AOT warm-rebind matrix passes for ExprLegacy-AOT, AtomViewNative-AOT and
+AtomViewNative-Lambdify on both layouts. Rebound and fresh parameter-3.0
+solutions have zero state/time drift and identical `376/273/364` counters.
+This closes the same-process stale callback/factor gate, but not the broader
+parameter-continuation performance claim.
+
+The all-frontend `BuildIfMissing -> RequirePrebuilt` lifecycle matrix passes
+for all four `ExprLegacy`/`AtomViewNative` x `Sparse`/`Banded` routes. Five
+strict prebuilt repetitions preserve roundoff-level differences and identical
+`1087/574/1086` residual/Jacobian/linear counters. The Banded `BuildIfMissing`
+rows are close to prebuilt rows in this run, so they prove correctness and
+reuse but are not a cold compiler benchmark until cache provenance and
+build/link attempts are reported uniformly.
+
+The AOT callback matrix now includes compact-Banded ExprLegacy as a real
+control route and reports `publication_ms`, cache hits/misses and
+`runtime_ready`. At dimension `512`, AOT residual callbacks are about
+`0.002-0.003 ms/call` versus `0.020-0.023 ms/call` for Lambdify, while AOT
+Jacobian callbacks are about `0.002 ms/call` versus `0.007 ms/call`. ExprLegacy
+and AtomView AOT callbacks are in the same performance range; this is a
+callback result, not a full-solve result.
+
+The multi-worker Auto sweep covers workers `1,2,4` and dimensions `256,512`.
+All residual/Jacobian values and counters match. Auto remains sequential at
+some thresholds and dispatches parallel work for larger cases, but the
+portable two-stage criterion reports no stable crossover: parallel execution
+does not beat Sequential for both residual and Jacobian at every later
+checkpoint. This is a valid conservative result, not a test failure.
+
+Continuation work still open:
+
+- AOT artifact continuation with numeric-only rebind and no new build,
+  materialization or symbolic preparation is now covered in-process; the
+  process-isolated full-toolchain continuation remains open.
+- Process-isolated parameter continuation across the full Rust/C/tcc/C/gcc/Zig
+  matrix, including artifact provenance and consumer reconnect semantics.
+- Public prepared-plan invalidation after parameter schema, mesh/layout,
+  boundary-condition or Jacobian-pattern changes, including stale factor and
+  callback rejection.
+- A fair release continuation break-even matrix with identical telemetry,
+  repeated warm solves and a larger production-shaped workload.
+- A portable multi-worker Auto/Parallel break-even baseline on more expensive
+  Sparse/Banded systems.
+
+### 2026-09-27 22:38 local: fair continuation performance gate
+
+The new
+`lsode2_parameter_continuation_fair_warm_performance_matrix` story closes the
+measurement-contract gap in the earlier continuation report. Both continuation
+and fresh routes use `IvpTelemetry::detailed()`; the table separates
+continuation rebind+solve from fresh preparation and fresh solve time. The
+dated report is:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_fair_warm_performance_matrix.md
+```
+
+Debug result for four target parameter pairs per route:
+
+```text
+matrix | frontend       | continuation_ms | fresh_prepare_ms | fresh_solve_ms | fresh_total_ms | binds | new_expr_to_atom | new_symbolic_jacobian
+Sparse | ExprLegacy     | 39.831          | 0.204            | 39.580         | 39.784         | 4     | 0                | 0
+Sparse | AtomViewNative | 39.893          | 0.197            | 43.218         | 43.416         | 4     | 0                | 0
+Banded | ExprLegacy     | 22.522          | 0.133            | 18.809         | 18.942         | 4     | 0                | 0
+Banded | AtomViewNative | 19.222          | 0.148            | 22.935         | 23.084         | 4     | 0                | 0
+```
+
+The result is a fair diagnostic comparison, not yet a release performance
+baseline. Continuation reuses the prepared callback plan and performs no new
+symbolic conversion or differentiation. The remaining timing spread belongs
+to solver warm-state behavior and should be repeated on larger workloads before
+claiming a general continuation speedup.
+
+### 2026-09-27 22:39 local: AOT continuation cache gate
+
+The
+`aot_parameter_continuation_fair_warm_performance_and_cache_matrix` story
+extends the same fair telemetry contract to AOT. It performs one
+`BuildIfMissing` preparation, then three numeric rebinds, and compares them
+with fresh `RequirePrebuilt` solvers using identical detailed telemetry. The
+report is:
+
+```text
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_warm_rebind_story_tests__aot_parameter_continuation_fair_warm_performance_and_cache_matrix.md
+```
+
+All six route/layout rows passed. Continuation recorded zero additional AOT
+builds, links and materialization stages; fresh `RequirePrebuilt` rows also
+recorded zero builds. The debug timings were:
+
+```text
+matrix | route                  | continuation_ms | fresh_prepare_ms | fresh_solve_ms | fresh_total_ms
+Sparse | ExprLegacy-AOT         | 26.792          | 0.104            | 27.260         | 27.364
+Sparse | AtomViewNative-AOT     | 26.710          | 0.101            | 27.345         | 27.446
+Sparse | AtomViewNative-Lambdify| 26.531          | 0.085            | 27.355         | 27.440
+Banded | ExprLegacy-AOT         | 20.590          | 0.069            | 15.975         | 16.044
+Banded | AtomViewNative-AOT     | 18.160          | 0.064            | 16.203         | 16.267
+Banded | AtomViewNative-Lambdify| 18.082          | 0.068            | 15.841         | 15.909
+```
+
+This closes the same-process numeric-only AOT continuation/cache contract. It
+does not claim a general speedup: the measured workload is small and the
+process-isolated full-toolchain matrix still needs separate release evidence.
+
+### 2026-09-27 local: public structural reconfiguration gate
+
+The `lsode2_public_reconfigure_invalidates_structural_runtime_transactionally`
+story covers the public invalidation boundary that was previously tested only
+through the process harness. A prepared AtomView solver is replaced with a
+different equation/Jacobian pattern and compact-Banded layout. The replacement
+is unprepared until its new callbacks are prepared, and its solution matches a
+fresh solver with zero state drift. A replacement with an invalid parameter
+schema is rejected without destroying the already prepared runtime.
+
+The debug report is:
+
+```text
+test_reports/LSODE2_Lambdify/numerical__LSODE2__lifecycle_story_tests__lsode2_public_reconfigure_invalidates_structural_runtime_transactionally.md
+```
+
+This closes public schema/layout/Jacobian-pattern invalidation for the current
+LSODE2 configuration API. A separate mesh or boundary-condition mutator does
+not exist yet, so those cases remain represented by full transactional config
+replacement rather than by an artificial partial API.
+
+### 2026-09-27 local: process-isolated parameter continuation gate
+
+The
+`aot_process_isolated_parameter_continuation_reuses_producer_artifact` story
+extends continuation across a real producer/consumer process boundary. The
+producer prepares the parameter-independent C/tcc artifact at `2.0`; the
+consumer loads it at `3.0`, rebinds numerically to `4.0`, and solves without a
+new build or link. `ExprLegacy-AOT` and `AtomView-AOT` both preserve the
+published artifact key, reconnect successfully, report one parameter bind,
+and match a fresh AtomView Lambdify reference with zero state drift and equal
+trajectory counters.
+
+The debug report is:
+
+```text
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_parameter_continuation_reuses_producer_artifact.md
+```
+
+This closes the debug C/tcc process-continuation correctness contract. Rust,
+C/gcc and Zig process-isolated continuation, plus release break-even on larger
+production workloads, remain intentionally deferred until the final expensive
+release sweep.
+
+### 2026-09-27 23:12-23:19 local: AOT release matrix and break-even sweep
+
+The complete expensive release batch passed. These reports are the current
+dated evidence for the AOT comparison and should be read as one coordinated
+slice, not as interchangeable single-run benchmarks:
+
+```text
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_residual_boundary_isolation_exprlegacy_vs_atomview.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_callback_stage_performance_matrix.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_warm_solver_stage_performance_matrix.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_toolchain_callback_performance_matrix.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_chunking_policy_callback_break_even_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_lifecycle_story_tests__lsode2_combustion_sparse_banded_all_frontends_tcc_build_then_require_prebuilt_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_lifecycle_story_tests__lsode2_combustion_banded_atomview_lambdify_vs_tcc_prebuilt_warm_cooldown_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_chunking_story_tests__lsode2_large_chain_tcc_chunking_sparse_banded_warm_story.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_toolchain_story_tests__lsode2_combustion_aot_toolchain_chunking_sparse_banded_cold_matrix.md
+test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_release_apple_to_apple_matrix.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md
+test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_multi_worker_story.md
+```
+
+#### Correctness and lifecycle
+
+- Every report passed. The all-frontend lifecycle story now covers all four
+  `ExprLegacy`/`AtomViewNative` x `Sparse`/`Banded` routes through
+  `BuildIfMissing -> RequirePrebuilt`, with identical `1087/574/1086`
+  residual/Jacobian/linear counters and roundoff-level final-state differences.
+- Compact-Banded `ExprLegacy-AOT` is no longer an unsupported control route.
+  It passes at dimensions `128`, `256` and `512`, including residual length,
+  Jacobian output length and numerical parity.
+- The process-isolated release matrix passes Lambdify, ExprLegacy-AOT and
+  AtomView-AOT across Rust, C/tcc, C/gcc and Zig. Cold producer, warm consumer
+  and callback-only phases preserve trajectory counters, artifact provenance,
+  reconnect behavior and numerical results. Child-process startup is excluded
+  from solver timings.
+
+#### AOT versus Lambdify
+
+- At dimension `512`, generated AOT callbacks remain materially faster:
+  residual is about `0.002-0.003 ms/call` versus `0.020 ms/call` for
+  AtomViewNative Lambdify, and Jacobian is about `0.002 ms/call` versus
+  `0.007-0.008 ms/call`.
+- This does not imply a cold full-solve win. The warm solver story still shows
+  AOT preparation dominating total time. At dimension `256`, Sparse total is
+  about `57.7 ms` AOT versus `29.0 ms` Lambdify, while the measured AOT solve
+  interval is lower (`12.9 ms` versus `17.3 ms`). Banded shows the same split:
+  about `26.0 ms` versus `21.3 ms` total, with about `6.3 ms` versus `10.1 ms`
+  solve time.
+- The correct interpretation is: AOT wins the repeated callback/solve phase,
+  while Lambdify wins the small cold end-to-end workload unless preparation is
+  amortized by reuse or parameter continuation.
+
+#### AOT AtomView versus AOT ExprLegacy
+
+- The callback boundary is now broadly comparable. At dimension `512`, raw
+  residual is `1967.6 ns` for AtomView versus `1801.8 ns` for ExprLegacy, and
+  typed residual is `2210.0 ns` versus `2042.7 ns`; the typed boundary itself
+  is nearly equal (`242.5 ns` versus `240.9 ns`). The remaining difference is
+  generated callback/lowering cost, not typed validation.
+- Both AOT frontends have the same callback-scale order in the stage matrix.
+  AtomView pays larger source/materialization costs (`331 KB` and `11301`
+  lines versus `285 KB` and `9769` lines at `512`), but this does not create a
+  comparable runtime slowdown in the current release slice.
+- The lifecycle matrix shows that prebuilt AtomView is usually slightly slower
+  than prebuilt ExprLegacy on the small combustion fixture, while the large
+  callback matrix shows near parity. These are different scopes and must not be
+  collapsed into one universal frontend ranking.
+
+#### Toolchains and cold cost
+
+- `tcc` remains the practical cold toolchain in this environment. The cold
+  combustion matrix is roughly tens of milliseconds for tcc, hundreds for gcc
+  and Rust, and about `8-16 seconds` for Zig. All routes remain numerically
+  correct, so Zig is a build-time anomaly rather than a runtime correctness
+  failure.
+- In the process-isolated matrix the same pattern is reproduced: warm solve and
+  callback stages are close across toolchains, while cold producer build time
+  dominates. Toolchain selection must therefore be reported separately from
+  generated callback quality.
+
+#### Chunking and Auto
+
+- Whole and chunked tcc warm AOT have identical counters and numerical output.
+  Chunking is close to whole execution; it is not yet a general full-solve
+  speedup claim.
+- Forced Parallel is slower than Sequential on the current callback matrix.
+  Multi-worker `Auto` is numerically correct and now reports calibrated worker
+  thresholds, but the portable two-stage criterion finds no stable crossover
+  where both residual and Jacobian improve. Auto conservatively remains
+  sequential in many cases.
+- The standalone AOT chunk-policy release rerun closes the previous anomaly.
+  At `dimension=512`, `chunk_size=16` and `repetitions=200`, Auto reports
+  `0.011114 ms/call` residual and `0.026776 ms/call` Jacobian versus
+  Sequential `0.011424` and `0.026718`, with zero parallel dispatches. The
+  old `11.150883 ms/call` row was first-use Rayon calibration contamination,
+  not evaluator work. Calibration is now paid during linked-plan assembly and
+  exposed as cold `parallel_calibration`; forced Parallel remains slower on
+  these deliberately small chunks and is not a break-even claim.
+
+#### Current conclusion
+
+The release slice closes the major AOT correctness, compact-Banded, lifecycle,
+toolchain and process-isolated evidence gaps. It does not close production
+performance readiness: cold preparation/materialization remains dominant and
+portable Parallel break-even is not demonstrated. The chunk-policy Auto
+measurement anomaly is closed as a calibration-scope bug. The next safe work
+is therefore telemetry normalization and continuation-scale measurement, not a
+numerical algorithm change.
+
+## 2026-09-28 00:29-00:40 local: Lambdify correctness and release reconciliation
+
+This section records the fresh reports produced after the correctness-story
+rebind fix. The old report named `invalidates_prepared_solver_state` is kept as
+historical evidence; the current contract is that a valid numeric parameter
+rebind reuses prepared solver state, while structural changes invalidate it.
+
+### Correctness and continuation
+
+- The complete LSODE2 correctness story passed: trajectory parity, Sparse order,
+  Banded slots, wider boundary layouts, non-finite values, typed shape errors,
+  failure recovery and scope cleanup.
+- Parameter continuation passed for ExprLegacy and AtomViewNative on Sparse and
+  Banded routes. Rebound solutions match fresh solvers in state and time, solver
+  counters match, and rebind creates no new symbolic preparation.
+- Continuation correctness is closed, but a universal wall-clock win is not:
+  on small workloads controller/setup overhead can make a reused solve slower
+  than a fresh solve. This is an amortization question, not a stale-callback
+  defect.
+
+Reports:
+
+- [current valid-rebind correctness report](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__correctness_story_tests__lsode2_debug_parameter_rebind_reuses_prepared_solver_state.md)
+- [continuation parity](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_matches_fresh_solver_matrix.md)
+- [continuation preparation reuse](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_reports_reuse_vs_fresh_preparation.md)
+- [continuation warm performance](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__parameter_continuation_story_tests__lsode2_parameter_continuation_fair_warm_performance_matrix.md)
+
+### Large-system performance
+
+The large Sparse/Banded stage report passed at dimensions `128`, `256` and
+`512`, with matching trajectory counters and roundoff-level final differences.
+At dimension `512`, full solve time is close: AtomViewNative is about `0.7%`
+slower on Sparse and about `4.3%` slower on Banded. Warm callback stages remain
+slower for AtomViewNative: residual is approximately `9.32 ms` versus `8.04 ms`
+on Sparse and `9.59 ms` versus `7.55 ms` on Banded; Jacobian is approximately
+`2.98 ms` versus `2.49 ms` and `2.91 ms` versus `2.44 ms`, respectively.
+Linear stages are effectively at parity. The former tenfold Diffusion-chain
+Native anomaly is not reproduced by this release slice.
+
+The combustion dashboard remains a small-workload performance warning:
+AtomViewNative is about `29%` slower than ExprLegacy on Sparse full solve and
+about `12%` slower on Banded, with identical `776/387/774` solver counters and
+only roundoff-level numerical differences. This is noise-sensitive at small
+sizes and is retained as a regression gate, not treated as a correctness bug.
+
+Reports:
+
+- [large Sparse/Banded stages](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md)
+- [combustion dashboard](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__story_tests2__lsode2_combustion_symbolic_frontend_sparse_banded_multi_run_dashboard.md)
+- [Auto break-even](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md)
+- [multi-worker Auto break-even](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_multi_worker_story.md)
+
+### Auto and remaining Lambdify debt
+
+Auto is numerically correct and calibration is active, but the fresh reports do
+not establish a portable Parallel crossover. On the tested dimensions and
+worker counts Auto is usually sequential; forced Parallel is generally slower,
+with one machine-dependent worker/dimension selection that is not a general
+win. The policy is therefore safe, but its cross-machine break-even criterion
+remains open.
+
+The remaining Lambdify work is performance and accounting, not basic safety:
+
+- AtomViewNative residual/Jacobian warm stages still need optimization without
+  regressing the large-system, combustion and Diffusion-chain gates.
+- The canonical counter ownership diagnostic is now stable and fully
+  attributed: solver-owned calls are `776/387`, executor callback requests are
+  `774/387`, evaluator evaluations are `782/387`, nested runtime `aux_res=2`,
+  cold preparation `prep_res=6` and `unattributed_res=0` on every repeated
+  route.
+  Jacobian ownership is exact. No counter normalization is used.
+- The current large stage report uses three repetitions, so it is evidence of
+  direction, not the final stable baseline.
+- Numeric continuation needs a larger repeated-parameter workload to show when
+  avoided symbolic preparation amortizes controller/setup overhead.
+- The older canonical policy report contains a first-use Auto preparation spike;
+  it must be rerun after the calibration-scope fix before that historical spike
+  can be marked fully closed.
+
+### AOT release cross-check
+
+The parallel AOT reports from the same release slice also passed: trajectory and
+layout parity, compact-Banded ExprLegacy control, full BuildIfMissing to
+RequirePrebuilt lifecycle, process-isolated cold/warm/callback phases and
+producer/consumer continuation across Rust, C/tcc, C/gcc and Zig. Cache
+provenance, reconnects, typed errors, progress and stage telemetry are present.
+This closes the major AOT correctness and lifecycle evidence gaps, but does not
+claim a cold performance win over Lambdify: preparation and toolchain costs must
+be amortized by reuse or continuation.
+
+Reports:
+
+- [AOT process-isolated release matrix](../../../test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_release_apple_to_apple_matrix.md)
+- [AOT process-isolated continuation](../../../test_reports/LSODE2_AOT/numerical__LSODE2__aot_process_harness_story_tests__aot_process_isolated_release_parameter_continuation_matrix.md)
+- [AOT callback stages](../../../test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_callback_stage_performance_matrix.md)
+- [AOT warm solver stages](../../../test_reports/LSODE2_AOT/numerical__LSODE2__aot_performance_story_tests__lsode2_aot_large_warm_solver_stage_performance_matrix.md)
+
+The safe next step is to keep the current correctness and lifecycle gates green,
+rerun the canonical counter/policy stories with sufficient repetitions, and only
+then optimize residual/Jacobian dispatch or portable Auto thresholds.
+
+## 2026-09-28: safe AtomViewNative evaluator optimization pass
+
+The first optimization pass stayed below the solver and ABI layers. Native
+residual/Jacobian batches now validate each scalar plan's shared IVP ABI at the
+batch boundary instead of repeating the same length check inside every plain
+numeric node interpreter. The public
+single-evaluator path retains full typed validation. The prepared numeric
+`Add`/`Mul` interpreter also uses direct indexed loops instead of iterator
+adapters; operation order is unchanged.
+
+The pass was deliberately conservative: no `unsafe`, parameter-lock semantic
+change, buffer ownership change, sparse/banded layout change, or
+Sequential/Parallel/Auto policy change was made. The evaluator unit corpus
+passed `11/11`, the LSODE2 correctness story passed `10/10`, and the release
+large-chain callback story passed with zero residual/Jacobian drift and zero
+native allocation growth. In that single release sample, AtomViewNative
+residual was at parity or below ExprLegacy at dimensions `128` and `256`, while
+the Jacobian stage was also competitive; this is evidence that the batch
+overhead removal is plausible, not yet a stable ranking.
+
+The required evidence was a high-repeat release callback/full-solve matrix with
+the same telemetry settings on both frontends. It reports residual, Jacobian,
+preparation and solve stages independently, preserves trajectory and counter
+parity, and was used to accept this optimization provisionally. The resulting
+portable Parallel/Auto break-even sweep remains a separate open policy issue.
+Zig is intentionally outside this optimization pass because its known cold
+compile latency is not a callback-runtime signal.
+
+The high-repeat evidence is now available. The five-run full-solve baseline on
+`128/256/512` preserved counters and numerical parity; at `n=512` Sparse total
+time was `72.949 ms` for AtomViewNative versus `73.104 ms` for ExprLegacy,
+while Banded was `58.369 ms` versus `56.855 ms`. The twenty-repeat
+callback-only baseline also passed: at `n=512`, residual was `0.388 ms` versus
+`0.442 ms`, and Jacobian was `5.281 ms` versus `36.844 ms`.
+
+The multi-worker release sweep used fresh child processes for worker counts
+`1/2/4`, dimensions `256/512`, both matrix layouts and checkpoints
+`1/4/16/64`. All numerical diffs were zero. Auto remained conservative and
+did not produce a portable crossover; forced Parallel was generally slower or
+machine-sensitive. This is evidence for keeping Sequential as the safe
+fallback, not a final portable break-even claim.
+
+Reports:
+
+- [five-run large stage baseline](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_system_sparse_banded_total_and_stage_story.md)
+- [twenty-repeat callback-only policy baseline](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__lambdify_stress_story_tests__tests__lsode2_lambdify_callback_only_policy_story.md)
+- [multi-worker Auto break-even](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_multi_worker_story.md)
+
+## 2026-09-28: worker-local Parallel evaluator batching
+
+The next optimization pass stayed inside the prepared AtomView evaluator. The
+Sequential path already evaluated a residual/Jacobian batch with one
+worker-local scratch borrow; the Parallel path still entered
+`thread_local!`/`RefCell` once per scalar evaluator. It now partitions the
+immutable evaluator plan into disjoint chunks and runs the same batch evaluator
+once per Rayon worker chunk. The change preserves output order, the flattened
+ABI, typed error indices, parameter binding and the existing
+Sequential/Parallel/Auto decision.
+
+The safety checks passed in debug: evaluator `11/11` and LSODE2 correctness
+`10/10`. The release large-chain callback gate also passed with zero residual
+and Jacobian differences and zero Native allocation growth. That release gate
+exercised the production sequential path, so it confirms that the shared batch
+code remains safe but does not yet establish a Parallel speedup.
+
+The release reruns are recorded at local `2026-09-28` after the worker-local
+batch optimization. The process-isolated multi-worker Auto story passed for
+workers `1/2/4`, layouts and dimensions `256/512`, with zero residual/Jacobian
+differences and the expected `64` residual plus `64` Jacobian calls per child.
+Auto stayed sequential in most rows; worker counts `2` and `4` selected
+parallel dispatches in some dimension-512 rows, but no row established a
+portable crossover. The measured calibration thresholds were machine-local
+(`263`, `262` and `276` work units for workers `1`, `2` and `4`), so they are
+evidence for observability rather than portable constants.
+
+The separate canonical release matrix covered forced `Sequential`, forced
+`Parallel` and `Auto` for Sparse/Banded dimensions `128/256/512/1024` at
+checkpoints `1/4/16/64`. All callback values and counters matched. Forced
+Parallel was generally slower at small and intermediate workloads and mixed
+at the largest checkpoints; Auto remained sequential throughout that matrix.
+The two-stage criterion therefore reports no stable crossover for both
+residual and Jacobian, and no Auto heuristic change is justified yet.
+
+Reports:
+
+- [release multi-worker Auto baseline](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_multi_worker_story.md)
+- [release canonical Sequential/Parallel/Auto matrix](../../../test_reports/LSODE2_Lambdify/numerical__LSODE2__large_performance_story_tests__lsode2_large_auto_break_even_story.md)

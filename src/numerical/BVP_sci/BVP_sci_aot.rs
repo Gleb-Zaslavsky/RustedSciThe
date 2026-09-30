@@ -766,6 +766,7 @@ impl BvpSciPointwiseSparsePrepared {
                     .map(|entry| entry.diag_position)
                     .collect(),
             },
+            compact: false,
             chunks,
         }
     }

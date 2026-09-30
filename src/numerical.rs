@@ -86,8 +86,8 @@ pub mod BDF;
 ///          solver.plot_result();
 /// ```
 pub mod BE;
-/// Newton Raphson solver for Backward Euler method
-pub mod NR_for_Euler;
+/// Backward-Euler Newton implementation, retained at its historical path.
+pub use BE::NR_for_Euler;
 pub mod NR_for_ODE;
 
 /// Boundary value problems solvers for stiff nonlinear ODEs

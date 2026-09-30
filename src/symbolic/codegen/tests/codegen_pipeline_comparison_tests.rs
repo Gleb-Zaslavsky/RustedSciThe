@@ -358,7 +358,9 @@ fn compiled_generated_bvp_residual_fixture_matches_existing_lambdify_values() {
     for (lhs, rhs) in actual.iter().zip(expected.iter()) {
         assert!(
             (lhs - rhs).abs() < 1e-11,
-            "compiled residual fixture mismatch: {lhs} vs {rhs}"
+            "compiled residual fixture mismatch: {lhs} vs {rhs}; vars={variable_names:?}; first_expected={:?}; first_actual={:?}",
+            &expected[..expected.len().min(4)],
+            &actual[..actual.len().min(4)]
         );
     }
 }

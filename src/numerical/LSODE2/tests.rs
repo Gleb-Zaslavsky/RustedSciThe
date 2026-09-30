@@ -1697,7 +1697,7 @@ fn lsode2_native_statistics_track_prepare_solve_and_controller_decision() {
     assert_eq!(native.algorithm_decision_calls, 1);
     assert_eq!(native.preferred_bdf_count, 1);
     assert_eq!(native.executed_bdf_count, 1);
-    assert_eq!(native.bridge_prepare_calls, 1);
+    assert_eq!(native.bridge_prepare_calls, 0);
     assert_eq!(native.bridge_step_calls, 0);
     assert_eq!(native.bridge_bdf_nlu_total, 0);
     assert!(native.native_step_attempts > 0);
@@ -1766,11 +1766,11 @@ fn lsode2_solve_with_summary_reports_final_state_and_statistics() {
     assert!(summary.algorithm.bdf_current_order.is_some());
     assert_eq!(summary.algorithm.bdf_max_order_cap, Some(5));
     assert!(summary.algorithm.bdf_equal_step_count.is_some());
-    assert_eq!(summary.statistics.backend_prepare_calls, 0);
+    assert_eq!(summary.statistics.backend_prepare_calls, 1);
     assert!(summary.statistics.step_calls > 0);
     assert_eq!(summary.native_statistics.bridge_step_calls, 0);
     assert_eq!(summary.native_statistics.bridge_solve_calls, 0);
-    assert_eq!(summary.native_statistics.backend_prepare_calls, 0);
+    assert_eq!(summary.native_statistics.backend_prepare_calls, 1);
     assert_eq!(summary.native_statistics.solve_calls, 1);
     assert_eq!(summary.native_statistics.preferred_bdf_count, 1);
     assert_eq!(summary.native_statistics.executed_bdf_count, 1);
@@ -2597,7 +2597,7 @@ fn lsode2_sparse_native_path_uses_updated_parameter_values_before_solve() {
 }
 
 #[test]
-fn lsode2_native_path_uses_updated_parameter_values_after_prepare() {
+fn lsode2_native_path_reuses_prepared_state_after_parameter_rebind() {
     let config = parameterized_decay_config()
         .with_equation_parameter_values(DVector::from_vec(vec![-2.0]))
         .with_native_sparse_faer_backend();
@@ -2607,8 +2607,8 @@ fn lsode2_native_path_uses_updated_parameter_values_after_prepare() {
         .set_parameter_values(DVector::from_vec(vec![-1.0]))
         .expect("parameter update should succeed after prepare");
     assert!(
-        !solver.is_prepared(),
-        "parameter updates should invalidate cached prepared BDF state"
+        solver.is_prepared(),
+        "numeric parameter updates should retain the prepared callback state"
     );
     solver.solve().expect("LSODE2 solve should finish");
 

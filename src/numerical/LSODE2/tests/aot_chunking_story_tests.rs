@@ -6,7 +6,7 @@ fn lsode2_parallel_chunking_story_by_weight_class() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_chunking_story_tests::lsode2_parallel_chunking_story_by_weight_class",
     );
-    super::story_tests2::run_lsode2_parallel_chunking_story_by_weight_class();
+    super::legacy_story_support::run_lsode2_parallel_chunking_story_by_weight_class();
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_chunking_story_tests::lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard",
     );
-    super::story_tests2::run_lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard();
+    super::legacy_story_support::run_lsode2_combustion_like_parallel_chunking_multi_run_story_dashboard();
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn lsode2_parallel_chunking_cold_stage_story_by_weight_class() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_chunking_story_tests::lsode2_parallel_chunking_cold_stage_story_by_weight_class",
     );
-    super::story_tests2::run_lsode2_parallel_chunking_cold_stage_story_by_weight_class();
+    super::legacy_story_support::run_lsode2_parallel_chunking_cold_stage_story_by_weight_class();
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_chunking_story_tests::lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard",
     );
-    super::story_tests2::run_lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard();
+    super::legacy_story_support::run_lsode2_combustion_like_parallel_chunking_cold_stage_story_dashboard();
 }
 
 #[test]
@@ -43,5 +43,5 @@ fn lsode2_large_chain_tcc_chunking_sparse_banded_warm_story() {
         "LSODE2_AOT",
         "numerical::LSODE2::aot_chunking_story_tests::lsode2_large_chain_tcc_chunking_sparse_banded_warm_story",
     );
-    super::story_tests2::run_lsode2_large_chain_tcc_chunking_sparse_banded_warm_story();
+    super::legacy_story_support::run_lsode2_large_chain_tcc_chunking_sparse_banded_warm_story();
 }

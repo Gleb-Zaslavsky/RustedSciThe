@@ -40,18 +40,20 @@ use crate::symbolic::codegen::codegen_aot_lifecycle::AotArtifactState;
 use crate::symbolic::codegen::codegen_aot_resolution::{AotResolutionStatus, AotResolver};
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedJacobianLayout, LinkedResidualAotBackend, LinkedSparseAotBackend,
+    try_register_linked_residual_backend,
     register_generated_banded_cdylib_backend, register_generated_dense_cdylib_backend,
     register_generated_residual_cdylib_backend, register_generated_sparse_cdylib_backend,
     resolve_linked_dense_backend, resolve_linked_residual_backend, resolve_linked_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_provider_api::{
-    BackendKind, MatrixBackend, PreparedProblem, PreparedSparseProblem,
+    BackendKind, MatrixBackend, PreparedBandedProblem, PreparedProblem, PreparedSparseProblem,
 };
 use crate::symbolic::codegen::codegen_runtime_api::{
     ResidualChunkingStrategy, SparseJacobianStructure,
 };
 use crate::symbolic::codegen::codegen_tasks::{
-    IvpResidualTask, SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
+    BandedChunkingStrategy, BandedExprEntry, BandedJacobianTask, IvpResidualTask,
+    SparseChunkingStrategy, SparseExprEntry, SparseJacobianTask,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_registry::register_zig_build_in_registry;
@@ -263,6 +265,9 @@ pub struct SymbolicIvpGeneratedBackendConfig {
     pub aot_c_compiler: Option<String>,
     /// Parent directory where generated crates should be materialized.
     pub output_parent_dir: Option<PathBuf>,
+    /// Optional durable registry publication path for a process-isolated
+    /// producer. This is metadata only; compiled artifacts remain on disk.
+    pub handoff_path: Option<PathBuf>,
     /// Optional explicit generated crate name.
     pub crate_name_override: Option<String>,
     /// Optional explicit generated module name.
@@ -280,6 +285,7 @@ impl Default for SymbolicIvpGeneratedBackendConfig {
             aot_codegen_backend: AotCodegenBackend::default(),
             aot_c_compiler: None,
             output_parent_dir: None,
+            handoff_path: None,
             crate_name_override: None,
             module_name_override: None,
         }
@@ -384,6 +390,11 @@ impl SymbolicIvpGeneratedBackendConfig {
 
     pub fn with_output_parent_dir(mut self, output_parent_dir: Option<PathBuf>) -> Self {
         self.output_parent_dir = output_parent_dir;
+        self
+    }
+
+    pub fn with_handoff_path(mut self, handoff_path: Option<PathBuf>) -> Self {
+        self.handoff_path = handoff_path;
         self
     }
 
@@ -881,6 +892,15 @@ impl PreparedGeneratedSymbolicIvpSparseBackend {
             .map(|runtime| runtime.validate().map(|()| runtime))
             .transpose()
     }
+}
+
+/// Result of one AtomView-native AOT preparation that owns both sides of the
+/// generated callback contract.  LSODE2 uses this to install the residual
+/// callback and the sparse/compact-Banded Jacobian callback from the same
+/// lifecycle, rather than preparing the native artifact twice.
+pub struct PreparedGeneratedSymbolicIvpNativeCallbacks {
+    pub residual_problem: PreparedSymbolicIvpResidualProblem,
+    pub sparse_backend: PreparedGeneratedSymbolicIvpSparseBackend,
 }
 
 #[derive(Clone)]
@@ -1705,6 +1725,7 @@ fn reconnect_ivp_native_sparse_runtime_backend(
             route,
             problem_key
         );
+        publish_residual_alias_from_sparse_backend(&linked)?;
         return Ok(Some(linked));
     }
 
@@ -1733,7 +1754,41 @@ fn reconnect_ivp_native_sparse_runtime_backend(
         register_ivp_sparse_runtime_backend(route, backend, resolver, problem_key)
     };
     result?;
-    Ok(resolve_linked_sparse_backend(problem_key))
+    let linked = resolve_linked_sparse_backend(problem_key);
+    if let Some(linked) = linked.as_ref() {
+        publish_residual_alias_from_sparse_backend(linked)?;
+    }
+    Ok(linked)
+}
+
+/// A sparse/compact-Banded AtomView artifact publishes residual and Jacobian
+/// entry points together.  Reconnecting only the sparse registry would leave
+/// the residual resolver empty after a process restart, even though the loaded
+/// artifact is fully usable.  Keep both process-local views synchronized.
+fn publish_residual_alias_from_sparse_backend(
+    linked: &LinkedSparseAotBackend,
+) -> Result<(), SymbolicIvpGeneratedError> {
+    if resolve_linked_residual_backend(linked.problem_key.as_str()).is_none() {
+        let residual = LinkedResidualAotBackend {
+            problem_key: linked.problem_key.clone(),
+            residual_len: linked.residual_len,
+            residual_eval: linked.residual_eval.clone(),
+            residual_chunks: linked.residual_chunks.clone(),
+        };
+        try_register_linked_residual_backend(residual).map_err(|error| {
+            SymbolicIvpGeneratedError::AotLifecycle(
+                crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleError::new(
+                    crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureDiagnostics::new(
+                        crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Link,
+                        crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Lock,
+                        linked.problem_key.clone(),
+                        format!("failed to publish residual runtime alias: {error}"),
+                    ),
+                ),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Reconnects the residual callback from a compiled shared artifact when the
@@ -2081,6 +2136,7 @@ fn perform_requested_residual_build(
 
 fn perform_requested_sparse_build(
     problem: &PreparedSparseProblem<'_>,
+    telemetry: &IvpTelemetry,
     config: &SymbolicIvpGeneratedBackendConfig,
     resolver_snapshot: Option<AotResolver>,
 ) -> Result<(Option<GeneratedAotBuildResult>, Option<AotResolver>), SymbolicIvpGeneratedError> {
@@ -2101,16 +2157,25 @@ fn perform_requested_sparse_build(
         config.aot_codegen_backend, crate_name, preset
     );
     let prepared_problem = PreparedProblem::sparse(problem.clone());
-    let artifact = generated_aot_artifact_from_prepared_problem(
-        &crate_name,
-        &module_name,
-        &prepared_problem,
-        config.aot_codegen_backend,
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Planned,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "sparse ExprLegacy AOT build requested",
     );
+    let artifact = measure_cold_stage(telemetry, IvpColdStage::AotLowering, || {
+        generated_aot_artifact_from_prepared_problem(
+            &crate_name,
+            &module_name,
+            &prepared_problem,
+            config.aot_codegen_backend,
+        )
+    });
     let output_parent_dir =
         output_parent_dir_for_requested_build(config, "sparse", problem_key.as_str())?;
-    let mut request =
-        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
+    let mut request = measure_cold_stage(telemetry, IvpColdStage::AotSourceGeneration, || {
+        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset)
+    });
     if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
         (&mut request, config.aot_c_compiler.as_ref())
     {
@@ -2122,28 +2187,208 @@ fn perform_requested_sparse_build(
         .with_compiler(compiler.clone());
         *c_request = c_request.clone().with_compile_config(compile_config);
     }
-    let build = request
-        .materialize()
-        .map_err(|err| materialization_error("sparse-expr-legacy", problem_key.as_str(), err))?;
-
-    execute_generated_build_with_retry(
+    let build = measure_cold_stage(telemetry, IvpColdStage::AotMaterialization, || {
+        request
+            .materialize()
+            .map_err(|err| materialization_error("sparse-expr-legacy", problem_key.as_str(), err))
+    })?;
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Materialized,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "sparse ExprLegacy source artifact materialized",
+    );
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::BuildStarted,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "compiler build started",
+    );
+    measure_cold_stage(telemetry, IvpColdStage::AotBuild, || {
+        execute_generated_build_with_retry(
         &build,
         &format!(
             "ivp-sparse backend={:?} key={}",
             config.aot_codegen_backend, problem_key
         ),
-        None,
+        Some(telemetry),
         "sparse-expr-legacy",
         problem_key.as_str(),
-    )?;
-
-    let resolver = register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)?;
-    register_ivp_sparse_runtime_backend(
-        "sparse",
-        config.aot_codegen_backend,
-        &resolver,
+        )
+    })?;
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::BuildSucceeded,
+        "sparse-expr-legacy",
         problem_key.as_str(),
-    )?;
+        "compiler build completed",
+    );
+
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::LinkStarted,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "link/load started",
+    );
+    telemetry.record_aot_link_attempt();
+    let resolver = match measure_cold_stage(telemetry, IvpColdStage::AotLink, || {
+        register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)
+    }) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            telemetry.record_aot_link_result(false);
+            telemetry.log_aot_event(
+                crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::LinkFailed,
+                "sparse-expr-legacy",
+                problem_key.as_str(),
+                "artifact registration failed",
+            );
+            return Err(error);
+        }
+    };
+    let published = measure_cold_stage(telemetry, IvpColdStage::AotPublication, || {
+        register_ivp_sparse_runtime_backend(
+            "sparse",
+            config.aot_codegen_backend,
+            &resolver,
+            problem_key.as_str(),
+        )
+    });
+    telemetry.record_aot_link_result(published.is_ok());
+    published?;
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Linked,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "linked runtime registered",
+    );
+    telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Published,
+        "sparse-expr-legacy",
+        problem_key.as_str(),
+        "linked runtime published",
+    );
+    Ok((Some(build), Some(resolver)))
+}
+
+fn perform_requested_expr_banded_build(
+    generic: &PreparedProblem<'_>,
+    baseline_problem: &PreparedSymbolicIvpProblem,
+    config: &SymbolicIvpGeneratedBackendConfig,
+    resolver_snapshot: Option<AotResolver>,
+) -> Result<(Option<GeneratedAotBuildResult>, Option<AotResolver>), SymbolicIvpGeneratedError> {
+    let preset = match ResolvedIvpAotPlan::resolve(config, SelectedSymbolicIvpBackendKind::AotMissing)
+        .preset()
+    {
+        Some(preset) => preset,
+        None => return Ok((None, resolver_snapshot)),
+    };
+    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(generic);
+    let problem_key = manifest.problem_key();
+    let (crate_name, module_name) = generated_sparse_names(&problem_key, config);
+    let artifact = generated_aot_artifact_from_prepared_problem(
+        &crate_name,
+        &module_name,
+        generic,
+        config.aot_codegen_backend,
+    );
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Planned,
+        "banded-expr-legacy",
+        &problem_key,
+        "compact-Banded ExprLegacy AOT build requested",
+    );
+    let output_parent_dir =
+        output_parent_dir_for_requested_build(config, "banded-expr-legacy", &problem_key)?;
+    let mut request = generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
+    if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
+        (&mut request, config.aot_c_compiler.as_ref())
+    {
+        let compile_config = match preset {
+            AotBuildPreset::Production => CAotCompileConfig::production(),
+            AotBuildPreset::FastBuild => CAotCompileConfig::fast_build(),
+            AotBuildPreset::DevFastest => CAotCompileConfig::dev_fastest(),
+        }
+        .with_compiler(compiler.clone());
+        *c_request = c_request.clone().with_compile_config(compile_config);
+    }
+    let build = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotMaterialization, || {
+        request
+            .materialize()
+            .map_err(|err| materialization_error("banded-expr-legacy", &problem_key, err))
+    })?;
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Materialized,
+        "banded-expr-legacy",
+        &problem_key,
+        "compact-Banded ExprLegacy source artifact materialized",
+    );
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::BuildStarted,
+        "banded-expr-legacy",
+        &problem_key,
+        "compiler build started",
+    );
+    let executed = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotBuild, || {
+        execute_generated_build_with_retry(
+            &build,
+            &format!(
+                "ivp-banded-expr-legacy backend={:?} key={}",
+                config.aot_codegen_backend, problem_key
+            ),
+            Some(&baseline_problem.telemetry),
+            "banded-expr-legacy",
+            &problem_key,
+        )
+    });
+    if let Err(error) = executed {
+        baseline_problem.telemetry.log_aot_event(
+            crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::BuildFailed,
+            "banded-expr-legacy",
+            &problem_key,
+            "compiler build failed",
+        );
+        return Err(error);
+    }
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::BuildSucceeded,
+        "banded-expr-legacy",
+        &problem_key,
+        "compiler build completed",
+    );
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::LinkStarted,
+        "banded-expr-legacy",
+        &problem_key,
+        "link/load started",
+    );
+    baseline_problem.telemetry.record_aot_link_attempt();
+    let resolver = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotLink, || {
+        register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)
+    })?;
+    let publication = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotPublication, || {
+        register_ivp_banded_runtime_backend(
+            "banded-expr-legacy",
+            config.aot_codegen_backend,
+            &resolver,
+            &problem_key,
+        )
+    });
+    baseline_problem
+        .telemetry
+        .record_aot_link_result(publication.is_ok());
+    publication?;
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Linked,
+        "banded-expr-legacy",
+        &problem_key,
+        "linked runtime registered",
+    );
+    baseline_problem.telemetry.log_aot_event(
+        crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Published,
+        "banded-expr-legacy",
+        &problem_key,
+        "linked runtime published",
+    );
     Ok((Some(build), Some(resolver)))
 }
 
@@ -2429,6 +2674,76 @@ fn prepare_generated_symbolic_ivp_native_banded_backend(
     )
 }
 
+/// Prepare the AtomView-native residual and sparse/compact-Banded Jacobian
+/// callbacks as one lifecycle.  The baseline residual problem is deliberately
+/// retained and converted to the linked residual runtime after the combined
+/// backend has been prepared, so the solver can reuse the same linked artifact.
+pub fn prepare_generated_symbolic_ivp_native_callbacks(
+    equations: Vec<crate::symbolic::symbolic_engine::Expr>,
+    variables: Vec<String>,
+    time_arg: String,
+    bandwidth: Option<(usize, usize)>,
+    options: SymbolicIvpProblemOptions,
+    config: SymbolicIvpGeneratedBackendConfig,
+) -> Result<PreparedGeneratedSymbolicIvpNativeCallbacks, SymbolicIvpGeneratedError> {
+    if options.symbolic_assembly_backend
+        != crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView
+    {
+        return Err(SymbolicIvpGeneratedError::AotBuildFailed(
+            "native generated IVP callbacks require AtomView assembly".to_string(),
+        ));
+    }
+
+    let baseline_problem =
+        prepare_symbolic_ivp_residual_problem(equations, variables, time_arg, options)?;
+    let sparse_backend = match bandwidth {
+        Some((kl, ku)) => prepare_generated_symbolic_ivp_native_banded_backend(
+            &baseline_problem,
+            &config,
+            kl,
+            ku,
+        )?,
+        None => prepare_generated_symbolic_ivp_native_sparse_backend(&baseline_problem, &config)?,
+    };
+
+    if sparse_backend.selected_backend != SelectedSymbolicIvpBackendKind::AotCompiled {
+        return Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+            runtime_unavailable_aot_message(
+                "native-atomview",
+                sparse_backend.problem_key.as_str(),
+                &config,
+            ),
+        ));
+    }
+    let linked_sparse = sparse_backend.linked_backend.clone().ok_or_else(|| {
+        SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(runtime_unavailable_aot_message(
+            "native-atomview",
+            sparse_backend.problem_key.as_str(),
+            &config,
+        ))
+    })?;
+    // Prefer a separately published residual runtime when one exists. The
+    // helper publishes the sparse-derived alias only when that dedicated
+    // compatibility entry is absent, so every lifecycle uses one typed
+    // publication boundary.
+    publish_residual_alias_from_sparse_backend(&linked_sparse)?;
+    let linked_residual = resolve_linked_residual_backend(linked_sparse.problem_key.as_str())
+        .ok_or_else(|| {
+            SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+                runtime_unavailable_aot_message(
+                    "native-atomview",
+                    linked_sparse.problem_key.as_str(),
+                    &config,
+                ),
+            )
+        })?;
+
+    Ok(PreparedGeneratedSymbolicIvpNativeCallbacks {
+        residual_problem: baseline_problem.into_linked_residual_backend(linked_residual),
+        sparse_backend,
+    })
+}
+
 fn prepare_generated_symbolic_ivp_native_backend(
     baseline_problem: &PreparedSymbolicIvpResidualProblem,
     config: &SymbolicIvpGeneratedBackendConfig,
@@ -2677,7 +2992,12 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         });
     let resolved_plan = ResolvedIvpAotPlan::resolve(&config, initial_selection);
     let (build_result, resolver_snapshot) = if resolved_plan.should_build() {
-        perform_requested_sparse_build(&prepared_sparse, &config, config.resolver.clone())?
+        perform_requested_sparse_build(
+            &prepared_sparse,
+            &aot_source.telemetry,
+            &config,
+            config.resolver.clone(),
+        )?
     } else {
         (None, config.resolver.clone())
     };
@@ -2771,21 +3091,256 @@ pub fn prepare_generated_symbolic_ivp_banded_backend(
     options: SymbolicIvpProblemOptions,
     config: SymbolicIvpGeneratedBackendConfig,
 ) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
-    if options.symbolic_assembly_backend
-        != crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView
-    {
-        return Err(SymbolicIvpGeneratedError::AotBuildFailed(
-            "compact-Banded generated IVP backend requires AtomView assembly".to_string(),
-        ));
+    match options.symbolic_assembly_backend {
+        crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView => {
+            let baseline_problem =
+                prepare_symbolic_ivp_residual_problem(equations, variables, time_arg, options)?;
+            prepare_generated_symbolic_ivp_native_banded_backend(
+                &baseline_problem,
+                &config,
+                bandwidth.0,
+                bandwidth.1,
+            )
+        }
+        crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::ExprLegacy
+        | crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomViewExprCompat => {
+            let baseline_problem =
+                prepare_symbolic_ivp_problem(equations, variables, time_arg, options)?;
+            prepare_generated_symbolic_ivp_expr_banded_backend(
+                &baseline_problem,
+                &config,
+                bandwidth.0,
+                bandwidth.1,
+            )
+        }
     }
-    let baseline_problem =
-        prepare_symbolic_ivp_residual_problem(equations, variables, time_arg, options)?;
-    prepare_generated_symbolic_ivp_native_banded_backend(
-        &baseline_problem,
-        &config,
-        bandwidth.0,
-        bandwidth.1,
-    )
+}
+
+/// Prepares the historical ExprLegacy route with the same complete compact
+/// Banded ABI used by the AtomView-native route.
+///
+/// ExprLegacy remains an intentionally slower control path. The important
+/// invariant here is layout parity: boundary slots are emitted as literal
+/// zero expressions, while in-band entries retain their original Expr values.
+fn prepare_generated_symbolic_ivp_expr_banded_backend(
+    baseline_problem: &PreparedSymbolicIvpProblem,
+    config: &SymbolicIvpGeneratedBackendConfig,
+    kl: usize,
+    ku: usize,
+) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
+    let rows = baseline_problem.equations.len();
+    let cols = baseline_problem.variables.len();
+    if rows == 0 || rows != cols {
+        return Err(SymbolicIvpGeneratedError::AotBuildFailed(format!(
+            "compact-Banded ExprLegacy backend requires a non-empty square Jacobian, got {rows}x{cols}"
+        )));
+    }
+    let slots = kl
+        .checked_add(ku)
+        .and_then(|width| width.checked_add(1))
+        .and_then(|width| width.checked_mul(cols))
+        .ok_or_else(|| {
+            SymbolicIvpGeneratedError::AotBuildFailed(format!(
+                "compact-Banded ExprLegacy slot count overflow for {rows}x{cols}, kl={kl}, ku={ku}"
+            ))
+        })?;
+
+    let variables = baseline_problem
+        .variables
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut jacobian_params = Vec::with_capacity(
+        1 + baseline_problem
+            .equation_parameters
+            .as_ref()
+            .map_or(0, Vec::len),
+    );
+    jacobian_params.push(baseline_problem.time_arg.as_str());
+    if let Some(parameters) = baseline_problem.equation_parameters.as_ref() {
+        jacobian_params.extend(parameters.iter().map(String::as_str));
+    }
+    let params = (!jacobian_params.is_empty()).then_some(jacobian_params.as_slice());
+
+    let zero_slots = vec![crate::symbolic::symbolic_engine::Expr::Const(0.0); slots];
+    let mut compact_entries = Vec::with_capacity(slots);
+    for band_row in 0..(kl + ku + 1) {
+        // Match Banded::offset and AtomAotBandedSlotMap: row-col is the
+        // compact storage offset, so the first band row is the lower edge.
+        let offset = band_row as isize - ku as isize;
+        for col in 0..cols {
+            let row = col as isize + offset;
+            let (row, expr) = if row >= 0 && (row as usize) < rows {
+                let row = row as usize;
+                (row, &baseline_problem.symbolic_jacobian[row][col])
+            } else {
+                (0, &zero_slots[band_row * cols + col])
+            };
+            let diag_position = if offset >= 0 { col } else { row };
+            compact_entries.push(BandedExprEntry {
+                row,
+                col,
+                diag_offset: offset,
+                diag_position,
+                expr,
+            });
+        }
+    }
+
+    let residual_params = baseline_problem
+        .equation_parameters
+        .as_ref()
+        .map(|parameters| parameters.iter().map(String::as_str).collect::<Vec<_>>());
+    let residual_task = IvpResidualTask {
+        fn_name: "generated_ivp_residual_eval",
+        time_arg: baseline_problem.time_arg.as_str(),
+        residuals: &baseline_problem.equations,
+        variables: &variables,
+        params: residual_params.as_deref(),
+    };
+    let banded_task = BandedJacobianTask {
+        fn_name: "generated_ivp_sparse_jacobian_eval",
+        shape: (rows, cols),
+        kl,
+        ku,
+        compact: true,
+        entries: &compact_entries,
+        variables: &variables,
+        params,
+    };
+    let prepared = PreparedBandedProblem::new(
+        BackendKind::Aot,
+        MatrixBackend::Banded,
+        residual_task.runtime_plan(config.residual_chunking_strategy),
+        banded_task.runtime_plan(BandedChunkingStrategy::Whole),
+    );
+    let generic = PreparedProblem::banded(prepared.clone());
+    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
+        &generic,
+    );
+    let problem_key = manifest.problem_key();
+    let initial_selection = measure_cold_stage(
+        &baseline_problem.telemetry,
+        IvpColdStage::AotCacheLookup,
+        || select_sparse_backend_by_key(&problem_key, config.resolver.as_ref()),
+    );
+    log_aot_cache_selection(
+        &baseline_problem.telemetry,
+        "banded-expr-legacy",
+        &problem_key,
+        "phase=initial-selection",
+        initial_selection,
+    );
+    baseline_problem
+        .telemetry
+        .record_aot_resolution(initial_selection == SelectedSymbolicIvpBackendKind::AotCompiled);
+    let resolved_plan = ResolvedIvpAotPlan::resolve(config, initial_selection);
+    let (build_result, resolver_snapshot) = if resolved_plan.should_build() {
+        perform_requested_expr_banded_build(
+            &generic,
+            baseline_problem,
+            config,
+            config.resolver.clone(),
+        )?
+    } else {
+        (None, config.resolver.clone())
+    };
+    let final_selection = measure_cold_stage(
+        &baseline_problem.telemetry,
+        IvpColdStage::AotCacheLookup,
+        || select_sparse_backend_by_key(&problem_key, resolver_snapshot.as_ref()),
+    );
+    log_aot_cache_selection(
+        &baseline_problem.telemetry,
+        "banded-expr-legacy",
+        &problem_key,
+        "phase=final-selection",
+        final_selection,
+    );
+    baseline_problem
+        .telemetry
+        .record_aot_resolution(final_selection == SelectedSymbolicIvpBackendKind::AotCompiled);
+    let structural_coordinates = baseline_problem
+        .symbolic_jacobian
+        .iter()
+        .enumerate()
+        .flat_map(|(row, values)| {
+            values.iter().enumerate().filter_map(move |(col, expr)| {
+                (!expr.is_zero()).then_some((row, col))
+            })
+        })
+        .collect::<Vec<_>>();
+    let jacobian_structure = SparseJacobianStructure {
+        rows,
+        cols,
+        row_indices: structural_coordinates.iter().map(|&(row, _)| row).collect(),
+        col_indices: structural_coordinates.iter().map(|&(_, col)| col).collect(),
+    };
+    match final_selection {
+        SelectedSymbolicIvpBackendKind::AotCompiled => {
+            let linked_backend = reconnect_ivp_native_sparse_runtime_backend(
+                "banded-expr-legacy",
+                config.aot_codegen_backend,
+                resolver_snapshot.as_ref(),
+                &problem_key,
+                AtomAotMatrixLayout::BandedCompact {
+                    rows,
+                    cols,
+                    kl,
+                    ku,
+                    slots,
+                },
+            )?
+            .ok_or_else(|| {
+                SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
+                    runtime_unavailable_aot_message("banded-expr-legacy", &problem_key, config),
+                )
+            })?;
+            let runtime_owner = PreparedIvpAotRuntime::new(
+                problem_key.clone(),
+                final_selection,
+                resolver_snapshot.clone(),
+                build_result.clone(),
+                PreparedIvpLinkedRuntime::Sparse(linked_backend.clone()),
+            );
+            Ok(PreparedGeneratedSymbolicIvpSparseBackend {
+                problem_key,
+                selected_backend: final_selection,
+                linked_backend: Some(linked_backend),
+                jacobian_structure,
+                telemetry: baseline_problem.telemetry.clone(),
+                updated_resolver: resolver_snapshot,
+                build_result,
+                runtime_owner: Some(runtime_owner),
+            })
+        }
+        SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt => {
+            Err(SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(
+                not_built_aot_message("banded-expr-legacy", &problem_key, config),
+            ))
+        }
+        SelectedSymbolicIvpBackendKind::AotMissing | SelectedSymbolicIvpBackendKind::Lambdify => {
+            if matches!(
+                config.build_policy,
+                SymbolicIvpAotBuildPolicy::RequirePrebuilt
+            ) {
+                Err(SymbolicIvpGeneratedError::CompiledAotArtifactMissing(
+                    missing_aot_message("banded-expr-legacy", &problem_key, config),
+                ))
+            } else {
+                Ok(PreparedGeneratedSymbolicIvpSparseBackend {
+                    problem_key,
+                    selected_backend: SelectedSymbolicIvpBackendKind::Lambdify,
+                    linked_backend: None,
+                    jacobian_structure,
+                    telemetry: baseline_problem.telemetry.clone(),
+                    updated_resolver: resolver_snapshot,
+                    build_result,
+                    runtime_owner: None,
+                })
+            }
+        }
+    }
 }
 
 /// Builds one shared IVP symbolic problem through the high-level generated-backend layer.
@@ -4041,6 +4596,62 @@ mod tests {
         );
         assert_eq!(snapshot.cold_stage(IvpColdStage::AotBuild).calls, 1);
         assert_eq!(snapshot.cold_stage(IvpColdStage::AotLink).calls, 1);
+        assert_eq!(snapshot.aot_build_attempts, 1);
+        assert_eq!(snapshot.aot_link_attempts, 1);
+        assert_eq!(snapshot.aot_build_successes, 1);
+        assert_eq!(snapshot.aot_link_successes, 1);
+    }
+
+    #[test]
+    fn generated_exprlegacy_sparse_build_if_missing_reports_complete_lifecycle() {
+        let (equations, variables, time_arg, options) = sample_problem_with_offset(0.125);
+        let dir = tempdir().expect("tempdir should exist");
+        let telemetry = IvpTelemetry::detailed();
+        let prepared = prepare_generated_symbolic_ivp_sparse_backend(
+            equations,
+            variables,
+            time_arg,
+            options
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::ExprLegacy)
+                .with_telemetry(telemetry.clone()),
+            SymbolicIvpGeneratedBackendConfig::defaults()
+                .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Debug,
+                })
+                .with_output_parent_dir(Some(dir.path().to_path_buf())),
+        )
+        .expect("ExprLegacy sparse build-if-missing should succeed");
+
+        assert_eq!(
+            prepared.selected_backend,
+            SelectedSymbolicIvpBackendKind::AotCompiled
+        );
+        let linked = prepared
+            .linked_backend
+            .expect("ExprLegacy sparse build should publish linked callbacks");
+        let args = [0.25, 2.0, -0.5, 3.0, 1.0, 2.0];
+        let mut residual = [0.0; 2];
+        linked
+            .try_residual_eval(&args, &mut residual)
+            .expect("ExprLegacy sparse residual callback should evaluate");
+        assert!((residual[0] - 0.625).abs() < 1.0e-12);
+        assert!((residual[1] - 0.875).abs() < 1.0e-12);
+
+        let mut jacobian = [0.0; 4];
+        linked
+            .try_jacobian_values_eval(&args, &mut jacobian)
+            .expect("ExprLegacy sparse Jacobian callback should evaluate");
+        for (actual, expected) in jacobian.iter().zip([1.0, -0.5, 3.0, -1.0]) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.cold_stage(IvpColdStage::AotBuild).calls, 1);
+        assert_eq!(snapshot.cold_stage(IvpColdStage::AotLink).calls, 1);
+        assert_eq!(snapshot.aot_build_attempts, 1);
+        assert_eq!(snapshot.aot_link_attempts, 1);
+        assert_eq!(snapshot.aot_build_successes, 1);
+        assert_eq!(snapshot.aot_link_successes, 1);
     }
 
     #[test]
@@ -4089,7 +4700,10 @@ mod tests {
         let banded = crate::somelinalg::banded::storage::Banded::from_vec(2, 1, 1, values.to_vec())
             .expect("compact callback output should form a valid Banded matrix");
         assert!((banded[(0, 0)] - 1.0).abs() < 1.0e-12);
-        assert!((banded[(0, 1)] + 0.5).abs() < 1.0e-12);
+        assert!(
+            (banded[(0, 1)] + 0.5).abs() < 1.0e-12,
+            "AtomView compact buffer={values:?}, decoded={banded:?}"
+        );
         assert!((banded[(1, 0)] - 3.0).abs() < 1.0e-12);
         assert!((banded[(1, 1)] + 1.0).abs() < 1.0e-12);
 
@@ -4102,6 +4716,73 @@ mod tests {
         );
         assert_eq!(snapshot.cold_stage(IvpColdStage::AotBuild).calls, 1);
         assert_eq!(snapshot.cold_stage(IvpColdStage::AotLink).calls, 1);
+    }
+
+    #[test]
+    fn generated_exprlegacy_banded_build_if_missing_publishes_compact_slots() {
+        let (equations, variables, time_arg, options) = sample_problem_with_offset(0.125);
+        let dir = tempdir().expect("tempdir should exist");
+        let telemetry = IvpTelemetry::detailed();
+        let prepared = prepare_generated_symbolic_ivp_banded_backend(
+            equations,
+            variables,
+            time_arg,
+            (1, 1),
+            options
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::ExprLegacy)
+                .with_telemetry(telemetry.clone()),
+            SymbolicIvpGeneratedBackendConfig::defaults()
+                .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+                    profile: AotBuildProfile::Debug,
+                })
+                .with_output_parent_dir(Some(dir.path().to_path_buf())),
+        )
+        .expect("ExprLegacy compact-Banded build should succeed");
+
+        assert_eq!(
+            prepared.selected_backend,
+            SelectedSymbolicIvpBackendKind::AotCompiled
+        );
+        let linked = prepared
+            .linked_backend
+            .expect("ExprLegacy compact-Banded build should publish a linked callback");
+        assert_eq!(
+            linked.jacobian_layout,
+            crate::symbolic::codegen::codegen_aot_runtime_link::LinkedJacobianLayout::BandedCompact {
+                rows: 2,
+                cols: 2,
+                kl: 1,
+                ku: 1,
+            }
+        );
+
+        let args = [0.25, 2.0, -0.5, 3.0, 1.0, 2.0];
+        let mut values = [0.0; 6];
+        linked
+            .try_jacobian_values_eval(&args, &mut values)
+            .expect("ExprLegacy compact-Banded callback should accept its full slot buffer");
+        let banded = crate::somelinalg::banded::storage::Banded::from_vec(
+            2,
+            1,
+            1,
+            values.to_vec(),
+        )
+        .expect("ExprLegacy compact callback output should form a valid Banded matrix");
+        assert!((banded[(0, 0)] - 1.0).abs() < 1.0e-12);
+        assert!(
+            (banded[(0, 1)] + 0.5).abs() < 1.0e-12,
+            "ExprLegacy compact buffer={values:?}, decoded={banded:?}"
+        );
+        assert!((banded[(1, 0)] - 3.0).abs() < 1.0e-12);
+        assert!((banded[(1, 1)] + 1.0).abs() < 1.0e-12);
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.cold_stage(IvpColdStage::AotBuild).calls, 1);
+        assert_eq!(snapshot.cold_stage(IvpColdStage::AotLink).calls, 1);
+        assert_eq!(snapshot.aot_build_attempts, 1);
+        assert_eq!(snapshot.aot_link_attempts, 1);
+        assert_eq!(snapshot.aot_build_successes, 1);
+        assert_eq!(snapshot.aot_link_successes, 1);
     }
 
     #[test]

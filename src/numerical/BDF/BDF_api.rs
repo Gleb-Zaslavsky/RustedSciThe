@@ -149,6 +149,7 @@ use std::time::Instant;
 
 type BdfNativeJacobianFactory =
     dyn Fn(Option<SharedIvpParameterValues>) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>;
+type BdfPreparedResidual = dyn Fn(f64, &DVector<f64>) -> DVector<f64>;
 type BdfNativeRhs = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
 type BdfNativeDenseJac = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
 
@@ -399,6 +400,12 @@ pub struct ODEsolver {
     /// Optional factory for replacing the dense generated Jacobian callback
     /// with a native sparse/banded Jacobian callback.
     bdf_native_jacobian_factory: Option<Box<BdfNativeJacobianFactory>>,
+    /// Prepared generated residual supplied by an owning solver lifecycle.
+    ///
+    /// LSODE2 prepares residual and native Jacobian callbacks as one unit. The
+    /// bridge must consume that unit instead of rebuilding the symbolic
+    /// problem before installing its BDF instance.
+    prepared_generated_residual: Option<Box<BdfPreparedResidual>>,
     /// Optional pure numerical RHS callback `f(t, y)`.
     native_rhs: Option<BdfNativeRhs>,
     /// Optional pure numerical dense Jacobian callback `df/dy`.
@@ -486,6 +493,7 @@ impl ODEsolver {
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
+            prepared_generated_residual: None,
             native_rhs: None,
             native_jacobian: None,
         }
@@ -596,6 +604,28 @@ impl ODEsolver {
             + 'static,
     {
         self.bdf_native_jacobian_factory = Some(Box::new(factory));
+        self.backend_prepared = false;
+    }
+
+    /// Installs callbacks prepared by an owning symbolic lifecycle.
+    ///
+    /// This is intentionally a single operation: installing the residual and
+    /// Jacobian separately would allow `try_generate` to prepare the symbolic
+    /// residual a second time before it invokes the native Jacobian factory.
+    pub(crate) fn set_prepared_generated_callbacks<F>(
+        &mut self,
+        residual: Box<BdfPreparedResidual>,
+        parameter_values_handle: Option<SharedIvpParameterValues>,
+        jacobian_factory: F,
+    ) where
+        F: Fn(
+                Option<SharedIvpParameterValues>,
+            ) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>
+            + 'static,
+    {
+        self.prepared_generated_residual = Some(residual);
+        self.parameter_values_handle = parameter_values_handle;
+        self.bdf_native_jacobian_factory = Some(Box::new(jacobian_factory));
         self.backend_prepared = false;
     }
 
@@ -849,7 +879,6 @@ impl ODEsolver {
         let prepared_problem = prepared.into_problem();
         let parameter_values_handle = prepared_problem.parameter_values_handle();
         let fun = prepared_problem.residual;
-        let jac = prepared_problem.jacobian;
         let stats_for_fun = Arc::clone(&self.statistics);
         let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
             let start = Instant::now();
@@ -860,6 +889,7 @@ impl ODEsolver {
                 .record_residual_duration(start.elapsed());
             out
         });
+        let jac = prepared_problem.jacobian;
         let stats_for_jac = Arc::clone(&self.statistics);
         let wrapped_jac = Box::new(move |t: f64, y: &DVector<f64>| -> DMatrix<f64> {
             let start = Instant::now();
@@ -970,20 +1000,28 @@ impl ODEsolver {
         start: std::time::Instant,
         options: SymbolicIvpProblemOptions,
     ) -> Result<(), IvpBackendError> {
-        let prepared = prepare_generated_symbolic_ivp_residual_problem(
-            self.eq_system.clone(),
-            self.values.clone(),
-            self.arg.clone(),
-            options.with_aot_options(self.generated_backend_config.aot_options),
-            self.generated_backend_config.clone(),
-        )
-        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
-            message: err.to_string(),
-        })?;
-        self.generated_backend_config.resolver = prepared.updated_resolver.clone();
-        let prepared_problem = prepared.into_problem();
-        let parameter_values_handle = prepared_problem.parameter_values_handle();
-        let fun = prepared_problem.residual;
+        let (parameter_values_handle, fun) =
+            if let Some(prepared_residual) = self.prepared_generated_residual.take() {
+                (self.parameter_values_handle.clone(), prepared_residual)
+            } else {
+                let prepared = prepare_generated_symbolic_ivp_residual_problem(
+                    self.eq_system.clone(),
+                    self.values.clone(),
+                    self.arg.clone(),
+                    options.with_aot_options(self.generated_backend_config.aot_options),
+                    self.generated_backend_config.clone(),
+                )
+                .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+                    message: err.to_string(),
+                })?;
+                self.generated_backend_config.resolver = prepared.updated_resolver.clone();
+                let prepared_problem = prepared.into_problem();
+                let parameter_values_handle = prepared_problem.parameter_values_handle();
+                let residual = prepared_problem.residual;
+                let residual = Box::new(move |t: f64, y: &DVector<f64>| residual(t, y))
+                    as Box<BdfPreparedResidual>;
+                (parameter_values_handle, residual)
+            };
         let stats_for_fun = Arc::clone(&self.statistics);
         let wrapped_fun = Box::new(move |t: f64, y: &DVector<f64>| -> DVector<f64> {
             let start = Instant::now();
@@ -1216,6 +1254,10 @@ impl ODEsolver {
     /// ```
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
         (self.t_result.clone(), self.y_result.clone())
+    }
+
+    pub(crate) fn get_result_ref(&self) -> (&DVector<f64>, &DMatrix<f64>) {
+        (&self.t_result, &self.y_result)
     }
 
     /// Returns the current integration status.

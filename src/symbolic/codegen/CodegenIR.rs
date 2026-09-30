@@ -46,6 +46,7 @@ use crate::symbolic::symbolic_metadata::SignatureCache;
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 /// Target language for code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1601,7 +1602,8 @@ pub struct GeneratedBlock {
     /// Public Rust function name emitted for this generated multi-output block.
     pub fn_name: String,
     /// Flattened input names expected by the generated block function.
-    pub vars: Vec<String>,
+    pub vars: Arc<[String]>,
+    var_index_map: Option<Arc<ahash::HashMap<u32, usize>>>,
     /// Lowered multi-output IR backing the generated block.
     pub ir: LinearBlock,
     /// Optional typed output-layout metadata used for specialized emitters.
@@ -1695,6 +1697,7 @@ impl GeneratedBlock {
         Self {
             fn_name: fn_name.into(),
             vars: vars.iter().map(|s| s.to_string()).collect(),
+            var_index_map: None,
             ir: Expr::lower_many_to_linear(exprs, vars),
             layout: None,
             output_offsets: None,
@@ -1707,6 +1710,7 @@ impl GeneratedBlock {
         Self {
             fn_name: plan.fn_name.to_string(),
             vars: plan.input_names.iter().map(|s| s.to_string()).collect(),
+            var_index_map: None,
             ir: Lowerer::new(&plan.input_names)
                 .lower_many_iter(plan.outputs.iter().map(|output| output.expr)),
             layout: Some(plan.layout),
@@ -1744,6 +1748,7 @@ impl GeneratedBlock {
                 Self {
                     fn_name: plan.fn_name.to_string(),
                     vars: plan.input_names.iter().map(|s| s.to_string()).collect(),
+                    var_index_map: None,
                     ir: Lowerer::new(&plan.input_names)
                         .lower_many_iter(nonzero_outputs.iter().map(|output| output.expr)),
                     layout: Some(plan.layout),
@@ -1858,9 +1863,41 @@ impl GeneratedBlock {
         optimization_profile: AtomOptimizationProfile,
         reuse_policy: AtomTempReusePolicy,
     ) -> (Self, AtomGeneratedBlockBreakdown) {
+        let vars: Arc<[String]> = vars.to_vec().into();
+        let symbols: Arc<[Symbol]> = symbols.to_vec().into();
+        let var_index_map = Arc::new(
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| (symbol.id, index))
+                .collect(),
+        );
+        Self::from_atom_views_with_shared_abi_and_profile(
+            fn_name,
+            views,
+            vars,
+            var_index_map,
+            layout,
+            optimization_profile,
+            reuse_policy,
+        )
+    }
+
+    pub(crate) fn from_atom_views_with_shared_abi_and_profile(
+        fn_name: impl Into<String>,
+        views: &[AtomView<'_>],
+        vars: Arc<[String]>,
+        var_index_map: Arc<ahash::HashMap<u32, usize>>,
+        layout: Option<CodegenOutputLayout>,
+        optimization_profile: AtomOptimizationProfile,
+        reuse_policy: AtomTempReusePolicy,
+    ) -> (Self, AtomGeneratedBlockBreakdown) {
         let lower_begin = std::time::Instant::now();
-        let lowered = AtomLowerer::new_with_cse_policy(symbols, optimization_profile.cse_policy())
-            .lower_many(views);
+        let lowered = AtomLowerer::new_with_shared_index(
+            Arc::clone(&var_index_map),
+            optimization_profile.cse_policy(),
+        )
+        .lower_many(views);
         let lower_many_ms = lower_begin.elapsed().as_secs_f64() * 1_000.0;
 
         let (optimized, peephole_ms) = if optimization_profile.use_peephole() {
@@ -1899,7 +1936,8 @@ impl GeneratedBlock {
         (
             Self {
                 fn_name: fn_name.into(),
-                vars: vars.to_vec(),
+                vars,
+                var_index_map: Some(var_index_map),
                 ir: final_ir,
                 layout,
                 output_offsets: None,
@@ -1979,6 +2017,15 @@ impl GeneratedBlock {
 
     pub fn output_count(&self) -> usize {
         self.ir.outputs.len()
+    }
+
+    pub(crate) fn shares_input_abi_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.vars, &other.vars)
+            && match (&self.var_index_map, &other.var_index_map) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => false,
+                _ => false,
+            }
     }
 }
 
@@ -2846,6 +2893,10 @@ mod tests {
             .join("codegen")
             .join("testing_fixtures")
             .join("codegen_generated_snapshot.rs");
+        if std::env::var_os("UPDATE_CODEGEN_SNAPSHOT").is_some() {
+            std::fs::write(&snapshot_path, &generated)
+                .expect("codegen snapshot should be writable");
+        }
         let snapshot = std::fs::read_to_string(snapshot_path)
             .expect("checked-in codegen snapshot should be readable")
             .replace("\r\n", "\n");
@@ -2871,7 +2922,10 @@ mod tests {
         let args = [2.0, 3.0];
 
         assert_eq!(plan.layout, CodegenOutputLayout::Vector { len: 2 });
-        assert_eq!(from_plan.vars, vec!["alpha".to_string(), "y".to_string()]);
+        assert_eq!(
+            from_plan.vars.as_ref(),
+            &["alpha".to_string(), "y".to_string()]
+        );
         assert_eq!(from_plan.ir.eval(&args), direct.ir.eval(&args));
     }
 

@@ -313,7 +313,13 @@ where
 }
 
 fn reached_t_bound(t: f64, t_bound: f64, h: f64) -> bool {
-    if h >= 0.0 { t >= t_bound } else { t <= t_bound }
+    let endpoint_tolerance = f64::EPSILON * t.abs().max(t_bound.abs());
+    let remaining = t_bound - t;
+    if h >= 0.0 {
+        remaining <= endpoint_tolerance
+    } else {
+        -remaining <= endpoint_tolerance
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +390,31 @@ mod tests {
             1e-6,
             1e-8,
         )
+    }
+
+    #[test]
+    fn native_integration_t_bound_detection_accepts_roundoff_sized_endpoint_gap() {
+        let forward_bound = 0.25_f64;
+        let forward_one_ulp_before = f64::from_bits(forward_bound.to_bits() - 1);
+        let forward_four_ulps_before = f64::from_bits(forward_bound.to_bits() - 4);
+        assert!(reached_t_bound(
+            forward_one_ulp_before,
+            forward_bound,
+            forward_bound - forward_one_ulp_before,
+        ));
+        assert!(!reached_t_bound(
+            forward_four_ulps_before,
+            forward_bound,
+            forward_bound - forward_four_ulps_before,
+        ));
+
+        let backward_bound = -0.25_f64;
+        let backward_one_ulp_before = f64::from_bits(backward_bound.to_bits() - 1);
+        assert!(reached_t_bound(
+            backward_one_ulp_before,
+            backward_bound,
+            backward_bound - backward_one_ulp_before,
+        ));
     }
 
     #[test]

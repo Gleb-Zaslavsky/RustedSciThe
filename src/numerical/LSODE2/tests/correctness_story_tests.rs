@@ -282,10 +282,10 @@ fn lsode2_debug_trajectory_parity_exprlegacy_vs_atomview_native() {
 }
 
 #[test]
-fn lsode2_debug_parameter_rebind_invalidates_prepared_solver_state() {
+fn lsode2_debug_parameter_rebind_reuses_prepared_solver_state() {
     let _report = crate::Utils::test_reporting::TestReportCapture::new(
         "LSODE2_Lambdify",
-        "numerical::LSODE2::correctness_story_tests::lsode2_debug_parameter_rebind_invalidates_prepared_solver_state",
+        "numerical::LSODE2::correctness_story_tests::lsode2_debug_parameter_rebind_reuses_prepared_solver_state",
     );
 
     let telemetry = IvpTelemetry::counters();
@@ -319,12 +319,12 @@ fn lsode2_debug_parameter_rebind_invalidates_prepared_solver_state() {
         .set_parameter_values(DVector::from_vec(vec![2.0]))
         .expect("valid parameter rebind should succeed");
     assert!(
-        !solver.is_prepared(),
-        "valid rebind must invalidate prepared state"
+        solver.is_prepared(),
+        "valid numeric rebind must retain the prepared callback state"
     );
     solver
         .prepare()
-        .expect("rebound preparation should succeed");
+        .expect("repeated preparation after numeric rebind should remain valid");
     assert!(solver.is_prepared());
     let rebound_summary = solver
         .solve_with_summary()
@@ -353,7 +353,7 @@ fn lsode2_debug_parameter_rebind_invalidates_prepared_solver_state() {
         .fold(0.0, f64::max);
 
     reportln!(
-        "[LSODE2 invalidation] rejected_rebind=typed; valid_rebind=invalidates; stale_factor_or_callback_diff={max_value_diff:.3e}; time_diff={max_time_diff:.3e}; rebound_status={}; fresh_status={}",
+        "[LSODE2 parameter continuation] rejected_rebind=typed; valid_rebind=reuses_prepared_state; stale_factor_or_callback_diff={max_value_diff:.3e}; time_diff={max_time_diff:.3e}; rebound_status={}; fresh_status={}",
         rebound_summary.status,
         fresh_summary.status,
     );
@@ -1056,6 +1056,74 @@ fn lsode2_debug_exprlegacy_and_native_binding_scopes_close_on_poison() {
             snapshot.warm_stage(IvpWarmStage::ResidualCallback).calls,
             snapshot.warm_stage(IvpWarmStage::ArgumentBinding).calls,
             snapshot.errors,
+        );
+    }
+}
+
+#[test]
+fn lsode2_debug_summary_matches_owned_trajectory_without_changing_result_contract() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::correctness_story_tests::lsode2_debug_summary_matches_owned_trajectory_without_changing_result_contract",
+    );
+
+    let cases = [
+        (
+            "ExprLegacy-bridge",
+            bridge_counter_config(
+                Lsode2SymbolicAssemblyBackend::ExprLegacy,
+                IvpTelemetry::counters(),
+            ),
+        ),
+        (
+            "AtomView-native",
+            trajectory_config(
+                Lsode2SymbolicAssemblyBackend::AtomView,
+                2.0,
+                IvpTelemetry::counters(),
+            ),
+        ),
+    ];
+
+    for (route, config) in cases {
+        let mut solver = Lsode2Solver::new(config).expect("summary fixture should construct");
+        solver.solve().expect("summary fixture should solve");
+
+        let (times_before, values_before) = solver.get_result();
+        let summary = solver.summary();
+        let (times_after, values_after) = solver.get_result();
+
+        assert_eq!(summary.time_points, times_before.len(), "route={route}");
+        assert_eq!(
+            summary.variable_count,
+            values_before.ncols(),
+            "route={route}"
+        );
+        assert_eq!(
+            times_before, times_after,
+            "owned time output changed; route={route}"
+        );
+        assert_eq!(
+            values_before, values_after,
+            "owned state output changed; route={route}"
+        );
+
+        let last_t = times_before[times_before.len() - 1];
+        let last_y = DVector::from_iterator(
+            values_before.ncols(),
+            (0..values_before.ncols()).map(|col| values_before[(values_before.nrows() - 1, col)]),
+        );
+        let max_abs = values_before
+            .iter()
+            .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+        assert_eq!(summary.final_t, Some(last_t), "route={route}");
+        assert_eq!(summary.final_y, Some(last_y), "route={route}");
+        assert_eq!(summary.max_abs_solution, max_abs, "route={route}");
+
+        reportln!(
+            "[LSODE2 summary/result parity] route={route}; time_points={}; variables={}; final_t={last_t:.6}; max_abs={max_abs:.6e}; owned_result_stable=true",
+            summary.time_points,
+            summary.variable_count,
         );
     }
 }

@@ -7,26 +7,34 @@
 //! by default because a single matrix may invoke several external toolchains.
 
 use super::native_jacobian::{
-    try_prepare_native_atomview_jacobian_runtime, NativeAtomJacobianRuntime, NativeJacobianStorage,
+    NativeAtomJacobianRuntime, NativeJacobianStorage, try_prepare_native_atomview_jacobian_runtime,
 };
-use super::story_support::{chain_equations, chain_solver_config, chain_state, ChainMatrixRoute};
+use super::story_support::{ChainMatrixRoute, chain_equations, chain_solver_config, chain_state};
 use super::{IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry};
 use super::{
-    IvpWarmStage, Lsode2AotProfile, Lsode2AotToolchain, Lsode2ResidualJacobianSource, Lsode2Solver,
-    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+    IvpWarmStage, Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerConfig,
+    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2Solver, Lsode2SymbolicAssemblyBackend,
+    Lsode2SymbolicExecutionMode,
+};
+use crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout;
+use crate::symbolic::codegen::codegen_aot_driver::{
+    AotCodegenBackend, GeneratedAotArtifact, GeneratedAotBuildResult,
 };
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
-use crate::symbolic::codegen::codegen_aot_driver::GeneratedAotBuildResult;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpTelemetryRoute;
 use crate::symbolic::symbolic_ivp::{
-    prepare_symbolic_ivp_residual_problem, IvpSymbolicAssemblyBackend,
-    PreparedSymbolicIvpResidualProblem, SymbolicIvpProblemOptions,
+    IvpSymbolicAssemblyBackend, PreparedSymbolicIvpResidualProblem, SymbolicIvpProblemOptions,
+    prepare_symbolic_ivp_residual_problem,
+};
+use crate::symbolic::symbolic_ivp_aot::{
+    generated_aot_artifact_from_symbolic_ivp_atom_problem,
+    prepared_atom_aot_problem_from_residual_problem,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_banded_backend, prepare_generated_symbolic_ivp_sparse_backend,
     SelectedSymbolicIvpBackendKind, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_banded_backend, prepare_generated_symbolic_ivp_sparse_backend,
 };
 use nalgebra::DVector;
 use std::hint::black_box;
@@ -136,15 +144,11 @@ fn fresh_diagnostic_config(
     residual_chunking: ResidualChunkingStrategy,
     sparse_chunking: SparseChunkingStrategy,
 ) -> SymbolicIvpGeneratedBackendConfig {
-    generated_config(
-        output_parent,
-        compiler,
-        residual_chunking,
-        sparse_chunking,
+    generated_config(output_parent, compiler, residual_chunking, sparse_chunking).with_build_policy(
+        SymbolicIvpAotBuildPolicy::RebuildAlways {
+            profile: AotBuildProfile::Release,
+        },
     )
-    .with_build_policy(SymbolicIvpAotBuildPolicy::RebuildAlways {
-        profile: AotBuildProfile::Release,
-    })
 }
 
 fn cold_ms(snapshot: &super::IvpTelemetrySnapshot, stage: IvpColdStage) -> f64 {
@@ -187,13 +191,14 @@ fn generated_source_shape(build: Option<&GeneratedAotBuildResult>) -> GeneratedS
     };
     for line in source.lines() {
         let line = line.trim_start();
-        let is_compute = line.starts_with("let t")
-            || line.starts_with("double t")
-            || line.starts_with("var t");
+        let is_compute =
+            line.starts_with("let t") || line.starts_with("double t") || line.starts_with("var t");
         if is_compute {
             shape.compute_lines += 1;
             shape.temp_declarations += usize::from(
-                line.starts_with("double t") || line.starts_with("let t") || line.starts_with("var t"),
+                line.starts_with("double t")
+                    || line.starts_with("let t")
+                    || line.starts_with("var t"),
             );
             shape.add_ops += line.matches(" + ").count();
             shape.sub_ops += line.matches(" - ").count();
@@ -362,12 +367,7 @@ fn run_aot_callback_case(
             variables,
             "t".to_string(),
             options(frontend, telemetry.clone()),
-            fresh_diagnostic_config(
-                output.path(),
-                compiler,
-                residual_chunking,
-                sparse_chunking,
-            ),
+            fresh_diagnostic_config(output.path(), compiler, residual_chunking, sparse_chunking),
         )
         .expect("large sparse AOT performance preparation should succeed"),
         "Banded" => prepare_generated_symbolic_ivp_banded_backend(
@@ -376,12 +376,7 @@ fn run_aot_callback_case(
             "t".to_string(),
             (1, 1),
             options(frontend, telemetry.clone()),
-            fresh_diagnostic_config(
-                output.path(),
-                compiler,
-                residual_chunking,
-                sparse_chunking,
-            ),
+            fresh_diagnostic_config(output.path(), compiler, residual_chunking, sparse_chunking),
         )
         .expect("large banded AOT performance preparation should succeed"),
         other => panic!("unknown AOT matrix {other}"),
@@ -414,7 +409,7 @@ fn run_aot_callback_case(
     let snapshot = prepared.telemetry.snapshot();
     let source_shape = generated_source_shape(prepared.build_result.as_ref());
     reportln!(
-        "AOT | {compiler} | {matrix} | {:?} | {dimension} | {prepare_ms:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
+        "AOT | {compiler} | {matrix} | {:?} | {dimension} | {prepare_ms:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
         frontend,
         cold_ms(&snapshot, IvpColdStage::AtomResidualPreparation),
         cold_ms(&snapshot, IvpColdStage::AtomJacobianPreparation),
@@ -427,8 +422,12 @@ fn run_aot_callback_case(
         cold_ms(&snapshot, IvpColdStage::AotMaterialization),
         cold_ms(&snapshot, IvpColdStage::AotBuild),
         cold_ms(&snapshot, IvpColdStage::AotLink),
+        cold_ms(&snapshot, IvpColdStage::AotPublication),
         snapshot.aot_build_attempts,
         snapshot.aot_link_attempts,
+        snapshot.aot_resolution_hits,
+        snapshot.aot_resolution_misses,
+        snapshot.aot_runtime_ready,
         timing.calls,
         linked.residual_len,
         linked.jacobian_output_len().expect("valid AOT layout"),
@@ -436,6 +435,444 @@ fn run_aot_callback_case(
         source_shape.lines,
         source_shape.compute_lines,
     );
+}
+
+#[test]
+#[ignore = "release-only detailed cold AOT preparation stage breakdown"]
+fn lsode2_aot_cold_preparation_stage_breakdown_large() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_performance_story_tests::lsode2_aot_cold_preparation_stage_breakdown_large",
+    );
+    let dimensions = dimensions_from_env("LSODE2_AOT_COLD_STAGE_DIMENSIONS", &[512, 1024, 2048]);
+    reportln!(
+        "[LSODE2 AOT cold preparation stages] dimensions={dimensions:?}; compiler=tcc; RebuildAlways; filesystem/source inspection excluded from prepare_ms"
+    );
+    reportln!(
+        "frontend | matrix | dimension | prepare_ms | solver_prep_ms | bridge_ms | native_callback_ms | atom_prep_ms | atom_residual_ms | atom_jacobian_ms | cache_lookup_ms | expr_to_atom_ms | symbolic_jacobian_ms | differentiation_ms | simplify_ms | pattern_ms | layout_ms | backend_binding_ms | lowering_ms | source_generation_ms | materialize_ms | build_ms | link_ms | publication_ms | build_attempts | link_attempts | runtime_ready"
+    );
+    for dimension in dimensions {
+        for matrix in ["Sparse", "Banded"] {
+            for frontend in [
+                IvpSymbolicAssemblyBackend::ExprLegacy,
+                IvpSymbolicAssemblyBackend::AtomView,
+            ] {
+                let telemetry = IvpTelemetry::detailed();
+                let output = tempdir().expect("AOT cold stage output directory should exist");
+                let started = Instant::now();
+                let prepared = match matrix {
+                    "Sparse" => prepare_generated_symbolic_ivp_sparse_backend(
+                        chain_equations(dimension),
+                        variables(dimension),
+                        "t".to_string(),
+                        options(frontend, telemetry.clone()),
+                        fresh_diagnostic_config(
+                            output.path(),
+                            "tcc",
+                            ResidualChunkingStrategy::Whole,
+                            SparseChunkingStrategy::Whole,
+                        ),
+                    )
+                    .expect("large sparse AOT cold stage preparation should succeed"),
+                    "Banded" => prepare_generated_symbolic_ivp_banded_backend(
+                        chain_equations(dimension),
+                        variables(dimension),
+                        "t".to_string(),
+                        (1, 1),
+                        options(frontend, telemetry.clone()),
+                        fresh_diagnostic_config(
+                            output.path(),
+                            "tcc",
+                            ResidualChunkingStrategy::Whole,
+                            SparseChunkingStrategy::Whole,
+                        ),
+                    )
+                    .expect("large banded AOT cold stage preparation should succeed"),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    prepared.selected_backend,
+                    SelectedSymbolicIvpBackendKind::AotCompiled
+                );
+                let prepare_ms = started.elapsed().as_secs_f64() * 1.0e3;
+                let snapshot = telemetry.snapshot();
+                reportln!(
+                    "{:?} | {matrix} | {dimension} | {prepare_ms:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {}",
+                    frontend,
+                    cold_ms(&snapshot, IvpColdStage::SolverPreparation),
+                    cold_ms(&snapshot, IvpColdStage::BridgePreparation),
+                    cold_ms(&snapshot, IvpColdStage::NativeCallbackPreparation),
+                    cold_ms(&snapshot, IvpColdStage::AtomPreparation),
+                    cold_ms(&snapshot, IvpColdStage::AtomResidualPreparation),
+                    cold_ms(&snapshot, IvpColdStage::AtomJacobianPreparation),
+                    cold_ms(&snapshot, IvpColdStage::AotCacheLookup),
+                    cold_ms(&snapshot, IvpColdStage::ExprToAtom),
+                    cold_ms(&snapshot, IvpColdStage::SymbolicJacobian),
+                    cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+                    cold_ms(&snapshot, IvpColdStage::Simplification),
+                    cold_ms(&snapshot, IvpColdStage::SparsePattern),
+                    cold_ms(&snapshot, IvpColdStage::LayoutPlanning),
+                    cold_ms(&snapshot, IvpColdStage::BackendBinding),
+                    cold_ms(&snapshot, IvpColdStage::AotLowering),
+                    cold_ms(&snapshot, IvpColdStage::AotSourceGeneration),
+                    cold_ms(&snapshot, IvpColdStage::AotMaterialization),
+                    cold_ms(&snapshot, IvpColdStage::AotBuild),
+                    cold_ms(&snapshot, IvpColdStage::AotLink),
+                    cold_ms(&snapshot, IvpColdStage::AotPublication),
+                    snapshot.aot_build_attempts,
+                    snapshot.aot_link_attempts,
+                    snapshot.aot_runtime_ready,
+                );
+                reportln!(
+                    "native-preparation-leaves | {frontend:?} | {matrix} | {dimension} | dependency_ms={:.6} | differentiation_ms={:.6} | evaluator_ms={:.6} | aot_input_abi_ms={:.6}",
+                    cold_ms(&snapshot, IvpColdStage::AtomDependencyAnalysis),
+                    cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+                    cold_ms(&snapshot, IvpColdStage::NativeJacobianEvaluatorPreparation),
+                    cold_ms(&snapshot, IvpColdStage::AotInputAbiPreparation),
+                );
+                black_box(prepared);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AppleToAppleColdRow {
+    prepare_ms: f64,
+    atom_jacobian_ms: f64,
+    symbolic_jacobian_ms: f64,
+    differentiation_ms: f64,
+    pattern_ms: f64,
+    lowering_ms: f64,
+    materialize_ms: f64,
+    build_ms: f64,
+    link_ms: f64,
+    publication_ms: f64,
+    build_attempts: u64,
+    link_attempts: u64,
+    runtime_ready: u64,
+}
+
+fn run_apple_to_apple_cold_case(
+    dimension: usize,
+    matrix: &str,
+    frontend: IvpSymbolicAssemblyBackend,
+) -> AppleToAppleColdRow {
+    let telemetry = IvpTelemetry::detailed();
+    let output = tempdir().expect("AOT apple-to-apple output directory should exist");
+    let started = Instant::now();
+    let prepared = match matrix {
+        "Sparse" => prepare_generated_symbolic_ivp_sparse_backend(
+            chain_equations(dimension),
+            variables(dimension),
+            "t".to_string(),
+            options(frontend, telemetry.clone()),
+            fresh_diagnostic_config(
+                output.path(),
+                "tcc",
+                ResidualChunkingStrategy::Whole,
+                SparseChunkingStrategy::Whole,
+            ),
+        )
+        .expect("apple-to-apple sparse AOT preparation should succeed"),
+        "Banded" => prepare_generated_symbolic_ivp_banded_backend(
+            chain_equations(dimension),
+            variables(dimension),
+            "t".to_string(),
+            (1, 1),
+            options(frontend, telemetry.clone()),
+            fresh_diagnostic_config(
+                output.path(),
+                "tcc",
+                ResidualChunkingStrategy::Whole,
+                SparseChunkingStrategy::Whole,
+            ),
+        )
+        .expect("apple-to-apple banded AOT preparation should succeed"),
+        other => panic!("unknown apple-to-apple matrix {other}"),
+    };
+    assert_eq!(
+        prepared.selected_backend,
+        SelectedSymbolicIvpBackendKind::AotCompiled
+    );
+    let expected_route = match frontend {
+        IvpSymbolicAssemblyBackend::ExprLegacy => IvpTelemetryRoute::ExprLegacy,
+        IvpSymbolicAssemblyBackend::AtomViewExprCompat => IvpTelemetryRoute::AtomViewExprCompat,
+        IvpSymbolicAssemblyBackend::AtomView => IvpTelemetryRoute::AtomViewNative,
+    };
+    let snapshot = prepared.telemetry.snapshot();
+    assert_eq!(snapshot.route, expected_route);
+    assert_eq!(
+        snapshot.aot_build_attempts, 1,
+        "cold routes must build once"
+    );
+    assert_eq!(snapshot.aot_link_attempts, 1, "cold routes must link once");
+
+    let prepare_ms = started.elapsed().as_secs_f64() * 1.0e3;
+    reportln!(
+        "native-preparation-leaves | direct | {frontend:?} | {matrix} | {dimension} | dependency_ms={:.6} | differentiation_ms={:.6} | evaluator_ms={:.6} | aot_input_abi_ms={:.6}",
+        cold_ms(&snapshot, IvpColdStage::AtomDependencyAnalysis),
+        cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        cold_ms(&snapshot, IvpColdStage::NativeJacobianEvaluatorPreparation),
+        cold_ms(&snapshot, IvpColdStage::AotInputAbiPreparation),
+    );
+    AppleToAppleColdRow {
+        prepare_ms,
+        atom_jacobian_ms: cold_ms(&snapshot, IvpColdStage::AtomJacobianPreparation),
+        symbolic_jacobian_ms: cold_ms(&snapshot, IvpColdStage::SymbolicJacobian),
+        differentiation_ms: cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        pattern_ms: cold_ms(&snapshot, IvpColdStage::SparsePattern),
+        lowering_ms: cold_ms(&snapshot, IvpColdStage::AotLowering),
+        materialize_ms: cold_ms(&snapshot, IvpColdStage::AotMaterialization),
+        build_ms: cold_ms(&snapshot, IvpColdStage::AotBuild),
+        link_ms: cold_ms(&snapshot, IvpColdStage::AotLink),
+        publication_ms: cold_ms(&snapshot, IvpColdStage::AotPublication),
+        build_attempts: snapshot.aot_build_attempts,
+        link_attempts: snapshot.aot_link_attempts,
+        runtime_ready: snapshot.aot_runtime_ready,
+    }
+}
+
+fn run_solver_prepare_cold_case(
+    dimension: usize,
+    matrix: &str,
+    frontend: IvpSymbolicAssemblyBackend,
+) -> AppleToAppleColdRow {
+    let output = tempdir().expect("AOT solver output directory should exist");
+    let assembly = match frontend {
+        IvpSymbolicAssemblyBackend::ExprLegacy => Lsode2SymbolicAssemblyBackend::ExprLegacy,
+        IvpSymbolicAssemblyBackend::AtomView => Lsode2SymbolicAssemblyBackend::AtomView,
+        IvpSymbolicAssemblyBackend::AtomViewExprCompat => {
+            panic!("solver lifecycle diagnostic accepts only production AOT backends")
+        }
+    };
+    let mut config = Lsode2ProblemConfig::new(
+        chain_equations(dimension),
+        variables(dimension),
+        "t".to_string(),
+        0.0,
+        chain_state(dimension),
+        0.25,
+        0.02,
+        1.0e-7,
+        1.0e-9,
+    )
+    .with_controller(Lsode2ControllerConfig::bdf_only())
+    .with_faithful_bdf_solve(200_000, 200_000)
+    .with_bridge_solve()
+    .with_lambdify_execution_policy(IvpLambdifyExecutionPolicy::Sequential)
+    .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+        assembly,
+        execution: Lsode2SymbolicExecutionMode::Aot {
+            toolchain: Lsode2AotToolchain::CTcc,
+            profile: Lsode2AotProfile::Release,
+        },
+    })
+    .with_telemetry(IvpTelemetry::detailed())
+    .with_equation_parameters(parameter_names())
+    .with_equation_parameter_values(parameter_values());
+    let generated = fresh_diagnostic_config(
+        output.path(),
+        "tcc",
+        ResidualChunkingStrategy::Whole,
+        SparseChunkingStrategy::Whole,
+    );
+    config = match matrix {
+        "Sparse" => config.with_native_sparse_faer_generated_backend(generated),
+        "Banded" => config.with_native_banded_faithful_generated_backend(generated),
+        other => panic!("unknown solver preparation matrix {other}"),
+    };
+
+    let started = Instant::now();
+    let mut solver = Lsode2Solver::new(config).expect("AOT solver construction should succeed");
+    solver
+        .prepare()
+        .expect("AOT solver preparation should succeed");
+    let snapshot = solver.telemetry_snapshot();
+    assert!(
+        snapshot.aot_build_attempts >= 1,
+        "solver route must build at least one artifact"
+    );
+    assert!(
+        snapshot.aot_link_attempts >= 1,
+        "solver route must link at least one artifact"
+    );
+
+    let prepare_ms = started.elapsed().as_secs_f64() * 1.0e3;
+    reportln!(
+        "native-preparation-leaves | solver | {frontend:?} | {matrix} | {dimension} | dependency_ms={:.6} | differentiation_ms={:.6} | evaluator_ms={:.6} | aot_input_abi_ms={:.6}",
+        cold_ms(&snapshot, IvpColdStage::AtomDependencyAnalysis),
+        cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        cold_ms(&snapshot, IvpColdStage::NativeJacobianEvaluatorPreparation),
+        cold_ms(&snapshot, IvpColdStage::AotInputAbiPreparation),
+    );
+    AppleToAppleColdRow {
+        prepare_ms,
+        atom_jacobian_ms: cold_ms(&snapshot, IvpColdStage::AtomJacobianPreparation),
+        symbolic_jacobian_ms: cold_ms(&snapshot, IvpColdStage::SymbolicJacobian),
+        differentiation_ms: cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        pattern_ms: cold_ms(&snapshot, IvpColdStage::SparsePattern),
+        lowering_ms: cold_ms(&snapshot, IvpColdStage::AotLowering),
+        materialize_ms: cold_ms(&snapshot, IvpColdStage::AotMaterialization),
+        build_ms: cold_ms(&snapshot, IvpColdStage::AotBuild),
+        link_ms: cold_ms(&snapshot, IvpColdStage::AotLink),
+        publication_ms: cold_ms(&snapshot, IvpColdStage::AotPublication),
+        build_attempts: snapshot.aot_build_attempts,
+        link_attempts: snapshot.aot_link_attempts,
+        runtime_ready: snapshot.aot_runtime_ready,
+    }
+}
+
+#[test]
+#[ignore = "release-only paired cold AOT lifecycle comparison"]
+fn lsode2_aot_cold_preparation_apple_to_apple_matrix() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_performance_story_tests::lsode2_aot_cold_preparation_apple_to_apple_matrix",
+    );
+    let dimensions = dimensions_from_env("LSODE2_AOT_COLD_STAGE_DIMENSIONS", &[512, 1024, 2048]);
+    reportln!(
+        "[LSODE2 AOT apple-to-apple cold preparation] dimensions={dimensions:?}; compiler=tcc; RebuildAlways; fresh output directory per route; order alternates"
+    );
+    reportln!(
+        "frontend | matrix | dimension | order | prepare_ms | atom_jacobian_ms | symbolic_jacobian_ms | differentiation_ms | pattern_ms | lowering_ms | materialize_ms | build_ms | link_ms | publication_ms | runtime_ready"
+    );
+
+    for (matrix_index, matrix) in ["Sparse", "Banded"].into_iter().enumerate() {
+        for &dimension in &dimensions {
+            let frontends = if (dimension + matrix_index) % 2 == 0 {
+                [
+                    IvpSymbolicAssemblyBackend::ExprLegacy,
+                    IvpSymbolicAssemblyBackend::AtomView,
+                ]
+            } else {
+                [
+                    IvpSymbolicAssemblyBackend::AtomView,
+                    IvpSymbolicAssemblyBackend::ExprLegacy,
+                ]
+            };
+            let mut expr = None;
+            let mut atom = None;
+            for (order_index, frontend) in frontends.into_iter().enumerate() {
+                let row = run_apple_to_apple_cold_case(dimension, matrix, frontend);
+                reportln!(
+                    "{:?} | {matrix} | {dimension} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {}",
+                    frontend,
+                    order_index + 1,
+                    row.prepare_ms,
+                    row.atom_jacobian_ms,
+                    row.symbolic_jacobian_ms,
+                    row.differentiation_ms,
+                    row.pattern_ms,
+                    row.lowering_ms,
+                    row.materialize_ms,
+                    row.build_ms,
+                    row.link_ms,
+                    row.publication_ms,
+                    row.runtime_ready,
+                );
+                match frontend {
+                    IvpSymbolicAssemblyBackend::ExprLegacy => expr = Some(row),
+                    IvpSymbolicAssemblyBackend::AtomView => atom = Some(row),
+                    IvpSymbolicAssemblyBackend::AtomViewExprCompat => unreachable!(),
+                }
+            }
+            let expr = expr.expect("ExprLegacy row should be present");
+            let atom = atom.expect("AtomView row should be present");
+            let delta_ms = atom.prepare_ms - expr.prepare_ms;
+            let delta_pct = delta_ms / expr.prepare_ms * 100.0;
+            reportln!(
+                "delta AtomView-ExprLegacy | {matrix} | {dimension} | atom_minus_expr_ms={delta_ms:.3} | atom_minus_expr_pct={delta_pct:.1} | expr_prepare_ms={:.3} | atom_prepare_ms={:.3}",
+                expr.prepare_ms,
+                atom.prepare_ms,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "release-only direct versus solver cold lifecycle diagnostic"]
+fn lsode2_aot_cold_preparation_direct_vs_solver_lifecycle() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_performance_story_tests::lsode2_aot_cold_preparation_direct_vs_solver_lifecycle",
+    );
+    let dimensions = dimensions_from_env("LSODE2_AOT_COLD_STAGE_DIMENSIONS", &[512, 1024, 2048]);
+    reportln!(
+        "[LSODE2 AOT cold lifecycle attribution] dimensions={dimensions:?}; compiler=tcc; RebuildAlways; fresh output directory per row"
+    );
+    reportln!(
+        "lifecycle | frontend | matrix | dimension | prepare_ms | atom_jacobian_ms | symbolic_jacobian_ms | differentiation_ms | pattern_ms | lowering_ms | materialize_ms | build_ms | link_ms | publication_ms | build_attempts | link_attempts | runtime_ready"
+    );
+
+    for (matrix_index, matrix) in ["Sparse", "Banded"].into_iter().enumerate() {
+        for &dimension in &dimensions {
+            let frontends = if (dimension + matrix_index) % 2 == 0 {
+                [
+                    IvpSymbolicAssemblyBackend::ExprLegacy,
+                    IvpSymbolicAssemblyBackend::AtomView,
+                ]
+            } else {
+                [
+                    IvpSymbolicAssemblyBackend::AtomView,
+                    IvpSymbolicAssemblyBackend::ExprLegacy,
+                ]
+            };
+            for frontend in frontends {
+                let direct = run_apple_to_apple_cold_case(dimension, matrix, frontend);
+                let solver = run_solver_prepare_cold_case(dimension, matrix, frontend);
+                for (lifecycle, row) in [("direct-generated", direct), ("solver.prepare", solver)] {
+                    let expected_attempts = match (frontend, lifecycle) {
+                        (IvpSymbolicAssemblyBackend::ExprLegacy, "solver.prepare") => 2,
+                        _ => 1,
+                    };
+                    assert_eq!(
+                        row.build_attempts, expected_attempts,
+                        "unexpected build lifecycle for {frontend:?}/{matrix}/{lifecycle}"
+                    );
+                    assert_eq!(
+                        row.link_attempts, expected_attempts,
+                        "unexpected link lifecycle for {frontend:?}/{matrix}/{lifecycle}"
+                    );
+                    reportln!(
+                        "{lifecycle} | {:?} | {matrix} | {dimension} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {}",
+                        frontend,
+                        row.prepare_ms,
+                        row.atom_jacobian_ms,
+                        row.symbolic_jacobian_ms,
+                        row.differentiation_ms,
+                        row.pattern_ms,
+                        row.lowering_ms,
+                        row.materialize_ms,
+                        row.build_ms,
+                        row.link_ms,
+                        row.publication_ms,
+                        row.build_attempts,
+                        row.link_attempts,
+                        row.runtime_ready,
+                    );
+                }
+                reportln!(
+                    "delta solver.prepare-direct-generated | {:?} | {matrix} | {dimension} | prepare_ms={:.3} | build_ms={:.3} | link_ms={:.3} | publication_ms={:.3}",
+                    frontend,
+                    solver.prepare_ms - direct.prepare_ms,
+                    solver.build_ms - direct.build_ms,
+                    solver.link_ms - direct.link_ms,
+                    solver.publication_ms - direct.publication_ms,
+                );
+                if frontend == IvpSymbolicAssemblyBackend::AtomView {
+                    assert_eq!(
+                        solver.build_attempts, direct.build_attempts,
+                        "AtomView solver and direct cold lifecycles must build the shared artifact equally"
+                    );
+                    assert_eq!(
+                        solver.link_attempts, direct.link_attempts,
+                        "AtomView solver and direct cold lifecycles must link the shared artifact equally"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn median_sample(values: &mut [f64]) -> f64 {
@@ -577,7 +1014,7 @@ fn run_lambdify_callback_case(dimension: usize, matrix: &str, repetitions: usize
     let timing = run_native_callbacks(&residual, &mut jacobian, matrix, 0.125, &state, repetitions);
     let snapshot = telemetry.snapshot();
     reportln!(
-        "Lambdify | - | {matrix} | AtomViewNative | {dimension} | {prepare_ms:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
+        "Lambdify | - | {matrix} | AtomViewNative | {dimension} | {prepare_ms:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
         cold_ms(&snapshot, IvpColdStage::AtomResidualPreparation),
         cold_ms(&snapshot, IvpColdStage::AtomJacobianPreparation),
         timing.residual_ms / repetitions as f64,
@@ -589,6 +1026,10 @@ fn run_lambdify_callback_case(dimension: usize, matrix: &str, repetitions: usize
         cold_ms(&snapshot, IvpColdStage::AotMaterialization),
         cold_ms(&snapshot, IvpColdStage::AotBuild),
         cold_ms(&snapshot, IvpColdStage::AotLink),
+        cold_ms(&snapshot, IvpColdStage::AotPublication),
+        0,
+        0,
+        0,
         0,
         0,
         timing.calls,
@@ -751,10 +1192,10 @@ fn lsode2_aot_large_callback_stage_performance_matrix() {
     let dimensions = dimensions_from_env("LSODE2_AOT_PERF_DIMENSIONS", &[128, 256, 512]);
     let repetitions = usize_from_env("LSODE2_AOT_CALLBACK_REPETITIONS", 200);
     reportln!(
-        "[LSODE2 AOT callback performance] dimensions={dimensions:?}; compiler=tcc; repetitions={repetitions}; Dense excluded; build/link included only in prepare_ms; source shape is read after timing; compact-Banded ExprLegacy is reported as unsupported"
+        "[LSODE2 AOT callback performance] dimensions={dimensions:?}; compiler=tcc; repetitions={repetitions}; Dense excluded; build/link included only in prepare_ms; source shape is read after timing; compact-Banded ExprLegacy is included as a control route"
     );
     reportln!(
-        "route | compiler | matrix | frontend | dimension | prepare_ms | atom_residual_prepare_ms | atom_jacobian_prepare_ms | residual_ms/call | jacobian_ms/call | expr_to_atom_ms | diff_ms | simplify_ms | pattern_ms | materialize_ms | build_ms | link_ms | build_attempts | link_attempts | callback_calls | residual_len | jacobian_output_len | source_kb | source_lines | compute_lines"
+        "route | compiler | matrix | frontend | dimension | prepare_ms | atom_residual_prepare_ms | atom_jacobian_prepare_ms | residual_ms/call | jacobian_ms/call | expr_to_atom_ms | diff_ms | simplify_ms | pattern_ms | materialize_ms | build_ms | link_ms | publication_ms | build_attempts | link_attempts | cache_hits | cache_misses | runtime_ready | callback_calls | residual_len | jacobian_output_len | source_kb | source_lines | compute_lines"
     );
     for dimension in dimensions {
         run_lambdify_callback_case(dimension, "Sparse", repetitions);
@@ -777,8 +1218,14 @@ fn lsode2_aot_large_callback_stage_performance_matrix() {
             ResidualChunkingStrategy::Whole,
             SparseChunkingStrategy::Whole,
         );
-        reportln!(
-            "AOT | tcc | Banded | ExprLegacy | unsupported | compact-Banded AOT currently requires AtomView assembly"
+        run_aot_callback_case(
+            dimension,
+            "Banded",
+            IvpSymbolicAssemblyBackend::ExprLegacy,
+            "tcc",
+            repetitions,
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
         );
         run_aot_callback_case(
             dimension,
@@ -805,7 +1252,7 @@ fn lsode2_aot_toolchain_callback_performance_matrix() {
         "[LSODE2 AOT toolchain callback performance] dimensions={dimensions:?}; repetitions={repetitions}; Sparse/Banded AtomViewNative; source shape is read after timing; unavailable external toolchains are skipped"
     );
     reportln!(
-        "route | compiler | matrix | frontend | dimension | prepare_ms | atom_residual_prepare_ms | atom_jacobian_prepare_ms | residual_ms/call | jacobian_ms/call | expr_to_atom_ms | diff_ms | simplify_ms | pattern_ms | materialize_ms | build_ms | link_ms | build_attempts | link_attempts | callback_calls | residual_len | jacobian_output_len | source_kb | source_lines | compute_lines"
+        "route | compiler | matrix | frontend | dimension | prepare_ms | atom_residual_prepare_ms | atom_jacobian_prepare_ms | residual_ms/call | jacobian_ms/call | expr_to_atom_ms | diff_ms | simplify_ms | pattern_ms | materialize_ms | build_ms | link_ms | publication_ms | build_attempts | link_attempts | cache_hits | cache_misses | runtime_ready | callback_calls | residual_len | jacobian_output_len | source_kb | source_lines | compute_lines"
     );
     for (compiler, command) in [
         ("tcc", "tcc"),
@@ -881,8 +1328,9 @@ fn lsode2_aot_chunking_policy_callback_break_even_story() {
         linked.jacobian_value_chunks.len(),
     );
     reportln!(
-        "policy | residual_ms/call | jacobian_ms/call | dispatches | parallel_dispatches | chunks | worker_callbacks | errors"
+        "policy | parallel_calibration_ms | residual_ms/call | jacobian_ms/call | dispatches | parallel_dispatches | chunks | worker_callbacks | errors"
     );
+    let mut residual_measurements = Vec::new();
     for (label, policy) in [
         ("Sequential", IvpLambdifyExecutionPolicy::Sequential),
         (
@@ -892,6 +1340,11 @@ fn lsode2_aot_chunking_policy_callback_break_even_story() {
         ("Auto", IvpLambdifyExecutionPolicy::Auto { min_work: 1 }),
     ] {
         let callback_telemetry = IvpTelemetry::detailed();
+        // The solver normally registers the policy during preparation. This
+        // story calls the linked callback directly, so perform that lifecycle
+        // step before timing; otherwise Auto's one-time Rayon calibration is
+        // incorrectly amortized into the first warm callback measurement.
+        callback_telemetry.set_lambdify_execution_policy(policy);
         let mut residual = vec![0.0; linked.residual_len];
         let mut jacobian = vec![0.0; linked.jacobian_output_len().expect("valid AOT layout")];
         let started = Instant::now();
@@ -916,16 +1369,176 @@ fn lsode2_aot_chunking_policy_callback_break_even_story() {
         }
         let jacobian_ms = started.elapsed().as_secs_f64() * 1.0e3 / repetitions as f64;
         let snapshot = callback_telemetry.snapshot();
+        let calibration = snapshot.cold_stage(IvpColdStage::ParallelCalibration);
+        let expected_calibration_calls =
+            usize::from(matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. }));
+        assert_eq!(
+            calibration.calls, expected_calibration_calls as u64,
+            "policy registration must own parallel calibration"
+        );
         assert!(residual.iter().all(|value| value.is_finite()));
         assert!(jacobian.iter().all(|value| value.is_finite()));
         reportln!(
-            "{label} | {residual_ms:.6} | {jacobian_ms:.6} | {} | {} | {} | {} | {}",
+            "{label} | {:.6} | {residual_ms:.6} | {jacobian_ms:.6} | {} | {} | {} | {} | {}",
+            calibration.elapsed.as_secs_f64() * 1.0e3,
             snapshot.aot_chunk_dispatches,
             snapshot.aot_parallel_dispatches,
             snapshot.aot_chunks,
             snapshot.aot_worker_callbacks,
             snapshot.errors,
         );
+        residual_measurements.push((label, residual_ms, snapshot.aot_parallel_dispatches));
+    }
+    let sequential_residual = residual_measurements
+        .iter()
+        .find(|(label, _, _)| *label == "Sequential")
+        .map(|(_, elapsed, _)| *elapsed)
+        .expect("chunking story must report Sequential");
+    if let Some((_, auto_residual, auto_parallel_dispatches)) = residual_measurements
+        .iter()
+        .find(|(label, _, _)| *label == "Auto")
+    {
+        if *auto_parallel_dispatches == 0 {
+            assert!(
+                *auto_residual <= sequential_residual * 20.0 + 0.5,
+                "Auto sequential fallback contains unexpected callback overhead: auto={auto_residual:.6} ms/call, sequential={sequential_residual:.6} ms/call"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "release-only bounded Atom AOT whole/chunked ABI and module-emission comparison"]
+fn lsode2_aot_chunked_shared_abi_emission_scaling_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_AOT",
+        "numerical::LSODE2::aot_performance_story_tests::lsode2_aot_chunked_shared_abi_emission_scaling_story",
+    );
+    let dimensions = dimensions_from_env("LSODE2_AOT_ABI_DIMENSIONS", &[256, 512, 1024]);
+    let chunk_size = usize_from_env("LSODE2_AOT_ABI_CHUNK_SIZE", 128);
+    let repetitions = usize_from_env("LSODE2_AOT_ABI_REPETITIONS", 3);
+    reportln!(
+        "[LSODE2 Atom AOT shared ABI emission] dimensions={dimensions:?}; sparse diffusion; chunk_size={chunk_size}; repetitions={repetitions}; Rust module emission only; compilation/link excluded"
+    );
+    reportln!(
+        "mode | dimension | residual_chunks | jacobian_chunks | blocks | input_count | schema_name_bytes | legacy_name_bytes_avoided_est | emission_ms_median | abi_stage_ms_median | source_kb | source_lines | output_coverage"
+    );
+
+    for dimension in dimensions {
+        let telemetry = IvpTelemetry::detailed();
+        let residual_problem = super::story_support::prepare_chain_residual(
+            dimension,
+            IvpSymbolicAssemblyBackend::AtomView,
+            IvpLambdifyExecutionPolicy::Sequential,
+            telemetry.clone(),
+        );
+        let layout = AtomAotMatrixLayout::SparseCsc {
+            rows: dimension,
+            cols: dimension,
+            nnz: 0,
+        };
+        let variants = [
+            (
+                "whole",
+                ResidualChunkingStrategy::Whole,
+                SparseChunkingStrategy::Whole,
+            ),
+            (
+                "chunked",
+                ResidualChunkingStrategy::ByOutputCount {
+                    max_outputs_per_chunk: chunk_size,
+                },
+                SparseChunkingStrategy::ByNonZeroCount {
+                    max_entries_per_chunk: chunk_size,
+                },
+            ),
+        ];
+
+        for (mode, residual_strategy, jacobian_strategy) in variants {
+            let problem = prepared_atom_aot_problem_from_residual_problem(
+                &residual_problem,
+                residual_strategy,
+                jacobian_strategy,
+                layout,
+            )
+            .expect("Atom AOT chunk policy should prepare");
+            let manifest = problem.manifest();
+            let residual_chunks = &manifest.functions.residual_chunks;
+            let jacobian_chunks = &manifest.functions.jacobian_chunks;
+            let residual_coverage = residual_chunks.iter().map(|chunk| chunk.len).sum::<usize>();
+            let jacobian_coverage = jacobian_chunks.iter().map(|chunk| chunk.len).sum::<usize>();
+            assert_eq!(
+                residual_coverage, dimension,
+                "residual chunks must cover each row once"
+            );
+            assert_eq!(
+                jacobian_coverage,
+                manifest.io.jacobian_nnz.expect("Sparse manifest has nnz"),
+                "Jacobian chunks must cover each sparse value once"
+            );
+
+            let input_count = problem.flattened_input_names().len();
+            let schema_name_bytes = problem
+                .flattened_input_names()
+                .iter()
+                .map(String::len)
+                .sum::<usize>();
+            let block_count = residual_chunks.len() + jacobian_chunks.len();
+            // Estimate only repeated UTF-8 name payload. HashMap capacity,
+            // Arc metadata and allocator overhead are intentionally excluded.
+            let legacy_name_bytes_avoided_est =
+                schema_name_bytes.saturating_mul(block_count.saturating_sub(1));
+
+            let mut emission_samples_ms = Vec::with_capacity(repetitions);
+            let mut abi_samples_ms = Vec::with_capacity(repetitions);
+            let mut final_source_shape = (0usize, 0usize);
+            for repetition in 0..repetitions {
+                let stage_before = telemetry
+                    .snapshot()
+                    .cold_stage(IvpColdStage::AotInputAbiPreparation);
+                let started = Instant::now();
+                let artifact = generated_aot_artifact_from_symbolic_ivp_atom_problem(
+                    &format!("lsode2_abi_{mode}_{dimension}_{repetition}"),
+                    &format!("lsode2_abi_module_{mode}_{dimension}_{repetition}"),
+                    &problem,
+                    AotCodegenBackend::Rust,
+                )
+                .expect("Atom AOT module emission should succeed");
+                let emission_ms = started.elapsed().as_secs_f64() * 1.0e3;
+                let GeneratedAotArtifact::Rust(crate_spec) = artifact else {
+                    panic!("Rust module emission should return a Rust artifact");
+                };
+                assert!(!crate_spec.module_source.is_empty());
+                final_source_shape = (
+                    crate_spec.module_source.len(),
+                    crate_spec.module_source.lines().count(),
+                );
+                let stage_after = telemetry
+                    .snapshot()
+                    .cold_stage(IvpColdStage::AotInputAbiPreparation);
+                assert_eq!(stage_after.calls, stage_before.calls + 1);
+                emission_samples_ms.push(emission_ms);
+                abi_samples_ms.push(
+                    stage_after
+                        .elapsed
+                        .saturating_sub(stage_before.elapsed)
+                        .as_secs_f64()
+                        * 1.0e3,
+                );
+            }
+            emission_samples_ms.sort_by(f64::total_cmp);
+            abi_samples_ms.sort_by(f64::total_cmp);
+            let emission_median = emission_samples_ms[emission_samples_ms.len() / 2];
+            let abi_median = abi_samples_ms[abi_samples_ms.len() / 2];
+            reportln!(
+                "{mode} | {dimension} | {} | {} | {block_count} | {input_count} | {schema_name_bytes} | {legacy_name_bytes_avoided_est} | {emission_median:.3} | {abi_median:.6} | {:.1} | {} | residual={residual_coverage}/{dimension},jacobian={jacobian_coverage}/{}",
+                residual_chunks.len(),
+                jacobian_chunks.len(),
+                final_source_shape.0 as f64 / 1024.0,
+                final_source_shape.1,
+                manifest.io.jacobian_nnz.expect("Sparse manifest has nnz"),
+            );
+        }
     }
 }
 

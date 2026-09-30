@@ -1,9 +1,3 @@
-//! Checked-in generated Rust fixtures for a larger real discretized BVP case.
-//!
-//! These functions are emitted from the current `CodegenIR` pipeline for
-//! the same real `BVP_Damp1`-style system as the smaller fixture, but with
-//! `n_steps = 32` to exercise runtime scaling and chunk orchestration.
-
 // =========================================
 // AUTO-GENERATED FILE. DO NOT EDIT MANUALLY.
 // =========================================
@@ -27,38 +21,38 @@ pub mod generated_bvp_large_fixture {
         let t7 = t6 * t1;
         let t8 = args[2];
         let t9 = t7 + t8;
-        let t10 = t9 - t2;
+        let t10 = t9 + t2;
         let t11 = t6 * t0;
         let t12 = args[3];
         let t13 = t11 + t12;
         let t14 = t8 - t0;
         let t15 = t13 - t14;
-        let t16 = 3.00000000000000000e0_f64;
-        let t17 = t0.powf(t16);
-        let t18 = t6 * t17;
-        let t19 = t18 - t8;
-        let t20 = args[4];
-        let t21 = t19 + t20;
+        let t16 = t6 * t8;
+        let t17 = args[4];
+        let t18 = t16 + t17;
+        let t19 = 3.00000000000000000e0_f64;
+        let t20 = t11.powf(t19);
+        let t21 = t18 - t20;
         let t22 = t6 * t12;
         let t23 = args[5];
         let t24 = t22 + t23;
-        let t25 = t20 - t12;
+        let t25 = t17 - t12;
         let t26 = t24 - t25;
-        let t27 = t12.powf(t16);
-        let t28 = t6 * t27;
-        let t29 = t28 - t20;
-        let t30 = args[6];
-        let t31 = t29 + t30;
+        let t27 = t6 * t17;
+        let t28 = args[6];
+        let t29 = t27 + t28;
+        let t30 = t22.powf(t19);
+        let t31 = t29 - t30;
         let t32 = t6 * t23;
         let t33 = args[7];
         let t34 = t32 + t33;
-        let t35 = t30 - t23;
+        let t35 = t28 - t23;
         let t36 = t34 - t35;
-        let t37 = t23.powf(t16);
-        let t38 = t6 * t37;
-        let t39 = t38 - t30;
-        let t40 = args[8];
-        let t41 = t39 + t40;
+        let t37 = t6 * t28;
+        let t38 = args[8];
+        let t39 = t37 + t38;
+        let t40 = t32.powf(t19);
+        let t41 = t39 - t40;
         out[0] = t5;
         out[1] = t10;
         out[2] = t15;
@@ -81,42 +75,42 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[8];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[10];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[10];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[11];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[12];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[12];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[13];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[14];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[14];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[15];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
-        let t42 = args[16];
-        let t43 = t41 + t42;
+        let t39 = t0 * t30;
+        let t40 = args[16];
+        let t41 = t39 + t40;
+        let t42 = t34.powf(t11);
+        let t43 = t41 - t42;
         out[0] = t7;
         out[1] = t13;
         out[2] = t18;
@@ -139,41 +133,41 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[16];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[18];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[18];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = args[19];
         let t15 = t14 - t3;
-        let t16 = t12 - t3;
+        let t16 = t9 - t3;
         let t17 = t15 - t16;
-        let t18 = t3.powf(t8);
-        let t19 = t0 * t18;
-        let t20 = args[20];
-        let t21 = t19 + t20;
-        let t22 = t21 - t12;
+        let t18 = args[20];
+        let t19 = t18 - t9;
+        let t20 = t0 * t3;
+        let t21 = t20.powf(t11);
+        let t22 = t19 - t21;
         let t23 = t0 * t14;
         let t24 = args[21];
         let t25 = t23 + t24;
-        let t26 = t20 - t14;
+        let t26 = t18 - t14;
         let t27 = t25 - t26;
-        let t28 = t14.powf(t8);
-        let t29 = t0 * t28;
-        let t30 = t29 - t20;
-        let t31 = args[22];
-        let t32 = t30 + t31;
+        let t28 = t0 * t18;
+        let t29 = args[22];
+        let t30 = t28 + t29;
+        let t31 = t23.powf(t11);
+        let t32 = t30 - t31;
         let t33 = t0 * t24;
         let t34 = args[23];
         let t35 = t33 + t34;
-        let t36 = t31 - t24;
+        let t36 = t29 - t24;
         let t37 = t35 - t36;
-        let t38 = t24.powf(t8);
-        let t39 = t0 * t38;
-        let t40 = t39 - t31;
-        let t41 = args[24];
-        let t42 = t40 + t41;
+        let t38 = t0 * t29;
+        let t39 = args[24];
+        let t40 = t38 + t39;
+        let t41 = t33.powf(t11);
+        let t42 = t40 - t41;
         out[0] = t7;
         out[1] = t13;
         out[2] = t17;
@@ -196,42 +190,42 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[24];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[26];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[26];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[27];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[28];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[28];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[29];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[30];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[30];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[31];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
-        let t42 = args[32];
-        let t43 = t41 + t42;
+        let t39 = t0 * t30;
+        let t40 = args[32];
+        let t41 = t39 + t40;
+        let t42 = t34.powf(t11);
+        let t43 = t41 - t42;
         out[0] = t7;
         out[1] = t13;
         out[2] = t18;
@@ -254,42 +248,42 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[32];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[34];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[34];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[35];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[36];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[36];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[37];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[38];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[38];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[39];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
-        let t42 = args[40];
-        let t43 = t41 + t42;
+        let t39 = t0 * t30;
+        let t40 = args[40];
+        let t41 = t39 + t40;
+        let t42 = t34.powf(t11);
+        let t43 = t41 - t42;
         out[0] = t7;
         out[1] = t13;
         out[2] = t18;
@@ -312,42 +306,42 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[40];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[42];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[42];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[43];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[44];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[44];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[45];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[46];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[46];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[47];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
-        let t42 = args[48];
-        let t43 = t41 + t42;
+        let t39 = t0 * t30;
+        let t40 = args[48];
+        let t41 = t39 + t40;
+        let t42 = t34.powf(t11);
+        let t43 = t41 - t42;
         out[0] = t7;
         out[1] = t13;
         out[2] = t18;
@@ -370,42 +364,42 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[48];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[50];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[50];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[51];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[52];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[52];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[53];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[54];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[54];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[55];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
-        let t42 = args[56];
-        let t43 = t41 + t42;
+        let t39 = t0 * t30;
+        let t40 = args[56];
+        let t41 = t39 + t40;
+        let t42 = t34.powf(t11);
+        let t43 = t41 - t42;
         out[0] = t7;
         out[1] = t13;
         out[2] = t18;
@@ -428,40 +422,40 @@ pub mod generated_bvp_large_fixture {
         let t5 = args[56];
         let t6 = t5 - t1;
         let t7 = t4 - t6;
-        let t8 = 3.00000000000000000e0_f64;
-        let t9 = t1.powf(t8);
-        let t10 = t0 * t9;
-        let t11 = t10 - t5;
-        let t12 = args[58];
-        let t13 = t11 + t12;
+        let t8 = t0 * t5;
+        let t9 = args[58];
+        let t10 = t8 + t9;
+        let t11 = 3.00000000000000000e0_f64;
+        let t12 = t2.powf(t11);
+        let t13 = t10 - t12;
         let t14 = t0 * t3;
         let t15 = args[59];
         let t16 = t14 + t15;
-        let t17 = t12 - t3;
+        let t17 = t9 - t3;
         let t18 = t16 - t17;
-        let t19 = t3.powf(t8);
-        let t20 = t0 * t19;
-        let t21 = t20 - t12;
-        let t22 = args[60];
-        let t23 = t21 + t22;
+        let t19 = t0 * t9;
+        let t20 = args[60];
+        let t21 = t19 + t20;
+        let t22 = t14.powf(t11);
+        let t23 = t21 - t22;
         let t24 = t0 * t15;
         let t25 = args[61];
         let t26 = t24 + t25;
-        let t27 = t22 - t15;
+        let t27 = t20 - t15;
         let t28 = t26 - t27;
-        let t29 = t15.powf(t8);
-        let t30 = t0 * t29;
-        let t31 = t30 - t22;
-        let t32 = args[62];
-        let t33 = t31 + t32;
+        let t29 = t0 * t20;
+        let t30 = args[62];
+        let t31 = t29 + t30;
+        let t32 = t24.powf(t11);
+        let t33 = t31 - t32;
         let t34 = t0 * t25;
         let t35 = args[63];
         let t36 = t34 + t35;
-        let t37 = t32 - t25;
+        let t37 = t30 - t25;
         let t38 = t36 - t37;
-        let t39 = t25.powf(t8);
-        let t40 = t0 * t39;
-        let t41 = t40 - t32;
+        let t39 = t0 * t30;
+        let t40 = t34.powf(t11);
+        let t41 = t39 - t40;
         let t42 = 1.00000000000000000e0_f64;
         let t43 = t41 + t42;
         out[0] = t7;
@@ -508,16 +502,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_3(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[1];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[1];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -534,16 +529,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_5(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[3];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[3];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -560,16 +556,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_7(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[5];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[5];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -586,16 +583,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_9(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[7];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[7];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -612,16 +610,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_11(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[9];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[9];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -638,16 +637,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_13(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[11];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[11];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -664,16 +664,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_15(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[13];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[13];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -690,16 +691,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_17(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[15];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[15];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -716,16 +718,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_19(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[17];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[17];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -742,16 +745,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_21(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[19];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[19];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -768,16 +772,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_23(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[21];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[21];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -794,16 +799,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_25(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[23];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[23];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -820,16 +826,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_27(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[25];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[25];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -846,16 +853,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_29(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[27];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[27];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -872,16 +880,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_31(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[29];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[29];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -898,16 +907,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_33(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[31];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[31];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -924,16 +934,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_35(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[33];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[33];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -950,16 +961,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_37(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[35];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[35];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -976,16 +988,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_39(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[37];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[37];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1002,16 +1015,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_41(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[39];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[39];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1028,16 +1042,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_43(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[41];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[41];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1054,16 +1069,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_45(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[43];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[43];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1080,16 +1096,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_47(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[45];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[45];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1106,16 +1123,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_49(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[47];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[47];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1132,16 +1150,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_51(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[49];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[49];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1158,16 +1177,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_53(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[51];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[51];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1184,16 +1204,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_55(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[53];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[53];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1210,16 +1231,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_57(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[55];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[55];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1236,16 +1258,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_59(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[57];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[57];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1262,16 +1285,17 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_61(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 3, "expected at least 3 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[59];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        let t6 = 1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
-        out[2] = t6;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[59];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        let t7 = 1.00000000000000000e0_f64;
+        out[0] = t6;
+        out[1] = t1;
+        out[2] = t7;
     }
 
     // Sparse Jacobian values block: 64 rows x 64 cols, 2 non-zero values
@@ -1288,20 +1312,20 @@ pub mod generated_bvp_large_fixture {
     pub fn fixture_bvp32_sparse_values_chunk_63(args: &[f64], out: &mut [f64]) {
         debug_assert!(args.len() >= 64, "expected at least 64 arguments");
         debug_assert!(out.len() >= 2, "expected at least 2 output slots");
-        let t0 = -3.00000000000000000e0_f64;
-        let t1 = args[61];
-        let t2 = 2.00000000000000000e0_f64;
-        let t3 = t1.powf(t2);
-        let t4 = t0 * t3;
-        let t5 = -1.00000000000000000e0_f64;
-        out[0] = t4;
-        out[1] = t5;
+        let t0 = 3.00000000000000000e0_f64;
+        let t1 = -1.00000000000000000e0_f64;
+        let t2 = args[61];
+        let t3 = t1 * t2;
+        let t4 = 2.00000000000000000e0_f64;
+        let t5 = t3.powf(t4);
+        let t6 = t0 * t5;
+        out[0] = t6;
+        out[1] = t1;
     }
 }
 
 pub mod generated_bvp_large_fixture_bindings {
     use super::generated_bvp_large_fixture;
-
     pub const N_STEPS: usize = 32;
     pub const RESIDUAL_CHUNKS: [fn(&[f64], &mut [f64]); 8] = [
         generated_bvp_large_fixture::fixture_bvp32_residual_chunk_0,

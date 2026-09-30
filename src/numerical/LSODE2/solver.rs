@@ -11,31 +11,30 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
-    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
+    run_native_integration_for_method_with_prepared_callbacks,
 };
 use super::native_jacobian::{
-    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
-    NativeJacobianStorage,
 };
 use super::native_preflight::{
-    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
-    Lsode2NativeStepProbeSummary,
+    Lsode2NativeStepProbeSummary, run_native_step_preflight,
+    run_native_step_preflight_with_prepared_callbacks,
 };
 use super::native_step_engine::{
     Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
-};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -372,6 +371,29 @@ impl Lsode2Solver {
         &self.config
     }
 
+    /// Replaces the structural problem configuration transactionally.
+    ///
+    /// A replacement invalidates prepared callbacks, generated bridges,
+    /// Jacobian layouts and solver factors. The candidate is fully validated
+    /// and constructed before it replaces `self`, so a failed reconfiguration
+    /// leaves the current prepared solver usable and untouched.
+    pub fn reconfigure(&mut self, config: Lsode2ProblemConfig) -> Result<(), Lsode2Error> {
+        let replacement = Self::new(config)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    /// Returns the generated-backend resolver after preparation.
+    ///
+    /// AOT preparation may publish a new resolver snapshot inside the BDF
+    /// engine. Exposing that snapshot lets process-isolated producers publish
+    /// provenance without rebuilding the artifact in a consumer process.
+    pub fn generated_backend_config(
+        &self,
+    ) -> &crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig {
+        self.inner.generated_backend_config()
+    }
+
     /// Returns the typed opt-in telemetry snapshot for the current solve.
     ///
     /// The snapshot remains available after a typed solve error, which allows
@@ -399,9 +421,6 @@ impl Lsode2Solver {
                     | Lsode2NativeExecutionConfig::Disabled
                     | Lsode2NativeExecutionConfig::ProbeBeforeBridge { .. }
             );
-            if bridge_required_before_solve {
-                self.prepare_bridge()?;
-            }
             {
                 let _native_scope = self
                     .config
@@ -410,6 +429,9 @@ impl Lsode2Solver {
                 self.native_callbacks =
                     Lsode2NativeStepEngine::prepare_callbacks_for_config(&self.config)
                         .map_err(Lsode2Error::from)?;
+            }
+            if bridge_required_before_solve {
+                self.prepare_bridge()?;
             }
             self.native_statistics
                 .record_backend_prepare_duration(started.elapsed());
@@ -426,6 +448,18 @@ impl Lsode2Solver {
                 .config
                 .telemetry
                 .scoped_cold_stage(IvpColdStage::BridgePreparation);
+            if self.config.backend.jacobian_backend == Lsode2JacobianBackend::SymbolicGenerated {
+                if let Some(callbacks) = self.native_callbacks.as_ref() {
+                    let residual = callbacks.bridge_residual();
+                    let parameter_values_handle = callbacks.parameter_values_handle();
+                    let jacobian_factory = callbacks.bridge_jacobian_factory();
+                    self.inner.set_prepared_generated_callbacks(
+                        residual,
+                        parameter_values_handle,
+                        jacobian_factory,
+                    );
+                }
+            }
             self.inner.try_generate()?;
             self.bridge_prepared = true;
         }
@@ -551,9 +585,15 @@ impl Lsode2Solver {
     }
 
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
-        self.native_override_result
-            .clone()
-            .unwrap_or_else(|| self.inner.get_result())
+        let (times, values) = self.result_ref();
+        (times.clone(), values.clone())
+    }
+
+    fn result_ref(&self) -> (&DVector<f64>, &DMatrix<f64>) {
+        match self.native_override_result.as_ref() {
+            Some((times, values)) => (times, values),
+            None => self.inner.get_result_ref(),
+        }
     }
 
     /// Converts the current LSODE2 result into the unified postprocessing dataset.
@@ -861,7 +901,13 @@ impl Lsode2Solver {
     }
 
     pub fn bdf_max_order_cap(&self) -> usize {
-        self.inner.bdf_max_order_cap()
+        // NativeSolve deliberately does not materialize the bridge BDF
+        // instance.  Reading the low-level default in that state used to
+        // report 5 even when the public controller was capped at a lower
+        // order.  The configured cap is the stable API contract for both
+        // native and bridge execution; once the bridge exists it receives
+        // this same value during generation.
+        self.config.controller.max_bdf_order
     }
 
     pub fn bdf_current_order(&self) -> usize {
@@ -1026,7 +1072,7 @@ impl Lsode2Solver {
             .config
             .telemetry
             .scoped_warm_stage(IvpWarmStage::Summary);
-        let (t, y) = self.get_result();
+        let (t, y) = self.result_ref();
         let final_t = (!t.is_empty()).then(|| t[t.len() - 1]);
         let final_y = (y.nrows() > 0).then(|| {
             DVector::from_iterator(y.ncols(), (0..y.ncols()).map(|col| y[(y.nrows() - 1, col)]))
@@ -1067,9 +1113,10 @@ impl Lsode2Solver {
 
     /// Updates numeric values for symbolic equation parameters.
     ///
-    /// Updating parameters invalidates prepared BDF state.  The next
-    /// [`Self::prepare`] or [`Self::solve`] call rebuilds callbacks and cached
-    /// initial quantities consistently.
+    /// Prepared residual/Jacobian callbacks keep a shared numeric parameter
+    /// binding, so a rebind does not rebuild symbolic plans or compiled
+    /// artifacts. The next solve creates fresh mutable integration state while
+    /// retaining the immutable callback plan.
     pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), Lsode2Error> {
         let expected = self
             .config
@@ -1086,10 +1133,13 @@ impl Lsode2Solver {
         }
 
         self.config.equation_parameter_values = Some(values.clone());
-        self.inner.set_parameter_values(values)?;
-        self.backend_prepared = false;
-        self.bridge_prepared = false;
-        self.native_callbacks = None;
+        self.inner.set_parameter_values(values.clone())?;
+        if let Some(callbacks) = self.native_callbacks.as_ref() {
+            callbacks
+                .rebind_parameter_values(&values)
+                .map_err(Lsode2Error::from)?;
+        }
+        self.config.telemetry.record_parameter_bind();
         Ok(())
     }
 

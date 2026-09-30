@@ -10,6 +10,11 @@ use crate::symbolic::symbolic_ivp::{
 use nalgebra::{DMatrix, DVector};
 use std::time::Instant;
 
+use super::{
+    Lsode2LinearSystemStructure, Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2Solver,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+};
+
 macro_rules! println {
     ($($arg:tt)*) => {
         crate::Utils::test_reporting::capture_test_line(format_args!($($arg)*));
@@ -200,6 +205,102 @@ fn lsode2_atomview_native_parameter_rebind_parity_story() {
     assert_eq!(atom_snapshot.parameter_binds, 1);
     assert_eq!(atom_snapshot.cold_stage(IvpColdStage::ExprToAtom).calls, 1);
     assert_eq!(atom_snapshot.cold_stage(IvpColdStage::AtomToExpr).calls, 0);
+}
+
+#[test]
+fn lsode2_public_reconfigure_invalidates_structural_runtime_transactionally() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::lifecycle_story_tests::lsode2_public_reconfigure_invalidates_structural_runtime_transactionally",
+    );
+
+    let base = Lsode2ProblemConfig::new(
+        vec![
+            Expr::parse_expression("-a*y1 + y2"),
+            Expr::parse_expression("y1 - b*y2"),
+        ],
+        vec!["y1".to_string(), "y2".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0, 0.5]),
+        0.25,
+        0.025,
+        1.0e-9,
+        1.0e-11,
+    )
+    .with_equation_parameters(vec!["a".to_string(), "b".to_string()])
+    .with_equation_parameter_values(DVector::from_vec(vec![2.0, 0.5]))
+    .with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+        assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+        execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+    })
+    .with_native_sparse_faer_backend()
+    .with_faithful_bdf_solve(2_000, 2_000)
+    .with_lambdify_execution_policy(IvpLambdifyExecutionPolicy::Sequential)
+    .with_telemetry(IvpTelemetry::detailed());
+
+    let mut solver = Lsode2Solver::new(base.clone()).expect("base fixture should construct");
+    solver.prepare().expect("base fixture should prepare");
+    assert!(solver.is_prepared());
+
+    let mut replacement = base.clone();
+    replacement.eq_system = vec![
+        Expr::parse_expression("-a*y1"),
+        Expr::parse_expression("y1 - b*y2 + t"),
+    ];
+    replacement = replacement
+        .with_native_banded_faithful_backend()
+        .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 });
+
+    solver
+        .reconfigure(replacement.clone())
+        .expect("structural replacement should construct");
+    assert!(
+        !solver.is_prepared(),
+        "replacement must invalidate callbacks"
+    );
+    solver
+        .prepare()
+        .expect("replacement should prepare independently");
+    let replacement_summary = solver
+        .solve_with_summary()
+        .expect("replacement should solve");
+
+    let mut fresh = Lsode2Solver::new(replacement).expect("fresh replacement should construct");
+    let fresh_summary = fresh
+        .solve_with_summary()
+        .expect("fresh replacement should solve");
+    let state_diff = replacement_summary
+        .final_y
+        .as_ref()
+        .zip(fresh_summary.final_y.as_ref())
+        .map(|(left, right)| {
+            left.iter()
+                .zip(right.iter())
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0, f64::max)
+        })
+        .unwrap_or(f64::INFINITY);
+    assert!(state_diff <= 1.0e-12, "replacement drifted: {state_diff:e}");
+
+    let mut invalid = base.clone();
+    invalid.equation_parameter_values = Some(DVector::from_vec(vec![2.0]));
+    let error = solver
+        .reconfigure(invalid)
+        .expect_err("invalid replacement must be rejected");
+    assert!(matches!(error, super::Lsode2Error::GeneratedBackend(_)));
+    assert!(
+        solver.is_prepared(),
+        "failed replacement must preserve runtime"
+    );
+    let preserved_summary = solver
+        .solve_with_summary()
+        .expect("preserved replacement runtime should remain usable");
+    assert!(preserved_summary.final_t.is_some());
+
+    println!(
+        "[LSODE2 public structural invalidation] schema/layout/pattern replacement=transactional; prepared_after_success=true; failed_replacement_preserved=true; max_state_diff={state_diff:.3e}"
+    );
 }
 
 #[test]

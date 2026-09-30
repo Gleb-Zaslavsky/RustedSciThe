@@ -179,6 +179,49 @@ loaded dynamic library can be safely deleted. If you use `RebuildAlways` in long
 diagnostic sessions, old isolated rebuild directories can be cleaned later when
 no process is using them.
 
+## Parameter continuation: rebind values, reuse prepared callbacks
+
+For a parameterized symbolic model, declare parameter names in expression
+order and provide the corresponding initial values:
+
+```rust
+let config = Lsode2ProblemConfig::new(
+    vec![Expr::parse_expression("-k*y")],
+    vec!["y".to_string()],
+    "t".to_string(),
+    0.0,
+    DVector::from_vec(vec![1.0]),
+    1.0,
+    0.05,
+    1e-8,
+    1e-10,
+)
+.with_equation_parameters(vec!["k".to_string()])
+.with_equation_parameter_values(DVector::from_vec(vec![1.0]));
+```
+
+Construct one `Lsode2Solver`, then update only the numeric vector between
+solves:
+
+```rust
+let mut solver = Lsode2Solver::new(config)?;
+for k in [1.0, 2.0, 4.0] {
+    solver.set_parameter_values(DVector::from_vec(vec![k]))?;
+    solver.solve()?;
+    let (_, states) = solver.get_result();
+    println!("k={k}: y(1)={:.6e}", states[(states.nrows() - 1, 0)]);
+}
+```
+
+This reuses the prepared symbolic callbacks; the AOT route also reuses its
+prepared artifact instead of repeating symbolic preparation or compilation
+for each value. Each `solve()` is nevertheless a new integration initialized
+from the configured `t0` and `y0`: parameter continuation does not carry the
+previous trajectory or integrator history forward. Parameter count and order
+must match the declared schema. See the runnable examples
+`lsode2_parameter_continuation_lambdify` and
+`lsode2_parameter_continuation_aot`.
+
 ## AOT parallelism/chunking and performance
 
 Generated backend settings include `aot_options`, where residual/Jacobian chunking strategies are defined. This influences function size, compile behavior, and runtime dispatch plan. Residual strategies include `Whole`, `ByTargetChunkCount`, `ByOutputCount`; dense Jacobian strategies include `Whole`, `ByTargetChunkCount`, `ByRowCount`.
@@ -386,8 +429,12 @@ The same logic applies to Dense and Banded. Structure selection changes linear a
 
 ## Where to continue in this repository
 
-Hands-on examples are in `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs`, and `examples/lsode2_task_shell_guide.rs`.
+Hands-on examples are in `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_continuation_lambdify.rs`, `examples/lsode2_parameter_continuation_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs`, and `examples/lsode2_task_shell_guide.rs`.
 
-For scenario-level quality/performance behavior, use `story_tests.rs` and `story_tests2.rs`. For math parity against ODEPACK-style control logic, use `parity_micro.rs`, `stiff_parity_tests.rs`, `nonstiff_parity_tests.rs`, plus `MIRRORING_CHECKLIST.md`.
+Scenario-level correctness and performance tests are organized by topic under
+`src/numerical/LSODE2/tests/` (for example, `correctness_story_tests.rs`,
+`parameter_continuation_story_tests.rs`, and the `aot_*_story_tests.rs`
+modules). For ODEPACK-style numerical parity, see `parity_micro.rs`,
+`stiff_parity_tests.rs`, and `nonstiff_parity_tests.rs` in the LSODE2 module.
 
 When these layers stay separated (guide for usage, story tests for end-to-end behavior, parity tests for mathematical equivalence), LSODE2 stops feeling complicated and starts behaving like a predictable engineering tool.
