@@ -5,12 +5,28 @@ use crate::Utils::plots::plots;
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 pub mod NR_for_Euler;
 
-use self::NR_for_Euler::{NreError, NreStepMode, NRE};
+/// Common Backward Euler types for applications using the direct solver API.
+pub mod prelude {
+    pub use super::NR_for_Euler::{NRE, NreError, NreSolverOptions, NreStepMode};
+    pub use super::{
+        BE, BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
+        BeSymbolicAssemblyBackend, BeTelemetryMode, DEFAULT_BE_MAX_STEPS,
+    };
+    pub use crate::symbolic::symbolic_engine::Expr;
+    pub use crate::symbolic::symbolic_ivp_generated::{
+        DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
+    };
+    pub use nalgebra::{DMatrix, DVector};
+}
+
+use self::NR_for_Euler::{NRE, NreError, NreStepMode};
+use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
+use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
-    SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpGeneratedError, prepare_generated_symbolic_ivp_problem,
 };
 use log::info;
 use nalgebra::{DMatrix, DVector};
@@ -21,6 +37,29 @@ use std::time::Instant;
 
 /// Default upper bound for BE step attempts in one integration segment.
 pub const DEFAULT_BE_MAX_STEPS: usize = 1_000_000;
+
+/// Symbolic frontend used to prepare Backward Euler residual/Jacobian callbacks.
+///
+/// `ExprLegacy` remains the compatibility default. `AtomViewNative` is
+/// recommended for medium/large symbolic systems based on the BE frontend
+/// measurements; tiny systems may favor the legacy preparation path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BeSymbolicAssemblyBackend {
+    /// Legacy expression differentiation and callback preparation.
+    #[default]
+    ExprLegacy,
+    /// Native AtomView differentiation and evaluator preparation.
+    AtomViewNative,
+}
+
+impl BeSymbolicAssemblyBackend {
+    const fn as_ivp_backend(self) -> IvpSymbolicAssemblyBackend {
+        match self {
+            Self::ExprLegacy => IvpSymbolicAssemblyBackend::ExprLegacy,
+            Self::AtomViewNative => IvpSymbolicAssemblyBackend::AtomView,
+        }
+    }
+}
 
 /// Controls collection of BE/NRE lifecycle and callback telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -311,6 +350,8 @@ pub struct BeSolverOptions {
     pub t_bound: f64,
     pub y0: DVector<f64>,
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    /// Symbolic expression frontend used when callbacks are prepared.
+    pub symbolic_assembly_backend: BeSymbolicAssemblyBackend,
     /// Maximum integration step attempts in one solve/continuation segment.
     pub max_steps: usize,
     /// Controls solver and callback instrumentation.
@@ -341,6 +382,7 @@ impl BeSolverOptions {
             t_bound,
             y0,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             max_steps: DEFAULT_BE_MAX_STEPS,
             telemetry_mode: BeTelemetryMode::Timings,
         }
@@ -352,6 +394,12 @@ impl BeSolverOptions {
         config: SymbolicIvpGeneratedBackendConfig,
     ) -> Self {
         self.generated_backend_config = config;
+        self
+    }
+
+    /// Selects the symbolic frontend used to prepare residual/Jacobian callbacks.
+    pub fn with_symbolic_assembly_backend(mut self, backend: BeSymbolicAssemblyBackend) -> Self {
+        self.symbolic_assembly_backend = backend;
         self
     }
 
@@ -516,6 +564,7 @@ impl BE {
     }
 
     pub fn try_new_with_options(options: BeSolverOptions) -> Result<Self, BeError> {
+        let symbolic_assembly_backend = options.symbolic_assembly_backend;
         let mut solver =
             Self::new().with_generated_backend_config(options.generated_backend_config);
         solver.try_set_initial(
@@ -531,18 +580,33 @@ impl BE {
         )?;
         solver.try_set_max_steps(options.max_steps)?;
         solver.try_set_telemetry_mode(options.telemetry_mode)?;
+        solver.set_symbolic_assembly_backend(symbolic_assembly_backend);
         Ok(solver)
     }
 
     /// Installs one high-level generated-backend orchestration config.
     pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
         self.generated_backend_config = config;
-        self.newton.jac = None;
+        self.newton
+            .set_generated_backend_config(self.generated_backend_config.clone());
     }
 
     /// Returns the current generated-backend orchestration config.
     pub fn generated_backend_config(&self) -> &SymbolicIvpGeneratedBackendConfig {
         &self.generated_backend_config
+    }
+
+    /// Selects the symbolic frontend used for future callback preparation.
+    ///
+    /// This must be changed before callbacks are prepared. Re-selecting a
+    /// frontend invalidates any currently prepared symbolic callback set.
+    pub fn set_symbolic_assembly_backend(&mut self, backend: BeSymbolicAssemblyBackend) {
+        self.newton.set_symbolic_assembly_backend(backend);
+    }
+
+    /// Returns the selected symbolic frontend.
+    pub fn symbolic_assembly_backend(&self) -> BeSymbolicAssemblyBackend {
+        self.newton.symbolic_assembly_backend()
     }
 
     pub fn get_statistics(&self) -> IvpBackendStatistics {
@@ -594,7 +658,17 @@ impl BE {
             detailed.output_assembly_calls,
             detailed.output_assembly_ms_total,
         ));
+        if let Some(snapshot) = self.symbolic_ivp_telemetry_snapshot() {
+            report.push_str("\n\n## Symbolic IVP lifecycle telemetry\n\n");
+            report.push_str(&snapshot.pretty_report());
+        }
         report
+    }
+
+    /// Returns the shared typed symbolic-IVP telemetry captured during
+    /// preparation and subsequent callback evaluation, if telemetry is enabled.
+    pub fn symbolic_ivp_telemetry_snapshot(&self) -> Option<IvpTelemetrySnapshot> {
+        self.newton.symbolic_ivp_telemetry_snapshot()
     }
 
     /// Returns BE/NRE-specific work counters and stage timings.
@@ -864,7 +938,10 @@ impl BE {
         t_bound: f64,
         y0: DVector<f64>,
     ) {
+        let symbolic_assembly_backend = self.newton.symbolic_assembly_backend();
         self.newton = newton;
+        self.newton
+            .set_symbolic_assembly_backend(symbolic_assembly_backend);
         self.t0 = t0;
         self.t_bound = t_bound;
         self.y0 = y0.clone();
@@ -986,6 +1063,7 @@ impl BE {
         self.native_rhs = Some(Arc::new(rhs));
         self.native_jac = jac.map(|j| Arc::new(j) as BeNativeJac);
         self.newton.jac = None;
+        self.newton.clear_symbolic_ivp_telemetry();
     }
 
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
@@ -1167,7 +1245,9 @@ impl BE {
         // Analogue of https://github.com/scipy/scipy/blob/main/scipy/integrate/_ivp/ivp.py
 
         let mut integr_status: Option<i8> = None;
-        let mut y: Vec<DVector<f64>> = vec![self.y.clone()];
+        let state_dimension = self.y.len();
+        let mut state_samples = Vec::with_capacity(state_dimension);
+        state_samples.extend(self.y.iter().copied());
         let mut t: Vec<f64> = vec![self.t];
         let mut step_count = 0usize;
         while integr_status.is_none() {
@@ -1207,22 +1287,16 @@ impl BE {
             }
 
             //  info("i: {}, t: {}, y: {:?}, _status: {}", i, self.Solver_instance.t, self.Solver_instance.y, _status);
-            if self.t > *t.last().unwrap() {
+            if t.last().is_some_and(|last| self.t > *last) {
                 t.push(self.t);
-                y.push(self.y.clone());
+                state_samples.extend(self.y.iter().copied());
             }
             // info("time  {:?}, len {}", t, t.len())
         }
 
         let output_assembly_start = TIMINGS.then(Instant::now);
-        let rows = &y.len();
-        let cols = &y[0].len();
-
-        let mut flat_vec: Vec<f64> = Vec::new();
-        for vector in y.iter() {
-            flat_vec.extend(vector)
-        }
-        let y_res: DMatrix<f64> = DMatrix::from_vec(*cols, *rows, flat_vec).transpose();
+        let rows = t.len();
+        let y_res = DMatrix::from_vec(state_dimension, rows, state_samples).transpose();
         let t_res = DVector::from_vec(t);
 
         // info("time  {:?}, len {}", &t_res, t_res.len());
@@ -1363,6 +1437,11 @@ impl BE {
             if let Some(values) = self.newton.equation_parameter_values.clone() {
                 options = options.with_equation_parameter_values(values);
             }
+            let symbolic_telemetry = self.newton.symbolic_ivp_telemetry_for_preparation();
+            options = options.with_telemetry(symbolic_telemetry);
+            options = options.with_symbolic_assembly_backend(
+                self.newton.symbolic_assembly_backend().as_ivp_backend(),
+            );
             let prepared = match prepare_generated_symbolic_ivp_problem(
                 self.newton.eq_system.clone(),
                 self.newton.values.clone(),
@@ -1436,6 +1515,12 @@ impl BE {
     /// only the initial sample plus states from successfully accepted steps.
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
         (Some(self.t_result.clone()), Some(self.y_result.clone()))
+    }
+
+    /// Borrows the accepted trajectory without cloning its potentially large
+    /// time vector or state matrix. `states` is shaped `(samples, variables)`.
+    pub fn trajectory(&self) -> (&DVector<f64>, &DMatrix<f64>) {
+        (&self.t_result, &self.y_result)
     }
 
     /// Returns the typed lifecycle state.
@@ -1547,3 +1632,11 @@ fn make_be_newton(
 #[cfg(test)]
 #[path = "tests/be_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/performance_story_tests.rs"]
+mod performance_story_tests;
+
+#[cfg(test)]
+#[path = "tests/cold_process_story_tests.rs"]
+mod cold_process_story_tests;

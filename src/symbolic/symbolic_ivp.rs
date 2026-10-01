@@ -13,13 +13,6 @@
 //! - and one prepared AOT bridge that can later be materialized through the
 //!   generic codegen lifecycle.
 
-use crate::symbolic::View::atom::Atom;
-use crate::symbolic::View::conversions::{atom_to_expr, expr_to_atom};
-use crate::symbolic::View::evaluate::{
-    FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext,
-};
-use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianError};
-use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, LinkedResidualAotBackend,
 };
@@ -36,6 +29,13 @@ use crate::symbolic::ivp_telemetry::{
     IvpTelemetryRoute, IvpWarmStage,
 };
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::View::atom::Atom;
+use crate::symbolic::View::conversions::{atom_to_expr, expr_to_atom};
+use crate::symbolic::View::evaluate::{
+    FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext,
+};
+use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianError};
+use crate::symbolic::View::state::Symbol;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -1145,6 +1145,7 @@ impl PreparedSymbolicIvpResidualProblem {
         let residual_len = linked.residual_len;
         let parameter_values_handle = self.parameter_values_handle.clone();
         let telemetry = self.telemetry.clone();
+        telemetry.set_execution(IvpTelemetryExecution::Aot);
         let execution_policy = self.execution_policy;
         let linked_runtime = Arc::new(PreparedLinkedResidual::new(
             linked.clone(),
@@ -1334,6 +1335,7 @@ impl PreparedSymbolicIvpProblem {
         let (rows, cols) = linked.shape;
         let parameter_values_handle = self.parameter_values_handle.clone();
         let telemetry = self.telemetry.clone();
+        telemetry.set_execution(IvpTelemetryExecution::Aot);
         let execution_policy = self.execution_policy;
         let linked_runtime = Arc::new(PreparedLinkedResidual::new(
             LinkedResidualAotBackend::new(

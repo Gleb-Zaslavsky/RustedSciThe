@@ -1,12 +1,13 @@
-use super::{BeDetailedStatistics, BeFailureKind, BeTelemetryMode};
+use super::{BeDetailedStatistics, BeFailureKind, BeSymbolicAssemblyBackend, BeTelemetryMode};
+use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetryMode, IvpTelemetrySnapshot};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, PreparedSymbolicIvpProblem, SharedIvpParameterValues,
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
-    SymbolicIvpGeneratedBackendConfig,
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
 };
 use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
@@ -109,13 +110,14 @@ fn finite_difference_jacobian(
     let f0 = fun(t, y);
     validate_residual(&f0, n)?;
     let mut jac = DMatrix::zeros(n, n);
+    let mut y_pert = y.clone();
     let eps_base = f64::EPSILON.sqrt();
     for col in 0..n {
-        let mut y_pert = y.clone();
         let h = eps_base * (1.0 + y[col].abs());
         y_pert[col] += h;
         on_rhs_evaluation();
         let f1 = fun(t, &y_pert);
+        y_pert[col] = y[col];
         validate_residual(&f1, n)?;
         for row in 0..n {
             jac[(row, col)] = (f1[row] - f0[row]) / h;
@@ -137,6 +139,8 @@ pub struct NreSolverOptions {
     pub step_mode: NreStepMode,
     pub t_bound: Option<f64>,
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
+    /// Symbolic expression frontend used when callbacks are prepared.
+    pub symbolic_assembly_backend: BeSymbolicAssemblyBackend,
 }
 
 impl NreSolverOptions {
@@ -162,11 +166,18 @@ impl NreSolverOptions {
             step_mode: NreStepMode::from_legacy_global_timestepping(global_timestepping),
             t_bound,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
+            symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
         }
     }
 
     pub fn with_step_mode(mut self, step_mode: NreStepMode) -> Self {
         self.step_mode = step_mode;
+        self
+    }
+
+    /// Selects the symbolic frontend used to prepare residual/Jacobian callbacks.
+    pub fn with_symbolic_assembly_backend(mut self, backend: BeSymbolicAssemblyBackend) -> Self {
+        self.symbolic_assembly_backend = backend;
         self
     }
 
@@ -260,7 +271,10 @@ pub struct NRE {
     generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     statistics: Arc<Mutex<IvpBackendStatistics>>,
     finite_difference_error: Arc<Mutex<Option<NreError>>>,
+    uses_finite_difference_jacobian: bool,
     telemetry_mode: BeTelemetryMode,
+    symbolic_ivp_telemetry: IvpTelemetry,
+    symbolic_assembly_backend: BeSymbolicAssemblyBackend,
     detailed_statistics: Arc<Mutex<BeDetailedStatistics>>,
 }
 
@@ -314,7 +328,10 @@ impl NRE {
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             finite_difference_error: Arc::new(Mutex::new(None)),
+            uses_finite_difference_jacobian: false,
             telemetry_mode: BeTelemetryMode::Timings,
+            symbolic_ivp_telemetry: IvpTelemetry::disabled(),
+            symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             detailed_statistics: Arc::new(Mutex::new(BeDetailedStatistics::default())),
         }
     }
@@ -335,12 +352,30 @@ impl NRE {
         )
         .with_generated_backend_config(options.generated_backend_config);
         solver.set_step_mode(step_mode);
+        solver.set_symbolic_assembly_backend(options.symbolic_assembly_backend);
         solver
     }
 
     pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
         self.generated_backend_config = config;
         self.jac = None;
+        self.uses_finite_difference_jacobian = false;
+        self.symbolic_ivp_telemetry = IvpTelemetry::disabled();
+    }
+
+    /// Selects the symbolic frontend used for subsequent callback preparation.
+    pub fn set_symbolic_assembly_backend(&mut self, backend: BeSymbolicAssemblyBackend) {
+        if self.symbolic_assembly_backend != backend {
+            self.symbolic_assembly_backend = backend;
+            self.jac = None;
+            self.uses_finite_difference_jacobian = false;
+            self.symbolic_ivp_telemetry = IvpTelemetry::disabled();
+        }
+    }
+
+    /// Returns the selected symbolic frontend.
+    pub fn symbolic_assembly_backend(&self) -> BeSymbolicAssemblyBackend {
+        self.symbolic_assembly_backend
     }
 
     pub fn step_mode(&self) -> NreStepMode {
@@ -541,6 +576,8 @@ impl NRE {
         self.equation_parameter_values = None;
         self.parameter_values_handle = None;
         self.jac = None;
+        self.uses_finite_difference_jacobian = false;
+        self.symbolic_ivp_telemetry = IvpTelemetry::disabled();
         self.result = None;
         self.max_error = f64::INFINITY;
         Ok(())
@@ -594,6 +631,8 @@ impl NRE {
     }
 
     pub(crate) fn install_prepared_backend(&mut self, prepared: PreparedSymbolicIvpProblem) {
+        self.uses_finite_difference_jacobian = false;
+        self.symbolic_ivp_telemetry = prepared.telemetry.clone();
         self.jacobian = Some(prepared.symbolic_jacobian.clone());
         self.parameter_values_handle = prepared.parameter_values_handle();
         self.equation_parameters = prepared.equation_parameters.clone();
@@ -645,6 +684,28 @@ impl NRE {
         self.n = self.eq_system.len();
     }
 
+    pub(crate) fn symbolic_ivp_telemetry_for_preparation(&mut self) -> IvpTelemetry {
+        let telemetry = match self.telemetry_mode {
+            BeTelemetryMode::Off => IvpTelemetry::disabled(),
+            BeTelemetryMode::Counters => IvpTelemetry::counters(),
+            BeTelemetryMode::Timings => IvpTelemetry::detailed(),
+        };
+        self.symbolic_ivp_telemetry = telemetry.clone();
+        telemetry
+    }
+
+    pub fn symbolic_ivp_telemetry_snapshot(&self) -> Option<IvpTelemetrySnapshot> {
+        if self.telemetry_mode == BeTelemetryMode::Off {
+            return None;
+        }
+        let snapshot = self.symbolic_ivp_telemetry.snapshot();
+        (snapshot.mode != IvpTelemetryMode::Off).then_some(snapshot)
+    }
+
+    pub(crate) fn clear_symbolic_ivp_telemetry(&mut self) {
+        self.symbolic_ivp_telemetry = IvpTelemetry::disabled();
+    }
+
     pub fn try_eq_generate(&mut self) -> Result<(), IvpBackendError> {
         info!("generating equations and jacobian");
         let start = self.telemetry_mode.collects_timings().then(Instant::now);
@@ -655,6 +716,16 @@ impl NRE {
         if let Some(values) = self.equation_parameter_values.clone() {
             options = options.with_equation_parameter_values(values);
         }
+        let telemetry = self.symbolic_ivp_telemetry_for_preparation();
+        options = options.with_telemetry(telemetry);
+        options = options.with_symbolic_assembly_backend(match self.symbolic_assembly_backend {
+            BeSymbolicAssemblyBackend::ExprLegacy => {
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::ExprLegacy
+            }
+            BeSymbolicAssemblyBackend::AtomViewNative => {
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView
+            }
+        });
 
         let prepared = prepare_generated_symbolic_ivp_problem(
             self.eq_system.clone(),
@@ -716,20 +787,12 @@ impl NRE {
                 "maximum step must be finite and positive",
             ));
         }
-        *self
-            .finite_difference_error
-            .lock()
-            .expect("finite-difference callback error lock poisoned") = None;
+        self.clear_finite_difference_error();
         let f = (self.fun)(t, y);
         let jac = self.jac.as_mut().ok_or(NreError::InvalidConfiguration(
             "Jacobian callback is not prepared",
         ))?(t, y);
-        if let Some(error) = self
-            .finite_difference_error
-            .lock()
-            .expect("finite-difference callback error lock poisoned")
-            .take()
-        {
+        if let Some(error) = self.take_finite_difference_error() {
             return Err(error);
         }
         let n = y.len();
@@ -758,6 +821,8 @@ impl NRE {
         jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
     ) {
         use std::sync::Arc;
+        self.clear_symbolic_ivp_telemetry();
+        self.uses_finite_difference_jacobian = jac.is_none();
         let fun = Arc::new(fun);
         let wrapped_fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> = match self.telemetry_mode
         {
@@ -922,20 +987,12 @@ impl NRE {
         }
         let t = self.t;
         let y = &self.y;
-        *self
-            .finite_difference_error
-            .lock()
-            .expect("finite-difference callback error lock poisoned") = None;
+        self.clear_finite_difference_error();
         let f = (self.fun)(t, &y);
-        let new_j = self.jac.as_mut().ok_or(NreError::InvalidConfiguration(
+        let mut new_j = self.jac.as_mut().ok_or(NreError::InvalidConfiguration(
             "Jacobian callback is not prepared",
         ))?(t, &y);
-        if let Some(error) = self
-            .finite_difference_error
-            .lock()
-            .expect("finite-difference callback error lock poisoned")
-            .take()
-        {
+        if let Some(error) = self.take_finite_difference_error() {
             return Err(error);
         }
         validate_callbacks(&f, &new_j, y.len())?;
@@ -951,13 +1008,14 @@ impl NRE {
         let new_G = y - y_k_minus_1 - dt * f;
         //   println!("new_f = {:?}", &new_G);
 
-        let I = DMatrix::identity(self.n, self.n);
-        // if new_j is jacobian of jacobian of f(t_k+1, y_k+1),  then jacobian of function G = y_k+1 - y_k - h*f(t_k+1, y_k+1) is
-        let J = I - dt * new_j;
-        //    println!("J = {:?} /n", &J);
+        // Build I - dt*J in the owned callback result to avoid two dense temporaries.
+        new_j *= -dt;
+        for diagonal in 0..self.n {
+            new_j[(diagonal, diagonal)] += 1.0;
+        }
         //equation J*deltay  = -G
         let factorization_start = TIMINGS.then(Instant::now);
-        let lu = J.lu();
+        let lu = new_j.lu();
         if COUNTERS {
             self.update_detailed_statistics(|stats| {
                 stats.record_factorization(factorization_start.map(|start| start.elapsed()));
@@ -1068,6 +1126,26 @@ impl NRE {
     pub fn get_result(&self) -> Option<DVector<f64>> {
         self.result.clone()
     }
+
+    fn clear_finite_difference_error(&self) {
+        if self.uses_finite_difference_jacobian {
+            *self
+                .finite_difference_error
+                .lock()
+                .expect("finite-difference callback error lock poisoned") = None;
+        }
+    }
+
+    fn take_finite_difference_error(&self) -> Option<NreError> {
+        if self.uses_finite_difference_jacobian {
+            self.finite_difference_error
+                .lock()
+                .expect("finite-difference callback error lock poisoned")
+                .take()
+        } else {
+            None
+        }
+    }
 }
 
 fn validate_callbacks(f: &DVector<f64>, jac: &DMatrix<f64>, n: usize) -> Result<(), NreError> {
@@ -1132,6 +1210,26 @@ mod tests {
         DMatrix::from_element(1, 1, -1.0)
     }
 
+    #[test]
+    fn nre_finite_difference_jacobian_reuses_perturbation_and_restores_state() {
+        let state = DVector::from_vec(vec![2.0, 3.0]);
+        let mut rhs_calls = 0;
+        let jacobian = finite_difference_jacobian(
+            &|_, y| DVector::from_vec(vec![y[0] * y[0] + y[1], y[0] * y[1]]),
+            0.0,
+            &state,
+            || rhs_calls += 1,
+        )
+        .unwrap();
+
+        assert_eq!(rhs_calls, 3);
+        assert_eq!(state, DVector::from_vec(vec![2.0, 3.0]));
+        assert!((jacobian[(0, 0)] - 4.0).abs() < 1e-7);
+        assert!((jacobian[(0, 1)] - 1.0).abs() < 1e-7);
+        assert!((jacobian[(1, 0)] - 3.0).abs() < 1e-7);
+        assert!((jacobian[(1, 1)] - 2.0).abs() < 1e-7);
+    }
+
     fn make_nre() -> NRE {
         NRE::new(
             vec![Expr::parse_expression("0")],
@@ -1168,6 +1266,7 @@ mod tests {
     fn nre_finite_difference_callback_errors_are_typed() {
         let mut solver = make_nre();
         solver.set_native_callbacks(Box::new(wrong_shape_rhs), None);
+        assert!(solver.uses_finite_difference_jacobian);
         assert!(matches!(
             solver.try_solve(),
             Err(NreError::InvalidResidualShape {
@@ -1181,6 +1280,26 @@ mod tests {
             solver.try_solve(),
             Err(NreError::NonFiniteCallback { stage: "residual" })
         ));
+    }
+
+    #[test]
+    fn nre_analytic_jacobian_skips_finite_difference_error_channel() {
+        let mut solver = make_nre();
+        solver.set_native_callbacks(Box::new(zero_rhs), Some(Box::new(zero_jac)));
+
+        assert!(!solver.uses_finite_difference_jacobian);
+        solver.try_solve().unwrap();
+    }
+
+    #[test]
+    fn nre_native_callback_replacement_clears_symbolic_telemetry() {
+        let mut solver = make_nre();
+        solver.try_eq_generate().unwrap();
+        assert!(solver.symbolic_ivp_telemetry_snapshot().is_some());
+
+        solver.set_native_callbacks(Box::new(zero_rhs), Some(Box::new(zero_jac)));
+
+        assert!(solver.symbolic_ivp_telemetry_snapshot().is_none());
     }
 
     #[test]
@@ -1213,9 +1332,11 @@ mod tests {
         assert_eq!(uncapped, 1.0);
         assert_eq!(solver.statistics().residual_calls, 2);
         assert_eq!(solver.statistics().jacobian_calls, 2);
-        assert!(solver
-            .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
-            .is_err());
+        assert!(
+            solver
+                .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1239,9 +1360,11 @@ mod tests {
                 .as_slice(),
             &[2.0]
         );
-        assert!(solver
-            .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
-            .is_err());
+        assert!(
+            solver
+                .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
+                .is_err()
+        );
     }
 
     #[test]

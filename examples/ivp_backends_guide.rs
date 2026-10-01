@@ -1,7 +1,11 @@
 //! IVP backend guide for dense implicit solvers.
 //!
 //! This example is the user-facing summary of the current IVP backend story:
-//! - `Lambdify` is still the safest default for small systems.
+//! - BE lets callers choose `ExprLegacy` or `AtomViewNative` for symbolic
+//!   preparation; `ExprLegacy` remains the compatibility default.
+//! - Current frontend benchmarks favor `AtomViewNative` from medium system
+//!   sizes upward, while tiny systems may favor `ExprLegacy`.
+//! - `Lambdify` remains the execution mode unless a generated backend is chosen.
 //! - `C + tcc` is the first compiled backend to try for larger or stiffer
 //!   Backward Euler problems when you want a native Jacobian/residual path
 //!   without paying a large startup tax.
@@ -22,7 +26,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use RustedSciThe::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver};
-use RustedSciThe::numerical::BE::{BE, BeSolverOptions};
+use RustedSciThe::numerical::BE::{BE, BeSolverOptions, BeSymbolicAssemblyBackend};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 
@@ -50,8 +54,10 @@ fn print_guide() {
     println!("IVP backend guide");
     println!("=================");
     println!("Recommended defaults:");
-    println!("  - Small BE/BDF systems: Lambdify");
-    println!("  - Larger stiff BE systems: try C-tcc first");
+    println!("  - BE symbolic frontend: choose ExprLegacy or AtomViewNative");
+    println!("  - Tiny symbolic BE systems: ExprLegacy is a reasonable baseline");
+    println!("  - Medium/larger symbolic BE systems: benchmark AtomViewNative first");
+    println!("  - Larger stiff BE systems: try C-tcc if compilation is acceptable");
     println!("  - Repeated runtime-oriented dense solves: C-gcc");
     println!("  - BDF often stays residual-dominated, so benchmark before");
     println!("    replacing Lambdify by default.");
@@ -114,7 +120,21 @@ fn main() {
         5.0,
         y0.clone(),
     );
-    run_be_case("Lambdify", be_lambdify);
+    run_be_case("ExprLegacy/Lambdify", be_lambdify);
+
+    let be_atom_native = BeSolverOptions::new(
+        equations.clone(),
+        values.clone(),
+        "t".to_string(),
+        1e-9,
+        25,
+        Some(0.02),
+        0.0,
+        5.0,
+        y0.clone(),
+    )
+    .with_symbolic_assembly_backend(BeSymbolicAssemblyBackend::AtomViewNative);
+    run_be_case("AtomView Lambdify", be_atom_native);
 
     if command_available("tcc") {
         run_be_case(

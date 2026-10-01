@@ -115,9 +115,11 @@ fn be_parameter_rebind_reuses_prepared_symbolic_callbacks() {
     rebound
         .set_parameter_values(DVector::from_vec(vec![2.0]))
         .unwrap();
-    assert!(rebound
-        .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
-        .is_err());
+    assert!(
+        rebound
+            .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
+            .is_err()
+    );
     rebound.try_solve().unwrap();
     let rebound_solution = rebound.y.clone();
     assert_eq!(rebound.get_statistics().backend_prepare_calls, 1);
@@ -159,6 +161,64 @@ fn be_parameter_rebind_reuses_prepared_symbolic_callbacks() {
 }
 
 #[test]
+fn be_symbolic_frontend_selection_preserves_trajectory_and_reports_route() {
+    use crate::symbolic::ivp_telemetry::IvpTelemetryRoute;
+
+    let make_solver = |backend| {
+        BE::try_new_with_options(
+            BeSolverOptions::new(
+                vec![Expr::parse_expression("-rate*y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                1e-12,
+                20,
+                Some(0.1),
+                0.0,
+                0.5,
+                DVector::from_vec(vec![1.0]),
+            )
+            .with_symbolic_assembly_backend(backend)
+            .with_telemetry_mode(BeTelemetryMode::Counters),
+        )
+        .unwrap()
+    };
+
+    let mut legacy = make_solver(BeSymbolicAssemblyBackend::ExprLegacy);
+    let mut atom = make_solver(BeSymbolicAssemblyBackend::AtomViewNative);
+    for solver in [&mut legacy, &mut atom] {
+        solver.try_set_equation_parameters(Some(&["rate"])).unwrap();
+        solver
+            .set_parameter_values(DVector::from_vec(vec![2.0]))
+            .unwrap();
+        solver.try_solve().unwrap();
+    }
+
+    assert_eq!(
+        legacy.symbolic_assembly_backend(),
+        BeSymbolicAssemblyBackend::ExprLegacy
+    );
+    assert_eq!(
+        atom.symbolic_assembly_backend(),
+        BeSymbolicAssemblyBackend::AtomViewNative
+    );
+    assert_eq!(
+        legacy.symbolic_ivp_telemetry_snapshot().unwrap().route,
+        IvpTelemetryRoute::ExprLegacy
+    );
+    assert_eq!(
+        atom.symbolic_ivp_telemetry_snapshot().unwrap().route,
+        IvpTelemetryRoute::AtomViewNative
+    );
+    assert_eq!(legacy.get_result().0, atom.get_result().0);
+    let legacy_states = legacy.get_result().1.unwrap();
+    let atom_states = atom.get_result().1.unwrap();
+    assert_eq!(legacy_states.shape(), atom_states.shape());
+    for (legacy_value, atom_value) in legacy_states.iter().zip(atom_states.iter()) {
+        assert!((legacy_value - atom_value).abs() <= 1e-12);
+    }
+}
+
+#[test]
 fn be_parameter_binding_telemetry_respects_selected_mode() {
     let mut solver = one_state_be(0.2, Some(0.1));
     solver.try_set_equation_parameters(Some(&["rate"])).unwrap();
@@ -169,9 +229,11 @@ fn be_parameter_binding_telemetry_respects_selected_mode() {
     solver
         .set_parameter_values(DVector::from_vec(vec![2.0]))
         .unwrap();
-    assert!(solver
-        .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
-        .is_err());
+    assert!(
+        solver
+            .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
+            .is_err()
+    );
     assert!(matches!(
         solver.set_parameter_values(DVector::from_vec(vec![2.0, 3.0])),
         Err(BeError::Backend(IvpBackendError::ParameterCountMismatch {
@@ -211,6 +273,156 @@ fn be_parameter_binding_telemetry_respects_selected_mode() {
     assert_eq!(timings.parameter_bind_successes, 1);
     assert_eq!(timings.parameter_bind_failures, 0);
     assert!(timings.parameter_bind_ms_total >= 0.0);
+}
+
+#[test]
+fn be_symbolic_ivp_telemetry_reports_preparation_and_resets_on_backend_change() {
+    let mut solver = one_state_be(0.2, Some(0.1));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Counters)
+        .unwrap();
+    solver.try_solve().unwrap();
+
+    let snapshot = solver.symbolic_ivp_telemetry_snapshot().unwrap();
+    assert_eq!(
+        snapshot.mode,
+        crate::symbolic::ivp_telemetry::IvpTelemetryMode::Counters
+    );
+    assert_eq!(
+        snapshot.route,
+        crate::symbolic::ivp_telemetry::IvpTelemetryRoute::ExprLegacy
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::Validation)
+            .calls,
+        1
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .calls,
+        1
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .elapsed,
+        std::time::Duration::ZERO
+    );
+    assert!(snapshot.residual_evaluations > 0);
+    assert!(
+        snapshot
+            .warm_stage(crate::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback)
+            .calls
+            > 0
+    );
+    let report = solver.statistics_report();
+    assert!(report.contains("## Symbolic IVP lifecycle telemetry"));
+    assert!(report.contains("| `symbolic_jacobian` | 1 | 0.000000 |"));
+
+    solver.set_generated_backend_config(SymbolicIvpGeneratedBackendConfig::defaults());
+    assert!(solver.symbolic_ivp_telemetry_snapshot().is_none());
+    solver.try_solve().unwrap();
+    let rebuilt = solver.symbolic_ivp_telemetry_snapshot().unwrap();
+    assert_eq!(
+        rebuilt
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .calls,
+        1,
+        "a new backend configuration should start a fresh lifecycle stream"
+    );
+}
+
+#[test]
+fn be_symbolic_ivp_telemetry_retains_partial_preparation_on_failure() {
+    let mut solver = one_state_be(0.2, Some(0.1));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Counters)
+        .unwrap();
+    let output_parent = tempfile::tempdir().unwrap();
+    solver.set_generated_backend_config(
+        SymbolicIvpGeneratedBackendConfig::require_prebuilt()
+            .with_output_parent_dir(Some(output_parent.path().to_path_buf())),
+    );
+
+    assert!(matches!(
+        solver.try_solve(),
+        Err(BeError::GeneratedBackend(_))
+    ));
+    let snapshot = solver
+        .symbolic_ivp_telemetry_snapshot()
+        .expect("failed preparation should retain its partial telemetry");
+    assert_eq!(
+        snapshot.mode,
+        crate::symbolic::ivp_telemetry::IvpTelemetryMode::Counters
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::Validation)
+            .calls,
+        1
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .calls,
+        1
+    );
+    assert!(
+        solver
+            .statistics_report()
+            .contains("## Symbolic IVP lifecycle telemetry")
+    );
+}
+
+#[test]
+fn be_symbolic_ivp_telemetry_is_absent_when_off_and_cleared_for_native_callbacks() {
+    let mut solver = one_state_be(0.2, Some(0.1));
+    solver.try_set_telemetry_mode(BeTelemetryMode::Off).unwrap();
+    solver.try_solve().unwrap();
+    assert!(solver.symbolic_ivp_telemetry_snapshot().is_none());
+    assert!(
+        !solver
+            .statistics_report()
+            .contains("## Symbolic IVP lifecycle telemetry")
+    );
+
+    let mut solver = one_state_be(0.2, Some(0.1));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Counters)
+        .unwrap();
+    solver.try_solve().unwrap();
+    assert!(solver.symbolic_ivp_telemetry_snapshot().is_some());
+    solver.set_native_ode_callbacks(decay_rhs, Some(decay_jac));
+    assert!(solver.symbolic_ivp_telemetry_snapshot().is_none());
+}
+
+#[test]
+fn be_symbolic_ivp_telemetry_timings_mode_uses_detailed_shared_stream() {
+    let mut solver = one_state_be(0.2, Some(0.1));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .unwrap();
+    solver.try_solve().unwrap();
+
+    let snapshot = solver.symbolic_ivp_telemetry_snapshot().unwrap();
+    assert_eq!(
+        snapshot.mode,
+        crate::symbolic::ivp_telemetry::IvpTelemetryMode::Detailed
+    );
+    assert!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .calls
+            > 0
+    );
+    assert!(
+        snapshot
+            .warm_stage(crate::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback)
+            .calls
+            > 0
+    );
 }
 
 #[test]
@@ -256,9 +468,11 @@ fn be_accepted_state_continuation_appends_history_and_reuses_backend() {
     assert_eq!(continued.continuation_statistics().attempts, 1);
     assert_eq!(continued.continuation_statistics().completed, 1);
     assert_eq!(continued.continuation_statistics().failures, 0);
-    assert!(continued
-        .statistics_report()
-        .contains("continuation: attempts=1"));
+    assert!(
+        continued
+            .statistics_report()
+            .contains("continuation: attempts=1")
+    );
 
     let mut fresh = make_parameterized(1.0);
     fresh.try_solve().unwrap();
@@ -341,6 +555,37 @@ fn be_initial_result_uses_time_rows_before_first_solve() {
 }
 
 #[test]
+fn be_streamed_output_assembly_preserves_multistate_sample_rows() {
+    let mut solver = BE::new();
+    solver
+        .try_set_initial(
+            vec![Expr::parse_expression("0"), Expr::parse_expression("0")],
+            vec!["x".to_string(), "y".to_string()],
+            "t".to_string(),
+            1e-12,
+            10,
+            Some(0.25),
+            0.0,
+            0.5,
+            DVector::from_vec(vec![1.0, 2.0]),
+        )
+        .unwrap();
+    solver.set_native_ode_callbacks(
+        |_: f64, _: &DVector<f64>| DVector::from_vec(vec![1.0, -2.0]),
+        Some(|_: f64, _: &DVector<f64>| DMatrix::zeros(2, 2)),
+    );
+
+    solver.try_solve().unwrap();
+
+    let (times, states) = solver.get_result();
+    assert_eq!(times.unwrap().as_slice(), &[0.0, 0.25, 0.5]);
+    assert_eq!(
+        states.unwrap(),
+        DMatrix::from_row_slice(3, 2, &[1.0, 2.0, 1.25, 1.5, 1.5, 1.0])
+    );
+}
+
+#[test]
 fn be_telemetry_can_be_disabled_before_callbacks_are_installed() {
     let mut solver = one_state_be(0.25, Some(0.125));
     solver
@@ -359,9 +604,11 @@ fn be_telemetry_can_be_disabled_before_callbacks_are_installed() {
         solver.continuation_statistics(),
         &BeContinuationStatistics::default()
     );
-    assert!(solver
-        .statistics_report()
-        .contains("attempts=0 completed=0 failures=0"));
+    assert!(
+        solver
+            .statistics_report()
+            .contains("attempts=0 completed=0 failures=0")
+    );
     assert_eq!(
         solver.detailed_statistics(),
         BeDetailedStatistics::default()
@@ -940,9 +1187,11 @@ fn be_stop_conditions_are_validated_and_reset_on_reinitialization() {
     solver
         .try_set_stop_condition(HashMap::from([("y".to_string(), 0.5)]))
         .unwrap();
-    assert!(solver
-        .try_set_stop_condition(HashMap::from([("missing".to_string(), 1.0)]))
-        .is_err());
+    assert!(
+        solver
+            .try_set_stop_condition(HashMap::from([("missing".to_string(), 1.0)]))
+            .is_err()
+    );
     assert_eq!(solver.stop_conditions, vec![(0, 0.5)]);
     solver
         .try_set_initial(
@@ -1454,4 +1703,31 @@ fn test_be_no_stop_condition() {
     let t_res = t_result.unwrap();
     let final_t = t_res[t_res.len() - 1];
     assert!((final_t - t_bound).abs() <= h.unwrap());
+}
+
+#[test]
+fn borrowed_trajectory_matches_legacy_owned_result() {
+    let mut solver = BE::new();
+    solver
+        .try_set_native_initial(
+            vec!["y".into()],
+            "t".into(),
+            1e-12,
+            8,
+            Some(0.1),
+            0.0,
+            0.2,
+            DVector::from_vec(vec![1.0]),
+            |_, y| DVector::from_vec(vec![-y[0]]),
+            Some(|_, _y: &DVector<f64>| DMatrix::from_element(1, 1, -1.0)),
+        )
+        .unwrap();
+    solver.try_solve().unwrap();
+
+    let (borrowed_times, borrowed_states) = solver.trajectory();
+    let (owned_times, owned_states) = solver.get_result();
+    assert_eq!(borrowed_times, owned_times.as_ref().unwrap());
+    assert_eq!(borrowed_states, owned_states.as_ref().unwrap());
+    assert_eq!(borrowed_states.nrows(), borrowed_times.len());
+    assert_eq!(borrowed_states.ncols(), 1);
 }

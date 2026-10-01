@@ -32,18 +32,18 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
     register_generated_c_residual_backend, register_generated_c_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_aot_driver::{
+    generated_aot_artifact_from_prepared_problem, generated_aot_build_request_from_artifact,
     AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildRequest,
-    GeneratedAotBuildResult, generated_aot_artifact_from_prepared_problem,
-    generated_aot_build_request_from_artifact,
+    GeneratedAotBuildResult,
 };
 use crate::symbolic::codegen::codegen_aot_lifecycle::AotArtifactState;
 use crate::symbolic::codegen::codegen_aot_resolution::{AotResolutionStatus, AotResolver};
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, LinkedJacobianLayout, LinkedResidualAotBackend, LinkedSparseAotBackend,
-    try_register_linked_residual_backend,
     register_generated_banded_cdylib_backend, register_generated_dense_cdylib_backend,
     register_generated_residual_cdylib_backend, register_generated_sparse_cdylib_backend,
     resolve_linked_dense_backend, resolve_linked_residual_backend, resolve_linked_sparse_backend,
+    try_register_linked_residual_backend, LinkedDenseAotBackend, LinkedJacobianLayout,
+    LinkedResidualAotBackend, LinkedSparseAotBackend,
 };
 use crate::symbolic::codegen::codegen_provider_api::{
     BackendKind, MatrixBackend, PreparedBandedProblem, PreparedProblem, PreparedSparseProblem,
@@ -63,16 +63,16 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
 };
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_ivp::{
-    IvpBackendError, PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
-    SymbolicIvpAotOptions, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
-    prepare_symbolic_ivp_residual_problem,
+    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem, IvpBackendError,
+    PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem, SymbolicIvpAotOptions,
+    SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_aot::{
-    PreparedSymbolicIvpAtomAotProblem, generated_aot_artifact_from_symbolic_ivp_atom_problem,
+    generated_aot_artifact_from_symbolic_ivp_atom_problem,
     generated_aot_artifact_from_symbolic_ivp_residual_problem,
     prepared_atom_aot_problem_from_residual_problem,
     prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout,
-    try_generated_aot_artifact_from_symbolic_ivp_problem,
+    try_generated_aot_artifact_from_symbolic_ivp_problem, PreparedSymbolicIvpAtomAotProblem,
 };
 use log::{debug, info, warn};
 use std::fmt;
@@ -91,15 +91,38 @@ pub struct IvpBackendStatistics {
     pub backend_prepare_ms_total: f64,
     pub solve_calls: usize,
     pub solve_ms_total: f64,
+    /// BDF integration loop, nested within solve and excluding result assembly.
+    pub integration_loop_ms_total: f64,
+    /// Time spent in BDF step attempts; nested within the integration loop.
+    pub bdf_step_ms_total: f64,
+    /// Time spent copying/appending accepted states and times; nested in the integration loop.
+    pub output_collection_ms_total: f64,
+    /// Child scope inside solve; do not add this to `solve_ms_total`.
+    pub result_assembly_ms_total: f64,
+    /// Time spent constructing Newton factorizations; nested within solve.
+    pub linear_factorization_ms_total: f64,
+    /// Time spent solving Newton linear systems; nested within solve.
+    pub linear_solve_ms_total: f64,
     pub step_calls: usize,
+    /// BDF accepted steps; other backends may leave this at zero.
+    pub accepted_steps_total: usize,
+    /// BDF candidates entering the error/Newton controller.
+    pub candidate_step_attempts_total: usize,
+    /// BDF rejected candidate steps, including internal retries.
+    pub rejected_step_attempts_total: usize,
+    /// BDF linear-solve attempts, including failed solves.
+    pub linear_solve_attempts_total: usize,
     pub nonlinear_solve_calls: usize,
     pub nonlinear_iterations_total: usize,
     pub residual_calls: usize,
     pub residual_ms_total: f64,
     pub jacobian_calls: usize,
     pub jacobian_ms_total: f64,
+    /// BDF RHS calls; includes initialization and finite-difference probes.
     pub bdf_nfev_total: usize,
+    /// BDF Jacobian evaluations, including the initial Jacobian.
     pub bdf_njev_total: usize,
+    /// BDF shifted-Jacobian factorization attempts, including failures.
     pub bdf_nlu_total: usize,
 }
 
@@ -139,12 +162,22 @@ impl IvpBackendStatistics {
 
     pub fn table_report(&self) -> String {
         format!(
-            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} steps={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
+            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_solve_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} linear_solve_attempts={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
             self.backend_prepare_calls,
             self.backend_prepare_ms_total,
             self.solve_calls,
             self.solve_ms_total,
+            self.integration_loop_ms_total,
+            self.bdf_step_ms_total,
+            self.output_collection_ms_total,
+            self.result_assembly_ms_total,
+            self.linear_factorization_ms_total,
+            self.linear_solve_ms_total,
             self.step_calls,
+            self.accepted_steps_total,
+            self.candidate_step_attempts_total,
+            self.rejected_step_attempts_total,
+            self.linear_solve_attempts_total,
             self.nonlinear_solve_calls,
             self.nonlinear_iterations_total,
             self.avg_nonlinear_iterations().unwrap_or(0.0),
@@ -2206,14 +2239,14 @@ fn perform_requested_sparse_build(
     );
     measure_cold_stage(telemetry, IvpColdStage::AotBuild, || {
         execute_generated_build_with_retry(
-        &build,
-        &format!(
-            "ivp-sparse backend={:?} key={}",
-            config.aot_codegen_backend, problem_key
-        ),
-        Some(telemetry),
-        "sparse-expr-legacy",
-        problem_key.as_str(),
+            &build,
+            &format!(
+                "ivp-sparse backend={:?} key={}",
+                config.aot_codegen_backend, problem_key
+            ),
+            Some(telemetry),
+            "sparse-expr-legacy",
+            problem_key.as_str(),
         )
     })?;
     telemetry.log_aot_event(
@@ -2276,13 +2309,15 @@ fn perform_requested_expr_banded_build(
     config: &SymbolicIvpGeneratedBackendConfig,
     resolver_snapshot: Option<AotResolver>,
 ) -> Result<(Option<GeneratedAotBuildResult>, Option<AotResolver>), SymbolicIvpGeneratedError> {
-    let preset = match ResolvedIvpAotPlan::resolve(config, SelectedSymbolicIvpBackendKind::AotMissing)
-        .preset()
-    {
-        Some(preset) => preset,
-        None => return Ok((None, resolver_snapshot)),
-    };
-    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(generic);
+    let preset =
+        match ResolvedIvpAotPlan::resolve(config, SelectedSymbolicIvpBackendKind::AotMissing)
+            .preset()
+        {
+            Some(preset) => preset,
+            None => return Ok((None, resolver_snapshot)),
+        };
+    let manifest =
+        crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(generic);
     let problem_key = manifest.problem_key();
     let (crate_name, module_name) = generated_sparse_names(&problem_key, config);
     let artifact = generated_aot_artifact_from_prepared_problem(
@@ -2299,7 +2334,8 @@ fn perform_requested_expr_banded_build(
     );
     let output_parent_dir =
         output_parent_dir_for_requested_build(config, "banded-expr-legacy", &problem_key)?;
-    let mut request = generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
+    let mut request =
+        generated_aot_build_request_from_artifact(artifact, output_parent_dir, preset);
     if let (GeneratedAotBuildRequest::C(c_request), Some(compiler)) =
         (&mut request, config.aot_c_compiler.as_ref())
     {
@@ -2311,11 +2347,15 @@ fn perform_requested_expr_banded_build(
         .with_compiler(compiler.clone());
         *c_request = c_request.clone().with_compile_config(compile_config);
     }
-    let build = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotMaterialization, || {
-        request
-            .materialize()
-            .map_err(|err| materialization_error("banded-expr-legacy", &problem_key, err))
-    })?;
+    let build = measure_cold_stage(
+        &baseline_problem.telemetry,
+        IvpColdStage::AotMaterialization,
+        || {
+            request
+                .materialize()
+                .map_err(|err| materialization_error("banded-expr-legacy", &problem_key, err))
+        },
+    )?;
     baseline_problem.telemetry.log_aot_event(
         crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Materialized,
         "banded-expr-legacy",
@@ -2365,14 +2405,18 @@ fn perform_requested_expr_banded_build(
     let resolver = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotLink, || {
         register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)
     })?;
-    let publication = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotPublication, || {
-        register_ivp_banded_runtime_backend(
-            "banded-expr-legacy",
-            config.aot_codegen_backend,
-            &resolver,
-            &problem_key,
-        )
-    });
+    let publication = measure_cold_stage(
+        &baseline_problem.telemetry,
+        IvpColdStage::AotPublication,
+        || {
+            register_ivp_banded_runtime_backend(
+                "banded-expr-legacy",
+                config.aot_codegen_backend,
+                &resolver,
+                &problem_key,
+            )
+        },
+    );
     baseline_problem
         .telemetry
         .record_aot_link_result(publication.is_ok());
@@ -3215,9 +3259,8 @@ fn prepare_generated_symbolic_ivp_expr_banded_backend(
         banded_task.runtime_plan(BandedChunkingStrategy::Whole),
     );
     let generic = PreparedProblem::banded(prepared.clone());
-    let manifest = crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(
-        &generic,
-    );
+    let manifest =
+        crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest::from(&generic);
     let problem_key = manifest.problem_key();
     let initial_selection = measure_cold_stage(
         &baseline_problem.telemetry,
@@ -3265,9 +3308,10 @@ fn prepare_generated_symbolic_ivp_expr_banded_backend(
         .iter()
         .enumerate()
         .flat_map(|(row, values)| {
-            values.iter().enumerate().filter_map(move |(col, expr)| {
-                (!expr.is_zero()).then_some((row, col))
-            })
+            values
+                .iter()
+                .enumerate()
+                .filter_map(move |(col, expr)| (!expr.is_zero()).then_some((row, col)))
         })
         .collect::<Vec<_>>();
     let jacobian_structure = SparseJacobianStructure {
@@ -3778,10 +3822,10 @@ mod tests {
     use super::*;
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
-        LinkedDenseAotBackend, LinkedDenseJacobianChunk, register_linked_dense_backend,
-        resolve_linked_residual_backend, resolve_linked_sparse_backend,
-        unregister_linked_dense_backend, unregister_linked_residual_backend,
-        unregister_linked_sparse_backend,
+        register_linked_dense_backend, resolve_linked_residual_backend,
+        resolve_linked_sparse_backend, unregister_linked_dense_backend,
+        unregister_linked_residual_backend, unregister_linked_sparse_backend,
+        LinkedDenseAotBackend, LinkedDenseJacobianChunk,
     };
     use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry, IvpTelemetryRoute};
     use crate::symbolic::symbolic_engine::Expr;
@@ -3866,12 +3910,10 @@ mod tests {
             SelectedSymbolicIvpBackendKind::Lambdify
         );
         assert_eq!(prepared.problem.backend_kind, IvpBackendKind::Lambdify);
-        assert!(
-            prepared
-                .try_aot_runtime()
-                .expect("Lambdify fallback has no stale AOT owner")
-                .is_none()
-        );
+        assert!(prepared
+            .try_aot_runtime()
+            .expect("Lambdify fallback has no stale AOT owner")
+            .is_none());
     }
 
     #[test]
@@ -4761,13 +4803,8 @@ mod tests {
         linked
             .try_jacobian_values_eval(&args, &mut values)
             .expect("ExprLegacy compact-Banded callback should accept its full slot buffer");
-        let banded = crate::somelinalg::banded::storage::Banded::from_vec(
-            2,
-            1,
-            1,
-            values.to_vec(),
-        )
-        .expect("ExprLegacy compact callback output should form a valid Banded matrix");
+        let banded = crate::somelinalg::banded::storage::Banded::from_vec(2, 1, 1, values.to_vec())
+            .expect("ExprLegacy compact callback output should form a valid Banded matrix");
         assert!((banded[(0, 0)] - 1.0).abs() < 1.0e-12);
         assert!(
             (banded[(0, 1)] + 0.5).abs() < 1.0e-12,

@@ -7,17 +7,20 @@
 //! thin legacy wrappers for older call-sites that pass string-keyed parameter
 //! bags.
 
-use crate::Utils::plots::plots;
-use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
-use crate::numerical::BE::{BE, BeError, BeSolverOptions};
-use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::NonStiff_api::nonstiffODE;
 use crate::numerical::Radau::Radau_main::{Radau, RadauOrder, RadauSolverOptions, RadauStatistics};
+use crate::numerical::BDF::BDF_api::{
+    BdfSolveError, BdfSolverOptions, BdfStopConditionError, BdfTelemetryMode,
+    ODEsolver as BdfOdeSolver,
+};
+use crate::numerical::BE::{BeError, BeSolverOptions, BE};
+use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp_generated::{
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
 };
+use crate::Utils::plots::plots_ref;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,15 +54,28 @@ pub struct UniversalIvpStatistics {
     pub backend_label: String,
     pub setup_ms_total: f64,
     pub solve_ms_total: f64,
+    pub integration_loop_ms_total: f64,
+    pub bdf_step_ms_total: f64,
+    pub output_collection_ms_total: f64,
+    pub result_assembly_ms_total: f64,
+    pub linear_factorization_ms_total: f64,
+    pub linear_solve_ms_total: f64,
     pub residual_calls: usize,
     pub residual_ms_total: f64,
     pub jacobian_calls: usize,
     pub jacobian_ms_total: f64,
     pub step_calls: usize,
+    pub accepted_steps_total: usize,
+    pub candidate_step_attempts_total: usize,
+    pub rejected_step_attempts_total: usize,
+    pub linear_solve_attempts_total: usize,
     pub nonlinear_solve_calls: usize,
     pub nonlinear_iterations_total: usize,
+    /// BDF RHS calls, including initialization and finite-difference probes.
     pub bdf_nfev_total: usize,
+    /// BDF Jacobian evaluations, including the initial Jacobian.
     pub bdf_njev_total: usize,
+    /// BDF shifted-Jacobian factorization attempts, including failures.
     pub bdf_nlu_total: usize,
 }
 
@@ -79,12 +95,22 @@ impl UniversalIvpStatistics {
 
     pub fn table_report(&self) -> String {
         format!(
-            "method={} backend={} setup_ms_total={:.3} solve_ms_total={:.3} steps={} res_calls={} res_ms_total={:.3} res_ms_avg={:.6} jac_calls={} jac_ms_total={:.3} jac_ms_avg={:.6} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} bdf_nfev={} bdf_njev={} bdf_nlu={}",
+            "method={} backend={} setup_ms_total={:.3} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_solve_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} linear_solve_attempts={} res_calls={} res_ms_total={:.3} res_ms_avg={:.6} jac_calls={} jac_ms_total={:.3} jac_ms_avg={:.6} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} bdf_nfev={} bdf_njev={} bdf_nlu={}",
             self.method_label,
             self.backend_label,
             self.setup_ms_total,
             self.solve_ms_total,
+            self.integration_loop_ms_total,
+            self.bdf_step_ms_total,
+            self.output_collection_ms_total,
+            self.result_assembly_ms_total,
+            self.linear_factorization_ms_total,
+            self.linear_solve_ms_total,
             self.step_calls,
+            self.accepted_steps_total,
+            self.candidate_step_attempts_total,
+            self.rejected_step_attempts_total,
+            self.linear_solve_attempts_total,
             self.residual_calls,
             self.residual_ms_total,
             self.avg_residual_ms().unwrap_or(0.0),
@@ -110,11 +136,21 @@ impl UniversalIvpStatistics {
             backend_label: backend_label.into(),
             setup_ms_total: stats.backend_prepare_ms_total,
             solve_ms_total: stats.solve_ms_total,
+            integration_loop_ms_total: stats.integration_loop_ms_total,
+            bdf_step_ms_total: stats.bdf_step_ms_total,
+            output_collection_ms_total: stats.output_collection_ms_total,
+            result_assembly_ms_total: stats.result_assembly_ms_total,
+            linear_factorization_ms_total: stats.linear_factorization_ms_total,
+            linear_solve_ms_total: stats.linear_solve_ms_total,
             residual_calls: stats.residual_calls,
             residual_ms_total: stats.residual_ms_total,
             jacobian_calls: stats.jacobian_calls,
             jacobian_ms_total: stats.jacobian_ms_total,
             step_calls: stats.step_calls,
+            accepted_steps_total: stats.accepted_steps_total,
+            candidate_step_attempts_total: stats.candidate_step_attempts_total,
+            rejected_step_attempts_total: stats.rejected_step_attempts_total,
+            linear_solve_attempts_total: stats.linear_solve_attempts_total,
             nonlinear_solve_calls: stats.nonlinear_solve_calls,
             nonlinear_iterations_total: stats.nonlinear_iterations_total,
             bdf_nfev_total: stats.bdf_nfev_total,
@@ -133,11 +169,22 @@ impl UniversalIvpStatistics {
             backend_label: backend_label.into(),
             setup_ms_total: stats.backend_prepare_ms_total,
             solve_ms_total: stats.solve_ms_total,
+            integration_loop_ms_total: 0.0,
+            bdf_step_ms_total: 0.0,
+            output_collection_ms_total: 0.0,
+            // Radau has not yet instrumented these scopes.
+            result_assembly_ms_total: 0.0,
+            linear_factorization_ms_total: 0.0,
+            linear_solve_ms_total: 0.0,
             residual_calls: stats.residual_calls,
             residual_ms_total: stats.residual_ms_total,
             jacobian_calls: stats.jacobian_calls,
             jacobian_ms_total: stats.jacobian_ms_total,
             step_calls: stats.step_calls,
+            accepted_steps_total: 0,
+            candidate_step_attempts_total: 0,
+            rejected_step_attempts_total: 0,
+            linear_solve_attempts_total: stats.linear_solves,
             nonlinear_solve_calls: stats.newton_solve_calls,
             nonlinear_iterations_total: stats.newton_iterations_total,
             bdf_nfev_total: 0,
@@ -150,6 +197,8 @@ impl UniversalIvpStatistics {
 #[derive(Debug)]
 pub enum UniversalOdeError {
     Backend(IvpBackendError),
+    Bdf(BdfSolveError),
+    BdfStopCondition(BdfStopConditionError),
     BackwardEuler(BeError),
     Lsode2(Lsode2Error),
     UnsupportedGeneratedBackendForMethod { method: String },
@@ -159,6 +208,8 @@ impl std::fmt::Display for UniversalOdeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(err) => write!(f, "{err}"),
+            Self::Bdf(err) => write!(f, "{err}"),
+            Self::BdfStopCondition(err) => write!(f, "{err}"),
             Self::BackwardEuler(err) => write!(f, "{err}"),
             Self::Lsode2(err) => write!(f, "{err}"),
             Self::UnsupportedGeneratedBackendForMethod { method } => {
@@ -175,6 +226,8 @@ impl std::error::Error for UniversalOdeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Backend(err) => Some(err),
+            Self::Bdf(err) => Some(err),
+            Self::BdfStopCondition(err) => Some(err),
             Self::BackwardEuler(err) => Some(err),
             Self::Lsode2(err) => Some(err),
             Self::UnsupportedGeneratedBackendForMethod { .. } => None,
@@ -185,6 +238,18 @@ impl std::error::Error for UniversalOdeError {
 impl From<IvpBackendError> for UniversalOdeError {
     fn from(value: IvpBackendError) -> Self {
         Self::Backend(value)
+    }
+}
+
+impl From<BdfStopConditionError> for UniversalOdeError {
+    fn from(value: BdfStopConditionError) -> Self {
+        Self::BdfStopCondition(value)
+    }
+}
+
+impl From<BdfSolveError> for UniversalOdeError {
+    fn from(value: BdfSolveError) -> Self {
+        Self::Bdf(value)
     }
 }
 
@@ -226,6 +291,7 @@ pub struct UniversalODESolver {
     rtol: Option<f64>,
     atol: Option<f64>,
     max_step: Option<f64>,
+    bdf_telemetry_mode: BdfTelemetryMode,
     first_step: Option<f64>,
     vectorized: bool,
     jac_sparsity: Option<DMatrix<f64>>,
@@ -267,6 +333,7 @@ impl UniversalODESolver {
             rtol: None,
             atol: None,
             max_step: None,
+            bdf_telemetry_mode: BdfTelemetryMode::Off,
             first_step: None,
             vectorized: false,
             jac_sparsity: None,
@@ -486,6 +553,12 @@ impl UniversalODESolver {
         self
     }
 
+    /// Selects telemetry for the BDF route. Telemetry remains disabled by default.
+    pub fn with_bdf_telemetry_mode(mut self, mode: BdfTelemetryMode) -> Self {
+        self.bdf_telemetry_mode = mode;
+        self
+    }
+
     pub fn with_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
         self.set_generated_backend_mode(mode);
         self
@@ -615,11 +688,10 @@ impl UniversalODESolver {
                 SolverInstance::Radau(solver)
             }
             SolverType::BDF => {
-                let mut options = BdfSolverOptions::new(
+                let mut options = BdfSolverOptions::for_bdf(
                     self.eq_system.clone(),
                     self.values.clone(),
                     self.arg.clone(),
-                    "BDF".to_string(),
                     self.t0,
                     self.y0.clone(),
                     self.t_bound,
@@ -629,7 +701,8 @@ impl UniversalODESolver {
                     self.jac_sparsity.clone(),
                     self.vectorized,
                     self.first_step,
-                );
+                )
+                .with_telemetry_mode(self.bdf_telemetry_mode);
                 if let Some(config) = self.generated_backend_config.clone() {
                     options = options.with_generated_backend_config(config);
                 }
@@ -642,7 +715,7 @@ impl UniversalODESolver {
                     );
                 }
                 if let Some(stop_condition) = self.stop_condition.clone() {
-                    solver.set_stop_condition(stop_condition);
+                    solver.try_set_stop_condition(stop_condition)?;
                 }
                 SolverInstance::BDF(solver)
             }
@@ -731,10 +804,7 @@ impl UniversalODESolver {
                 self.y_result = y_result;
             }
             SolverInstance::BDF(solver) => {
-                solver.solve();
-                let (t_result, y_result) = solver.get_result();
-                self.t_result = Some(t_result);
-                self.y_result = Some(y_result);
+                solver.try_solve()?;
             }
             SolverInstance::BE(solver) => {
                 solver.try_solve()?;
@@ -763,14 +833,23 @@ impl UniversalODESolver {
     }
 
     pub fn get_result(&self) -> (Option<DVector<f64>>, Option<DMatrix<f64>>) {
-        (self.t_result.clone(), self.y_result.clone())
+        self.get_result_ref()
+            .map_or((None, None), |(t, y)| (Some(t.clone()), Some(y.clone())))
+    }
+
+    /// Borrows the latest trajectory without cloning its time/state buffers.
+    pub fn get_result_ref(&self) -> Option<(&DVector<f64>, &DMatrix<f64>)> {
+        match self.solver_instance.as_ref() {
+            Some(SolverInstance::BDF(solver)) => Some(solver.get_result_ref()),
+            _ => Some((self.t_result.as_ref()?, self.y_result.as_ref()?)),
+        }
     }
 
     pub fn get_status(&self) -> Option<String> {
         match self.solver_instance.as_ref()? {
             SolverInstance::NonStiff(solver) => Some(solver.get_status().clone()),
             SolverInstance::Radau(solver) => Some(solver.get_status().clone()),
-            SolverInstance::BDF(solver) => Some(solver.get_status().clone()),
+            SolverInstance::BDF(solver) => Some(solver.get_status().to_string()),
             SolverInstance::BE(solver) => Some(solver.get_status()),
             SolverInstance::LSODE2(solver) => Some(solver.status().to_string()),
         }
@@ -817,13 +896,8 @@ impl UniversalODESolver {
     }
 
     pub fn plot_result(&self) {
-        if let (Some(t_result), Some(y_result)) = (&self.t_result, &self.y_result) {
-            plots(
-                self.arg.clone(),
-                self.values.clone(),
-                t_result.clone(),
-                y_result.clone(),
-            );
+        if let Some((t_result, y_result)) = self.get_result_ref() {
+            plots_ref(&self.arg, &self.values, t_result, y_result);
         }
     }
 
@@ -1301,6 +1375,7 @@ mod tests {
         let (eq_system, values, arg, y0) = simple_decay_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(decay_rhs, Some(decay_jac));
         solver.solve();
         assert_finished_status(&solver);
@@ -1313,10 +1388,39 @@ mod tests {
     }
 
     #[test]
+    fn universal_bdf_result_access_borrows_solver_storage() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
+                .with_native_ode_callbacks(
+                    decay_rhs,
+                    Some(decay_jac as fn(f64, &DVector<f64>) -> DMatrix<f64>),
+                );
+        solver.solve();
+
+        assert!(solver.t_result.is_none());
+        assert!(solver.y_result.is_none());
+        let report = solver.statistics_report().expect("BDF telemetry report");
+        assert!(report.contains("accepted_steps="));
+        assert!(report.contains("candidate_steps="));
+        assert!(report.contains("linear_solve_attempts="));
+        assert!(report.contains("bdf_step_ms="));
+        assert!(report.contains("output_collection_ms="));
+        let (t, y) = solver.get_result_ref().expect("borrowed BDF trajectory");
+        assert!(!t.is_empty());
+        assert_eq!(y.nrows(), t.len());
+        let (owned_t, owned_y) = solver.get_result();
+        assert_eq!(owned_t.as_ref(), Some(t));
+        assert_eq!(owned_y.as_ref(), Some(y));
+    }
+
+    #[test]
     fn universal_ode_api_bdf_native_callbacks_fd_jacobian() {
         let (eq_system, values, arg, y0) = simple_decay_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 0.1, 1e-2, 1e-6, 1e-8)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(
                     decay_rhs,
                     Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
@@ -1390,6 +1494,7 @@ mod tests {
         let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 1e-5, 1e-10, 1e-12)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(stiff_diagonal_rhs, Some(stiff_diagonal_jac));
         solver.solve();
         assert_finished_status(&solver);
@@ -1411,6 +1516,7 @@ mod tests {
         let (eq_system, values, arg, y0, t_bound) = stiff_diagonal_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 1e-5, 1e-10, 1e-12)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(
                     stiff_diagonal_rhs,
                     Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
@@ -1555,6 +1661,7 @@ mod tests {
         let (eq_system, values, arg, y0, t_bound) = robertson_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 5e-4, 1e-9, 1e-12)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(robertson_rhs, Some(robertson_jac));
         solver.solve();
         assert_finished_status(&solver);
@@ -1569,6 +1676,7 @@ mod tests {
         let (eq_system, values, arg, y0, t_bound) = robertson_problem();
         let mut solver =
             UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, t_bound, 5e-4, 1e-9, 1e-12)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters)
                 .with_native_ode_callbacks(
                     robertson_rhs,
                     Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
@@ -2092,6 +2200,29 @@ mod tests2 {
         let y_res = y_result.unwrap();
         let final_y = y_res[(y_res.nrows() - 1, 0)];
         assert!((final_y - 2.0).abs() <= 1e-2); // Uses BDF's atol
+    }
+
+    #[test]
+    fn universal_bdf_propagates_invalid_stop_condition() {
+        let mut solver = UniversalODESolver::bdf(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+        );
+        solver.set_stop_condition(HashMap::from([("unknown".to_string(), 0.0)]));
+
+        assert!(matches!(
+            solver.try_initialize(),
+            Err(UniversalOdeError::BdfStopCondition(
+                BdfStopConditionError::UnknownVariable(name)
+            )) if name == "unknown"
+        ));
     }
 
     #[test]

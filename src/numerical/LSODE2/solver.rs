@@ -11,30 +11,31 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks,
+    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
+    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
 };
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
+    NativeJacobianStorage,
 };
 use super::native_preflight::{
-    Lsode2NativeStepProbeSummary, run_native_step_preflight,
-    run_native_step_preflight_with_prepared_callbacks,
+    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
+    Lsode2NativeStepProbeSummary,
 };
 use super::native_step_engine::{
     Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
-};
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -305,11 +306,10 @@ impl Lsode2Solver {
         validate_stop_condition_config(&config)?;
         let resolved_plan = config.resolve_plan();
 
-        let mut options = BdfSolverOptions::new(
+        let mut options = BdfSolverOptions::for_bdf(
             config.eq_system.clone(),
             config.values.clone(),
             config.arg.clone(),
-            config.method.as_bdf_method_name(),
             config.t0,
             config.y0.clone(),
             config.t_bound,
@@ -658,7 +658,17 @@ impl Lsode2Solver {
             } else {
                 native.bridge_solve_ms_total
             },
+            integration_loop_ms_total: bridge.integration_loop_ms_total,
+            bdf_step_ms_total: bridge.bdf_step_ms_total,
+            output_collection_ms_total: bridge.output_collection_ms_total,
+            result_assembly_ms_total: bridge.result_assembly_ms_total,
+            linear_factorization_ms_total: bridge.linear_factorization_ms_total,
+            linear_solve_ms_total: bridge.linear_solve_ms_total,
             step_calls: native.bridge_step_calls.max(native.native_step_attempts),
+            accepted_steps_total: bridge.accepted_steps_total,
+            candidate_step_attempts_total: bridge.candidate_step_attempts_total,
+            rejected_step_attempts_total: bridge.rejected_step_attempts_total,
+            linear_solve_attempts_total: bridge.linear_solve_attempts_total,
             nonlinear_solve_calls: native.bridge_nonlinear_solve_calls.max(
                 native.native_nonlinear_converged_count + native.native_nonlinear_continue_count,
             ),

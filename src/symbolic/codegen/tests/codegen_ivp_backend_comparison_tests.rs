@@ -300,7 +300,7 @@ fn run_bdf_variant(
     let start = Instant::now();
     solver.solve();
     let total = start.elapsed();
-    let status = solver.get_status().clone();
+    let status = solver.get_status().to_string();
     let statistics = solver.get_statistics();
     let (_, y) = solver.get_result();
     if y.nrows() == 0 {

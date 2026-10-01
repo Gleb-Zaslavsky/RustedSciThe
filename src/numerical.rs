@@ -86,6 +86,9 @@ pub mod BDF;
 ///          solver.plot_result();
 /// ```
 pub mod BE;
+#[cfg(test)]
+pub(crate) mod ivp_test_support;
+pub mod ivp_workloads;
 /// Backward-Euler Newton implementation, retained at its historical path.
 pub use BE::NR_for_Euler;
 pub mod NR_for_ODE;

@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.18"
+version = "0.4.19"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -16,6 +16,7 @@ include = [
     "examples/**/*",
     "benches/**/*",
     "tests/**/*",
+    "!test_reports/**/*",
     "!/.kilo",
     "!/.kilo/**",
 ]
@@ -66,6 +67,48 @@ name = "nonlinear_systems_benches"
 harness = false
 [[bench]]
 name = "nonlinear_systems_allocation_audit"
+harness = false
+[[bench]]
+name = "nonlinear_preparation_telemetry"
+harness = false
+[[bench]]
+name = "bvp_numeric_assembly"
+harness = false
+[[bench]]
+name = "bvp_frozen_runtime_benches"
+harness = false
+[[bench]]
+name = "ivp_parameter_free_callbacks"
+harness = false
+[[bench]]
+name = "lsode2_workload_callbacks"
+harness = false
+[[bench]]
+name = "lsode2_workload_aot"
+harness = false
+[[bench]]
+name = "lsode2_parameter_continuation"
+harness = false
+[[bench]]
+name = "be_workload_benches"
+harness = false
+[[bench]]
+name = "be_symbolic_frontend_benches"
+harness = false
+[[bench]]
+name = "be_symbolic_execution_benches"
+harness = false
+[[bench]]
+name = "be_history_allocation_audit"
+harness = false
+[[bench]]
+name = "bdf_telemetry_overhead"
+harness = false
+[[bench]]
+name = "bdf_symbolic_frontends"
+harness = false
+[[bench]]
+name = "bdf_aot_frontends"
 harness = false
 
 [profile.bench]
@@ -210,6 +253,36 @@ path = "examples/rus/nonlinear_aot_lifecycle_guide.rs"
 name = "rus_task_document_symbolic_aliases_guide"
 path = "examples/rus/task_document_symbolic_aliases_guide.rs"
 [[example]]
+name = "bvp_backends_guide"
+path = "examples/bvp_backends_guide.rs"
+[[example]]
+name = "bvp_damped_aot_guide"
+path = "examples/bvp_damped_aot_guide.rs"
+[[example]]
+name = "bvp_damped_lambdify_guide"
+path = "examples/bvp_damped_lambdify_guide.rs"
+[[example]]
+name = "bvp_damped_numerical_guide"
+path = "examples/bvp_damped_numerical_guide.rs"
+[[example]]
+name = "bvp_frozen_aot_guide"
+path = "examples/bvp_frozen_aot_guide.rs"
+[[example]]
+name = "bvp_frozen_lambdify_guide"
+path = "examples/bvp_frozen_lambdify_guide.rs"
+[[example]]
+name = "bvp_frozen_numerical_route_guide"
+path = "examples/bvp_frozen_numerical_route_guide.rs"
+[[example]]
+name = "bvp_sci_numerical_guide"
+path = "examples/bvp_sci_numerical_guide.rs"
+[[example]]
+name = "bvp_sci_numerical_parameters_guide"
+path = "examples/bvp_sci_numerical_parameters_guide.rs"
+[[example]]
+name = "bvp_task_shell_guide"
+path = "examples/bvp_task_shell_guide.rs"
+[[example]]
 name = "rus_bvp_backends_guide"
 path = "examples/rus/bvp_backends_guide.rs"
 [[example]]
@@ -278,6 +351,30 @@ path = "examples/rus/lsode2_task_shell_guide.rs"
 [[example]]
 name = "rus_lsode2_three_body_problem"
 path = "examples/rus/lsode2_three_body_problem.rs"
+[[example]]
+name = "lsode2_parameter_continuation_lambdify"
+path = "examples/lsode2_parameter_continuation_lambdify.rs"
+[[example]]
+name = "lsode2_parameter_continuation_aot"
+path = "examples/lsode2_parameter_continuation_aot.rs"
+[[example]]
+name = "be_native_callbacks_guide"
+path = "examples/be_native_callbacks_guide.rs"
+[[example]]
+name = "be_symbolic_continuation_guide"
+path = "examples/be_symbolic_continuation_guide.rs"
+[[example]]
+name = "be_aot_guide"
+path = "examples/be_aot_guide.rs"
+[[example]]
+name = "rus_be_native_callbacks_guide"
+path = "examples/rus/be_native_callbacks_guide.rs"
+[[example]]
+name = "rus_be_symbolic_continuation_guide"
+path = "examples/rus/be_symbolic_continuation_guide.rs"
+[[example]]
+name = "rus_be_aot_guide"
+path = "examples/rus/be_aot_guide.rs"
 [[example]]
 name = "rus_universal_ode_example"
 path = "examples/rus/universal_ode_example.rs"

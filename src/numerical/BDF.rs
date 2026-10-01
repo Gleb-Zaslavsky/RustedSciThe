@@ -9,3 +9,7 @@ mod BDF_utils;
 /// some utilities for ODE solvers (now written only BDF)
 ///
 pub mod common;
+
+#[cfg(test)]
+#[path = "BDF/tests/telemetry.rs"]
+mod telemetry_tests;

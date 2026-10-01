@@ -99,7 +99,7 @@ pub fn validate_first_step(first_step: f64, t0: f64, t_bound: f64) -> Result<f64
 }
 
 pub fn validate_max_step(max_step: f64) -> Result<f64, &'static str> {
-    if max_step <= 0.0 {
+    if max_step.is_nan() || max_step <= 0.0 {
         return Err("`max_step` must be positive.");
     }
     Ok(max_step)

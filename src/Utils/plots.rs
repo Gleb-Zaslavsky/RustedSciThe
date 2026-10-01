@@ -1,8 +1,12 @@
 use nalgebra::{DMatrix, DVector};
 use textplots::{Chart, Plot, Shape};
 pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result: DMatrix<f64>) {
+    plots_ref(&arg, &values, &t_result, &y_result);
+}
+
+/// Plot a trajectory by borrowing its buffers, avoiding copies of large result arrays.
+pub fn plots_ref(arg: &str, values: &[String], t_result: &DVector<f64>, y_result: &DMatrix<f64>) {
     use plotters::prelude::*;
-    // Example data
     let x = t_result;
     let y = y_result;
     let x_min = x.min();
@@ -12,14 +16,14 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
         //   println!("{}" , y_col);
         let y_min = y_col.min();
         let y_max = y_col.max();
-        let varname = values[col].clone();
+        let varname = &values[col];
         let filename = format!("{}.png", varname);
         let root_area = BitMapBackend::new(&filename, (800, 600)).into_drawing_area();
         root_area.fill(&WHITE).unwrap();
 
         // Create a chart builder
         let mut chart = ChartBuilder::on(&root_area)
-            .caption(format!("{}", varname), ("sans-serif", 50))
+            .caption(varname, ("sans-serif", 50))
             .margin(10)
             .x_label_area_size(30)
             .y_label_area_size(30)
@@ -29,8 +33,8 @@ pub fn plots(arg: String, values: Vec<String>, t_result: DVector<f64>, y_result:
         // Configure the mesh
         chart
             .configure_mesh()
-            .x_desc(&arg)
-            .y_desc(&varname)
+            .x_desc(arg)
+            .y_desc(varname.as_str())
             .draw()
             .unwrap();
 

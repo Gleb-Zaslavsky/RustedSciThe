@@ -104,21 +104,113 @@ use log::info;
 use std::f64;
 use std::ops::AddAssign;
 
-use crate::numerical::BDF::BDF_utils::{OrderEnum, group_columns};
-
 use crate::numerical::BDF::common::{
-    NumberOrVec, check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
-    validate_first_step, validate_max_step, validate_tol,
+    check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
+    validate_first_step, validate_max_step, validate_tol, NumberOrVec,
 };
 use crate::somelinalg::banded::storage::Banded;
 use faer::sparse::Triplet;
+use std::cell::Cell;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::rc::Rc;
+use std::time::Instant;
 const MAX_ORDER: usize = 5;
 const NEWTON_MAXITER: usize = 4;
 const MIN_FACTOR: f64 = 0.2;
 const MAX_FACTOR: f64 = 10.0;
 const SPARSE: f64 = 0.01;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BdfStepError {
+    InvalidStepSize,
+    NoProgress,
+    StepSizeUnderflow,
+    NewtonNonConvergence,
+}
+
+impl std::error::Error for BdfStepError {}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BdfOperationCounters {
+    pub rhs_evaluations: usize,
+    pub jacobian_evaluations: usize,
+    pub factorization_attempts: usize,
+    pub linear_solve_attempts: usize,
+    pub candidate_step_attempts: usize,
+    pub accepted_steps: usize,
+    pub rejected_step_attempts: usize,
+    pub nonlinear_solves: usize,
+    pub nonlinear_iterations: usize,
+    pub linear_factorization_ms_total: f64,
+    pub linear_solve_ms_total: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BdfConfigurationError {
+    NonFiniteTime,
+    EmptyInitialState,
+    NonFiniteInitialState,
+    InvalidMaxStep,
+    InvalidFirstStep,
+    InvalidRelativeTolerance,
+    InvalidAbsoluteTolerance,
+    ToleranceDimension,
+    SparsityDimension,
+}
+
+impl Display for BdfConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::NonFiniteTime => "initial and bound times must be finite",
+            Self::EmptyInitialState => "initial state must contain at least one component",
+            Self::NonFiniteInitialState => "initial state must contain only finite values",
+            Self::InvalidMaxStep => "max_step must be positive and not NaN",
+            Self::InvalidFirstStep => {
+                "first_step must be finite, positive, and within the interval"
+            }
+            Self::InvalidRelativeTolerance => "relative tolerances must be finite and positive",
+            Self::InvalidAbsoluteTolerance => "absolute tolerances must be finite and non-negative",
+            Self::ToleranceDimension => "vector tolerance length must match the state dimension",
+            Self::SparsityDimension => "Jacobian sparsity shape must match the state dimension",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for BdfConfigurationError {}
+
+impl Display for BdfStepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::InvalidStepSize => "step size is non-finite or non-positive",
+            Self::NoProgress => "step does not advance representable time",
+            Self::StepSizeUnderflow => "step size fell below representable time resolution",
+            Self::NewtonNonConvergence => "Newton iteration failed at the minimum step size",
+        };
+        f.write_str(message)
+    }
+}
+
+fn proposed_step_time(
+    t: f64,
+    h: f64,
+    direction: f64,
+    t_bound: f64,
+) -> Result<(f64, bool), BdfStepError> {
+    let proposed_t = t + h;
+    let clipped = direction * (proposed_t - t_bound) > 0.0;
+    let t_new = if clipped { t_bound } else { proposed_t };
+
+    if t_new == t {
+        return Err(BdfStepError::NoProgress);
+    }
+    if !t_new.is_finite() {
+        return Err(BdfStepError::StepSizeUnderflow);
+    }
+
+    Ok((t_new, clipped))
+}
 
 /// Factorized Newton matrix used by one BDF correction step.
 ///
@@ -128,6 +220,26 @@ const SPARSE: f64 = 0.01;
 /// without changing the BDF predictor/corrector mathematics.
 pub trait BdfLinearFactorization {
     fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>>;
+}
+
+struct InstrumentedLinearFactorization {
+    inner: Box<dyn BdfLinearFactorization>,
+    solve_counter: Option<Rc<Cell<usize>>>,
+    solve_time_ms: Option<Rc<Cell<f64>>>,
+}
+
+impl BdfLinearFactorization for InstrumentedLinearFactorization {
+    fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>> {
+        if let Some(counter) = &self.solve_counter {
+            counter.set(counter.get().saturating_add(1));
+        }
+        let start = self.solve_time_ms.as_ref().map(|_| Instant::now());
+        let result = self.inner.solve(rhs);
+        if let (Some(total_ms), Some(start)) = (&self.solve_time_ms, start) {
+            total_ms.set(total_ms.get() + start.elapsed().as_secs_f64() * 1_000.0);
+        }
+        result
+    }
 }
 
 /// Backend that factorizes BDF Newton matrices.
@@ -609,7 +721,6 @@ pub struct BDF {
     max_step: f64,
     rtol: NumberOrVec,
     atol: NumberOrVec,
-    vectorized: bool,
     n: usize,
     pub t_old: Option<f64>,
     h_abs: f64,
@@ -630,8 +741,18 @@ pub struct BDF {
     n_equal_steps: usize,
     linear_factorization: Option<Box<dyn BdfLinearFactorization>>,
     nlu: usize,
-    nfev: usize,
+    rhs_evaluation_counter: Option<Rc<Cell<usize>>>,
+    linear_solve_counter: Option<Rc<Cell<usize>>>,
+    linear_solve_time_ms: Option<Rc<Cell<f64>>>,
     njev: usize,
+    candidate_step_attempts: usize,
+    accepted_steps: usize,
+    rejected_step_attempts: usize,
+    nonlinear_solves: usize,
+    nonlinear_iterations: usize,
+    collect_operation_timings: bool,
+    linear_factorization_ms_total: f64,
+    collect_operation_counters: bool,
     pub direction: f64,
 }
 
@@ -649,7 +770,6 @@ impl Debug for BDF {
             .field("max_step", &self.max_step)
             .field("rtol", &self.rtol)
             .field("atol", &self.atol)
-            .field("vectorized", &self.vectorized)
             .field("n", &self.n)
             .field("t_old", &self.t_old)
             .field("h_abs", &self.h_abs)
@@ -670,8 +790,12 @@ impl Debug for BDF {
                 &self.linear_factorization.is_some(),
             )
             .field("nlu", &self.nlu)
-            .field("nfev", &self.nfev)
+            .field("operation_counters", &self.operation_counters())
             .field("njev", &self.njev)
+            .field(
+                "collect_operation_counters",
+                &self.collect_operation_counters,
+            )
             .field("direction", &self.direction)
             .finish()
     }
@@ -690,8 +814,8 @@ impl BDF {
     rtol (float, optional): The relative tolerance for the error norm. Default is 1e-3.
     atol (float, optional): The absolute tolerance for the error norm. Default is 1e-6.
     jac (callable, optional): The Jacobian of the right-hand side function. Default is None.
-    jac_sparsity (ndarray, optional): The sparsity pattern of the Jacobian. Default is None.
-    vectorized (bool, optional): Whether the function is vectorized. Default is False.
+    jac_sparsity (ndarray, optional): Dimension-validated hint; grouped sparse finite differences are not implemented.
+    vectorized (bool, optional): Reserved for API compatibility; RHS calls remain scalar.
     first_step (float, optional): The initial step size. If None, it will be selected automatically. Default is None.
     **extraneous (dict, optional): Additional keyword arguments.
 
@@ -715,8 +839,6 @@ impl BDF {
             max_step: 1e-3,
             rtol: NumberOrVec::Number(1e-3),
             atol: NumberOrVec::Number(1e-4),
-            vectorized: false,
-
             h_abs: 0.0,
             h_abs_old: None,
             error_norm_old: None,
@@ -736,15 +858,100 @@ impl BDF {
             linear_factorization: None,
             nlu: 0,
             direction: 1.0,
-            nfev: 0,
+            rhs_evaluation_counter: None,
+            linear_solve_counter: None,
+            linear_solve_time_ms: None,
             njev: 0,
+            candidate_step_attempts: 0,
+            accepted_steps: 0,
+            rejected_step_attempts: 0,
+            nonlinear_solves: 0,
+            nonlinear_iterations: 0,
+            collect_operation_timings: false,
+            linear_factorization_ms_total: 0.0,
+            collect_operation_counters: false,
             n: 0,
             t_old: None,
         }
     }
 
     pub fn counters(&self) -> (usize, usize, usize) {
-        (self.nfev, self.njev, self.nlu)
+        let detailed = self.operation_counters();
+        (
+            detailed.rhs_evaluations,
+            detailed.jacobian_evaluations,
+            detailed.factorization_attempts,
+        )
+    }
+
+    pub fn operation_counters(&self) -> BdfOperationCounters {
+        BdfOperationCounters {
+            rhs_evaluations: self
+                .rhs_evaluation_counter
+                .as_ref()
+                .map_or(0, |counter| counter.get()),
+            jacobian_evaluations: self.njev,
+            factorization_attempts: self.nlu,
+            linear_solve_attempts: self
+                .linear_solve_counter
+                .as_ref()
+                .map_or(0, |counter| counter.get()),
+            accepted_steps: self.accepted_steps,
+            candidate_step_attempts: self.candidate_step_attempts,
+            rejected_step_attempts: self.rejected_step_attempts,
+            nonlinear_solves: self.nonlinear_solves,
+            nonlinear_iterations: self.nonlinear_iterations,
+            linear_factorization_ms_total: self.linear_factorization_ms_total,
+            linear_solve_ms_total: self
+                .linear_solve_time_ms
+                .as_ref()
+                .map_or(0.0, |total| total.get()),
+        }
+    }
+
+    /// Enables optional counters; configure this before `set_initial` so the
+    /// RHS wrapper also captures initialization and finite-difference calls.
+    /// Changing it after initialization does not rewrap the existing callbacks;
+    /// create and initialize a new engine to change instrumentation modes.
+    pub fn set_operation_counters_enabled(&mut self, enabled: bool) {
+        self.collect_operation_counters = enabled;
+        if !enabled {
+            self.rhs_evaluation_counter = None;
+            self.linear_solve_counter = None;
+            self.njev = 0;
+            self.nlu = 0;
+            self.candidate_step_attempts = 0;
+            self.accepted_steps = 0;
+            self.rejected_step_attempts = 0;
+            self.nonlinear_solves = 0;
+            self.nonlinear_iterations = 0;
+            self.linear_factorization_ms_total = 0.0;
+            self.linear_solve_time_ms = None;
+        } else {
+            self.linear_solve_counter = Some(Rc::new(Cell::new(0)));
+            self.njev = 0;
+            self.nlu = 0;
+            self.candidate_step_attempts = 0;
+            self.accepted_steps = 0;
+            self.rejected_step_attempts = 0;
+            self.nonlinear_solves = 0;
+            self.nonlinear_iterations = 0;
+            self.linear_factorization_ms_total = 0.0;
+            self.linear_solve_time_ms = None;
+        }
+    }
+
+    /// Enables optional factorization and linear-solve timings. Configure this
+    /// before `set_initial`, which constructs the instrumented factorization.
+    /// Changing it afterward does not replace an existing factorization.
+    pub fn set_operation_timings_enabled(&mut self, enabled: bool) {
+        self.collect_operation_timings = enabled;
+        if !enabled {
+            self.linear_factorization_ms_total = 0.0;
+            self.linear_solve_time_ms = None;
+        } else {
+            self.linear_solve_time_ms = Some(Rc::new(Cell::new(0.0)));
+        }
     }
 
     /// Caps adaptive BDF order selection.
@@ -806,7 +1013,9 @@ impl BDF {
         self.jac = Some(jacobian);
         self.J = initial;
         self.linear_factorization = None;
-        self.njev += 1;
+        if self.collect_operation_counters {
+            self.njev += 1;
+        }
     }
 
     /// Initializes the BDF solver with problem-specific parameters.
@@ -819,12 +1028,12 @@ impl BDF {
     /// * `t0` - Initial time
     /// * `y0` - Initial solution vector
     /// * `t_bound` - Final integration time
-    /// * `_max_step` - Maximum allowed step size
+    /// * `max_step` - Maximum allowed step size
     /// * `rtol` - Relative error tolerance (scalar or vector)
     /// * `atol` - Absolute error tolerance (scalar or vector)
     /// * `jac` - Optional Jacobian function ∂f/∂y
-    /// * `jac_sparsity` - Optional sparsity pattern for numerical Jacobian
-    /// * `vectorized` - Whether function supports vectorized evaluation
+    /// * `jac_sparsity` - Optional mask; currently shape-validated but not used to group dense finite differences
+    /// * `vectorized` - Compatibility argument; batched RHS evaluation is not implemented
     /// * `first_step` - Optional initial step size (auto-selected if None)
     ///
     /// # Mathematical Setup
@@ -844,20 +1053,148 @@ impl BDF {
         t0: f64,
         y0: DVector<f64>,
         t_bound: f64,
-        _max_step: f64,
+        max_step: f64,
+        rtol: NumberOrVec,
+        atol: NumberOrVec,
+        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
+        jac_sparsity: Option<DMatrix<f64>>,
+        _vectorized: bool,
+        first_step: Option<f64>,
+    ) {
+        self.try_set_initial(
+            fun,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol,
+            atol,
+            jac,
+            jac_sparsity,
+            _vectorized,
+            first_step,
+        )
+        .expect("valid BDF initial configuration is required");
+    }
+
+    /// Fallible initialization that rejects invalid scalar and dimensioned
+    /// configuration before mutating the solver state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_set_initial(
+        &mut self,
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
         rtol: NumberOrVec,
         atol: NumberOrVec,
         jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
         jac_sparsity: Option<DMatrix<f64>>,
         vectorized: bool,
         first_step: Option<f64>,
+    ) -> Result<(), BdfConfigurationError> {
+        if !t0.is_finite() || !t_bound.is_finite() {
+            return Err(BdfConfigurationError::NonFiniteTime);
+        }
+        if y0.is_empty() {
+            return Err(BdfConfigurationError::EmptyInitialState);
+        }
+        if y0.iter().any(|value| !value.is_finite()) {
+            return Err(BdfConfigurationError::NonFiniteInitialState);
+        }
+        if max_step.is_nan() || max_step <= 0.0 {
+            return Err(BdfConfigurationError::InvalidMaxStep);
+        }
+        if first_step
+            .is_some_and(|step| !step.is_finite() || step <= 0.0 || step > (t_bound - t0).abs())
+        {
+            return Err(BdfConfigurationError::InvalidFirstStep);
+        }
+
+        let n = y0.len();
+        for tolerance in [&rtol, &atol] {
+            if let NumberOrVec::Vec(values) = tolerance {
+                if values.len() != n {
+                    return Err(BdfConfigurationError::ToleranceDimension);
+                }
+            }
+        }
+        let relative_is_valid = |value: f64| value.is_finite() && value > 0.0;
+        match &rtol {
+            NumberOrVec::Number(value) if !relative_is_valid(*value) => {
+                return Err(BdfConfigurationError::InvalidRelativeTolerance);
+            }
+            NumberOrVec::Vec(values) if values.iter().any(|value| !relative_is_valid(*value)) => {
+                return Err(BdfConfigurationError::InvalidRelativeTolerance);
+            }
+            _ => {}
+        }
+        let absolute_is_valid = |value: f64| value.is_finite() && value >= 0.0;
+        match &atol {
+            NumberOrVec::Number(value) if !absolute_is_valid(*value) => {
+                return Err(BdfConfigurationError::InvalidAbsoluteTolerance);
+            }
+            NumberOrVec::Vec(values) if values.iter().any(|value| !absolute_is_valid(*value)) => {
+                return Err(BdfConfigurationError::InvalidAbsoluteTolerance);
+            }
+            _ => {}
+        }
+        if jac_sparsity
+            .as_ref()
+            .is_some_and(|pattern| pattern.shape() != (n, n))
+        {
+            return Err(BdfConfigurationError::SparsityDimension);
+        }
+
+        self.set_initial_unchecked(
+            fun,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol,
+            atol,
+            jac,
+            jac_sparsity,
+            vectorized,
+            first_step,
+        );
+        Ok(())
+    }
+
+    fn set_initial_unchecked(
+        &mut self,
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: NumberOrVec,
+        atol: NumberOrVec,
+        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
+        jac_sparsity: Option<DMatrix<f64>>,
+        _vectorized: bool,
+        first_step: Option<f64>,
     ) {
+        let fun = if self.collect_operation_counters {
+            let counter = Rc::new(Cell::new(0));
+            let callback_counter = Rc::clone(&counter);
+            self.rhs_evaluation_counter = Some(counter);
+            Box::new(move |t, y: &DVector<f64>| {
+                callback_counter.set(callback_counter.get().saturating_add(1));
+                fun(t, y)
+            }) as Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>
+        } else {
+            self.rhs_evaluation_counter = None;
+            fun
+        };
         // prelude imitates super class in python package
-        self.prelude(fun, t0, y0, t_bound, vectorized);
+        self.prelude(fun, t0, y0, t_bound);
         info!("prelude done");
         // initialize parameters, if some parameters are not provided by the user then we will use special functions
-        let max_step = validate_max_step(self.max_step);
-        self.max_step = max_step.unwrap();
+        self.max_step = validate_max_step(max_step)
+            .expect("max_step must be a positive number or positive infinity");
 
         let (rtol, atol) = validate_tol(rtol, atol, self.n).unwrap();
         self.rtol = rtol.clone();
@@ -963,19 +1300,17 @@ impl BDF {
     /// * `t0` - Initial time
     /// * `y0` - Initial solution vector
     /// * `t_bound` - Final integration time
-    /// * `vectorized` - Whether function supports vectorized calls
-    ///
     /// # Sets
     /// - Integration direction: sign(t_bound - t0)
     /// - Problem dimension: n = length(y0)
-    /// - Function evaluation counter: nfev = 0
+    /// - Optional RHS instrumentation is installed before initialization so
+    ///   `nfev` includes initial-step and finite-difference probe evaluations.
     fn prelude(
         &mut self,
         fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
         t0: f64,
         y0: DVector<f64>,
         t_bound: f64,
-        vectorized: bool,
     ) {
         let support_complex: bool = false;
         self.t_old = None;
@@ -986,7 +1321,6 @@ impl BDF {
         self.y = y;
 
         self.t_bound = t_bound;
-        self.vectorized = vectorized;
         self.fun = fun;
 
         self.direction = if t_bound != t0 {
@@ -994,8 +1328,6 @@ impl BDF {
         } else {
             1.0
         };
-
-        self.nfev = 0;
     }
 
     /*
@@ -1035,11 +1367,10 @@ impl BDF {
     fn validate_jac(
         &mut self,
         jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
-        sparsity: Option<DMatrix<f64>>,
+        _sparsity: Option<DMatrix<f64>>,
     ) {
         let t0 = self.t;
         let y0 = self.y.clone();
-        let _sparsity_ = 0.0;
         // if jac is None, then we calculate the jacobian using the num_jac function and return a wrapped function that computes the jacobian
         // at a given point
 
@@ -1047,7 +1378,9 @@ impl BDF {
             Some(jac) => {
                 info!("analytical jacobian used");
                 let J = jac(t0, &y0);
-                self.njev += 1;
+                if self.collect_operation_counters {
+                    self.njev += 1;
+                }
 
                 let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> =
                     if is_sparse(&J, SPARSE) {
@@ -1077,16 +1410,12 @@ impl BDF {
                 self.J = BdfJacobian::from_dense(J.clone());
             }
             _ => {
-                let _new_sparsity: Option<(DMatrix<f64>, Vec<usize>)> =
-                    if let Some(sparsity) = sparsity {
-                        let groups = group_columns(&sparsity, OrderEnum::None);
-                        Some((sparsity.clone(), groups))
-                    } else {
-                        None
-                    };
                 self.J =
                     BdfJacobian::from_dense(finite_difference_jacobian_rhs(&*self.fun, t0, &y0));
                 self.jac = None;
+                if self.collect_operation_counters {
+                    self.njev += 1;
+                }
             }
         };
 
@@ -1132,11 +1461,23 @@ impl BDF {
     /// factor = safety * error_norm^(-1/(k+1))
     /// h_new = h * clamp(factor, MIN_FACTOR, MAX_FACTOR)
     /// ```
-    pub fn _step_impl(&mut self) -> (bool, Option<&'static str>) {
+    pub fn _step_impl(&mut self) -> (bool, Option<BdfStepError>) {
         let t = self.t;
+        if !t.is_finite() || !self.h_abs.is_finite() || self.h_abs <= 0.0 {
+            return (false, Some(BdfStepError::InvalidStepSize));
+        }
+
         let mut D = self.D.clone();
         let max_step = self.max_step;
-        let min_step = 10.0 * f64::MIN;
+        let adjacent_t = if self.direction > 0.0 {
+            t.next_up()
+        } else {
+            t.next_down()
+        };
+        let min_step = 10.0 * (adjacent_t - t).abs();
+        if !min_step.is_finite() || min_step <= 0.0 {
+            return (false, Some(BdfStepError::StepSizeUnderflow));
+        }
 
         let mut h_abs = if self.h_abs > max_step {
             change_D(&mut D, self.order, max_step / self.h_abs);
@@ -1150,6 +1491,9 @@ impl BDF {
         } else {
             self.h_abs
         };
+        if !h_abs.is_finite() || h_abs <= 0.0 {
+            return (false, Some(BdfStepError::InvalidStepSize));
+        }
 
         let order = self.order;
         assert!(
@@ -1166,7 +1510,10 @@ impl BDF {
         let error_const = &self.error_const;
         let mut J = self.J.clone();
         let mut linear_factorization = self.linear_factorization.take();
-        let mut current_jac = self.jac.is_none();
+        // `J` is only current at the state where it was last evaluated. A
+        // failed Newton solve may refresh it once at the current predictor.
+        let mut current_jac = false;
+        let mut newton_failed = false;
         let mut step_accepted = false;
         // scale preallocation
         let mut scale = DVector::zeros(self.n);
@@ -1185,20 +1532,31 @@ impl BDF {
         let mut d = DVector::zeros(self.n);
         while !step_accepted {
             if h_abs < min_step {
-                return (false, "step size too small".into());
+                return (
+                    false,
+                    Some(if newton_failed {
+                        BdfStepError::NewtonNonConvergence
+                    } else {
+                        BdfStepError::StepSizeUnderflow
+                    }),
+                );
             }
 
             let h = h_abs * self.direction;
-            let t_new_ = t + h;
-
-            if self.direction * (t_new - self.t_bound) > 0.0 {
-                t_new = self.t_bound;
-
+            let (candidate_t, clipped) =
+                match proposed_step_time(t, h, self.direction, self.t_bound) {
+                    Ok(candidate) => candidate,
+                    Err(error) => return (false, Some(error)),
+                };
+            t_new = candidate_t;
+            if self.collect_operation_counters {
+                self.candidate_step_attempts += 1;
+            }
+            if clipped {
                 change_D(&mut D, order, (t_new - t).abs() / h_abs);
                 self.n_equal_steps = 0;
                 linear_factorization = None;
             }
-            t_new = t_new_;
 
             let h = t_new - t;
             h_abs = h.abs();
@@ -1218,8 +1576,29 @@ impl BDF {
                         (self.n, self.n),
                         "J shape is not equal to solver dimension"
                     );
+                    let factor_start = self.collect_operation_timings.then(Instant::now);
                     linear_factorization = self.linear_backend.factor_shifted_jacobian(c, &J);
-                    self.nlu += 1;
+                    if let Some(start) = factor_start {
+                        self.linear_factorization_ms_total +=
+                            start.elapsed().as_secs_f64() * 1_000.0;
+                    }
+                    if self.collect_operation_counters {
+                        self.nlu += 1;
+                    }
+                    if let Some(inner) = linear_factorization.take() {
+                        if self.linear_solve_counter.is_some()
+                            || self.linear_solve_time_ms.is_some()
+                        {
+                            linear_factorization =
+                                Some(Box::new(InstrumentedLinearFactorization {
+                                    inner,
+                                    solve_counter: self.linear_solve_counter.clone(),
+                                    solve_time_ms: self.linear_solve_time_ms.clone(),
+                                }));
+                        } else {
+                            linear_factorization = Some(inner);
+                        }
+                    }
                     if linear_factorization.is_none() {
                         break;
                     }
@@ -1235,12 +1614,19 @@ impl BDF {
                     &scale.clone(),
                     self.newton_tol,
                 );
+                if self.collect_operation_counters {
+                    self.nonlinear_solves += 1;
+                    self.nonlinear_iterations = self.nonlinear_iterations.saturating_add(n_iter_);
+                }
                 n_iter = n_iter_;
                 y_new = y_new_;
                 d = d_;
                 converged = conv;
                 if !converged {
                     if current_jac {
+                        if self.collect_operation_counters {
+                            self.rejected_step_attempts += 1;
+                        }
                         break;
                     }
                     J = if let Some(jac_fun) = self.jac.as_mut() {
@@ -1250,13 +1636,16 @@ impl BDF {
                             &*self.fun, t_new, &y_predict,
                         ))
                     };
-                    self.njev += 1;
+                    if self.collect_operation_counters {
+                        self.njev += 1;
+                    }
                     linear_factorization = None;
                     current_jac = true;
                 }
             }
 
             if !converged {
+                newton_failed = true;
                 let factor = 0.5;
                 h_abs *= factor;
                 change_D(&mut D, order, factor);
@@ -1274,6 +1663,9 @@ impl BDF {
             let error_norm_ = norm(&(error.component_div(&scale)));
             error_norm = error_norm_;
             if error_norm > 1.0 {
+                if self.collect_operation_counters {
+                    self.rejected_step_attempts += 1;
+                }
                 let factor =
                     (safety * error_norm.powf(-1.0 / (order as f64 + 1.0))).max(MIN_FACTOR);
                 h_abs *= factor;
@@ -1284,12 +1676,28 @@ impl BDF {
             }
         }
 
+        if self.collect_operation_counters {
+            self.accepted_steps += 1;
+        }
         self.n_equal_steps += 1;
         self.t = t_new;
         self.y = y_new;
         self.h_abs = h_abs;
         self.J = J;
         self.linear_factorization = linear_factorization;
+        if self.jac.is_none() {
+            self.J = BdfJacobian::from_dense(finite_difference_jacobian_rhs(
+                &*self.fun,
+                self.t,
+                &self.y,
+            ));
+            if self.collect_operation_counters {
+                self.njev += 1;
+            }
+            // The cached factorization belongs to the Jacobian from before
+            // this accepted state and cannot be reused after the refresh.
+            self.linear_factorization = None;
+        }
         let D_ = D.clone();
         D.set_row(order + 2, &(d.clone().transpose() - D_.row(order + 1)));
 
@@ -1349,3 +1757,7 @@ impl BDF {
         (true, None)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/step_boundary.rs"]
+mod step_boundary_tests;
