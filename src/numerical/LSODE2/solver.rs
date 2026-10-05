@@ -11,31 +11,30 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
-    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
+    run_native_integration_for_method_with_prepared_callbacks,
 };
 use super::native_jacobian::{
-    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
-    NativeJacobianStorage,
 };
 use super::native_preflight::{
-    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
-    Lsode2NativeStepProbeSummary,
+    Lsode2NativeStepProbeSummary, run_native_step_preflight,
+    run_native_step_preflight_with_prepared_callbacks,
 };
 use super::native_step_engine::{
     Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
-};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -663,7 +662,15 @@ impl Lsode2Solver {
             output_collection_ms_total: bridge.output_collection_ms_total,
             result_assembly_ms_total: bridge.result_assembly_ms_total,
             linear_factorization_ms_total: bridge.linear_factorization_ms_total,
+            linear_matrix_assembly_ms_total: bridge.linear_matrix_assembly_ms_total,
             linear_solve_ms_total: bridge.linear_solve_ms_total,
+            bdf_step_snapshot_ms_total: 0.0,
+            bdf_step_predictor_setup_ms_total: 0.0,
+            bdf_newton_rhs_assembly_ms_total: 0.0,
+            bdf_newton_correction_norm_ms_total: 0.0,
+            bdf_newton_state_update_ms_total: 0.0,
+            bdf_step_error_estimate_ms_total: 0.0,
+            bdf_step_nordsieck_update_ms_total: 0.0,
             step_calls: native.bridge_step_calls.max(native.native_step_attempts),
             accepted_steps_total: bridge.accepted_steps_total,
             candidate_step_attempts_total: bridge.candidate_step_attempts_total,

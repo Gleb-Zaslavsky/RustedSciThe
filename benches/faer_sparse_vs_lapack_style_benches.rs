@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 use RustedSciThe::somelinalg::banded::{
@@ -256,7 +256,7 @@ fn banded_to_triplets(a: &Banded<f64>) -> Vec<Triplet<usize, usize, f64>> {
 fn rhs_vec_to_faer_col(rhs: &[f64]) -> faer::Col<f64> {
     faer::Col::from_fn(rhs.len(), |i| rhs[i])
 }
-
+#[allow(dead_code)]
 fn vec_linf_norm(x: &[f64]) -> f64 {
     x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
 }

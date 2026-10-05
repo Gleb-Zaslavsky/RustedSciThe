@@ -402,6 +402,7 @@ mod tests {
             expected_cdylib: PathBuf::from("generated_zig_mismatch_fixture/zig-out/fixture.dll"),
             cargo_program: "zig".to_string(),
             cargo_args: Vec::new(),
+            codegen_backend: Some(crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::Zig),
         }
     }
 

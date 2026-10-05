@@ -137,11 +137,40 @@ Typical flow is:
 
 `BDF` supports symbolic routes with generated backend config and also pure numerical callbacks. If native Jacobian callback is omitted, finite differences are used.
 
+The standalone `BDF` solver is intentionally dense-only: every Jacobian is
+materialized for dense linear algebra. ExprLegacy/AtomView and Lambdify/AOT
+choose the evaluator lifecycle, not a sparse matrix route. For a sparse or
+banded BDF solve, use LSODE2 and explicitly select its BDF method family plus
+the Sparse or Banded matrix structure.
+
 ### 5.2 Radau API
 
-Core module: [`Radau_main.rs`](/f:/RUST/RustProjects_/RustedSciThe_experimental4/src/numerical/Radau/Radau_main.rs).
+The maintained API is `RadauProblem`, `RadauConfig`, and `RadauSolver` from
+`numerical::Radau`. The old `RadauSolverOptions` and `RadauOrder` API is
+archived and should not be used for new code. The complete guide is
+[`RADAU_USER_GUIDE_EN.md`](Radau/RADAU_USER_GUIDE_EN.md); it covers the direct
+API, the universal facade, frontend/layout selection, continuation, telemetry,
+and AOT.
 
-Radau uses `RadauSolverOptions` with order (`Order3/Order5/Order7`), tolerances, and generated backend config. Native callbacks are available through `set_native_ode_callbacks(...)`, again with finite-difference fallback when Jacobian is absent.
+The compact universal constructor has no order argument:
+
+```rust
+let mut solver = UniversalODESolver::radau(
+    vec![Expr::parse_expression("-y")],
+    vec!["y".to_owned()],
+    "t".to_owned(),
+    0.0,
+    DVector::from_vec(vec![1.0]),
+    1.0,
+    1e-6,
+    50,
+    Some(1e-3),
+);
+solver.solve();
+```
+
+Use the direct API for frontend, Dense/Sparse/Banded layout, continuation,
+telemetry, output, execution policy, or AOT selection.
 
 Radau has rich runtime counters (Newton solves, Jacobian calls, LU usage), which makes it suitable for serious diagnostics, not only for “did it converge”.
 

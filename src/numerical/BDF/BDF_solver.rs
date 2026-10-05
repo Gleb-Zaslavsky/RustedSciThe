@@ -102,11 +102,9 @@ use na::{DMatrix, DVector, Dyn, LU};
 
 use log::info;
 use std::f64;
-use std::ops::AddAssign;
 
 use crate::numerical::BDF::common::{
-    check_arguments, is_sparse, newton_tol, norm, scale_func, select_initial_step,
-    validate_first_step, validate_max_step, validate_tol, NumberOrVec,
+    NumberOrVec, newton_tol, norm, try_select_initial_step, validate_tol,
 };
 use crate::somelinalg::banded::storage::Banded;
 use faer::sparse::Triplet;
@@ -119,7 +117,6 @@ const MAX_ORDER: usize = 5;
 const NEWTON_MAXITER: usize = 4;
 const MIN_FACTOR: f64 = 0.2;
 const MAX_FACTOR: f64 = 10.0;
-const SPARSE: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BdfStepError {
@@ -127,6 +124,15 @@ pub enum BdfStepError {
     NoProgress,
     StepSizeUnderflow,
     NewtonNonConvergence,
+    NewtonIterationLimit,
+    LinearSolveFailure,
+    InvalidJacobianDimension,
+    InvalidJacobianStructure,
+    NonFiniteJacobian,
+    RhsDimension,
+    NonFiniteRhs,
+    JacobianCallback,
+    InternalStateInvariant,
 }
 
 impl std::error::Error for BdfStepError {}
@@ -143,20 +149,58 @@ pub struct BdfOperationCounters {
     pub nonlinear_solves: usize,
     pub nonlinear_iterations: usize,
     pub linear_factorization_ms_total: f64,
+    /// Child scope for constructing the shifted Newton matrix. This is nested
+    /// in `linear_factorization_ms_total` and is reported only for the dense
+    /// nalgebra backend.
+    pub linear_matrix_assembly_ms_total: f64,
     pub linear_solve_ms_total: f64,
+    pub step_snapshot_ms_total: f64,
+    pub step_predictor_setup_ms_total: f64,
+    pub newton_rhs_assembly_ms_total: f64,
+    pub newton_correction_norm_ms_total: f64,
+    pub newton_state_update_ms_total: f64,
+    pub step_error_estimate_ms_total: f64,
+    pub step_nordsieck_update_ms_total: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BdfTimingScopes {
+    step_snapshot_ms_total: f64,
+    step_predictor_setup_ms_total: f64,
+    newton_rhs_assembly_ms_total: f64,
+    newton_correction_norm_ms_total: f64,
+    newton_state_update_ms_total: f64,
+    step_error_estimate_ms_total: f64,
+    step_nordsieck_update_ms_total: f64,
+    linear_matrix_assembly_ms_total: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BdfConfigurationError {
     NonFiniteTime,
     EmptyInitialState,
+    InitialStateDimension,
     NonFiniteInitialState,
     InvalidMaxStep,
+    InvalidMaxBdfOrder,
     InvalidFirstStep,
     InvalidRelativeTolerance,
     InvalidAbsoluteTolerance,
     ToleranceDimension,
+    InitialRhsDimension,
+    NonFiniteInitialRhs,
+    InitialStepRhsDimension,
+    NonFiniteInitialStepRhs,
+    InitialJacobianRhsDimension,
+    NonFiniteInitialJacobianRhs,
     SparsityDimension,
+    JacobianDimension,
+    InvalidJacobianStructure,
+    NonFiniteJacobian,
+    MissingNativeRhs,
+    UnsupportedJacobianSparsity,
+    UnsupportedVectorizedRhs,
+    JacobianCallback,
 }
 
 impl Display for BdfConfigurationError {
@@ -164,15 +208,42 @@ impl Display for BdfConfigurationError {
         let message = match self {
             Self::NonFiniteTime => "initial and bound times must be finite",
             Self::EmptyInitialState => "initial state must contain at least one component",
+            Self::InitialStateDimension => "initial state dimension must match the prepared model",
             Self::NonFiniteInitialState => "initial state must contain only finite values",
             Self::InvalidMaxStep => "max_step must be positive and not NaN",
+            Self::InvalidMaxBdfOrder => "max BDF order must be between 1 and 5",
             Self::InvalidFirstStep => {
                 "first_step must be finite, positive, and within the interval"
             }
             Self::InvalidRelativeTolerance => "relative tolerances must be finite and positive",
             Self::InvalidAbsoluteTolerance => "absolute tolerances must be finite and non-negative",
             Self::ToleranceDimension => "vector tolerance length must match the state dimension",
+            Self::InitialRhsDimension => "initial RHS shape must match the state dimension",
+            Self::NonFiniteInitialRhs => "initial RHS entries must be finite",
+            Self::InitialStepRhsDimension => {
+                "RHS shape during automatic initial-step selection must match the state dimension"
+            }
+            Self::NonFiniteInitialStepRhs => {
+                "RHS values during automatic initial-step selection must be finite"
+            }
+            Self::InitialJacobianRhsDimension => {
+                "RHS shape during initial finite-difference Jacobian preparation must match the state dimension"
+            }
+            Self::NonFiniteInitialJacobianRhs => {
+                "RHS values during initial finite-difference Jacobian preparation must be finite"
+            }
             Self::SparsityDimension => "Jacobian sparsity shape must match the state dimension",
+            Self::JacobianDimension => "Jacobian shape must match the state dimension",
+            Self::InvalidJacobianStructure => "Jacobian structure contains invalid indices",
+            Self::NonFiniteJacobian => "Jacobian entries must be finite",
+            Self::MissingNativeRhs => "native numeric BDF requires an RHS callback",
+            Self::UnsupportedJacobianSparsity => {
+                "jac_sparsity is not supported until grouped finite differences are implemented"
+            }
+            Self::UnsupportedVectorizedRhs => {
+                "vectorized RHS callbacks are not supported by the BDF solver"
+            }
+            Self::JacobianCallback => "dense Jacobian callback failed during initialization",
         };
         f.write_str(message)
     }
@@ -187,6 +258,17 @@ impl Display for BdfStepError {
             Self::NoProgress => "step does not advance representable time",
             Self::StepSizeUnderflow => "step size fell below representable time resolution",
             Self::NewtonNonConvergence => "Newton iteration failed at the minimum step size",
+            Self::NewtonIterationLimit => "Newton iteration limit was reached",
+            Self::LinearSolveFailure => "Newton linear solve failed",
+            Self::InvalidJacobianDimension => {
+                "Jacobian shape changed or does not match the state dimension"
+            }
+            Self::InvalidJacobianStructure => "Jacobian structure contains invalid indices",
+            Self::NonFiniteJacobian => "Jacobian contains non-finite entries",
+            Self::RhsDimension => "RHS shape does not match the state dimension",
+            Self::NonFiniteRhs => "RHS contains non-finite entries",
+            Self::JacobianCallback => "dense Jacobian callback failed",
+            Self::InternalStateInvariant => "BDF runtime state invariant was violated",
         };
         f.write_str(message)
     }
@@ -246,6 +328,12 @@ impl BdfLinearFactorization for InstrumentedLinearFactorization {
 pub trait BdfLinearBackend {
     fn factor(&mut self, matrix: &DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>>;
 
+    /// Consumes an already owned Newton matrix when the backend can factor it
+    /// in place. The default preserves compatibility with borrowed backends.
+    fn factor_owned(&mut self, matrix: DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>> {
+        self.factor(&matrix)
+    }
+
     /// Factorizes the Newton matrix `[I - cJ]` from the Jacobian representation.
     ///
     /// The default implementation preserves the legacy dense path.  Native
@@ -257,7 +345,20 @@ pub trait BdfLinearBackend {
         jacobian: &BdfJacobian,
     ) -> Option<Box<dyn BdfLinearFactorization>> {
         let matrix = jacobian.to_shifted_dense(c)?;
-        self.factor(&matrix)
+        self.factor_owned(matrix)
+    }
+
+    /// Factors a shifted Jacobian while optionally reporting the matrix-build
+    /// child scope. Custom backends retain their existing implementation; the
+    /// dense nalgebra backend overrides this to separate matrix construction
+    /// from LU factorization without changing the public linear-backend API.
+    fn factor_shifted_jacobian_with_timing(
+        &mut self,
+        c: f64,
+        jacobian: &BdfJacobian,
+        _matrix_assembly_ms: Option<&mut f64>,
+    ) -> Option<Box<dyn BdfLinearFactorization>> {
+        self.factor_shifted_jacobian(c, jacobian)
     }
 }
 
@@ -276,6 +377,81 @@ pub enum BdfJacobian {
     Banded(Banded<f64>),
 }
 
+/// Defines how BDF obtains and refreshes the Jacobian during integration.
+///
+/// The legacy `Option<jac>` initialization maps `None` to finite differences
+/// and `Some(jac)` to a state-dependent callback. Use this enum when the
+/// Jacobian is known to be constant so Newton retries do not reevaluate it.
+pub enum BdfJacobianSource {
+    FiniteDifference,
+    StateDependent(Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>),
+    /// Fills caller-owned dense storage. The solver reuses this buffer across
+    /// refreshes instead of materializing a fresh Jacobian matrix each time.
+    StateDependentDenseInto(
+        Box<
+            dyn FnMut(
+                f64,
+                &DVector<f64>,
+                &mut DMatrix<f64>,
+            ) -> Result<(), BdfJacobianCallbackError>,
+        >,
+    ),
+    Constant(BdfJacobian),
+}
+
+/// Typed failure returned by an in-place dense Jacobian callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BdfJacobianCallbackError {
+    EvaluationFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JacobianRefreshPolicy {
+    FiniteDifference,
+    StateDependent,
+    StateDependentDenseInto,
+    Constant,
+}
+
+enum PreparedBdfJacobianSource {
+    FiniteDifference {
+        initial: BdfJacobian,
+        factor: DVector<f64>,
+    },
+    StateDependent {
+        callback: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
+        initial: BdfJacobian,
+    },
+    StateDependentDenseInto {
+        callback: Box<
+            dyn FnMut(
+                f64,
+                &DVector<f64>,
+                &mut DMatrix<f64>,
+            ) -> Result<(), BdfJacobianCallbackError>,
+        >,
+        initial: BdfJacobian,
+        workspace: DMatrix<f64>,
+    },
+    Constant(BdfJacobian),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BdfRhsOutputError {
+    Dimension,
+    NonFinite,
+}
+
+fn validate_rhs_output(rhs: &DVector<f64>, dimension: usize) -> Result<(), BdfRhsOutputError> {
+    if rhs.len() != dimension {
+        return Err(BdfRhsOutputError::Dimension);
+    }
+    if rhs.iter().any(|value| !value.is_finite()) {
+        return Err(BdfRhsOutputError::NonFinite);
+    }
+    Ok(())
+}
+
 impl BdfJacobian {
     pub fn from_dense(matrix: DMatrix<f64>) -> Self {
         Self::Dense(matrix)
@@ -290,8 +466,43 @@ impl BdfJacobian {
     }
 
     pub fn shape(&self) -> (usize, usize) {
-        let n = self.n();
-        (n, n)
+        match self {
+            Self::Dense(matrix) => matrix.shape(),
+            Self::SparseTriplets { n, .. } => (*n, *n),
+            Self::Banded(matrix) => (matrix.n(), matrix.n()),
+        }
+    }
+
+    fn has_valid_structure(&self, expected_dimension: usize) -> bool {
+        if self.shape() != (expected_dimension, expected_dimension) {
+            return false;
+        }
+        match self {
+            Self::SparseTriplets { n, triplets } => {
+                *n == expected_dimension
+                    && triplets
+                        .iter()
+                        .all(|triplet| triplet.row < *n && triplet.col < *n)
+            }
+            Self::Dense(_) | Self::Banded(_) => true,
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        match self {
+            Self::Dense(matrix) => matrix.iter().all(|value| value.is_finite()),
+            Self::SparseTriplets { triplets, .. } => {
+                triplets.iter().all(|triplet| triplet.val.is_finite())
+            }
+            Self::Banded(matrix) => {
+                let n = matrix.n();
+                (0..n).all(|j| {
+                    let i0 = j.saturating_sub(matrix.ku());
+                    let i1 = (j + matrix.kl() + 1).min(n);
+                    (i0..i1).all(|i| matrix[(i, j)].is_finite())
+                })
+            }
+        }
     }
 
     pub fn to_shifted_dense(&self, c: f64) -> Option<DMatrix<f64>> {
@@ -470,9 +681,27 @@ struct DenseNalgebraLinearBackend;
 
 impl BdfLinearBackend for DenseNalgebraLinearBackend {
     fn factor(&mut self, matrix: &DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>> {
+        self.factor_owned(matrix.clone())
+    }
+
+    fn factor_owned(&mut self, matrix: DMatrix<f64>) -> Option<Box<dyn BdfLinearFactorization>> {
         Some(Box::new(DenseNalgebraFactorization {
-            lu: LU::new(matrix.clone()),
+            lu: LU::new(matrix),
         }))
+    }
+
+    fn factor_shifted_jacobian_with_timing(
+        &mut self,
+        c: f64,
+        jacobian: &BdfJacobian,
+        matrix_assembly_ms: Option<&mut f64>,
+    ) -> Option<Box<dyn BdfLinearFactorization>> {
+        let matrix_started = matrix_assembly_ms.as_ref().map(|_| Instant::now());
+        let matrix = jacobian.to_shifted_dense(c)?;
+        if let (Some(output), Some(started)) = (matrix_assembly_ms, matrix_started) {
+            *output += started.elapsed().as_secs_f64() * 1_000.0;
+        }
+        self.factor_owned(matrix)
     }
 }
 /// Computes cumulative product along columns of a matrix.
@@ -566,6 +795,49 @@ fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
     D.rows_mut(0, order + 1).copy_from(&temp);
 }
 
+fn select_order_and_step_factor(
+    order: usize,
+    max_order_cap: usize,
+    differences: &DMatrix<f64>,
+    error_const: &DVector<f64>,
+    current_error_norm: f64,
+    scale: &DVector<f64>,
+    safety: f64,
+) -> (usize, f64) {
+    let error_m_norm = if order > 1 {
+        let error_m = error_const[order - 1] * differences.row(order);
+        norm(&(error_m.transpose().component_div(scale)))
+    } else {
+        f64::INFINITY
+    };
+
+    let error_p_norm = if order < max_order_cap {
+        let error_p = error_const[order + 1] * differences.row(order + 2);
+        norm(&(error_p.transpose().component_div(scale)))
+    } else {
+        f64::INFINITY
+    };
+
+    let factors = [
+        error_m_norm.powf(-1.0 / order as f64),
+        current_error_norm.powf(-1.0 / (order as f64 + 1.0)),
+        error_p_norm.powf(-1.0 / (order as f64 + 2.0)),
+    ];
+    let argmax_index = (1..factors.len()).fold(0, |best, index| {
+        if factors[index] > factors[best] {
+            index
+        } else {
+            best
+        }
+    });
+    let delta_order = argmax_index as i32 - 1;
+    let new_order = ((order as i32 + delta_order)
+        .max(1)
+        .min(max_order_cap as i32)) as usize;
+    let step_factor = (safety * factors.into_iter().fold(0.0_f64, f64::max)).min(MAX_FACTOR);
+    (new_order, step_factor)
+}
+
 /// Solves the nonlinear BDF system using Newton-Raphson iteration.
 ///
 /// At each BDF step, we must solve the nonlinear system:
@@ -601,6 +873,55 @@ fn change_D(D: &mut DMatrix<f64>, order: usize, factor: f64) {
 /// * `iterations` - Number of Newton iterations performed
 /// * `y` - Final solution at t_new
 /// * `d` - Correction vector (y_final - y_predict)
+struct NewtonSystemResult {
+    converged: bool,
+    iterations: usize,
+    retry_cause: Option<BdfStepError>,
+}
+
+struct NewtonWorkspace {
+    state: DVector<f64>,
+    correction: DVector<f64>,
+    scaled_correction: DVector<f64>,
+    rhs: DVector<f64>,
+}
+
+impl NewtonWorkspace {
+    fn new(dimension: usize) -> Self {
+        Self {
+            state: DVector::zeros(dimension),
+            correction: DVector::zeros(dimension),
+            scaled_correction: DVector::zeros(dimension),
+            rhs: DVector::zeros(dimension),
+        }
+    }
+
+    fn reset(&mut self, predictor: &DVector<f64>) {
+        self.state.copy_from(predictor);
+        self.correction.fill(0.0);
+    }
+}
+
+fn fill_tolerance_scale(
+    output: &mut DVector<f64>,
+    rtol: &NumberOrVec,
+    atol: &NumberOrVec,
+    state: &DVector<f64>,
+) {
+    debug_assert_eq!(output.len(), state.len());
+    for index in 0..state.len() {
+        let relative = match rtol {
+            NumberOrVec::Number(value) => *value,
+            NumberOrVec::Vec(values) => values[index],
+        };
+        let absolute = match atol {
+            NumberOrVec::Number(value) => *value,
+            NumberOrVec::Vec(values) => values[index],
+        };
+        output[index] = absolute + relative * state[index].abs();
+    }
+}
+
 fn solve_bdf_system<F>(
     fun: F,
     t_new: f64,
@@ -610,27 +931,54 @@ fn solve_bdf_system<F>(
     linear_factorization: &dyn BdfLinearFactorization,
     scale: &DVector<f64>, // scale
     tol: f64,
-) -> (bool, usize, DVector<f64>, DVector<f64>)
+    collect_timings: bool,
+    timing_scopes: &mut BdfTimingScopes,
+    workspace: &mut NewtonWorkspace,
+) -> Result<NewtonSystemResult, BdfStepError>
 where
     F: Fn(f64, &DVector<f64>) -> DVector<f64>,
 {
-    let mut d = DVector::zeros(y_predict.len()); //??????????
-    let mut y = y_predict.clone();
+    workspace.reset(y_predict);
     let mut dy_norm_old: Option<f64> = None;
     let mut converged = false;
-    let mut k_: usize = 0;
+    let mut iterations = 0;
+    let mut retry_cause = None;
+    let mut completed_iteration_budget = true;
     for k in 0..NEWTON_MAXITER {
-        let f = fun(t_new, &y);
+        iterations = k + 1;
+        let f = fun(t_new, &workspace.state);
+        if f.len() != y_predict.len() {
+            return Err(BdfStepError::RhsDimension);
+        }
         // checks if all elements in the vector f are finite. If any element is not finite, the loop is broken.
-        if !f.iter().all(|&x| x.is_finite()) {
+        if f.iter().any(|value| !value.is_finite()) {
+            retry_cause = Some(BdfStepError::NonFiniteRhs);
+            completed_iteration_budget = false;
             break;
         }
         // The dy vector represents the change in the solution vector y at each iteration of the Newton-Raphson method
-        let Some(dy) = linear_factorization.solve(&(c * &f - psi - &d)) else {
+        let rhs_assembly_start = collect_timings.then(Instant::now);
+        workspace.rhs.copy_from(&f);
+        workspace.rhs *= c;
+        workspace.rhs -= psi;
+        workspace.rhs -= &workspace.correction;
+        if let Some(start) = rhs_assembly_start {
+            timing_scopes.newton_rhs_assembly_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+        }
+        let Some(dy) = linear_factorization.solve(&workspace.rhs) else {
+            retry_cause = Some(BdfStepError::LinearSolveFailure);
+            completed_iteration_budget = false;
             break;
         };
         // The dy_norm value is then used to determine the convergence of the Newton-Raphson method and to adjust the step size in the BDF method
-        let dy_norm = norm(&(dy.component_div(scale)));
+        let correction_norm_start = collect_timings.then(Instant::now);
+        workspace.scaled_correction.copy_from(&dy);
+        workspace.scaled_correction.component_div_assign(scale);
+        let dy_norm = norm(&workspace.scaled_correction);
+        if let Some(start) = correction_norm_start {
+            timing_scopes.newton_correction_norm_ms_total +=
+                start.elapsed().as_secs_f64() * 1_000.0;
+        }
         // Calculate the rate of convergence for the Newton-Raphson method
         let rate: Option<f64> = if let Some(dy_norm_old) = dy_norm_old {
             Some(dy_norm / dy_norm_old)
@@ -642,13 +990,17 @@ where
             if rate >= 1.0
                 || (rate.powi((NEWTON_MAXITER - k) as i32) / (1.0 - rate)) * dy_norm > tol
             {
+                completed_iteration_budget = false;
                 break;
             }
         }
 
-        y += &dy;
-        d += &dy;
-        k_ = k;
+        let state_update_start = collect_timings.then(Instant::now);
+        workspace.state += &dy;
+        workspace.correction += &dy;
+        if let Some(start) = state_update_start {
+            timing_scopes.newton_state_update_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+        }
         if dy_norm == 0.0 {
             converged = true;
             break;
@@ -661,31 +1013,139 @@ where
         }
         dy_norm_old = Some(dy_norm);
     }
-    (converged, k_ + 1, y, d)
+    if !converged && retry_cause.is_none() && completed_iteration_budget {
+        retry_cause = Some(BdfStepError::NewtonIterationLimit);
+    }
+    Ok(NewtonSystemResult {
+        converged,
+        iterations,
+        retry_cause,
+    })
+}
+
+struct FiniteDifferenceJacobian {
+    matrix: DMatrix<f64>,
+    factor: DVector<f64>,
+    rhs_evaluations: usize,
 }
 
 fn finite_difference_jacobian_rhs(
     fun: &dyn Fn(f64, &DVector<f64>) -> DVector<f64>,
     t: f64,
     y: &DVector<f64>,
-) -> DMatrix<f64> {
+    f0: &DVector<f64>,
+    atol: &NumberOrVec,
+    factor: Option<&DVector<f64>>,
+) -> Result<FiniteDifferenceJacobian, BdfRhsOutputError> {
     let n = y.len();
     if n == 0 {
-        return DMatrix::zeros(0, 0);
+        return Ok(FiniteDifferenceJacobian {
+            matrix: DMatrix::zeros(0, 0),
+            factor: DVector::zeros(0),
+            rhs_evaluations: 0,
+        });
     }
-    let f0 = fun(t, y);
-    let mut jac = DMatrix::zeros(n, n);
-    let eps_base = f64::EPSILON.sqrt();
+    validate_rhs_output(f0, n)?;
+
+    const FACTOR_INCREASE: f64 = 10.0;
+    const FACTOR_DECREASE: f64 = 0.1;
+    let mut factor = factor
+        .cloned()
+        .unwrap_or_else(|| DVector::from_element(n, f64::EPSILON.sqrt()));
+    let mut y_scale = DVector::zeros(n);
+    let mut h = DVector::zeros(n);
     for col in 0..n {
-        let mut y_pert = y.clone();
-        let h = eps_base * (1.0 + y[col].abs());
-        y_pert[col] += h;
-        let f1 = fun(t, &y_pert);
-        for row in 0..n {
-            jac[(row, col)] = (f1[row] - f0[row]) / h;
+        let threshold = match atol {
+            NumberOrVec::Number(value) => *value,
+            NumberOrVec::Vec(values) => values[col],
+        };
+        let scale = y[col].abs().max(threshold);
+        // A zero state with zero atol still needs a representable perturbation.
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        let sign = if f0[col] >= 0.0 { 1.0 } else { -1.0 };
+        y_scale[col] = sign * scale;
+        h[col] = (y[col] + factor[col] * y_scale[col]) - y[col];
+        while h[col] == 0.0 {
+            factor[col] *= FACTOR_INCREASE;
+            h[col] = (y[col] + factor[col] * y_scale[col]) - y[col];
         }
     }
-    jac
+
+    let mut jac = DMatrix::zeros(n, n);
+    let mut max_diff = DVector::zeros(n);
+    let mut diff_scale = DVector::zeros(n);
+    let mut rhs_evaluations = 0;
+    let mut y_pert = y.clone();
+    for col in 0..n {
+        y_pert[col] = y[col] + h[col];
+        let f1 = fun(t, &y_pert);
+        y_pert[col] = y[col];
+        rhs_evaluations += 1;
+        validate_rhs_output(&f1, n)?;
+        let mut max_row = 0;
+        for row in 0..n {
+            let difference = f1[row] - f0[row];
+            jac[(row, col)] = difference;
+            if difference.abs() > (f1[max_row] - f0[max_row]).abs() {
+                max_row = row;
+            }
+        }
+        max_diff[col] = jac
+            .column(col)
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        diff_scale[col] = f0[max_row].abs().max(f1[max_row].abs());
+
+        // If subtraction is dominated by round-off, retry this column with a
+        // larger perturbation and keep it only when the relative signal grows.
+        if max_diff[col] < f64::EPSILON.powf(0.875) * diff_scale[col] {
+            let increased_factor = factor[col] * FACTOR_INCREASE;
+            let increased_h = (y[col] + increased_factor * y_scale[col]) - y[col];
+            if increased_h.is_finite() && increased_h != 0.0 {
+                y_pert[col] = y[col] + increased_h;
+                let f_retry = fun(t, &y_pert);
+                y_pert[col] = y[col];
+                rhs_evaluations += 1;
+                validate_rhs_output(&f_retry, n)?;
+                let mut retry_max_row = 0;
+                for row in 1..n {
+                    if (f_retry[row] - f0[row]).abs()
+                        > (f_retry[retry_max_row] - f0[retry_max_row]).abs()
+                    {
+                        retry_max_row = row;
+                    }
+                }
+                let retry_diff = (f_retry[retry_max_row] - f0[retry_max_row]).abs();
+                let retry_scale = f_retry[retry_max_row].abs().max(f0[retry_max_row].abs());
+                if max_diff[col] * retry_scale < retry_diff * diff_scale[col] {
+                    factor[col] = increased_factor;
+                    h[col] = increased_h;
+                    max_diff[col] = retry_diff;
+                    diff_scale[col] = retry_scale;
+                    for row in 0..n {
+                        jac[(row, col)] = f_retry[row] - f0[row];
+                    }
+                }
+            }
+        }
+
+        for row in 0..n {
+            jac[(row, col)] /= h[col];
+        }
+
+        if max_diff[col] < f64::EPSILON.powf(0.75) * diff_scale[col] {
+            factor[col] *= FACTOR_INCREASE;
+        } else if max_diff[col] > f64::EPSILON.powf(0.25) * diff_scale[col] {
+            factor[col] *= FACTOR_DECREASE;
+        }
+    }
+    factor.apply(|value| *value = value.max(1_000.0 * f64::EPSILON));
+    Ok(FiniteDifferenceJacobian {
+        matrix: jac,
+        factor,
+        rhs_evaluations,
+    })
 }
 
 /// Backward Differentiation Formula (BDF) solver for stiff ODEs.
@@ -729,8 +1189,18 @@ pub struct BDF {
     newton_tol: f64,
     jac_factor: Option<DVector<f64>>,
     jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>>,
+    jac_into: Option<
+        Box<
+            dyn FnMut(
+                f64,
+                &DVector<f64>,
+                &mut DMatrix<f64>,
+            ) -> Result<(), BdfJacobianCallbackError>,
+        >,
+    >,
+    jacobian_workspace: Option<DMatrix<f64>>,
+    jacobian_refresh_policy: JacobianRefreshPolicy,
     J: BdfJacobian,
-    I: DMatrix<f64>,
     linear_backend: Box<dyn BdfLinearBackend>,
     gamma: DVector<f64>,
     alpha: DVector<f64>,
@@ -752,6 +1222,7 @@ pub struct BDF {
     nonlinear_iterations: usize,
     collect_operation_timings: bool,
     linear_factorization_ms_total: f64,
+    operation_timing_scopes: BdfTimingScopes,
     collect_operation_counters: bool,
     pub direction: f64,
 }
@@ -777,8 +1248,8 @@ impl Debug for BDF {
             .field("error_norm_old", &self.error_norm_old)
             .field("newton_tol", &self.newton_tol)
             .field("jac_factor", &self.jac_factor)
+            .field("jacobian_refresh_policy", &self.jacobian_refresh_policy)
             .field("J", &self.J)
-            .field("I", &self.I)
             .field("gamma", &self.gamma)
             .field("alpha", &self.alpha)
             .field("error_const", &self.error_const)
@@ -814,8 +1285,8 @@ impl BDF {
     rtol (float, optional): The relative tolerance for the error norm. Default is 1e-3.
     atol (float, optional): The absolute tolerance for the error norm. Default is 1e-6.
     jac (callable, optional): The Jacobian of the right-hand side function. Default is None.
-    jac_sparsity (ndarray, optional): Dimension-validated hint; grouped sparse finite differences are not implemented.
-    vectorized (bool, optional): Reserved for API compatibility; RHS calls remain scalar.
+    jac_sparsity (optional): Rejected until grouped finite-difference Jacobians are implemented.
+    vectorized (bool): Must be false; RHS callbacks currently accept one state vector.
     first_step (float, optional): The initial step size. If None, it will be selected automatically. Default is None.
     **extraneous (dict, optional): Additional keyword arguments.
 
@@ -845,8 +1316,10 @@ impl BDF {
             newton_tol: 0.0,
             jac_factor: None,
             jac: None,
+            jac_into: None,
+            jacobian_workspace: None,
+            jacobian_refresh_policy: JacobianRefreshPolicy::FiniteDifference,
             J: BdfJacobian::from_dense(DMatrix::zeros(0, 0)),
-            I: DMatrix::zeros(0, 0),
             linear_backend: Box::new(DenseNalgebraLinearBackend),
             gamma: DVector::zeros(0),
             alpha: DVector::zeros(0),
@@ -869,6 +1342,7 @@ impl BDF {
             nonlinear_iterations: 0,
             collect_operation_timings: false,
             linear_factorization_ms_total: 0.0,
+            operation_timing_scopes: BdfTimingScopes::default(),
             collect_operation_counters: false,
             n: 0,
             t_old: None,
@@ -902,10 +1376,26 @@ impl BDF {
             nonlinear_solves: self.nonlinear_solves,
             nonlinear_iterations: self.nonlinear_iterations,
             linear_factorization_ms_total: self.linear_factorization_ms_total,
+            linear_matrix_assembly_ms_total: self
+                .operation_timing_scopes
+                .linear_matrix_assembly_ms_total,
             linear_solve_ms_total: self
                 .linear_solve_time_ms
                 .as_ref()
                 .map_or(0.0, |total| total.get()),
+            step_snapshot_ms_total: self.operation_timing_scopes.step_snapshot_ms_total,
+            step_predictor_setup_ms_total: self
+                .operation_timing_scopes
+                .step_predictor_setup_ms_total,
+            newton_rhs_assembly_ms_total: self.operation_timing_scopes.newton_rhs_assembly_ms_total,
+            newton_correction_norm_ms_total: self
+                .operation_timing_scopes
+                .newton_correction_norm_ms_total,
+            newton_state_update_ms_total: self.operation_timing_scopes.newton_state_update_ms_total,
+            step_error_estimate_ms_total: self.operation_timing_scopes.step_error_estimate_ms_total,
+            step_nordsieck_update_ms_total: self
+                .operation_timing_scopes
+                .step_nordsieck_update_ms_total,
         }
     }
 
@@ -926,6 +1416,7 @@ impl BDF {
             self.nonlinear_solves = 0;
             self.nonlinear_iterations = 0;
             self.linear_factorization_ms_total = 0.0;
+            self.operation_timing_scopes = BdfTimingScopes::default();
             self.linear_solve_time_ms = None;
         } else {
             self.linear_solve_counter = Some(Rc::new(Cell::new(0)));
@@ -937,6 +1428,7 @@ impl BDF {
             self.nonlinear_solves = 0;
             self.nonlinear_iterations = 0;
             self.linear_factorization_ms_total = 0.0;
+            self.operation_timing_scopes = BdfTimingScopes::default();
             self.linear_solve_time_ms = None;
         }
     }
@@ -948,8 +1440,10 @@ impl BDF {
         self.collect_operation_timings = enabled;
         if !enabled {
             self.linear_factorization_ms_total = 0.0;
+            self.operation_timing_scopes = BdfTimingScopes::default();
             self.linear_solve_time_ms = None;
         } else {
+            self.operation_timing_scopes = BdfTimingScopes::default();
             self.linear_solve_time_ms = Some(Rc::new(Cell::new(0.0)));
         }
     }
@@ -960,16 +1454,25 @@ impl BDF {
     /// range, but LSODE2 can use this hook to expose LSODE-style algorithm
     /// policy without forking the BDF stepper.
     pub fn set_max_order_cap(&mut self, max_order_cap: usize) {
-        assert!(
-            (1..=MAX_ORDER).contains(&max_order_cap),
-            "BDF max order cap must be in 1..={MAX_ORDER}, got {max_order_cap}"
-        );
+        self.try_set_max_order_cap(max_order_cap)
+            .expect("valid BDF max order cap is required");
+    }
+
+    /// Fallible counterpart to [`Self::set_max_order_cap`].
+    pub fn try_set_max_order_cap(
+        &mut self,
+        max_order_cap: usize,
+    ) -> Result<(), BdfConfigurationError> {
+        if !(1..=MAX_ORDER).contains(&max_order_cap) {
+            return Err(BdfConfigurationError::InvalidMaxBdfOrder);
+        }
         self.max_order_cap = max_order_cap;
         if self.order > self.max_order_cap {
             self.order = self.max_order_cap;
             self.linear_factorization = None;
             self.n_equal_steps = 0;
         }
+        Ok(())
     }
 
     pub fn max_order_cap(&self) -> usize {
@@ -1002,20 +1505,38 @@ impl BDF {
     /// `[I - cJ]` without a dense round-trip.
     pub fn set_native_jacobian(
         &mut self,
-        mut jacobian: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
+        jacobian: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
     ) {
+        self.try_set_native_jacobian(jacobian)
+            .expect("valid native BDF Jacobian is required");
+    }
+
+    /// Fallible counterpart to [`Self::set_native_jacobian`]. The first
+    /// callback result is validated before the solver's Jacobian state changes.
+    pub fn try_set_native_jacobian(
+        &mut self,
+        mut jacobian: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>,
+    ) -> Result<(), BdfConfigurationError> {
         let initial = jacobian(self.t, &self.y);
-        assert_eq!(
-            initial.shape(),
-            (self.n, self.n),
-            "native Jacobian shape is not equal to solver dimension"
-        );
+        if initial.shape() != (self.n, self.n) {
+            return Err(BdfConfigurationError::JacobianDimension);
+        }
+        if !initial.has_valid_structure(self.n) {
+            return Err(BdfConfigurationError::InvalidJacobianStructure);
+        }
+        if !initial.is_finite() {
+            return Err(BdfConfigurationError::NonFiniteJacobian);
+        }
         self.jac = Some(jacobian);
+        self.jac_into = None;
+        self.jacobian_workspace = None;
+        self.jacobian_refresh_policy = JacobianRefreshPolicy::StateDependent;
         self.J = initial;
         self.linear_factorization = None;
         if self.collect_operation_counters {
             self.njev += 1;
         }
+        Ok(())
     }
 
     /// Initializes the BDF solver with problem-specific parameters.
@@ -1032,8 +1553,8 @@ impl BDF {
     /// * `rtol` - Relative error tolerance (scalar or vector)
     /// * `atol` - Absolute error tolerance (scalar or vector)
     /// * `jac` - Optional Jacobian function ∂f/∂y
-    /// * `jac_sparsity` - Optional mask; currently shape-validated but not used to group dense finite differences
-    /// * `vectorized` - Compatibility argument; batched RHS evaluation is not implemented
+    /// * `jac_sparsity` - Reserved; rejected until grouped finite-difference Jacobians are implemented
+    /// * `vectorized` - Must be false; batched RHS evaluation is not implemented
     /// * `first_step` - Optional initial step size (auto-selected if None)
     ///
     /// # Mathematical Setup
@@ -1094,6 +1615,43 @@ impl BDF {
         vectorized: bool,
         first_step: Option<f64>,
     ) -> Result<(), BdfConfigurationError> {
+        let jacobian_source = match jac {
+            Some(jacobian) => BdfJacobianSource::StateDependent(Box::new(move |t, y| {
+                BdfJacobian::from_dense(jacobian(t, y))
+            })),
+            None => BdfJacobianSource::FiniteDifference,
+        };
+        self.try_set_initial_with_jacobian_source(
+            fun,
+            t0,
+            y0,
+            t_bound,
+            max_step,
+            rtol,
+            atol,
+            jacobian_source,
+            jac_sparsity,
+            vectorized,
+            first_step,
+        )
+    }
+
+    /// Initializes using an explicit Jacobian lifecycle contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_set_initial_with_jacobian_source(
+        &mut self,
+        fun: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: NumberOrVec,
+        atol: NumberOrVec,
+        jacobian_source: BdfJacobianSource,
+        jac_sparsity: Option<DMatrix<f64>>,
+        vectorized: bool,
+        first_step: Option<f64>,
+    ) -> Result<(), BdfConfigurationError> {
         if !t0.is_finite() || !t_bound.is_finite() {
             return Err(BdfConfigurationError::NonFiniteTime);
         }
@@ -1146,6 +1704,118 @@ impl BDF {
         {
             return Err(BdfConfigurationError::SparsityDimension);
         }
+        if matches!(&jacobian_source, BdfJacobianSource::FiniteDifference) && jac_sparsity.is_some()
+        {
+            return Err(BdfConfigurationError::UnsupportedJacobianSparsity);
+        }
+        if let BdfJacobianSource::Constant(jacobian) = &jacobian_source {
+            if jacobian.shape() != (n, n) {
+                return Err(BdfConfigurationError::JacobianDimension);
+            }
+            if !jacobian.has_valid_structure(n) {
+                return Err(BdfConfigurationError::InvalidJacobianStructure);
+            }
+            if !jacobian.is_finite() {
+                return Err(BdfConfigurationError::NonFiniteJacobian);
+            }
+        }
+        if vectorized {
+            return Err(BdfConfigurationError::UnsupportedVectorizedRhs);
+        }
+
+        let initial_rhs = fun(t0, &y0);
+        if initial_rhs.len() != n {
+            return Err(BdfConfigurationError::InitialRhsDimension);
+        }
+        if initial_rhs.iter().any(|value| !value.is_finite()) {
+            return Err(BdfConfigurationError::NonFiniteInitialRhs);
+        }
+
+        let (validated_rtol, validated_atol) = validate_tol(rtol.clone(), atol.clone(), n)
+            .map_err(|_| BdfConfigurationError::InvalidAbsoluteTolerance)?;
+        let (initial_h_abs, mut initial_rhs_evaluations) = match first_step {
+            Some(step) => (step, 1usize),
+            None => {
+                let h_abs = try_select_initial_step(
+                    &fun,
+                    t0,
+                    &y0,
+                    t_bound,
+                    max_step,
+                    &initial_rhs,
+                    (t_bound - t0).signum(),
+                    1.0,
+                    validated_rtol.clone(),
+                    validated_atol.clone(),
+                )
+                .map_err(|error| match error {
+                    crate::numerical::BDF::common::InitialStepError::RhsDimension => {
+                        BdfConfigurationError::InitialStepRhsDimension
+                    }
+                    crate::numerical::BDF::common::InitialStepError::NonFiniteRhs => {
+                        BdfConfigurationError::NonFiniteInitialStepRhs
+                    }
+                })?;
+                (h_abs, 2usize)
+            }
+        };
+
+        let jacobian_source = match jacobian_source {
+            BdfJacobianSource::FiniteDifference => {
+                let initial = finite_difference_jacobian_rhs(
+                    &*fun,
+                    t0,
+                    &y0,
+                    &initial_rhs,
+                    &validated_atol,
+                    None,
+                )
+                .map_err(|error| match error {
+                    BdfRhsOutputError::Dimension => {
+                        BdfConfigurationError::InitialJacobianRhsDimension
+                    }
+                    BdfRhsOutputError::NonFinite => {
+                        BdfConfigurationError::NonFiniteInitialJacobianRhs
+                    }
+                })?;
+                initial_rhs_evaluations =
+                    initial_rhs_evaluations.saturating_add(initial.rhs_evaluations);
+                PreparedBdfJacobianSource::FiniteDifference {
+                    initial: BdfJacobian::from_dense(initial.matrix),
+                    factor: initial.factor,
+                }
+            }
+            BdfJacobianSource::StateDependent(mut callback) => {
+                let initial = callback(t0, &y0);
+                if initial.shape() != (n, n) {
+                    return Err(BdfConfigurationError::JacobianDimension);
+                }
+                if !initial.has_valid_structure(n) {
+                    return Err(BdfConfigurationError::InvalidJacobianStructure);
+                }
+                if !initial.is_finite() {
+                    return Err(BdfConfigurationError::NonFiniteJacobian);
+                }
+                PreparedBdfJacobianSource::StateDependent { callback, initial }
+            }
+            BdfJacobianSource::StateDependentDenseInto(mut callback) => {
+                let mut initial = DMatrix::zeros(n, n);
+                callback(t0, &y0, &mut initial)
+                    .map_err(|_| BdfConfigurationError::JacobianCallback)?;
+                if initial.shape() != (n, n) {
+                    return Err(BdfConfigurationError::JacobianDimension);
+                }
+                if initial.iter().any(|value| !value.is_finite()) {
+                    return Err(BdfConfigurationError::NonFiniteJacobian);
+                }
+                PreparedBdfJacobianSource::StateDependentDenseInto {
+                    callback,
+                    initial: BdfJacobian::from_dense(initial),
+                    workspace: DMatrix::zeros(n, n),
+                }
+            }
+            BdfJacobianSource::Constant(initial) => PreparedBdfJacobianSource::Constant(initial),
+        };
 
         self.set_initial_unchecked(
             fun,
@@ -1153,12 +1823,13 @@ impl BDF {
             y0,
             t_bound,
             max_step,
-            rtol,
-            atol,
-            jac,
-            jac_sparsity,
+            validated_rtol,
+            validated_atol,
+            jacobian_source,
             vectorized,
-            first_step,
+            initial_h_abs,
+            initial_rhs,
+            initial_rhs_evaluations,
         );
         Ok(())
     }
@@ -1172,13 +1843,16 @@ impl BDF {
         max_step: f64,
         rtol: NumberOrVec,
         atol: NumberOrVec,
-        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
-        jac_sparsity: Option<DMatrix<f64>>,
+        jacobian_source: PreparedBdfJacobianSource,
         _vectorized: bool,
-        first_step: Option<f64>,
+        initial_h_abs: f64,
+        initial_rhs: DVector<f64>,
+        initial_rhs_evaluations: usize,
     ) {
         let fun = if self.collect_operation_counters {
-            let counter = Rc::new(Cell::new(0));
+            // The initial RHS was validated before mutating the solver and is
+            // carried into setup instead of being evaluated twice.
+            let counter = Rc::new(Cell::new(initial_rhs_evaluations));
             let callback_counter = Rc::clone(&counter);
             self.rhs_evaluation_counter = Some(counter);
             Box::new(move |t, y: &DVector<f64>| {
@@ -1193,33 +1867,15 @@ impl BDF {
         self.prelude(fun, t0, y0, t_bound);
         info!("prelude done");
         // initialize parameters, if some parameters are not provided by the user then we will use special functions
-        self.max_step = validate_max_step(max_step)
-            .expect("max_step must be a positive number or positive infinity");
-
-        let (rtol, atol) = validate_tol(rtol, atol, self.n).unwrap();
+        // All public validation is completed by `try_set_initial_with_jacobian_source`
+        // before this private initializer is entered. Keep this commit-free
+        // phase free of fallible re-validation and panic-based assumptions.
+        self.max_step = max_step;
         self.rtol = rtol.clone();
-        self.atol = atol.clone();
+        self.atol = atol;
         info!("tolerance validation: done");
-        let f = (&self.fun)(self.t, &self.y);
-        let h_abs = match first_step {
-            None => select_initial_step(
-                &self.fun,
-                self.t,
-                &self.y,
-                self.t_bound,
-                self.max_step,
-                &f,
-                self.direction,
-                1.0,
-                self.rtol.clone(),
-                self.atol.clone(),
-            ),
-            Some(first_step) => {
-                validate_first_step(first_step, t0, t_bound).expect("first_step must be positive")
-                //
-            }
-        };
-        self.h_abs = h_abs;
+        let f = initial_rhs;
+        self.h_abs = initial_h_abs;
         self.h_abs_old = None;
         self.error_norm_old = None;
         self.newton_tol = newton_tol(rtol);
@@ -1247,29 +1903,29 @@ impl BDF {
             + DVector::from_iterator(MAX_ORDER + 1, (1..=MAX_ORDER + 1).map(|i| 1.0 / i as f64));
 
         // Debug assertions to ensure correct initialization
-        assert_eq!(alpha.len(), MAX_ORDER + 1);
-        assert_eq!(gamma.len(), MAX_ORDER + 1);
-        assert_eq!(error_const.len(), MAX_ORDER + 1);
+        debug_assert_eq!(alpha.len(), MAX_ORDER + 1);
+        debug_assert_eq!(gamma.len(), MAX_ORDER + 1);
+        debug_assert_eq!(error_const.len(), MAX_ORDER + 1);
         self.alpha = alpha;
         self.error_const = error_const;
         self.gamma = gamma;
 
         let mut D = DMatrix::zeros(MAX_ORDER + 3, self.y.len());
-        assert!(
+        debug_assert!(
             D.nrows() >= MAX_ORDER + 3,
             "D matrix must have at least MAX_ORDER + 3 rows"
         );
         info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
 
         D.set_row(0, &self.y.transpose());
-        D.set_row(1, &(f * h_abs * self.direction).transpose());
+        D.set_row(1, &(f * initial_h_abs * self.direction).transpose());
         self.D = D;
 
         self.order = 1;
         self.n_equal_steps = 0;
         self.linear_factorization = None;
         self.create_funct();
-        self.validate_jac(jac, jac_sparsity);
+        self.validate_jac(jacobian_source);
     }
 
     /// Creates linear algebra functions for sparse or dense matrices.
@@ -1287,7 +1943,6 @@ impl BDF {
         // Newton matrix cache, so LSODE2 can install sparse/banded backends
         // without rewriting the BDF stepper.
         self.linear_backend = Box::new(DenseNalgebraLinearBackend);
-        self.I = DMatrix::identity(self.n, self.n);
         info!("linear backend creation: dense nalgebra");
     }
     /// Performs initial setup and validation of solver parameters.
@@ -1312,13 +1967,12 @@ impl BDF {
         y0: DVector<f64>,
         t_bound: f64,
     ) {
-        let support_complex: bool = false;
         self.t_old = None;
         self.t = t0;
         self.n = y0.len();
-        let (fun, y) = check_arguments(fun, (&y0).into(), support_complex).unwrap();
-
-        self.y = y;
+        // The checked initializer validated y0 before mutating solver state.
+        // Keep that owned vector instead of copying it through the legacy helper.
+        self.y = y0;
 
         self.t_bound = t_bound;
         self.fun = fun;
@@ -1345,15 +1999,11 @@ impl BDF {
 
     /// Validates and sets up the Jacobian computation strategy.
     ///
-    /// Handles three cases:
-    /// 1. **Analytical Jacobian**: User-provided function J = ∂f/∂y
-    /// 2. **Numerical Jacobian**: Finite difference approximation (not implemented)
-    /// 3. **No Jacobian**: Uses identity matrix (not recommended)
+    /// Installs either a user-provided state-dependent Jacobian or the
+    /// adaptive dense finite-difference Jacobian used when `jac` is absent.
     ///
     /// # Parameters
     /// * `jac` - Optional analytical Jacobian function
-    /// * `sparsity` - Optional sparsity pattern for numerical differentiation
-    ///
     /// # Mathematical Background
     /// The Jacobian matrix J[i,j] = ∂fᵢ/∂yⱼ is crucial for:
     /// - Newton-Raphson convergence: [I - c*J] Δy = -G(y)
@@ -1362,57 +2012,58 @@ impl BDF {
     ///
     /// # Implementation Notes
     /// - Wraps user Jacobian for consistent interface
-    /// - Handles both sparse and dense matrices
+    /// - Stores the Jacobian in the selected BDF linear-algebra representation
     /// - Increments Jacobian evaluation counter (njev)
-    fn validate_jac(
-        &mut self,
-        jac: Option<Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
-        _sparsity: Option<DMatrix<f64>>,
-    ) {
-        let t0 = self.t;
-        let y0 = self.y.clone();
+    fn validate_jac(&mut self, source: PreparedBdfJacobianSource) {
         // if jac is None, then we calculate the jacobian using the num_jac function and return a wrapped function that computes the jacobian
         // at a given point
 
-        match jac {
-            Some(jac) => {
-                info!("analytical jacobian used");
-                let J = jac(t0, &y0);
+        match source {
+            PreparedBdfJacobianSource::StateDependent { callback, initial } => {
+                info!("state-dependent analytical jacobian used");
+                self.jac_factor = None;
                 if self.collect_operation_counters {
                     self.njev += 1;
                 }
-
-                let jac_wrapped: Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian> =
-                    if is_sparse(&J, SPARSE) {
-                        Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
-                            // self.njev += 1;
-                            BdfJacobian::from_dense(jac(t, &y))
-                        })
-                    } else {
-                        Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
-                            //   self.njev += 1;
-                            BdfJacobian::from_dense(jac(t, &y))
-                        })
-                    };
-                /*
-                if J.shape() != (self.n, self.n) {
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!(
-                            "`jac` is expected to have shape ({}, {}), but actually has {:?}.",
-                            self.n, self.n, J.shape()
-                        ),
-                    )));
-                }
-                */
-                //  ( Some(jac_wrapped), J)
-                self.jac = Some(jac_wrapped);
-                self.J = BdfJacobian::from_dense(J.clone());
+                self.jac = Some(callback);
+                self.jacobian_refresh_policy = JacobianRefreshPolicy::StateDependent;
+                self.J = initial;
             }
-            _ => {
-                self.J =
-                    BdfJacobian::from_dense(finite_difference_jacobian_rhs(&*self.fun, t0, &y0));
+            PreparedBdfJacobianSource::StateDependentDenseInto {
+                callback,
+                initial,
+                workspace,
+            } => {
+                info!("state-dependent in-place dense analytical jacobian used");
+                self.jac_factor = None;
+                if self.collect_operation_counters {
+                    self.njev += 1;
+                }
                 self.jac = None;
+                self.jac_into = Some(callback);
+                self.jacobian_workspace = Some(workspace);
+                self.jacobian_refresh_policy = JacobianRefreshPolicy::StateDependentDenseInto;
+                self.J = initial;
+            }
+            PreparedBdfJacobianSource::Constant(jacobian) => {
+                info!("constant analytical jacobian used");
+                self.jac = None;
+                self.jac_into = None;
+                self.jacobian_workspace = None;
+                self.jac_factor = None;
+                self.jacobian_refresh_policy = JacobianRefreshPolicy::Constant;
+                self.J = jacobian;
+                if self.collect_operation_counters {
+                    self.njev += 1;
+                }
+            }
+            PreparedBdfJacobianSource::FiniteDifference { initial, factor } => {
+                self.J = initial;
+                self.jac_factor = Some(factor);
+                self.jac = None;
+                self.jac_into = None;
+                self.jacobian_workspace = None;
+                self.jacobian_refresh_policy = JacobianRefreshPolicy::FiniteDifference;
                 if self.collect_operation_counters {
                     self.njev += 1;
                 }
@@ -1467,7 +2118,12 @@ impl BDF {
             return (false, Some(BdfStepError::InvalidStepSize));
         }
 
+        let snapshot_start = self.collect_operation_timings.then(Instant::now);
         let mut D = self.D.clone();
+        if let Some(start) = snapshot_start {
+            self.operation_timing_scopes.step_snapshot_ms_total +=
+                start.elapsed().as_secs_f64() * 1_000.0;
+        }
         let max_step = self.max_step;
         let adjacent_t = if self.direction > 0.0 {
             t.next_up()
@@ -1496,31 +2152,26 @@ impl BDF {
         }
 
         let order = self.order;
-        assert!(
-            order <= self.max_order_cap,
-            "Order cannot exceed configured max order cap"
-        );
-        assert!(
-            order < self.alpha.len(),
-            "Order must be within alpha bounds"
-        );
+        if order > self.max_order_cap || order >= self.alpha.len() {
+            return (false, Some(BdfStepError::InternalStateInvariant));
+        }
 
         let alpha = &self.alpha;
         let gamma = &self.gamma;
         let error_const = &self.error_const;
-        let mut J = self.J.clone();
+        let mut jacobian_override: Option<BdfJacobian> = None;
         let mut linear_factorization = self.linear_factorization.take();
         // `J` is only current at the state where it was last evaluated. A
         // failed Newton solve may refresh it once at the current predictor.
         let mut current_jac = false;
         let mut newton_failed = false;
+        let mut last_newton_failure = None;
         let mut step_accepted = false;
         // scale preallocation
         let mut scale = DVector::zeros(self.n);
+        let mut newton_workspace = NewtonWorkspace::new(self.n);
         //n_iter preallocation
         let mut n_iter = 0;
-        // y_new preallocation
-        let mut y_new = DVector::zeros(self.n);
 
         let _conv = false;
         // t_new preallocation
@@ -1529,16 +2180,15 @@ impl BDF {
         let mut safety = 0.0;
         // error_norm preallocation
         let mut error_norm = 0.0;
-        let mut d = DVector::zeros(self.n);
         while !step_accepted {
             if h_abs < min_step {
                 return (
                     false,
-                    Some(if newton_failed {
+                    Some(last_newton_failure.unwrap_or(if newton_failed {
                         BdfStepError::NewtonNonConvergence
                     } else {
                         BdfStepError::StepSizeUnderflow
-                    }),
+                    })),
                 );
             }
 
@@ -1560,24 +2210,35 @@ impl BDF {
 
             let h = t_new - t;
             h_abs = h.abs();
+            let predictor_setup_start = self.collect_operation_timings.then(Instant::now);
             let y_predict = D.rows(0, order + 1).row_sum().transpose();
-            let y_predict_abs = y_predict.abs();
-            let scale_ = scale_func(self.rtol.clone(), self.atol.clone(), &y_predict_abs);
-            let scale_: DVector<f64> = DVector::from_vec(scale_);
-            scale = scale_;
+            fill_tolerance_scale(&mut scale, &self.rtol, &self.atol, &y_predict);
             let psi = D.rows(1, order).transpose() * gamma.rows(1, order) / alpha[order];
+            if let Some(start) = predictor_setup_start {
+                self.operation_timing_scopes.step_predictor_setup_ms_total +=
+                    start.elapsed().as_secs_f64() * 1_000.0;
+            }
             let mut converged = false;
             let c = h / alpha[order];
 
             while !converged {
                 if linear_factorization.is_none() {
-                    assert_eq!(
-                        J.shape(),
-                        (self.n, self.n),
-                        "J shape is not equal to solver dimension"
-                    );
+                    let jacobian = jacobian_override.as_ref().unwrap_or(&self.J);
+                    if jacobian.shape() != (self.n, self.n) {
+                        return (false, Some(BdfStepError::InvalidJacobianDimension));
+                    }
                     let factor_start = self.collect_operation_timings.then(Instant::now);
-                    linear_factorization = self.linear_backend.factor_shifted_jacobian(c, &J);
+                    let mut matrix_assembly_ms = 0.0;
+                    linear_factorization = self.linear_backend.factor_shifted_jacobian_with_timing(
+                        c,
+                        jacobian,
+                        self.collect_operation_timings
+                            .then_some(&mut matrix_assembly_ms),
+                    );
+                    if self.collect_operation_timings {
+                        self.operation_timing_scopes.linear_matrix_assembly_ms_total +=
+                            matrix_assembly_ms;
+                    }
                     if let Some(start) = factor_start {
                         self.linear_factorization_ms_total +=
                             start.elapsed().as_secs_f64() * 1_000.0;
@@ -1604,24 +2265,34 @@ impl BDF {
                     }
                 }
 
-                let (conv, n_iter_, y_new_, d_) = solve_bdf_system(
+                let Some(linear_factorization_ref) = linear_factorization.as_ref() else {
+                    return (false, Some(BdfStepError::InternalStateInvariant));
+                };
+                let newton_result = match solve_bdf_system(
                     &self.fun,
                     t_new,
-                    &y_predict.clone(),
+                    &y_predict,
                     c,
-                    &psi.clone(),
-                    linear_factorization.as_ref().unwrap().as_ref(),
-                    &scale.clone(),
+                    &psi,
+                    linear_factorization_ref.as_ref(),
+                    &scale,
                     self.newton_tol,
-                );
+                    self.collect_operation_timings,
+                    &mut self.operation_timing_scopes,
+                    &mut newton_workspace,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => return (false, Some(error)),
+                };
                 if self.collect_operation_counters {
                     self.nonlinear_solves += 1;
-                    self.nonlinear_iterations = self.nonlinear_iterations.saturating_add(n_iter_);
+                    self.nonlinear_iterations = self
+                        .nonlinear_iterations
+                        .saturating_add(newton_result.iterations);
                 }
-                n_iter = n_iter_;
-                y_new = y_new_;
-                d = d_;
-                converged = conv;
+                n_iter = newton_result.iterations;
+                converged = newton_result.converged;
+                last_newton_failure = newton_result.retry_cause;
                 if !converged {
                     if current_jac {
                         if self.collect_operation_counters {
@@ -1629,15 +2300,83 @@ impl BDF {
                         }
                         break;
                     }
-                    J = if let Some(jac_fun) = self.jac.as_mut() {
-                        jac_fun(t_new, &y_predict)
-                    } else {
-                        BdfJacobian::from_dense(finite_difference_jacobian_rhs(
-                            &*self.fun, t_new, &y_predict,
-                        ))
+                    let jacobian_was_refreshed =
+                        self.jacobian_refresh_policy != JacobianRefreshPolicy::Constant;
+                    let refreshed_jacobian = match self.jacobian_refresh_policy {
+                        JacobianRefreshPolicy::StateDependent => {
+                            let Some(jacobian) = self.jac.as_mut() else {
+                                return (false, Some(BdfStepError::InternalStateInvariant));
+                            };
+                            Some(jacobian(t_new, &y_predict))
+                        }
+                        JacobianRefreshPolicy::StateDependentDenseInto => {
+                            let mut workspace = self
+                                .jacobian_workspace
+                                .take()
+                                .unwrap_or_else(|| DMatrix::zeros(self.n, self.n));
+                            let Some(jacobian) = self.jac_into.as_mut() else {
+                                self.jacobian_workspace = Some(workspace);
+                                return (false, Some(BdfStepError::InternalStateInvariant));
+                            };
+                            let result = jacobian(t_new, &y_predict, &mut workspace);
+                            match result {
+                                Ok(()) => Some(BdfJacobian::from_dense(workspace)),
+                                Err(_) => {
+                                    self.jacobian_workspace = Some(workspace);
+                                    return (false, Some(BdfStepError::JacobianCallback));
+                                }
+                            }
+                        }
+                        JacobianRefreshPolicy::FiniteDifference => {
+                            let f_predict = (self.fun)(t_new, &y_predict);
+                            if let Err(error) = validate_rhs_output(&f_predict, self.n) {
+                                return (
+                                    false,
+                                    Some(match error {
+                                        BdfRhsOutputError::Dimension => BdfStepError::RhsDimension,
+                                        BdfRhsOutputError::NonFinite => BdfStepError::NonFiniteRhs,
+                                    }),
+                                );
+                            }
+                            let finite_difference = match finite_difference_jacobian_rhs(
+                                &*self.fun,
+                                t_new,
+                                &y_predict,
+                                &f_predict,
+                                &self.atol,
+                                self.jac_factor.as_ref(),
+                            ) {
+                                Ok(result) => result,
+                                Err(BdfRhsOutputError::Dimension) => {
+                                    return (false, Some(BdfStepError::RhsDimension));
+                                }
+                                Err(BdfRhsOutputError::NonFinite) => {
+                                    return (false, Some(BdfStepError::NonFiniteRhs));
+                                }
+                            };
+                            self.jac_factor = Some(finite_difference.factor);
+                            Some(BdfJacobian::from_dense(finite_difference.matrix))
+                        }
+                        JacobianRefreshPolicy::Constant => None,
                     };
-                    if self.collect_operation_counters {
+                    let jacobian = refreshed_jacobian
+                        .as_ref()
+                        .or(jacobian_override.as_ref())
+                        .unwrap_or(&self.J);
+                    if jacobian.shape() != (self.n, self.n) {
+                        return (false, Some(BdfStepError::InvalidJacobianDimension));
+                    }
+                    if !jacobian.has_valid_structure(self.n) {
+                        return (false, Some(BdfStepError::InvalidJacobianStructure));
+                    }
+                    if !jacobian.is_finite() {
+                        return (false, Some(BdfStepError::NonFiniteJacobian));
+                    }
+                    if jacobian_was_refreshed && self.collect_operation_counters {
                         self.njev += 1;
+                    }
+                    if let Some(jacobian) = refreshed_jacobian {
+                        jacobian_override = Some(jacobian);
                     }
                     linear_factorization = None;
                     current_jac = true;
@@ -1657,10 +2396,22 @@ impl BDF {
             let safety_ = 0.9 * (2.0 * (NEWTON_MAXITER as f64) + 1.0)
                 / (2.0 * (NEWTON_MAXITER as f64) + n_iter as f64);
             safety = safety_;
-            let scale = scale_func(self.rtol.clone(), self.atol.clone(), &y_new.abs());
-            let scale: DVector<f64> = DVector::from_vec(scale);
-            let error = error_const[order] * d.clone();
-            let error_norm_ = norm(&(error.component_div(&scale)));
+            // The accepted-state scale is also used by adjacent-order error
+            // estimates below, matching the reference BDF controller.
+            let error_estimate_start = self.collect_operation_timings.then(Instant::now);
+            fill_tolerance_scale(&mut scale, &self.rtol, &self.atol, &newton_workspace.state);
+            newton_workspace
+                .scaled_correction
+                .copy_from(&newton_workspace.correction);
+            newton_workspace.scaled_correction *= error_const[order];
+            newton_workspace
+                .scaled_correction
+                .component_div_assign(&scale);
+            let error_norm_ = norm(&newton_workspace.scaled_correction);
+            if let Some(start) = error_estimate_start {
+                self.operation_timing_scopes.step_error_estimate_ms_total +=
+                    start.elapsed().as_secs_f64() * 1_000.0;
+            }
             error_norm = error_norm_;
             if error_norm > 1.0 {
                 if self.collect_operation_counters {
@@ -1681,31 +2432,31 @@ impl BDF {
         }
         self.n_equal_steps += 1;
         self.t = t_new;
-        self.y = y_new;
+        self.y.copy_from(&newton_workspace.state);
         self.h_abs = h_abs;
-        self.J = J;
-        self.linear_factorization = linear_factorization;
-        if self.jac.is_none() {
-            self.J = BdfJacobian::from_dense(finite_difference_jacobian_rhs(
-                &*self.fun,
-                self.t,
-                &self.y,
-            ));
-            if self.collect_operation_counters {
-                self.njev += 1;
+        if let Some(jacobian) = jacobian_override {
+            let previous = std::mem::replace(&mut self.J, jacobian);
+            if self.jacobian_refresh_policy == JacobianRefreshPolicy::StateDependentDenseInto {
+                if let BdfJacobian::Dense(matrix) = previous {
+                    self.jacobian_workspace = Some(matrix);
+                }
             }
-            // The cached factorization belongs to the Jacobian from before
-            // this accepted state and cannot be reused after the refresh.
-            self.linear_factorization = None;
         }
-        let D_ = D.clone();
-        D.set_row(order + 2, &(d.clone().transpose() - D_.row(order + 1)));
-
-        D.set_row(order + 1, &d.transpose());
+        self.linear_factorization = linear_factorization;
+        let nordsieck_update_start = self.collect_operation_timings.then(Instant::now);
+        for column in 0..self.n {
+            D[(order + 2, column)] = newton_workspace.correction[column] - D[(order + 1, column)];
+            D[(order + 1, column)] = newton_workspace.correction[column];
+        }
 
         for i in (0..order + 1).rev() {
-            let D_ = D.clone();
-            D.row_mut(i).add_assign(D_.row(i + 1));
+            for column in 0..self.n {
+                D[(i, column)] += D[(i + 1, column)];
+            }
+        }
+        if let Some(start) = nordsieck_update_start {
+            self.operation_timing_scopes.step_nordsieck_update_ms_total +=
+                start.elapsed().as_secs_f64() * 1_000.0;
         }
 
         if self.n_equal_steps < order + 1 {
@@ -1713,47 +2464,21 @@ impl BDF {
             return (true, None);
         }
 
-        let error_m_norm = if order > 1 {
-            let error_m = error_const[order - 1] * D.row(order);
-
-            norm(&(error_m.transpose().component_div(&scale)))
-        } else {
-            f64::INFINITY
-        };
-
-        let error_p_norm = if order < self.max_order_cap {
-            let error_p = error_const[order + 1] * D.row(order + 2);
-
-            norm(&(error_p.transpose().component_div(&scale)))
-        } else {
-            f64::INFINITY
-        };
-
-        let error_norms = DVector::from_vec(vec![error_m_norm, error_norm, error_p_norm]);
-        // let factors = error_norms.map(|x| x.powf(-1.0 / (order as f64 + 1.0))); //?
-        let factors: Vec<f64> = error_norms
-            .iter()
-            .enumerate()
-            .map(|(i, x)| x.powf(-1.0 / (order as f64 + i as f64)))
-            .collect(); //?
-        let factors: DVector<f64> = factors.into();
-        // Python: delta_order = np.argmax(factors) - 1
-        // This gives delta_order ∈ {-1, 0, 1} since factors has 3 elements
-        let argmax_index = factors.argmax().0;
-        let delta_order = (argmax_index as i32) - 1; // Can be -1, 0, or 1
-        let new_order = ((order as i32) + delta_order)
-            .max(1)
-            .min(self.max_order_cap as i32) as usize;
+        let (new_order, factor) = select_order_and_step_factor(
+            order,
+            self.max_order_cap,
+            &D,
+            &error_const,
+            error_norm,
+            &scale,
+            safety,
+        );
         self.order = new_order;
-
-        let factor = (safety * factors.max()).min(MAX_FACTOR);
         self.h_abs *= factor;
-
         change_D(&mut D, self.order, factor);
         self.n_equal_steps = 0;
         self.linear_factorization = None;
         self.D = D;
-
         (true, None)
     }
 }

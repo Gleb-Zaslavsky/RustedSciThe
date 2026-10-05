@@ -2,6 +2,7 @@ use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
 use crate::numerical::BDF::BDF_solver::{BdfLinearBackend, BdfLinearFactorization};
+use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetryMode};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 
@@ -34,6 +35,11 @@ fn native_solver(mode: BdfTelemetryMode) -> ODEsolver {
 fn telemetry_is_off_by_default_and_collects_nothing() {
     let mut solver = native_solver(BdfTelemetryMode::Off);
     assert_eq!(solver.telemetry_mode(), BdfTelemetryMode::Off);
+    assert_eq!(
+        solver.preparation_timings(),
+        Default::default(),
+        "disabled telemetry leaves preparation timers untouched"
+    );
     solver.solve();
 
     let stats = solver.get_statistics();
@@ -53,6 +59,13 @@ fn telemetry_is_off_by_default_and_collects_nothing() {
     assert_eq!(stats.result_assembly_ms_total, 0.0);
     assert_eq!(stats.linear_factorization_ms_total, 0.0);
     assert_eq!(stats.linear_solve_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_snapshot_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_predictor_setup_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_rhs_assembly_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_correction_norm_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_state_update_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_error_estimate_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_nordsieck_update_ms_total, 0.0);
 }
 
 #[test]
@@ -98,6 +111,13 @@ fn counters_mode_counts_without_reading_timers() {
         stats.accepted_steps_total + stats.rejected_step_attempts_total
     );
     assert_eq!(stats.linear_solve_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_snapshot_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_predictor_setup_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_rhs_assembly_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_correction_norm_ms_total, 0.0);
+    assert_eq!(stats.bdf_newton_state_update_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_error_estimate_ms_total, 0.0);
+    assert_eq!(stats.bdf_step_nordsieck_update_ms_total, 0.0);
     assert_eq!(stats.bdf_nfev_total, stats.residual_calls);
     assert!(stats.nonlinear_solve_calls > 0);
     assert!(stats.nonlinear_iterations_total >= stats.nonlinear_solve_calls);
@@ -109,6 +129,7 @@ fn counters_mode_counts_without_reading_timers() {
     assert_eq!(stats.jacobian_ms_total, 0.0);
     assert_eq!(stats.result_assembly_ms_total, 0.0);
     assert_eq!(stats.linear_factorization_ms_total, 0.0);
+    assert_eq!(solver.preparation_timings(), Default::default());
 }
 
 #[test]
@@ -126,6 +147,15 @@ fn timings_mode_collects_calls_and_durations() {
     assert!(stats.nonlinear_solve_calls > 0);
     assert!(stats.nonlinear_iterations_total >= stats.nonlinear_solve_calls);
     assert!(stats.solve_ms_total > 0.0);
+    let preparation = solver.preparation_timings();
+    assert!(preparation.total_ms > 0.0);
+    assert!(preparation.callback_wiring_ms > 0.0);
+    assert!(preparation.runtime_initialization_ms > 0.0);
+    assert!(
+        preparation
+            .table_report()
+            .contains("runtime_initialization_ms=")
+    );
     assert!(stats.integration_loop_ms_total > 0.0);
     assert!(stats.bdf_step_ms_total > 0.0);
     assert!(stats.output_collection_ms_total > 0.0);
@@ -134,6 +164,13 @@ fn timings_mode_collects_calls_and_durations() {
     assert!(stats.result_assembly_ms_total > 0.0);
     assert!(stats.linear_factorization_ms_total > 0.0);
     assert!(stats.linear_solve_ms_total > 0.0);
+    assert!(stats.bdf_step_snapshot_ms_total > 0.0);
+    assert!(stats.bdf_step_predictor_setup_ms_total > 0.0);
+    assert!(stats.bdf_newton_rhs_assembly_ms_total > 0.0);
+    assert!(stats.bdf_newton_correction_norm_ms_total > 0.0);
+    assert!(stats.bdf_newton_state_update_ms_total > 0.0);
+    assert!(stats.bdf_step_error_estimate_ms_total > 0.0);
+    assert!(stats.bdf_step_nordsieck_update_ms_total > 0.0);
     assert!(
         stats.integration_loop_ms_total + stats.result_assembly_ms_total
             <= stats.solve_ms_total + 1e-9,
@@ -157,7 +194,44 @@ fn timings_mode_collects_calls_and_durations() {
     assert!(report.contains("output_collection_ms="));
     assert!(report.contains("linear_factorization_ms="));
     assert!(report.contains("linear_solve_ms="));
+    assert!(report.contains("bdf_step_snapshot_ms="));
+    assert!(report.contains("bdf_predictor_setup_ms="));
+    assert!(report.contains("bdf_newton_rhs_assembly_ms="));
+    assert!(report.contains("bdf_newton_correction_norm_ms="));
+    assert!(report.contains("bdf_newton_state_update_ms="));
+    assert!(report.contains("bdf_error_estimate_ms="));
+    assert!(report.contains("bdf_nordsieck_update_ms="));
     assert!(report.contains("(nested)"));
+}
+
+#[test]
+fn symbolic_preparation_timings_retain_backend_cold_stages() {
+    let options = BdfSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".to_string()],
+        "t".to_string(),
+        "BDF".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0]),
+        0.03,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        Some(0.01),
+    )
+    .with_telemetry_mode(BdfTelemetryMode::Timings);
+    let mut solver = ODEsolver::new_with_options(options);
+    solver.solve();
+
+    let backend = solver
+        .preparation_backend_telemetry()
+        .expect("symbolic timings should expose nested backend stages");
+    assert_eq!(backend.mode, IvpTelemetryMode::Detailed);
+    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).calls > 0);
+    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).elapsed > std::time::Duration::ZERO);
+    assert!(solver.preparation_timings().symbolic_backend_ms > 0.0);
 }
 
 #[test]
@@ -212,7 +286,7 @@ fn telemetry_counts_rejected_candidate_steps() {
 }
 
 #[test]
-fn finite_difference_jacobian_is_refreshed_after_accepted_nonlinear_steps() {
+fn finite_difference_jacobian_is_reused_across_accepted_steps() {
     let options = BdfSolverOptions::for_bdf(
         vec![Expr::parse_expression("-5*y^2")],
         vec!["y".to_string()],
@@ -241,10 +315,14 @@ fn finite_difference_jacobian_is_refreshed_after_accepted_nonlinear_steps() {
     let final_y = trajectory[(trajectory.nrows() - 1, 0)];
     let exact_y = 1.0 / (1.0 + 5.0 * 0.4);
     assert_eq!(solver.get_status(), "finished");
-    assert!((final_y - exact_y).abs() < 2e-7, "FD Jacobian solution error={:e}", (final_y - exact_y).abs());
     assert!(
-        stats.bdf_njev_total > stats.accepted_steps_total,
-        "finite-difference J must be refreshed as y changes; njev={} accepted={}",
+        (final_y - exact_y).abs() < 2e-7,
+        "FD Jacobian solution error={:e}",
+        (final_y - exact_y).abs()
+    );
+    assert!(
+        stats.bdf_njev_total < stats.accepted_steps_total,
+        "modified Newton should reuse finite-difference J across accepted steps; njev={} accepted={}",
         stats.bdf_njev_total,
         stats.accepted_steps_total
     );
@@ -299,10 +377,7 @@ fn fallible_solve_returns_typed_step_error_without_empty_result_panic() {
     solver.set_bdf_linear_backend_factory(|| Box::new(SingularBackend));
 
     let result = solver.try_solve();
-    assert!(matches!(
-        result,
-        Err(BdfSolveError::Step(_))
-    ));
+    assert!(matches!(result, Err(BdfSolveError::Step(_))));
     assert_eq!(solver.get_status(), "failed");
     let (times, states) = solver.get_result_ref();
     assert_eq!(times.len(), 1);
@@ -329,5 +404,40 @@ fn zero_step_budget_is_a_typed_configuration_error() {
     )
     .with_max_steps(0);
     let mut solver = ODEsolver::new_with_options(options);
-    assert!(matches!(solver.try_solve(), Err(BdfSolveError::InvalidMaxSteps)));
+    assert!(matches!(
+        solver.try_solve(),
+        Err(BdfSolveError::InvalidMaxSteps)
+    ));
+}
+
+#[test]
+fn invalid_max_bdf_order_is_typed_before_runtime_initialization() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".to_string()],
+        "t".to_string(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        Some(0.01),
+    )
+    .with_max_bdf_order(0);
+    let mut solver = ODEsolver::new_with_options(options);
+    solver.set_native_ode_callbacks(
+        |_: f64, y: &DVector<f64>| DVector::from_element(y.len(), -y[0]),
+        Some(|_: f64, _: &DVector<f64>| DMatrix::from_element(1, 1, -1.0)),
+    );
+
+    let result = solver.try_solve();
+    assert!(matches!(
+        result,
+        Err(BdfSolveError::Configuration(
+            crate::numerical::BDF::BDF_solver::BdfConfigurationError::InvalidMaxBdfOrder
+        ))
+    ));
 }

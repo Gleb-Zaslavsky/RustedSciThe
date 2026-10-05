@@ -32,7 +32,7 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::GeneratedZig
 use log::info;
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Backend selected for one emitted AOT artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +157,34 @@ impl GeneratedAotBuildRequest {
         attempts: u32,
         injection: AotFailureInjection,
     ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.materialize_and_execute_with_retry_inner(artifact_key, attempts, injection, None)
+    }
+
+    /// Materializes and executes a cross-toolchain build with a deadline per
+    /// compiler attempt. A timeout is reported as a typed lifecycle failure
+    /// rather than being mistaken for a compiler exit or an I/O error.
+    pub fn materialize_and_execute_with_retry_timeout(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+        timeout: Duration,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.materialize_and_execute_with_retry_inner(
+            artifact_key,
+            attempts,
+            injection,
+            Some(timeout),
+        )
+    }
+
+    fn materialize_and_execute_with_retry_inner(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+        timeout: Option<Duration>,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
         let artifact_key = artifact_key.into();
         let total = attempts.max(1);
         let mut last_error = None;
@@ -175,7 +203,13 @@ impl GeneratedAotBuildRequest {
                 AotLifecycleError::new(diagnostics)
             })?;
 
-            match build.execute_with_lifecycle(&artifact_key, injection) {
+            let result = match timeout {
+                Some(timeout) => {
+                    build.execute_with_lifecycle_timeout(&artifact_key, injection, timeout)
+                }
+                None => build.execute_with_lifecycle(&artifact_key, injection),
+            };
+            match result {
                 Ok(result) => return Ok(result),
                 Err(mut error) => {
                     error.diagnostics.attempts = attempt;
@@ -231,6 +265,21 @@ impl GeneratedAotBuildResult {
         }
     }
 
+    /// Executes the selected toolchain with an explicit wall-clock timeout.
+    pub fn execute_with_timeout(&self, timeout: Duration) -> io::Result<ExecutedGeneratedAotBuild> {
+        match self {
+            Self::Rust(result) => result
+                .execute_with_timeout(timeout)
+                .map(ExecutedGeneratedAotBuild::Rust),
+            Self::C(result) => result
+                .execute_with_timeout(timeout)
+                .map(ExecutedGeneratedAotBuild::C),
+            Self::Zig(result) => result
+                .execute_with_timeout(timeout)
+                .map(ExecutedGeneratedAotBuild::Zig),
+        }
+    }
+
     /// Executes any supported toolchain through the common typed lifecycle
     /// boundary. The three backends keep their native build commands and
     /// output types, but failures expose one diagnostic schema.
@@ -238,6 +287,26 @@ impl GeneratedAotBuildResult {
         &self,
         artifact_key: impl Into<String>,
         injection: AotFailureInjection,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.execute_with_lifecycle_inner(artifact_key, injection, None)
+    }
+
+    /// Executes the selected toolchain through the typed lifecycle boundary
+    /// with an explicit wall-clock deadline.
+    pub fn execute_with_lifecycle_timeout(
+        &self,
+        artifact_key: impl Into<String>,
+        injection: AotFailureInjection,
+        timeout: Duration,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.execute_with_lifecycle_inner(artifact_key, injection, Some(timeout))
+    }
+
+    fn execute_with_lifecycle_inner(
+        &self,
+        artifact_key: impl Into<String>,
+        injection: AotFailureInjection,
+        timeout: Option<Duration>,
     ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
         let artifact_key = artifact_key.into();
         let (stage, kind, detail) = injected_failure(injection).unwrap_or((
@@ -251,7 +320,11 @@ impl GeneratedAotBuildResult {
             ));
         }
 
-        let executed = self.execute().map_err(|error| {
+        let executed = match timeout {
+            Some(timeout) => self.execute_with_timeout(timeout),
+            None => self.execute(),
+        }
+        .map_err(|error| {
             AotLifecycleError::new(lifecycle_diagnostics_for_generated_result(
                 self,
                 artifact_key.clone(),
@@ -260,6 +333,17 @@ impl GeneratedAotBuildResult {
                 error.to_string(),
             ))
         })?;
+        if executed.timed_out() {
+            return Err(AotLifecycleError::new(
+                lifecycle_diagnostics_for_generated_result(
+                    self,
+                    artifact_key,
+                    AotLifecycleStage::Build,
+                    AotFailureKind::Timeout,
+                    executed_failure_detail(&executed),
+                ),
+            ));
+        }
         if !executed.succeeded() {
             return Err(AotLifecycleError::new(
                 lifecycle_diagnostics_for_generated_result(
@@ -284,11 +368,39 @@ impl GeneratedAotBuildResult {
         attempts: u32,
         injection: AotFailureInjection,
     ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.execute_with_retry_inner(artifact_key, attempts, injection, None)
+    }
+
+    /// Retries a typed build with a deadline applied to every toolchain
+    /// attempt.
+    pub fn execute_with_retry_timeout(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+        timeout: Duration,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        self.execute_with_retry_inner(artifact_key, attempts, injection, Some(timeout))
+    }
+
+    fn execute_with_retry_inner(
+        &self,
+        artifact_key: impl Into<String>,
+        attempts: u32,
+        injection: AotFailureInjection,
+        timeout: Option<Duration>,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
         let artifact_key = artifact_key.into();
         let total = attempts.max(1);
         let mut last_error = None;
         for _ in 0..total {
-            match self.execute_with_lifecycle(&artifact_key, injection) {
+            let result = match timeout {
+                Some(timeout) => {
+                    self.execute_with_lifecycle_timeout(&artifact_key, injection, timeout)
+                }
+                None => self.execute_with_lifecycle(&artifact_key, injection),
+            };
+            match result {
                 Ok(result) => return Ok(result),
                 Err(error) => last_error = Some(error),
             }
@@ -306,17 +418,29 @@ fn executed_failure_detail(executed: &ExecutedGeneratedAotBuild) -> String {
         ExecutedGeneratedAotBuild::Rust(build) => format_failure_detail(
             build.status_code,
             &build.stderr,
-            "Rust compiler exited without a valid output artifact",
+            if build.timed_out {
+                "Rust compiler timed out before producing a valid output artifact"
+            } else {
+                "Rust compiler exited without a valid output artifact"
+            },
         ),
         ExecutedGeneratedAotBuild::C(build) => format_failure_detail(
             build.status_code,
             &build.stderr,
-            "C compiler/linker exited without a valid output artifact",
+            if build.timed_out {
+                "C compiler/linker timed out before producing a valid output artifact"
+            } else {
+                "C compiler/linker exited without a valid output artifact"
+            },
         ),
         ExecutedGeneratedAotBuild::Zig(build) => format_failure_detail(
             build.status_code,
             &build.stderr,
-            "Zig compiler/linker exited without a valid output artifact",
+            if build.timed_out {
+                "Zig compiler/linker timed out before producing a valid output artifact"
+            } else {
+                "Zig compiler/linker exited without a valid output artifact"
+            },
         ),
     }
 }
@@ -336,6 +460,14 @@ impl ExecutedGeneratedAotBuild {
             Self::Rust(build) => build.succeeded(),
             Self::C(build) => build.succeeded(),
             Self::Zig(build) => build.succeeded(),
+        }
+    }
+
+    pub fn timed_out(&self) -> bool {
+        match self {
+            Self::Rust(build) => build.timed_out,
+            Self::C(build) => build.timed_out,
+            Self::Zig(build) => build.timed_out,
         }
     }
 }
@@ -1101,6 +1233,90 @@ mod tests {
         assert_eq!(error.diagnostics.kind, AotFailureKind::Link);
         assert_eq!(error.diagnostics.stage, AotLifecycleStage::Link);
         assert!(error.diagnostics.inspection.is_some());
+    }
+
+    #[test]
+    fn generated_build_result_classifies_timeout_and_retry_provenance() {
+        let residuals = vec![Expr::parse_expression("x + 1")];
+        let jacobian = vec![vec![Expr::parse_expression("1")]];
+        let vars = vec!["x"];
+        let prepared = PreparedProblem::dense(PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &vars,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        ));
+        let artifact = generated_aot_artifact_from_prepared_problem(
+            "generated_driver_timeout_fixture",
+            "driver_timeout_module",
+            &prepared,
+            AotCodegenBackend::Rust,
+        );
+        let temp = tempdir().expect("temporary directory should exist");
+        let request = generated_aot_build_request_from_artifact(
+            artifact,
+            temp.path(),
+            AotBuildPreset::DevFastest,
+        );
+        let materialized = request
+            .materialize()
+            .expect("driver request should materialize");
+        let result = match materialized {
+            GeneratedAotBuildResult::Rust(mut result) => {
+                if cfg!(target_os = "windows") {
+                    result.cargo_wrapper_program = Some("cmd".to_string());
+                    result.cargo_args = vec!["/C".to_string(), "ping 127.0.0.1 -n 4".to_string()];
+                } else {
+                    result.cargo_wrapper_program = Some("sh".to_string());
+                    result.cargo_args = vec!["-c".to_string(), "sleep 2".to_string()];
+                }
+                GeneratedAotBuildResult::Rust(result)
+            }
+            GeneratedAotBuildResult::C(_) | GeneratedAotBuildResult::Zig(_) => {
+                unreachable!("the fixture explicitly selects the Rust backend")
+            }
+        };
+
+        let error = materialized_timeout_result(&result)
+            .expect_err("a sleeping build command must hit the lifecycle deadline");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::Timeout);
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Build);
+        assert_eq!(error.diagnostics.root_kind, None);
+
+        let error = result
+            .execute_with_retry_timeout(
+                "driver-timeout-retry-key",
+                2,
+                AotFailureInjection::None,
+                Duration::from_millis(50),
+            )
+            .expect_err("both timed-out attempts must exhaust the retry budget");
+        assert_eq!(error.diagnostics.kind, AotFailureKind::RetryExhausted);
+        assert_eq!(error.diagnostics.root_kind, Some(AotFailureKind::Timeout));
+        assert_eq!(error.diagnostics.attempts, 2);
+        assert_eq!(error.diagnostics.stage, AotLifecycleStage::Build);
+    }
+
+    fn materialized_timeout_result(
+        result: &GeneratedAotBuildResult,
+    ) -> Result<ExecutedGeneratedAotBuild, AotLifecycleError> {
+        result.execute_with_lifecycle_timeout(
+            "driver-timeout-key",
+            AotFailureInjection::None,
+            Duration::from_millis(50),
+        )
     }
 
     #[test]

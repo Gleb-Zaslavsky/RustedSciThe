@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use faer::prelude::*;
 use faer::sparse::{SparseColMat, Triplet};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 use RustedSciThe::somelinalg::banded::{Banded, GeneralBandedLuPartialPivot, banded_matvec};

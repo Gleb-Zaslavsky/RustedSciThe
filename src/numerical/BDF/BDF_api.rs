@@ -126,17 +126,22 @@
 //! - Clear error messages for debugging
 
 use crate::numerical::BDF::BDF_solver::{
-    BDF, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
+    BDF, BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
 };
-use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+pub use crate::numerical::BDF::BDF_solver::{BdfJacobianCallbackError, BdfJacobianSource};
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
+use crate::symbolic::ivp_telemetry::{
+    IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
-    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpAotBuildPolicy,
+    SymbolicIvpGeneratedBackendConfig, prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_residual_problem,
 };
 extern crate nalgebra as na;
 use crate::Utils::plots::plots_ref;
@@ -149,11 +154,25 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+fn elapsed_ms(start: Option<Instant>) -> f64 {
+    start.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1_000.0)
+}
+
 type BdfNativeJacobianFactory =
     dyn Fn(Option<SharedIvpParameterValues>) -> Box<dyn FnMut(f64, &DVector<f64>) -> BdfJacobian>;
 type BdfPreparedResidual = dyn Fn(f64, &DVector<f64>) -> DVector<f64>;
+type BdfPreparedDenseJacobianInto =
+    dyn FnMut(f64, &DVector<f64>, &mut DMatrix<f64>) -> Result<(), BdfJacobianCallbackError>;
 type BdfNativeRhs = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;
-type BdfNativeDenseJac = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
+pub type BdfNativeDenseJacobian = Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>;
+
+/// Jacobian lifecycle for pure numerical callback problems.
+#[derive(Clone)]
+pub enum BdfNativeJacobianSource {
+    FiniteDifference,
+    StateDependent(BdfNativeDenseJacobian),
+    Constant(DMatrix<f64>),
+}
 
 /// Runtime instrumentation level for BDF. The default performs no telemetry
 /// allocation, callback wrapping, clock reads, or statistics locking.
@@ -163,6 +182,62 @@ pub enum BdfTelemetryMode {
     Off,
     Counters,
     Timings,
+}
+
+/// Disjoint diagnostic stages inside one BDF backend preparation call.
+/// Timings are populated only when [`BdfTelemetryMode::Timings`] is enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BdfPreparationTimings {
+    pub configuration_ms: f64,
+    pub symbolic_backend_ms: f64,
+    pub callback_wiring_ms: f64,
+    pub runtime_initialization_ms: f64,
+    pub linear_backend_setup_ms: f64,
+    pub runtime_publication_ms: f64,
+    pub total_ms: f64,
+}
+
+impl BdfPreparationTimings {
+    pub fn table_report(&self) -> String {
+        format!(
+            "configuration_ms={:.3} symbolic_backend_ms={:.3} callback_wiring_ms={:.3} runtime_initialization_ms={:.3} linear_backend_setup_ms={:.3} runtime_publication_ms={:.3} total_ms={:.3} (stages are disjoint diagnostic scopes)",
+            self.configuration_ms,
+            self.symbolic_backend_ms,
+            self.callback_wiring_ms,
+            self.runtime_initialization_ms,
+            self.linear_backend_setup_ms,
+            self.runtime_publication_ms,
+            self.total_ms,
+        )
+    }
+}
+
+/// Provenance for the latest generated AOT preparation.
+///
+/// The lifecycle identity is kept next to the immutable telemetry snapshot so
+/// reports cannot accidentally compare counters from one policy with metadata
+/// from another. The snapshot remains the source of truth for cache, build,
+/// link, publication, and timing values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BdfAotProvenance {
+    pub build_policy: SymbolicIvpAotBuildPolicy,
+    pub codegen_backend: AotCodegenBackend,
+    pub c_compiler: Option<String>,
+    pub telemetry: IvpTelemetrySnapshot,
+}
+
+impl BdfAotProvenance {
+    pub fn backend_label(&self) -> &'static str {
+        match self.codegen_backend {
+            AotCodegenBackend::Rust => "rust",
+            AotCodegenBackend::C => "c",
+            AotCodegenBackend::Zig => "zig",
+        }
+    }
+
+    pub fn execution_label(&self) -> &'static str {
+        self.telemetry.execution.label()
+    }
 }
 
 /// Stable solver status; the string getter is retained for API compatibility.
@@ -179,6 +254,7 @@ pub enum BdfStatus {
 #[derive(Debug)]
 pub enum BdfSolveError {
     Backend(IvpBackendError),
+    Configuration(BdfConfigurationError),
     Step(BdfStepError),
     MaxStepsExceeded { max_steps: usize },
     InvalidMaxSteps,
@@ -190,6 +266,7 @@ impl std::fmt::Display for BdfSolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(error) => write!(f, "BDF backend preparation failed: {error}"),
+            Self::Configuration(error) => write!(f, "invalid BDF configuration: {error}"),
             Self::Step(error) => write!(f, "BDF integration step failed: {error}"),
             Self::MaxStepsExceeded { max_steps } => {
                 write!(f, "BDF exceeded the configured limit of {max_steps} steps")
@@ -198,9 +275,9 @@ impl std::fmt::Display for BdfSolveError {
             Self::InvalidContinuationBound => {
                 f.write_str("continuation bound must be finite and differ from the current time")
             }
-            Self::ContinuationRequiresPreparedBackend => {
-                f.write_str("prepare and solve the BDF model before starting a continuation segment")
-            }
+            Self::ContinuationRequiresPreparedBackend => f.write_str(
+                "prepare and solve the BDF model before starting a continuation segment",
+            ),
         }
     }
 }
@@ -209,6 +286,7 @@ impl std::error::Error for BdfSolveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
+            Self::Configuration(error) => Some(error),
             Self::Step(error) => Some(error),
             Self::MaxStepsExceeded { .. }
             | Self::InvalidMaxSteps
@@ -269,10 +347,11 @@ pub struct BdfSolverOptions {
     pub max_step: f64,
     pub rtol: f64,
     pub atol: f64,
-    /// Structural mask placeholder; currently dimension-validated but not used
-    /// to group finite-difference columns.
+    /// Reserved for grouped finite-difference Jacobians; rejected when BDF
+    /// would otherwise estimate the Jacobian by finite differences.
     pub jac_sparsity: Option<DMatrix<f64>>,
-    /// Compatibility placeholder; callbacks are currently scalar, not batched.
+    /// Compatibility placeholder; `true` is rejected because callbacks are
+    /// currently scalar, not batched.
     pub vectorized: bool,
     pub first_step: Option<f64>,
     pub max_bdf_order: usize,
@@ -512,13 +591,9 @@ pub struct ODEsolver {
     rtol: f64,
     /// Absolute error tolerance
     atol: f64,
-    /// Optional structural mask for a future grouped finite-difference Jacobian.
-    ///
-    /// The current BDF implementation validates the mask dimensions but still
-    /// computes a dense finite-difference Jacobian; this hint does not reduce
-    /// callback evaluations or allocations yet.
+    /// Reserved for grouped finite-difference Jacobians, which are not implemented.
     jac_sparsity: Option<DMatrix<f64>>,
-    /// Compatibility option; BDF currently invokes scalar RHS callbacks only.
+    /// Compatibility option; `true` is rejected until batched RHS callbacks exist.
     vectorized: bool,
     /// Optional initial step size (auto-selected if None)
     first_step: Option<f64>,
@@ -553,12 +628,14 @@ pub struct ODEsolver {
     lambdify_execution_policy: IvpLambdifyExecutionPolicy,
     telemetry_mode: BdfTelemetryMode,
     statistics: Option<Arc<Mutex<IvpBackendStatistics>>>,
+    preparation_timings: BdfPreparationTimings,
+    preparation_backend_telemetry: Option<IvpTelemetrySnapshot>,
     reported_bdf_counters: BdfOperationCounters,
-    /// Optional factory for replacing the default dense Newton linear backend
-    /// after each generated BDF instance is initialized.
+    /// Optional factory for the Newton linear backend of each generated BDF instance.
     bdf_linear_backend_factory: Option<Box<dyn Fn() -> Box<dyn BdfLinearBackend>>>,
-    /// Optional factory for replacing the dense generated Jacobian callback
-    /// with a native sparse/banded Jacobian callback.
+    /// Optional factory for a generated Jacobian callback. When present, the
+    /// residual-only preparation path is used and no dense symbolic/FD Jacobian
+    /// is constructed before the native callback is installed.
     bdf_native_jacobian_factory: Option<Box<BdfNativeJacobianFactory>>,
     /// Prepared generated residual supplied by an owning solver lifecycle.
     ///
@@ -570,10 +647,11 @@ pub struct ODEsolver {
     /// history without repeating symbolic differentiation or backend lowering.
     prepared_residual_callback: Option<Arc<BdfPreparedResidual>>,
     prepared_jacobian_callback: Option<Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>>,
+    prepared_jacobian_into_factory: Option<Arc<dyn Fn() -> Box<BdfPreparedDenseJacobianInto>>>,
     /// Optional pure numerical RHS callback `f(t, y)`.
     native_rhs: Option<BdfNativeRhs>,
-    /// Optional pure numerical dense Jacobian callback `df/dy`.
-    native_jacobian: Option<BdfNativeDenseJac>,
+    /// Optional pure numerical Jacobian lifecycle for `f(t, y)` callbacks.
+    native_jacobian_source: Option<BdfNativeJacobianSource>,
 }
 impl ODEsolver {
     /// Creates a new ODE solver through the legacy method-string interface.
@@ -591,8 +669,8 @@ impl ODEsolver {
     /// * `max_step` - Maximum step size
     /// * `rtol` - Relative tolerance for error control
     /// * `atol` - Absolute tolerance for error control
-    /// * `jac_sparsity` - Optional mask; currently dimension-validated but not used to group dense finite differences
-    /// * `vectorized` - Compatibility flag; the current RHS callback is scalar
+    /// * `jac_sparsity` - Reserved for grouped FD; rejected when no analytic Jacobian is available
+    /// * `vectorized` - Must be false; BDF currently invokes scalar RHS callbacks
     /// * `first_step` - Optional initial step size
     ///
     /// # Returns
@@ -689,14 +767,17 @@ impl ODEsolver {
             lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
             telemetry_mode: BdfTelemetryMode::Off,
             statistics: None,
+            preparation_timings: BdfPreparationTimings::default(),
+            preparation_backend_telemetry: None,
             reported_bdf_counters: BdfOperationCounters::default(),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
             prepared_generated_residual: None,
             prepared_residual_callback: None,
             prepared_jacobian_callback: None,
+            prepared_jacobian_into_factory: None,
             native_rhs: None,
-            native_jacobian: None,
+            native_jacobian_source: None,
         }
     }
 
@@ -750,9 +831,8 @@ impl ODEsolver {
     pub fn get_statistics(&self) -> IvpBackendStatistics {
         self.statistics
             .as_ref()
-            .map_or_else(IvpBackendStatistics::default, |stats| {
-                stats.lock().expect("IVP statistics lock poisoned").clone()
-            })
+            .and_then(|stats| stats.lock().ok().map(|stats| stats.clone()))
+            .unwrap_or_default()
     }
 
     /// Sets telemetry mode. Select it before generation/solve when possible;
@@ -765,6 +845,9 @@ impl ODEsolver {
         self.telemetry_mode = mode;
         self.statistics = (mode != BdfTelemetryMode::Off)
             .then(|| Arc::new(Mutex::new(IvpBackendStatistics::default())));
+        self.preparation_timings = BdfPreparationTimings::default();
+        self.preparation_backend_telemetry = None;
+        self.prepared_jacobian_into_factory = None;
         self.backend_prepared = false;
     }
 
@@ -772,9 +855,38 @@ impl ODEsolver {
         self.telemetry_mode
     }
 
+    /// Returns disjoint backend-preparation timings from the latest generation.
+    /// Values are zero unless telemetry mode is `Timings`.
+    pub fn preparation_timings(&self) -> BdfPreparationTimings {
+        self.preparation_timings
+    }
+
+    /// Detailed symbolic-backend cold stages from the latest preparation.
+    /// Available only when BDF timing telemetry was enabled.
+    pub fn preparation_backend_telemetry(&self) -> Option<&IvpTelemetrySnapshot> {
+        self.preparation_backend_telemetry.as_ref()
+    }
+
+    /// Returns the lifecycle identity and telemetry for the latest generated
+    /// AOT preparation. Returns `None` for native/Lambdify preparation or
+    /// before a generated backend has been prepared.
+    pub fn aot_provenance(&self) -> Option<BdfAotProvenance> {
+        let telemetry = self.preparation_backend_telemetry.as_ref()?;
+        (telemetry.execution == crate::symbolic::ivp_telemetry::IvpTelemetryExecution::Aot).then(
+            || BdfAotProvenance {
+                build_policy: self.generated_backend_config.build_policy,
+                codegen_backend: self.generated_backend_config.aot_codegen_backend,
+                c_compiler: self.generated_backend_config.aot_c_compiler.clone(),
+                telemetry: telemetry.clone(),
+            },
+        )
+    }
+
     fn record_prepare_duration(&self, start: Option<Instant>) {
         if let Some(stats) = self.statistics.as_ref() {
-            let mut stats = stats.lock().expect("IVP statistics lock poisoned");
+            let Ok(mut stats) = stats.lock() else {
+                return;
+            };
             stats.backend_prepare_calls += 1;
             if let Some(start) = start {
                 stats.backend_prepare_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
@@ -793,7 +905,9 @@ impl ODEsolver {
         Box::new(move |t, y| {
             let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
             let out = residual(t, y);
-            let mut stats = stats.lock().expect("IVP statistics lock poisoned");
+            let Ok(mut stats) = stats.lock() else {
+                return out;
+            };
             if let Some(start) = start {
                 stats.record_residual_duration(start.elapsed());
             } else {
@@ -814,13 +928,38 @@ impl ODEsolver {
         Box::new(move |t, y| {
             let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
             let out = jacobian(t, y);
-            let mut stats = stats.lock().expect("IVP statistics lock poisoned");
+            let Ok(mut stats) = stats.lock() else {
+                return out;
+            };
             if let Some(start) = start {
                 stats.record_jacobian_duration(start.elapsed());
             } else {
                 stats.jacobian_calls += 1;
             }
             out
+        })
+    }
+
+    fn instrument_jacobian_into(
+        &self,
+        mut jacobian: Box<BdfPreparedDenseJacobianInto>,
+    ) -> Box<BdfPreparedDenseJacobianInto> {
+        let Some(stats) = self.statistics.as_ref().map(Arc::clone) else {
+            return jacobian;
+        };
+        let mode = self.telemetry_mode;
+        Box::new(move |t, y, out| {
+            let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let result = jacobian(t, y, out);
+            let Ok(mut stats) = stats.lock() else {
+                return result;
+            };
+            if let Some(start) = start {
+                stats.record_jacobian_duration(start.elapsed());
+            } else {
+                stats.jacobian_calls += 1;
+            }
+            result
         })
     }
 
@@ -865,9 +1004,9 @@ impl ODEsolver {
 
     /// Installs a factory for native BDF Jacobian evaluators.
     ///
-    /// The regular IVP path still prepares dense Jacobian closures. This hook
-    /// lets LSODE2 override that closure with a sparse triplet or banded
-    /// evaluator after the low-level BDF instance has been initialized.
+    /// When this factory is present, BDF prepares the residual separately and
+    /// uses the factory result as the initial and refresh Jacobian source. This
+    /// avoids constructing and then discarding a dense Jacobian.
     pub fn set_bdf_native_jacobian_factory<F>(&mut self, factory: F)
     where
         F: Fn(
@@ -915,14 +1054,30 @@ impl ODEsolver {
 
     /// Installs pure numerical ODE callbacks for BDF.
     ///
-    /// If `jac` is `None`, BDF falls back to finite-difference Jacobians.
+    /// Compatibility adapter: `None` selects finite differences and `Some`
+    /// selects a state-dependent analytic Jacobian.
     pub fn set_native_ode_callbacks<F, J>(&mut self, rhs: F, jac: Option<J>)
     where
         F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
         J: Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync + 'static,
     {
+        let jacobian_source = match jac {
+            Some(jacobian) => BdfNativeJacobianSource::StateDependent(Arc::new(jacobian)),
+            None => BdfNativeJacobianSource::FiniteDifference,
+        };
+        self.set_native_ode_callbacks_with_jacobian_source(rhs, jacobian_source);
+    }
+
+    /// Installs pure numerical callbacks with an explicit Jacobian lifecycle.
+    pub fn set_native_ode_callbacks_with_jacobian_source<F>(
+        &mut self,
+        rhs: F,
+        jacobian_source: BdfNativeJacobianSource,
+    ) where
+        F: Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync + 'static,
+    {
         self.native_rhs = Some(Arc::new(rhs));
-        self.native_jacobian = jac.map(|j| Arc::new(j) as BdfNativeDenseJac);
+        self.native_jacobian_source = Some(jacobian_source);
         self.backend_prepared = false;
     }
 
@@ -1105,7 +1260,7 @@ impl ODEsolver {
         if let Some(handle) = self.parameter_values_handle.as_ref() {
             let mut slot = handle
                 .write()
-                .expect("shared IVP parameter state lock poisoned");
+                .map_err(|_| IvpBackendError::ParameterStatePoisoned)?;
             *slot = values.clone();
         }
         self.equation_parameter_values = Some(values);
@@ -1137,9 +1292,56 @@ impl ODEsolver {
         self.y0 = self.Solver_instance.y.clone();
         self.t_bound = t_bound;
 
+        self.try_restart_prepared_runtime()
+    }
+
+    /// Restarts a prepared model with a new initial state and integration
+    /// interval without repeating symbolic preparation or AOT publication.
+    ///
+    /// The prepared residual/Jacobian callbacks, generated artifact and
+    /// selected linear-backend factory are retained. Only the BDF history,
+    /// initial Jacobian and factorization are rebuilt for the new segment.
+    pub fn try_restart_with_initial_state(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+    ) -> Result<(), BdfSolveError> {
+        if !self.backend_prepared {
+            return Err(BdfSolveError::ContinuationRequiresPreparedBackend);
+        }
+        if self.max_steps == 0 {
+            return Err(BdfSolveError::InvalidMaxSteps);
+        }
+        if !t0.is_finite() || !t_bound.is_finite() || t0 == t_bound {
+            return Err(BdfSolveError::InvalidContinuationBound);
+        }
+        if y0.is_empty() {
+            return Err(BdfSolveError::Configuration(
+                BdfConfigurationError::EmptyInitialState,
+            ));
+        }
+        if y0.len() != self.y0.len() {
+            return Err(BdfSolveError::Configuration(
+                BdfConfigurationError::InitialStateDimension,
+            ));
+        }
+        if y0.iter().any(|value| !value.is_finite()) {
+            return Err(BdfSolveError::Configuration(
+                BdfConfigurationError::NonFiniteInitialState,
+            ));
+        }
+
+        self.t0 = t0;
+        self.y0 = y0;
+        self.t_bound = t_bound;
+        self.try_restart_prepared_runtime()
+    }
+
+    fn try_restart_prepared_runtime(&mut self) -> Result<(), BdfSolveError> {
         if self.native_rhs.is_some() {
             self.try_generate_native_numeric()
-                .map_err(BdfSolveError::Backend)?;
+                .map_err(BdfSolveError::Configuration)?;
             return Ok(());
         }
 
@@ -1149,42 +1351,47 @@ impl ODEsolver {
             .cloned()
             .ok_or(BdfSolveError::ContinuationRequiresPreparedBackend)?;
         let mut solver_instance = BDF::new();
-        solver_instance.set_max_order_cap(self.max_bdf_order);
+        solver_instance
+            .try_set_max_order_cap(self.max_bdf_order)
+            .map_err(BdfSolveError::Configuration)?;
         solver_instance
             .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
         solver_instance
             .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
         let residual_for_runtime = Arc::clone(&residual);
-        let wrapped_fun = self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
-        let jacobian = if self.bdf_native_jacobian_factory.is_some() {
-            None
-        } else {
-            self.prepared_jacobian_callback
-                .as_ref()
-                .cloned()
-                .map(|jacobian| {
-                    let jacobian_for_runtime = Arc::clone(&jacobian);
-                    self.instrument_jacobian(Box::new(move |t, y| jacobian_for_runtime(t, y)))
-                })
-        };
-        solver_instance.set_initial(
-            wrapped_fun,
-            self.t0,
-            self.y0.clone(),
-            self.t_bound,
-            self.max_step,
-            NumberOrVec::Number(self.rtol),
-            NumberOrVec::Number(self.atol),
-            jacobian,
-            self.jac_sparsity.clone(),
-            self.vectorized,
-            self.first_step
-                .filter(|first_step| *first_step <= (self.t_bound - self.t0).abs()),
-        );
-        if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
+        let wrapped_fun =
+            self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
+        let jacobian_source = if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
             let handle = self.parameter_values_handle.clone();
-            solver_instance.set_native_jacobian(self.timed_native_jacobian(factory(handle)));
-        }
+            BdfJacobianSource::StateDependent(self.timed_native_jacobian(factory(handle)))
+        } else if let Some(factory) = self.prepared_jacobian_into_factory.as_ref().cloned() {
+            BdfJacobianSource::StateDependentDenseInto(self.instrument_jacobian_into(factory()))
+        } else if let Some(jacobian) = self.prepared_jacobian_callback.as_ref().cloned() {
+            let jacobian_for_runtime = Arc::clone(&jacobian);
+            let jacobian =
+                self.instrument_jacobian(Box::new(move |t, y| jacobian_for_runtime(t, y)));
+            BdfJacobianSource::StateDependent(Box::new(move |t, y| {
+                BdfJacobian::from_dense(jacobian(t, y))
+            }))
+        } else {
+            BdfJacobianSource::FiniteDifference
+        };
+        solver_instance
+            .try_set_initial_with_jacobian_source(
+                wrapped_fun,
+                self.t0,
+                self.y0.clone(),
+                self.t_bound,
+                self.max_step,
+                NumberOrVec::Number(self.rtol),
+                NumberOrVec::Number(self.atol),
+                jacobian_source,
+                self.jac_sparsity.clone(),
+                self.vectorized,
+                self.first_step
+                    .filter(|first_step| *first_step <= (self.t_bound - self.t0).abs()),
+            )
+            .map_err(BdfSolveError::Configuration)?;
         if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
             solver_instance.set_linear_backend(factory());
         }
@@ -1221,10 +1428,22 @@ impl ODEsolver {
     /// Uses the symbolic engine to automatically compute ∂f/∂y analytically,
     /// which is crucial for stiff problem performance.
     pub fn try_generate(&mut self) -> Result<(), IvpBackendError> {
+        self.validate_callback_options().map_err(|error| {
+            IvpBackendError::InvalidArgumentSchema {
+                message: error.to_string(),
+            }
+        })?;
         if self.native_rhs.is_some() {
-            return self.try_generate_native_numeric();
+            return self.try_generate_native_numeric().map_err(|error| {
+                IvpBackendError::InvalidArgumentSchema {
+                    message: error.to_string(),
+                }
+            });
         }
+        self.preparation_timings = BdfPreparationTimings::default();
+        self.preparation_backend_telemetry = None;
         let start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+        let configuration_started = start.map(|_| Instant::now());
         let mut options = SymbolicIvpProblemOptions::new();
         if let Some(parameters) = self.equation_parameters.clone() {
             options = options.with_equation_parameters(parameters);
@@ -1234,95 +1453,175 @@ impl ODEsolver {
         }
         options = options.with_symbolic_assembly_backend(self.symbolic_assembly_backend);
         options = options.with_lambdify_execution_policy(self.lambdify_execution_policy);
+        let backend_telemetry =
+            (self.telemetry_mode == BdfTelemetryMode::Timings).then(IvpTelemetry::detailed);
+        if let Some(telemetry) = &backend_telemetry {
+            options = options.with_telemetry(telemetry.clone());
+        }
+        self.preparation_timings.configuration_ms = elapsed_ms(configuration_started);
 
         if self.bdf_native_jacobian_factory.is_some() {
             return self.try_generate_with_native_jacobian(start, options);
         }
 
-        let prepared = prepare_generated_symbolic_ivp_problem(
+        let symbolic_started = start.map(|_| Instant::now());
+        let prepared_result = prepare_generated_symbolic_ivp_problem(
             self.eq_system.clone(),
             self.values.clone(),
             self.arg.clone(),
             options.with_aot_options(self.generated_backend_config.aot_options),
             self.generated_backend_config.clone(),
-        )
-        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
+        );
+        self.preparation_timings.symbolic_backend_ms = elapsed_ms(symbolic_started);
+        let prepared = prepared_result.map_err(|err| IvpBackendError::GeneratedBackendFailure {
             message: err.to_string(),
         })?;
+        self.preparation_backend_telemetry =
+            backend_telemetry.map(|telemetry| telemetry.snapshot());
+
+        let callback_wiring_started = start.map(|_| Instant::now());
         self.generated_backend_config.resolver = prepared.updated_resolver.clone();
-        let prepared_problem = prepared.into_problem();
+        let prepared_problem = Arc::new(prepared.into_problem());
         let parameter_values_handle = prepared_problem.parameter_values_handle();
-        let residual = prepared_problem.residual;
-        let residual_callback: Arc<BdfPreparedResidual> = Arc::new(move |t, y| residual(t, y));
-        let jacobian = prepared_problem.jacobian;
+        let residual_problem = Arc::clone(&prepared_problem);
+        let residual_callback: Arc<BdfPreparedResidual> =
+            Arc::new(move |t, y| (residual_problem.residual)(t, y));
+        let jacobian_problem = Arc::clone(&prepared_problem);
         let jacobian_callback: Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>> =
-            Arc::new(move |t, y| jacobian(t, y));
+            Arc::new(move |t, y| (jacobian_problem.jacobian)(t, y));
+        let jacobian_into_factory = if prepared_problem.supports_jacobian_row_major_workspace() {
+            let jacobian_into_problem = Arc::clone(&prepared_problem);
+            Some(Arc::new(move || -> Box<BdfPreparedDenseJacobianInto> {
+                let problem = Arc::clone(&jacobian_into_problem);
+                let mut args = Vec::new();
+                // AtomView keeps the native Jacobian plan outside the legacy
+                // symbolic matrix field. Use the validated IVP shape rather
+                // than inferring it from that compatibility-only field.
+                let rows = problem.equations.len();
+                let cols = problem.variables.len();
+                let mut values = vec![0.0; rows.saturating_mul(cols)];
+                Box::new(move |t, y, out: &mut DMatrix<f64>| {
+                    problem
+                        .try_evaluate_jacobian_into_dmatrix_with_workspace(
+                            t,
+                            y,
+                            out,
+                            &mut values,
+                            &mut args,
+                        )
+                        .map_err(|_| BdfJacobianCallbackError::EvaluationFailed)?;
+                    Ok(())
+                })
+            })
+                as Arc<dyn Fn() -> Box<BdfPreparedDenseJacobianInto>>)
+        } else {
+            None
+        };
         self.prepared_residual_callback = Some(Arc::clone(&residual_callback));
         self.prepared_jacobian_callback = Some(Arc::clone(&jacobian_callback));
+        self.prepared_jacobian_into_factory = jacobian_into_factory.clone();
         let residual_for_runtime = Arc::clone(&residual_callback);
-        let jacobian_for_runtime = Arc::clone(&jacobian_callback);
-        let wrapped_fun = self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
-        let wrapped_jac =
-            self.instrument_jacobian(Box::new(move |t, y| jacobian_for_runtime(t, y)));
+        let wrapped_fun =
+            self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
+        let jacobian_source = if let Some(factory) = jacobian_into_factory.as_ref() {
+            BdfJacobianSource::StateDependentDenseInto(self.instrument_jacobian_into(factory()))
+        } else {
+            let jacobian_for_runtime = Arc::clone(&jacobian_callback);
+            let instrumented =
+                self.instrument_jacobian(Box::new(move |t, y| jacobian_for_runtime(t, y)));
+            BdfJacobianSource::StateDependent(Box::new(move |t, y| {
+                BdfJacobian::from_dense(instrumented(t, y))
+            }))
+        };
         self.parameter_values_handle = parameter_values_handle.clone();
+        self.preparation_timings.callback_wiring_ms = elapsed_ms(callback_wiring_started);
 
+        let runtime_initialization_started = start.map(|_| Instant::now());
         let mut Solver_instance = BDF::new();
         self.reported_bdf_counters = BdfOperationCounters::default();
-        Solver_instance.set_max_order_cap(self.max_bdf_order);
+        Solver_instance
+            .try_set_max_order_cap(self.max_bdf_order)
+            .map_err(|error| IvpBackendError::InvalidArgumentSchema {
+                message: error.to_string(),
+            })?;
         Solver_instance
             .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
         Solver_instance
             .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
-        Solver_instance.set_initial(
-            wrapped_fun,
-            self.t0,
-            self.y0.clone(),
-            self.t_bound,
-            self.max_step,
-            NumberOrVec::Number(self.rtol),
-            NumberOrVec::Number(self.atol),
-            Some(wrapped_jac),
-            None,
-            self.vectorized,
-            self.first_step,
-        );
-        if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
-            Solver_instance.set_native_jacobian(
-                self.timed_native_jacobian(factory(parameter_values_handle.clone())),
-            );
-        }
+        Solver_instance
+            .try_set_initial_with_jacobian_source(
+                wrapped_fun,
+                self.t0,
+                self.y0.clone(),
+                self.t_bound,
+                self.max_step,
+                NumberOrVec::Number(self.rtol),
+                NumberOrVec::Number(self.atol),
+                jacobian_source,
+                None,
+                self.vectorized,
+                self.first_step,
+            )
+            .map_err(|error| IvpBackendError::InvalidArgumentSchema {
+                message: error.to_string(),
+            })?;
+        self.preparation_timings.runtime_initialization_ms =
+            elapsed_ms(runtime_initialization_started);
+
+        let linear_backend_started = start.map(|_| Instant::now());
         if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
             Solver_instance.set_linear_backend(factory());
         }
+        self.preparation_timings.linear_backend_setup_ms = elapsed_ms(linear_backend_started);
+
+        let publication_started = start.map(|_| Instant::now());
         self.Solver_instance = Solver_instance;
         self.mark_backend_prepared();
+        self.preparation_timings.runtime_publication_ms = elapsed_ms(publication_started);
+        self.preparation_timings.total_ms = elapsed_ms(start);
         self.record_prepare_duration(start);
         Ok(())
     }
 
-    fn try_generate_native_numeric(&mut self) -> Result<(), IvpBackendError> {
+    fn try_generate_native_numeric(&mut self) -> Result<(), BdfConfigurationError> {
+        self.preparation_timings = BdfPreparationTimings::default();
+        self.preparation_backend_telemetry = None;
+        self.prepared_jacobian_into_factory = None;
         let start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
-        let rhs =
-            self.native_rhs
-                .clone()
-                .ok_or_else(|| IvpBackendError::GeneratedBackendFailure {
-                    message: "native numeric BDF generation requires an RHS callback".to_string(),
-                })?;
+        let callback_wiring_started = start.map(|_| Instant::now());
+        let rhs = self
+            .native_rhs
+            .clone()
+            .ok_or(BdfConfigurationError::MissingNativeRhs)?;
         let wrapped_fun = self.instrument_residual(Box::new(move |t, y| rhs(t, y)));
 
-        let wrapped_jac = self
-            .native_jacobian
+        let jacobian_source = match self
+            .native_jacobian_source
             .clone()
-            .map(|jac| self.instrument_jacobian(Box::new(move |t, y| jac(t, y))));
+            .unwrap_or(BdfNativeJacobianSource::FiniteDifference)
+        {
+            BdfNativeJacobianSource::FiniteDifference => BdfJacobianSource::FiniteDifference,
+            BdfNativeJacobianSource::StateDependent(jacobian) => {
+                let jacobian = self.instrument_jacobian(Box::new(move |t, y| jacobian(t, y)));
+                BdfJacobianSource::StateDependent(Box::new(move |t, y| {
+                    BdfJacobian::from_dense(jacobian(t, y))
+                }))
+            }
+            BdfNativeJacobianSource::Constant(jacobian) => {
+                BdfJacobianSource::Constant(BdfJacobian::from_dense(jacobian))
+            }
+        };
+        self.preparation_timings.callback_wiring_ms = elapsed_ms(callback_wiring_started);
 
+        let runtime_initialization_started = start.map(|_| Instant::now());
         let mut solver_instance = BDF::new();
         self.reported_bdf_counters = BdfOperationCounters::default();
-        solver_instance.set_max_order_cap(self.max_bdf_order);
+        solver_instance.try_set_max_order_cap(self.max_bdf_order)?;
         solver_instance
             .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
         solver_instance
             .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
-        solver_instance.set_initial(
+        solver_instance.try_set_initial_with_jacobian_source(
             wrapped_fun,
             self.t0,
             self.y0.clone(),
@@ -1330,16 +1629,25 @@ impl ODEsolver {
             self.max_step,
             NumberOrVec::Number(self.rtol),
             NumberOrVec::Number(self.atol),
-            wrapped_jac,
+            jacobian_source,
             self.jac_sparsity.clone(),
             self.vectorized,
             self.first_step,
-        );
+        )?;
+        self.preparation_timings.runtime_initialization_ms =
+            elapsed_ms(runtime_initialization_started);
+
+        let linear_backend_started = start.map(|_| Instant::now());
         if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
             solver_instance.set_linear_backend(factory());
         }
+        self.preparation_timings.linear_backend_setup_ms = elapsed_ms(linear_backend_started);
+
+        let publication_started = start.map(|_| Instant::now());
         self.Solver_instance = solver_instance;
         self.mark_backend_prepared();
+        self.preparation_timings.runtime_publication_ms = elapsed_ms(publication_started);
+        self.preparation_timings.total_ms = elapsed_ms(start);
         self.record_prepare_duration(start);
         Ok(())
     }
@@ -1349,6 +1657,8 @@ impl ODEsolver {
         start: Option<Instant>,
         options: SymbolicIvpProblemOptions,
     ) -> Result<(), IvpBackendError> {
+        self.prepared_jacobian_into_factory = None;
+        let symbolic_started = start.map(|_| Instant::now());
         let (parameter_values_handle, fun) =
             if let Some(prepared_residual) = self.prepared_generated_residual.take() {
                 (self.parameter_values_handle.clone(), prepared_residual)
@@ -1371,43 +1681,69 @@ impl ODEsolver {
                     as Box<BdfPreparedResidual>;
                 (parameter_values_handle, residual)
             };
+        self.preparation_timings.symbolic_backend_ms = elapsed_ms(symbolic_started);
+
+        let callback_wiring_started = start.map(|_| Instant::now());
         let residual_callback: Arc<BdfPreparedResidual> = Arc::new(move |t, y| fun(t, y));
         self.prepared_residual_callback = Some(Arc::clone(&residual_callback));
         let residual_for_runtime = Arc::clone(&residual_callback);
-        let wrapped_fun = self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
+        let wrapped_fun =
+            self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
         self.parameter_values_handle = parameter_values_handle.clone();
+        self.preparation_timings.callback_wiring_ms = elapsed_ms(callback_wiring_started);
 
+        let runtime_initialization_started = start.map(|_| Instant::now());
         let mut solver_instance = BDF::new();
         self.reported_bdf_counters = BdfOperationCounters::default();
-        solver_instance.set_max_order_cap(self.max_bdf_order);
+        solver_instance
+            .try_set_max_order_cap(self.max_bdf_order)
+            .map_err(|error| IvpBackendError::InvalidArgumentSchema {
+                message: error.to_string(),
+            })?;
         solver_instance
             .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
         solver_instance
             .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
-        solver_instance.set_initial(
-            wrapped_fun,
-            self.t0,
-            self.y0.clone(),
-            self.t_bound,
-            self.max_step,
-            NumberOrVec::Number(self.rtol),
-            NumberOrVec::Number(self.atol),
-            None,
-            None,
-            self.vectorized,
-            self.first_step,
+        let Some(factory) = self.bdf_native_jacobian_factory.as_ref() else {
+            return Err(IvpBackendError::InvalidArgumentSchema {
+                message: "native Jacobian route has no registered factory".to_string(),
+            });
+        };
+        let jacobian_source = BdfJacobianSource::StateDependent(
+            self.timed_native_jacobian(factory(parameter_values_handle.clone())),
         );
-        if let Some(factory) = self.bdf_native_jacobian_factory.as_ref() {
-            solver_instance.set_native_jacobian(
-                self.timed_native_jacobian(factory(parameter_values_handle.clone())),
-            );
-        }
+        solver_instance
+            .try_set_initial_with_jacobian_source(
+                wrapped_fun,
+                self.t0,
+                self.y0.clone(),
+                self.t_bound,
+                self.max_step,
+                NumberOrVec::Number(self.rtol),
+                NumberOrVec::Number(self.atol),
+                jacobian_source,
+                None,
+                self.vectorized,
+                self.first_step,
+            )
+            .map_err(|error| IvpBackendError::InvalidArgumentSchema {
+                message: error.to_string(),
+            })?;
+        self.preparation_timings.runtime_initialization_ms =
+            elapsed_ms(runtime_initialization_started);
+
+        let linear_backend_started = start.map(|_| Instant::now());
         if let Some(factory) = self.bdf_linear_backend_factory.as_ref() {
             solver_instance.set_linear_backend(factory());
         }
+        self.preparation_timings.linear_backend_setup_ms = elapsed_ms(linear_backend_started);
+
+        let publication_started = start.map(|_| Instant::now());
         self.Solver_instance = solver_instance;
 
         self.mark_backend_prepared();
+        self.preparation_timings.runtime_publication_ms = elapsed_ms(publication_started);
+        self.preparation_timings.total_ms = elapsed_ms(start);
         self.record_prepare_duration(start);
         Ok(())
     }
@@ -1431,7 +1767,9 @@ impl ODEsolver {
         Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
             let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
             let out = jacobian(t, y);
-            let mut stats = stats_for_jac.lock().expect("IVP statistics lock poisoned");
+            let Ok(mut stats) = stats_for_jac.lock() else {
+                return out;
+            };
             if let Some(start) = start {
                 stats.record_jacobian_duration(start.elapsed());
             } else {
@@ -1495,10 +1833,45 @@ impl ODEsolver {
         if self.max_steps == 0 {
             return Err(BdfSolveError::InvalidMaxSteps);
         }
+        self.validate_callback_options()
+            .map_err(BdfSolveError::Configuration)?;
         if !self.backend_prepared {
-            self.try_generate().map_err(BdfSolveError::Backend)?;
+            if self.native_rhs.is_some() {
+                self.try_generate_native_numeric()
+                    .map_err(BdfSolveError::Configuration)?;
+            } else {
+                self.try_generate().map_err(BdfSolveError::Backend)?;
+            }
         }
         self.try_main_loop()
+    }
+
+    fn validate_callback_options(&self) -> Result<(), BdfConfigurationError> {
+        if let Some(pattern) = &self.jac_sparsity {
+            if pattern.shape() != (self.y0.len(), self.y0.len()) {
+                return Err(BdfConfigurationError::SparsityDimension);
+            }
+            if self.native_rhs.is_some()
+                && matches!(
+                    &self.native_jacobian_source,
+                    None | Some(BdfNativeJacobianSource::FiniteDifference)
+                )
+            {
+                return Err(BdfConfigurationError::UnsupportedJacobianSparsity);
+            }
+        }
+        if let Some(BdfNativeJacobianSource::Constant(jacobian)) = &self.native_jacobian_source {
+            if jacobian.shape() != (self.y0.len(), self.y0.len()) {
+                return Err(BdfConfigurationError::JacobianDimension);
+            }
+            if jacobian.iter().any(|value| !value.is_finite()) {
+                return Err(BdfConfigurationError::NonFiniteJacobian);
+            }
+        }
+        if self.vectorized {
+            return Err(BdfConfigurationError::UnsupportedVectorizedRhs);
+        }
+        Ok(())
     }
 
     fn try_main_loop(&mut self) -> Result<(), BdfSolveError> {
@@ -1575,7 +1948,9 @@ impl ODEsolver {
             let current = self.Solver_instance.operation_counters();
             let previous = self.reported_bdf_counters;
             self.reported_bdf_counters = current;
-            let mut stats = stats.lock().expect("IVP statistics lock poisoned");
+            let Ok(mut stats) = stats.lock() else {
+                return failure.map_or(Ok(()), Err);
+            };
             stats.solve_calls += 1;
             stats.step_calls += step_calls;
             stats.accepted_steps_total += current
@@ -1596,7 +1971,9 @@ impl ODEsolver {
             stats.nonlinear_iterations_total += current
                 .nonlinear_iterations
                 .saturating_sub(previous.nonlinear_iterations);
-            stats.bdf_nfev_total += current.rhs_evaluations.saturating_sub(previous.rhs_evaluations);
+            stats.bdf_nfev_total += current
+                .rhs_evaluations
+                .saturating_sub(previous.rhs_evaluations);
             stats.bdf_njev_total += current
                 .jacobian_evaluations
                 .saturating_sub(previous.jacobian_evaluations);
@@ -1606,8 +1983,31 @@ impl ODEsolver {
             stats.linear_factorization_ms_total += (current.linear_factorization_ms_total
                 - previous.linear_factorization_ms_total)
                 .max(0.0);
+            stats.linear_matrix_assembly_ms_total += (current.linear_matrix_assembly_ms_total
+                - previous.linear_matrix_assembly_ms_total)
+                .max(0.0);
             stats.linear_solve_ms_total +=
                 (current.linear_solve_ms_total - previous.linear_solve_ms_total).max(0.0);
+            stats.bdf_step_snapshot_ms_total +=
+                (current.step_snapshot_ms_total - previous.step_snapshot_ms_total).max(0.0);
+            stats.bdf_step_predictor_setup_ms_total += (current.step_predictor_setup_ms_total
+                - previous.step_predictor_setup_ms_total)
+                .max(0.0);
+            stats.bdf_newton_rhs_assembly_ms_total += (current.newton_rhs_assembly_ms_total
+                - previous.newton_rhs_assembly_ms_total)
+                .max(0.0);
+            stats.bdf_newton_correction_norm_ms_total += (current.newton_correction_norm_ms_total
+                - previous.newton_correction_norm_ms_total)
+                .max(0.0);
+            stats.bdf_newton_state_update_ms_total += (current.newton_state_update_ms_total
+                - previous.newton_state_update_ms_total)
+                .max(0.0);
+            stats.bdf_step_error_estimate_ms_total += (current.step_error_estimate_ms_total
+                - previous.step_error_estimate_ms_total)
+                .max(0.0);
+            stats.bdf_step_nordsieck_update_ms_total += (current.step_nordsieck_update_ms_total
+                - previous.step_nordsieck_update_ms_total)
+                .max(0.0);
             if let Some(ms) = assembly_ms {
                 stats.result_assembly_ms_total += ms;
             }
@@ -1786,6 +2186,189 @@ mod tests {
         assert_eq!(solver.telemetry_mode, BdfTelemetryMode::Off);
         assert_eq!(solver.status_kind(), BdfStatus::Running);
         assert_eq!(solver.get_status(), "running");
+    }
+
+    #[test]
+    fn unsupported_vectorized_rhs_fails_before_backend_preparation() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            None,
+            true,
+            None,
+        );
+        let mut solver = ODEsolver::new_with_options(options);
+
+        assert!(matches!(
+            solver.try_solve(),
+            Err(BdfSolveError::Configuration(
+                BdfConfigurationError::UnsupportedVectorizedRhs
+            ))
+        ));
+        assert!(!solver.backend_prepared);
+    }
+
+    #[test]
+    fn unsupported_jacobian_sparsity_fails_before_backend_preparation() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            Some(DMatrix::from_element(1, 1, 1.0)),
+            false,
+            None,
+        );
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_native_ode_callbacks(
+            |_, y: &DVector<f64>| DVector::from_element(y.len(), -y[0]),
+            None::<fn(f64, &DVector<f64>) -> DMatrix<f64>>,
+        );
+
+        assert!(matches!(
+            solver.try_solve(),
+            Err(BdfSolveError::Configuration(
+                BdfConfigurationError::UnsupportedJacobianSparsity
+            ))
+        ));
+        assert!(!solver.backend_prepared);
+    }
+
+    #[test]
+    fn native_callback_api_accepts_constant_jacobian_source() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            0.2,
+            0.05,
+            1e-7,
+            1e-10,
+            None,
+            false,
+            Some(0.01),
+        )
+        .with_equation_parameters(vec!["rate".to_string()])
+        .with_equation_parameter_values(DVector::from_element(1, 1.0))
+        .with_telemetry_mode(BdfTelemetryMode::Counters);
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_native_ode_callbacks_with_jacobian_source(
+            |_, y: &DVector<f64>| -y,
+            BdfNativeJacobianSource::Constant(DMatrix::from_element(1, 1, -1.0)),
+        );
+
+        solver.try_solve().unwrap();
+
+        assert_eq!(solver.get_statistics().bdf_njev_total, 1);
+        let (_, trajectory) = solver.get_result_ref();
+        let final_state = trajectory[(trajectory.nrows() - 1, 0)];
+        assert!((final_state - (-0.2_f64).exp()).abs() < 2e-6);
+    }
+
+    #[test]
+    fn native_callback_jacobian_shape_error_remains_typed() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            0.2,
+            0.05,
+            1e-7,
+            1e-10,
+            None,
+            false,
+            Some(0.01),
+        );
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_native_ode_callbacks_with_jacobian_source(
+            |_, y: &DVector<f64>| -y,
+            BdfNativeJacobianSource::StateDependent(Arc::new(|_, _| DMatrix::zeros(2, 2))),
+        );
+
+        assert!(matches!(
+            solver.try_solve(),
+            Err(BdfSolveError::Configuration(
+                BdfConfigurationError::JacobianDimension
+            ))
+        ));
+        assert!(!solver.backend_prepared);
+    }
+
+    #[test]
+    fn generated_native_jacobian_factory_skips_initial_finite_difference_work() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            0.2,
+            0.05,
+            1e-7,
+            1e-10,
+            None,
+            false,
+            Some(0.01),
+        )
+        .with_equation_parameters(vec!["rate".to_string()])
+        .with_equation_parameter_values(DVector::from_element(1, 1.0))
+        .with_telemetry_mode(BdfTelemetryMode::Counters);
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_bdf_native_jacobian_factory(|_| {
+            Box::new(|_, _| BdfJacobian::from_dense(DMatrix::from_element(1, 1, -1.0)))
+        });
+
+        solver.try_generate().unwrap();
+
+        let counters = solver.Solver_instance.operation_counters();
+        assert_eq!(
+            counters.rhs_evaluations, 1,
+            "only the initial RHS is needed"
+        );
+        assert_eq!(counters.jacobian_evaluations, 1);
+
+        solver
+            .try_continue_with_parameter_values(DVector::from_element(1, 2.0), 0.4)
+            .unwrap();
+        let continuation_counters = solver.Solver_instance.operation_counters();
+        assert_eq!(continuation_counters.rhs_evaluations, 1);
+        assert_eq!(continuation_counters.jacobian_evaluations, 1);
+    }
+
+    #[test]
+    fn jacobian_sparsity_does_not_reject_an_analytic_jacobian_route() {
+        let mut solver = BDF::new();
+        let result = solver.try_set_initial(
+            Box::new(|_, y| DVector::from_element(y.len(), -y[0])),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            NumberOrVec::Number(1e-6),
+            NumberOrVec::Number(1e-8),
+            Some(Box::new(|_, _| DMatrix::from_element(1, 1, -1.0))),
+            Some(DMatrix::from_element(1, 1, 1.0)),
+            false,
+            None,
+        );
+
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

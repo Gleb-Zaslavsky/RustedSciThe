@@ -3,6 +3,7 @@
 //! Mirrors `codegen_c_aot_registry.rs` but for Zig compiled libraries.
 
 use crate::symbolic::codegen::codegen_aot_registry::{AotRegistry, RegisteredAotArtifact};
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_build::ZigAotBuildResult;
 
@@ -35,7 +36,11 @@ pub fn register_zig_build_in_registry<'a>(
         expected_cdylib: build.expected_so.clone(),
     };
 
-    registry.register_materialized_build(manifest, &temp_build)
+    registry.try_register_materialized_build_with_backend(
+        manifest,
+        &temp_build,
+        Some(AotCodegenBackend::Zig),
+    ).expect("Zig build metadata should be valid at registry boundary")
 }
 
 #[cfg(test)]

@@ -1892,6 +1892,39 @@ impl GeneratedBlock {
         optimization_profile: AtomOptimizationProfile,
         reuse_policy: AtomTempReusePolicy,
     ) -> (Self, AtomGeneratedBlockBreakdown) {
+        Self::from_atom_views_with_shared_abi_and_profile_and_output_offsets(
+            fn_name,
+            views,
+            vars,
+            var_index_map,
+            layout,
+            optimization_profile,
+            reuse_policy,
+            None,
+        )
+    }
+
+    pub(crate) fn from_atom_views_with_shared_abi_and_profile_and_output_offsets(
+        fn_name: impl Into<String>,
+        views: &[AtomView<'_>],
+        vars: Arc<[String]>,
+        var_index_map: Arc<ahash::HashMap<u32, usize>>,
+        layout: Option<CodegenOutputLayout>,
+        optimization_profile: AtomOptimizationProfile,
+        reuse_policy: AtomTempReusePolicy,
+        output_offsets: Option<Vec<usize>>,
+    ) -> (Self, AtomGeneratedBlockBreakdown) {
+        if let Some(offsets) = &output_offsets {
+            assert!(
+                matches!(layout, Some(CodegenOutputLayout::Matrix { .. })),
+                "output offsets are only valid for dense matrix blocks"
+            );
+            assert_eq!(
+                offsets.len(),
+                views.len(),
+                "dense output offsets must match AtomView outputs"
+            );
+        }
         let lower_begin = std::time::Instant::now();
         let lowered = AtomLowerer::new_with_shared_index(
             Arc::clone(&var_index_map),
@@ -1940,7 +1973,7 @@ impl GeneratedBlock {
                 var_index_map: Some(var_index_map),
                 ir: final_ir,
                 layout,
-                output_offsets: None,
+                output_offsets,
             },
             breakdown,
         )
@@ -2988,6 +3021,45 @@ mod tests {
         assert!(source.contains("structural zeros elided"));
         assert!(source.contains("out[0]"));
         assert!(source.contains("out[3]"));
+        assert!(!source.contains("out[1] ="));
+        assert!(!source.contains("out[2] ="));
+    }
+
+    #[test]
+    fn atom_dense_jacobian_codegen_elides_structural_zeros_with_global_offsets() {
+        let (x, y) = crate::symbol!("x", "y");
+        let atoms = vec![
+            crate::symbolic::View::atom::Atom::new_var(x.clone()),
+            crate::symbolic::View::atom::Atom::new(),
+            crate::symbolic::View::atom::Atom::new(),
+            crate::symbolic::View::atom::Atom::new_var(y.clone()),
+        ];
+        let views = atoms.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
+        let vars: Arc<[String]> = vec!["x".to_string(), "y".to_string()].into();
+        let symbols = [x, y];
+        let var_index_map = Arc::new(
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| (symbol.id, index))
+                .collect(),
+        );
+        let block = GeneratedBlock::from_atom_views_with_shared_abi_and_profile_and_output_offsets(
+            "eval_atom_jacobian",
+            &[views[0], views[3]],
+            vars,
+            var_index_map,
+            Some(CodegenOutputLayout::Matrix { rows: 2, cols: 2 }),
+            AtomOptimizationProfile::Full,
+            AtomTempReusePolicy::Auto,
+            Some(vec![0, 3]),
+        )
+        .0;
+        let source = block.emit();
+
+        assert!(source.contains("structural zeros elided"));
+        assert!(source.contains("out[0] ="));
+        assert!(source.contains("out[3] ="));
         assert!(!source.contains("out[1] ="));
         assert!(!source.contains("out[2] ="));
     }

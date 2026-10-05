@@ -13,11 +13,13 @@
 use crate::symbolic::codegen::c_backend::codegen_c_aot_library::{
     GeneratedCAotLibrary, WrittenCAotLibrary,
 };
+use crate::symbolic::codegen::codegen_aot_lifecycle::run_aot_command;
 use log::info;
 use std::env;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
+use std::time::Duration;
 
 fn compiler_override_env_var(program: &str) -> Option<&'static str> {
     match program.to_ascii_lowercase().as_str() {
@@ -248,6 +250,7 @@ pub struct ExecutedCAotBuild {
     pub stdout: String,
     /// Captured standard error from the build process.
     pub stderr: String,
+    pub timed_out: bool,
 }
 
 impl CAotBuildRequest {
@@ -383,17 +386,36 @@ impl CAotBuildResult {
             self.build_command_line(),
             self.build_workdir().display()
         );
-        let output = Command::new(&self.build_program)
+        let mut command = Command::new(&self.build_program);
+        command
             .args(&self.build_args)
             .envs(self.build_env.iter().map(|(k, v)| (k, v)))
-            .current_dir(self.build_workdir())
-            .output()?;
+            .current_dir(self.build_workdir());
+        let output = run_aot_command(&mut command, None)?;
 
         Ok(ExecutedCAotBuild {
             build: self.clone(),
             status_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out: output.timed_out,
+        })
+    }
+
+    /// Executes the build with an explicit wall-clock timeout.
+    pub fn execute_with_timeout(&self, timeout: Duration) -> io::Result<ExecutedCAotBuild> {
+        let mut command = Command::new(&self.build_program);
+        command
+            .args(&self.build_args)
+            .envs(self.build_env.iter().map(|(k, v)| (k, v)))
+            .current_dir(self.build_workdir());
+        let output = run_aot_command(&mut command, Some(timeout))?;
+        Ok(ExecutedCAotBuild {
+            build: self.clone(),
+            status_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out: output.timed_out,
         })
     }
 }
@@ -402,7 +424,7 @@ impl ExecutedCAotBuild {
     /// Returns `true` when the build reported a successful exit status and the
     /// expected shared library exists on disk.
     pub fn succeeded(&self) -> bool {
-        self.status_code == Some(0) && self.build.expected_so.exists()
+        !self.timed_out && self.status_code == Some(0) && self.build.expected_so.exists()
     }
 }
 

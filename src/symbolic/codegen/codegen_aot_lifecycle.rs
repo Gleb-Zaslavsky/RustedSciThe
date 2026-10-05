@@ -8,7 +8,9 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Coarse lifecycle stage of one generated artifact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub enum AotFailureKind {
     RetryExhausted,
     Quarantined,
     Io,
+    Timeout,
 }
 
 /// On-disk state derived from the marker and compiled outputs.
@@ -137,6 +140,77 @@ impl AotFailureDiagnostics {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotLifecycleError {
     pub diagnostics: AotFailureDiagnostics,
+}
+
+/// Captured process output with an explicit timeout outcome.
+#[derive(Debug)]
+pub struct AotCommandOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+}
+
+/// Runs one external toolchain command with an optional wall-clock deadline.
+///
+/// `None` preserves the historical blocking behavior. When a deadline is
+/// supplied, the child is killed and reaped before returning, so a timed-out
+/// compiler cannot remain attached to a generated artifact directory.
+pub fn run_aot_command(
+    command: &mut Command,
+    timeout: Option<Duration>,
+) -> io::Result<AotCommandOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if timeout.is_none() {
+        let output = command.output()?;
+        return Ok(AotCommandOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            timed_out: false,
+        });
+    }
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let output = child.wait_with_output()?;
+            return Ok(AotCommandOutput {
+                status,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                timed_out: false,
+            });
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            terminate_aot_process_tree(&mut child);
+            let output = child.wait_with_output()?;
+            return Ok(AotCommandOutput {
+                status: output.status,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                timed_out: true,
+            });
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(windows)]
+fn terminate_aot_process_tree(child: &mut Child) {
+    // Cargo/compiler wrappers can leave descendants holding the captured
+    // pipes open. Kill the whole tree before reaping the root process.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+#[cfg(not(windows))]
+fn terminate_aot_process_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 impl AotLifecycleError {
@@ -282,5 +356,27 @@ mod tests {
         assert_eq!(error.diagnostics, diagnostics);
         assert!(error.to_string().contains("Compiler"));
         assert!(error.to_string().contains("problem-key"));
+    }
+
+    #[test]
+    fn command_runner_reports_timeout_after_killing_child() {
+        let started = Instant::now();
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 4 127.0.0.1 > NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 2"]);
+            command
+        };
+
+        let output = run_aot_command(&mut command, Some(Duration::from_millis(20)))
+            .expect("timeout runner should return captured process output");
+        assert!(output.timed_out);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout runner waited for a descendant after killing the root process"
+        );
     }
 }

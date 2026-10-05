@@ -7,6 +7,7 @@
 
 use ahash::{HashMap, HashSet};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 use super::{
     Atom, AtomView, DerivativeError,
@@ -54,7 +55,7 @@ impl std::error::Error for SparseAtomJacobianError {
 /// performed once here so that repeated Jacobian builds can stay on the View
 /// path.
 pub struct PreparedSparseAtomSystem {
-    atoms: Vec<Atom>,
+    atoms: Arc<[Atom]>,
     variable_symbols: Vec<Symbol>,
     column_indices_per_row: Vec<Vec<usize>>,
 }
@@ -67,7 +68,7 @@ impl PreparedSparseAtomSystem {
         variables_for_all_discrete: &[Vec<String>],
     ) -> Self {
         let atoms = functions.iter().map(expr_to_atom).collect::<Vec<_>>();
-        Self::from_atoms(&atoms, variable_names, variables_for_all_discrete)
+        Self::from_owned_atoms(atoms, variable_names, variables_for_all_discrete)
     }
 
     /// Prepare sparse lookup data starting from already packed residual atoms.
@@ -76,7 +77,19 @@ impl PreparedSparseAtomSystem {
         variable_names: &[String],
         variables_for_all_discrete: &[Vec<String>],
     ) -> Self {
-        let atoms = functions.to_vec();
+        Self::from_owned_atoms(
+            functions.to_vec(),
+            variable_names,
+            variables_for_all_discrete,
+        )
+    }
+
+    fn from_owned_atoms(
+        atoms: Vec<Atom>,
+        variable_names: &[String],
+        variables_for_all_discrete: &[Vec<String>],
+    ) -> Self {
+        let atoms: Arc<[Atom]> = atoms.into();
         let variable_symbols = variable_names
             .iter()
             .map(|name| Symbol::new(crate::wrap_symbol!(name.as_str())))
@@ -100,7 +113,20 @@ impl PreparedSparseAtomSystem {
         functions: &[Atom],
         variable_names: &[String],
     ) -> Self {
-        let atoms = functions.to_vec();
+        Self::from_shared_atoms_discovering_dependencies(
+            Arc::from(functions.to_vec()),
+            variable_names,
+        )
+    }
+
+    /// Prepare sparse lookup data while sharing an already-owned Atom graph.
+    ///
+    /// This avoids cloning every packed expression when a caller needs both
+    /// residual evaluators and a Jacobian plan from the same prepared system.
+    pub(crate) fn from_shared_atoms_discovering_dependencies(
+        atoms: Arc<[Atom]>,
+        variable_names: &[String],
+    ) -> Self {
         let variable_symbols = variable_names
             .iter()
             .map(|name| Symbol::new(crate::wrap_symbol!(name.as_str())))
@@ -524,5 +550,25 @@ mod tests {
             super::DerivativeError::DerivativeTargetMustBeFunction
         );
         assert!(error.to_string().contains("row 0, column 0"));
+    }
+
+    #[test]
+    fn discovered_dependency_plan_shares_prepared_atom_graph() {
+        let variables = vec!["x".to_string()];
+        let atoms: Arc<[Atom]> = vec![crate::symbolic::View::parser::parse("x^2").unwrap()].into();
+        let prepared = PreparedSparseAtomSystem::from_shared_atoms_discovering_dependencies(
+            Arc::clone(&atoms),
+            &variables,
+        );
+
+        assert!(Arc::ptr_eq(&prepared.atoms, &atoms));
+        assert_eq!(prepared.column_indices_per_row(), &[vec![0]]);
+        assert_eq!(
+            prepared
+                .try_calc_sparse_jacobian_with_bandwidth(None)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

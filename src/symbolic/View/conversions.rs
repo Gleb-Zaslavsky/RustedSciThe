@@ -231,9 +231,21 @@ pub fn expr_to_atom(expr: &Expr) -> Atom {
             Atom::new_var(sym)
         }
         Expr::Const(v) => approximate_f64_atom(*v),
-        Expr::Add(l, r) => expr_to_atom(l) + expr_to_atom(r),
+        Expr::Add(_, _) => {
+            let mut terms = Vec::new();
+            collect_add_terms(expr, &mut terms);
+            let atoms = terms.into_iter().map(expr_to_atom).collect::<Vec<_>>();
+            let views = atoms.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
+            Atom::add_many(&views)
+        }
         Expr::Sub(l, r) => expr_to_atom(l) - expr_to_atom(r),
-        Expr::Mul(l, r) => expr_to_atom(l) * expr_to_atom(r),
+        Expr::Mul(_, _) => {
+            let mut factors = Vec::new();
+            collect_mul_factors(expr, &mut factors);
+            let atoms = factors.into_iter().map(expr_to_atom).collect::<Vec<_>>();
+            let views = atoms.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
+            Atom::mul_many(&views)
+        }
         Expr::Div(l, r) => expr_to_atom(l) / expr_to_atom(r),
         Expr::Pow(b, e) => expr_to_atom(b).pow(expr_to_atom(e)),
         Expr::Exp(x) => FunctionBuilder::new(Atom::EXP)
@@ -266,6 +278,30 @@ pub fn expr_to_atom(expr: &Expr) -> Atom {
         Expr::arcctg(x) => FunctionBuilder::new(Atom::ACOT)
             .add_arg(expr_to_atom(x))
             .finish(),
+    }
+}
+
+fn collect_add_terms<'a>(expr: &'a Expr, terms: &mut Vec<&'a Expr>) {
+    let mut pending = vec![expr];
+    while let Some(current) = pending.pop() {
+        if let Expr::Add(left, right) = current {
+            pending.push(right);
+            pending.push(left);
+        } else {
+            terms.push(current);
+        }
+    }
+}
+
+fn collect_mul_factors<'a>(expr: &'a Expr, factors: &mut Vec<&'a Expr>) {
+    let mut pending = vec![expr];
+    while let Some(current) = pending.pop() {
+        if let Expr::Mul(left, right) = current {
+            pending.push(right);
+            pending.push(left);
+        } else {
+            factors.push(current);
+        }
     }
 }
 
@@ -638,6 +674,18 @@ mod tests {
         let eq2 = back == expected2;
         assert!(eq1 || eq2);
         sleep(time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn expr_to_atom_flattens_associative_add_and_mul_chains() {
+        let sum = Expr::parse_expression("a + b + c + d + e");
+        let product = Expr::parse_expression("a * b * c * d * e");
+        let vars = ["a", "b", "c", "d", "e"]
+            .map(|name| Atom::new_var(Symbol::new(crate::wrap_symbol!(name))));
+        let views = vars.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
+
+        assert_eq!(expr_to_atom(&sum), Atom::add_many(&views));
+        assert_eq!(expr_to_atom(&product), Atom::mul_many(&views));
     }
 
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).

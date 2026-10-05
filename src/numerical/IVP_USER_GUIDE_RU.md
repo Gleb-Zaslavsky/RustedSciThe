@@ -137,6 +137,12 @@ if let Some(stats) = solver.get_statistics() {
 
 `BDF` поддерживает и symbolic-маршруты, и pure numerical callbacks. Если native Jacobian не задан, автоматически используется конечная разность.
 
+Самостоятельный солвер `BDF` намеренно поддерживает только плотные матрицы:
+любой Jacobian материализуется для плотной линейной алгебры. Выбор
+ExprLegacy/AtomView и Lambdify/AOT определяет подготовку и выполнение evaluator,
+но не включает sparse-маршрут. Для BDF с разреженной или ленточной матрицей
+используйте LSODE2, явно выбрав семейство BDF и структуру Sparse или Banded.
+
 ### 5.2 Radau API
 
 Основной модуль: [`Radau_main.rs`](/f:/RUST/RustProjects_/RustedSciThe_experimental4/src/numerical/Radau/Radau_main.rs).

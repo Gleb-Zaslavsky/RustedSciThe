@@ -438,118 +438,38 @@ pub mod Nonlinear_systems;
 ///   ODE_instance.plot_result();
 ///  ```
 pub mod ODE_api;
-/// better universal api for all IVP solvers on board
-/// use universal syntax with "new" function and choise of solvers with enum "SolverType"
-/// ```
-///  use RustedSciThe::numerical::ODE_api2::{UniversalODESolver, SolverType};
-///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
-/// use RustedSciThe::symbolic::symbolic_engine::Expr;
+/// Universal API for the legacy non-Radau IVP solvers.
 ///
-/// use nalgebra::DVector;
-///         let eq1 = Expr::parse_expression("-y");
-///        let eq_system = vec![eq1];
-///        let values = vec!["y".to_string()];
-///        let arg = "t".to_string();
-///        let t0 = 0.0;
-///        let y0 = DVector::from_vec(vec![1.0]);
-///        let t_bound = 0.5;
-///
-///        let mut solver = UniversalODESolver::new(
-///            eq_system,
-///            values,
-///            arg,
-///            SolverType::Radau(RadauOrder::Order3),
-///            t0,
-///            y0,
-///            t_bound,
-///        );
-///        solver.set_max_iterations(100);
-///        solver.set_tolerance(1e-6);
-///        solver.set_step_size(1e-3);
-///        solver.initialize();
-///        solver.solve();
-///        let (t_result, y_result) = solver.get_result();
-///  ```
-///  or use shortcuts for every solver
-/// ```
-///  use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
-///  use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
-/// use RustedSciThe::symbolic::symbolic_engine::Expr;
-/// use nalgebra::DVector;
-///        let eq1 = Expr::parse_expression("-y");
-///        let eq_system = vec![eq1];
-///        let values = vec!["y".to_string()];
-///        let arg = "t".to_string();
-///        let t0 = 0.0;
-///        let y0 = DVector::from_vec(vec![1.0]);
-///        let t_bound = 0.5;
-///
-///        let mut solver = UniversalODESolver::radau(
-///            eq_system,
-///            values,
-///            arg,
-///            RadauOrder::Order3,
-///            t0,
-///            y0,
-///            t_bound,
-///            1e-6,
-///            50,
-///            Some(1e-3),
-///        );
-///
-///        solver.solve();
-///        let (t_result, y_result) = solver.get_result();
-///  ```        
+/// The production Radau entry point is `numerical::Radau::RadauSolver`.
+/// The archived Radau selector is intentionally not constructed by this
+/// compatibility facade; use the dedicated Radau API and examples instead.
 pub mod ODE_api2;
-/// Radau solver (good for nonlinear ODEs)
-/// #############################END OF ODEs SECTIONS#####
+/// Radau solver for nonlinear and stiff ODEs.
 ///
-/// Example#1
+/// The stable entry point is `RadauSolver`; the archived `Radau_main` module
+/// is not part of the public API. See `examples/radau_public_api_guide.rs`.
+///
 /// ```
-///   use RustedSciThe::symbolic::symbolic_engine::Expr;
+/// use RustedSciThe::numerical::Radau::{
+///     RadauConfig, RadauFrontend, RadauProblem, RadauSolver,
+/// };
+/// use RustedSciThe::symbolic::symbolic_engine::Expr;
 ///
-///    use RustedSciThe::numerical::Radau::Radau_main::{Radau, RadauOrder};
-///    use approx::assert_relative_eq;
-///    use nalgebra::DMatrix;
-///    use nalgebra::DVector;
-///    use simplelog::*;
-///   // Test system: y1' = -2*y1 + y2, y2' = y1 - 2*y2
-///        // Initial conditions: y1(0) = 1, y2(0) = 0
-///        // solution: y1(t) =  1/2 e^(-3 x) (e^(2 x) + 1)
-///        // y2(t) = 1/2 e^(-3 x) (-1 + e^(2 x))
-///        let eq1 = Expr::parse_expression("-2*y1+y2");
-///        let eq2 = Expr::parse_expression("y1-2*y2");
-///        let eq_system = vec![eq1, eq2];
-///
-///        let values = vec!["y1".to_string(), "y2".to_string()];
-///        let arg = "t".to_string();
-///        let tolerance = 1e-6;
-///        let max_iterations = 50;
-///        let h = Some(1e-3);
-///        let t0 = 0.0;
-///        let t_bound = 1.0;
-///        let y0 = DVector::from_vec(vec![1.0, 0.0]);
-///
-///        let mut radau = Radau::new(RadauOrder::Order3);
-///        radau.set_initial(
-///            eq_system,
-///            values,
-///            arg,
-///            tolerance,
-///            max_iterations,
-///            h,
-///            t0,
-///            t_bound,
-///            y0,
-///        );
-///
-///        radau.solve();
-///
-///        assert_eq!(radau.status, "finished");
-///        let (_, y_result) = radau.get_result();
-///        let y_res = y_result.unwrap();
-///
-///    ```
+/// let problem = RadauProblem::new(
+///     vec![Expr::parse_expression("-y")],
+///     vec!["y".to_owned()],
+///     "t",
+/// );
+/// let config = RadauConfig {
+///     frontend: RadauFrontend::ExprLegacy,
+///     t_bound: 1.0,
+///     ..RadauConfig::default()
+/// };
+/// let mut solver = RadauSolver::prepare(problem, config)?;
+/// let solution = solver.solve(&[1.0])?;
+/// assert!((solution.y[0] - (-1.0f64).exp()).abs() < 1e-5);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub mod Radau;
 pub mod Rosenbrock;
 /// shooting method for solving BVP

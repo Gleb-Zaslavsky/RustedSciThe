@@ -331,6 +331,80 @@ impl PreparedNativeAtomJacobian {
             },
         )
     }
+
+    /// Evaluate native Jacobian entries directly from borrowed IVP segments.
+    ///
+    /// This is the solver-neutral counterpart of the historical DMatrix
+    /// callback.  It keeps Radau and other IVP consumers on the same prepared
+    /// Atom plan without forcing a temporary `DVector` or dense matrix.
+    pub(crate) fn evaluate_values_into_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        execution_policy: IvpLambdifyExecutionPolicy,
+        values: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        if values.len() != self.entries.len() {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "native Jacobian values".to_string(),
+                expected: self.entries.len(),
+                actual: values.len(),
+            });
+        }
+        let actual_input_len = 1 + parameters.len() + state.len();
+        if actual_input_len != self.expected_input_len {
+            return Err(IvpBackendError::InvalidStateShape {
+                expected: self.expected_input_len.saturating_sub(1 + parameters.len()),
+                actual: state.len(),
+            });
+        }
+
+        let parallel =
+            execution_policy.should_parallel_with_tasks(self.entries.len(), self.entries.len());
+        if parallel {
+            let worker_count = rayon::current_num_threads().max(1);
+            let chunk_size = (self.entries.len() + worker_count - 1)
+                .checked_div(worker_count)
+                .unwrap_or(1)
+                .max(1);
+            self.entries
+                .par_chunks(chunk_size)
+                .zip(values.par_chunks_mut(chunk_size))
+                .enumerate()
+                .try_for_each(|(chunk_index, (entries, values))| {
+                    PreparedEvaluator::evaluate_many_thread_local_ivp(
+                        entries.iter().map(|entry| &entry.evaluator),
+                        time,
+                        parameters,
+                        state,
+                        self.expected_input_len,
+                        values,
+                    )
+                    .map_err(|(index, message)| {
+                        IvpBackendError::AtomEvaluationFailure {
+                            stage: "Jacobian".to_string(),
+                            index: chunk_index * chunk_size + index,
+                            message,
+                        }
+                    })
+                })
+        } else {
+            PreparedEvaluator::evaluate_many_thread_local_ivp(
+                self.entries.iter().map(|entry| &entry.evaluator),
+                time,
+                parameters,
+                state,
+                self.expected_input_len,
+                values,
+            )
+            .map_err(|(index, message)| IvpBackendError::AtomEvaluationFailure {
+                stage: "Jacobian".to_string(),
+                index,
+                message,
+            })
+        }
+    }
 }
 
 /// Immutable native residual runtime shared by owned and caller-owned APIs.
@@ -491,6 +565,41 @@ impl PreparedNativeAtomResidual {
         evaluation
     }
 
+    fn evaluate_values_into_parts(
+        &self,
+        t: f64,
+        parameters: &[f64],
+        state: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        if state.len() != self.expected_state_len {
+            return Err(IvpBackendError::InvalidStateShape {
+                expected: self.expected_state_len,
+                actual: state.len(),
+            });
+        }
+        if out.len() != self.evaluators.len() {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "residual".to_string(),
+                expected: self.evaluators.len(),
+                actual: out.len(),
+            });
+        }
+        PreparedEvaluator::evaluate_many_thread_local_ivp(
+            self.evaluators.iter(),
+            t,
+            parameters,
+            state,
+            self.expected_input_len,
+            out,
+        )
+        .map_err(|(index, message)| IvpBackendError::AtomEvaluationFailure {
+            stage: "residual".to_string(),
+            index,
+            message,
+        })
+    }
+
     fn evaluate(&self, t: f64, y: &DVector<f64>) -> Result<DVector<f64>, IvpBackendError> {
         let mut values = vec![0.0; self.len()];
         self.evaluate_into(t, y, &mut values)?;
@@ -545,6 +654,13 @@ pub struct SymbolicIvpProblemOptions {
     /// Runtime policy for independent residual/Jacobian Lambdify entries.
     /// Sequential is the compatibility default; Parallel and Auto are opt-in.
     pub lambdify_execution_policy: IvpLambdifyExecutionPolicy,
+    /// Optional row-major Jacobian supplied by the caller.
+    ///
+    /// When present, preparation must not differentiate the residual graph.
+    /// The payload is also carried into the AOT manifest, so an explicit
+    /// Jacobian cannot accidentally reuse an artifact generated from a
+    /// residual-derived Jacobian.
+    pub explicit_jacobian: Option<Vec<Vec<Expr>>>,
     /// Optional preparation/callback telemetry. Disabled by default.
     pub telemetry: IvpTelemetry,
 }
@@ -589,6 +705,13 @@ impl SymbolicIvpProblemOptions {
     /// execution without changing symbolic preparation or solver semantics.
     pub fn with_lambdify_execution_policy(mut self, policy: IvpLambdifyExecutionPolicy) -> Self {
         self.lambdify_execution_policy = policy;
+        self
+    }
+
+    /// Supplies a validated row-major symbolic Jacobian for all supported
+    /// symbolic assembly frontends.
+    pub fn with_explicit_jacobian(mut self, jacobian: Vec<Vec<Expr>>) -> Self {
+        self.explicit_jacobian = Some(jacobian);
         self
     }
 
@@ -726,6 +849,7 @@ pub struct PreparedSymbolicIvpProblem {
     try_residual: Arc<IvpTryResidualEval>,
     try_jacobian: Arc<IvpTryDenseJacobianEval>,
     native_residual: Option<Arc<PreparedNativeAtomResidual>>,
+    native_jacobian: Option<Arc<PreparedNativeAtomJacobian>>,
     linked_residual: Option<Arc<PreparedLinkedResidual>>,
     _linked_dense: Option<Arc<PreparedLinkedDense>>,
     /// Packed Atom payload retained for the native AOT handoff. It is built
@@ -736,6 +860,10 @@ pub struct PreparedSymbolicIvpProblem {
     pub equations: Vec<Expr>,
     /// Symbolic dense Jacobian used by both lambdify and AOT preparation.
     pub symbolic_jacobian: Vec<Vec<Expr>>,
+    /// Explicit Jacobian source, when the caller supplied one. This remains
+    /// separate from the derived/native representation so AtomView AOT can
+    /// lower it directly without converting a derived Jacobian back to Expr.
+    pub(crate) explicit_jacobian: Option<Vec<Vec<Expr>>>,
     /// Independent IVP argument name, typically `t`.
     pub time_arg: String,
     /// Differentiable state variables.
@@ -765,6 +893,8 @@ pub struct PreparedSymbolicIvpResidualProblem {
     native_atoms: Option<Arc<[Atom]>>,
     /// Symbolic equations used to prepare residuals.
     pub equations: Vec<Expr>,
+    /// Explicit Jacobian retained for the later AtomView AOT handoff.
+    pub(crate) explicit_jacobian: Option<Vec<Vec<Expr>>>,
     /// Independent IVP argument name, typically `t`.
     pub time_arg: String,
     /// Differentiable state variables.
@@ -819,11 +949,100 @@ impl PreparedLinkedDense {
         }
     }
 
-    fn evaluate_into(
+    fn evaluate_with_output<T>(
         &self,
         t: f64,
         y: &DVector<f64>,
-        out: &mut DMatrix<f64>,
+        args: &mut Vec<f64>,
+        assemble_output: impl FnOnce(&[f64], usize, usize) -> T,
+    ) -> Result<T, IvpBackendError> {
+        let callback_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::JacobianCallback);
+        if y.len() != self.expected_state_len {
+            self.telemetry.record_error();
+            drop(callback_scope);
+            return Err(IvpBackendError::InvalidStateShape {
+                expected: self.expected_state_len,
+                actual: y.len(),
+            });
+        }
+        let (rows, cols) = self.linked.shape;
+
+        let binding_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::ArgumentBinding);
+        let copy_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::AotArgumentCopy);
+        if let Err(error) =
+            build_linked_args_into(t, y, self.parameter_values_handle.as_ref(), args)
+        {
+            self.telemetry.record_error();
+            drop(copy_scope);
+            drop(binding_scope);
+            drop(callback_scope);
+            return Err(error);
+        }
+        self.telemetry
+            .record_copy_bytes(args.len() * std::mem::size_of::<f64>());
+        drop(copy_scope);
+        drop(binding_scope);
+
+        let worker_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
+        let mut values = vec![0.0; rows * cols];
+        self.telemetry
+            .record_allocation(values.len() * std::mem::size_of::<f64>());
+        self.linked
+            .try_jacobian_eval_with_policy(
+                args.as_slice(),
+                values.as_mut_slice(),
+                self.execution_policy,
+                &self.telemetry,
+            )
+            .map_err(|error| IvpBackendError::GeneratedBackendFailure {
+                message: error.to_string(),
+            })?;
+        drop(worker_scope);
+
+        let output_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+        let output = assemble_output(values.as_slice(), rows, cols);
+        self.telemetry
+            .record_copy_bytes(values.len() * std::mem::size_of::<f64>());
+        drop(output_scope);
+        self.telemetry.record_jacobian_evaluation_count();
+        drop(callback_scope);
+        Ok(output)
+    }
+
+    fn evaluate_owned(
+        &self,
+        t: f64,
+        y: &DVector<f64>,
+        args: &mut Vec<f64>,
+    ) -> Result<DMatrix<f64>, IvpBackendError> {
+        self.evaluate_with_output(t, y, args, |values, rows, cols| {
+            self.telemetry
+                .record_allocation(values.len() * std::mem::size_of::<f64>());
+            DMatrix::from_row_slice(rows, cols, values)
+        })
+    }
+
+    /// Evaluates directly into the caller-owned row-major ABI buffer.
+    ///
+    /// Generated dense Jacobian callbacks already write row-major values. This
+    /// boundary deliberately does not materialize a temporary `Vec` or a
+    /// `DMatrix`; callers that can consume the generated layout can therefore
+    /// reuse both the argument and output buffers across evaluations.
+    fn evaluate_row_major_into(
+        &self,
+        t: f64,
+        y: &DVector<f64>,
+        out: &mut [f64],
         args: &mut Vec<f64>,
     ) -> Result<(), IvpBackendError> {
         let callback_scope = self
@@ -838,12 +1057,13 @@ impl PreparedLinkedDense {
             });
         }
         let (rows, cols) = self.linked.shape;
-        if out.nrows() != rows || out.ncols() != cols {
+        let expected = rows.saturating_mul(cols);
+        if out.len() != expected {
             self.telemetry.record_error();
             drop(callback_scope);
             return Err(IvpBackendError::InvalidOutputShape {
-                stage: "jacobian".to_string(),
-                expected: rows * cols,
+                stage: "jacobian-row-major".to_string(),
+                expected,
                 actual: out.len(),
             });
         }
@@ -871,11 +1091,10 @@ impl PreparedLinkedDense {
         let worker_scope = self
             .telemetry
             .scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
-        let mut values = vec![0.0; rows * cols];
         self.linked
             .try_jacobian_eval_with_policy(
                 args.as_slice(),
-                values.as_mut_slice(),
+                out,
                 self.execution_policy,
                 &self.telemetry,
             )
@@ -883,21 +1102,50 @@ impl PreparedLinkedDense {
                 message: error.to_string(),
             })?;
         drop(worker_scope);
-
-        let output_scope = self
-            .telemetry
-            .scoped_warm_stage(IvpWarmStage::AotOutputWrite);
-        for row in 0..rows {
-            for col in 0..cols {
-                out[(row, col)] = values[row * cols + col];
-            }
-        }
-        self.telemetry
-            .record_copy_bytes(values.len() * std::mem::size_of::<f64>());
-        drop(output_scope);
         self.telemetry.record_jacobian_evaluation_count();
         drop(callback_scope);
         Ok(())
+    }
+
+    /// Evaluates a linked dense Jacobian from borrowed solver slices.
+    ///
+    /// This is the zero-temporary boundary used by Radau AOT.  Unlike the
+    /// historical DVector-facing method it does not create a state vector or
+    /// consult a shared parameter lock on every callback.
+    fn evaluate_row_major_parts_into(
+        &self,
+        t: f64,
+        parameters: &[f64],
+        state: &[f64],
+        out: &mut [f64],
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        if state.len() != self.expected_state_len {
+            return Err(IvpBackendError::InvalidStateShape {
+                expected: self.expected_state_len,
+                actual: state.len(),
+            });
+        }
+        let (rows, cols) = self.linked.shape;
+        let expected = rows.saturating_mul(cols);
+        if out.len() != expected {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "jacobian-row-major".to_string(),
+                expected,
+                actual: out.len(),
+            });
+        }
+        build_linked_args_from_parts(t, parameters, state, args);
+        self.linked
+            .try_jacobian_eval_with_policy(
+                args.as_slice(),
+                out,
+                self.execution_policy,
+                &self.telemetry,
+            )
+            .map_err(|error| IvpBackendError::GeneratedBackendFailure {
+                message: error.to_string(),
+            })
     }
 }
 
@@ -1001,6 +1249,42 @@ impl PreparedLinkedResidual {
         drop(output_scope);
         drop(callback_scope);
         Ok(())
+    }
+
+    /// Evaluates a linked residual from borrowed solver slices without
+    /// materializing a temporary state vector or parameter binding.
+    fn evaluate_parts_into(
+        &self,
+        t: f64,
+        parameters: &[f64],
+        state: &[f64],
+        out: &mut [f64],
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        if state.len() != self.expected_state_len {
+            return Err(IvpBackendError::InvalidStateShape {
+                expected: self.expected_state_len,
+                actual: state.len(),
+            });
+        }
+        if out.len() != self.linked.residual_len {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "residual".to_string(),
+                expected: self.linked.residual_len,
+                actual: out.len(),
+            });
+        }
+        build_linked_args_from_parts(t, parameters, state, args);
+        self.linked
+            .try_residual_eval_with_policy(
+                args.as_slice(),
+                out,
+                self.execution_policy,
+                &self.telemetry,
+            )
+            .map_err(|error| IvpBackendError::GeneratedBackendFailure {
+                message: error.to_string(),
+            })
     }
 }
 
@@ -1171,6 +1455,7 @@ impl PreparedSymbolicIvpResidualProblem {
             linked_residual: Some(linked_runtime),
             native_atoms: None,
             equations: self.equations,
+            explicit_jacobian: self.explicit_jacobian,
             time_arg: self.time_arg,
             variables: self.variables,
             equation_parameters: self.equation_parameters,
@@ -1185,6 +1470,145 @@ impl PreparedSymbolicIvpResidualProblem {
 impl PreparedSymbolicIvpProblem {
     pub(crate) fn native_atoms(&self) -> Option<&[Atom]> {
         self.native_atoms.as_deref()
+    }
+
+    /// Returns whether the prepared problem can write generated dense AOT
+    /// Jacobian values into a caller-owned row-major buffer.
+    pub(crate) fn supports_jacobian_row_major_workspace(&self) -> bool {
+        self._linked_dense.is_some()
+    }
+
+    /// Number of entries in the prepared native Atom Jacobian, when this
+    /// problem uses the AtomView assembly route.
+    pub(crate) fn native_jacobian_entry_count(&self) -> Option<usize> {
+        self.native_jacobian
+            .as_ref()
+            .map(|jacobian| jacobian.entries.len())
+    }
+
+    /// Return the immutable native Jacobian entry pattern for structured
+    /// solver consumers. This is preparation metadata; callbacks should use
+    /// the borrowed values method below rather than rebuild the pattern.
+    pub(crate) fn native_jacobian_pattern(&self) -> Option<Vec<(usize, usize)>> {
+        self.native_jacobian.as_ref().map(|jacobian| {
+            jacobian
+                .entries
+                .iter()
+                .map(|entry| (entry.row, entry.col))
+                .collect()
+        })
+    }
+
+    /// Evaluate the native Atom residual from borrowed IVP slices.
+    ///
+    /// This is shared by solver adapters so they do not need to construct a
+    /// temporary nalgebra vector merely to call the prepared evaluator.
+    pub(crate) fn try_evaluate_native_residual_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        let Some(native) = &self.native_residual else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no native AtomView residual".to_string(),
+            });
+        };
+        native.evaluate_values_into_parts(time, parameters, state, output)
+    }
+
+    /// Evaluate the native Atom Jacobian directly into a row-major caller
+    /// buffer. The sparse evaluator values are reused through `values` and
+    /// never materialized as an Expr or DMatrix.
+    pub(crate) fn try_evaluate_native_jacobian_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        output: &mut [f64],
+        values: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        let Some(native) = &self.native_jacobian else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no native AtomView Jacobian".to_string(),
+            });
+        };
+        let rows = self.equations.len();
+        let cols = self.variables.len();
+        let expected = rows.saturating_mul(cols);
+        if output.len() != expected {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "native Jacobian".to_string(),
+                expected,
+                actual: output.len(),
+            });
+        }
+        self.try_evaluate_native_jacobian_values_parts(time, parameters, state, values)?;
+        output.fill(0.0);
+        for (entry, value) in native.entries.iter().zip(values.iter().copied()) {
+            output[entry.row * cols + entry.col] = value;
+        }
+        Ok(())
+    }
+
+    /// Evaluate native Jacobian entries in the immutable prepared pattern
+    /// order. Structured consumers can write these values directly into
+    /// sparse or banded storage without first materializing a dense matrix.
+    pub(crate) fn try_evaluate_native_jacobian_values_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        values: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        let Some(native) = &self.native_jacobian else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no native AtomView Jacobian".to_string(),
+            });
+        };
+        values.resize(native.entries.len(), 0.0);
+        native.evaluate_values_into_parts(
+            time,
+            parameters,
+            state,
+            self.execution_policy,
+            values.as_mut_slice(),
+        )
+    }
+
+    /// Evaluate a linked dense AOT residual directly from borrowed slices.
+    pub(crate) fn try_evaluate_aot_residual_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        output: &mut [f64],
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        let Some(linked) = &self.linked_residual else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no linked AOT residual".to_string(),
+            });
+        };
+        linked.evaluate_parts_into(time, parameters, state, output, args)
+    }
+
+    /// Evaluate a linked dense AOT Jacobian directly into row-major storage.
+    pub(crate) fn try_evaluate_aot_jacobian_parts(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        output: &mut [f64],
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        let Some(linked) = &self._linked_dense else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no linked AOT Jacobian".to_string(),
+            });
+        };
+        linked.evaluate_row_major_parts_into(time, parameters, state, output, args)
     }
 
     /// Evaluates the prepared residual through the typed fallible boundary.
@@ -1245,6 +1669,100 @@ impl PreparedSymbolicIvpProblem {
         y: &DVector<f64>,
     ) -> Result<DMatrix<f64>, IvpBackendError> {
         (self.try_jacobian)(t, y)
+    }
+
+    /// Evaluates a dense Jacobian into caller-owned row-major storage.
+    ///
+    /// This is the zero-temporary boundary for linked dense AOT callbacks:
+    /// `out` is written directly by the generated evaluator and `args` is
+    /// reused for flattened input binding. The compatibility `DMatrix`
+    /// callback remains available through [`Self::try_evaluate_jacobian`].
+    /// For non-linked backends this method preserves the same output contract
+    /// through a compatibility fallback.
+    pub fn try_evaluate_jacobian_row_major_into_with_workspace(
+        &self,
+        t: f64,
+        y: &DVector<f64>,
+        out: &mut [f64],
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        // Native AtomView preparation keeps the Jacobian in its native plan
+        // and leaves the legacy symbolic matrix empty. Dense IVP shape is
+        // defined by the validated equation/state schema instead.
+        let rows = self.equations.len();
+        let cols = self.variables.len();
+        let expected = rows.saturating_mul(cols);
+        if out.len() != expected {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "jacobian-row-major".to_string(),
+                expected,
+                actual: out.len(),
+            });
+        }
+        if let Some(linked) = &self._linked_dense {
+            return linked.evaluate_row_major_into(t, y, out, args);
+        }
+
+        let matrix = self.try_evaluate_jacobian(t, y)?;
+        for row in 0..rows {
+            let start = row * cols;
+            for col in 0..cols {
+                out[start + col] = matrix[(row, col)];
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluates a dense Jacobian into caller-owned nalgebra storage while
+    /// reusing the flattened ABI and row-major value workspaces.
+    ///
+    /// The generated dense ABI is row-major, whereas `DMatrix` stores each
+    /// column contiguously. The conversion therefore writes one destination
+    /// column at a time, avoiding the strided destination writes used by the
+    /// old row-first bridge and keeping the output-assembly scope visible in
+    /// the shared IVP telemetry.
+    pub(crate) fn try_evaluate_jacobian_into_dmatrix_with_workspace(
+        &self,
+        t: f64,
+        y: &DVector<f64>,
+        out: &mut DMatrix<f64>,
+        values: &mut Vec<f64>,
+        args: &mut Vec<f64>,
+    ) -> Result<(), IvpBackendError> {
+        // AtomView native preparation intentionally does not retain the
+        // legacy Expr Jacobian matrix. The validated IVP schema is the
+        // canonical dense shape for both symbolic frontends.
+        let rows = self.equations.len();
+        let cols = self.variables.len();
+        if out.shape() != (rows, cols) {
+            return Err(IvpBackendError::InvalidOutputShape {
+                stage: "jacobian-dmatrix".to_string(),
+                expected: rows.saturating_mul(cols),
+                actual: out.len(),
+            });
+        }
+        values.resize(rows.saturating_mul(cols), 0.0);
+        self.try_evaluate_jacobian_row_major_into_with_workspace(
+            t,
+            y,
+            values.as_mut_slice(),
+            args,
+        )?;
+
+        let output_scope = self
+            .telemetry
+            .scoped_warm_stage(IvpWarmStage::JacobianOutputAssembly);
+        let output = out.as_mut_slice();
+        for col in 0..cols {
+            let destination = &mut output[col * rows..(col + 1) * rows];
+            for row in 0..rows {
+                destination[row] = values[row * cols + col];
+            }
+        }
+        self.telemetry
+            .record_copy_bytes(values.len() * std::mem::size_of::<f64>());
+        drop(output_scope);
+        Ok(())
     }
 
     /// Updates parameter values in-place without recompiling closures.
@@ -1365,10 +1883,8 @@ impl PreparedSymbolicIvpProblem {
         });
         let dense_runtime_for_closure = linked_dense_runtime.clone();
         let try_jacobian: Arc<IvpTryDenseJacobianEval> = Arc::new(move |t, y| {
-            let mut out = DMatrix::zeros(rows, cols);
             let mut args = Vec::new();
-            dense_runtime_for_closure.evaluate_into(t, y, &mut out, &mut args)?;
-            Ok(out)
+            dense_runtime_for_closure.evaluate_owned(t, y, &mut args)
         });
         let residual =
             compatibility_residual(try_residual.clone(), telemetry.clone(), residual_len);
@@ -1380,11 +1896,13 @@ impl PreparedSymbolicIvpProblem {
             try_residual,
             try_jacobian,
             native_residual: None,
+            native_jacobian: None,
             linked_residual: Some(linked_runtime),
             _linked_dense: Some(linked_dense_runtime),
             native_atoms: None,
             equations: self.equations,
             symbolic_jacobian: self.symbolic_jacobian,
+            explicit_jacobian: self.explicit_jacobian,
             time_arg: self.time_arg,
             variables: self.variables,
             equation_parameters: self.equation_parameters,
@@ -1568,8 +2086,10 @@ fn prepare_native_atom_jacobian_from_system(
     let rows = system.atoms.len();
     let cols = variables.len();
     let dependency_started = telemetry.start_cold_stage(IvpColdStage::AtomDependencyAnalysis);
-    let prepared =
-        PreparedSparseAtomSystem::from_atoms_discovering_dependencies(&system.atoms, variables);
+    let prepared = PreparedSparseAtomSystem::from_shared_atoms_discovering_dependencies(
+        Arc::clone(&system.atoms),
+        variables,
+    );
     telemetry.record_cold_stage(IvpColdStage::AtomDependencyAnalysis, dependency_started);
     let differentiation_started = telemetry.start_cold_stage(IvpColdStage::SymbolicDifferentiation);
     let sparse_entries = prepared
@@ -1615,6 +2135,55 @@ fn prepare_native_atom_jacobian_from_system(
     Ok(PreparedNativeAtomJacobian {
         rows,
         cols,
+        expected_input_len: system.context.vars.len(),
+        entries: compiled?.into(),
+    })
+}
+
+/// Compiles a caller-supplied Jacobian directly into the native Atom plan.
+///
+/// The residual graph remains the source of the residual callback, while the
+/// explicit Jacobian expressions are converted to Atom exactly once. Zero
+/// entries are omitted from the native entry list and are restored as zeros
+/// only when a dense caller asks for the complete matrix.
+fn prepare_native_atom_jacobian_from_explicit(
+    system: &PreparedNativeAtomSystem,
+    jacobian: &[Vec<Expr>],
+    variables: &[String],
+    telemetry: &IvpTelemetry,
+) -> Result<PreparedNativeAtomJacobian, IvpBackendError> {
+    let evaluator_started =
+        telemetry.start_cold_stage(IvpColdStage::NativeJacobianEvaluatorPreparation);
+    let compiled = jacobian
+        .iter()
+        .enumerate()
+        .flat_map(|(row, entries)| {
+            entries.iter().enumerate().filter_map(move |(col, expr)| {
+                (!expr.is_zero()).then_some((row, col, expr))
+            })
+        })
+        .map(|(row, col, expr)| {
+            let atom = expr_to_atom(expr);
+            PreparedEvaluator::new_with_context(&atom, &system.context, &system.function_map)
+                .map(|evaluator| PreparedNativeAtomJacobianEntry {
+                    row,
+                    col,
+                    evaluator,
+                })
+                .map_err(|message| IvpBackendError::AtomPreparationFailure {
+                    stage: "explicit native Jacobian evaluator compilation".to_string(),
+                    message,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>();
+    telemetry.record_cold_stage(
+        IvpColdStage::NativeJacobianEvaluatorPreparation,
+        evaluator_started,
+    );
+
+    Ok(PreparedNativeAtomJacobian {
+        rows: jacobian.len(),
+        cols: variables.len(),
         expected_input_len: system.context.vars.len(),
         entries: compiled?.into(),
     })
@@ -1677,13 +2246,12 @@ fn compile_native_atom_residual_from_system(
 }
 
 fn compile_native_atom_dense_jacobian(
-    plan: PreparedNativeAtomJacobian,
+    plan: Arc<PreparedNativeAtomJacobian>,
     variables: &[String],
     parameter_values_handle: Option<SharedIvpParameterValues>,
     telemetry: IvpTelemetry,
     execution_policy: IvpLambdifyExecutionPolicy,
 ) -> Arc<IvpTryDenseJacobianEval> {
-    let plan = Arc::new(plan);
     let expected_state_len = variables.len();
     Arc::new(move |t, y| {
         let callback_started = telemetry.start_warm_stage(IvpWarmStage::JacobianCallback);
@@ -1782,21 +2350,11 @@ fn build_lambdify_args(
     y: &DVector<f64>,
     parameter_values_handle: Option<&SharedIvpParameterValues>,
 ) -> Result<Vec<f64>, IvpBackendError> {
-    // Build the only flat argument buffer required by Expr Lambdify. The
-    // parameter read guard is borrowed directly, avoiding a temporary
-    // DVector clone before the final ABI buffer is assembled.
-    let mut args = Vec::with_capacity(1 + y.len());
-    args.push(t);
-    with_shared_parameter_values(
-        parameter_values_handle,
-        || {},
-        |parameters| {
-            args.reserve(parameters.len());
-            args.extend(parameters.iter().copied());
-            args.extend(y.iter().copied());
-            Ok(())
-        },
-    )?;
+    // Reserve the complete ABI buffer once. Starting with only `1 + y.len()`
+    // can reallocate after parameter insertion even though the final size is
+    // known while the shared binding is borrowed.
+    let mut args = Vec::new();
+    build_linked_args_into(t, y, parameter_values_handle, &mut args)?;
     Ok(args)
 }
 
@@ -1826,15 +2384,25 @@ fn build_linked_args_into(
                 .map_err(|_| IvpBackendError::ParameterStatePoisoned)
         })
         .transpose()?;
-    let parameter_len = parameter_values.as_ref().map_or(0, |values| values.len());
-    args.clear();
-    args.reserve(1 + parameter_len + y.len());
-    args.push(t);
     if let Some(values) = parameter_values.as_ref() {
-        args.extend(values.iter().copied());
+        build_linked_args_from_parts(t, values.as_slice(), y.as_slice(), args);
+    } else {
+        build_linked_args_from_parts(t, &[], y.as_slice(), args);
     }
-    args.extend(y.iter().copied());
     Ok(())
+}
+
+fn build_linked_args_from_parts(
+    t: f64,
+    parameters: &[f64],
+    state: &[f64],
+    args: &mut Vec<f64>,
+) {
+    args.clear();
+    args.reserve(1 + parameters.len() + state.len());
+    args.push(t);
+    args.extend(parameters.iter().copied());
+    args.extend(state.iter().copied());
 }
 
 fn compatibility_residual(
@@ -1876,6 +2444,26 @@ fn compatibility_jacobian(
             }
         }
     })
+}
+
+fn validate_explicit_jacobian(
+    jacobian: Option<Vec<Vec<Expr>>>,
+    rows: usize,
+    cols: usize,
+) -> Result<Option<Vec<Vec<Expr>>>, IvpBackendError> {
+    let Some(jacobian) = jacobian else {
+        return Ok(None);
+    };
+    if jacobian.len() != rows || jacobian.iter().any(|row| row.len() != cols) {
+        return Err(IvpBackendError::InvalidMatrixShape {
+            stage: "explicit Jacobian".to_string(),
+            expected_rows: rows,
+            expected_cols: cols,
+            actual_rows: jacobian.len(),
+            actual_cols: jacobian.first().map_or(0, Vec::len),
+        });
+    }
+    Ok(Some(jacobian))
 }
 
 fn compile_ivp_residual(
@@ -2026,6 +2614,11 @@ pub fn prepare_symbolic_ivp_problem(
     time_arg: String,
     options: SymbolicIvpProblemOptions,
 ) -> Result<PreparedSymbolicIvpProblem, IvpBackendError> {
+    let explicit_jacobian = validate_explicit_jacobian(
+        options.explicit_jacobian,
+        equations.len(),
+        variables.len(),
+    )?;
     let telemetry = options.telemetry.clone();
     let validation_started = telemetry.start_cold_stage(IvpColdStage::Validation);
     let validation = validate_ivp_argument_schema(
@@ -2071,91 +2664,121 @@ pub fn prepare_symbolic_ivp_problem(
         }
     };
 
-    let (symbolic_jacobian, try_residual, try_jacobian, native_residual, native_atoms) =
-        match options.symbolic_assembly_backend {
-            IvpSymbolicAssemblyBackend::AtomView => {
-                let symbolic_started = telemetry.start_cold_stage(IvpColdStage::SymbolicJacobian);
-                let atom_system = prepare_native_atom_system(
-                    &equations,
-                    time_arg.as_str(),
-                    &variables,
-                    options.equation_parameters.as_deref(),
-                    &telemetry,
-                );
-                let native_jacobian =
-                    prepare_native_atom_jacobian_from_system(&atom_system, &variables, &telemetry)?;
-                telemetry.record_cold_stage(IvpColdStage::SymbolicJacobian, symbolic_started);
-                telemetry.record_symbolic_jacobian_build();
-                let residual_started =
-                    telemetry.start_cold_stage(IvpColdStage::ResidualCompilation);
-                let native_residual = compile_native_atom_residual_from_system(
+    let (
+        symbolic_jacobian,
+        try_residual,
+        try_jacobian,
+        native_residual,
+        native_jacobian,
+        native_atoms,
+    ) = match options.symbolic_assembly_backend {
+        IvpSymbolicAssemblyBackend::AtomView => {
+            let symbolic_started = telemetry.start_cold_stage(IvpColdStage::SymbolicJacobian);
+            let atom_residual_preparation =
+                telemetry.scoped_cold_stage(IvpColdStage::AtomResidualPreparation);
+            let atom_system = prepare_native_atom_system(
+                &equations,
+                time_arg.as_str(),
+                &variables,
+                options.equation_parameters.as_deref(),
+                &telemetry,
+            );
+            drop(atom_residual_preparation);
+            let atom_jacobian_preparation =
+                telemetry.scoped_cold_stage(IvpColdStage::AtomJacobianPreparation);
+            let native_jacobian = match explicit_jacobian.as_deref() {
+                Some(jacobian) => prepare_native_atom_jacobian_from_explicit(
                     &atom_system,
+                    jacobian,
                     &variables,
-                    parameter_values_handle.clone(),
-                    telemetry.clone(),
-                    options.lambdify_execution_policy,
-                )?;
-                let try_residual: Arc<IvpTryResidualEval> = {
-                    let native_residual = Arc::clone(&native_residual);
-                    Arc::new(move |t, y| native_residual.evaluate(t, y))
-                };
-                telemetry.record_cold_stage(IvpColdStage::ResidualCompilation, residual_started);
-                let jacobian_started =
-                    telemetry.start_cold_stage(IvpColdStage::JacobianCompilation);
-                let try_jacobian = compile_native_atom_dense_jacobian(
-                    native_jacobian,
-                    &variables,
-                    parameter_values_handle.clone(),
-                    telemetry.clone(),
-                    options.lambdify_execution_policy,
-                );
-                telemetry.record_cold_stage(IvpColdStage::JacobianCompilation, jacobian_started);
-                (
-                    Vec::new(),
-                    try_residual,
-                    try_jacobian,
-                    Some(native_residual),
-                    Some(Arc::clone(&atom_system.atoms)),
-                )
-            }
-            IvpSymbolicAssemblyBackend::ExprLegacy
-            | IvpSymbolicAssemblyBackend::AtomViewExprCompat => {
-                let symbolic_started = telemetry.start_cold_stage(IvpColdStage::SymbolicJacobian);
-                let symbolic_jacobian = build_symbolic_jacobian(
+                    &telemetry,
+                )?,
+                None => {
+                    prepare_native_atom_jacobian_from_system(&atom_system, &variables, &telemetry)?
+                }
+            };
+            drop(atom_jacobian_preparation);
+            telemetry.record_cold_stage(IvpColdStage::SymbolicJacobian, symbolic_started);
+            telemetry.record_symbolic_jacobian_build();
+            let residual_started = telemetry.start_cold_stage(IvpColdStage::ResidualCompilation);
+            let atom_residual_compilation =
+                telemetry.scoped_cold_stage(IvpColdStage::AtomResidualPreparation);
+            let native_residual = compile_native_atom_residual_from_system(
+                &atom_system,
+                &variables,
+                parameter_values_handle.clone(),
+                telemetry.clone(),
+                options.lambdify_execution_policy,
+            )?;
+            drop(atom_residual_compilation);
+            let try_residual: Arc<IvpTryResidualEval> = {
+                let native_residual = Arc::clone(&native_residual);
+                Arc::new(move |t, y| native_residual.evaluate(t, y))
+            };
+            telemetry.record_cold_stage(IvpColdStage::ResidualCompilation, residual_started);
+            let jacobian_started = telemetry.start_cold_stage(IvpColdStage::JacobianCompilation);
+            let native_jacobian = Arc::new(native_jacobian);
+            let try_jacobian = compile_native_atom_dense_jacobian(
+                Arc::clone(&native_jacobian),
+                &variables,
+                parameter_values_handle.clone(),
+                telemetry.clone(),
+                options.lambdify_execution_policy,
+            );
+            telemetry.record_cold_stage(IvpColdStage::JacobianCompilation, jacobian_started);
+            (
+                explicit_jacobian.clone().unwrap_or_default(),
+                try_residual,
+                try_jacobian,
+                Some(native_residual),
+                Some(native_jacobian),
+                Some(Arc::clone(&atom_system.atoms)),
+            )
+        }
+        IvpSymbolicAssemblyBackend::ExprLegacy | IvpSymbolicAssemblyBackend::AtomViewExprCompat => {
+            let symbolic_started = telemetry.start_cold_stage(IvpColdStage::SymbolicJacobian);
+            let symbolic_jacobian = explicit_jacobian.clone().unwrap_or_else(|| {
+                build_symbolic_jacobian(
                     &equations,
                     &variables,
                     options.symbolic_assembly_backend,
                     &telemetry,
-                );
-                telemetry.record_cold_stage(IvpColdStage::SymbolicJacobian, symbolic_started);
-                telemetry.record_symbolic_jacobian_build();
-                let residual_started =
-                    telemetry.start_cold_stage(IvpColdStage::ResidualCompilation);
-                let try_residual = compile_ivp_residual(
-                    &equations,
-                    time_arg.as_str(),
-                    &variables,
-                    options.equation_parameters.as_deref(),
-                    parameter_values_handle.clone(),
-                    telemetry.clone(),
-                    options.lambdify_execution_policy,
-                );
-                telemetry.record_cold_stage(IvpColdStage::ResidualCompilation, residual_started);
-                let jacobian_started =
-                    telemetry.start_cold_stage(IvpColdStage::JacobianCompilation);
-                let try_jacobian = compile_ivp_dense_jacobian(
-                    &symbolic_jacobian,
-                    time_arg.as_str(),
-                    &variables,
-                    options.equation_parameters.as_deref(),
-                    parameter_values_handle.clone(),
-                    telemetry.clone(),
-                    options.lambdify_execution_policy,
-                );
-                telemetry.record_cold_stage(IvpColdStage::JacobianCompilation, jacobian_started);
-                (symbolic_jacobian, try_residual, try_jacobian, None, None)
-            }
-        };
+                )
+            });
+            telemetry.record_cold_stage(IvpColdStage::SymbolicJacobian, symbolic_started);
+            telemetry.record_symbolic_jacobian_build();
+            let residual_started = telemetry.start_cold_stage(IvpColdStage::ResidualCompilation);
+            let try_residual = compile_ivp_residual(
+                &equations,
+                time_arg.as_str(),
+                &variables,
+                options.equation_parameters.as_deref(),
+                parameter_values_handle.clone(),
+                telemetry.clone(),
+                options.lambdify_execution_policy,
+            );
+            telemetry.record_cold_stage(IvpColdStage::ResidualCompilation, residual_started);
+            let jacobian_started = telemetry.start_cold_stage(IvpColdStage::JacobianCompilation);
+            let try_jacobian = compile_ivp_dense_jacobian(
+                &symbolic_jacobian,
+                time_arg.as_str(),
+                &variables,
+                options.equation_parameters.as_deref(),
+                parameter_values_handle.clone(),
+                telemetry.clone(),
+                options.lambdify_execution_policy,
+            );
+            telemetry.record_cold_stage(IvpColdStage::JacobianCompilation, jacobian_started);
+            (
+                symbolic_jacobian,
+                try_residual,
+                try_jacobian,
+                None,
+                None,
+                None,
+            )
+        }
+    };
     let residual = compatibility_residual(try_residual.clone(), telemetry.clone(), equations.len());
     let jacobian = compatibility_jacobian(
         try_jacobian.clone(),
@@ -2175,11 +2798,13 @@ pub fn prepare_symbolic_ivp_problem(
         try_residual,
         try_jacobian,
         native_residual,
+        native_jacobian,
         linked_residual: None,
         _linked_dense: None,
         native_atoms,
         equations,
         symbolic_jacobian,
+        explicit_jacobian,
         time_arg,
         variables,
         equation_parameters: options.equation_parameters,
@@ -2201,6 +2826,11 @@ pub fn prepare_symbolic_ivp_residual_problem(
     time_arg: String,
     options: SymbolicIvpProblemOptions,
 ) -> Result<PreparedSymbolicIvpResidualProblem, IvpBackendError> {
+    let explicit_jacobian = validate_explicit_jacobian(
+        options.explicit_jacobian,
+        equations.len(),
+        variables.len(),
+    )?;
     let telemetry = options.telemetry.clone();
     let validation_started = telemetry.start_cold_stage(IvpColdStage::Validation);
     let validation = validate_ivp_argument_schema(
@@ -2296,6 +2926,7 @@ pub fn prepare_symbolic_ivp_residual_problem(
         linked_residual: None,
         native_atoms,
         equations,
+        explicit_jacobian,
         time_arg,
         variables,
         equation_parameters: options.equation_parameters,
@@ -2355,6 +2986,7 @@ mod tests {
             vec!["y".to_string()],
             "t".to_string(),
             SymbolicIvpProblemOptions::new()
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView)
                 .with_equation_parameters(vec!["a".to_string()])
                 .with_equation_parameter_values(DVector::from_vec(vec![2.0]))
                 .with_telemetry(telemetry.clone()),
@@ -2404,13 +3036,15 @@ mod tests {
 
     #[test]
     fn linked_dense_runtime_rebind_updates_residual_and_jacobian_without_republication() {
+        let telemetry = IvpTelemetry::counters();
         let problem = prepare_symbolic_ivp_problem(
             vec![Expr::parse_expression("a*y + t")],
             vec!["y".to_string()],
             "t".to_string(),
             SymbolicIvpProblemOptions::new()
                 .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_equation_parameter_values(DVector::from_vec(vec![2.0]))
+                .with_telemetry(telemetry.clone()),
         )
         .expect("parameterized IVP problem should prepare");
         let linked = LinkedDenseAotBackend::new(
@@ -2421,6 +3055,7 @@ mod tests {
             Arc::new(|args, out| out[0] = args[1]),
         );
         let problem = problem.into_linked_dense_backend(linked);
+        let allocation_baseline = telemetry.snapshot().allocated_bytes;
         let state = DVector::from_vec(vec![3.0]);
         let first_residual = problem
             .try_evaluate_residual(1.0, &state)
@@ -2442,6 +3077,88 @@ mod tests {
             .expect("rebound linked Dense Jacobian should evaluate");
         assert_eq!(rebound_residual[0], 13.0);
         assert_eq!(rebound_jacobian[(0, 0)], 4.0);
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.jacobian_evaluations, 2);
+        assert_eq!(
+            snapshot.allocated_bytes - allocation_baseline,
+            (2 * 2 * std::mem::size_of::<f64>()) as u64,
+            "each owned dense Jacobian has one row-major ABI buffer and one DMatrix allocation"
+        );
+    }
+
+    #[test]
+    fn linked_dense_row_major_workspace_matches_owned_matrix_without_output_allocation() {
+        let telemetry = IvpTelemetry::counters();
+        let problem = prepare_symbolic_ivp_problem(
+            vec![
+                Expr::parse_expression("a*y + t"),
+                Expr::parse_expression("y"),
+            ],
+            vec!["y".to_string(), "z".to_string()],
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new()
+                .with_equation_parameters(vec!["a".to_string()])
+                .with_equation_parameter_values(DVector::from_vec(vec![2.0]))
+                .with_telemetry(telemetry.clone()),
+        )
+        .expect("parameterized dense IVP problem should prepare");
+        let linked = LinkedDenseAotBackend::new(
+            "dense-row-major-workspace-test",
+            2,
+            (2, 2),
+            Arc::new(|args, out| {
+                out[0] = args[1];
+                out[1] = args[2];
+                out[2] = args[1] + args[2];
+                out[3] = args[0];
+            }),
+            Arc::new(|_args, out| {
+                out.copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+            }),
+        );
+        let problem = problem.into_linked_dense_backend(linked);
+        let state = DVector::from_vec(vec![3.0, 5.0]);
+        let owned = problem
+            .try_evaluate_jacobian(1.0, &state)
+            .expect("owned linked Jacobian should evaluate");
+        let mut row_major = vec![0.0; 4];
+        let mut args = Vec::new();
+        problem
+            .try_evaluate_jacobian_row_major_into_with_workspace(
+                1.0,
+                &state,
+                &mut row_major,
+                &mut args,
+            )
+            .expect("row-major linked Jacobian should evaluate");
+        let mut dmatrix = DMatrix::zeros(2, 2);
+        let mut values = Vec::new();
+        problem
+            .try_evaluate_jacobian_into_dmatrix_with_workspace(
+                1.0,
+                &state,
+                &mut dmatrix,
+                &mut values,
+                &mut args,
+            )
+            .expect("DMatrix linked Jacobian should evaluate");
+        let args_capacity = args.capacity();
+        problem
+            .try_evaluate_jacobian_row_major_into_with_workspace(
+                1.0,
+                &state,
+                &mut row_major,
+                &mut args,
+            )
+            .expect("row-major linked Jacobian should reuse its workspace");
+
+        assert_eq!(
+            row_major,
+            vec![owned[(0, 0)], owned[(0, 1)], owned[(1, 0)], owned[(1, 1)]]
+        );
+        assert_eq!(dmatrix, owned);
+        assert_eq!(args.capacity(), args_capacity);
+        assert_eq!(telemetry.snapshot().jacobian_evaluations, 4);
     }
 
     #[test]

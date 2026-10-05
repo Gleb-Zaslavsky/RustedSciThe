@@ -12,13 +12,101 @@ include = [
     "Cargo.lock",
     "LICENSE.txt",
     "README.md",
+    "!/.kilo",
+    "!/.kilo/**/*",
+    "!Cargo.toml.orig",
     "src/**/*",
+    "scripts/**/*",
     "examples/**/*",
     "benches/**/*",
-    "tests/**/*",
-    "!test_reports/**/*",
-    "!/.kilo",
-    "!/.kilo/**",
+    # Story/test Markdown is repository evidence, not part of the crate.
+    "!src/**/*[tT][eE][sS][tT]*.md",
+    "!src/**/*[sS][tT][oO][rR][yY]*.md",
+    "!src/**/tests/**/*.md",
+    "!scripts/**/*[tT][eE][sS][tT]*.md",
+    "!scripts/**/*[sS][tT][oO][rR][yY]*.md",
+    "!benches/**/*[tT][eE][sS][tT]*.md",
+    "!benches/**/*[sS][tT][oO][rR][yY]*.md",
+    "!examples/**/*[tT][eE][sS][tT]*.md",
+    "!examples/**/*[sS][tT][oO][rR][yY]*.md",
+    "!examples/**/tests/**/*.md",
+    # Generated AOT directories and non-source artifacts.
+    "!src/**/aot/**/*",
+    "!src/**/generated/**/*",
+    "!scripts/**/aot/**/*",
+    "!scripts/**/generated/**/*",
+    "!benches/**/aot/**/*",
+    "!benches/**/generated/**/*",
+    "!examples/**/aot/**/*",
+    "!examples/**/generated/**/*",
+    "!src/**/*.txt",
+    "!src/**/*.log",
+    "!src/**/*.py",
+    "!src/**/*.f",
+    "!src/**/*.c",
+    "!src/**/*.cpp",
+    "!src/**/*.h",
+    "!src/**/*.[pP][nN][gG]",
+    "!src/**/*.[jJ][pP][gG]",
+    "!src/**/*.[jJ][pP][eE][gG]",
+    "!src/**/*.[gG][iI][fF]",
+    "!src/**/*.[bB][mM][pP]",
+    "!src/**/*.[sS][vV][gG]",
+    "!scripts/**/*.txt",
+    "!scripts/**/*.log",
+    "!scripts/**/*.py",
+    "!scripts/**/*.f",
+    "!scripts/**/*.c",
+    "!scripts/**/*.cpp",
+    "!scripts/**/*.h",
+    "!scripts/**/*.[pP][nN][gG]",
+    "!scripts/**/*.[jJ][pP][gG]",
+    "!scripts/**/*.[jJ][pP][eE][gG]",
+    "!scripts/**/*.[gG][iI][fF]",
+    "!scripts/**/*.[bB][mM][pP]",
+    "!scripts/**/*.[sS][vV][gG]",
+    "!benches/**/*.txt",
+    "!benches/**/*.log",
+    "!benches/**/*.py",
+    "!benches/**/*.f",
+    "!benches/**/*.c",
+    "!benches/**/*.cpp",
+    "!benches/**/*.h",
+    "!benches/**/*.[pP][nN][gG]",
+    "!benches/**/*.[jJ][pP][gG]",
+    "!benches/**/*.[jJ][pP][eE][gG]",
+    "!benches/**/*.[gG][iI][fF]",
+    "!benches/**/*.[bB][mM][pP]",
+    "!benches/**/*.[sS][vV][gG]",
+    "!examples/**/*.txt",
+    "!examples/**/*.log",
+    "!examples/**/*.py",
+    "!examples/**/*.f",
+    "!examples/**/*.c",
+    "!examples/**/*.cpp",
+    "!examples/**/*.h",
+    "!examples/**/*.[pP][nN][gG]",
+    "!examples/**/*.[jJ][pP][gG]",
+    "!examples/**/*.[jJ][pP][eE][gG]",
+    "!examples/**/*.[gG][iI][fF]",
+    "!examples/**/*.[bB][mM][pP]",
+    "!examples/**/*.[sS][vV][gG]",
+    # Catch files directly below a tree as well as nested files.
+    "!**/*.txt",
+    "!**/*.log",
+    "!**/*.py",
+    "!**/*.f",
+    "!**/*.c",
+    "!**/*.cpp",
+    "!**/*.h",
+    "!**/*.[pP][nN][gG]",
+    "!**/*.[jJ][pP][gG]",
+    "!**/*.[jJ][pP][eE][gG]",
+    "!**/*.[gG][iI][fF]",
+    "!**/*.[bB][mM][pP]",
+    "!**/*.[sS][vV][gG]",
+    # Cargo's license file is the one intentional text-file exception.
+    "LICENSE.txt",
 ]
 
 
@@ -109,6 +197,15 @@ name = "bdf_symbolic_frontends"
 harness = false
 [[bench]]
 name = "bdf_aot_frontends"
+harness = false
+[[bench]]
+name = "bdf_backend_matrix"
+harness = false
+[[bench]]
+name = "bdf_aot_continuation"
+harness = false
+[[bench]]
+name = "radau_workloads"
 harness = false
 
 [profile.bench]
@@ -367,6 +464,15 @@ path = "examples/be_symbolic_continuation_guide.rs"
 name = "be_aot_guide"
 path = "examples/be_aot_guide.rs"
 [[example]]
+name = "bdf_native_dense_guide"
+path = "examples/bdf_native_dense_guide.rs"
+[[example]]
+name = "bdf_symbolic_continuation_guide"
+path = "examples/bdf_symbolic_continuation_guide.rs"
+[[example]]
+name = "bdf_aot_guide"
+path = "examples/bdf_aot_guide.rs"
+[[example]]
 name = "rus_be_native_callbacks_guide"
 path = "examples/rus/be_native_callbacks_guide.rs"
 [[example]]
@@ -375,6 +481,15 @@ path = "examples/rus/be_symbolic_continuation_guide.rs"
 [[example]]
 name = "rus_be_aot_guide"
 path = "examples/rus/be_aot_guide.rs"
+[[example]]
+name = "rus_bdf_native_dense_guide"
+path = "examples/rus/bdf_native_dense_guide.rs"
+[[example]]
+name = "rus_bdf_symbolic_continuation_guide"
+path = "examples/rus/bdf_symbolic_continuation_guide.rs"
+[[example]]
+name = "rus_bdf_aot_guide"
+path = "examples/rus/bdf_aot_guide.rs"
 [[example]]
 name = "rus_universal_ode_example"
 path = "examples/rus/universal_ode_example.rs"

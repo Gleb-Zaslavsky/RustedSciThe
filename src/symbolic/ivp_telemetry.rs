@@ -250,10 +250,14 @@ pub enum IvpColdStage {
     NativeJacobianEvaluatorPreparation,
     /// One-time input name/index ABI built for a generated Atom AOT module.
     AotInputAbiPreparation,
+    /// Construction of the canonical key used by dense generated-backend lookup.
+    AotProblemKeyConstruction,
+    /// Preparation of a native Atom payload used to identify or build an AOT artifact.
+    AotAtomPlanPreparation,
 }
 
 impl IvpColdStage {
-    pub const COUNT: usize = 31;
+    pub const COUNT: usize = 33;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -287,7 +291,9 @@ impl IvpColdStage {
             27 => Self::ParallelCalibration,
             28 => Self::AtomDependencyAnalysis,
             29 => Self::NativeJacobianEvaluatorPreparation,
-            _ => Self::AotInputAbiPreparation,
+            30 => Self::AotInputAbiPreparation,
+            31 => Self::AotProblemKeyConstruction,
+            _ => Self::AotAtomPlanPreparation,
         }
     }
 
@@ -324,6 +330,8 @@ impl IvpColdStage {
             Self::AtomDependencyAnalysis => "atom_dependency_analysis",
             Self::NativeJacobianEvaluatorPreparation => "native_jacobian_evaluator_preparation",
             Self::AotInputAbiPreparation => "aot_input_abi_preparation",
+            Self::AotProblemKeyConstruction => "aot_problem_key_construction",
+            Self::AotAtomPlanPreparation => "aot_atom_plan_preparation",
         }
     }
 }
@@ -1620,7 +1628,11 @@ mod tests {
             IvpColdStage::AotInputAbiPreparation.label(),
             "aot_input_abi_preparation"
         );
-        assert_eq!(IvpColdStage::COUNT, 31);
+        assert_eq!(
+            IvpColdStage::AotAtomPlanPreparation.label(),
+            "aot_atom_plan_preparation"
+        );
+        assert_eq!(IvpColdStage::COUNT, 33);
         assert_eq!(IvpWarmStage::Solve.label(), "solve");
         assert_eq!(IvpWarmStage::Summary.label(), "summary");
         assert_eq!(IvpWarmStage::COUNT, 25);

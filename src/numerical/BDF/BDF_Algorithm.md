@@ -1,5 +1,18 @@
 # Backward Differentiation Formula (BDF) Algorithm
 
+## Implementation Scope
+
+This standalone solver intentionally implements a classic dense variable-order
+BDF/NDF method, closely following the numerical role of SciPy's BDF solver. All
+Jacobians used by its Newton iteration are materialized as dense matrices and
+solved by dense linear algebra.
+
+ExprLegacy, AtomView, Lambdify and AOT select how residuals and dense Jacobians
+are prepared and evaluated; they do not change the matrix structure of this
+solver. For a BDF method with Sparse or Banded linear algebra, use LSODE2 and
+select its BDF method family together with the required matrix route. Extending
+this standalone solver into another LSODE2 is explicitly outside its scope.
+
 ## Mathematical Foundation
 
 ### Problem Statement

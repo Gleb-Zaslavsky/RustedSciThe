@@ -50,6 +50,20 @@ pub struct SymbolicWorkload {
     pub parameter_values: DVector<f64>,
 }
 
+/// Fully coupled dense symbolic workload used for scaling studies.
+///
+/// Kept separate from `WorkloadKind` because it is a size-controlled stress
+/// fixture rather than a canonical physical benchmark family.
+#[derive(Clone, Debug)]
+pub struct DenseCoupledWorkload {
+    pub equations: Vec<Expr>,
+    pub variables: Vec<String>,
+    pub time_variable: String,
+    pub initial_state: DVector<f64>,
+    pub parameter_names: Vec<String>,
+    pub parameter_values: DVector<f64>,
+}
+
 /// Returns the deterministic numeric target used by continuation stories and benches.
 /// The first parameter is swept upward; remaining nonzero parameters move down.
 pub fn parameter_continuation_target(base: &DVector<f64>, step: usize) -> DVector<f64> {
@@ -113,6 +127,33 @@ pub fn diffusion_chain(dimension: usize) -> SymbolicWorkload {
         ),
         parameter_names: vec!["k".into(), "d".into(), "q".into(), "nl".into()],
         parameter_values: DVector::from_vec(vec![20.0, 4.0, 0.20, 0.010]),
+    }
+}
+
+/// Builds a stable, fully coupled dense system with one nonzero Jacobian entry
+/// for every state-equation pair. Its purpose is frontend/linear-algebra
+/// scaling, not physical modelling.
+pub fn dense_coupled(dimension: usize) -> DenseCoupledWorkload {
+    assert!(dimension > 0, "dense coupled dimension must be positive");
+    let variables: Vec<_> = (0..dimension).map(|index| format!("y{index}")).collect();
+    let coupled_sum = variables.join(" + ");
+    let equations = variables
+        .iter()
+        .map(|variable| {
+            Expr::parse_expression(&format!("-k*{variable} + c*({coupled_sum}) + q*exp(-t)"))
+        })
+        .collect();
+
+    DenseCoupledWorkload {
+        equations,
+        variables,
+        time_variable: "t".to_string(),
+        initial_state: DVector::from_iterator(
+            dimension,
+            (0..dimension).map(|index| 0.2 + 0.01 * (index % 11) as f64),
+        ),
+        parameter_names: vec!["k".into(), "c".into(), "q".into()],
+        parameter_values: DVector::from_vec(vec![20.0, 0.25 / dimension as f64, 0.20]),
     }
 }
 
@@ -254,6 +295,12 @@ mod tests {
                 workload.parameter_values.len()
             );
         }
+
+        let dense = dense_coupled(32);
+        assert_eq!(dense.equations.len(), 32);
+        assert_eq!(dense.variables.len(), 32);
+        assert_eq!(dense.initial_state.len(), 32);
+        assert_eq!(dense.parameter_names.len(), dense.parameter_values.len());
     }
 
     #[test]

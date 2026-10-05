@@ -5,6 +5,7 @@
 //! registry and be resolved through the same resolution layer.
 
 use crate::symbolic::codegen::c_backend::codegen_c_aot_build::CAotBuildResult;
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_aot_registry::{AotRegistry, RegisteredAotArtifact};
 use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
 
@@ -42,7 +43,13 @@ pub fn register_c_build_in_registry<'a>(
         expected_cdylib: build.expected_so.clone(),
     };
 
-    registry.register_materialized_build(manifest, &temp_build)
+    registry
+        .try_register_materialized_build_with_backend(
+            manifest,
+            &temp_build,
+            Some(AotCodegenBackend::C),
+        )
+        .expect("C build metadata should be valid at registry boundary")
 }
 
 #[cfg(test)]

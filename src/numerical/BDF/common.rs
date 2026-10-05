@@ -7,11 +7,10 @@ use nalgebra_sparse::CsrMatrix;
 use std::cmp::{PartialEq, PartialOrd};
 
 extern crate num;
-extern crate num_complex;
 use log::{error, info};
 use num::traits::Float;
 use std::error::Error;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 pub fn newton_tol(rtol: NumberOrVec) -> f64 {
     let newton_tol: f64 = match rtol {
@@ -50,37 +49,39 @@ pub fn is_sparse(matrix: &DMatrix<f64>, threshold: f64) -> bool {
     nonzero_elements / total_elements < threshold
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentValidationError {
+    EmptyInitialState,
+    NonFiniteInitialState,
+}
+
+impl Display for ArgumentValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::EmptyInitialState => "initial state must contain at least one component",
+            Self::NonFiniteInitialState => "initial state must contain only finite values",
+        };
+        f.write_str(message)
+    }
+}
+
+impl Error for ArgumentValidationError {}
+
 pub fn check_arguments<F, T>(
     fun: F,
     y0: &[T],
-    support_complex: bool,
-) -> Result<(Box<dyn Fn(f64, &DVector<T>) -> DVector<T>>, DVector<T>), Box<dyn Error>>
+) -> Result<(Box<dyn Fn(f64, &DVector<T>) -> DVector<T>>, DVector<T>), ArgumentValidationError>
 where
     F: 'static + Fn(f64, &DVector<T>) -> DVector<T>,
-    T: Float + num::traits::FromPrimitive + Debug + 'static,
+    T: Float + Debug + 'static,
 {
+    if y0.is_empty() {
+        return Err(ArgumentValidationError::EmptyInitialState);
+    }
+    if y0.iter().any(|value| !value.is_finite()) {
+        return Err(ArgumentValidationError::NonFiniteInitialState);
+    }
     let y0 = DVector::from_column_slice(y0);
-
-    let dtype_is_complex = y0.iter().any(|&x| x.is_nan() || x.is_infinite());
-
-    if dtype_is_complex && !support_complex {
-        return Err("`y0` is complex, but the chosen solver does not support integration in a complex domain.".into());
-    }
-    fn check_if_is_dvector(obj: &dyn std::any::Any) -> bool {
-        if let Some(_obj) = obj.downcast_ref::<DVector<f64>>() {
-            true
-        } else {
-            false
-        }
-    }
-
-    if y0.nrows() != 1 && check_if_is_dvector(&y0) == false {
-        return Err("`y0` must be 1-dimensional.".into());
-    }
-
-    if y0.iter().any(|&x| !x.is_finite()) {
-        return Err("All components of the initial state `y0` must be finite.".into());
-    }
 
     let fun_wrapped = Box::new(move |t: f64, y: &DVector<T>| -> DVector<T> { fun(t, y) });
 
@@ -170,6 +171,14 @@ impl Clone for NumberOrVec {
 ///
 
 pub fn scale_func(rtol: NumberOrVec, atol: NumberOrVec, y0: &DVector<f64>) -> Vec<f64> {
+    scale_func_ref(&rtol, &atol, y0)
+}
+
+pub(crate) fn scale_func_ref(
+    rtol: &NumberOrVec,
+    atol: &NumberOrVec,
+    y0: &DVector<f64>,
+) -> Vec<f64> {
     let scale: Vec<f64> = match atol {
         // atol is a number
         NumberOrVec::Number(atol) => {
@@ -177,14 +186,14 @@ pub fn scale_func(rtol: NumberOrVec, atol: NumberOrVec, y0: &DVector<f64>) -> Ve
                 // rtol is a number
                 NumberOrVec::Number(rtol) => y0
                     .into_iter()
-                    .map(|&y_i| atol + (y_i.abs() * rtol))
+                    .map(|&y_i| *atol + (y_i.abs() * *rtol))
                     .collect(),
 
                 // rtol is a vector
                 NumberOrVec::Vec(rtol) => y0
                     .into_iter()
-                    .zip(&rtol)
-                    .map(|(y_i, rtol_i)| atol + (y_i.abs() * rtol_i))
+                    .zip(rtol.iter())
+                    .map(|(y_i, rtol_i)| *atol + (y_i.abs() * rtol_i))
                     .collect(),
             }
         }
@@ -194,15 +203,15 @@ pub fn scale_func(rtol: NumberOrVec, atol: NumberOrVec, y0: &DVector<f64>) -> Ve
                 // rtol is a number
                 NumberOrVec::Number(rtol) => y0
                     .into_iter()
-                    .zip(&atol)
-                    .map(|(y_i, atol_i)| atol_i + (y_i.abs() * rtol))
+                    .zip(atol.iter())
+                    .map(|(y_i, atol_i)| *atol_i + (y_i.abs() * *rtol))
                     .collect(),
                 // rtol is a vector
                 NumberOrVec::Vec(rtol) => y0
                     .into_iter()
-                    .zip(&atol)
-                    .zip(&rtol)
-                    .map(|((y_i, atol_i), rtol_i)| atol_i + (y_i.abs() * rtol_i))
+                    .zip(atol.iter())
+                    .zip(rtol.iter())
+                    .map(|((y_i, atol_i), rtol_i)| *atol_i + (y_i.abs() * rtol_i))
                     .collect(),
             }
         }
@@ -210,7 +219,13 @@ pub fn scale_func(rtol: NumberOrVec, atol: NumberOrVec, y0: &DVector<f64>) -> Ve
     //   print!("scale = {:?} \n", &scale);
     scale
 }
-pub fn select_initial_step(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialStepError {
+    RhsDimension,
+    NonFiniteRhs,
+}
+
+pub fn try_select_initial_step(
     fun: &Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     t0: f64,
     y0: &DVector<f64>,
@@ -221,14 +236,14 @@ pub fn select_initial_step(
     order: f64,
     rtol: NumberOrVec,
     atol: NumberOrVec,
-) -> f64 {
+) -> Result<f64, InitialStepError> {
     if y0.len() == 0 {
-        return f64::INFINITY;
+        return Ok(f64::INFINITY);
     }
 
     let interval_length = (t_bound - t0).abs();
     if interval_length == 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
     // atol_i + (y_i.abs() * rtol element-wise
 
@@ -246,6 +261,12 @@ pub fn select_initial_step(
     let h0 = h0.min(interval_length);
     let y1 = y0 + h0 * direction * f0;
     let f1 = fun(t0 + h0 * direction, &y1);
+    if f1.len() != y0.len() {
+        return Err(InitialStepError::RhsDimension);
+    }
+    if f1.iter().any(|value| !value.is_finite()) {
+        return Err(InitialStepError::NonFiniteRhs);
+    }
     //   info!("f {}, arg{}", f1.clone(), &y1);
     let d2 = norm(&((f1 - f0).component_div(&scale))) / h0;
     //  info!("SCALE, {}, d2, {}, h0 {}", scale, d2.clone(), h0  );
@@ -260,9 +281,27 @@ pub fn select_initial_step(
     //let res = h0.min(h1).min(interval_length).min(max_step);
     let res = vec![100.0 * h0, h1, interval_length, max_step]
         .into_iter()
-        .fold(1.0, |acc, x| acc.min(x));
+        .fold(f64::INFINITY, f64::min);
 
-    res
+    Ok(res)
+}
+
+pub fn select_initial_step(
+    fun: &Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+    t0: f64,
+    y0: &DVector<f64>,
+    t_bound: f64,
+    max_step: f64,
+    f0: &DVector<f64>,
+    direction: f64,
+    order: f64,
+    rtol: NumberOrVec,
+    atol: NumberOrVec,
+) -> f64 {
+    try_select_initial_step(
+        fun, t0, y0, t_bound, max_step, f0, direction, order, rtol, atol,
+    )
+    .expect("valid RHS output is required for initial-step selection")
 }
 
 pub fn validate_tol(
@@ -360,6 +399,9 @@ pub fn validate_tol(
         Suggested `factor` for the next evaluation.
 */
 
+/// Legacy finite-difference Jacobian helper; the active BDF solver uses its
+/// checked implementation in `BDF_solver` instead.
+#[deprecated(note = "known-broken legacy helper; use the BDF solver API")]
 pub fn num_jac(
     fun: &Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
     t: f64,
@@ -394,7 +436,7 @@ pub fn num_jac(
     for i in 0..n {
         let f_sign = if f[i] >= 0.0 { 1.0 } else { -1.0 };
         let y_scale_i = f_sign * f64::max(y[i].abs(), atol_value);
-        y_scale.push(y_scale_i);
+        let _ = y_scale.push(y_scale_i);
         h[i] = y_scale_i * factor[i];
     }
     let h_ = DVector::zeros(n);
@@ -403,7 +445,7 @@ pub fn num_jac(
             while h[i] == 0.0 {
                 factor[i] *= 10.0;
                 h[i] = y_scale[i] * factor[i];
-                h_.push(h[i]);
+                let _ = h_.push(h[i]);
             }
         }
     }

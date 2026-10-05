@@ -12,7 +12,7 @@
 
 use crate::symbolic::View::atom::Atom;
 use crate::symbolic::View::conversions::expr_to_atom;
-use crate::symbolic::View::jacobian::PreparedSparseAtomSystem;
+use crate::symbolic::View::jacobian::{PreparedSparseAtomSystem, SparseAtomJacobianEntry};
 use crate::symbolic::View::state::Symbol;
 use crate::symbolic::bvp::atom_aot::{
     AtomAotBandedSlotMap, AtomAotMatrixLayout, AtomAotPreparedPlan,
@@ -37,7 +37,7 @@ use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
 use crate::symbolic::codegen::zig_backend::codegen_zig_aot_library::GeneratedZigAotLibrary;
-use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
+use crate::symbolic::ivp_telemetry::IvpColdStage;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, PreparedSymbolicIvpAotProblem, PreparedSymbolicIvpProblem,
     PreparedSymbolicIvpResidualAotProblem, PreparedSymbolicIvpResidualProblem,
@@ -228,6 +228,7 @@ pub fn prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
             options.residual_strategy,
             SparseChunkingStrategy::Whole,
             requested_layout,
+            problem.explicit_jacobian.as_deref(),
             Some(&problem.telemetry),
         );
     }
@@ -317,6 +318,7 @@ pub fn prepared_atom_aot_problem_from_parts_with_layout(
         jacobian_strategy,
         requested_layout,
         None,
+        None,
     )
 }
 
@@ -346,6 +348,7 @@ pub(crate) fn prepared_atom_aot_problem_from_residual_problem(
         residual_strategy,
         jacobian_strategy,
         requested_layout,
+        problem.explicit_jacobian.as_deref(),
         Some(&problem.telemetry),
     )
 }
@@ -358,6 +361,7 @@ fn prepared_atom_aot_problem_from_atoms_with_layout_and_telemetry(
     residual_strategy: ResidualChunkingStrategy,
     jacobian_strategy: SparseChunkingStrategy,
     requested_layout: AtomAotMatrixLayout,
+    explicit_jacobian: Option<&[Vec<crate::symbolic::symbolic_engine::Expr>]>,
     telemetry: Option<&crate::symbolic::ivp_telemetry::IvpTelemetry>,
 ) -> Result<PreparedSymbolicIvpAtomAotProblem, IvpBackendError> {
     let dependency_started = telemetry.map(|telemetry| {
@@ -372,27 +376,44 @@ fn prepared_atom_aot_problem_from_atoms_with_layout_and_telemetry(
             dependency_started.flatten(),
         );
     }
-    let differentiation_started = telemetry.map(|telemetry| {
-        telemetry
-            .start_cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation)
-    });
-    let jacobian_entries = sparse_system
-        .try_calc_sparse_jacobian_with_bandwidth(None)
-        .map_err(|error| IvpBackendError::AtomDifferentiationFailure {
-            row: error.row,
-            col: error.col,
-            source: error.source,
+    let jacobian_entries = if let Some(explicit_jacobian) = explicit_jacobian {
+        explicit_jacobian
+            .iter()
+            .enumerate()
+            .flat_map(|(row, entries)| {
+                entries.iter().enumerate().filter_map(move |(col, expr)| {
+                    (!expr.is_zero()).then(|| SparseAtomJacobianEntry {
+                        row,
+                        col,
+                        value: expr_to_atom(expr),
+                    })
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let differentiation_started = telemetry.map(|telemetry| {
+            telemetry.start_cold_stage(
+                crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation,
+            )
         });
-    if let Some(telemetry) = telemetry {
-        telemetry.record_cold_stage(
-            crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation,
-            differentiation_started.flatten(),
-        );
-        if jacobian_entries.is_err() {
-            telemetry.record_error();
+        let jacobian_entries = sparse_system
+            .try_calc_sparse_jacobian_with_bandwidth(None)
+            .map_err(|error| IvpBackendError::AtomDifferentiationFailure {
+                row: error.row,
+                col: error.col,
+                source: error.source,
+            });
+        if let Some(telemetry) = telemetry {
+            telemetry.record_cold_stage(
+                crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicDifferentiation,
+                differentiation_started.flatten(),
+            );
+            if jacobian_entries.is_err() {
+                telemetry.record_error();
+            }
         }
-    }
-    let jacobian_entries = jacobian_entries?;
+        jacobian_entries?
+    };
 
     let mut input_names =
         Vec::with_capacity(1 + variables.len() + equation_parameters.map_or(0, <[String]>::len));
@@ -543,14 +564,18 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
         .iter()
         .map(|atom| atom.as_view())
         .collect::<Vec<_>>();
-    let (jacobian_rows, jacobian_cols, jacobian_layout, jacobian_atoms) =
+    let (jacobian_rows, jacobian_cols, jacobian_layout, jacobian_atoms, jacobian_offsets) =
         match *problem.plan.matrix_layout() {
-            AtomAotMatrixLayout::Dense { rows, cols } => (
-                rows,
-                cols,
-                CodegenOutputLayout::Matrix { rows, cols },
-                dense_atoms(problem.plan(), rows, cols)?,
-            ),
+            AtomAotMatrixLayout::Dense { rows, cols } => {
+                let (atoms, offsets) = dense_atoms(problem.plan(), rows, cols)?;
+                (
+                    rows,
+                    cols,
+                    CodegenOutputLayout::Matrix { rows, cols },
+                    atoms,
+                    offsets,
+                )
+            }
             AtomAotMatrixLayout::SparseCsc { rows, cols, nnz } => {
                 let _ = nnz;
                 (
@@ -567,6 +592,7 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
                         .iter()
                         .map(|entry| entry.value.clone())
                         .collect::<Vec<_>>(),
+                    None,
                 )
             }
             AtomAotMatrixLayout::Banded {
@@ -591,6 +617,7 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
                     .iter()
                     .map(|entry| entry.value.clone())
                     .collect::<Vec<_>>(),
+                None,
             ),
             AtomAotMatrixLayout::BandedCompact {
                 rows,
@@ -609,6 +636,7 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
                     slots,
                 },
                 compact_banded_atoms(problem.plan(), rows, cols, kl, ku)?,
+                None,
             ),
         };
     let jacobian_views = jacobian_atoms
@@ -660,7 +688,7 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
             format!("{}_chunk_{index}", problem.jacobian_fn_name)
         };
         module.push_generated_block(
-            GeneratedBlock::from_atom_views_with_shared_abi_and_profile(
+            GeneratedBlock::from_atom_views_with_shared_abi_and_profile_and_output_offsets(
                 fn_name,
                 &jacobian_views[start..end],
                 Arc::clone(&vars),
@@ -698,6 +726,9 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
                 }),
                 AtomOptimizationProfile::Full,
                 AtomTempReusePolicy::Auto,
+                jacobian_offsets
+                    .as_ref()
+                    .map(|offsets| offsets[start..end].to_vec()),
             )
             .0,
         );
@@ -754,8 +785,9 @@ fn dense_atoms(
     plan: &AtomAotPreparedPlan,
     rows: usize,
     cols: usize,
-) -> Result<Vec<crate::symbolic::View::atom::Atom>, IvpBackendError> {
-    let mut atoms = vec![crate::symbolic::View::atom::Atom::new(); rows * cols];
+) -> Result<(Vec<crate::symbolic::View::atom::Atom>, Option<Vec<usize>>), IvpBackendError> {
+    let mut atoms = Vec::with_capacity(plan.jacobian_entries().len());
+    let mut offsets = Vec::with_capacity(plan.jacobian_entries().len());
     for entry in plan.jacobian_entries() {
         if entry.row >= rows || entry.col >= cols {
             return Err(IvpBackendError::AtomPreparationFailure {
@@ -766,9 +798,19 @@ fn dense_atoms(
                 ),
             });
         }
-        atoms[entry.row * cols + entry.col] = entry.value.clone();
+        if !entry.value.is_zero() {
+            atoms.push(entry.value.clone());
+            offsets.push(entry.row * cols + entry.col);
+        }
     }
-    Ok(atoms)
+    // Keep the historical non-empty callback contract for a valid all-zero
+    // dense Jacobian. The ABI wrapper clears the full matrix before dispatch,
+    // so one zero output preserves the result without restoring zero traffic.
+    if atoms.is_empty() && rows > 0 && cols > 0 {
+        atoms.push(crate::symbolic::View::atom::Atom::new());
+        offsets.push(0);
+    }
+    Ok((atoms, Some(offsets)))
 }
 
 /// Prepares the dense IVP AOT bridge owned by the shared symbolic IVP layer.
@@ -1061,6 +1103,33 @@ mod tests {
             Some(PreparedJacobianLayout::Dense)
         );
         assert!(crate_spec.module_source.contains("native_dense_module"));
+    }
+
+    #[test]
+    fn atomview_dense_aot_preserves_all_zero_jacobian_contract() {
+        let problem = prepare_symbolic_ivp_problem(
+            vec![Expr::parse_expression("t"), Expr::parse_expression("2*t")],
+            vec!["y".to_string(), "z".to_string()],
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new().with_symbolic_assembly_backend(
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+            ),
+        )
+        .expect("all-zero AtomView Jacobian problem should prepare");
+
+        let artifact = try_generated_aot_artifact_from_symbolic_ivp_problem(
+            "native_zero_dense_fixture",
+            "native_zero_dense_module",
+            &problem,
+            SymbolicIvpAotOptions::default(),
+            AotCodegenBackend::Rust,
+        )
+        .expect("all-zero dense AtomView artifact should emit");
+        let crate_spec = artifact
+            .into_rust_crate()
+            .expect("Rust backend should produce a crate");
+        assert!(crate_spec.module_source.contains("structural zeros elided"));
+        assert!(crate_spec.module_source.contains("out[0]"));
     }
 
     #[test]

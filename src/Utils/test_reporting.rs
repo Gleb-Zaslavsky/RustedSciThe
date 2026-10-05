@@ -14,6 +14,7 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tabled::{Table, Tabled};
 
 static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -39,6 +40,33 @@ pub fn write_test_report(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_reports"));
     write_test_report_in(&root, suite, canonical_test_name, body)
+}
+
+/// Writes a replaceable progress snapshot without creating an archive entry.
+///
+/// Long-running benchmark drivers use this for live compact tables. The final
+/// report should still be written through [`write_test_report`] so release
+/// archival remains atomic and immutable.
+pub fn write_test_report_snapshot(
+    suite: &str,
+    canonical_test_name: &str,
+    body: &str,
+) -> io::Result<PathBuf> {
+    let root = std::env::var_os("RST_TEST_REPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_reports"));
+    let suite = sanitize_component(suite);
+    let test_name = format!("{}__progress", sanitize_component(canonical_test_name));
+    let profile = report_profile();
+    write_test_report_in_profile(
+        &root,
+        &suite,
+        &test_name,
+        profile,
+        canonical_test_name,
+        body,
+        false,
+    )
 }
 
 /// Variant with an explicit root, primarily useful for utility tests.
@@ -213,17 +241,49 @@ impl Drop for TestReportCapture {
 
 /// Forwards one already formatted test line to stdout and the active report.
 ///
-/// Test modules normally expose this through a local `println!` macro so
-/// existing diagnostic output needs no second formatting path.
+/// Set `RST_TEST_REPORT_STDOUT=off` (or `false`/`0`) for a large release run
+/// when the report file, rather than the terminal, should be the diagnostic
+/// output. The report capture remains active in that mode.
 pub fn capture_test_line(args: fmt::Arguments<'_>) {
-    let line = args.to_string();
-    std::println!("{line}");
+    capture_test_block(args.to_string());
+}
+
+/// Captures a preformatted multi-line block as one reporting event.
+///
+/// This is useful for tables: the caller can collect rows during the test and
+/// emit one compact artifact after the measured work has completed.
+pub fn capture_test_block(block: impl AsRef<str>) {
+    let block = block.as_ref();
+    if report_stdout_enabled() {
+        std::println!("{block}");
+    }
     ACTIVE_CAPTURE.with(|active| {
         if let Some(body) = active.borrow_mut().as_mut() {
-            body.push_str(&line);
+            body.push_str(block);
             body.push('\n');
         }
     });
+}
+
+/// Captures a compact [`tabled`] table in the active report.
+///
+/// Rows should normally be accumulated in a local `Vec` while the expensive
+/// operation runs. Formatting is performed only once, outside that operation,
+/// and is therefore not part of a solver or callback timing scope.
+pub fn capture_test_table<T: Tabled>(title: impl AsRef<str>, rows: &[T]) {
+    let table = if rows.is_empty() {
+        "(no rows)".to_owned()
+    } else {
+        Table::new(rows).to_string()
+    };
+    capture_test_block(format!("{}\n{}", title.as_ref(), table));
+}
+
+fn report_stdout_enabled() -> bool {
+    !matches!(
+        std::env::var("RST_TEST_REPORT_STDOUT").as_deref(),
+        Ok("off") | Ok("false") | Ok("0")
+    )
 }
 
 fn sanitize_component(value: &str) -> String {
@@ -280,8 +340,8 @@ fn report_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TestReportCapture, capture_test_line, sanitize_component, write_test_report_in,
-        write_test_report_in_profile,
+        TestReportCapture, capture_test_line, capture_test_table, sanitize_component,
+        write_test_report_in, write_test_report_in_profile,
     };
     use std::fs;
 
@@ -359,6 +419,40 @@ mod tests {
                 .contains("release row")
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn table_capture_writes_one_compact_block() {
+        #[derive(tabled::Tabled)]
+        struct Row {
+            route: &'static str,
+            elapsed_ms: &'static str,
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "rustedscithe-test-report-table-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        {
+            let _capture = TestReportCapture::new_in(&root, "Radau_Large", "table_story");
+            capture_test_table(
+                "summary",
+                &[Row {
+                    route: "ExprLegacy",
+                    elapsed_ms: "1.25",
+                }],
+            );
+        }
+        let report = root
+            .join("Radau_Large")
+            .join("debug")
+            .join("table_story.md");
+        let contents = fs::read_to_string(report).expect("table report should exist");
+        assert!(contents.contains("summary"));
+        assert!(contents.contains("ExprLegacy"));
+        assert!(contents.contains("elapsed_ms"));
         let _ = fs::remove_dir_all(root);
     }
 }

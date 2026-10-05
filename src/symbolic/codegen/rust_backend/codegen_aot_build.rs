@@ -17,7 +17,7 @@
 
 use crate::symbolic::codegen::codegen_aot_lifecycle::{
     AotArtifactInspection, AotFailureDiagnostics, AotFailureInjection, AotFailureKind,
-    AotLifecycleError, AotLifecycleStage, quarantine_generated_tree,
+    AotLifecycleError, AotLifecycleStage, quarantine_generated_tree, run_aot_command,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::{
     GeneratedAotCrate, WrittenAotCrate,
@@ -27,6 +27,7 @@ use log::info;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Requested build profile for a generated AOT crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +217,7 @@ pub struct ExecutedAotBuild {
     pub stdout: String,
     /// Captured standard error from the build process.
     pub stderr: String,
+    pub timed_out: bool,
 }
 
 impl AotBuildRequest {
@@ -415,17 +417,41 @@ impl AotBuildResult {
         } else {
             std::env::var("CARGO").unwrap_or_else(|_| self.cargo_program.clone())
         };
-        let output = Command::new(command_program)
+        let mut command = Command::new(command_program);
+        command
             .args(&self.cargo_args)
             .envs(self.cargo_env.iter().map(|(k, v)| (k, v)))
-            .current_dir(self.cargo_workdir())
-            .output()?;
+            .current_dir(self.cargo_workdir());
+        let output = run_aot_command(&mut command, None)?;
 
         Ok(ExecutedAotBuild {
             build: self.clone(),
             status_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out: output.timed_out,
+        })
+    }
+
+    /// Executes the build with an explicit wall-clock timeout.
+    pub fn execute_with_timeout(&self, timeout: Duration) -> io::Result<ExecutedAotBuild> {
+        let command_program = if self.cargo_wrapper_program.is_some() {
+            self.cargo_wrapper_program.clone().unwrap()
+        } else {
+            std::env::var("CARGO").unwrap_or_else(|_| self.cargo_program.clone())
+        };
+        let mut command = Command::new(command_program);
+        command
+            .args(&self.cargo_args)
+            .envs(self.cargo_env.iter().map(|(k, v)| (k, v)))
+            .current_dir(self.cargo_workdir());
+        let output = run_aot_command(&mut command, Some(timeout))?;
+        Ok(ExecutedAotBuild {
+            build: self.clone(),
+            status_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out: output.timed_out,
         })
     }
 
@@ -550,7 +576,8 @@ impl ExecutedAotBuild {
     /// Returns `true` when Cargo reported a successful exit status and the
     /// expected `rlib` exists on disk.
     pub fn succeeded(&self) -> bool {
-        self.status_code == Some(0)
+        !self.timed_out
+            && self.status_code == Some(0)
             && (self.build.expected_rlib.exists() || self.build.expected_cdylib.exists())
     }
 }

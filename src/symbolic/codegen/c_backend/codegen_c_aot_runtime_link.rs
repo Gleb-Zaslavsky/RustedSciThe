@@ -429,6 +429,9 @@ mod tests {
             expected_cdylib: PathBuf::from("generated_c_mismatch_fixture/build/fixture.dll"),
             cargo_program: "tcc".to_string(),
             cargo_args: Vec::new(),
+            codegen_backend: Some(
+                crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::C,
+            ),
         }
     }
 

@@ -1,5 +1,4 @@
-use RustedSciThe::numerical::ODE_api2::{SolverType, UniversalODESolver};
-use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType, UniversalODESolver};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 
@@ -62,19 +61,18 @@ fn main() {
         println!("   Error: {:.2e}\n", (final_value - expected).abs());
     }
 
-    // Example 3: Radau solver
-    println!("3. Using Radau solver (Order 3):");
+    // Example 3: production Radau solver (fixed universal order)
+    println!("3. Using Radau solver:");
     let mut radau_solver = UniversalODESolver::radau(
         eq_system.clone(),
         values.clone(),
         arg.clone(),
-        RadauOrder::Order3,
         t0,
         y0.clone(),
         t_bound,
-        1e-6,       // tolerance
-        50,         // max iterations
-        Some(1e-3), // step size
+        1e-6,
+        50,
+        Some(1e-3),
     );
 
     radau_solver.solve();
@@ -144,7 +142,7 @@ fn main() {
         eq_system.clone(),
         values.clone(),
         arg.clone(),
-        SolverType::NonStiff("RK45".to_string()),
+        SolverType::NonStiff(NonStiffMethod::Rk45),
         t0,
         y0.clone(),
         t_bound,

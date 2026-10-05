@@ -26,9 +26,6 @@ use RustedSciThe::Utils::animation_2d::create_2d_animation;
 
 use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-
-use RustedSciThe::numerical::ODE_api2::SolverType;
-use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -194,23 +191,6 @@ fn main() {
             UniversalODESolver::bdf(eq_sys, unknowns, arg, t0, y0, t_bound, max_step, rtol, atol)
         }
 
-        "Radau" => {
-            let mut solver = UniversalODESolver::new(
-                eq_sys,
-                unknowns,
-                arg,
-                SolverType::Radau(RadauOrder::Order5),
-                t0,
-                y0,
-                t_bound,
-            );
-            solver.set_max_iterations(1000);
-            solver.set_parallel(true);
-            solver.set_tolerance(1e-4);
-            solver.set_step_size(1e-3);
-            solver.initialize();
-            solver
-        }
         "RK45" => UniversalODESolver::rk45(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
         "AB4" => UniversalODESolver::ab4(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
         "BE" => {

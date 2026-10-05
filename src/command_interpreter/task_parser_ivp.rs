@@ -27,8 +27,7 @@ use crate::numerical::LSODE2::{
     Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
     Lsode2SymbolicExecutionMode,
 };
-use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
-use crate::numerical::Radau::Radau_main::RadauOrder;
+use crate::numerical::ODE_api2::{NonStiffMethod, SolverType, UniversalODESolver};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
@@ -62,12 +61,11 @@ pub enum IvpMethodSpec {
 impl IvpMethodSpec {
     fn to_solver_type(&self) -> SolverType {
         match self {
-            Self::NonStiff(name) => SolverType::NonStiff(name.clone()),
-            Self::Radau3 => SolverType::Radau(RadauOrder::Order3),
-            Self::Radau5 => SolverType::Radau(RadauOrder::Order5),
-            Self::Bdf => SolverType::BDF,
+            Self::NonStiff(name) => SolverType::NonStiff(NonStiffMethod::from_name(name.clone())),
+            Self::Radau3 | Self::Radau5 => SolverType::Radau,
+            Self::Bdf => SolverType::Bdf,
             Self::BackwardEuler => SolverType::BackwardEuler,
-            Self::Lsode2 => SolverType::LSODE2,
+            Self::Lsode2 => SolverType::Lsode2,
         }
     }
 

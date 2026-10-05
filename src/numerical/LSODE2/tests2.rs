@@ -4,7 +4,6 @@ use super::{
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::ODE_api2::UniversalODESolver;
-use crate::numerical::Radau::Radau_main::RadauOrder;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashMap;
@@ -916,18 +915,7 @@ fn subliamtion_radau_test() {
     let y0 = DVector::from_vec(vec![1e-3, 1e-3, 300.0]);
     let t_bound = 4e-2;
 
-    let mut solver = UniversalODESolver::radau(
-        eqs,
-        values,
-        arg,
-        RadauOrder::Order3,
-        t0,
-        y0,
-        t_bound,
-        1e-6,
-        550,
-        None,
-    );
+    let mut solver = UniversalODESolver::radau(eqs, values, arg, t0, y0, t_bound, 1e-6, 550, None);
 
     solver.solve();
     let (_t_result, y) = solver.get_result();
@@ -1410,18 +1398,8 @@ fn no_subliamtion_radau_test() {
     let y0 = DVector::from_vec(vec![1e-3, 1e-3, 300.0]);
     let t_bound = 5e-2;
 
-    let mut solver = UniversalODESolver::radau(
-        eqs,
-        values,
-        arg,
-        RadauOrder::Order3,
-        t0,
-        y0,
-        t_bound,
-        1e-6,
-        550,
-        Some(1e-5),
-    );
+    let mut solver =
+        UniversalODESolver::radau(eqs, values, arg, t0, y0, t_bound, 1e-6, 550, Some(1e-5));
 
     solver.solve();
     let (_t_result, y) = solver.get_result();

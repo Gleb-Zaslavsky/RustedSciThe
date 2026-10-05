@@ -1510,6 +1510,7 @@ mod tests {
             expected_cdylib: PathBuf::from("generated_mismatched_fixture/target/fixture.dll"),
             cargo_program: "cargo".to_string(),
             cargo_args: vec!["build".to_string()],
+            codegen_backend: None,
         }
     }
 

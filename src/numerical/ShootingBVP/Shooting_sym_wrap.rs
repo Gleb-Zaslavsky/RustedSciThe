@@ -31,7 +31,7 @@
 //! ```rust, ignore
 //! use std::collections::HashMap;
 //! use RustedSciThe::numerical::ShootingBVP::Shooting_sym_wrap::BVPShooting;
-//! use RustedSciThe::numerical::ODE_api2::{SolverType, SolverParam};
+//! use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType, SolverParam};
 //! use RustedSciThe::symbolic::symbolic_engine::Expr;
 //!
 //! // Define second-order ODE: y'' + y = 0
@@ -59,7 +59,7 @@
 //! let params = HashMap::new();
 //! bvp.solve_with_certain_ivp(
 //!     0.0, 1e-6, 100, 0.01,
-//!     SolverType::NonStiff("RK45".to_string()),
+//!     SolverType::NonStiff(NonStiffMethod::Rk45),
 //!     params
 //! );
 //!
@@ -127,7 +127,7 @@ impl BVPShooting {
             values,
             arg,
             solver: ShootingMethodSolver::new(),
-            ivp_solver: SolverType::BDF,
+            ivp_solver: SolverType::Bdf,
             solver_params: HashMap::new(),
             BoundaryConditions: BoundaryConditions,
             borders: borders,

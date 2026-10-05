@@ -276,6 +276,41 @@ impl LapackStyleBandedLuFaithful {
 
         Ok(())
     }
+
+    /// Factor a compact row-major band buffer without constructing `Banded`.
+    ///
+    /// Radau already owns the compact shifted matrix in its backend workspace.
+    /// Accepting that representation directly removes a temporary `Vec` clone
+    /// and the short-lived wrapper object from every rejected or resized step.
+    pub fn factor_from_compact(&mut self, data: &[f64]) -> Result<(), BandedError> {
+        let expected = self
+            .kl
+            .checked_add(self.ku)
+            .and_then(|rows| rows.checked_add(1))
+            .and_then(|rows| rows.checked_mul(self.n))
+            .ok_or(BandedError::DimensionMismatch)?;
+        if data.len() != expected {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        self.ab.fill(0.0);
+        self.work13.fill(0.0);
+        self.work31.fill(0.0);
+        self.ipiv.fill(0);
+        self.ju = 0;
+        self.is_factorized = false;
+
+        for j in 0..self.n {
+            let i0 = j.saturating_sub(self.ku);
+            let i1 = (j + self.kl + 1).min(self.n);
+            for i in i0..i1 {
+                let source = (self.ku + i - j) * self.n + j;
+                let row = self.kv + i - j;
+                self.ab_set(row, j, data[source]);
+            }
+        }
+        self.factor_loaded()
+    }
     /// In DGBTRF/DGBTF2 the top KL rows are fill rows.
     /// For the faithful solver, these rows are explicitly managed.
     fn zero_fillin_column(&mut self, col: usize) {
@@ -453,6 +488,10 @@ impl LapackStyleBandedLuFaithful {
 
     pub fn factor_from(&mut self, a: &Banded<f64>) -> Result<(), BandedError> {
         self.load_from_banded(a)?;
+        self.factor_loaded()
+    }
+
+    fn factor_loaded(&mut self) -> Result<(), BandedError> {
         self.ju = 0;
         self.panel_start = 0;
         self.panel_size = 0;

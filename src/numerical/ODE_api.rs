@@ -6,6 +6,7 @@ use crate::Utils::plots::plots;
 use crate::numerical::BDF::common::NumberOrVec;
 use crate::numerical::BE::BE;
 use crate::numerical::NonStiff_api::{DormandPrince, RK45};
+#[cfg(test)]
 use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
 use csv::Writer;
 use na::{DMatrix, DVector};
@@ -13,12 +14,15 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-static COMPLEX: [&str; 2] = ["BDF", "RADAU"];
+static COMPLEX: [&str; 1] = ["BDF"];
+#[cfg(test)]
+static ARCHIVED_COMPLEX: [&str; 2] = ["BDF", "RADAU"];
 
 const EASY: [&str; 2] = ["RK45", "DOPRI"];
 pub enum Solvers {
     BE(BE),
     BDF(BDF),
+    #[cfg(test)]
     RADAU(Radau),
     RK45(RK45),
     DOPRI(DormandPrince),
@@ -29,7 +33,14 @@ impl Solvers {
         match name {
             //    "BE" => Solvers::BE(BE::new()),
             "BDF" => Solvers::BDF(BDF::new()),
-            "RADAU" => Solvers::RADAU(Radau::new(RadauOrder::Order5)),
+            "RADAU" => {
+                #[cfg(test)]
+                {
+                    return Solvers::RADAU(Radau::new(RadauOrder::Order5));
+                }
+                #[cfg(not(test))]
+                panic!("legacy Radau is disabled in ODE_api; use numerical::Radau::RadauSolver")
+            }
             "RK45" => Solvers::RK45(RK45::new()),
             "DOPRI" => Solvers::DOPRI(DormandPrince::new()),
             _ => panic!("Unknown solver name"),
@@ -144,7 +155,12 @@ impl ODEsolver {
         vectorized: bool,
         first_step: Option<f64>,
     ) -> Self {
-        if !COMPLEX.contains(&method.as_str()) {
+        let mut supported = COMPLEX.contains(&method.as_str());
+        #[cfg(test)]
+        {
+            supported |= ARCHIVED_COMPLEX.contains(&method.as_str());
+        }
+        if !supported {
             panic!("new_complex not implemented, please, use new_easy")
         }
         let solver_instance = Solvers::new(&method);
@@ -231,22 +247,28 @@ impl ODEsolver {
             );
             self.solver_instance = Solvers::BDF(solver_instance);
         }
-        // RADAU
+        // Archived reference route is compiled only for the crate's legacy
+        // tests. Production callers must use the typed RadauSolver API.
         else if self.method == "RADAU" {
-            let mut solver_instance = Radau::new(RadauOrder::Order5);
-            solver_instance.set_initial(
-                self.eq_system.clone(),
-                self.values.clone(),
-                self.arg.clone(),
-                self.rtol, // tolerance
-                50,        // max_iterations
-                self.first_step,
-                self.t0,
-                self.t_bound,
-                self.y0.clone(),
-            );
-            solver_instance.newton.eq_generate();
-            self.solver_instance = Solvers::RADAU(solver_instance);
+            #[cfg(test)]
+            {
+                let mut solver_instance = Radau::new(RadauOrder::Order5);
+                solver_instance.set_initial(
+                    self.eq_system.clone(),
+                    self.values.clone(),
+                    self.arg.clone(),
+                    self.rtol,
+                    50,
+                    self.first_step,
+                    self.t0,
+                    self.t_bound,
+                    self.y0.clone(),
+                );
+                solver_instance.newton.eq_generate();
+                self.solver_instance = Solvers::RADAU(solver_instance);
+            }
+            #[cfg(not(test))]
+            panic!("legacy Radau is disabled in ODE_api; use numerical::Radau::RadauSolver");
         }
         // BDF
         else if self.method == "RK45" {
@@ -280,6 +302,7 @@ impl ODEsolver {
                 Solvers::BDF(bdf) => {
                     bdf.step(self.t_bound, &mut self.status, &mut self.message);
                 }
+                #[cfg(test)]
                 Solvers::RADAU(radau) => {
                     radau.step();
                     self.status = radau.status.clone();
@@ -309,6 +332,7 @@ impl ODEsolver {
                     t.push(t_i);
                     y.push(y_i);
                 }
+                #[cfg(test)]
                 Solvers::RADAU(radau) => {
                     let y_i = radau.y.clone();
                     let t_i = radau.t;

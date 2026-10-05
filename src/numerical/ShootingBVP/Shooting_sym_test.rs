@@ -4,7 +4,6 @@ mod tests {
     use super::super::Shooting_sym_wrap::BVPShooting;
     use crate::symbolic::symbolic_engine::Expr;
 
-    use crate::numerical::Radau::Radau_main::RadauOrder;
     use approx::assert_abs_diff_eq;
     use approx::assert_relative_eq;
     use simplelog::*;
@@ -209,7 +208,7 @@ mod tests {
             ("max_step".to_string(), SolverParam::Float(1e-3)),
         ]);
 
-        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 0.001, SolverType::BDF, params);
+        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 0.001, SolverType::Bdf, params);
         let sol = bvp.get_solution();
         let boundpoint = sol.bound_values;
         let x_mesh = bvp.get_x();
@@ -247,7 +246,7 @@ mod tests {
             ("max_step".to_string(), SolverParam::Float(1e-3)),
         ]);
 
-        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 0.001, SolverType::BDF, params);
+        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 0.001, SolverType::Bdf, params);
         let sol = bvp.get_solution();
         let boundpoint = sol.bound_values;
         let x_mesh = bvp.get_x();
@@ -287,7 +286,7 @@ mod tests {
             ("max_step".to_string(), SolverParam::Float(1e-4)),
         ]);
 
-        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 1e-5, SolverType::BDF, params);
+        bvp.solve_with_certain_ivp(0.5, 1e-8, 100, 1e-5, SolverType::Bdf, params);
         let sol = bvp.get_solution();
         let boundpoint = sol.bound_values;
 
@@ -331,14 +330,7 @@ mod tests {
             ("atol".to_string(), SolverParam::Float(1e-8)),
         ]);
 
-        bvp.solve_with_certain_ivp(
-            1.0,
-            1e-6,
-            100,
-            0.01,
-            SolverType::Radau(RadauOrder::Order5),
-            params,
-        );
+        bvp.solve_with_certain_ivp(1.0, 1e-6, 100, 0.01, SolverType::Radau, params);
         let sol = bvp.get_solution();
 
         let boundpoint = sol.bound_values;
@@ -376,14 +368,7 @@ mod tests {
             ("atol".to_string(), SolverParam::Float(1e-8)),
         ]);
 
-        bvp.solve_with_certain_ivp(
-            1.0,
-            1e-6,
-            100,
-            0.01,
-            SolverType::Radau(RadauOrder::Order5),
-            params,
-        );
+        bvp.solve_with_certain_ivp(1.0, 1e-6, 100, 0.01, SolverType::Radau, params);
         let sol = bvp.get_solution();
 
         let boundpoint = sol.bound_values;
@@ -404,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_solve_with_rk45() {
-        use crate::numerical::ODE_api2::SolverType;
+        use crate::numerical::ODE_api2::{NonStiffMethod, SolverType};
         init_logger();
 
         // y'' + y = 0, y(0) = 1, y(π/2) = 0 (solution: y = cos(x))
@@ -430,7 +415,7 @@ mod tests {
             1e-6,
             100,
             1e-4,
-            SolverType::NonStiff("RK45".to_string()),
+            SolverType::NonStiff(NonStiffMethod::Rk45),
             params,
         );
         let sol = bvp.get_solution();
@@ -468,7 +453,7 @@ mod tests {
 
         let mut bvp = BVPShooting::new(eq_vec, values, arg, boundary_conditions, (0.0, 1.0));
 
-        bvp.solve_with_certain_ivp_generic(0.5, 1e-8, 100, 0.001, SolverType::BDF, |mut solver| {
+        bvp.solve_with_certain_ivp_generic(0.5, 1e-8, 100, 0.001, SolverType::Bdf, |mut solver| {
             solver.set_rtol(1e-6);
             solver.set_atol(1e-8);
             solver.set_max_step(1e-3);

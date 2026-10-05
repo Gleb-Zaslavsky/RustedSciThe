@@ -64,15 +64,15 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_ivp::{
     prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem, IvpBackendError,
-    PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem, SymbolicIvpAotOptions,
-    SymbolicIvpProblemOptions,
+    PreparedSymbolicIvpAotProblem, PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
+    SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_aot::{
     generated_aot_artifact_from_symbolic_ivp_atom_problem,
     generated_aot_artifact_from_symbolic_ivp_residual_problem,
     prepared_atom_aot_problem_from_residual_problem,
     prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout,
-    try_generated_aot_artifact_from_symbolic_ivp_problem, PreparedSymbolicIvpAtomAotProblem,
+    PreparedSymbolicIvpAtomAotProblem,
 };
 use log::{debug, info, warn};
 use std::fmt;
@@ -101,8 +101,18 @@ pub struct IvpBackendStatistics {
     pub result_assembly_ms_total: f64,
     /// Time spent constructing Newton factorizations; nested within solve.
     pub linear_factorization_ms_total: f64,
+    /// Dense shifted-matrix construction; nested within factorization time.
+    pub linear_matrix_assembly_ms_total: f64,
     /// Time spent solving Newton linear systems; nested within solve.
     pub linear_solve_ms_total: f64,
+    /// Diagnostic child scopes within BDF steps; they are not additive to `bdf_step_ms_total`.
+    pub bdf_step_snapshot_ms_total: f64,
+    pub bdf_step_predictor_setup_ms_total: f64,
+    pub bdf_newton_rhs_assembly_ms_total: f64,
+    pub bdf_newton_correction_norm_ms_total: f64,
+    pub bdf_newton_state_update_ms_total: f64,
+    pub bdf_step_error_estimate_ms_total: f64,
+    pub bdf_step_nordsieck_update_ms_total: f64,
     pub step_calls: usize,
     /// BDF accepted steps; other backends may leave this at zero.
     pub accepted_steps_total: usize,
@@ -162,7 +172,7 @@ impl IvpBackendStatistics {
 
     pub fn table_report(&self) -> String {
         format!(
-            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_solve_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} linear_solve_attempts={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
+            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_matrix_assembly_ms={:.3}(nested) linear_solve_ms={:.3}(nested) bdf_step_snapshot_ms={:.3}(nested) bdf_predictor_setup_ms={:.3}(nested) bdf_newton_rhs_assembly_ms={:.3}(nested) bdf_newton_correction_norm_ms={:.3}(nested) bdf_newton_state_update_ms={:.3}(nested) bdf_error_estimate_ms={:.3}(nested) bdf_nordsieck_update_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} linear_solve_attempts={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
             self.backend_prepare_calls,
             self.backend_prepare_ms_total,
             self.solve_calls,
@@ -172,7 +182,15 @@ impl IvpBackendStatistics {
             self.output_collection_ms_total,
             self.result_assembly_ms_total,
             self.linear_factorization_ms_total,
+            self.linear_matrix_assembly_ms_total,
             self.linear_solve_ms_total,
+            self.bdf_step_snapshot_ms_total,
+            self.bdf_step_predictor_setup_ms_total,
+            self.bdf_newton_rhs_assembly_ms_total,
+            self.bdf_newton_correction_norm_ms_total,
+            self.bdf_newton_state_update_ms_total,
+            self.bdf_step_error_estimate_ms_total,
+            self.bdf_step_nordsieck_update_ms_total,
             self.step_calls,
             self.accepted_steps_total,
             self.candidate_step_attempts_total,
@@ -290,6 +308,8 @@ pub struct SymbolicIvpGeneratedBackendConfig {
     pub residual_chunking_strategy: ResidualChunkingStrategy,
     /// Sparse Jacobian chunking used by sparse/banded native-AOT Jacobian paths.
     pub sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
+    /// Banded Jacobian chunking used by compact-banded native-AOT paths.
+    pub banded_jacobian_chunking_strategy: BandedChunkingStrategy,
     /// Lifecycle build policy.
     pub build_policy: SymbolicIvpAotBuildPolicy,
     /// Backend used to emit generated dense IVP artifacts.
@@ -314,6 +334,7 @@ impl Default for SymbolicIvpGeneratedBackendConfig {
             aot_options: SymbolicIvpAotOptions::default(),
             residual_chunking_strategy: ResidualChunkingStrategy::Whole,
             sparse_jacobian_chunking_strategy: SparseChunkingStrategy::Whole,
+            banded_jacobian_chunking_strategy: BandedChunkingStrategy::Whole,
             build_policy: SymbolicIvpAotBuildPolicy::default(),
             aot_codegen_backend: AotCodegenBackend::default(),
             aot_c_compiler: None,
@@ -403,6 +424,14 @@ impl SymbolicIvpGeneratedBackendConfig {
         sparse_jacobian_chunking_strategy: SparseChunkingStrategy,
     ) -> Self {
         self.sparse_jacobian_chunking_strategy = sparse_jacobian_chunking_strategy;
+        self
+    }
+
+    pub fn with_banded_jacobian_chunking_strategy(
+        mut self,
+        strategy: BandedChunkingStrategy,
+    ) -> Self {
+        self.banded_jacobian_chunking_strategy = strategy;
         self
     }
 
@@ -1368,40 +1397,68 @@ fn output_parent_dir_for_requested_build(
     }
 }
 
-fn dense_problem_key(
-    problem: &PreparedSymbolicIvpProblem,
-    options: SymbolicIvpAotOptions,
-) -> Result<String, SymbolicIvpGeneratedError> {
-    if problem.native_atoms().is_some() {
-        return Ok(
-            prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
-                problem,
-                options,
-                AtomAotMatrixLayout::Dense {
-                    rows: problem.equations.len(),
-                    cols: problem.variables.len(),
-                },
-            )?
-            .problem_key(),
-        );
-    }
-    Ok(problem.prepare_dense_aot_problem(options).problem_key())
+struct DenseProblemPreparation<'a> {
+    problem_key: String,
+    native_prepared: Option<PreparedSymbolicIvpAtomAotProblem>,
+    legacy_prepared: Option<PreparedSymbolicIvpAotProblem<'a>>,
 }
 
-fn select_backend(
+fn dense_problem_preparation(
     problem: &PreparedSymbolicIvpProblem,
-    resolver: Option<&AotResolver>,
     options: SymbolicIvpAotOptions,
+) -> Result<DenseProblemPreparation<'_>, SymbolicIvpGeneratedError> {
+    measure_cold_stage(
+        &problem.telemetry,
+        IvpColdStage::AotProblemKeyConstruction,
+        || dense_problem_preparation_unmeasured(problem, options),
+    )
+}
+
+fn dense_problem_preparation_unmeasured(
+    problem: &PreparedSymbolicIvpProblem,
+    options: SymbolicIvpAotOptions,
+) -> Result<DenseProblemPreparation<'_>, SymbolicIvpGeneratedError> {
+    if problem.native_atoms().is_some() {
+        let prepared = measure_cold_stage(
+            &problem.telemetry,
+            IvpColdStage::AotAtomPlanPreparation,
+            || {
+                prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
+                    problem,
+                    options,
+                    AtomAotMatrixLayout::Dense {
+                        rows: problem.equations.len(),
+                        cols: problem.variables.len(),
+                    },
+                )
+            },
+        )?;
+        return Ok(DenseProblemPreparation {
+            problem_key: prepared.problem_key(),
+            native_prepared: Some(prepared),
+            legacy_prepared: None,
+        });
+    }
+    let prepared = problem.prepare_dense_aot_problem(options);
+    Ok(DenseProblemPreparation {
+        problem_key: prepared.problem_key(),
+        native_prepared: None,
+        legacy_prepared: Some(prepared),
+    })
+}
+
+fn select_backend_with_key(
+    problem_key: &str,
+    resolver: Option<&AotResolver>,
 ) -> Result<SelectedSymbolicIvpBackendKind, SymbolicIvpGeneratedError> {
-    let problem_key = dense_problem_key(problem, options)?;
-    if let Some(linked) = resolve_linked_dense_backend(problem_key.as_str()) {
+    if let Some(linked) = resolve_linked_dense_backend(problem_key) {
         if linked.problem_key == problem_key {
             return Ok(SelectedSymbolicIvpBackendKind::AotCompiled);
         }
     }
 
     Ok(match resolver {
-        Some(resolver) => match resolver.resolve_by_problem_key(problem_key.as_str()).status {
+        Some(resolver) => match resolver.resolve_by_problem_key(problem_key).status {
             AotResolutionStatus::Missing => SelectedSymbolicIvpBackendKind::AotMissing,
             AotResolutionStatus::RegisteredButNotBuilt => {
                 SelectedSymbolicIvpBackendKind::AotRegisteredButNotBuilt
@@ -1735,6 +1792,62 @@ fn register_ivp_banded_runtime_backend(
     })
 }
 
+fn resolved_codegen_backend(
+    resolver: &AotResolver,
+    problem_key: &str,
+    fallback: AotCodegenBackend,
+) -> AotCodegenBackend {
+    resolver
+        .resolve_by_problem_key(problem_key)
+        .registered
+        .codegen_backend
+        .unwrap_or(fallback)
+}
+
+/// Reconnects a dense runtime from durable resolver metadata.
+///
+/// The linked-runtime registries are intentionally process-local because they
+/// own the `libloading` handle.  A resolver handoff therefore cannot be used
+/// directly by a fresh process: it must reopen the published cdylib and
+/// publish a new process-local callback owner first.  Sparse/Banded already
+/// had this reconnect path; keeping Dense here makes `RequirePrebuilt`
+/// symmetric across all Radau layouts.
+fn reconnect_ivp_dense_runtime_backend(
+    route: &str,
+    backend: AotCodegenBackend,
+    resolver: Option<&AotResolver>,
+    problem_key: &str,
+) -> Result<Option<LinkedDenseAotBackend>, SymbolicIvpGeneratedError> {
+    if let Some(linked) = resolve_linked_dense_backend(problem_key) {
+        debug!(
+            target: "rustedscithe::symbolic::aot",
+            "linked dense AOT runtime already available route={} key={}",
+            route,
+            problem_key
+        );
+        return Ok(Some(linked));
+    }
+
+    let Some(resolver) = resolver else {
+        return Ok(None);
+    };
+    let resolved = resolver.resolve_by_problem_key(problem_key);
+    if !resolved.is_compiled() {
+        return Ok(None);
+    }
+    let registration_backend = resolved.registered.codegen_backend.unwrap_or(backend);
+
+    debug!(
+        target: "rustedscithe::symbolic::aot",
+        "reconnecting dense AOT runtime route={} backend={:?} key={}",
+        route,
+        registration_backend,
+        problem_key
+    );
+    register_ivp_runtime_backend(route, registration_backend, resolver, problem_key)?;
+    Ok(resolve_linked_dense_backend(problem_key))
+}
+
 /// Reconnects an AtomView-native sparse or compact-Banded runtime from the
 /// resolver when this process does not yet have a linked registry entry.
 ///
@@ -1769,12 +1882,13 @@ fn reconnect_ivp_native_sparse_runtime_backend(
     if !resolved.is_compiled() {
         return Ok(None);
     }
+    let registration_backend = resolved.registered.codegen_backend.unwrap_or(backend);
 
     debug!(
         target: "rustedscithe::symbolic::aot",
         "reconnecting sparse AOT runtime route={} backend={:?} key={}",
         route,
-        backend,
+        registration_backend,
         problem_key
     );
 
@@ -1782,9 +1896,9 @@ fn reconnect_ivp_native_sparse_runtime_backend(
         layout,
         crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::BandedCompact { .. }
     ) {
-        register_ivp_banded_runtime_backend(route, backend, resolver, problem_key)
+        register_ivp_banded_runtime_backend(route, registration_backend, resolver, problem_key)
     } else {
-        register_ivp_sparse_runtime_backend(route, backend, resolver, problem_key)
+        register_ivp_sparse_runtime_backend(route, registration_backend, resolver, problem_key)
     };
     result?;
     let linked = resolve_linked_sparse_backend(problem_key);
@@ -1852,16 +1966,17 @@ fn reconnect_ivp_native_residual_runtime_backend(
     if !resolved.is_compiled() {
         return Ok(None);
     }
+    let registration_backend = resolved.registered.codegen_backend.unwrap_or(backend);
 
     debug!(
         target: "rustedscithe::symbolic::aot",
         "reconnecting residual AOT runtime route={} backend={:?} key={}",
         route,
-        backend,
+        registration_backend,
         problem_key
     );
 
-    register_ivp_residual_runtime_backend(route, backend, resolver, problem_key)?;
+    register_ivp_residual_runtime_backend(route, registration_backend, resolver, problem_key)?;
     Ok(resolve_linked_residual_backend(problem_key))
 }
 
@@ -1869,6 +1984,8 @@ fn perform_requested_build(
     problem: &PreparedSymbolicIvpProblem,
     config: &SymbolicIvpGeneratedBackendConfig,
     resolver_snapshot: Option<AotResolver>,
+    native_prepared: Option<PreparedSymbolicIvpAtomAotProblem>,
+    legacy_prepared: Option<PreparedSymbolicIvpAotProblem<'_>>,
 ) -> Result<(Option<GeneratedAotBuildResult>, Option<AotResolver>), SymbolicIvpGeneratedError> {
     let preset =
         match ResolvedIvpAotPlan::resolve(config, SelectedSymbolicIvpBackendKind::AotMissing)
@@ -1878,28 +1995,31 @@ fn perform_requested_build(
             None => return Ok((None, resolver_snapshot)),
         };
 
-    let native_prepared = if problem.native_atoms().is_some() {
-        Some(measure_cold_stage(
-            &problem.telemetry,
-            IvpColdStage::AtomJacobianPreparation,
-            || {
-                prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
-                    problem,
-                    config.aot_options,
-                    AtomAotMatrixLayout::Dense {
-                        rows: problem.equations.len(),
-                        cols: problem.variables.len(),
-                    },
+    let (native_prepared, legacy_prepared) = if problem.native_atoms().is_some() {
+        (
+            Some(native_prepared.ok_or_else(|| {
+                SymbolicIvpGeneratedError::AotBuildFailed(
+                    "dense AtomView AOT build lost its prepared plan".to_string(),
                 )
-            },
-        )?)
+            })?),
+            None,
+        )
     } else {
-        None
+        (
+            None,
+            Some(legacy_prepared.ok_or_else(|| {
+                SymbolicIvpGeneratedError::AotBuildFailed(
+                    "dense ExprLegacy AOT build lost its prepared descriptor".to_string(),
+                )
+            })?),
+        )
     };
     let (problem_key, manifest) = if let Some(prepared) = native_prepared.as_ref() {
         (prepared.problem_key(), prepared.manifest())
     } else {
-        let prepared = problem.prepare_dense_aot_problem(config.aot_options);
+        let prepared = legacy_prepared
+            .as_ref()
+            .expect("ExprLegacy AOT descriptor is checked above");
         (prepared.problem_key(), prepared.manifest())
     };
     let route = if native_prepared.is_some() {
@@ -1920,20 +2040,24 @@ fn perform_requested_build(
     );
     let artifact = measure_cold_stage(&problem.telemetry, IvpColdStage::AotLowering, || {
         if let Some(prepared) = native_prepared.as_ref() {
-            generated_aot_artifact_from_symbolic_ivp_atom_problem(
+            Ok(generated_aot_artifact_from_symbolic_ivp_atom_problem(
                 &crate_name,
                 &module_name,
                 prepared,
                 config.aot_codegen_backend,
-            )
-        } else {
-            try_generated_aot_artifact_from_symbolic_ivp_problem(
+            )?)
+        } else if let Some(prepared) = legacy_prepared.as_ref() {
+            let generic = PreparedProblem::Dense(prepared.as_prepared_problem());
+            Ok(generated_aot_artifact_from_prepared_problem(
                 &crate_name,
                 &module_name,
-                problem,
-                config.aot_options,
+                &generic,
                 config.aot_codegen_backend,
-            )
+            ))
+        } else {
+            Err(SymbolicIvpGeneratedError::AotBuildFailed(
+                "dense ExprLegacy AOT build lost its prepared descriptor".to_string(),
+            ))
         }
     })?;
     let output_parent_dir =
@@ -2006,17 +2130,43 @@ fn perform_requested_build(
         problem_key.as_str(),
         "link/load started",
     );
-    let resolver = measure_cold_stage(&problem.telemetry, IvpColdStage::AotLink, || {
+    let resolver = match measure_cold_stage(&problem.telemetry, IvpColdStage::AotLink, || {
         register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)
-    })?;
-    measure_cold_stage(&problem.telemetry, IvpColdStage::AotPublication, || {
+    }) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            problem.telemetry.record_aot_link_result(false);
+            problem.telemetry.log_aot_event(
+                crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::LinkFailed,
+                route,
+                problem_key.as_str(),
+                "artifact registration failed",
+            );
+            return Err(error);
+        }
+    };
+    // The publication call below performs the first dynamic load for a cold
+    // producer.  Count it here so a producer reports one link attempt, while
+    // a later in-process cache hit does not fabricate another attempt.
+    problem.telemetry.record_aot_link_attempt();
+    let published = measure_cold_stage(&problem.telemetry, IvpColdStage::AotPublication, || {
         register_ivp_runtime_backend(
             "dense",
             config.aot_codegen_backend,
             &resolver,
             problem_key.as_str(),
         )
-    })?;
+    });
+    problem.telemetry.record_aot_link_result(published.is_ok());
+    if let Err(error) = published {
+        problem.telemetry.log_aot_event(
+            crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::LinkFailed,
+            route,
+            problem_key.as_str(),
+            "runtime publication failed",
+        );
+        return Err(error);
+    }
     problem.telemetry.log_aot_event(
         crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Linked,
         route,
@@ -2617,6 +2767,16 @@ fn perform_requested_native_sparse_build(
             return Err(error);
         }
     };
+    // The link scope ends when the artifact has been registered in the
+    // resolver. Runtime callback publication is a separate lifecycle stage;
+    // keeping it outside AotLink makes structured AtomView comparable with
+    // ExprLegacy and with the dense route.
+    if let Some(telemetry) = problem.telemetry() {
+        telemetry.record_cold_stage(
+            crate::symbolic::ivp_telemetry::IvpColdStage::AotLink,
+            link_started,
+        );
+    }
     let is_compact_banded = matches!(
         problem.plan().matrix_layout(),
         crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::BandedCompact { .. }
@@ -2652,10 +2812,6 @@ fn perform_requested_native_sparse_build(
     let linked =
         measure_optional_cold_stage(problem.telemetry(), IvpColdStage::AotPublication, publish);
     if let Some(telemetry) = problem.telemetry() {
-        telemetry.record_cold_stage(
-            crate::symbolic::ivp_telemetry::IvpColdStage::AotLink,
-            link_started,
-        );
         telemetry.record_aot_link_result(linked.is_ok());
         if linked.is_ok() {
             telemetry.log_aot_event(
@@ -2795,7 +2951,7 @@ fn prepare_generated_symbolic_ivp_native_backend(
 ) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
     let native = measure_cold_stage(
         &baseline_problem.telemetry,
-        IvpColdStage::AtomJacobianPreparation,
+        IvpColdStage::AotAtomPlanPreparation,
         || {
             prepared_atom_aot_problem_from_residual_problem(
                 baseline_problem,
@@ -2865,20 +3021,40 @@ fn prepare_generated_symbolic_ivp_native_backend(
     match final_selection {
         SelectedSymbolicIvpBackendKind::AotCompiled => {
             let had_process_local_runtime = resolve_linked_sparse_backend(&problem_key).is_some();
-            let linked_backend = reconnect_ivp_native_sparse_runtime_backend(
+            if !had_process_local_runtime {
+                baseline_problem.telemetry.record_aot_link_attempt();
+            }
+            let linked_backend = match reconnect_ivp_native_sparse_runtime_backend(
                 "sparse-atom-native",
                 config.aot_codegen_backend,
                 resolver_snapshot.as_ref(),
                 &problem_key,
                 *layout,
-            )?;
+            ) {
+                Ok(linked_backend) => {
+                    if !had_process_local_runtime {
+                        baseline_problem
+                            .telemetry
+                            .record_aot_link_result(linked_backend.is_some());
+                        if linked_backend.is_some() {
+                            baseline_problem.telemetry.record_aot_reconnect();
+                        }
+                    }
+                    linked_backend
+                }
+                Err(error) => {
+                    if !had_process_local_runtime {
+                        baseline_problem.telemetry.record_aot_link_result(false);
+                    }
+                    return Err(error);
+                }
+            };
             if linked_backend.is_none() {
                 return Err(SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
                     runtime_unavailable_aot_message("sparse-atom-native", &problem_key, config),
                 ));
             }
             if !had_process_local_runtime {
-                baseline_problem.telemetry.record_aot_reconnect();
                 baseline_problem.telemetry.log_aot_event(
                     crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::Linked,
                     "sparse-atom-native",
@@ -3057,12 +3233,24 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
     let mut linked_backend = resolve_linked_sparse_backend(problem_key.as_str());
     if linked_backend.is_none() {
         if let Some(resolver) = resolver_snapshot.as_ref() {
-            let _ = register_ivp_sparse_runtime_backend(
-                "sparse",
+            let registration_backend = resolved_codegen_backend(
+                resolver,
+                problem_key.as_str(),
                 config.aot_codegen_backend,
+            );
+            aot_source.telemetry.record_aot_link_attempt();
+            let registration = register_ivp_sparse_runtime_backend(
+                "sparse",
+                registration_backend,
                 resolver,
                 problem_key.as_str(),
             );
+            aot_source
+                .telemetry
+                .record_aot_link_result(registration.is_ok());
+            if registration.is_ok() {
+                aot_source.telemetry.record_aot_reconnect();
+            }
             linked_backend = resolve_linked_sparse_backend(problem_key.as_str());
         }
     }
@@ -3074,6 +3262,13 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
                     runtime_unavailable_aot_message("sparse", problem_key.as_str(), &config),
                 ));
             }
+            aot_source.telemetry.record_aot_runtime_ready();
+            aot_source.telemetry.log_aot_event(
+                crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::RuntimeReady,
+                "sparse-expr-legacy",
+                problem_key.as_str(),
+                "runtime ready for solver handoff",
+            );
             let runtime_owner = linked_backend.clone().map(|linked| {
                 PreparedIvpAotRuntime::new(
                     problem_key.clone(),
@@ -3256,7 +3451,7 @@ fn prepare_generated_symbolic_ivp_expr_banded_backend(
         BackendKind::Aot,
         MatrixBackend::Banded,
         residual_task.runtime_plan(config.residual_chunking_strategy),
-        banded_task.runtime_plan(BandedChunkingStrategy::Whole),
+        banded_task.runtime_plan(config.banded_jacobian_chunking_strategy),
     );
     let generic = PreparedProblem::banded(prepared.clone());
     let manifest =
@@ -3322,7 +3517,11 @@ fn prepare_generated_symbolic_ivp_expr_banded_backend(
     };
     match final_selection {
         SelectedSymbolicIvpBackendKind::AotCompiled => {
-            let linked_backend = reconnect_ivp_native_sparse_runtime_backend(
+            let had_process_local_runtime = resolve_linked_sparse_backend(&problem_key).is_some();
+            if !had_process_local_runtime {
+                baseline_problem.telemetry.record_aot_link_attempt();
+            }
+            let linked_backend = match reconnect_ivp_native_sparse_runtime_backend(
                 "banded-expr-legacy",
                 config.aot_codegen_backend,
                 resolver_snapshot.as_ref(),
@@ -3334,12 +3533,37 @@ fn prepare_generated_symbolic_ivp_expr_banded_backend(
                     ku,
                     slots,
                 },
-            )?
+            ) {
+                Ok(linked_backend) => {
+                    if !had_process_local_runtime {
+                        baseline_problem
+                            .telemetry
+                            .record_aot_link_result(linked_backend.is_some());
+                        if linked_backend.is_some() {
+                            baseline_problem.telemetry.record_aot_reconnect();
+                        }
+                    }
+                    linked_backend
+                }
+                Err(error) => {
+                    if !had_process_local_runtime {
+                        baseline_problem.telemetry.record_aot_link_result(false);
+                    }
+                    return Err(error);
+                }
+            }
             .ok_or_else(|| {
                 SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(
                     runtime_unavailable_aot_message("banded-expr-legacy", &problem_key, config),
                 )
             })?;
+            baseline_problem.telemetry.record_aot_runtime_ready();
+            baseline_problem.telemetry.log_aot_event(
+                crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::RuntimeReady,
+                "banded-expr-legacy",
+                &problem_key,
+                "runtime ready for solver handoff",
+            );
             let runtime_owner = PreparedIvpAotRuntime::new(
                 problem_key.clone(),
                 final_selection,
@@ -3397,12 +3621,17 @@ pub fn prepare_generated_symbolic_ivp_problem(
 ) -> Result<PreparedGeneratedSymbolicIvpProblem, SymbolicIvpGeneratedError> {
     let baseline_problem = prepare_symbolic_ivp_problem(equations, variables, time_arg, options)?;
     let aot_source = &baseline_problem;
+    let dense_preparation = dense_problem_preparation(aot_source, config.aot_options)?;
+    let DenseProblemPreparation {
+        problem_key,
+        native_prepared,
+        legacy_prepared,
+    } = dense_preparation;
     let initial_selection = measure_cold_stage(
         &baseline_problem.telemetry,
         IvpColdStage::AotCacheLookup,
-        || select_backend(aot_source, config.resolver.as_ref(), config.aot_options),
+        || select_backend_with_key(problem_key.as_str(), config.resolver.as_ref()),
     )?;
-    let problem_key = dense_problem_key(aot_source, config.aot_options)?;
     log_aot_cache_selection(
         &baseline_problem.telemetry,
         if aot_source.native_atoms().is_some() {
@@ -3418,31 +3647,43 @@ pub fn prepare_generated_symbolic_ivp_problem(
         .telemetry
         .record_aot_resolution(initial_selection == SelectedSymbolicIvpBackendKind::AotCompiled);
     let resolved_plan = ResolvedIvpAotPlan::resolve(&config, initial_selection);
-    let (build_result, resolver_snapshot) = if resolved_plan.should_build() {
-        perform_requested_build(aot_source, &config, config.resolver.clone())?
+    let performed_build = resolved_plan.should_build();
+    let (build_result, resolver_snapshot) = if performed_build {
+        perform_requested_build(
+            aot_source,
+            &config,
+            config.resolver.clone(),
+            native_prepared,
+            legacy_prepared,
+        )?
     } else {
         (None, config.resolver.clone())
     };
 
-    let final_selection = measure_cold_stage(
-        &baseline_problem.telemetry,
-        IvpColdStage::AotCacheLookup,
-        || select_backend(aot_source, resolver_snapshot.as_ref(), config.aot_options),
-    )?;
-    log_aot_cache_selection(
-        &baseline_problem.telemetry,
-        if aot_source.native_atoms().is_some() {
-            "dense-atom-native"
-        } else {
-            "dense-expr-legacy"
-        },
-        problem_key.as_str(),
-        "phase=final-selection",
-        final_selection,
-    );
-    baseline_problem
-        .telemetry
-        .record_aot_resolution(final_selection == SelectedSymbolicIvpBackendKind::AotCompiled);
+    let final_selection = if performed_build {
+        let selection = measure_cold_stage(
+            &baseline_problem.telemetry,
+            IvpColdStage::AotCacheLookup,
+            || select_backend_with_key(problem_key.as_str(), resolver_snapshot.as_ref()),
+        )?;
+        log_aot_cache_selection(
+            &baseline_problem.telemetry,
+            if aot_source.native_atoms().is_some() {
+                "dense-atom-native"
+            } else {
+                "dense-expr-legacy"
+            },
+            problem_key.as_str(),
+            "phase=post-build-selection",
+            selection,
+        );
+        baseline_problem
+            .telemetry
+            .record_aot_resolution(selection == SelectedSymbolicIvpBackendKind::AotCompiled);
+        selection
+    } else {
+        initial_selection
+    };
     match final_selection {
         SelectedSymbolicIvpBackendKind::Lambdify | SelectedSymbolicIvpBackendKind::AotMissing => {
             match config.build_policy {
@@ -3466,11 +3707,22 @@ pub fn prepare_generated_symbolic_ivp_problem(
             ))
         }
         SelectedSymbolicIvpBackendKind::AotCompiled => {
-            let problem_key = dense_problem_key(aot_source, config.aot_options)?;
-            baseline_problem.telemetry.record_aot_link_attempt();
-            if let Some(linked) = resolve_linked_dense_backend(problem_key.as_str()) {
+            let had_process_local_runtime =
+                resolve_linked_dense_backend(problem_key.as_str()).is_some();
+            if !had_process_local_runtime {
+                baseline_problem.telemetry.record_aot_link_attempt();
+            }
+            if let Some(linked) = reconnect_ivp_dense_runtime_backend(
+                "dense",
+                config.aot_codegen_backend,
+                resolver_snapshot.as_ref(),
+                problem_key.as_str(),
+            )? {
                 let problem = baseline_problem;
-                problem.telemetry.record_aot_link_result(true);
+                if !had_process_local_runtime {
+                    problem.telemetry.record_aot_link_result(true);
+                    problem.telemetry.record_aot_reconnect();
+                }
                 problem.telemetry.record_aot_runtime_ready();
                 problem.telemetry.log_aot_event(
                     crate::symbolic::ivp_telemetry::IvpAotLifecycleEvent::RuntimeReady,
@@ -3942,6 +4194,14 @@ mod tests {
         assert_eq!(snapshot.route, IvpTelemetryRoute::AtomViewNative);
         assert_eq!(snapshot.cold_stage(IvpColdStage::AtomToExpr).calls, 0);
         assert!(snapshot.cold_stage(IvpColdStage::ExprToAtom).calls > 0);
+        assert_eq!(
+            snapshot
+                .cold_stage(IvpColdStage::AotProblemKeyConstruction)
+                .calls,
+            1,
+            "dense generated preparation should build its canonical artifact key once"
+        );
+        assert_eq!(snapshot.cold_stage(IvpColdStage::AotCacheLookup).calls, 1);
     }
 
     #[test]
@@ -3996,8 +4256,20 @@ mod tests {
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.cold_stage(IvpColdStage::ExprToAtom).calls, 1);
         assert_eq!(snapshot.cold_stage(IvpColdStage::AtomToExpr).calls, 0);
-        assert_eq!(snapshot.cold_stage(IvpColdStage::SparsePattern).calls, 1);
+        assert_eq!(snapshot.cold_stage(IvpColdStage::SparsePattern).calls, 0);
         assert_eq!(snapshot.cold_stage(IvpColdStage::LayoutPlanning).calls, 1);
+        assert_eq!(
+            snapshot
+                .cold_stage(IvpColdStage::AtomDependencyAnalysis)
+                .calls,
+            1
+        );
+        assert_eq!(
+            snapshot
+                .cold_stage(IvpColdStage::SymbolicDifferentiation)
+                .calls,
+            1
+        );
     }
 
     #[test]

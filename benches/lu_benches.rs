@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 use RustedSciThe::somelinalg::banded::{
@@ -325,7 +325,7 @@ fn generate_rhs_from_known_solution(a: &Banded<f64>, seed: u64) -> (Vec<f64>, Ve
     let b = RustedSciThe::somelinalg::banded::banded_matvec(a, &x_true).unwrap();
     (x_true, b)
 }
-
+#[allow(dead_code)]
 fn bench_block_tridiag_factor(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_tridiag_factor");
 

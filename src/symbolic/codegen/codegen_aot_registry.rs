@@ -13,6 +13,7 @@
 //! - a derived `problem_key`,
 //! - and the on-disk locations returned by `AotBuildRequest::materialize()`.
 
+use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_aot_lifecycle::{
     AotArtifactInspection, AotArtifactState, AotFailureDiagnostics, AotFailureKind,
     AotLifecycleError, AotLifecycleStage, quarantine_generated_tree,
@@ -37,6 +38,12 @@ pub struct RegisteredAotArtifact {
     pub expected_cdylib: PathBuf,
     pub cargo_program: String,
     pub cargo_args: Vec<String>,
+    /// Codegen/runtime loader selected by the producer.
+    ///
+    /// `None` is retained only for legacy handoff records written before
+    /// backend provenance was part of the durable registry contract. New
+    /// records always carry this value.
+    pub codegen_backend: Option<AotCodegenBackend>,
 }
 
 impl RegisteredAotArtifact {
@@ -231,7 +238,7 @@ impl AotRegistry {
         let mut file = fs::File::create(path)?;
         writeln!(
             file,
-            "RST_AOT_REGISTRY_HANDOFF|version=1|entries={}",
+            "RST_AOT_REGISTRY_HANDOFF|version=2|entries={}",
             self.len()
         )?;
         for artifact in self.entries_by_problem_key.values() {
@@ -243,12 +250,25 @@ impl AotRegistry {
     /// Loads a registry snapshot published by another process.
     pub fn read_handoff(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
         let source = fs::read_to_string(path)?;
+        let mut lines = source.lines();
+        let header = lines
+            .next()
+            .ok_or_else(|| invalid_handoff("empty AOT registry handoff"))?;
+        let version = header
+            .split('|')
+            .find_map(|field| field.strip_prefix("version="))
+            .ok_or_else(|| invalid_handoff("AOT registry handoff has no version"))?;
+        if version != "1" && version != "2" {
+            return Err(invalid_handoff(format!(
+                "unsupported AOT registry handoff version {version}"
+            )));
+        }
         let mut registry = Self::new();
-        for line in source.lines().filter(|line| line.starts_with("entry|")) {
+        for line in lines.filter(|line| line.starts_with("entry|")) {
             let encoded = line
                 .strip_prefix("entry|")
                 .ok_or_else(|| invalid_handoff("malformed AOT registry entry prefix"))?;
-            let artifact = decode_artifact(encoded)?;
+            let artifact = decode_artifact(encoded, version == "2")?;
             registry.register_existing_artifact(artifact)?;
         }
         Ok(registry)
@@ -299,8 +319,12 @@ impl AotRegistry {
         manifest: PreparedProblemManifest,
         build: &AotBuildResult,
     ) -> &RegisteredAotArtifact {
-        self.try_register_materialized_build(manifest, build)
-            .expect("generated crate metadata should be valid at compatibility boundary")
+        self.try_register_materialized_build_with_backend(
+            manifest,
+            build,
+            Some(AotCodegenBackend::Rust),
+        )
+        .expect("generated crate metadata should be valid at compatibility boundary")
     }
 
     /// Fallible registry insertion used by new lifecycle code.
@@ -308,6 +332,21 @@ impl AotRegistry {
         &mut self,
         manifest: PreparedProblemManifest,
         build: &AotBuildResult,
+    ) -> Result<&RegisteredAotArtifact, AotLifecycleError> {
+        self.try_register_materialized_build_with_backend(
+            manifest,
+            build,
+            Some(AotCodegenBackend::Rust),
+        )
+    }
+
+    /// Registers a materialized artifact and preserves the producer's runtime
+    /// loader choice for process-isolated consumers.
+    pub fn try_register_materialized_build_with_backend(
+        &mut self,
+        manifest: PreparedProblemManifest,
+        build: &AotBuildResult,
+        codegen_backend: Option<AotCodegenBackend>,
     ) -> Result<&RegisteredAotArtifact, AotLifecycleError> {
         let problem_key = manifest.problem_key();
         let crate_name = build
@@ -338,6 +377,7 @@ impl AotRegistry {
                 expected_cdylib: build.expected_cdylib.clone(),
                 cargo_program: build.cargo_program.clone(),
                 cargo_args: build.cargo_args.clone(),
+                codegen_backend,
             },
         ) {
             self.crate_name_to_problem_key.remove(&previous.crate_name);
@@ -513,6 +553,25 @@ fn encode_layout(
     }
 }
 
+fn encode_codegen_backend(backend: Option<AotCodegenBackend>) -> &'static str {
+    match backend {
+        None => "unknown",
+        Some(AotCodegenBackend::Rust) => "rust",
+        Some(AotCodegenBackend::C) => "c",
+        Some(AotCodegenBackend::Zig) => "zig",
+    }
+}
+
+fn decode_codegen_backend(value: &str) -> io::Result<Option<AotCodegenBackend>> {
+    match value {
+        "unknown" => Ok(None),
+        "rust" => Ok(Some(AotCodegenBackend::Rust)),
+        "c" => Ok(Some(AotCodegenBackend::C)),
+        "zig" => Ok(Some(AotCodegenBackend::Zig)),
+        _ => Err(invalid_handoff("unknown codegen backend in AOT handoff")),
+    }
+}
+
 fn decode_layout(
     value: &str,
 ) -> io::Result<Option<crate::symbolic::codegen::codegen_manifest::PreparedJacobianLayout>> {
@@ -595,18 +654,20 @@ fn encode_artifact(artifact: &RegisteredAotArtifact) -> String {
         encode_strings(&functions.jacobian_chunk_names),
         encode_chunks(&functions.jacobian_chunks),
         manifest.expression_signature.to_string(),
+        encode_codegen_backend(artifact.codegen_backend).to_string(),
     ]
     .join("|")
 }
 
-fn decode_artifact(value: &str) -> io::Result<RegisteredAotArtifact> {
+fn decode_artifact(value: &str, has_backend_provenance: bool) -> io::Result<RegisteredAotArtifact> {
     use crate::symbolic::codegen::codegen_manifest::{
         GeneratedFunctionsManifest, PreparedProblemManifest, PreparedSymbolicRoute,
         ProblemIoManifest,
     };
     use crate::symbolic::codegen::codegen_provider_api::{BackendKind, MatrixBackend};
     let fields = value.split('|').collect::<Vec<_>>();
-    if fields.len() != 25 {
+    let expected_fields = if has_backend_provenance { 26 } else { 25 };
+    if fields.len() != expected_fields {
         return Err(invalid_handoff(
             "AOT handoff entry has an unexpected field count",
         ));
@@ -674,6 +735,11 @@ fn decode_artifact(value: &str) -> io::Result<RegisteredAotArtifact> {
         expected_cdylib: PathBuf::from(decode_text(fields[6])?),
         cargo_program: decode_text(fields[7])?,
         cargo_args: decode_strings(fields[8])?,
+        codegen_backend: if has_backend_provenance {
+            decode_codegen_backend(fields[25])?
+        } else {
+            None
+        },
     })
 }
 //================================================================================
@@ -810,11 +876,65 @@ mod tests {
         );
         assert_eq!(
             restored
+                .get_by_problem_key(&registered.problem_key)
+                .and_then(|artifact| artifact.codegen_backend),
+            Some(AotCodegenBackend::Rust)
+        );
+        assert_eq!(
+            restored
                 .get_by_crate_name(&registered.crate_name)
                 .expect("restored crate name should resolve")
                 .expected_cdylib,
             registered.expected_cdylib
         );
+    }
+
+    #[test]
+    fn registry_handoff_v1_remains_readable_without_backend_provenance() {
+        let prepared = sample_prepared_problem();
+        let manifest = PreparedProblemManifest::from(&prepared);
+        let crate_spec = generated_aot_crate_from_prepared_problem(
+            "generated_registry_v1_fixture",
+            "generated_registry_v1_module",
+            &prepared,
+        );
+        let dir = tempdir().expect("tempdir should exist");
+        let build = AotBuildRequest::new(crate_spec, dir.path(), AotBuildProfile::Debug)
+            .materialize()
+            .expect("build request should materialize");
+        let mut registry = AotRegistry::new();
+        registry.register_materialized_build(manifest, &build);
+
+        let v2_path = dir.path().join("registry-v2.txt");
+        registry
+            .write_handoff(&v2_path)
+            .expect("v2 handoff should be writable");
+        let v2 = fs::read_to_string(&v2_path).expect("v2 handoff should be readable");
+        let v1 = v2
+            .lines()
+            .map(|line| {
+                if line.starts_with("RST_AOT_REGISTRY_HANDOFF|") {
+                    line.replace("version=2", "version=1")
+                } else if let Some(entry) = line.strip_prefix("entry|") {
+                    let mut fields = entry.split('|').collect::<Vec<_>>();
+                    fields.pop();
+                    format!("entry|{}", fields.join("|"))
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let v1_path = dir.path().join("registry-v1.txt");
+        fs::write(&v1_path, v1).expect("v1 handoff should be writable");
+
+        let restored = AotRegistry::read_handoff(&v1_path).expect("v1 handoff should be readable");
+        let artifact = restored
+            .problem_keys()
+            .first()
+            .and_then(|key| restored.get_by_problem_key(key))
+            .expect("v1 artifact should be restored");
+        assert_eq!(artifact.codegen_backend, None);
     }
 
     #[test]
