@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use nalgebra::{DMatrix, DVector};
 
-use super::callbacks::{validate_callback_output, ResidualCallback};
+use super::callbacks::{ResidualCallback, validate_callback_output};
 use super::error::{RadauError, RadauStage};
 
 pub(crate) type NativeResidualFn = Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>;

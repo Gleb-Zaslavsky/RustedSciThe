@@ -746,3 +746,71 @@ println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 адаптивные решения. Буфер ограничен на каждый solve, поэтому большая задача не
 может бесконечно наращивать память диагностики. При достижении лимита проверяйте
 `log_events_dropped`.
+
+## Запуск BVP-задач из текстовых документов
+
+Текстовый task-document — это удобный слой над нативным API BVP_Damp для
+воспроизводимых экспериментов и пакетных запусков. В прикладном коде лучше
+использовать типизированный builder API из предыдущих разделов. Документ может
+задать солвер, layout матрицы, символьный маршрут, режим исполнения,
+допуски, continuation и политику вывода.
+
+```text
+# BVP_Damp task: комментарии игнорируются парсером.
+solver: BVP
+strategy: Damped
+method: Sparse
+frontend: AtomViewNative
+execution: Lambdify
+tolerance: 1e-6
+max_iterations: 100
+
+parameters:
+  k: 2.5
+
+continuation:
+  parameter: k
+  values: 1.0, 1.5, 2.0, 2.5
+  mode: prepared
+  restart_each: false
+
+output_policy: none
+```
+
+`solver: BVP` выбирает адаптер BVP_Damp. `strategy` задаёт нелинейную политику
+(`Damped`, `Frozen` или `Naive`), а `method` — layout линейной алгебры
+(`Dense`, `Sparse` или `Banded`). Это независимые измерения: layout не является
+символьным frontend, а strategy не является execution backend.
+
+`frontend` выбирает символьное представление. `ExprLegacy` использует
+expression-oriented маршрут; `AtomViewNative` переводит residual и Jacobian на
+нативный AtomView и не возвращает подготовленный граф обратно в Expr. Параметр
+`execution` выбирает `Lambdify` или `AOT`; `Lambdify` — режим исполнения, а не
+ещё один frontend. Для большой разреженной задачи обычно разумно начать с
+`AtomViewNative` и `Lambdify`, а для маленькой полностью связанной задачи — с
+`ExprLegacy` и `Dense`. Универсально быстрого выбора нет: сравнивайте одинаковые
+задачи и выбирайте маршрут, который быстрее и устойчивее на реальной модели.
+
+Для AOT можно дополнительно задать `aot_build_policy`
+(`BuildIfMissing`, `RequirePrebuilt` или `RebuildAlways`), `output_dir`,
+`compiler`, `profile` и каталог publication/handoff. `RequirePrebuilt` ничего
+не компилирует; отсутствие или устаревание артефакта, неверная provenance,
+ошибка compiler/link или timeout должны возвращаться типизированной ошибкой,
+а не скрытым переходом на другой маршрут. В lifecycle-отчёте отдельно видны
+cache hit/miss, build/link attempts, publication и runtime readiness.
+
+Блок `continuation` описывает семейство BVP-задач. `mode: fresh` заново
+подготавливает каждый сегмент, `warm` переиспользует подготовленную модель с
+новыми параметрами, а `prepared` запрашивает максимально сильное повторное
+использование. `restart_each` определяет, начинается ли каждый сегмент с
+исходной сетки и начального приближения. Для каждого сегмента можно задать
+собственные `y0`, `t0` и `t_end`; это настоящий restart-контракт, а не просто
+изменение параметра. Для обычного continuation используйте монотонные значения,
+если немонотонный sweep не является намеренной частью эксперимента.
+
+`output_policy` принимает `none`, `terminal`, `plotters` или `gnuplot`; старый
+ключ `plot` поддерживается как compatibility alias. Комментарии, начинающиеся
+с `#`, игнорируются, поэтому пояснения можно оставлять прямо в task-файле.
+Эталонные документы находятся в `examples/task_docs/`. Общая грамматика,
+типизированные diagnostics и правила batch-runner описаны в
+[`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).

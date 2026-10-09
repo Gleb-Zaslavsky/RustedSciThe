@@ -26,24 +26,36 @@
 //! - postprocessing is routed through the unified postprocessing facade, while
 //!   the historical plot flag remains available for legacy plotters output
 
-use crate::Utils::postprocessing::PostprocessPlan;
-use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_common::{
-    SharedEquationParseError, parse_symbolic_equation_system,
+    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode, ContinuationSpec,
+    SharedEquationParseError,
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use crate::numerical::BVP_api::BVP;
+use crate::numerical::BVP_sci::new::{
+    BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciNewError, BvpSciOptions,
+    BvpSciSolver,
+};
 use crate::somelinalg::banded::{LinearSolverConfig, LinearSolverPolicy};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
-use nalgebra::DMatrix;
+use crate::symbolic::symbolic_ivp_generated::{
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+};
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
+use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 
@@ -51,6 +63,68 @@ type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpTaskKindSpec {
     Bvp,
+}
+
+/// Concrete BVP implementation selected by a task document.
+///
+/// `BVP` remains the compatibility spelling for the mature damped solver;
+/// `BVP_sci` is an explicit route to the new SciPy-like collocation solver.
+/// Keeping this distinction in the parsed contract prevents the runner from
+/// silently routing one algorithm through another solver's legacy facade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BvpSolverFamilySpec {
+    Damp,
+    Sci,
+}
+
+/// Symbolic representation used to build residual/Jacobian callbacks.
+///
+/// This is independent from [`BvpExecutionSpec`]: both representations can
+/// be lowered to Lambdify or AOT when that execution route is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BvpFrontendSpec {
+    ExprLegacy,
+    AtomViewNative,
+}
+
+impl BvpFrontendSpec {
+    fn from_str(raw: &str) -> Result<Self, BvpTaskError> {
+        match normalize_token(raw).as_str() {
+            "exprlegacy" | "expr_legacy" | "expr" | "legacy" => Ok(Self::ExprLegacy),
+            "atomview" | "atomviewnative" | "atom_view" | "atomnative" | "atom_native" | "atom" => {
+                Ok(Self::AtomViewNative)
+            }
+            other => Err(BvpTaskError::UnsupportedRoute(format!(
+                "unsupported BVP frontend `{other}`"
+            ))),
+        }
+    }
+}
+
+/// Runtime lowering/execution route for symbolic BVP callbacks.
+///
+/// This is deliberately separate from [`BvpFrontendSpec`]. `ExprLegacy` and
+/// `AtomViewNative` describe the symbolic graph representation; `Lambdify` and
+/// `Aot` describe how the prepared callbacks execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BvpExecutionSpec {
+    Lambdify,
+    Aot,
+}
+
+impl BvpExecutionSpec {
+    fn from_str(raw: &str) -> Result<Self, BvpTaskError> {
+        match normalize_token(raw).as_str() {
+            "lambdify" | "lambdify_expr" | "lambdifyexpr" => Ok(Self::Lambdify),
+            "aot" | "generated" => Ok(Self::Aot),
+            "numerical" | "callbacks" => Err(BvpTaskError::UnsupportedRoute(
+                "BVP task documents contain symbolic equations; numerical callback execution belongs to the native Rust API".to_string(),
+            )),
+            other => Err(BvpTaskError::UnsupportedRoute(format!(
+                "unsupported BVP execution route `{other}` (use Lambdify or AOT)"
+            ))),
+        }
+    }
 }
 
 /// Damped/frozen/naive solver family chosen by the task document.
@@ -113,6 +187,13 @@ impl BvpLinearBackendSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BvpSolverSelectionSpec {
     pub task_kind: BvpTaskKindSpec,
+    pub family: BvpSolverFamilySpec,
+    /// Explicit symbolic representation. `None` preserves the selected
+    /// solver/backend preset's frontend default.
+    pub frontend: Option<BvpFrontendSpec>,
+    /// Explicit execution route, if the task overrides generated-backend
+    /// policy. `None` preserves the selected backend preset's policy.
+    pub execution: Option<BvpExecutionSpec>,
     pub strategy: BvpStrategySpec,
     pub scheme: String,
     pub backend: BvpLinearBackendSpec,
@@ -171,6 +252,8 @@ pub struct BvpGeneratedBackendSpec {
     pub aot_build_profile: Option<String>,
     pub aot_compile_preset: Option<String>,
     pub aot_execution_policy: Option<String>,
+    pub aot_output_dir: Option<String>,
+    pub aot_handoff_path: Option<String>,
     pub banded_linear_solver: Option<String>,
     pub refinement_steps: Option<usize>,
 }
@@ -189,7 +272,34 @@ pub struct BvpPostprocessingSpec {
     pub gnuplot_png: bool,
     pub gnuplot_dir: Option<String>,
     pub terminal_plot: bool,
+    /// Explicit replacement for the historical `plot` boolean. The boolean
+    /// remains accepted as a compatibility alias for legacy task files.
+    pub output_policy: BvpOutputPolicy,
     pub plot: bool,
+}
+
+/// Typed plotting/output policy for task documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BvpOutputPolicy {
+    #[default]
+    None,
+    Plotters,
+    Gnuplot,
+    Terminal,
+}
+
+impl BvpOutputPolicy {
+    fn from_str(raw: &str) -> Result<Self, BvpTaskError> {
+        match normalize_token(raw).as_str() {
+            "none" | "off" | "disabled" => Ok(Self::None),
+            "plotters" | "plotter" | "plotterspng" | "plotters_png" => Ok(Self::Plotters),
+            "gnuplot" | "gnuplotpng" | "gnuplot_png" => Ok(Self::Gnuplot),
+            "terminal" | "terminalplot" | "terminal_plot" => Ok(Self::Terminal),
+            other => Err(BvpTaskError::UnsupportedRoute(format!(
+                "unsupported BVP output policy `{other}`"
+            ))),
+        }
+    }
 }
 
 impl BvpPostprocessingSpec {
@@ -233,6 +343,18 @@ impl BvpPostprocessingSpec {
         if self.terminal_plot {
             plan = plan.terminal_plot();
         }
+        match self.output_policy {
+            BvpOutputPolicy::None => {}
+            BvpOutputPolicy::Plotters => {
+                plan = plan.plotters_png("bvp_plotters");
+            }
+            BvpOutputPolicy::Gnuplot => {
+                plan = plan.gnuplot_png("bvp_gnuplot");
+            }
+            BvpOutputPolicy::Terminal => {
+                plan = plan.terminal_plot();
+            }
+        }
         plan
     }
 }
@@ -247,6 +369,8 @@ pub struct BvpTaskSpec {
     pub initial_guess: BvpInitialGuessSpec,
     pub solver_options: BvpSolverOptionsSpec,
     pub postprocessing: BvpPostprocessingSpec,
+    /// Optional repeated-parameter plan retaining symbolic RHS expressions.
+    pub continuation: Option<ContinuationSpec>,
 }
 
 /// Problem-only subset of the BVP task DSL.
@@ -295,12 +419,42 @@ impl BvpTaskSpec {
 pub struct BvpTaskRunResult {
     pub specification: BvpTaskSpec,
     pub result: Option<DMatrix<f64>>,
+    /// One final matrix per executed continuation segment. The last entry is
+    /// also exposed through `result` for compatibility with existing callers.
+    pub continuation_segments: Vec<BvpTaskSegmentResult>,
+    /// Execution-level facts needed to distinguish fresh and prepared task
+    /// runs without scraping solver logs.
+    pub continuation_telemetry: BvpTaskContinuationTelemetry,
+}
+
+/// Compact continuation lifecycle telemetry owned by the task runner.
+#[derive(Debug, Clone, Default)]
+pub struct BvpTaskContinuationTelemetry {
+    pub segments: usize,
+    pub fresh_preparations: usize,
+    pub prepared_reuses: usize,
+    pub mesh_restarts: usize,
+    pub initial_guess_restarts: usize,
+    pub peak_result_elements: usize,
+}
+
+/// Compact result of one task-document continuation segment.
+#[derive(Debug)]
+pub struct BvpTaskSegmentResult {
+    pub index: usize,
+    pub parameters: Vec<f64>,
+    pub result: DMatrix<f64>,
 }
 
 /// Parser/build error for BVP task documents.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum BvpTaskError {
     Parser(String),
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Document(ParseError),
     MissingSection(&'static str),
     MissingField {
         section: String,
@@ -317,14 +471,58 @@ pub enum BvpTaskError {
     },
     UnknownStrategy(String),
     UnknownBackend(String),
+    UnsupportedRoute(String),
+    UnsupportedContinuation(String),
+    BvpDamp(BvpBackendIntegrationError),
+    BvpSci(BvpSciNewError),
+    InvalidConfiguration {
+        field: String,
+        message: String,
+    },
+    /// Semantic validation discovered after the generic document map was
+    /// built, with a best-effort source location recovered from the task text.
+    SymbolDiagnostic {
+        message: String,
+        token: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+    Postprocess(PostprocessError),
     Semantic(String),
     Solver(String),
+}
+
+impl BvpTaskError {
+    /// Stable category used by batch reports and task-runner summaries.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Parser(_) | Self::Document(_) => "parse",
+            Self::Io { .. } => "io",
+            Self::MissingSection(_)
+            | Self::MissingField { .. }
+            | Self::InvalidField { .. }
+            | Self::InconsistentEquationCounts { .. }
+            | Self::UnknownStrategy(_)
+            | Self::UnknownBackend(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::SymbolDiagnostic { .. }
+            | Self::Semantic(_) => "configuration",
+            Self::UnsupportedRoute(_) => "unsupported_route",
+            Self::UnsupportedContinuation(_) => "continuation",
+            Self::BvpSci(_) | Self::BvpDamp(_) | Self::Solver(_) => "solver",
+            Self::Postprocess(_) => "postprocess",
+        }
+    }
 }
 
 impl std::fmt::Display for BvpTaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parser(msg) => write!(f, "parser error: {msg}"),
+            Self::Io { path, source } => {
+                write!(f, "failed to read BVP task `{}`: {source}", path.display())
+            }
+            Self::Document(error) => write!(f, "document parser error: {error}"),
             Self::MissingSection(section) => write!(f, "missing section `{section}`"),
             Self::MissingField { section, field } => {
                 write!(f, "missing field `{field}` in section `{section}`")
@@ -343,53 +541,175 @@ impl std::fmt::Display for BvpTaskError {
             ),
             Self::UnknownStrategy(strategy) => write!(f, "unknown BVP strategy `{strategy}`"),
             Self::UnknownBackend(method) => write!(f, "unknown BVP backend `{method}`"),
+            Self::UnsupportedRoute(message) => write!(f, "unsupported BVP route: {message}"),
+            Self::UnsupportedContinuation(message) => {
+                write!(f, "unsupported BVP continuation: {message}")
+            }
+            Self::BvpSci(error) => write!(f, "BVP_sci failed: {error}"),
+            Self::BvpDamp(error) => write!(f, "BVP_Damp failed: {error}"),
+            Self::InvalidConfiguration { field, message } => {
+                write!(f, "invalid BVP configuration `{field}`: {message}")
+            }
+            Self::SymbolDiagnostic {
+                message,
+                token,
+                line,
+                column,
+            } => {
+                write!(f, "BVP diagnostic for `{token}`: {message}")?;
+                if let (Some(line), Some(column)) = (line, column) {
+                    write!(f, " at line {line}, column {column}")?;
+                }
+                Ok(())
+            }
+            Self::Postprocess(error) => write!(f, "postprocessing error: {error}"),
             Self::Semantic(message) => write!(f, "{message}"),
             Self::Solver(message) => write!(f, "{message}"),
         }
     }
 }
 
-impl std::error::Error for BvpTaskError {}
+impl std::error::Error for BvpTaskError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Document(error) => Some(error),
+            Self::BvpSci(error) => Some(error),
+            Self::BvpDamp(error) => Some(error),
+            Self::Postprocess(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Parse a full BVP task document from DSL text.
 pub fn parse_bvp_task_from_str(input: &str) -> Result<BvpTaskSpec, BvpTaskError> {
     let mut parser = DocumentParser::new(input.to_string());
     let pseudonyms = default_bvp_pseudonyms();
-    parser.with_pseudonims(Some(pseudonyms.0), Some(pseudonyms.1));
-    parser.parse_document().map_err(BvpTaskError::Parser)?;
-    parser.keys_to_lower_case(Some(vec![
-        "equations".to_string(),
-        "parameters".to_string(),
-        "boundary_conditions".to_string(),
-        "initial_guess".to_string(),
-        "where".to_string(),
-        "substitute".to_string(),
-    ]));
+    parser
+        .try_with_pseudonims_typed(Some(pseudonyms.0), Some(pseudonyms.1))
+        .map_err(BvpTaskError::Document)?;
+    parser
+        .parse_document_typed()
+        .map_err(BvpTaskError::Document)?;
+    parser
+        .try_keys_to_lower_case_typed(Some(vec![
+            "equations".to_string(),
+            "parameters".to_string(),
+            "boundary_conditions".to_string(),
+            "initial_guess".to_string(),
+            "where".to_string(),
+            "substitute".to_string(),
+        ]))
+        .map_err(BvpTaskError::Document)?;
     let document = parser
         .get_result()
         .ok_or_else(|| BvpTaskError::Parser("document parser returned no result".to_string()))?;
-    parse_bvp_task_from_document(document)
+    parse_bvp_task_from_document(document).map_err(|error| attach_symbol_position(error, input))
+}
+
+fn attach_symbol_position(error: BvpTaskError, input: &str) -> BvpTaskError {
+    let (message, token) = match error {
+        BvpTaskError::Semantic(message) => {
+            let token = diagnostic_token(&message);
+            (message, token)
+        }
+        BvpTaskError::InvalidField {
+            section,
+            field,
+            message,
+        } => {
+            let token = if field == "*" {
+                diagnostic_token(&message)
+            } else {
+                field.clone()
+            };
+            (
+                format!("invalid field `{field}` in section `{section}`: {message}"),
+                token,
+            )
+        }
+        other => return other,
+    };
+    let (line, column) = source_position(input, &token)
+        .map(|(line, column)| (Some(line), Some(column)))
+        .unwrap_or((None, None));
+    BvpTaskError::SymbolDiagnostic {
+        message,
+        token,
+        line,
+        column,
+    }
+}
+
+fn diagnostic_token(message: &str) -> String {
+    if let Some((_, remainder)) = message.split_once("symbol(s):") {
+        return remainder
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .find(|token| !token.is_empty())
+            .unwrap_or("<unknown>")
+            .trim_matches('`')
+            .to_string();
+    }
+    message
+        .split('`')
+        .nth(1)
+        .unwrap_or("equations")
+        .to_string()
+}
+
+fn source_position(input: &str, token: &str) -> Option<(usize, usize)> {
+    let offset = input.find(token)?;
+    let before = &input[..offset];
+    let line = before.lines().count().max(1);
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map(|line| line.chars().count() + 1)
+        .unwrap_or(1);
+    Some((line, column))
 }
 
 /// Parse a full BVP task document from an on-disk file.
 pub fn parse_bvp_task_from_file(path: Option<PathBuf>) -> Result<BvpTaskSpec, BvpTaskError> {
-    let mut parser = DocumentParser::new(String::new());
-    parser
-        .setting_from_file(path)
-        .map_err(BvpTaskError::Parser)?;
-    parser.parse_document().map_err(BvpTaskError::Parser)?;
-    parser.keys_to_lower_case(Some(vec![
-        "equations".to_string(),
-        "parameters".to_string(),
-        "boundary_conditions".to_string(),
-        "initial_guess".to_string(),
-        "where".to_string(),
-        "substitute".to_string(),
-    ]));
-    let document = parser
-        .get_result()
-        .ok_or_else(|| BvpTaskError::Parser("document parser returned no result".to_string()))?;
-    parse_bvp_task_from_document(document)
+    let path = match path {
+        Some(path) => path,
+        None => find_default_bvp_task_file()?,
+    };
+    let input = fs::read_to_string(&path).map_err(|source| BvpTaskError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    parse_bvp_task_from_str(&input)
+}
+
+fn find_default_bvp_task_file() -> Result<PathBuf, BvpTaskError> {
+    let current_dir = std::env::current_dir().map_err(|source| BvpTaskError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let entries = fs::read_dir(&current_dir).map_err(|source| BvpTaskError::Io {
+        path: current_dir.clone(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| BvpTaskError::Io {
+            path: current_dir.clone(),
+            source,
+        })?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("problem") && name.to_string_lossy().ends_with(".txt")
+        {
+            return Ok(entry.path());
+        }
+    }
+    Err(BvpTaskError::Io {
+        path: current_dir,
+        source: io::Error::new(
+            io::ErrorKind::NotFound,
+            "no task file starting with `problem` and ending with `.txt` was found",
+        ),
+    })
 }
 
 /// Fallible alias for [`parse_bvp_problem_from_document`].
@@ -455,8 +775,15 @@ pub fn parse_bvp_task_from_document(document: &DocumentMap) -> Result<BvpTaskSpe
     let problem = parse_bvp_problem_from_document(document)?;
     let solver_settings = parse_bvp_solver_settings_from_document(document)?;
     let postprocessing = parse_bvp_postprocessing(document)?;
+    let continuation = if document.contains_key("continuation") {
+        let parsed = parse_symbolic_equation_system(document, "x").map_err(map_equation_error)?;
+        parse_continuation_spec(document, parsed.symbolic_rhs, &parsed.parameter_names)
+            .map_err(map_equation_error)?
+    } else {
+        None
+    };
 
-    Ok(BvpTaskSpec {
+    let spec = BvpTaskSpec {
         solver: solver_settings.solver,
         equations: problem.equations,
         boundary_conditions: problem.boundary_conditions,
@@ -464,11 +791,21 @@ pub fn parse_bvp_task_from_document(document: &DocumentMap) -> Result<BvpTaskSpe
         initial_guess: problem.initial_guess,
         solver_options: solver_settings.solver_options,
         postprocessing,
-    })
+        continuation,
+    };
+    validate_bvp_task_spec(&spec)?;
+    Ok(spec)
 }
 
 /// Build a [`BVP`] solver from a full task specification.
 pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskError> {
+    validate_bvp_task_spec(spec)?;
+    if spec.solver.family != BvpSolverFamilySpec::Damp {
+        return Err(BvpTaskError::UnsupportedRoute(
+            "build_bvp_solver_from_spec is only for BVP_Damp; use run_bvp_task for BVP_sci"
+                .to_string(),
+        ));
+    }
     build_bvp_solver_from_problem_and_settings(&spec.problem_spec(), &spec.solver_settings_spec())
 }
 
@@ -477,6 +814,13 @@ pub fn build_bvp_solver_from_problem_and_settings(
     problem: &BvpProblemSpec,
     settings: &BvpSolverSettingsSpec,
 ) -> Result<BVP, BvpTaskError> {
+    validate_bvp_problem_spec(problem)?;
+    validate_bvp_solver_options(&settings.solver_options)?;
+    if settings.solver.family != BvpSolverFamilySpec::Damp {
+        return Err(BvpTaskError::UnsupportedRoute(
+            "the legacy BVP facade cannot build BVP_sci settings".to_string(),
+        ));
+    }
     build_bvp_solver_core(
         &problem.equations,
         &problem.boundary_conditions,
@@ -561,10 +905,43 @@ fn build_bvp_solver_core(
         solver_options.loglevel.clone(),
     );
 
-    let generated_config = generated_backend_config_from_spec(
+    if !equations.parameter_names.is_empty() {
+        let parameter_values = equations
+            .parameter_names
+            .iter()
+            .map(|name| {
+                equations
+                    .parameter_values
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                        field: format!("parameters.{name}"),
+                        message: "missing initial numeric value".to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        bvp.try_set_damped_parameter_binding(&equations.parameter_names, parameter_values)
+            .map_err(BvpTaskError::BvpDamp)?;
+    }
+
+    let mut generated_config = generated_backend_config_from_spec(
         &solver_options.generated_backend,
         &solver_selection.backend,
     )?;
+    if let Some(frontend) = solver_selection.frontend {
+        let symbolic_backend = match frontend {
+            BvpFrontendSpec::ExprLegacy => BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpFrontendSpec::AtomViewNative => BvpSymbolicAssemblyBackend::AtomView,
+        };
+        generated_config = generated_config.with_symbolic_assembly_backend(symbolic_backend);
+    }
+    if let Some(execution) = solver_selection.execution {
+        let policy = match execution {
+            BvpExecutionSpec::Lambdify => BackendSelectionPolicy::LambdifyOnly,
+            BvpExecutionSpec::Aot => BackendSelectionPolicy::AotOnly,
+        };
+        generated_config = generated_config.with_backend_policy_override(Some(policy));
+    }
     if matches!(
         generated_config.backend_policy_override,
         Some(
@@ -598,22 +975,867 @@ pub fn run_bvp_task_from_str(input: &str) -> Result<BvpTaskRunResult, BvpTaskErr
 
 /// Execute a fully parsed BVP task and apply any requested postprocessing.
 pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
-    let mut solver = build_bvp_solver_from_spec(&spec)?;
-    solver.solve();
-    let plan = spec.postprocessing.to_plan("bvp_result.csv");
-    if !plan.actions.is_empty() {
-        solver
-            .execute_postprocessing(&plan)
-            .map_err(|err| BvpTaskError::Solver(err.to_string()))?;
+    validate_bvp_task_spec(&spec)?;
+    match spec.solver.family {
+        BvpSolverFamilySpec::Damp => run_bvp_damp_task(spec),
+        BvpSolverFamilySpec::Sci => run_bvp_sci_task(spec),
     }
-    if spec.postprocessing.plot {
-        solver.plot_result();
+}
+
+fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+    if matches!(
+        spec.continuation
+            .as_ref()
+            .map(|continuation| continuation.mode),
+        Some(ContinuationMode::Warm | ContinuationMode::Prepared)
+    ) {
+        return run_bvp_damp_reused_continuation(spec);
     }
-    let result = solver.get_result();
+    let segments = continuation_rows(&spec)?;
+    let mut executed = Vec::with_capacity(segments.len());
+    let mut continuation_telemetry = BvpTaskContinuationTelemetry::default();
+    for (index, values) in segments.iter().enumerate() {
+        let mut segment_spec = bind_continuation_segment(&spec, values)?;
+        // Task execution is batch-friendly by default. The historical BVP
+        // facade otherwise installs a terminal logger whenever `loglevel` is
+        // absent, flooding callers with solver internals. An explicit task
+        // `loglevel` still overrides this quiet default.
+        if segment_spec.solver_options.loglevel.is_none() {
+            segment_spec.solver_options.loglevel = Some("off".to_string());
+        }
+        let mut solver = build_bvp_solver_from_spec(&segment_spec)?;
+        solver.solve();
+        let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
+        if !plan.actions.is_empty() {
+            solver
+                .execute_postprocessing(&plan)
+                .map_err(BvpTaskError::Postprocess)?;
+        }
+        if segment_spec.postprocessing.plot {
+            solver.plot_result();
+        }
+        let result = solver
+            .get_result()
+            .ok_or_else(|| BvpTaskError::Solver("BVP_Damp produced no result".to_string()))?;
+        continuation_telemetry.segments += 1;
+        continuation_telemetry.fresh_preparations += 1;
+        continuation_telemetry.peak_result_elements = continuation_telemetry
+            .peak_result_elements
+            .max(result.len());
+        executed.push(BvpTaskSegmentResult {
+            index,
+            parameters: values.clone(),
+            result,
+        });
+    }
+    let result = executed.last().map(|segment| segment.result.clone());
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
+        continuation_segments: executed,
+        continuation_telemetry,
     })
+}
+
+/// Execute a BVP_Damp continuation while retaining its prepared symbolic and
+/// generated callback bundle. Numeric parameter rebinding invalidates only
+/// numeric Jacobian/factor state; a mesh change explicitly re-prepares layout.
+fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+    let continuation =
+        spec.continuation
+            .as_ref()
+            .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                field: "continuation.mode".to_string(),
+                message: "warm/prepared mode requires a continuation section".to_string(),
+            })?;
+    let rows = continuation.value_grid.clone();
+    if rows.is_empty() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "continuation.value_grid".to_string(),
+            message: "must contain at least one row".to_string(),
+        });
+    }
+
+    // Keep the symbolic parameter schema intact. Unlike fresh mode this is
+    // intentionally not substituted into new expressions per segment.
+    let mut prepared_spec = spec.clone();
+    prepared_spec.continuation = None;
+    let mut solver = build_bvp_solver_from_spec(&prepared_spec)?;
+    let mut executed = Vec::with_capacity(rows.len());
+    let mut telemetry = BvpTaskContinuationTelemetry::default();
+    let mut prepared = false;
+    let mut previous_result: Option<DMatrix<f64>> = None;
+
+    for (index, row) in rows.iter().enumerate() {
+        let parameters = bvp_parameter_values(&spec, continuation, row)?;
+        solver
+            .try_set_damped_parameter_binding(&spec.equations.parameter_names, parameters)
+            .map_err(BvpTaskError::BvpDamp)?;
+
+        let restart = continuation_needs_restart(continuation, index);
+        let mut mesh_changed = false;
+        if restart {
+            let t0 = continuation
+                .t0_values
+                .as_ref()
+                .and_then(|values| values.get(if values.len() == 1 { 0 } else { index }))
+                .copied()
+                .unwrap_or(spec.mesh.t0);
+            let t_end = continuation
+                .t_end_values
+                .as_ref()
+                .and_then(|values| values.get(if values.len() == 1 { 0 } else { index }))
+                .copied()
+                .unwrap_or(spec.mesh.t_end);
+            mesh_changed = t0 != spec.mesh.t0
+                || t_end != spec.mesh.t_end
+                || continuation.t0_values.is_some()
+                || continuation.t_end_values.is_some();
+            if mesh_changed {
+                solver
+                    .try_set_damped_mesh(t0, t_end, spec.mesh.n_steps)
+                    .map_err(BvpTaskError::BvpDamp)?;
+                telemetry.mesh_restarts += 1;
+            }
+
+            let initial_guess = if let Some(values) = continuation
+                .y0_values
+                .as_ref()
+                .and_then(|values| values.get(if values.len() == 1 { 0 } else { index }))
+            {
+                DMatrix::from_fn(
+                    spec.equations.unknowns.len(),
+                    spec.mesh.n_steps,
+                    |row, _| values[row],
+                )
+            } else if let Some(previous) = previous_result.as_ref() {
+                damped_initial_guess_from_result(
+                    previous,
+                    spec.equations.unknowns.len(),
+                    spec.mesh.n_steps,
+                )
+            } else {
+                DMatrix::from_fn(
+                    spec.equations.unknowns.len(),
+                    spec.mesh.n_steps,
+                    |row, _| spec.initial_guess.values[row],
+                )
+            };
+            if mesh_changed {
+                solver
+                    .try_set_damped_initial_guess(initial_guess)
+                    .map_err(BvpTaskError::BvpDamp)?;
+            } else {
+                solver
+                    .try_set_damped_prepared_iterate(initial_guess)
+                    .map_err(BvpTaskError::BvpDamp)?;
+            }
+            // The first segment consumes the document's initial guess; it is
+            // preparation, not a continuation restart. Count only later
+            // segment-level resets here.
+            if index > 0 {
+                telemetry.initial_guess_restarts += 1;
+            }
+        } else if let Some(previous) = previous_result.as_ref() {
+            solver
+                .try_set_damped_prepared_iterate(damped_initial_guess_from_result(
+                    previous,
+                    spec.equations.unknowns.len(),
+                    spec.mesh.n_steps,
+                ))
+                .map_err(BvpTaskError::BvpDamp)?;
+            telemetry.initial_guess_restarts += 1;
+        }
+
+        if mesh_changed {
+            solver.try_prepare_damped().map_err(BvpTaskError::BvpDamp)?;
+            prepared = true;
+        }
+        solver
+            .try_solve_damped(prepared)
+            .map_err(BvpTaskError::BvpDamp)?;
+        prepared = true;
+        telemetry.segments += 1;
+        if index > 0 {
+            telemetry.prepared_reuses += 1;
+        } else {
+            telemetry.fresh_preparations += 1;
+        }
+
+        let result = solver
+            .get_result()
+            .ok_or_else(|| BvpTaskError::Solver("BVP_Damp produced no result".to_string()))?;
+        telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
+        let plan = spec.postprocessing.to_plan("bvp_result.csv");
+        if !plan.actions.is_empty() {
+            solver
+                .execute_postprocessing(&plan)
+                .map_err(BvpTaskError::Postprocess)?;
+        }
+        if spec.postprocessing.plot {
+            solver.plot_result();
+        }
+        previous_result = Some(result.clone());
+        executed.push(BvpTaskSegmentResult {
+            index,
+            parameters: row.clone(),
+            result,
+        });
+    }
+
+    let result = executed.last().map(|segment| segment.result.clone());
+    Ok(BvpTaskRunResult {
+        specification: spec,
+        result,
+        continuation_segments: executed,
+        continuation_telemetry: telemetry,
+    })
+}
+
+fn validate_bvp_task_spec(spec: &BvpTaskSpec) -> Result<(), BvpTaskError> {
+    validate_bvp_problem_spec(&spec.problem_spec())?;
+    validate_bvp_solver_options(&spec.solver_options)?;
+
+    for (name, value) in &spec.equations.parameter_values {
+        if !value.is_finite() {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: format!("parameters.{name}"),
+                message: "must be finite".to_string(),
+            });
+        }
+    }
+    for name in &spec.equations.parameter_names {
+        if !spec.equations.parameter_values.contains_key(name) {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: format!("parameters.{name}"),
+                message: "declared BVP parameter requires an initial numeric value".to_string(),
+            });
+        }
+    }
+
+    if let Some(continuation) = &spec.continuation {
+        if continuation.parameters.is_empty() || continuation.value_grid.is_empty() {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "continuation.value_grid".to_string(),
+                message: "must contain at least one parameter row".to_string(),
+            });
+        }
+        for parameter in &continuation.parameters {
+            if !spec
+                .equations
+                .parameter_names
+                .iter()
+                .any(|declared| declared == parameter)
+            {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("continuation.parameters.{parameter}"),
+                    message: "parameter is not declared in equations".to_string(),
+                });
+            }
+        }
+        for (row, values) in continuation.value_grid.iter().enumerate() {
+            if values.len() != continuation.parameters.len() {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("continuation.value_grid[{row}]"),
+                    message: format!(
+                        "expected {} values, got {}",
+                        continuation.parameters.len(),
+                        values.len()
+                    ),
+                });
+            }
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("continuation.value_grid[{row}]"),
+                    message: "all values must be finite".to_string(),
+                });
+            }
+        }
+        if let Some(y0_values) = &continuation.y0_values {
+            for (row, values) in y0_values.iter().enumerate() {
+                if values.len() != spec.equations.unknowns.len() {
+                    return Err(BvpTaskError::InvalidConfiguration {
+                        field: format!("continuation.y0_values[{row}]"),
+                        message: format!(
+                            "expected {} values, got {}",
+                            spec.equations.unknowns.len(),
+                            values.len()
+                        ),
+                    });
+                }
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err(BvpTaskError::InvalidConfiguration {
+                        field: format!("continuation.y0_values[{row}]"),
+                        message: "all values must be finite".to_string(),
+                    });
+                }
+            }
+        }
+        for (field, values) in [
+            ("continuation.t0_values", continuation.t0_values.as_ref()),
+            (
+                "continuation.t_end_values",
+                continuation.t_end_values.as_ref(),
+            ),
+        ] {
+            if let Some(values) = values {
+                if values.len() != continuation.value_grid.len() {
+                    return Err(BvpTaskError::InvalidConfiguration {
+                        field: field.to_string(),
+                        message: format!(
+                            "expected {} values, got {}",
+                            continuation.value_grid.len(),
+                            values.len()
+                        ),
+                    });
+                }
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err(BvpTaskError::InvalidConfiguration {
+                        field: field.to_string(),
+                        message: "all values must be finite".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_bvp_problem_spec(problem: &BvpProblemSpec) -> Result<(), BvpTaskError> {
+    let mesh = &problem.mesh;
+    if !mesh.t0.is_finite() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "mesh.t0".to_string(),
+            message: "must be finite".to_string(),
+        });
+    }
+    if !mesh.t_end.is_finite() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "mesh.t_end".to_string(),
+            message: "must be finite".to_string(),
+        });
+    }
+    if mesh.t_end <= mesh.t0 {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "mesh.t_end".to_string(),
+            message: "must be greater than mesh.t0".to_string(),
+        });
+    }
+    if mesh.n_steps < 2 {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "mesh.n_steps".to_string(),
+            message: "must be at least 2".to_string(),
+        });
+    }
+    if problem.initial_guess.values.len() != problem.equations.unknowns.len() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "initial_guess".to_string(),
+            message: format!(
+                "expected {} values, got {}",
+                problem.equations.unknowns.len(),
+                problem.initial_guess.values.len()
+            ),
+        });
+    }
+    if problem
+        .initial_guess
+        .values
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "initial_guess".to_string(),
+            message: "all values must be finite".to_string(),
+        });
+    }
+    for (unknown, conditions) in &problem.boundary_conditions.conditions {
+        for (_, value) in conditions {
+            if !value.is_finite() {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("boundary_conditions.{unknown}"),
+                    message: "all values must be finite".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_bvp_solver_options(options: &BvpSolverOptionsSpec) -> Result<(), BvpTaskError> {
+    if let Some(tolerance) = options.tolerance {
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.tolerance".to_string(),
+                message: "must be finite and greater than zero".to_string(),
+            });
+        }
+    }
+    if matches!(options.max_iterations, Some(0)) {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "solver_options.max_iterations".to_string(),
+            message: "must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+    if spec.postprocessing.plot {
+        return Err(BvpTaskError::UnsupportedRoute(
+            "BVP_sci legacy `plot` is not connected; use the typed postprocessing actions"
+                .to_string(),
+        ));
+    }
+    if matches!(
+        spec.continuation
+            .as_ref()
+            .map(|continuation| continuation.mode),
+        Some(ContinuationMode::Warm | ContinuationMode::Prepared)
+    ) {
+        return run_bvp_sci_reused_continuation(spec);
+    }
+    let segments = continuation_rows(&spec)?;
+    let mut executed = Vec::with_capacity(segments.len());
+    for (index, values) in segments.iter().enumerate() {
+        let segment_spec = bind_continuation_segment(&spec, values)?;
+        let mut solver = build_bvp_sci_solver_from_spec(&segment_spec)?;
+        let solution = solver.solve().map_err(BvpTaskError::BvpSci)?;
+        let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
+        if !plan.actions.is_empty() {
+            let dataset = sci_solution_dataset(&solution, &segment_spec.equations.unknowns)?;
+            plan.execute(&dataset).map_err(BvpTaskError::Postprocess)?;
+        }
+        let result = sci_solution_matrix(&solution)?;
+        executed.push(BvpTaskSegmentResult {
+            index,
+            parameters: values.clone(),
+            result,
+        });
+    }
+    let result = executed.last().map(|segment| segment.result.clone());
+    let continuation_telemetry = BvpTaskContinuationTelemetry {
+        segments: executed.len(),
+        fresh_preparations: executed.len(),
+        peak_result_elements: result.as_ref().map(DMatrix::len).unwrap_or(0),
+        ..Default::default()
+    };
+    Ok(BvpTaskRunResult {
+        specification: spec,
+        result,
+        continuation_segments: executed,
+        continuation_telemetry,
+    })
+}
+
+fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+    let continuation =
+        spec.continuation
+            .as_ref()
+            .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                field: "continuation.mode".to_string(),
+                message: "warm/prepared mode requires a continuation section".to_string(),
+            })?;
+    if spec.equations.parameter_names.is_empty() {
+        return Err(BvpTaskError::UnsupportedContinuation(
+            "BVP_sci warm/prepared continuation requires declared symbolic parameters".to_string(),
+        ));
+    }
+    let rows = continuation.value_grid.clone();
+    if rows.is_empty() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "continuation.value_grid".to_string(),
+            message: "must contain at least one row".to_string(),
+        });
+    }
+
+    // Retain the symbolic model for the complete series. Only the numeric
+    // parameter vector is rebound between solves; no expression parsing or
+    // frontend preparation is repeated.
+    let mut prepared_spec = spec.clone();
+    prepared_spec.equations.rhs = continuation.symbolic_rhs.clone();
+    prepared_spec.continuation = None;
+    let initial_parameters = bvp_parameter_values(&spec, continuation, &rows[0])?;
+    let parameter_targets = Arc::new(Mutex::new(initial_parameters.clone()));
+    let mut solver = build_bvp_sci_solver_with_parameter_targets(
+        &prepared_spec,
+        initial_parameters,
+        Arc::clone(&parameter_targets),
+    )?;
+
+    let mut executed = Vec::with_capacity(rows.len());
+    for (index, values) in rows.iter().enumerate() {
+        let parameters = bvp_parameter_values(&spec, continuation, values)?;
+        if index > 0 {
+            parameter_targets
+                .lock()
+                .map_err(|_| {
+                    BvpTaskError::UnsupportedContinuation(
+                        "BVP_sci continuation parameter target lock was poisoned".to_string(),
+                    )
+                })?
+                .clone_from(&parameters);
+            solver
+                .set_parameters(parameters)
+                .map_err(BvpTaskError::BvpSci)?;
+        }
+
+        if continuation_needs_restart(continuation, index) {
+            let mesh = bvp_segment_mesh(&spec, continuation, index)?;
+            let initial_state = bvp_segment_initial_state(&spec, continuation, index, mesh.len());
+            solver
+                .restart(mesh, initial_state)
+                .map_err(BvpTaskError::BvpSci)?;
+        }
+
+        let solution = solver.solve().map_err(BvpTaskError::BvpSci)?;
+        let plan = spec.postprocessing.to_plan("bvp_result.csv");
+        if !plan.actions.is_empty() {
+            let dataset = sci_solution_dataset(&solution, &spec.equations.unknowns)?;
+            plan.execute(&dataset).map_err(BvpTaskError::Postprocess)?;
+        }
+        executed.push(BvpTaskSegmentResult {
+            index,
+            parameters: values.clone(),
+            result: sci_solution_matrix(&solution)?,
+        });
+    }
+
+    let result = executed.last().map(|segment| segment.result.clone());
+    let continuation_telemetry = BvpTaskContinuationTelemetry {
+        segments: executed.len(),
+        fresh_preparations: 1,
+        prepared_reuses: executed.len().saturating_sub(1),
+        peak_result_elements: result.as_ref().map(DMatrix::len).unwrap_or(0),
+        ..Default::default()
+    };
+    Ok(BvpTaskRunResult {
+        specification: spec,
+        result,
+        continuation_segments: executed,
+        continuation_telemetry,
+    })
+}
+
+fn bvp_parameter_values(
+    spec: &BvpTaskSpec,
+    continuation: &ContinuationSpec,
+    row: &[f64],
+) -> Result<Vec<f64>, BvpTaskError> {
+    let mut values = spec
+        .equations
+        .parameter_names
+        .iter()
+        .map(|name| {
+            spec.equations
+                .parameter_values
+                .get(name)
+                .copied()
+                .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                    field: format!("parameters.{name}"),
+                    message: "missing initial value".to_string(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, value) in continuation.parameters.iter().zip(row.iter().copied()) {
+        let index = spec
+            .equations
+            .parameter_names
+            .iter()
+            .position(|candidate| candidate == name)
+            .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                field: format!("continuation.parameters.{name}"),
+                message: "parameter is not declared in equations".to_string(),
+            })?;
+        values[index] = value;
+    }
+    Ok(values)
+}
+
+/// Convert BVP_Damp's node-major full result (`nodes x states`) into the
+/// state-major Newton initial-guess layout (`states x n_steps`). The full
+/// result includes one reconstructed boundary node, while the internal guess
+/// intentionally stores only the solver's `n_steps` columns.
+fn damped_initial_guess_from_result(
+    result: &DMatrix<f64>,
+    state_count: usize,
+    n_steps: usize,
+) -> DMatrix<f64> {
+    DMatrix::from_fn(state_count, n_steps, |state, node| {
+        result
+            .get((node.min(result.nrows().saturating_sub(1)), state))
+            .copied()
+            .unwrap_or(0.0)
+    })
+}
+
+fn continuation_needs_restart(continuation: &ContinuationSpec, index: usize) -> bool {
+    index == 0
+        || !matches!(
+            continuation.restart_policy,
+            crate::command_interpreter::task_parser_common::ContinuationRestartPolicy::Continue
+        )
+        || continuation.y0_values.is_some()
+        || continuation.t0_values.is_some()
+        || continuation.t_end_values.is_some()
+}
+
+fn bvp_segment_mesh(
+    spec: &BvpTaskSpec,
+    continuation: &ContinuationSpec,
+    index: usize,
+) -> Result<Vec<f64>, BvpTaskError> {
+    let t0 = continuation
+        .t0_values
+        .as_ref()
+        .and_then(|values| values.get(if values.len() == 1 { 0 } else { index }))
+        .copied()
+        .unwrap_or(spec.mesh.t0);
+    let t_end = continuation
+        .t_end_values
+        .as_ref()
+        .and_then(|values| values.get(if values.len() == 1 { 0 } else { index }))
+        .copied()
+        .unwrap_or(spec.mesh.t_end);
+    if !t0.is_finite() || !t_end.is_finite() || t_end <= t0 {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: format!("continuation.segment[{index}].interval"),
+            message: "t_end must be finite and greater than t0".to_string(),
+        });
+    }
+    Ok((0..spec.mesh.n_steps)
+        .map(|node| t0 + (t_end - t0) * node as f64 / (spec.mesh.n_steps - 1) as f64)
+        .collect())
+}
+
+fn bvp_segment_initial_state(
+    spec: &BvpTaskSpec,
+    continuation: &ContinuationSpec,
+    index: usize,
+    node_count: usize,
+) -> Vec<f64> {
+    let values = continuation
+        .y0_values
+        .as_ref()
+        .and_then(|rows| rows.get(if rows.len() == 1 { 0 } else { index }))
+        .cloned()
+        .unwrap_or_else(|| spec.initial_guess.values.clone());
+    (0..node_count)
+        .flat_map(|_| values.iter().copied())
+        .collect()
+}
+
+fn continuation_rows(spec: &BvpTaskSpec) -> Result<Vec<Vec<f64>>, BvpTaskError> {
+    let Some(continuation) = &spec.continuation else {
+        return Ok(vec![Vec::new()]);
+    };
+    if !matches!(continuation.mode, ContinuationMode::Fresh) {
+        return Err(BvpTaskError::UnsupportedContinuation(
+            "BVP task execution currently supports only `mode: fresh`; warm/prepared reuse will be added after native rebind contracts are exposed".to_string(),
+        ));
+    }
+    if continuation.value_grid.is_empty() {
+        return Err(BvpTaskError::UnsupportedContinuation(
+            "continuation contains no value rows".to_string(),
+        ));
+    }
+    Ok(continuation.value_grid.clone())
+}
+
+fn bind_continuation_segment(
+    spec: &BvpTaskSpec,
+    values: &[f64],
+) -> Result<BvpTaskSpec, BvpTaskError> {
+    let Some(continuation) = &spec.continuation else {
+        return Ok(spec.clone());
+    };
+    let mut bound = spec.clone();
+    bound.equations.rhs = continuation.rhs_for_values(values);
+    bound.equations.parameter_names.clear();
+    bound.equations.parameter_values.clear();
+    bound.continuation = None;
+    Ok(bound)
+}
+
+fn build_bvp_sci_solver_from_spec(spec: &BvpTaskSpec) -> Result<BvpSciSolver, BvpTaskError> {
+    if !spec.equations.parameter_names.is_empty() {
+        return Err(BvpTaskError::UnsupportedRoute(
+            "BVP_sci task parameters must be expressed through fresh continuation rows; free BVP parameters need explicit parameter boundary equations".to_string(),
+        ));
+    }
+    build_bvp_sci_solver_with_parameter_targets(spec, Vec::new(), Arc::new(Mutex::new(Vec::new())))
+}
+
+fn build_bvp_sci_solver_with_parameter_targets(
+    spec: &BvpTaskSpec,
+    initial_parameters: Vec<f64>,
+    parameter_targets: Arc<Mutex<Vec<f64>>>,
+) -> Result<BvpSciSolver, BvpTaskError> {
+    let dimension = spec.equations.unknowns.len();
+    let initial_state = (0..spec.mesh.n_steps)
+        .flat_map(|_| spec.initial_guess.values.iter().copied())
+        .collect::<Vec<_>>();
+    let boundary_conditions =
+        sci_boundary_conditions(&spec.boundary_conditions, &spec.equations.unknowns)?;
+    let parameter_names = spec.equations.parameter_names.clone();
+    if initial_parameters.len() != parameter_names.len() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "parameters".to_string(),
+            message: format!(
+                "expected {} initial values, got {}",
+                parameter_names.len(),
+                initial_parameters.len()
+            ),
+        });
+    }
+    let boundary_dimension = dimension + parameter_names.len();
+    let execution = match spec.solver.execution.unwrap_or(BvpExecutionSpec::Lambdify) {
+        BvpExecutionSpec::Lambdify => BvpSciExecution::Lambdify,
+        BvpExecutionSpec::Aot => BvpSciExecution::Aot,
+    };
+    let options = BvpSciOptions::default()
+        .with_execution(execution)
+        .with_assembly(
+            match spec.solver.frontend.unwrap_or(BvpFrontendSpec::ExprLegacy) {
+                BvpFrontendSpec::ExprLegacy => BvpSciAssembly::ExprLegacy,
+                BvpFrontendSpec::AtomViewNative => BvpSciAssembly::AtomViewNative,
+            },
+        )
+        .with_matrix_layout(match spec.solver.backend {
+            BvpLinearBackendSpec::Dense => BvpSciMatrixLayout::Dense,
+            BvpLinearBackendSpec::Sparse => BvpSciMatrixLayout::Sparse,
+            BvpLinearBackendSpec::Banded => BvpSciMatrixLayout::Banded { lower: 1, upper: 1 },
+        })
+        .with_tolerance(spec.solver_options.tolerance.unwrap_or(1e-3))
+        .with_limits(
+            spec.mesh.n_steps.saturating_mul(16).max(128),
+            spec.solver_options.max_iterations.unwrap_or(10),
+            10,
+        );
+    let mut builder =
+        BvpSciSolver::builder(spec.equations.rhs.clone(), spec.equations.unknowns.clone())
+            .with_independent_variable(spec.equations.arg.clone())
+            .with_mesh_and_initial_state(
+                (0..spec.mesh.n_steps)
+                    .map(|index| {
+                        spec.mesh.t0
+                            + (spec.mesh.t_end - spec.mesh.t0) * index as f64
+                                / (spec.mesh.n_steps - 1) as f64
+                    })
+                    .collect(),
+                initial_state,
+            )
+            .with_matrix_layout(options.matrix_layout)
+            .with_tolerance(options.tolerance)
+            .with_limits(
+                options.max_nodes,
+                options.max_newton_iterations,
+                options.max_mesh_refinements,
+            )
+            .with_parameter_names(parameter_names.clone())
+            .with_parameters(initial_parameters);
+    builder = match spec.solver.frontend.unwrap_or(BvpFrontendSpec::ExprLegacy) {
+        BvpFrontendSpec::ExprLegacy => builder.with_expr_legacy(),
+        BvpFrontendSpec::AtomViewNative => builder.with_atom_native(),
+    };
+    let builder = if execution == BvpSciExecution::Aot {
+        builder.with_aot_generated_backend(symbolic_aot_config_from_spec(
+            &spec.solver_options.generated_backend,
+        )?)
+    } else {
+        builder
+    };
+    builder
+        .with_boundary_callback(move |ya, yb, parameters, output| {
+            if output.len() != boundary_dimension {
+                return Err("BVP boundary output has unexpected dimension".to_string());
+            }
+            for (row, side, value) in &boundary_conditions {
+                output[*row] = if *side == 0 {
+                    ya[*row] - *value
+                } else {
+                    yb[*row] - *value
+                };
+            }
+            if !parameter_names.is_empty() {
+                let targets = parameter_targets
+                    .lock()
+                    .map_err(|_| "BVP parameter target lock was poisoned".to_string())?;
+                if targets.len() != parameter_names.len()
+                    || parameters.len() != parameter_names.len()
+                {
+                    return Err("BVP parameter target dimension mismatch".to_string());
+                }
+                for (index, target) in targets.iter().copied().enumerate() {
+                    output[dimension + index] = parameters[index] - target;
+                }
+            }
+            Ok(())
+        })
+        .build()
+        .map_err(BvpTaskError::BvpSci)
+}
+
+fn sci_boundary_conditions(
+    conditions: &BoundaryConditionSpec,
+    unknowns: &[String],
+) -> Result<Vec<(usize, usize, f64)>, BvpTaskError> {
+    unknowns
+        .iter()
+        .enumerate()
+        .map(|(row, name)| {
+            let entries = conditions.conditions.get(name).ok_or_else(|| {
+                BvpTaskError::Semantic(format!("missing boundary condition for `{name}`"))
+            })?;
+            if entries.len() != 1 {
+                return Err(BvpTaskError::UnsupportedRoute(format!(
+                    "BVP_sci task route requires exactly one scalar boundary condition per state; `{name}` has {}",
+                    entries.len()
+                )));
+            }
+            let (side, value) = entries[0];
+            Ok((row, side, value))
+        })
+        .collect()
+}
+
+fn sci_solution_matrix(
+    solution: &crate::numerical::BVP_sci::new::BvpSciSolution,
+) -> Result<DMatrix<f64>, BvpTaskError> {
+    if solution.x.is_empty() || solution.y.len() % solution.x.len() != 0 {
+        return Err(BvpTaskError::Solver(
+            "BVP_sci returned an invalid node-major solution".to_string(),
+        ));
+    }
+    let dimension = solution.y.len() / solution.x.len();
+    Ok(DMatrix::from_fn(
+        dimension,
+        solution.x.len(),
+        |row, node| solution.y[node * dimension + row],
+    ))
+}
+
+fn sci_solution_dataset(
+    solution: &crate::numerical::BVP_sci::new::BvpSciSolution,
+    variable_names: &[String],
+) -> Result<PostprocessDataset, BvpTaskError> {
+    let matrix = sci_solution_matrix(solution)?;
+    let dimension = matrix.nrows();
+    if variable_names.len() != dimension {
+        return Err(BvpTaskError::Solver(format!(
+            "BVP_sci returned {dimension} state components but the task declares {}",
+            variable_names.len()
+        )));
+    }
+    let values = DMatrix::from_fn(solution.x.len(), dimension, |node, component| {
+        matrix[(component, node)]
+    });
+    PostprocessDataset::new(
+        "x",
+        variable_names.to_vec(),
+        DVector::from_vec(solution.x.clone()),
+        values,
+    )
+    .map_err(BvpTaskError::Postprocess)
 }
 
 /// Write a starter BVP task document template to disk or to the current folder.
@@ -688,13 +1910,17 @@ fn parse_bvp_solver_selection(
 ) -> Result<BvpSolverSelectionSpec, BvpTaskError> {
     let task_section = get_required_section(document, "task")?;
     let solver_name = get_required_string(task_section, "task", "solver")?;
-    if !solver_name.eq_ignore_ascii_case("bvp") {
-        return Err(BvpTaskError::InvalidField {
-            section: "task".to_string(),
-            field: "solver".to_string(),
-            message: format!("expected `BVP`, got `{solver_name}`"),
-        });
-    }
+    let family = match normalize_token(&solver_name).as_str() {
+        "bvp" | "bvp_damp" | "bvp_damped" => BvpSolverFamilySpec::Damp,
+        "bvp_sci" | "bvpsci" | "bvp_scipy" | "scipy_bvp" => BvpSolverFamilySpec::Sci,
+        _ => {
+            return Err(BvpTaskError::InvalidField {
+                section: "task".to_string(),
+                field: "solver".to_string(),
+                message: format!("expected `BVP` or `BVP_sci`, got `{solver_name}`"),
+            })
+        }
+    };
 
     let strategy = BvpStrategySpec::from_str(
         &get_optional_string(task_section, "strategy", "task")?.unwrap_or_else(|| "Damped".into()),
@@ -704,9 +1930,18 @@ fn parse_bvp_solver_selection(
     let backend = BvpLinearBackendSpec::from_str(
         &get_optional_string(task_section, "method", "task")?.unwrap_or_else(|| "Sparse".into()),
     )?;
+    let frontend = get_optional_string(task_section, "frontend", "task")?
+        .map(|raw| BvpFrontendSpec::from_str(&raw))
+        .transpose()?;
+    let execution = get_optional_string(task_section, "execution", "task")?
+        .map(|raw| BvpExecutionSpec::from_str(&raw))
+        .transpose()?;
 
     Ok(BvpSolverSelectionSpec {
         task_kind: BvpTaskKindSpec::Bvp,
+        family,
+        frontend,
+        execution,
         strategy,
         scheme,
         backend,
@@ -853,6 +2088,8 @@ fn parse_generated_backend_options(
             "aot_execution_policy",
             "solver_options",
         )?,
+        aot_output_dir: get_optional_string(section, "aot_output_dir", "solver_options")?,
+        aot_handoff_path: get_optional_string(section, "aot_handoff_path", "solver_options")?,
         banded_linear_solver: get_optional_string(
             section,
             "banded_linear_solver",
@@ -955,6 +2192,67 @@ fn generated_backend_config_from_spec(
     Ok(config)
 }
 
+/// Map task-document AOT knobs to the shared generated-IVP lifecycle config.
+///
+/// BVP_Damp has a richer compatibility facade, so it keeps its own handoff
+/// config. BVP_sci consumes the shared symbolic lifecycle directly; keeping
+/// this adapter here avoids making either solver know about the other's config
+/// type while preserving one compiler/cache implementation.
+fn symbolic_aot_config_from_spec(
+    spec: &BvpGeneratedBackendSpec,
+) -> Result<SymbolicIvpGeneratedBackendConfig, BvpTaskError> {
+    let mut config = SymbolicIvpGeneratedBackendConfig::new();
+    if let Some(output_dir) = spec.aot_output_dir.as_deref() {
+        config = config.with_output_parent_dir(Some(PathBuf::from(output_dir)));
+    }
+    if let Some(handoff_path) = spec.aot_handoff_path.as_deref() {
+        config = config.with_handoff_path(Some(PathBuf::from(handoff_path)));
+    }
+    if let Some(codegen_backend) = spec.aot_codegen_backend.as_deref() {
+        config = config.with_aot_codegen_backend(parse_aot_codegen_backend(codegen_backend)?);
+    }
+    if let Some(compiler) = spec.aot_c_compiler.as_deref() {
+        config = config.with_aot_c_compiler(compiler);
+    }
+
+    let profile =
+        parse_symbolic_aot_build_profile(spec.aot_build_profile.as_deref().unwrap_or("release"))?;
+    let policy = match normalized_option(spec.aot_build_policy.as_deref()).as_deref() {
+        None | Some("build_if_missing") | Some("build_if_missing_release") => {
+            SymbolicIvpAotBuildPolicy::BuildIfMissing { profile }
+        }
+        Some("require_prebuilt") | Some("require") => SymbolicIvpAotBuildPolicy::RequirePrebuilt,
+        Some("rebuild_always") | Some("rebuild") => {
+            SymbolicIvpAotBuildPolicy::RebuildAlways { profile }
+        }
+        Some(other) => {
+            return Err(invalid_solver_option(
+                "aot_build_policy",
+                format!("unknown BVP_sci AOT build policy `{other}`"),
+            ));
+        }
+    };
+    Ok(config.with_build_policy(policy))
+}
+
+fn parse_symbolic_aot_build_profile(
+    raw: &str,
+) -> Result<crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile, BvpTaskError>
+{
+    match normalize_token(raw).as_str() {
+        "debug" => {
+            Ok(crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Debug)
+        }
+        "release" => {
+            Ok(crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile::Release)
+        }
+        other => Err(invalid_solver_option(
+            "aot_build_profile",
+            format!("unknown AOT build profile `{other}`"),
+        )),
+    }
+}
+
 fn normalized_option(raw: Option<&str>) -> Option<String> {
     raw.map(normalize_token).filter(|value| !value.is_empty())
 }
@@ -1013,7 +2311,9 @@ fn parse_backend_policy(raw: &str) -> Result<BackendSelectionPolicy, BvpTaskErro
 fn parse_symbolic_backend(raw: &str) -> Result<BvpSymbolicAssemblyBackend, BvpTaskError> {
     match normalize_token(raw).as_str() {
         "exprlegacy" | "expr_legacy" | "legacy" => Ok(BvpSymbolicAssemblyBackend::ExprLegacy),
-        "atomview" | "atom_view" | "atom" => Ok(BvpSymbolicAssemblyBackend::AtomView),
+        "atomview" | "atomviewnative" | "atom_view" | "atomnative" | "atom_native" | "atom" => {
+            Ok(BvpSymbolicAssemblyBackend::AtomView)
+        }
         other => Err(invalid_solver_option(
             "symbolic_backend",
             format!("unknown symbolic backend `{other}`"),
@@ -1161,6 +2461,10 @@ fn parse_bvp_postprocessing(document: &DocumentMap) -> Result<BvpPostprocessingS
         gnuplot_dir: get_optional_string(section, "gnuplot_dir", "postprocessing")?,
         terminal_plot: get_optional_bool(section, "terminal_plot", "postprocessing")?
             .unwrap_or(false),
+        output_policy: get_optional_string(section, "output_policy", "postprocessing")?
+            .map(|value| BvpOutputPolicy::from_str(&value))
+            .transpose()?
+            .unwrap_or_default(),
         plot: get_optional_bool(section, "plot", "postprocessing")?.unwrap_or(false),
     })
 }

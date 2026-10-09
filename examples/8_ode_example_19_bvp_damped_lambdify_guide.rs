@@ -14,7 +14,7 @@
 //! - Lambdify - естественный первый путь для символических моделей;
 //! - `AtomView` - оптимизированный символический frontend;
 //! - `Banded` соответствует узкой связности, которую даёт локальный BVP stencil.
-//! 
+//!
 //! запуск: cargo run --example 8_ode_example_19_bvp_damped_lambdify_guide
 
 use std::collections::HashMap;

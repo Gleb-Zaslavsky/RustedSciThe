@@ -1,68 +1,117 @@
+//! Public Boundary Value Problem solver API.
 //!
-//! # BVP_sci - Advanced Boundary Value Problem Solver Module
+//! The root exposes the second-generation collocation implementation from
+//! [`new`]. The previous implementation is retained under [`legacy`] as a
+//! reference and compatibility route, but it is deliberately not the default
+//! public solver anymore.
 //!
-//! This module provides a comprehensive suite of high-performance solvers for Boundary Value Problems (BVP)
-//! in ordinary differential equations. It implements state-of-the-art numerical methods with both symbolic
-//! and direct numerical approaches.
-//!
-//! ## Key Features
-//! - **Multiple Linear Algebra Backends**: Support for both `faer` and `nalgebra` crates
-//! - **Symbolic Integration**: Automatic conversion from symbolic expressions to numerical functions
-//! - **Analytical Jacobians**: Symbolic differentiation for faster convergence
-//! - **Adaptive Mesh Refinement**: Automatic grid adaptation for optimal accuracy
-//! - **Collocation Methods**: 4th-order collocation algorithms with residual control
-//! - **Sparse Matrix Support**: Efficient handling of large, sparse systems
-//! - **Variable Bounds**: Numerical stability through variable constraints
-//! - **Comprehensive Testing**: Extensive test suites for reliability
-//!
-//! ## Module Structure
-//! - `BVP_sci_faer`: Core BVP solver using faer linear algebra (recommended for performance)
-//! - `BVP_sci_numerical`: Pure numerical no-symbolic user-facing API on top of the faer core
-//! - `BVP_sci_nalgebra`: Alternative implementation using nalgebra
-//! - `BVP_sci_symb`: High-level symbolic wrapper for easy problem setup
-//! - `BVP_sci_symbolic_functions`: Symbolic-to-numerical conversion utilities
-//! - `BVP_sci_utils`: Common utilities and helper functions
-//!
-//! ## Supported Problem Types
-//! - Linear and nonlinear BVPs
-//! - Systems of coupled ODEs
-//! - Problems with parameters
-//! - Stiff and non-stiff equations
-//! - Multi-point boundary conditions
-//!
-//! ## Performance Characteristics
-//! - Parallel symbolic differentiation
-//! - Sparse matrix optimizations
-//! - Bandwidth-aware Jacobian storage
-//! - Memory-efficient mesh handling
-//! - Adaptive error control
-//!
-pub mod BVP_sci_aot;
-mod BVP_sci_aot_tests;
-pub mod BVP_sci_banded;
+//! Keeping the old implementation in a named namespace prevents accidental
+//! coupling to its internal modules while preserving a migration path for old
+//! examples and downstream code that still needs the historical baseline.
+
+/// Second-generation BVP architecture and the public solver facade.
+pub mod new;
+
+/// Historical BVP implementation retained for reference and compatibility.
+///
+/// New code should use the re-exported items from [`new`] instead. This
+/// namespace is intentionally explicit so benchmarks and parity tests can
+/// identify when they are exercising the old baseline.
+#[doc(hidden)]
+pub mod legacy {
+    #[path = "../BVP_sci_aot.rs"]
+    pub mod BVP_sci_aot;
+    #[path = "../BVP_sci_banded.rs"]
+    pub mod BVP_sci_banded;
+    #[path = "../BVP_sci_bordered_banded.rs"]
+    pub mod BVP_sci_bordered_banded;
+    #[path = "../BVP_sci_bordered_solver.rs"]
+    pub mod BVP_sci_bordered_solver;
+    /// Historical solver using `faer` matrix and vector operations.
+    #[path = "../BVP_sci_faer.rs"]
+    pub mod BVP_sci_faer;
+    /// Historical alternative solver using `nalgebra` matrix operations.
+    #[path = "../BVP_sci_nalgebra.rs"]
+    pub mod BVP_sci_nalgebra;
+    #[path = "../BVP_sci_numerical.rs"]
+    pub mod BVP_sci_numerical;
+    #[path = "../BVP_sci_symb.rs"]
+    pub mod BVP_sci_symb;
+    #[path = "../BVP_sci_symbolic_functions.rs"]
+    pub mod BVP_sci_symbolic_functions;
+    #[path = "../BVP_sci_utils.rs"]
+    pub(crate) mod BVP_sci_utils;
+
+    #[cfg(test)]
+    #[path = "../BVP_sci_aot_tests.rs"]
+    mod BVP_sci_aot_tests;
+    #[cfg(test)]
+    #[path = "../tests/banded_story.rs"]
+    mod BVP_sci_banded_story_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_banded_tests.rs"]
+    mod BVP_sci_banded_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_bordered_banded_tests.rs"]
+    mod BVP_sci_bordered_banded_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_bordered_solver_tests.rs"]
+    mod BVP_sci_bordered_solver_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_faer_tests.rs"]
+    mod BVP_sci_faer_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_generated_compare_tests.rs"]
+    mod BVP_sci_generated_compare_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_nalgebra_tests.rs"]
+    mod BVP_sci_nalgebra_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_numerical_tests.rs"]
+    mod BVP_sci_numerical_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_story_tests.rs"]
+    mod BVP_sci_story_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_symb_tests.rs"]
+    mod BVP_sci_symb_tests;
+    #[cfg(test)]
+    #[path = "../BVP_sci_symb_tests2.rs"]
+    mod BVP_sci_symb_tests2;
+    #[cfg(test)]
+    #[path = "../tests/common.rs"]
+    pub(crate) mod test_common;
+}
+
+// The old source files use the historical root paths internally. Keep these
+// crate-local aliases while making the old modules externally visible only via
+// `BVP_sci::legacy`.
+pub(crate) use legacy::BVP_sci_aot;
+pub(crate) use legacy::BVP_sci_banded;
+pub(crate) use legacy::BVP_sci_bordered_banded;
+pub(crate) use legacy::BVP_sci_bordered_solver;
+pub(crate) use legacy::BVP_sci_faer;
+pub(crate) use legacy::BVP_sci_nalgebra;
+pub(crate) use legacy::BVP_sci_numerical;
+pub(crate) use legacy::BVP_sci_symb;
+pub(crate) use legacy::BVP_sci_symbolic_functions;
+pub(crate) use legacy::BVP_sci_utils;
 #[cfg(test)]
-#[path = "BVP_sci/tests/banded_story.rs"]
-mod BVP_sci_banded_story_tests;
-mod BVP_sci_banded_tests;
-pub mod BVP_sci_bordered_banded;
-mod BVP_sci_bordered_banded_tests;
-pub mod BVP_sci_bordered_solver;
-mod BVP_sci_bordered_solver_tests;
-///BVP solver using faer crate for matrix&vector operations
-pub mod BVP_sci_faer;
-mod BVP_sci_faer_tests;
-mod BVP_sci_generated_compare_tests;
-/// BVP solver using nalgebra crate for matrix&vector operations
-pub mod BVP_sci_nalgebra;
-mod BVP_sci_nalgebra_tests;
-pub mod BVP_sci_numerical;
-mod BVP_sci_numerical_tests;
-mod BVP_sci_story_tests;
-pub mod BVP_sci_symb;
-mod BVP_sci_symb_tests;
-mod BVP_sci_symb_tests2;
-pub mod BVP_sci_symbolic_functions;
-mod BVP_sci_utils;
-#[cfg(test)]
-#[path = "BVP_sci/tests/common.rs"]
-mod test_common;
+pub(crate) use legacy::test_common;
+
+pub use new::{
+    AtomViewNativeLambdifyPlan, BvpSciAotPlan, BvpSciAssembly, BvpSciBoundary,
+    BvpSciBoundaryCallbacks, BvpSciDenseOutput, BvpSciExecution,
+    BvpSciExecutionPolicy, BvpSciLambdifyPlan, BvpSciMatrixLayout, BvpSciOptions,
+    BvpSciSolverBuilder,
+    BvpSciOutputPolicy, BvpSciSingularTerm, BvpSciSolution, BvpSciSolver,
+    BvpSciNumericalPlan, NumericalJacobianCallback, NumericalParameterJacobianCallback,
+    NumericalRhsCallback,
+    BvpSciAotFailureKind, BvpSciNewError, BvpSciStage, BvpSciStatus, BvpSciTelemetryMode,
+    BvpSciTelemetry,
+    BvpSciTelemetryScope, BvpSciTelemetryScopeKind, BvpSciTelemetrySnapshot,
+    BvpSciTelemetryStage, BvpSciNewtonTraceEntry, ExprLegacyLambdifyPlan,
+    SCIPY_ARMIJO_SIGMA, SCIPY_BACKTRACKING_TAU, SCIPY_MAX_BACKTRACKING_TRIALS,
+    SCIPY_MAX_JACOBIAN_REFRESHES, SCIPY_MAX_MESH_ITERATIONS, SCIPY_MAX_NEWTON_ITERATIONS,
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+};

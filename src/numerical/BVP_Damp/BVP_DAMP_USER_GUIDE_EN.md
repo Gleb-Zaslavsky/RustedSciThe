@@ -750,3 +750,72 @@ failed-decision events; `Detailed` also keeps normal adaptive decisions. The
 trace is bounded per solve, so large adaptive problems cannot grow diagnostic
 memory without limit. Check `log_events_dropped` when the configured cap is
 reached.
+
+## Running BVP tasks from text documents
+
+The task-document route is a convenience layer over the native BVP_Damp API.
+It is useful for reproducible experiments and batch runs; for application code,
+prefer the typed builder API shown above. A task document can select the solver,
+matrix layout, symbolic route, execution mode, tolerances, continuation policy,
+and output policy without changing the numerical model.
+
+```text
+# BVP_Damp task: the comments are ignored by the parser.
+solver: BVP
+strategy: Damped
+method: Sparse
+frontend: AtomViewNative
+execution: Lambdify
+tolerance: 1e-6
+max_iterations: 100
+
+parameters:
+  k: 2.5
+
+continuation:
+  parameter: k
+  values: 1.0, 1.5, 2.0, 2.5
+  mode: prepared
+  restart_each: false
+
+output_policy: none
+```
+
+`solver: BVP` selects the task-parser adapter for BVP_Damp. `strategy` chooses
+the nonlinear policy (`Damped`, `Frozen`, or `Naive`), while `method` chooses
+the linear layout (`Dense`, `Sparse`, or `Banded`). These are independent
+choices: the layout is not a symbolic frontend and the strategy is not an
+execution backend.
+
+`frontend` selects the symbolic representation. `ExprLegacy` keeps the
+expression-oriented route; `AtomViewNative` lowers the residual and Jacobian
+to the native AtomView route without converting the prepared graph back to an
+expression tree. `execution` selects `Lambdify` or `AOT`; `Lambdify` is an
+execution mode, not another frontend. A typical large sparse task uses
+`AtomViewNative` with `Lambdify`, while a small fully coupled task is often
+best served by `ExprLegacy` and `Dense`. There is no universal fastest choice:
+compare matched workloads and retain the route that is fastest and stable for
+the actual problem.
+
+For AOT tasks, the document may additionally specify `aot_build_policy`
+(`BuildIfMissing`, `RequirePrebuilt`, or `RebuildAlways`), `output_dir`,
+`compiler`, `profile`, and a publication/handoff directory. `RequirePrebuilt`
+never compiles; it reports a typed missing, stale, provenance, compiler, link,
+or timeout error instead of silently falling back. The lifecycle report keeps
+cache hit/miss, build/link attempts, publication, and runtime readiness
+separate from numerical solve time.
+
+The `continuation` block describes a family of BVPs. `mode: fresh` reparses and
+prepares every segment, `warm` reuses the prepared model while rebinding
+parameters, and `prepared` requests the strongest reusable route. `restart_each`
+controls whether every segment starts from the original mesh/initial guess.
+Each segment may also provide its own `y0`, `t0`, and `t_end`; these are a real
+restart contract, not aliases for a parameter update. Use monotonic values for
+ordinary continuation unless a deliberate non-monotonic sweep is required.
+
+`output_policy` is `none`, `terminal`, `plotters`, or `gnuplot`; the legacy
+`plot` key is accepted as a compatibility alias. Comments beginning with `#`
+are ignored, so detailed explanations can stay beside the task. Reference
+documents are kept under `examples/task_docs/`. The shared grammar, typed
+diagnostics, and batch-runner conventions are documented in
+[`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).

@@ -44,7 +44,8 @@ fn solve_lorenz(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
     .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
     .with_faithful_bdf_solve(100_000, 100_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
     assert_eq!(
         solver.get_status().as_deref(),
@@ -52,8 +53,6 @@ fn solve_lorenz(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
     );
 
     let (t, y) = solver.get_result();
-    let t = t.expect("LSODE2 should produce a time mesh");
-    let y = y.expect("LSODE2 should produce a solution matrix");
     (y.transpose(), t)
 }
 

@@ -262,7 +262,14 @@ impl fmt::Display for PostprocessError {
     }
 }
 
-impl std::error::Error for PostprocessError {}
+impl std::error::Error for PostprocessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::InvalidDataset(_) | Self::InvalidPath(_) => None,
+        }
+    }
+}
 
 impl From<io::Error> for PostprocessError {
     fn from(value: io::Error) -> Self {
@@ -422,13 +429,11 @@ mod tests {
             assert!(dir.join("y.png").exists());
         } else {
             assert_eq!(entry.status, PostprocessStatus::Skipped);
-            assert!(
-                entry
-                    .message
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("gnuplot executable")
-            );
+            assert!(entry
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("gnuplot executable"));
         }
 
         let _ = fs::remove_dir_all(dir);

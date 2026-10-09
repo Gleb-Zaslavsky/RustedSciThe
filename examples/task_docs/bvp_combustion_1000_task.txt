@@ -1,0 +1,63 @@
+# BVP combustion-like reference task (dense symbolic system, 6 unknowns).
+# This document mirrors the spirit of `combustion_1000` stress tests.
+# Comments are ignored by the task parser. The long RHS is intentionally kept
+# as one ordered list: there must be exactly one expression for each unknown.
+
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Banded
+
+# The state order here is Teta, q, C0, J0, C1, J1. RHS expressions below use
+# precisely this order.
+equations
+arg: x
+unknowns: Teta, q, C0, J0, C1, J1
+rhs: q/0.07, q*0.0090168 - (3000.0*1000.0*0.034)*(130000.0*exp(-(5000.0*4.184)/(8.314*(Teta*600.0 + 600.0)))*C0*((0.0342*(2000000.0)/(8.314*1500.0))/0.342))*((0.0003)^2/600.0), J0/0.000288, J0*0.00150 - (0.0342*(-1.0)*(130000.0*exp(-(5000.0*4.184)/(8.314*(Teta*600.0 + 600.0)))*C0*((0.0342*(2000000.0)/(8.314*1500.0))/0.342))*((0.0342*(2000000.0)/(8.314*1500.0))/0.0342))*((0.0003)^2), J1/0.000288, J1*0.00150 - (0.0342*(130000.0*exp(-(5000.0*4.184)/(8.314*(Teta*600.0 + 600.0)))*C0*((0.0342*(2000000.0)/(8.314*1500.0))/0.342))*((0.0342*(2000000.0)/(8.314*1500.0))/0.0342))*((0.0003)^2)
+
+# Endpoint keys map physical conditions to state components. Six conditions
+# close the six-state problem; changing a key changes the mathematical task.
+boundary_conditions
+Teta_left: 0.6666666667
+q_right: 1e-10
+C0_left: 1.0
+J0_right: 1e-7
+C1_left: 1e-3
+J1_right: 1e-7
+
+# A large initial mesh makes this a performance/stress document, not a quick
+# correctness smoke test. Use a smaller n_steps interactively.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 1000
+
+# The six guesses are expanded across the initial mesh. Good guesses matter
+# for strongly nonlinear combustion-like equations.
+initial_guess
+Teta: 0.99
+q: 0.99
+C0: 0.99
+J0: 0.99
+C1: 0.99
+J1: 0.99
+
+# tolerance controls the nonlinear solve; max_iterations is not mesh size.
+solver_options
+tolerance: 1e-6
+max_iterations: 100
+loglevel: error
+# This preset selects symbolic Lambdify plus the native Banded backend.
+generated_backend: banded_lambdify
+# `lapack` selects the faithful banded factorization implementation.
+banded_linear_solver: lapack
+refinement_steps: 0
+
+postprocessing
+save_csv: false
+csv_path: bvp_combustion_1000.csv
+# Prefer this typed policy in new tasks. Other values: plotters, gnuplot,
+# terminal. CSV/TXT/Markdown actions are independent of this selector.
+output_policy: none
+plot: false

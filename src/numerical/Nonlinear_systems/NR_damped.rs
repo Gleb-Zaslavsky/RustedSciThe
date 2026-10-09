@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 
-use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
     IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
     StepOutcome, eval_residual_norm_with_runtime, measure_linear_system_operation,
 };
+use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 
@@ -271,7 +271,7 @@ impl NonlinearMethod for DampedNewtonMethodAdvanced {
             ));
         }
         if options.bounds.is_none() {
-            warn!("DampedNewtonMethodAdvanced works best with bounds specified");
+            nonlinear_log_warn!("DampedNewtonMethodAdvanced works best with bounds specified");
         }
         Ok(())
     }
@@ -344,7 +344,7 @@ impl DampedNewtonMethodAdvanced {
             }
 
             if fbound < 1e-10 {
-                warn!(
+                nonlinear_log_warn!(
                     "Initial step violates bounds severely, fbound = {:.6e}",
                     fbound
                 );
@@ -353,7 +353,7 @@ impl DampedNewtonMethodAdvanced {
         }
 
         for k in 0..self.max_damping_iterations {
-            info!("Damping iteration {}, lambda = {:.6e}", k, lambda);
+            nonlinear_log_info!("Damping iteration {}, lambda = {:.6e}", k, lambda);
 
             let (trial_x, trial_norm) = if let Some(workspace) = workspace.as_deref_mut() {
                 workspace.set_affine_trial(&state.x, -lambda, &newton_step)?;
@@ -384,9 +384,10 @@ impl DampedNewtonMethodAdvanced {
                 (Cow::Owned(trial_x), trial_norm)
             };
 
-            info!(
+            nonlinear_log_info!(
                 "Trial norm = {:.6e}, current norm = {:.6e}",
-                trial_norm, current_norm
+                trial_norm,
+                current_norm
             );
             // If the norm decreases, then accept this
             // damping coefficient. Also accept it if this step would result in a
@@ -397,7 +398,7 @@ impl DampedNewtonMethodAdvanced {
             if trial_norm < current_norm * (1.0 - lambda * self.sufficient_decrease)
                 || trial_norm < options.tolerance
             {
-                info!("Damping coefficient accepted");
+                nonlinear_log_info!("Damping coefficient accepted");
                 runtime.accepted_steps += 1;
                 return Ok(StepOutcome::Continue {
                     next_x: trial_x.into_owned(),
@@ -410,7 +411,7 @@ impl DampedNewtonMethodAdvanced {
             runtime.rejected_steps += 1;
         }
 
-        warn!("Max damping iterations reached");
+        nonlinear_log_warn!("Max damping iterations reached");
         Ok(StepOutcome::Terminated(
             TerminationReason::RejectedStepLimit,
         ))
@@ -434,15 +435,19 @@ pub fn bound_step(
 
         let s_i = step[i];
         if y_i <= below + 1e-14 {
-            warn!(
+            nonlinear_log_warn!(
                 "Solution y[{}] = {:.6e} is at lower bound {:.6e}",
-                i, y_i, below
+                i,
+                y_i,
+                below
             );
         }
         if y_i >= above - 1e-14 {
-            warn!(
+            nonlinear_log_warn!(
                 "Solution y[{}] = {:.6e} is at upper bound {:.6e}",
-                i, y_i, above
+                i,
+                y_i,
+                above
             );
         }
 

@@ -100,3 +100,64 @@ See [`BE_STORY_TESTS.md`](BE_STORY_TESTS.md),
 [`BE_BENCHMARKS.md`](BE_BENCHMARKS.md), and
 [`BE_PERFORMANCE_BASELINE.md`](BE_PERFORMANCE_BASELINE.md) for test and
 measurement evidence.
+
+## Text Task Documents
+
+Use a task document when a BE experiment should be reproducible or run as part
+of a batch. The task route dispatches to the native Backward Euler adapter:
+
+```text
+task
+solver: IVP
+method: BackwardEuler
+
+equations
+arg: t
+parameters: k
+parameter_values: 2.0
+y: -k*y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+step_size: 1e-2
+tolerance: 1e-7
+max_iterations: 100
+
+postprocessing
+output_policy: none
+```
+
+`step_size` selects the fixed BE step; the final step may be clipped to the
+requested bound. `tolerance` and `max_iterations` configure the Newton solve.
+`output_policy` accepts `none`, `terminal`, `plotters`, or `gnuplot`; `plot` is
+only a compatibility alias. Comments beginning with `#` are ignored.
+
+The text adapter is deliberately narrower than the native API. It uses the
+dense BE route and does not silently promise sparse matrices, adaptive error
+control, Jacobian/LU reuse, or event localization. To choose
+`ExprLegacy`/`AtomViewNative`, analytic versus finite-difference Jacobians,
+AOT lifecycle, telemetry mode, or a custom continuation/restart policy, use
+`BeSolverOptions` and the typed BE API. `None` for the native Jacobian means
+finite differences; it is not the same as selecting another symbolic frontend.
+
+Continuation is expressed explicitly:
+
+```text
+continuation
+parameter: k
+values: 1.0, 2.0, 4.0
+mode: prepared
+restart_each: false
+```
+
+`fresh` prepares every segment, `warm` reuses prepared callbacks, and
+`prepared` requests the strongest model reuse. `restart_each: true` starts each
+segment from its declared initial state; a segment may provide a new `y0`,
+`t0`, or `t_end`. Keep fresh/warm/prepared timings separate from the numerical
+solve time when reporting continuation performance. The shared grammar and
+batch-runner conventions are documented in
+[`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).

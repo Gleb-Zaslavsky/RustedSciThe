@@ -3,6 +3,7 @@ use crate::numerical::Nonlinear_systems::engine::{
     StepOutcome, eval_residual_with_runtime, measure_linear_operation,
     measure_linear_system_operation, solve_linear_system,
 };
+use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_debug, nonlinear_log_info};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 use nalgebra::{DMatrix, DVector};
@@ -189,7 +190,7 @@ pub fn Powell_dogleg_method(
     let scaled_norm = (scaling.clone().component_mul(&p_gauss.clone())).norm();
 
     if scaled_norm <= delta {
-        println!("scaled norm of gauss step <= delta => return gauss step");
+        nonlinear_log_debug!("scaled norm of gauss step <= delta => return gauss step");
         return p_gauss; // Gauss-Newton step is within trust region
     }
 
@@ -204,15 +205,15 @@ pub fn Powell_dogleg_method(
     let alpha_optimal = (gradient_scaled.norm() / (Jy * gradient_scaled).norm()).powf(2.0);
     let p_dl: DVector<f64>;
     if p_gauss.norm() < delta {
-        println!("scaled norm of gauss step <= delta => return gauss step");
+        nonlinear_log_debug!("scaled norm of gauss step <= delta => return gauss step");
         p_dl = p_gauss;
     } else if p_steepest.norm() * alpha_optimal > delta {
-        println!(
+        nonlinear_log_debug!(
             " norm of stepest descent step*alpha > delta => return  p_steepest*(delta/||p_steepest||)"
         );
         p_dl = p_steepest.clone() * (delta / p_steepest.norm());
     } else {
-        println!(
+        nonlinear_log_debug!(
             "||p_steepest|| {}, alpha {}, delta {}",
             p_steepest.norm(),
             alpha_optimal,
@@ -229,7 +230,7 @@ pub fn Powell_dogleg_method(
         } else {
             beta = (delta.powf(2.0) - a.norm().powf(2.0)) / (c + L);
         }
-        println!("beta = {}", beta);
+        nonlinear_log_debug!("beta = {}", beta);
         p_dl = alpha_optimal * p_steepest + beta * p_gauss;
     }
     return p_dl;
@@ -471,7 +472,7 @@ impl DoglegState {
         // CASE 2a: Gauss-Newton step is inside trust region
         if self.norm_dgn <= delta {
             // GN step is optimal since it minimizes quadratic model
-            log::debug!("gauss newton step norm <= delta: return gauss newton step");
+            nonlinear_log_debug!("gauss newton step norm <= delta: return gauss newton step");
             return Ok(self.dx_gn.clone());
         }
 
@@ -479,7 +480,7 @@ impl DoglegState {
         // Find point on dogleg path: dx = dx_sd + β*(dx_gn - dx_sd)
         // where β ∈ [0,1] such that ||D*dx|| = delta
         let beta = self.compute_dogleg_beta(1.0, delta, diag)?;
-        log::debug!("dogleg beta = {}", beta);
+        nonlinear_log_debug!("dogleg beta = {}", beta);
         // Compute final dogleg step
         // dx = dx_sd + β * (dx_gn - dx_sd)
         let dx_diff = &self.dx_gn - &self.dx_sd;
@@ -780,8 +781,8 @@ impl NonlinearMethod for PowellDoglegMethod {
         let dogleg_state = DoglegState::new(n, p)
             .map_err(|_| SolveError::InvalidConfig("failed to create dogleg state".to_string()))?;
 
-        log::info!("Initialized Powell Dogleg Method");
-        log::info!(
+        nonlinear_log_info!("Initialized Powell Dogleg Method");
+        nonlinear_log_info!(
             "  delta_init = {}, use_double_dogleg = {}",
             self.delta_init,
             self.use_double_dogleg

@@ -181,32 +181,14 @@ fn main() {
     let y0 = DVector::from_vec(vect.clone());
 
     let t_bound = 500.0;
-    let max_step = 0.001;
-    let rtol = 1e-7;
-    let atol = 1e-8;
-    let solver_name = "BDF".to_string();
+    // The universal facade is intentionally nonstiff-only.  A stiff run of
+    // this problem must use `BdfSolverOptions` and `BDF_api::ODEsolver`
+    // directly; this example demonstrates the portable RK45 route.
+    let solver_name = "RK45".to_string();
     let now = Instant::now();
     let mut solver = match solver_name.as_str() {
-        "BDF" => {
-            UniversalODESolver::bdf(eq_sys, unknowns, arg, t0, y0, t_bound, max_step, rtol, atol)
-        }
-
         "RK45" => UniversalODESolver::rk45(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
         "AB4" => UniversalODESolver::ab4(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
-        "BE" => {
-            let solver = UniversalODESolver::backward_euler(
-                eq_sys,
-                unknowns,
-                arg,
-                t0,
-                y0,
-                t_bound,
-                1e-6,
-                50,
-                Some(1e-3),
-            );
-            solver
-        }
         _ => panic!("Unsupported solver: {}", solver_name),
     };
 

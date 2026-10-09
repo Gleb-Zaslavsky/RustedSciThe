@@ -1,0 +1,25 @@
+task
+solver: IVP
+method: Radau5
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.02
+
+continuation
+parameter: rate
+values: 1.0, 2.0, 3.0
+mode: prepared
+restart_each: false

@@ -90,19 +90,14 @@ fn main() {
     // Step 5: faithful native BDF step engine.
     .with_faithful_bdf_solve(100_000, 100_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
 
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y1 = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
-    let final_y2 = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 1)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y1 = y[(y.nrows() - 1, 0)];
+    let final_y2 = y[(y.nrows() - 1, 1)];
 
     println!("LSODE2 AOT guide (C+tcc)");
     println!("status  = {}", solver.get_status().unwrap_or_default());

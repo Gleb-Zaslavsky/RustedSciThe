@@ -1,5 +1,20 @@
 # LSODE2 Symbolic Runtime TODO
 
+## Release Corpus Infrastructure
+
+- [x] Add `benches/lsode2_workloads.rs`, a bounded Tabled matrix for both
+  symbolic frontends, all three linear backends, Lambdify policies, AOT
+  whole/chunked routes, representative workloads, continuation, parity and
+  lifecycle telemetry.
+- [x] Add `scripts/lsode2_release_matrix.ps1` as a non-fail-fast runner with
+  separate compact `reports` and compiler/Criterion `technical` output.
+- [ ] Run and archive the new release matrix on the target machine. Do not
+  promote one compact run to a hard performance threshold.
+- [ ] Add other AOT toolchains only after the Tcc baseline is stable and keep
+  compiler lifecycle comparisons apple-to-apple.
+- [ ] Gradually migrate remaining historical dashboards; compact tables are
+  the release index while detailed Criterion targets remain diagnostic.
+
 Priority update, 2026-09-23: investigate the shared
 [View/Lambdify execution layer](../../symbolic/View/TODO.md) before further
 runtime migration. Preserve ExprLegacy and the historical AtomView comparison

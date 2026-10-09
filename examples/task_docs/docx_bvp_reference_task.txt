@@ -1,0 +1,28 @@
+﻿task
+# `BVP` selects the BVP_Damp compatibility adapter; comments are ignored.
+solver: BVP
+strategy: Damped
+scheme: forward
+backend: Sparse
+
+# RHS expressions are ordered exactly like the unknowns.
+equations
+arg: x
+unknowns: z, y
+rhs: $y - z$, $-z^3$
+
+# `_left` and `_right` identify the endpoint on which a condition applies.
+boundary_conditions
+z_left: 1.0
+y_right: 1.0
+
+# n_steps is the initial mesh size, not the Newton iteration limit.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+# One finite scalar guess per state is expanded over the initial mesh.
+initial_guess
+z: 0.0
+y: 0.0

@@ -140,6 +140,24 @@ if let Err(failure) = attempt {
 `SolveError`. Failure telemetry предназначена для отчетов и отладки и не
 превращает неудачную подготовку в пригодную для решения задачу.
 
+### Опциональное логирование солвера
+
+Логирование солвера по умолчанию отключено. Настройка действует только в
+рамках одного запуска `SolverEngine` и не меняет глобальный logger процесса:
+
+```rust
+let quiet = SolveOptions::default();
+let verbose = SolveOptions::default().with_logging(EngineLogLevel::Debug);
+let quiet_again = verbose.without_logging();
+```
+
+Та же политика доступна у `DiagnosticsOptions` через методы
+`with_logging(...)` и `without_logging()`. Диагностика runtime-методов
+использует этот публичный параметр и не пишет напрямую в stdout. Поэтому
+обычный путь не выполняет форматирование и отправку log-записей, а приложение
+с установленным фасадом `log` может явно включить уровни `Info`, `Warn` или
+`Debug`.
+
 ### Жизненный цикл AOT-артефакта
 
 Для холодного production-подобного запуска задайте каталог вывода и
@@ -390,3 +408,26 @@ cargo run --example rus_nonlinear_aot_lifecycle_guide
 
 Старый `nonlinear_systems_guide` оставлен как compatibility-пример legacy
 LM-wrapper.
+
+### Выбор символьного frontend
+
+Плотный Lambdify backend поддерживает два frontend-пути:
+
+```rust
+let expr_legacy = SymbolicProblemOptions::new()
+    .with_lambdify_frontend(SymbolicLambdifyFrontend::ExprLegacy);
+let atom_native = SymbolicProblemOptions::new()
+    .with_atom_native_frontend();
+```
+
+`ExprLegacy` остается совместимым выбором по умолчанию. `AtomViewNative` один
+раз преобразует публичные `Expr` в Atom, выполняет дифференцирование
+Якобиана на Atom-представлении и записывает невязку и Якобиан в плотные буферы
+вызывающей стороны. Плотный AOT поддерживает оба frontend-а: `ExprLegacy` и
+`AtomViewNative`; во втором случае генерация невязки и Якобиана остается на
+Atom-представлении и использует тот же dense ABI. Для AOT сейчас требуется
+цельная (`Whole`) стратегия chunking.
+
+Этот решатель намеренно работает с плотными матрицами. Для Sparse и Banded
+следует использовать ODE-солверы, например LSODE2, где layout-specific
+линейные backend-ы являются частью контракта.

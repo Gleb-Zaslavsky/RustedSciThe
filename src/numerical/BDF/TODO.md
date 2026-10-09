@@ -716,6 +716,53 @@ verification is deferred until the batch is exhausted.
   noisy/anomalous scopes with machine/compiler/source provenance, expand stage
   attribution for FD/Newton/controller costs, and choose a validated allocator-
   aware method. Do not treat a single-machine capture as a portable threshold.
+- [x] **BD-20a: Add a compact BDF workload matrix.** The new
+  `benches/bdf_workloads.rs` target follows the Radau reporting contract and
+  writes one `tabled` report for Lambdify and AOT ExprLegacy/AtomView across
+  shared workloads.
+  Rows retain preparation, solve and continuation timing, residual/Jacobian and
+  factorization counters, accepted steps, final magnitude, frontend parity and
+  status. Fixed-size workloads are reported as `fixed`, not as a fake numeric
+  dimension. Compact rows are written through `Utils::test_reporting`, outside
+  compiler/Criterion technical logs.
+- [x] **BD-20b: Add profile-aware BDF orchestration.**
+  `scripts/bdf_release_matrix.ps1` runs fast stories, optional ignored stories,
+  the compact workload matrix and optional historical detailed benches without
+  fail-fast behavior. It supports dimensions, workloads, continuation counts,
+  Lambdify/AOT route selection, `-PlanOnly` and `-FailOnAny`; each step receives
+  its own technical log, while compact reports are physically stored under
+  `reports/`, separate from `technical/`, and the final summary records status,
+  exit code and duration.
+- [~] **BD-20c: Complete policy/chunking evidence.** The compact workload
+  matrix now accepts matched `lambdify-sequential`, `lambdify-parallel`,
+  `lambdify-auto`, `aot-whole` and `aot-parallel2` routes over the same
+  workloads, continuation counts and parity checks. The ignored heavy story
+  remains the detailed AOT Whole-vs-Parallel2/toolchain gate. The first
+  release smoke passed all routes. The apparent `ExprLegacy + Auto` cold
+  preparation spike of about `2002 ms` is explained: `Auto` calls the cached
+  Rayon calibration during `set_lambdify_execution_policy`, and the first
+  calibration on the 24-worker release machine measured approximately
+  `8857 ns` per 2-way join and `24994 ns` per 4-way join over 7x10000 samples,
+  which accounts for about 1.75 seconds before ordinary preparation. The
+  first ExprLegacy Auto row pays this once; the later AtomView Auto row reuses
+  the process `OnceLock`. This is a real one-time startup cost, not random
+  noise or a symbolic quadratic regression. The compact table now exposes
+  `parallel_calibration_ms` and the diagnostic
+  `prepare_without_calibration_ms`; dispatch/chunk counters remain a follow-up
+  before declaring the policy matrix complete.
+
+  Future focused release confirmation (do not include in ordinary nightly
+  slices):
+
+  ```powershell
+  $env:BDF_BENCH_COMPACT_REPORT = "1"
+  $env:BDF_COMPACT_REPORT_NAME = "bdf_policy_calibration_confirmation"
+  $env:BDF_BENCH_COMPACT_ROUTES = "lambdify-sequential,lambdify-auto"
+  $env:BDF_BENCH_COMPACT_WORKLOADS = "combustion-like"
+  $env:BDF_COMPACT_CONTINUATION_COUNTS = "1"
+  cargo bench --no-default-features --bench bdf_workloads -- --noplot
+  ```
+
 - [~] **BD-27: Audit performance-stage and telemetry coverage before optimization.**
   Existing optional timings cover backend preparation, residual/Jacobian callbacks,
   solve, integration loop, BDF step, output collection, result assembly,

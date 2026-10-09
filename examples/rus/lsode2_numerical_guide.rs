@@ -52,14 +52,12 @@ fn numeric_options() -> Lsode2NumericProblemOptions {
 }
 
 fn run_and_report(title: &str, config: Lsode2ProblemConfig) {
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y = y[(y.nrows() - 1, 0)];
     println!("{title}");
     println!("  status  = {}", solver.get_status().unwrap_or_default());
     println!("  final_t = {final_t:.6}");

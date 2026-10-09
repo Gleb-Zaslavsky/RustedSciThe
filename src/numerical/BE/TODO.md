@@ -501,3 +501,15 @@ failure behavior, continuation and representative full-solve evidence are closed
   is next extended, not as a prerequisite for the other solvers.
 - The final BE-19 thematic-report audit can follow BDF/Radau work so shared
   fixture conclusions remain consistent across the solver family.
+
+## Compact Release Matrix And Reporting
+
+- [x] Add `be_workloads` as a bounded Tabled dashboard for native analytic/FD,
+  Lambdify ExprLegacy/AtomViewNative, optional dense AOT/tcc, shared workloads,
+  diffusion sizes and warm parameter rebinding.
+- [x] Add `scripts/be_release_matrix.ps1` with independent non-fail-fast steps,
+  compact `reports/` output and isolated Cargo/compiler `technical/` logs.
+- [x] Keep unsupported BE axes explicit: no fabricated Parallel/Auto or
+  Sparse/Banded rows; those belong to LSODE2 or another solver.
+- [ ] Run the complete BE release matrix and archive its compact reports after
+  the dashboard has received a local smoke run.

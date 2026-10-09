@@ -10,6 +10,7 @@
 //!
 //! запуск: cargo run --example lsode2_lorenz_3d_animation
 
+use RustedSciThe::Utils::animation_3d::create_3d_animation;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2BackendConfig, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
@@ -17,7 +18,6 @@ use RustedSciThe::numerical::LSODE2::{
 };
 use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::Utils::animation_3d::create_3d_animation;
 use nalgebra::{DMatrix, DVector};
 
 fn solve_lorenz(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
@@ -45,13 +45,15 @@ fn solve_lorenz(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
     .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
     .with_faithful_bdf_solve(100_000, 100_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
-    assert_eq!(solver.get_status().as_deref(), Some("finished_native_faithful"));
+    assert_eq!(
+        solver.get_status().as_deref(),
+        Some("finished_native_faithful")
+    );
 
     let (t, y) = solver.get_result();
-    let t = t.expect("LSODE2 should produce a time mesh");
-    let y = y.expect("LSODE2 should produce a solution matrix");
     (y.transpose(), t)
 }
 

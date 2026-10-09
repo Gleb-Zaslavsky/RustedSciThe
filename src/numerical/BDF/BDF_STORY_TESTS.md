@@ -4,6 +4,15 @@ This file records evidence for the BDF solver. Debug test results are not
 release performance baselines. Timing claims require the Criterion reports listed
 in [BDF_BENCHMARKS.md](BDF_BENCHMARKS.md).
 
+The compact release path is `benches/bdf_workloads.rs`, which follows the
+Radau reporting contract: useful values are collected into a `tabled` matrix,
+written through `Utils::test_reporting` under the release capture `reports/`
+directory, kept separate from technical Cargo/compiler output. The compact
+matrix covers Lambdify and AOT ExprLegacy/AtomView across representative
+workloads and continuation counts, including Sequential/Parallel/Auto and
+whole/chunked AOT policy routes. The non-fail-fast orchestration entry point is
+`scripts/bdf_release_matrix.ps1`.
+
 Scope note: standalone BDF is intentionally dense-only. Its ExprLegacy,
 AtomView, Lambdify and AOT routes all feed a dense Jacobian to dense linear
 algebra. Sparse/Banded BDF behavior is covered by LSODE2 stories and is not a
@@ -22,6 +31,7 @@ missing standalone-BDF test axis.
 | `bdf_piecewise_parameter_continuation_matches_lsode2_and_backward_euler` | BDF vs LSODE2 and Backward Euler | Piecewise scalar parameter changes at accepted boundary; compares independent analytic solution and reference solvers with method-appropriate tolerances | Debug correctness pass; LSODE2 shares the BDF engine, while analytic solution and fixed-step BE provide independent checks |
 | `bdf_large_workload_stage_breakdown_story` | ExprLegacy/Lambdify, AtomView/Lambdify | Preparation, solve, integration, BDF step, output collection, result assembly, callback averages, factorization/linear-solve time and work counters; parity checked per workload | Release pass: 6 route/workload rows; max final drift `1.110e-16` (combustion), `0` (diffusion n=8/16); nested scopes validated |
 | `bdf_dense_size_preparation_and_solver_matrix_story` | ExprLegacy/Lambdify, AtomView/Lambdify | Direct preparation-only stage snapshot plus BDF solver parity/work matrix for combustion-like and fully coupled dense n=32/64/100 | Follow-up converter optimization: dense parity exact; direct AtomView prep reaches parity at n=64 and is faster at n=100; Criterion prep improves 32/64/100 by 32/49/63%; BDF-facing prep still has an extra gap; details in [BDF_BENCHMARKS.md](BDF_BENCHMARKS.md) |
+| `bdf_workloads` policy/chunking matrix | ExprLegacy/AtomView x Lambdify Sequential/Parallel/Auto and AOT Whole/Parallel2 | Same workload, continuation and parity checks across sequential, parallel, auto and chunked routes; compact Tabled output | Release smoke passed all five modes with max parity `1.110e-16`; the `~2002 ms` ExprLegacy+Auto spike was traced to one-time Rayon calibration, not symbolic preparation; follow-up tables separate `parallel_calibration_ms` from inclusive `prepare_ms` |
 | `bdf_hundred_state_stiff_diagonal_matches_independent_analytic_reference` | ExprLegacy/Lambdify, AtomView/Lambdify | 100-state dense stiff diagonal system vs componentwise analytic solution | Debug pass: 226 samples; max scaled error `1.054e-10` in both frontends |
 | `stiff_decay_matches_exponential_reference_and_reports_work` | Native callback + constant analytic Jacobian | `y'=-1000y` vs `exp(-1000t)`; accepted order and RHS/J/factorization/solve work | Debug pass: 312 accepted, 3 rejected; max order 5; abs error `6.769e-13`; 636 RHS, 1 J, 56 factorizations, 635 solves |
 | `stiff_nonlinear_logistic_matches_closed_form_and_reports_work` | Native callback + state-dependent analytic Jacobian | Stiff logistic equation vs closed form; accepted order and RHS/J/factorization/solve work | Debug pass: 269 accepted, 7 rejected; max order 5; abs error `3.769e-9`; 738 RHS, 2 J, 48 factorizations, 737 solves |

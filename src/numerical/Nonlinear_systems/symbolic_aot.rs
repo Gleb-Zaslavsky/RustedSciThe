@@ -12,14 +12,15 @@
 //! unaware of nonlinear-specific setup details.
 
 use crate::numerical::Nonlinear_systems::symbolic::{
-    PreparedSymbolicNonlinearAotProblem, SymbolicDenseAotOptions, SymbolicNonlinearProblem,
+    PreparedSymbolicNonlinearAotProblem, SymbolicDenseAotOptions, SymbolicLambdifyFrontend,
+    SymbolicNonlinearProblem,
 };
+use crate::numerical::Nonlinear_systems::symbolic_atom_aot::generated_atom_dense_crate_for_prepared;
 use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepared_problem;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
     AotBuildProfile, AotBuildRequest, AotBuildResult, AotCompileConfig,
 };
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
-use log::info;
 use std::io;
 use std::path::Path;
 
@@ -45,10 +46,6 @@ pub fn generated_aot_crate_from_symbolic_nonlinear_problem(
     let prepared = prepared_problem_from_symbolic_nonlinear_problem(problem, options);
     let prepared_problem = crate::symbolic::codegen::codegen_provider_api::PreparedProblem::dense(
         prepared.as_prepared_problem(),
-    );
-    info!(
-        "Assembling nonlinear symbolic dense AOT crate '{}' from prepared problem",
-        crate_name
     );
     generated_aot_crate_from_prepared_problem(crate_name, module_name, &prepared_problem)
 }
@@ -86,12 +83,25 @@ pub fn materialize_symbolic_nonlinear_aot_build_with_compile_config(
     profile: AotBuildProfile,
     compile_config: AotCompileConfig,
 ) -> io::Result<AotBuildResult> {
-    let crate_spec = generated_aot_crate_from_symbolic_nonlinear_problem(
-        crate_name,
-        module_name,
-        problem,
-        options,
-    );
+    let prepared = prepared_problem_from_symbolic_nonlinear_problem(problem, options);
+    let crate_spec = match problem.lambdify_frontend() {
+        SymbolicLambdifyFrontend::ExprLegacy => {
+            generated_aot_crate_from_symbolic_nonlinear_problem(
+                crate_name,
+                module_name,
+                problem,
+                options,
+            )
+        }
+        SymbolicLambdifyFrontend::AtomViewNative => generated_atom_dense_crate_for_prepared(
+            crate_name,
+            module_name,
+            problem,
+            &prepared,
+            options,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?,
+    };
     AotBuildRequest::new(crate_spec, output_parent_dir, profile)
         .with_compile_config(compile_config)
         .materialize()

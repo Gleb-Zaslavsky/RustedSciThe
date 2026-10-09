@@ -1,0 +1,49 @@
+# Minimal BVP_Damp example.
+# Lines beginning with # are comments and are ignored by DocumentParser.
+# `solver: BVP` selects BVP_Damp; `BVP_sci` selects the separate collocation
+# solver. `strategy` controls the Newton route, while `method` controls only
+# the linear algebra layout.
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+# `arg` is the independent variable. `unknowns` fixes state ordering, and RHS
+# expressions must have one entry per unknown in that same ordering.
+equations
+arg: x
+unknowns: z, y
+rhs: y-z, -z^3
+
+# Endpoint keys use `<unknown>_left` and `<unknown>_right` suffixes. Together
+# they provide the scalar conditions required by this two-state BVP.
+boundary_conditions
+z_left: 1.0
+y_right: 1.0
+
+# This is the initial mesh. Refinement, if enabled by solver options, may add
+# points later; `n_steps` is not a Newton iteration limit.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+# One finite scalar initial guess per unknown. The solver expands it over the
+# initial mesh and then applies its damped Newton corrections.
+initial_guess
+z: 0.0
+y: 0.0
+
+solver_options
+tolerance: 1e-5
+max_iterations: 20
+loglevel: off
+
+postprocessing
+save_csv: false
+csv_path: bvp_reference_result.csv
+# `output_policy` is the typed modern output selector. `plot` below is kept
+# only to demonstrate the legacy alias accepted by older task documents.
+output_policy: none
+plot: false

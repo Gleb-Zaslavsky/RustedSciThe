@@ -115,11 +115,9 @@ fn be_parameter_rebind_reuses_prepared_symbolic_callbacks() {
     rebound
         .set_parameter_values(DVector::from_vec(vec![2.0]))
         .unwrap();
-    assert!(
-        rebound
-            .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
-            .is_err()
-    );
+    assert!(rebound
+        .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
+        .is_err());
     rebound.try_solve().unwrap();
     let rebound_solution = rebound.y.clone();
     assert_eq!(rebound.get_statistics().backend_prepare_calls, 1);
@@ -229,11 +227,9 @@ fn be_parameter_binding_telemetry_respects_selected_mode() {
     solver
         .set_parameter_values(DVector::from_vec(vec![2.0]))
         .unwrap();
-    assert!(
-        solver
-            .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
-            .is_err()
-    );
+    assert!(solver
+        .set_parameter_values(DVector::from_vec(vec![f64::NAN]))
+        .is_err());
     assert!(matches!(
         solver.set_parameter_values(DVector::from_vec(vec![2.0, 3.0])),
         Err(BeError::Backend(IvpBackendError::ParameterCountMismatch {
@@ -369,11 +365,9 @@ fn be_symbolic_ivp_telemetry_retains_partial_preparation_on_failure() {
             .calls,
         1
     );
-    assert!(
-        solver
-            .statistics_report()
-            .contains("## Symbolic IVP lifecycle telemetry")
-    );
+    assert!(solver
+        .statistics_report()
+        .contains("## Symbolic IVP lifecycle telemetry"));
 }
 
 #[test]
@@ -382,11 +376,9 @@ fn be_symbolic_ivp_telemetry_is_absent_when_off_and_cleared_for_native_callbacks
     solver.try_set_telemetry_mode(BeTelemetryMode::Off).unwrap();
     solver.try_solve().unwrap();
     assert!(solver.symbolic_ivp_telemetry_snapshot().is_none());
-    assert!(
-        !solver
-            .statistics_report()
-            .contains("## Symbolic IVP lifecycle telemetry")
-    );
+    assert!(!solver
+        .statistics_report()
+        .contains("## Symbolic IVP lifecycle telemetry"));
 
     let mut solver = one_state_be(0.2, Some(0.1));
     solver
@@ -468,11 +460,9 @@ fn be_accepted_state_continuation_appends_history_and_reuses_backend() {
     assert_eq!(continued.continuation_statistics().attempts, 1);
     assert_eq!(continued.continuation_statistics().completed, 1);
     assert_eq!(continued.continuation_statistics().failures, 0);
-    assert!(
-        continued
-            .statistics_report()
-            .contains("continuation: attempts=1")
-    );
+    assert!(continued
+        .statistics_report()
+        .contains("continuation: attempts=1"));
 
     let mut fresh = make_parameterized(1.0);
     fresh.try_solve().unwrap();
@@ -604,11 +594,9 @@ fn be_telemetry_can_be_disabled_before_callbacks_are_installed() {
         solver.continuation_statistics(),
         &BeContinuationStatistics::default()
     );
-    assert!(
-        solver
-            .statistics_report()
-            .contains("attempts=0 completed=0 failures=0")
-    );
+    assert!(solver
+        .statistics_report()
+        .contains("attempts=0 completed=0 failures=0"));
     assert_eq!(
         solver.detailed_statistics(),
         BeDetailedStatistics::default()
@@ -1187,11 +1175,9 @@ fn be_stop_conditions_are_validated_and_reset_on_reinitialization() {
     solver
         .try_set_stop_condition(HashMap::from([("y".to_string(), 0.5)]))
         .unwrap();
-    assert!(
-        solver
-            .try_set_stop_condition(HashMap::from([("missing".to_string(), 1.0)]))
-            .is_err()
-    );
+    assert!(solver
+        .try_set_stop_condition(HashMap::from([("missing".to_string(), 1.0)]))
+        .is_err());
     assert_eq!(solver.stop_conditions, vec![(0, 0.5)]);
     solver
         .try_set_initial(

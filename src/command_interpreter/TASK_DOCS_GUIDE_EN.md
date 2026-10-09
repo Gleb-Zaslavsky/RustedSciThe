@@ -59,6 +59,9 @@ For IVP:
 - `equations`
 - `initial_conditions`
 
+The optional `task.schema_version` is currently `1`. Unknown versions are
+rejected instead of being silently interpreted with older semantics.
+
 For BVP:
 
 - `task`
@@ -159,10 +162,16 @@ Core fields:
 Supported method values:
 
 - `RK45`, `RK4`, `Euler`, `AB4`
-- `Radau3`, `Radau5`
+- `Radau5`
 - `BDF`
 - `BackwardEuler`
-- `LSODE2` (aliases `LSODE`, `LSODA` are accepted)
+- `LSODE2`
+- `LSODE` (fixed BDF controller)
+- `LSODA` (automatic Adams/BDF controller)
+
+`LSODE` and `LSODA` are preserved as distinct typed routes. `LSODE2` keeps
+the crate's explicit BDF default, while `lsode2_method_family` may select a
+different controller policy.
 
 ### 3.3 `initial_conditions` (IVP)
 
@@ -174,7 +183,10 @@ Required:
 
 ### 3.4 General `solver_options` (IVP)
 
-These are parsed for all IVP methods; each solver uses what is relevant:
+The parser validates these per method. Unsupported combinations fail with a
+typed `UnsupportedOption` error; options are never silently ignored.
+
+Common options and their native routes are:
 
 - `step_size`
 - `tolerance`
@@ -187,7 +199,100 @@ These are parsed for all IVP methods; each solver uses what is relevant:
 - `parallel`
 - `neighborhood_check`
 
-### 3.5 LSODE2-specific options (IVP)
+`RK45`, `RK4`, `Euler`, and `AB4` accept all common options. BDF accepts
+`max_iterations`, `rtol`, `atol`, `max_step`, `first_step`, and `vectorized`.
+Backward Euler accepts `step_size`, `tolerance`, `max_iterations`, and
+`neighborhood_check`. Radau5 accepts `tolerance`, `max_iterations`, `rtol`,
+`atol`, `max_step`, and `first_step`. LSODE/LSODA/LSODE2 accept `rtol`,
+`atol`, `max_step`, `first_step`, and `vectorized`.
+
+### 3.5 Parameter continuation
+
+Continuation keeps the symbolic RHS and supports `fresh`, `warm`, and
+`prepared` lifecycle modes:
+
+```text
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: prepared
+restart_each: false
+```
+
+`fresh` rebuilds each segment. `warm` and `prepared` reuse the prepared
+symbolic callbacks where the native adapter exposes a continuation contract.
+
+Multi-parameter grids and per-segment restart data are also supported:
+
+```text
+continuation
+parameters: rate, source
+rate_values: 1.0, 2.0
+source_values: 0.0, 3.0
+mode: fresh
+restart_policy: restart_with_state
+monotonic: allow
+y0_values: [1.0], [2.0], [3.0], [4.0]
+t0_values: 0.0, 0.1, 0.2, 0.3
+t_end_values: 1.0, 1.1, 1.2, 1.3
+```
+
+The parameter lists form a Cartesian grid. `restart_policy` may be `continue`,
+`restart_each`, or `restart_with_state`; the latter is the explicit form for
+segments that provide a new state or interval. `y0_values`, `t0_values`, and
+`t_end_values` accept one broadcast value or one value per generated segment.
+`monotonic: increasing|decreasing` validates the generated row order, while
+`allow` permits a deliberately non-monotone experiment.
+For `warm`/`prepared` execution, explicit `y0`/`t0` segments require a native
+restart-capable adapter; otherwise the runner returns a typed continuation
+error rather than silently ignoring the override. BDF, Radau5, Backward Euler,
+and LSODE2 provide this contract. LSODE2 prepares its BDF bridge on demand for
+the restart path. Use `fresh` when a solver does not expose that contract.
+With `restart_each: false`, BDF continues from the previous accepted state;
+the task runner advances the segment bound. With `restart_each: true`, each
+segment starts from the document's initial state and interval. Unsupported
+native lifecycle combinations return a typed continuation error.
+
+The runner exposes a typed `status_code` and a typed `trajectory` alongside
+the legacy textual status and matrix projections. Grid-based solvers return a
+sampled grid; Radau returns its native solution object. Missing task files,
+invalid numerical configuration, native exhaustion, and postprocessing I/O
+are reported as separate typed error categories.
+
+### 3.5.1 BVP routes
+
+The solver-specific guides contain complete annotated task examples:
+[`BVP_DAMP_USER_GUIDE_EN.md`](../numerical/BVP_Damp/BVP_DAMP_USER_GUIDE_EN.md)
+and
+[`BVP_SOLVER_USER_GUIDE.md`](../numerical/BVP_sci/BVP_SOLVER_USER_GUIDE.md).
+Use them when a task needs more detail than this shared grammar reference.
+
+`solver: BVP` selects the compatibility task route backed by `BVP_Damp`.
+Its default task-document logging is quiet; set `solver_options.loglevel`
+explicitly when diagnostic solver output is required. `fresh` continuation
+rebuilds each segment. `warm` and `prepared` continuation reuse the prepared
+symbolic callbacks and parameter schema; the runner also supports typed
+mesh/initial-state restarts. The task result reports segment counts,
+fresh/prepared preparation counts, restart counts, and a bounded result-size
+retention proxy. Native byte-level allocation retention still requires a
+separate release measurement.
+
+`solver: BVP_sci` selects the new SciPy-like collocation route and never falls
+back to the historical `BVP` facade. `frontend: ExprLegacy` is the default;
+`frontend: AtomViewNative` selects the native symbolic path. `method: Dense`,
+`Sparse`, or `Banded` selects the corresponding linear backend. The current
+task-document contract requires exactly one scalar boundary condition per
+state. `fresh` continuation substitutes parameter values and rebuilds the
+numeric segment; `warm`/`prepared` continuation requires declared symbolic
+parameters and reuses the prepared BVP_sci plan, including optional per-segment
+mesh and initial-state restart. Parameter rows are pinned through the extra
+boundary residual block, so they are not silently treated as free unknowns.
+Both BVP routes support the shared CSV/TXT/Markdown/plot postprocessing plan.
+For new task documents, prefer the typed `output_policy` field:
+`none`, `plotters`, `gnuplot`, or `terminal`. The older `plot: true/false`
+field remains a compatibility alias and should not be used in new documents.
+
+### 3.6 LSODE2-specific options (IVP)
 
 Symbolic assembly backend:
 
@@ -229,6 +334,15 @@ Native limits:
 - `lsode2_native_max_step_attempts`
 - `lsode2_native_max_accepted_steps`
 
+### 3.7 Batch execution
+
+The library runner `run_task_batch(paths)` executes documents independently and
+continues after parser, I/O, or solver failures. Its `BatchTaskReport` exposes
+pass/fail counts and renders a compact Tabled report with the path, task kind,
+status, typed error category, and short error text. Use `write_table(path)` for
+the human-facing report; keep Cargo/compiler output in a separate technical
+log rather than mixing it into the table.
+
 ---
 
 ## 4. BVP Task Docs
@@ -241,6 +355,8 @@ solver: BVP
 strategy: Damped
 scheme: forward
 method: Sparse
+frontend: AtomViewNative
+execution: Lambdify
 
 equations
 arg: x
@@ -274,6 +390,8 @@ Fields:
 - `strategy: Damped | Frozen | Naive` (default `Damped`)
 - `scheme` (currently usually `forward`)
 - `method: Dense | Sparse | Banded` (default `Sparse`)
+- `frontend: ExprLegacy | AtomViewNative` (optional symbolic representation override)
+- `execution: Lambdify | AOT` (callback execution route; defaults to `Lambdify`)
 
 ### 4.3 Boundary conditions and mesh
 
@@ -294,10 +412,23 @@ In `solver_options`, parser supports:
 - `matrix_backend: dense | sparse | banded`
 - `backend_policy: lambdify_only | aot_only | prefer_aot_then_lambdify`
 - `symbolic_backend: ExprLegacy | AtomView`
+
+`symbolic_backend` and `frontend` select the symbolic representation; they do
+not select Lambdify versus AOT. `backend_policy` and the generated-backend
+presets are the compatibility controls for the mature `BVP_Damp` route. The
+omitted `frontend` preserves the preset default; for `BVP_sci`, omission means
+`ExprLegacy`. The explicit task-level `execution` field overrides that policy
+for `BVP_Damp` and `BVP_sci`, when present. For `BVP_sci`, task-level AOT uses
+the same shared generated lifecycle as the native Rust API; provide
+`aot_output_dir` (and optionally `aot_handoff_path`) when the policy may build
+or publish an artifact. Omitting the output directory produces a typed AOT
+preparation error rather than silently falling back to Lambdify.
 - `aot_codegen_backend: rust | c | zig`
 - `aot_c_compiler` (for C routes, e.g. `tcc`/`gcc`)
 - `aot_build_policy: use_if_available | build_if_missing | require_prebuilt | rebuild_always`
 - `aot_build_profile: debug | release`
+- `aot_output_dir` (required for BVP_sci task-level AOT build/publication)
+- `aot_handoff_path` (optional durable process-isolated resolver handoff)
 - `aot_compile_preset: production | fast_build | dev_fastest`
 - `aot_execution_policy: auto | sequential`
 - `banded_linear_solver` (faithful/block-tridiagonal/faer-sparse variants)
@@ -316,10 +447,10 @@ This table is intentionally practical: it shows what to put in task docs dependi
 | IVP method | Required task fields | Strongly recommended solver options | LSODE2-only options |
 |---|---|---|---|
 | `RK45`, `RK4`, `Euler`, `AB4` | `solver: IVP`, `method`, `equations`, `initial_conditions` | `step_size` (where relevant), `rtol`, `atol`, `max_step` | not used |
-| `Radau3`, `Radau5` | same | `rtol`, `atol`, `max_step`, optionally `first_step` | not used |
+| `Radau5` | native maintained Radau implementation | `rtol`, `atol`, `max_step`, optionally `first_step` | order selection is not exposed; `Radau3` is rejected |
 | `BDF` | same | `rtol`, `atol`, `max_step`, `first_step`, optionally `max_iterations` | not used |
 | `BackwardEuler` | same | `step_size` and/or `max_step`, `tolerance` | not used |
-| `LSODE2` / `LSODE` / `LSODA` | same | `rtol`, `atol`, `max_step`, `first_step` | `lsode2_symbolic_assembly`, `lsode2_symbolic_execution`, `lsode2_linear_structure`, `lsode2_linear_solver_policy`, `lsode2_native_execution`, optional AOT fields and native limits |
+| `LSODE2` / `LSODE` / `LSODA` | same | `rtol`, `atol`, `max_step`, `first_step` | `lsode2_symbolic_assembly`, `lsode2_symbolic_execution`, `lsode2_linear_structure`, `lsode2_linear_solver_policy`, `lsode2_native_execution`, optional AOT fields and native limits; `LSODE` is fixed BDF and `LSODA` is automatic Adams/BDF by default |
 
 ---
 

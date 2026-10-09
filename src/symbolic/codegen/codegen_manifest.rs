@@ -175,6 +175,14 @@ impl PreparedProblemManifest {
         functions: GeneratedFunctionsManifest,
     ) -> Self {
         let (rows, cols) = plan.matrix_layout().shape();
+        let jacobian_nnz = match plan.matrix_layout() {
+            // Dense manifests describe the complete output buffer, just like
+            // the historical PreparedDenseProblem manifest.  Keeping nnz
+            // absent here is important: it makes ExprLegacy and AtomView
+            // keys comparable when they publish the same dense ABI.
+            crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Dense { .. } => None,
+            _ => Some(plan.matrix_layout().value_count()),
+        };
         Self {
             backend_kind,
             matrix_backend,
@@ -184,7 +192,7 @@ impl PreparedProblemManifest {
                 residual_len: plan.residuals().len(),
                 jacobian_rows: rows,
                 jacobian_cols: cols,
-                jacobian_nnz: Some(plan.matrix_layout().value_count()),
+                jacobian_nnz,
                 jacobian_layout: Some(match plan.matrix_layout() {
                     crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Dense { .. } => {
                         PreparedJacobianLayout::Dense

@@ -1,0 +1,45 @@
+# LSODE2 IVP task example: 1D solid-like combustion with sublimation term.
+# Comments (`#`, `//`, `%`, `;`) are ignored by the parser.
+
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: x
+unknowns: eta, q, T
+# Main ODE right-hand sides use short aliases from `where`.
+rhs: W/(u*ro), K*q - Fq, q/Lambda
+parameters: k, E, R, u, c, ro, Lambda, P, Qd, Qs
+parameter_values: 3.7e11, 39000.0, 1.987, 0.5, 0.245, 1.6, 5e-4, 228000.0, -1000.0, 500.0
+
+where
+# Arrhenius block (symbolic substitution, not numeric parameter assignment).
+Arr: k*exp(-E/(R*T))
+Sublim: 10^(6.2 - 1400/(T-200))
+p_s: 1.013e6*Sublim
+Wd: (1-eta)*ro*Arr
+Ws: 2*Wd*Sublim
+W: Wd + Ws
+Fq: Qd*Wd - Qs*Ws
+K: ro*u*c/Lambda
+
+initial_conditions
+t0: 0.0
+t_end: 0.04
+y0: 1e-3, 1e-3, 300.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-6
+max_step: 1e-4
+lsode2_symbolic_assembly: ExprLegacy
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: faer_sparse_lu
+lsode2_native_execution: faithful_bdf_solve
+
+postprocessing
+save_csv: false
+csv_path: ivp_solid_combustion_with_sublimation.csv
+plot: false

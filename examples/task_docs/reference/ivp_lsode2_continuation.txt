@@ -1,0 +1,23 @@
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+max_step: 0.02
+
+continuation
+parameter: rate
+values: 1.0, 2.0, 3.0
+mode: prepared
+restart_each: true

@@ -1470,3 +1470,38 @@ still slower than sequential at that size. This validates the dispatch and
 parity contract, but the break-even threshold remains a performance task for
 larger expression cost, wider bands and production-sized workloads. These
 release rows are appended evidence and do not replace historical baselines.
+
+## Compact release dashboard
+
+`benches/bvp_damp_workloads.rs` is the bounded cross-product dashboard for
+release evidence. It emits one Tabled report across Damped/Frozen, Dense,
+faer Sparse and native Banded, ExprLegacy/AtomView, Lambdify
+Sequential/Parallel/Auto and prepared parameter continuation. Each row keeps
+preparation, prepared solve, continuation, residual/Jacobian/linear stages,
+solver counters, finite-result checks and route status together.
+
+```powershell
+cargo bench --no-default-features --bench bvp_damp_workloads -- --noplot
+```
+
+The non-fail-fast release runner is
+`scripts/bvp_damp_release_matrix.ps1`. It writes compact Markdown reports to
+`test_reports/BVP_Damp_release_manual/<stamp>/reports` and Cargo/compiler
+transcripts to the sibling `technical` directory. Every story module and
+Criterion target is an independent step.
+
+```powershell
+.\scripts\bvp_damp_release_matrix.ps1 -IncludeIgnoredStories -IncludeAot
+```
+
+For a bounded multi-size release slice, pass comma-separated step counts;
+the values are forwarded to the compact dashboard without changing the
+story-test selection:
+
+```powershell
+.\scripts\bvp_damp_release_matrix.ps1 -NSteps "32,128" -Continuation 4
+```
+
+AOT is opt-in because compiler lifecycle time should not silently turn a
+bounded callback matrix into an overnight run. Use `-IncludeCriterion` only
+when the detailed existing Criterion instruments are wanted as well.

@@ -41,6 +41,19 @@ is physically split into `legacy_story_core.rs`, `legacy_story_race.rs`,
 `legacy_story_solver_quality.rs`, `legacy_story_combustion.rs`,
 `legacy_story_view.rs` and `legacy_story_lifecycle.rs`.
 
+## Bench And Release Runner
+
+| Target/script | Role |
+|---|---|
+| `benches/lsode2_workloads.rs` | bounded Tabled matrix across frontend, execution policy, all three linear backends, continuation and telemetry |
+| `benches/lsode2_workload_callbacks.rs` | detailed callback-only Criterion statistics |
+| `benches/lsode2_workload_aot.rs` | detailed AOT cold/warm/full-solve Criterion statistics |
+| `benches/lsode2_parameter_continuation.rs` | detailed warm/fresh continuation amortization |
+| `scripts/lsode2_release_matrix.ps1` | non-fail-fast release sequence with separate report/technical directories |
+
+The compact target is the release index; detailed Criterion targets remain
+opt-in statistical instruments and are not merged into its table.
+
 ## Canonical Commands
 
 ```powershell
@@ -49,8 +62,10 @@ cargo test --lib --no-default-features numerical::LSODE2::telemetry_stage_story_
 cargo test --release --lib --no-default-features numerical::LSODE2::aot_correctness_story_tests -- --nocapture --test-threads=1
 cargo test --release --lib --no-default-features numerical::LSODE2::aot_performance_story_tests -- --nocapture --test-threads=1
 cargo test --release --lib --no-default-features numerical::LSODE2::aot_lifecycle_story_tests -- --nocapture --test-threads=1
+cargo bench --no-default-features --bench lsode2_workloads -- --noplot
 ```
 
-Criterion ownership remains with `benches/lsode2_workload_callbacks.rs` and
-`benches/lsode2_workload_aot.rs`; commands and archive rules are in
-`LSODE2_STORY_BENCHMARKS.md`.
+Criterion ownership remains with `benches/lsode2_workload_callbacks.rs`,
+`benches/lsode2_workload_aot.rs` and
+`benches/lsode2_parameter_continuation.rs`; compact matrix and archive rules
+are in `LSODE2_STORY_BENCHMARKS.md`.

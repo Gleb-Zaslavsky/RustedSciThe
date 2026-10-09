@@ -1,0 +1,41 @@
+# BVP_sci task contract. This route uses the maintained SciPy-like solver.
+# Comments are ignored. `BVP_sci` and `BVP` intentionally select different
+# solver families.
+task
+solver: BVP_sci
+frontend: ExprLegacy
+# ExprLegacy/AtomViewNative are symbolic frontends; Lambdify/AOT are execution
+# routes. They are independent choices.
+execution: Lambdify
+# Dense/Sparse/Banded chooses the linear algebra layout.
+method: Dense
+
+# One RHS expression is required for each unknown in the same order.
+equations
+arg: x
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+# BVP_sci validates the complete scalar boundary-condition set early.
+boundary_conditions
+y_left: 1.0
+
+# n_steps is the initial collocation mesh size.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 16
+
+# One finite scalar guess per unknown.
+initial_guess
+y: 0.0
+
+# This is the fresh lifecycle syntax. Warm/prepared use the same declaration
+# and additionally reuse the prepared symbolic plan.
+continuation
+parameter: rate
+values: 0.5, 1.0
+# `fresh` prepares each segment independently; warm/prepared retain the plan.
+mode: fresh

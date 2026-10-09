@@ -1,4 +1,8 @@
 use super::*;
+use crate::command_interpreter::task_parser::ParseErrorKind;
+use crate::command_interpreter::task_runner::{
+    parse_task_spec_from_file, ParsedTaskSpec, TaskRunnerError,
+};
 use std::fs;
 use tempfile::tempdir;
 
@@ -17,6 +21,361 @@ fn parse_document_for_ivp(input: &str) -> DocumentMap {
         .get_result()
         .expect("IVP document map should exist")
         .clone()
+}
+
+#[test]
+fn ivp_task_parser_preserves_symbolic_model_for_continuation() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: prepared
+restart_each: false
+"#;
+
+    let spec = parse_ivp_task_from_str(input).expect("continuation task should parse");
+    let continuation = spec
+        .continuation
+        .expect("continuation plan should be present");
+    assert_eq!(spec.schema_version, 1);
+    assert_eq!(continuation.parameter, "rate");
+    assert_eq!(continuation.values, vec![0.5, 1.0, 2.0]);
+    assert_eq!(continuation.mode, ContinuationMode::Prepared);
+    assert!(!continuation.restart_each);
+    assert!(continuation.symbolic_rhs[0].to_string().contains("rate"));
+    assert!(!spec.equations.rhs[0].to_string().contains("rate"));
+}
+
+#[test]
+fn ivp_continuation_supports_parameter_grids_and_segment_overrides() {
+    let input = r#"
+task
+schema_version: 1
+solver: IVP
+method: BDF
+
+equations
+arg: t
+unknowns: y
+rhs: -(rate + source)*y
+parameters: rate, source
+parameter_values: 1.0, 0.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+continuation
+parameters: rate, source
+rate_values: 1.0, 2.0
+source_values: 0.0, 3.0
+mode: fresh
+restart_policy: restart_with_state
+monotonic: allow
+y0_values: [1.0], [2.0], [3.0], [4.0]
+t0_values: 0.0, 0.1, 0.2, 0.3
+t_end_values: 1.0, 1.1, 1.2, 1.3
+"#;
+
+    let spec = parse_ivp_task_from_str(input).expect("parameter grid should parse");
+    let continuation = spec
+        .continuation
+        .clone()
+        .expect("continuation should be present");
+    assert_eq!(continuation.parameters, vec!["rate", "source"]);
+    assert_eq!(continuation.value_grid.len(), 4);
+    assert_eq!(continuation.value_grid[0], vec![1.0, 0.0]);
+    assert_eq!(continuation.value_grid[3], vec![2.0, 3.0]);
+    assert_eq!(continuation.y0_values.as_ref().unwrap().len(), 4);
+    assert_eq!(continuation.t_end_values.as_ref().unwrap()[2], 1.2);
+    assert_eq!(
+        continuation.restart_policy,
+        ContinuationRestartPolicy::RestartWithState
+    );
+    let run = run_ivp_continuation(spec).expect("fresh grid continuation should execute");
+    assert_eq!(run.segments.len(), 4);
+    assert!(run
+        .segments
+        .iter()
+        .all(|segment| segment.status_code.is_some()));
+}
+
+#[test]
+fn ivp_task_schema_rejects_unknown_version() {
+    let input = r#"
+task
+schema_version: 2
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: y
+rhs: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+"#;
+    let error = parse_ivp_task_from_str(input).expect_err("unknown schema must be rejected");
+    assert!(matches!(error, IvpTaskError::InvalidConfiguration { .. }));
+    assert!(error.to_string().contains("schema version"));
+}
+
+#[test]
+fn ivp_continuation_rejects_non_monotone_values_when_requested() {
+    let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+continuation
+parameter: rate
+values: 1.0, 0.5, 2.0
+monotonic: increasing
+"#;
+    let error = parse_ivp_task_from_str(input).expect_err("non-monotone values must be rejected");
+    assert!(error.to_string().contains("not monotonic"));
+}
+
+#[test]
+fn ivp_symbol_diagnostics_retain_source_position() {
+    let input = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: y
+rhs: -y + misspelled_gain
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+"#;
+    let error = parse_ivp_task_from_str(input).expect_err("undeclared symbol must fail");
+    match error {
+        IvpTaskError::SymbolDiagnostic {
+            token,
+            line: Some(line),
+            column: Some(column),
+            ..
+        } => {
+            assert_eq!(token, "misspelled_gain");
+            assert!(line > 1);
+            assert!(column > 1);
+        }
+        other => panic!("expected positioned symbol diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn document_parser_rejects_alias_collisions() {
+    let mut parser = DocumentParser::new("task\nsolver: IVP".to_string());
+    let headers = HashMap::from([
+        ("task".to_string(), vec!["task".to_string()]),
+        ("settings".to_string(), vec!["task".to_string()]),
+    ]);
+    let error = parser
+        .try_with_pseudonims(Some(headers), None)
+        .expect_err("one alias cannot denote two sections");
+    assert!(error.contains("pseudonym collision"));
+}
+
+#[test]
+fn typed_parser_errors_preserve_collision_categories() {
+    let mut parser = DocumentParser::new("task\nsolver: IVP".to_string());
+    let headers = HashMap::from([
+        ("task".to_string(), vec!["task".to_string()]),
+        ("settings".to_string(), vec!["task".to_string()]),
+    ]);
+    let error = parser
+        .try_with_pseudonims_typed(Some(headers), None)
+        .expect_err("alias collision must be typed");
+    assert_eq!(error.kind, ParseErrorKind::AliasCollision);
+    assert!(error.to_string().contains("pseudonym collision"));
+
+    let mut parser = DocumentParser::new("Task\nsolver: IVP\ntask\nmethod: BDF".to_string());
+    parser
+        .parse_document_typed()
+        .expect("mixed-case sections parse first");
+    let error = parser
+        .try_keys_to_lower_case_typed(None)
+        .expect_err("normalization collision must be typed");
+    assert_eq!(error.kind, ParseErrorKind::CaseNormalizationCollision);
+    assert!(error.line.is_some());
+    assert!(error.column.is_some());
+}
+
+#[test]
+fn ivp_adapter_keeps_syntax_error_category() {
+    let error = parse_ivp_task_from_str("task\nsolver IVP")
+        .expect_err("missing key/value separator must fail");
+    match error {
+        IvpTaskError::Document(error) => assert_eq!(error.kind, ParseErrorKind::InvalidSection),
+        other => panic!("expected typed document error, got {other:?}"),
+    }
+}
+
+#[test]
+fn ivp_adapter_preserves_native_error_category_and_source() {
+    let error = IvpTaskError::Native(IvpNativeSolverError::Universal(
+        UniversalOdeError::UnsupportedGeneratedBackendForMethod {
+            method: "BDF".to_string(),
+        },
+    ));
+
+    assert!(error
+        .to_string()
+        .contains("generated/AOT backend selection"));
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(
+        error,
+        IvpTaskError::Native(IvpNativeSolverError::Universal(
+            UniversalOdeError::UnsupportedGeneratedBackendForMethod { .. }
+        ))
+    ));
+}
+
+#[test]
+fn document_parser_rejects_field_alias_collisions() {
+    let mut parser = DocumentParser::new("task\nsolver: IVP".to_string());
+    let fields = HashMap::from([(
+        "method".to_string(),
+        vec!["solver".to_string(), "method".to_string()],
+    )]);
+    parser
+        .try_with_pseudonims(None, Some(fields))
+        .expect("aliases themselves are valid");
+    let document = HashMap::from([(
+        "task".to_string(),
+        HashMap::from([
+            (
+                "solver".to_string(),
+                Some(vec![Value::String("IVP".into())]),
+            ),
+            (
+                "method".to_string(),
+                Some(vec![Value::String("BDF".into())]),
+            ),
+        ]),
+    )]);
+    let error = parser
+        .try_to_real_names(Some(document))
+        .expect_err("two fields must not collapse into one");
+    assert!(error.contains("field alias collision"));
+}
+
+#[test]
+fn document_parser_rejects_case_normalization_collisions() {
+    let mut parser = DocumentParser::new("Task\nsolver: IVP\ntask\nmethod: BDF".to_string());
+    parser
+        .parse_document()
+        .expect("mixed-case sections parse first");
+    let error = parser
+        .try_keys_to_lower_case(None)
+        .expect_err("normalization must not discard a section");
+    assert!(error.contains("case-normalization collision"));
+}
+
+#[test]
+fn ivp_duplicate_semantic_declarations_are_rejected_with_source_location() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+parameters: rate, rate
+parameter_values: 1.0, 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+"#;
+
+    let error = parse_ivp_task_from_str(input)
+        .expect_err("duplicate parameter declarations must be rejected");
+    match error {
+        IvpTaskError::SymbolDiagnostic {
+            message,
+            token,
+            line,
+            column,
+        } => {
+            assert!(message.contains("duplicate parameter name"));
+            assert_eq!(token, "rate");
+            assert!(line.is_some());
+            assert!(column.is_some());
+        }
+        other => panic!("expected a located semantic diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn ivp_control_keys_are_case_insensitive_but_symbol_names_keep_case() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: T
+parameters: K
+parameter_values: 2.0
+Y: -K*Y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+RTOL: 1e-5
+ATOL: 1e-7
+MAX_STEP: 0.01
+"#;
+    let spec = parse_ivp_task_from_str(input).expect("mixed control and symbol case is valid");
+    assert_eq!(spec.equations.arg, "T");
+    assert_eq!(spec.equations.unknowns, vec!["Y"]);
+    assert_eq!(spec.equations.parameter_names, vec!["K"]);
+    assert_eq!(spec.solver_options.rtol, Some(1e-5));
+    assert_eq!(spec.solver_options.atol, Some(1e-7));
 }
 
 #[test]
@@ -404,6 +763,529 @@ max_step: 0.05
 }
 
 #[test]
+fn ivp_task_parser_rejects_unsupported_radau3_route() {
+    let input = r#"
+task
+solver: IVP
+method: Radau3
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+"#;
+
+    match parse_ivp_task_from_str(input) {
+        Err(IvpTaskError::UnknownMethod(method)) => assert_eq!(method, "radau3"),
+        other => panic!("Radau3 must be rejected as an unknown method: {other:?}"),
+    }
+}
+
+#[test]
+fn ivp_task_parser_keeps_lsode_and_lsoda_aliases_distinct() {
+    for (method, expected) in [
+        ("LSODE", IvpMethodSpec::Lsode),
+        ("LSODA", IvpMethodSpec::Lsoda),
+        ("LSODE2", IvpMethodSpec::Lsode2),
+    ] {
+        let input = format!("task\nsolver: IVP\nmethod: {method}\n");
+        let document = parse_document_for_ivp(&input);
+        let settings = parse_ivp_solver_settings_from_document(&document)
+            .expect("LSODE family method should parse");
+        assert_eq!(settings.solver.method, expected);
+    }
+}
+
+#[test]
+fn ivp_task_parser_rejects_an_option_that_native_bdf_cannot_honor() {
+    let input = "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\nstep_size: 1e-3\n";
+    let document = parse_document_for_ivp(input);
+    let error = parse_ivp_solver_settings_from_document(&document)
+        .expect_err("BDF must not silently ignore step_size");
+    assert!(matches!(
+        error,
+        IvpTaskError::UnsupportedOption { method, option }
+            if method == "BDF" && option == "step_size"
+    ));
+}
+
+#[test]
+fn ivp_task_runner_executes_prepared_bdf_continuation() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+parameters: rate
+parameter_values: 1.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+rtol: 1e-5
+atol: 1e-7
+max_step: 0.02
+
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: prepared
+restart_each: false
+"#;
+
+    let result = run_ivp_task_from_str(input).expect("prepared continuation should solve");
+    let continuation = result
+        .continuation
+        .expect("run result should retain continuation segments");
+    assert_eq!(continuation.segments.len(), 3);
+    assert_eq!(continuation.fresh_preparations, 1);
+    assert_eq!(continuation.prepared_reuses, 2);
+    assert_eq!(continuation.parameter, "rate");
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status.as_deref() == Some("finished")));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Grid { .. }))));
+}
+
+#[test]
+fn ivp_prepared_continuation_long_series_has_explicit_bounded_result_storage() {
+    let values = (0..64)
+        .map(|index| format!("{:.3}", 0.5 + index as f64 * 0.025))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let input = format!(
+        r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+parameters: rate
+parameter_values: 1.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.02
+y0: 1.0
+
+solver_options
+rtol: 1e-5
+atol: 1e-7
+max_step: 0.01
+
+continuation
+parameter: rate
+values: {values}
+mode: prepared
+restart_each: false
+"#
+    );
+
+    let first = run_ivp_task_from_str(&input).expect("long prepared series should solve");
+    let first_series = first
+        .continuation
+        .expect("continuation result should be present");
+    assert_eq!(first_series.segments.len(), 64);
+    assert_eq!(first_series.segments.capacity(), 64);
+    assert!(first_series
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+
+    let second = run_ivp_task_from_str(&input).expect("repeat long series should solve");
+    let second_series = second
+        .continuation
+        .expect("repeat result should be present");
+    assert_eq!(second_series.segments.len(), first_series.segments.len());
+    assert_eq!(
+        second_series.segments.capacity(),
+        first_series.segments.capacity()
+    );
+}
+
+#[test]
+fn ivp_prepared_continuation_reports_typed_mid_series_failure() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+parameters: dummy
+parameter_values: 1.0
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.01
+y0: 1.0
+
+solver_options
+max_step: 0.005
+
+continuation
+parameter: dummy
+values: 1.0, 2.0, 3.0
+mode: prepared
+restart_policy: restart_with_state
+y0_values: [1.0], [1.0, 2.0], [1.0]
+t0_values: 0.0, 0.0, 0.0
+t_end_values: 0.01, 0.01, 0.01
+"#;
+
+    let error = run_ivp_task_from_str(input)
+        .expect_err("a malformed middle segment must stop with a typed error");
+    assert!(matches!(error.category(), "configuration" | "solver"));
+    assert!(!error.to_string().is_empty());
+}
+
+#[test]
+fn ivp_be_and_lsode_restart_contract_is_explicit_for_new_state() {
+    let input = r#"
+task
+solver: IVP
+method: BackwardEuler
+
+equations
+arg: t
+parameters: rate
+parameter_values: 1.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.02
+y0: 1.0
+
+solver_options
+step_size: 0.01
+tolerance: 1e-6
+max_iterations: 20
+
+continuation
+parameter: rate
+values: 1.0, 2.0
+mode: prepared
+restart_policy: restart_with_state
+y0_values: [1.0], [2.0]
+t0_values: 0.0, 0.0
+t_end_values: 0.02, 0.02
+"#;
+    let result = run_ivp_task_from_str(input).expect("BE prepared restart should execute");
+    let continuation = result
+        .continuation
+        .expect("BE restart should return continuation segments");
+    assert_eq!(continuation.segments.len(), 2);
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+
+    let lsode = input
+        .replace("BackwardEuler", "LSODE2")
+        .replace("step_size: 0.01\n", "max_step: 0.01\n")
+        .replace("tolerance: 1e-6\n", "rtol: 1e-6\n")
+        .replace("max_iterations: 20\n", "");
+    let result = run_ivp_task_from_str(&lsode).expect("LSODE2 prepared restart should execute");
+    let continuation = result
+        .continuation
+        .expect("LSODE2 restart should return continuation segments");
+    assert_eq!(continuation.segments.len(), 2);
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+}
+
+#[test]
+fn ivp_task_runner_executes_backward_euler_continuation() {
+    let input = r#"
+task
+solver: IVP
+method: BackwardEuler
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+tolerance: 1e-8
+max_iterations: 100
+
+continuation
+parameter: rate
+values: 1.0, 2.0, 3.0
+mode: warm
+restart_each: false
+"#;
+
+    let result = run_ivp_task_from_str(input).expect("BE continuation should solve");
+    let continuation = result
+        .continuation
+        .expect("continuation result should be typed");
+    assert_eq!(continuation.segments.len(), 3);
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+}
+
+#[test]
+fn ivp_task_runner_executes_radau5_continuation() {
+    let input = r#"
+task
+solver: IVP
+method: Radau5
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.02
+
+continuation
+parameter: rate
+values: 1.0, 2.0, 3.0
+mode: prepared
+restart_each: false
+"#;
+
+    let result = run_ivp_task_from_str(input).expect("Radau continuation should solve");
+    let continuation = result
+        .continuation
+        .expect("continuation result should be typed");
+    assert_eq!(continuation.segments.len(), 3);
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Radau(_)))));
+}
+
+#[test]
+fn ivp_task_runner_executes_lsode2_restart_continuation() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate*y
+
+initial_conditions
+t0: 0.0
+t_end: 0.05
+y0: 1.0
+
+solver_options
+max_step: 0.02
+
+continuation
+parameter: rate
+values: 1.0, 2.0, 3.0
+mode: prepared
+restart_each: true
+"#;
+
+    let result = run_ivp_task_from_str(input).expect("LSODE2 continuation should solve");
+    let continuation = result
+        .continuation
+        .expect("continuation result should be typed");
+    assert_eq!(continuation.segments.len(), 3);
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+}
+
+#[test]
+fn ivp_task_parser_rejects_non_finite_configuration_before_build() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: NaN
+t_end: 1.0
+y0: 1.0
+"#;
+
+    let error = parse_ivp_task_from_str(input).expect_err("NaN t0 must be rejected early");
+    assert!(matches!(
+        error,
+        IvpTaskError::InvalidConfiguration { field, .. }
+            if field == "initial_conditions.t0"
+    ));
+}
+
+#[test]
+fn ivp_task_parser_rejects_zero_iteration_limit_before_build() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+max_iterations: 0
+"#;
+
+    let error = parse_ivp_task_from_str(input).expect_err("zero max_iterations must fail");
+    assert!(matches!(
+        error,
+        IvpTaskError::InvalidConfiguration { field, .. }
+            if field == "solver_options.max_iterations"
+    ));
+}
+
+#[test]
+fn ivp_task_runner_preserves_bdf_exhaustion_error() {
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+max_iterations: 1
+max_step: 1e-3
+"#;
+
+    let error = run_ivp_task_from_str(input).expect_err("one BDF step budget must be exhausted");
+    assert!(matches!(
+        error,
+        IvpTaskError::Native(IvpNativeSolverError::Bdf(
+            BdfSolveError::MaxStepsExceeded { .. }
+        ))
+    ));
+}
+
+#[test]
+fn ivp_task_file_errors_preserve_io_source() {
+    let path = tempdir()
+        .expect("tempdir should be created")
+        .path()
+        .join("missing_ivp_task.txt");
+    let error = parse_ivp_task_from_file(Some(path)).expect_err("missing task must fail");
+    assert!(matches!(error, IvpTaskError::Io { .. }));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
+fn reference_task_documents_parse_as_a_complete_matrix() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("task_docs")
+        .join("reference");
+    fn collect_reference_documents(
+        directory: &std::path::Path,
+        paths: &mut Vec<std::path::PathBuf>,
+    ) {
+        for entry in fs::read_dir(directory).expect("reference task directory should exist") {
+            let path = entry
+                .expect("reference directory entry should be readable")
+                .path();
+            if path.is_dir() {
+                collect_reference_documents(&path, paths);
+            } else if path.extension().is_some_and(|extension| extension == "txt") {
+                paths.push(path);
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect_reference_documents(&root, &mut paths);
+    paths.sort();
+    assert!(!paths.is_empty(), "reference task matrix must not be empty");
+    for path in paths {
+        let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("reference document {} unreadable: {error}", path.display())
+        });
+        let declared_solver = source
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case("solver"))
+            .map(|(_, value)| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        match parse_task_spec_from_file(path.clone()) {
+            Ok(spec) => assert!(matches!(
+                spec,
+                ParsedTaskSpec::Ivp(_) | ParsedTaskSpec::Bvp(_)
+            )),
+            Err(TaskRunnerError::UnsupportedSolver { value })
+                if declared_solver == "bvp_sci" && value == declared_solver => {}
+            Err(error) => panic!("reference document {} failed: {error}", path.display()),
+        }
+    }
+}
+
+#[test]
 fn ivp_task_parser_supports_lsode2_method_and_options() {
     let input = r#"
 task
@@ -460,6 +1342,30 @@ lsode2_stop_target: 0.5
     assert_eq!(config.stop_conditions.len(), 1);
     assert_eq!(config.stop_conditions[0].variable, "y");
     assert_eq!(config.stop_conditions[0].target, 0.5);
+
+    let invalid_assembly = input.replace(
+        "lsode2_symbolic_assembly: AtomView",
+        "lsode2_symbolic_assembly: Lambdify",
+    );
+    let error = parse_ivp_task_from_str(&invalid_assembly)
+        .expect_err("execution route must not be accepted as symbolic assembly");
+    assert!(matches!(
+        error,
+        IvpTaskError::InvalidField { .. } | IvpTaskError::SymbolDiagnostic { .. }
+    ));
+    assert!(error.to_string().contains("symbolic assembly"));
+
+    let invalid_execution = input.replace(
+        "lsode2_symbolic_execution: LambdifyExpr",
+        "lsode2_symbolic_execution: ExprLegacy",
+    );
+    let error = parse_ivp_task_from_str(&invalid_execution)
+        .expect_err("symbolic assembly must not be accepted as execution route");
+    assert!(matches!(
+        error,
+        IvpTaskError::InvalidField { .. } | IvpTaskError::SymbolDiagnostic { .. }
+    ));
+    assert!(error.to_string().contains("symbolic execution"));
 }
 
 #[test]
@@ -923,6 +1829,7 @@ fn ivp_task_parser_can_build_solver_from_rust_problem_and_task_doc_settings() {
             arg: "t".to_string(),
             unknowns: vec!["y".to_string()],
             rhs: vec![Expr::parse_expression("-y")],
+            symbolic_rhs: vec![Expr::parse_expression("-y")],
             parameter_names: vec![],
             parameter_values: HashMap::new(),
         },
@@ -957,6 +1864,7 @@ fn ivp_task_parser_reports_missing_parameter_values_during_lsode2_build() {
             arg: "t".to_string(),
             unknowns: vec!["y".to_string()],
             rhs: vec![Expr::parse_expression("-a*y")],
+            symbolic_rhs: vec![Expr::parse_expression("-a*y")],
             parameter_names: vec!["a".to_string()],
             parameter_values: HashMap::new(),
         },

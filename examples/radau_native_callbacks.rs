@@ -1,9 +1,9 @@
 //! Native Radau callbacks: analytic Jacobian and residual-only FD fallback.
 
-use nalgebra::{DMatrix, DVector};
 use RustedSciThe::numerical::Radau::{
     RadauConfig, RadauJacobianSource, RadauNativeSolver, RadauTelemetryMode,
 };
+use nalgebra::{DMatrix, DVector};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = RadauConfig {

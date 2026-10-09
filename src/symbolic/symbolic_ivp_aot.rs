@@ -646,12 +646,11 @@ pub fn generated_aot_artifact_from_symbolic_ivp_atom_problem(
     let _ = (jacobian_rows, jacobian_cols);
     let _ = &jacobian_layout;
 
-    if jacobian_views.is_empty() {
-        return Err(IvpBackendError::AtomPreparationFailure {
-            stage: "AOT AtomView output layout".to_string(),
-            message: "IVP Atom AOT Jacobian output cannot be empty".to_string(),
-        });
-    };
+    // A structured Jacobian may be mathematically empty: a state-independent
+    // right-hand side has no explicit sparse or banded values to emit. The
+    // generated ABI already represents this as one zero-length chunk, so do
+    // not manufacture a fake structural entry or reject a valid problem.
+    // Dense uses its own zero-filled matrix contract in `dense_atoms`.
     let mut module = CodegenModule::new(module_name).with_language(backend.codegen_language());
     let residual_ranges = chunk_ranges(residual_views.len(), problem.plan.residual_strategy());
     for (index, (start, end)) in residual_ranges.iter().copied().enumerate() {
@@ -1130,6 +1129,59 @@ mod tests {
             .expect("Rust backend should produce a crate");
         assert!(crate_spec.module_source.contains("structural zeros elided"));
         assert!(crate_spec.module_source.contains("out[0]"));
+    }
+
+    #[test]
+    fn atomview_structured_aot_accepts_all_zero_jacobian_layouts() {
+        let problem = prepare_symbolic_ivp_problem(
+            vec![Expr::parse_expression("t"), Expr::parse_expression("2*t")],
+            vec!["y".to_string(), "z".to_string()],
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new().with_symbolic_assembly_backend(
+                crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView,
+            ),
+        )
+        .expect("all-zero structured AtomView problem should prepare");
+
+        for layout in [
+            AtomAotMatrixLayout::SparseCsc {
+                rows: 2,
+                cols: 2,
+                nnz: 0,
+            },
+            AtomAotMatrixLayout::Banded {
+                rows: 2,
+                cols: 2,
+                kl: 0,
+                ku: 0,
+                slots: 0,
+            },
+        ] {
+            let prepared = prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout(
+                &problem,
+                SymbolicIvpAotOptions::default(),
+                layout,
+            )
+            .expect("empty structured Jacobian should prepare");
+            assert!(prepared.plan().jacobian_entries().is_empty());
+
+            let artifact = generated_aot_artifact_from_symbolic_ivp_atom_problem(
+                "native_zero_structured_fixture",
+                "native_zero_structured_module",
+                &prepared,
+                AotCodegenBackend::Rust,
+            )
+            .expect("empty structured AtomView artifact should emit");
+            let crate_spec = artifact
+                .into_rust_crate()
+                .expect("Rust backend should produce a crate");
+            assert_eq!(crate_spec.manifest.functions.jacobian_chunks.len(), 1);
+            assert_eq!(crate_spec.manifest.functions.jacobian_chunks[0].len, 0);
+            assert_eq!(crate_spec.manifest.io.jacobian_nnz, Some(0));
+            assert!(crate_spec
+                .module_source
+                .contains("generated_ivp_sparse_jacobian_eval"));
+        }
     }
 
     #[test]

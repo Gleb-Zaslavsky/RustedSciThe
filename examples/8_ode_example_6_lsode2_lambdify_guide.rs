@@ -1,5 +1,5 @@
 //! cargo run --example 8_ode_example_6_lsode2_lambdify_guide
-//! 
+//!
 //! Гайд по LSODE2 через Lambdify
 //!
 //! Цель:
@@ -19,7 +19,7 @@
 //! Почему здесь sparse:
 //! эту маленькую систему можно было бы сделать и dense, но sparse-настройка
 //! демонстрирует production-ориентированный путь, который важен на больших якобианах.
-//! 
+//!
 //! запуск: cargo run --example lsode2_lambdify_guide
 
 use RustedSciThe::numerical::LSODE2::{
@@ -72,19 +72,14 @@ fn main() {
     .with_faithful_bdf_solve(100_000, 100_000);
 
     // Шаг 5: запускаем через универсальный ODE-фасад.
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
 
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y1 = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
-    let final_y2 = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 1)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y1 = y[(y.nrows() - 1, 0)];
+    let final_y2 = y[(y.nrows() - 1, 1)];
 
     println!("LSODE2 Lambdify guide");
     println!("status  = {}", solver.get_status().unwrap_or_default());

@@ -31,8 +31,8 @@ use crate::symbolic::codegen::codegen_aot_resolution::{
     AotResolutionStatus, AotResolver, ResolvedAotArtifact,
 };
 use crate::symbolic::codegen::codegen_aot_runtime_link::resolve_linked_dense_backend;
+#[cfg(test)]
 use crate::symbolic::codegen::codegen_provider_api::PreparedProblem;
-use log::{info, warn};
 
 /// User-facing backend preference for symbolic nonlinear problems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,48 +91,34 @@ pub fn select_symbolic_nonlinear_backend<'a>(
     aot_options: SymbolicDenseAotOptions,
 ) -> SelectedSymbolicNonlinearBackend<'a> {
     match policy {
-        SymbolicBackendSelectionPolicy::LambdifyOnly => {
-            info!("Selected lambdify backend for symbolic nonlinear problem");
-            SelectedSymbolicNonlinearBackend {
-                requested_policy: policy,
-                effective_backend: SelectedSymbolicNonlinearBackendKind::Lambdify,
-                prepared_aot_problem: None,
-                aot_resolution: None,
-            }
-        }
+        SymbolicBackendSelectionPolicy::LambdifyOnly => SelectedSymbolicNonlinearBackend {
+            requested_policy: policy,
+            effective_backend: SelectedSymbolicNonlinearBackendKind::Lambdify,
+            prepared_aot_problem: None,
+            aot_resolution: None,
+        },
         SymbolicBackendSelectionPolicy::AotOnly
         | SymbolicBackendSelectionPolicy::PreferAotThenLambdify => {
             let prepared_aot_problem = problem.prepare_dense_aot_problem(aot_options);
-            let generic_prepared =
-                PreparedProblem::dense(prepared_aot_problem.as_prepared_problem());
-            let resolution =
-                resolver.map(|resolver| resolver.resolve_prepared_problem(&generic_prepared));
+            let resolution = resolver
+                .map(|resolver| resolver.resolve_by_manifest(&prepared_aot_problem.manifest()));
             let linked_runtime_available =
                 resolve_linked_dense_backend(&prepared_aot_problem.problem_key()).is_some();
             let effective_backend = if linked_runtime_available {
-                info!("Selected linked compiled AOT runtime for symbolic nonlinear problem");
                 SelectedSymbolicNonlinearBackendKind::AotCompiled
             } else {
                 match resolution.as_ref().map(|resolved| resolved.status) {
                     Some(AotResolutionStatus::Compiled) => {
-                        info!("Selected compiled AOT backend for symbolic nonlinear problem");
                         SelectedSymbolicNonlinearBackendKind::AotCompiled
                     }
                     Some(AotResolutionStatus::RegisteredButNotBuilt) => {
-                        warn!(
-                            "Selected nonlinear AOT backend, but artifact is registered and not built"
-                        );
                         SelectedSymbolicNonlinearBackendKind::AotRegisteredButNotBuilt
                     }
                     Some(AotResolutionStatus::Missing) | None => match policy {
                         SymbolicBackendSelectionPolicy::AotOnly => {
-                            warn!("AOT-only nonlinear backend requested, but artifact is missing");
                             SelectedSymbolicNonlinearBackendKind::AotMissing
                         }
                         SymbolicBackendSelectionPolicy::PreferAotThenLambdify => {
-                            info!(
-                                "AOT artifact missing for symbolic nonlinear problem; falling back to lambdify"
-                            );
                             SelectedSymbolicNonlinearBackendKind::Lambdify
                         }
                         SymbolicBackendSelectionPolicy::LambdifyOnly => unreachable!(),

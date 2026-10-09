@@ -481,13 +481,15 @@ impl NRBVP {
         ////////////////////////////////////////////////////////////////////////
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         info!("{:?}", self.initial_guess.shape());
-        if self.grid_refinemens == 0 {
+        let use_prepared_iterate = self.prepared_iterate;
+        self.prepared_iterate = false;
+        if self.grid_refinemens == 0 && !use_prepared_iterate {
             let y: DMatrix<f64> = self.initial_guess.clone();
             //  println!("new y = {} \n \n", &y);
             let y: Vec<f64> = y.iter().cloned().collect();
             let y: DVector<f64> = DVector::from_vec(y);
             self.result = Some(y.clone()); // save into result in case the very first iteration
-            // with the current n_steps will go wrong and we shall need grid refinement
+                                           // with the current n_steps will go wrong and we shall need grid refinement
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
@@ -555,7 +557,7 @@ impl NRBVP {
                 let resid_norm = residual_result?;
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                // before refining in case it will go wrong
+                                                                // before refining in case it will go wrong
                 self.result = result.clone();
                 info!(
                     "\n \n solution found for the current grid {}",

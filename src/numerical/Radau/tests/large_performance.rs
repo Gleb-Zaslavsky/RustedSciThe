@@ -62,10 +62,14 @@ struct DenseAotDiagnosticRow {
     prepare_ms: String,
     full_solve_ms: String,
     callback_ms: String,
+    callback_share_pct: String,
     newton_ms: String,
+    newton_share_pct: String,
     linear_ms: String,
+    linear_share_pct: String,
     jacobian_assembly_ms: String,
     factorization_ms: String,
+    factorization_share_pct: String,
     real_solve_ms: String,
     complex_solve_ms: String,
     residual_calls: u64,
@@ -81,6 +85,14 @@ struct DenseAotDiagnosticRow {
     parity_drift: String,
     final_norm: String,
     status: &'static str,
+}
+
+fn share_of_full_solve(part_ms: f64, full_solve_ms: f64) -> String {
+    if full_solve_ms > 0.0 && part_ms.is_finite() {
+        format!("{:.1}", 100.0 * part_ms / full_solve_ms)
+    } else {
+        "n/a".to_owned()
+    }
 }
 
 fn adaptive_trace_columns(
@@ -578,10 +590,17 @@ fn dense_aot_full_solve_attribution_story() {
                 prepare_ms: format!("{prepare_ms:.3}"),
                 full_solve_ms: format!("{full_solve_ms:.3}"),
                 callback_ms: format!("{:.3}", timing("callback_ms")),
+                callback_share_pct: share_of_full_solve(timing("callback_ms"), full_solve_ms),
                 newton_ms: format!("{:.3}", timing("newton_ms")),
+                newton_share_pct: share_of_full_solve(timing("newton_ms"), full_solve_ms),
                 linear_ms: format!("{:.3}", timing("linear_ms")),
+                linear_share_pct: share_of_full_solve(timing("linear_ms"), full_solve_ms),
                 jacobian_assembly_ms: format!("{:.3}", timing("jacobian_assembly_ms")),
                 factorization_ms: format!("{:.3}", timing("factorization_ms")),
+                factorization_share_pct: share_of_full_solve(
+                    timing("factorization_ms"),
+                    full_solve_ms,
+                ),
                 real_solve_ms: format!("{:.3}", timing("real_solve_ms")),
                 complex_solve_ms: format!("{:.3}", timing("complex_solve_ms")),
                 residual_calls: report.counters["residual_calls"],
@@ -658,10 +677,17 @@ fn dense_aot_full_solve_attribution_story() {
                 prepare_ms: format!("{prepare_ms:.3}"),
                 full_solve_ms: format!("{full_solve_ms:.3}"),
                 callback_ms: format!("{:.3}", timing("callback_ms")),
+                callback_share_pct: share_of_full_solve(timing("callback_ms"), full_solve_ms),
                 newton_ms: format!("{:.3}", timing("newton_ms")),
+                newton_share_pct: share_of_full_solve(timing("newton_ms"), full_solve_ms),
                 linear_ms: format!("{:.3}", timing("linear_ms")),
+                linear_share_pct: share_of_full_solve(timing("linear_ms"), full_solve_ms),
                 jacobian_assembly_ms: format!("{:.3}", timing("jacobian_assembly_ms")),
                 factorization_ms: format!("{:.3}", timing("factorization_ms")),
+                factorization_share_pct: share_of_full_solve(
+                    timing("factorization_ms"),
+                    full_solve_ms,
+                ),
                 real_solve_ms: format!("{:.3}", timing("real_solve_ms")),
                 complex_solve_ms: format!("{:.3}", timing("complex_solve_ms")),
                 residual_calls: report.counters["residual_calls"],

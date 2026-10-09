@@ -147,7 +147,10 @@ ExprLegacy/AtomView и Lambdify/AOT определяет подготовку и
 
 Основной модуль: [`Radau_main.rs`](/f:/RUST/RustProjects_/RustedSciThe_experimental4/src/numerical/Radau/Radau_main.rs).
 
-Radau работает через `RadauSolverOptions` с выбором порядка (`Order3/Order5/Order7`), tolerances и generated backend config. Native callbacks включаются через `set_native_ode_callbacks(...)`; при отсутствии Jacobian применяется FD fallback.
+Radau в новой архитектуре использует поддерживаемый порядок 5 (`Radau5` в
+текстовом IVP task DSL); выбор `Order3/Order5/Order7` не является частью
+этого API. Native callbacks включаются через `set_native_ode_callbacks(...)`;
+при отсутствии Jacobian применяется FD fallback.
 
 У Radau подробная встроенная статистика (Newton solves, Jacobian calls, LU usage), поэтому метод удобен не только как интегратор, но и как диагностический инструмент.
 

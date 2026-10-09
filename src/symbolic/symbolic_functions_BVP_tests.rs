@@ -292,6 +292,9 @@ fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
 #[test]
 fn legacy_lambdify_dense_callbacks_expose_typed_runtime_telemetry() {
     let mut jacobian = build_small_symbolic_case();
+    jacobian.set_lambdify_telemetry_mode(
+        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed,
+    );
     jacobian.compile_lambdified_problem_with_config(
         "x",
         vec!["y", "z"],

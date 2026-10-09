@@ -21,8 +21,98 @@ pub struct ParsedEquationSystem {
     pub arg: String,
     pub unknowns: Vec<String>,
     pub rhs: Vec<Expr>,
+    /// RHS after symbolic aliases are applied but before numeric parameters
+    /// are substituted. This is the reusable model for continuation runs.
+    pub symbolic_rhs: Vec<Expr>,
     pub parameter_names: Vec<String>,
     pub parameter_values: HashMap<String, f64>,
+}
+
+/// Repeated-parameter execution plan extracted from a task document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinuationSpec {
+    /// Legacy single-parameter spelling retained for source compatibility.
+    pub parameter: String,
+    /// Legacy single-parameter values retained for source compatibility.
+    pub values: Vec<f64>,
+    /// Parameters participating in the normalized continuation grid.
+    pub parameters: Vec<String>,
+    /// One row per continuation segment, one value per `parameters` entry.
+    /// The legacy `parameter/values` pair is represented as a one-column grid.
+    pub value_grid: Vec<Vec<f64>>,
+    pub mode: ContinuationMode,
+    pub restart_each: bool,
+    pub restart_policy: ContinuationRestartPolicy,
+    pub y0_values: Option<Vec<Vec<f64>>>,
+    pub t0_values: Option<Vec<f64>>,
+    pub t_end_values: Option<Vec<f64>>,
+    pub monotonicity: ContinuationMonotonicity,
+    /// Symbolic RHS retained so a runner can rebind values without reparsing.
+    pub symbolic_rhs: Vec<Expr>,
+}
+
+impl ContinuationSpec {
+    /// Bind one continuation value without reparsing or rebuilding aliases.
+    pub fn rhs_for_value(&self, value: f64) -> Vec<Expr> {
+        let bindings = HashMap::from([(self.parameter.clone(), value)]);
+        self.symbolic_rhs
+            .iter()
+            .cloned()
+            .map(|expr| expr.set_variable_from_map(&bindings))
+            .collect()
+    }
+
+    /// Bind one row of a multi-parameter grid without reparsing the task.
+    pub fn rhs_for_values(&self, values: &[f64]) -> Vec<Expr> {
+        let bindings = self
+            .parameters
+            .iter()
+            .cloned()
+            .zip(values.iter().copied())
+            .collect::<HashMap<_, _>>();
+        self.symbolic_rhs
+            .iter()
+            .cloned()
+            .map(|expr| expr.set_variable_from_map(&bindings))
+            .collect()
+    }
+}
+
+/// Policy controlling whether a continuation carries solver state forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationRestartPolicy {
+    Continue,
+    RestartEach,
+    RestartWithState,
+}
+
+/// Optional ordering contract for continuation values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationMonotonicity {
+    Allow,
+    Increasing,
+    Decreasing,
+}
+
+/// Lifecycle policy for continuation runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationMode {
+    Fresh,
+    Warm,
+    Prepared,
+}
+
+impl ContinuationMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "fresh" => Ok(Self::Fresh),
+            "warm" => Ok(Self::Warm),
+            "prepared" | "prepared-solve" | "prepared_solve" => Ok(Self::Prepared),
+            other => Err(format!(
+                "unknown continuation mode `{other}`; expected fresh, warm, or prepared"
+            )),
+        }
+    }
 }
 
 /// Typed validation error shared by IVP and BVP task-document parsers.
@@ -134,8 +224,10 @@ pub fn parse_symbolic_equation_system(
         .iter()
         .map(|expr| parse_expr_safe(expr, "equations", "rhs"))
         .collect::<Result<Vec<_>, _>>()?;
-    let rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions)
-        .into_iter()
+    let symbolic_rhs = apply_symbolic_substitutions_to_vec(rhs, &substitutions);
+    let rhs = symbolic_rhs
+        .iter()
+        .cloned()
         .map(|expr| expr.set_variable_from_map(&parameter_values))
         .collect::<Vec<_>>();
     validate_equation_rhs_variables(&rhs, &arg, &unknowns)?;
@@ -144,9 +236,241 @@ pub fn parse_symbolic_equation_system(
         arg,
         unknowns,
         rhs,
+        symbolic_rhs,
         parameter_names,
         parameter_values,
     })
+}
+
+/// Parse the optional continuation section and validate its parameter binding.
+pub fn parse_continuation_spec(
+    document: &DocumentMap,
+    symbolic_rhs: Vec<Expr>,
+    parameter_names: &[String],
+) -> Result<Option<ContinuationSpec>, SharedEquationParseError> {
+    let Some(section) = document.get("continuation") else {
+        return Ok(None);
+    };
+    let parameters =
+        if let Some(names) = get_optional_string_list(section, "parameters", "continuation")? {
+            if names.is_empty() {
+                return Err(SharedEquationParseError::InvalidField {
+                    section: "continuation".to_string(),
+                    field: "parameters".to_string(),
+                    message: "at least one continuation parameter is required".to_string(),
+                });
+            }
+            names
+        } else {
+            vec![get_required_string(section, "continuation", "parameter")?]
+        };
+    let mut seen = HashSet::new();
+    for parameter in &parameters {
+        if !seen.insert(parameter) {
+            return Err(SharedEquationParseError::InvalidField {
+                section: "continuation".to_string(),
+                field: "parameters".to_string(),
+                message: format!("duplicate continuation parameter `{parameter}`"),
+            });
+        }
+        if !parameter_names.iter().any(|name| name == parameter) {
+            return Err(SharedEquationParseError::InvalidField {
+                section: "continuation".to_string(),
+                field: "parameters".to_string(),
+                message: format!("parameter `{parameter}` is not declared in equations"),
+            });
+        }
+    }
+
+    let value_lists = if parameters.len() == 1 && section.contains_key("values") {
+        vec![get_required_float_list(section, "continuation", "values")?]
+    } else {
+        parameters
+            .iter()
+            .map(|parameter| {
+                get_required_float_list(section, "continuation", &format!("{parameter}_values"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if value_lists.iter().any(Vec::is_empty) {
+        return Err(SharedEquationParseError::InvalidField {
+            section: "continuation".to_string(),
+            field: "values/<parameter>_values".to_string(),
+            message: "at least one continuation value is required".to_string(),
+        });
+    }
+    let value_grid = cartesian_product(&value_lists);
+    let parameter = parameters[0].clone();
+    let values = value_grid.iter().map(|row| row[0]).collect::<Vec<_>>();
+    let mode = get_optional_string(section, "mode", "continuation")?
+        .map(|raw| ContinuationMode::parse(&raw))
+        .transpose()
+        .map_err(|message| SharedEquationParseError::InvalidField {
+            section: "continuation".to_string(),
+            field: "mode".to_string(),
+            message,
+        })?
+        .unwrap_or(ContinuationMode::Prepared);
+    let restart_each = get_optional_bool(section, "restart_each", "continuation")?.unwrap_or(false);
+    let restart_policy = get_optional_string(section, "restart_policy", "continuation")?
+        .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "continue" | "warm" | "prepared" => Ok(ContinuationRestartPolicy::Continue),
+            "restart_each" | "restart-each" => Ok(ContinuationRestartPolicy::RestartEach),
+            "restart_with_state" | "restart-with-state" => {
+                Ok(ContinuationRestartPolicy::RestartWithState)
+            }
+            other => Err(format!(
+                "unknown restart policy `{other}`; expected continue, restart_each, or restart_with_state"
+            )),
+        })
+        .transpose()
+        .map_err(|message| SharedEquationParseError::InvalidField {
+            section: "continuation".to_string(),
+            field: "restart_policy".to_string(),
+            message,
+        })?
+        .unwrap_or(if restart_each {
+            ContinuationRestartPolicy::RestartEach
+        } else {
+            ContinuationRestartPolicy::Continue
+        });
+    let monotonicity = get_optional_string(section, "monotonic", "continuation")?
+        .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "allow" | "any" | "none" => Ok(ContinuationMonotonicity::Allow),
+            "increasing" | "ascending" => Ok(ContinuationMonotonicity::Increasing),
+            "decreasing" | "descending" => Ok(ContinuationMonotonicity::Decreasing),
+            other => Err(format!(
+                "unknown monotonic policy `{other}`; expected allow, increasing, or decreasing"
+            )),
+        })
+        .transpose()
+        .map_err(|message| SharedEquationParseError::InvalidField {
+            section: "continuation".to_string(),
+            field: "monotonic".to_string(),
+            message,
+        })?
+        .unwrap_or(ContinuationMonotonicity::Allow);
+    validate_monotonicity(&value_grid, monotonicity)?;
+    let y0_values = get_optional_state_vectors(section, "y0_values")?;
+    let t0_values = get_optional_float_list(section, "t0_values", "continuation")?;
+    let t_end_values = get_optional_float_list(section, "t_end_values", "continuation")?;
+    if matches!(restart_policy, ContinuationRestartPolicy::Continue)
+        && (y0_values.is_some() || t0_values.is_some())
+    {
+        return Err(SharedEquationParseError::InvalidField {
+            section: "continuation".to_string(),
+            field: "restart_policy".to_string(),
+            message: "per-segment y0/t0 requires restart_each or restart_with_state".to_string(),
+        });
+    }
+    validate_segment_lengths(
+        "y0_values",
+        y0_values.as_ref().map(Vec::len),
+        value_grid.len(),
+    )?;
+    validate_segment_lengths(
+        "t0_values",
+        t0_values.as_ref().map(Vec::len),
+        value_grid.len(),
+    )?;
+    validate_segment_lengths(
+        "t_end_values",
+        t_end_values.as_ref().map(Vec::len),
+        value_grid.len(),
+    )?;
+
+    Ok(Some(ContinuationSpec {
+        parameter,
+        values,
+        parameters,
+        value_grid,
+        mode,
+        restart_each,
+        restart_policy,
+        y0_values,
+        t0_values,
+        t_end_values,
+        monotonicity,
+        symbolic_rhs,
+    }))
+}
+
+fn cartesian_product(value_lists: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    value_lists.iter().fold(vec![Vec::new()], |rows, values| {
+        rows.into_iter()
+            .flat_map(|row| {
+                values.iter().copied().map(move |value| {
+                    let mut next = row.clone();
+                    next.push(value);
+                    next
+                })
+            })
+            .collect()
+    })
+}
+
+fn validate_segment_lengths(
+    field: &str,
+    actual: Option<usize>,
+    segments: usize,
+) -> Result<(), SharedEquationParseError> {
+    if let Some(actual) = actual {
+        if actual != segments && actual != 1 {
+            return Err(SharedEquationParseError::InvalidField {
+                section: "continuation".to_string(),
+                field: field.to_string(),
+                message: format!("expected one value or {segments} segment values, got {actual}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_monotonicity(
+    grid: &[Vec<f64>],
+    policy: ContinuationMonotonicity,
+) -> Result<(), SharedEquationParseError> {
+    if matches!(policy, ContinuationMonotonicity::Allow) || grid.len() < 2 {
+        return Ok(());
+    }
+    for column in 0..grid[0].len() {
+        for pair in grid.windows(2) {
+            let valid = match policy {
+                ContinuationMonotonicity::Increasing => pair[1][column] >= pair[0][column],
+                ContinuationMonotonicity::Decreasing => pair[1][column] <= pair[0][column],
+                ContinuationMonotonicity::Allow => true,
+            };
+            if !valid {
+                return Err(SharedEquationParseError::InvalidField {
+                    section: "continuation".to_string(),
+                    field: "monotonic".to_string(),
+                    message: format!("values are not monotonic at parameter column {column}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn get_optional_state_vectors(
+    section: &GenericSectionMap,
+    field: &str,
+) -> Result<Option<Vec<Vec<f64>>>, SharedEquationParseError> {
+    let Some(Some(values)) = section.get(field) else {
+        return Ok(None);
+    };
+    let vectors = values
+        .iter()
+        .map(|value| match value {
+            Value::Vector(vector) => Ok(vector.clone()),
+            _ => Err(SharedEquationParseError::InvalidField {
+                section: "continuation".to_string(),
+                field: field.to_string(),
+                message: "expected one or more vector values such as `[1.0, 2.0]`".to_string(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(vectors))
 }
 
 /// Parses numeric task parameters declared in either supported document form.
@@ -550,6 +874,19 @@ fn get_required_values<'a>(
         })
 }
 
+fn get_required_string(
+    section: &GenericSectionMap,
+    section_name: &str,
+    field: &str,
+) -> Result<String, SharedEquationParseError> {
+    get_optional_string(section, field, section_name)?.ok_or_else(|| {
+        SharedEquationParseError::MissingField {
+            section: section_name.to_string(),
+            field: field.to_string(),
+        }
+    })
+}
+
 fn get_optional_string(
     section: &GenericSectionMap,
     field: &str,
@@ -566,6 +903,38 @@ fn get_optional_string(
             }
             Ok(Some(value_to_string(&values[0], section_name, field)?))
         }
+        _ => Ok(None),
+    }
+}
+
+fn get_optional_bool(
+    section: &GenericSectionMap,
+    field: &str,
+    section_name: &str,
+) -> Result<Option<bool>, SharedEquationParseError> {
+    match section.get(field) {
+        Some(Some(values)) if values.len() == 1 => match &values[0] {
+            Value::Boolean(value) => Ok(Some(*value)),
+            Value::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" => Ok(Some(true)),
+                "false" | "no" | "0" => Ok(Some(false)),
+                other => Err(SharedEquationParseError::InvalidField {
+                    section: section_name.to_string(),
+                    field: field.to_string(),
+                    message: format!("expected boolean, got `{other}`"),
+                }),
+            },
+            _ => Err(SharedEquationParseError::InvalidField {
+                section: section_name.to_string(),
+                field: field.to_string(),
+                message: "expected boolean".to_string(),
+            }),
+        },
+        Some(Some(_)) => Err(SharedEquationParseError::InvalidField {
+            section: section_name.to_string(),
+            field: field.to_string(),
+            message: "expected one boolean value".to_string(),
+        }),
         _ => Ok(None),
     }
 }
@@ -606,6 +975,19 @@ fn get_optional_float_list(
         Some(Some(values)) => values_to_float_list(values, section_name, field).map(Some),
         _ => Ok(None),
     }
+}
+
+fn get_required_float_list(
+    section: &GenericSectionMap,
+    section_name: &str,
+    field: &str,
+) -> Result<Vec<f64>, SharedEquationParseError> {
+    get_optional_float_list(section, field, section_name)?.ok_or_else(|| {
+        SharedEquationParseError::MissingField {
+            section: section_name.to_string(),
+            field: field.to_string(),
+        }
+    })
 }
 
 fn values_to_float_list(

@@ -29,7 +29,6 @@ use crate::symbolic::codegen::rust_backend::codegen_aot_build::{
 };
 use crate::symbolic::symbolic_engine::Expr;
 use fs2::FileExt;
-use log::{info, warn};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -655,10 +654,6 @@ fn perform_requested_build(
     let problem_key = prepared.problem_key();
     let lifecycle_key = nonlinear_aot_lifecycle_key(&problem_key, config, profile);
     let (crate_name, module_name) = generated_names(&lifecycle_key, config);
-    info!(
-        "Materializing dense nonlinear AOT build for crate '{}' with profile {:?}",
-        crate_name, profile
-    );
     let output_parent_dir = config.output_parent_dir()?;
     let max_attempts = config.retry_policy.max_attempts.max(1);
     let mut last_failure = None;
@@ -683,10 +678,6 @@ fn perform_requested_build(
                 ) && build.expected_cdylib.exists()
                     && nonlinear_aot_ready_marker_matches(&build, &lifecycle_key) =>
             {
-                info!(
-                    "Reusing persisted nonlinear AOT artifact for problem key {} and lifecycle key {}",
-                    problem_key, lifecycle_key
-                );
                 successful_build = Some(build);
                 break;
             }
@@ -696,21 +687,12 @@ fn perform_requested_build(
                         "cannot quarantine previous nonlinear AOT publication marker '{}': {error}",
                         nonlinear_aot_ready_marker_path(&build).display()
                     ))
-                })? {
-                    info!(
-                        "Invalidated previous nonlinear AOT ready marker before rebuild for problem key {}",
-                        problem_key
-                    );
-                }
+                })? {}
                 match build.execute() {
                     Ok(executed) if executed.succeeded() => {
                         built_now = true;
                         if let Err(error) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key)
                         {
-                            warn!(
-                                "Nonlinear AOT build succeeded but ready marker '{}' could not be written: {error}",
-                                nonlinear_aot_ready_marker_path(&build).display()
-                            );
                         }
                         Ok(build)
                     }
@@ -735,9 +717,6 @@ fn perform_requested_build(
                 if !transient || attempt == max_attempts {
                     break;
                 }
-                warn!(
-                    "Transient nonlinear AOT build failure on attempt {attempt}/{max_attempts}; retrying"
-                );
                 thread::sleep(
                     config
                         .retry_policy
@@ -806,10 +785,6 @@ fn discover_persisted_nonlinear_aot_resolver(
         if build.expected_cdylib.exists()
             && nonlinear_aot_ready_marker_matches(&build, &lifecycle_key)
         {
-            info!(
-                "Discovered persisted nonlinear AOT artifact for RequirePrebuilt, problem key {} and lifecycle key {}",
-                problem_key, lifecycle_key
-            );
             return resolver_from_nonlinear_aot_build(&prepared, &build, None).map(Some);
         }
     }
@@ -1002,10 +977,6 @@ impl SymbolicNonlinearProblem {
                         if config.effective_backend_policy()
                             == SymbolicBackendSelectionPolicy::PreferAotThenLambdify =>
                     {
-                        warn!(
-                            "Dense nonlinear compiled AOT artifact exists but no linked runtime is registered; falling back to lambdify: {}",
-                            message
-                        );
                         let mut problem = baseline_problem;
                         problem.replace_preparation_report(preparation_report.clone());
                         Ok(PreparedGeneratedSymbolicProblem {

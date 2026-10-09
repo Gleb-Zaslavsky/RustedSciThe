@@ -296,7 +296,34 @@ silently turn a Criterion run into a timing report. The compact mode
 `Utils::test_reporting`, accepts comma-separated `RADAU_COMPACT_POLICIES`,
 records `RAYON_NUM_THREADS`, and separates Lambdify solver, AOT solver and AOT
 callback-only rows. It is intended for reviewable overnight matrices; it does
-not replace Criterion's repeated sampling.
+not replace Criterion's repeated sampling. The separate
+`scripts/radau_statistical_baseline.ps1` runner disables compact mode and
+archives the repeated Criterion streams. It accepts `-Dimensions`,
+`-ContinuationCounts`, `-SampleSize`, `-MeasurementSeconds`,
+`-IncludePolicy`, `-IncludeAot` and `-PlanOnly`; the corresponding benchmark controls are
+`RADAU_BENCH_SAMPLE_SIZE` and `RADAU_BENCH_MEASUREMENT_SECONDS`.
+For an already completed archive, pass `-ConvertExistingRoot <archive>`; this
+reads the UTF-16 technical logs and creates `tables/*.md` plus `tables/index.md`
+without rerunning Cargo or Criterion.
+
+### Statistical Baseline Policy
+
+Compact tables are release evidence for absolute wall-clock cost, lifecycle
+coverage and numerical checks. They are not a hard performance threshold
+because one row is one bounded measurement and host noise is not estimated.
+For a performance regression claim, compare repeated Criterion runs on the
+same release profile, host, toolchain, worker count, workload, layout and
+continuation count. Use the median and confidence interval; treat a change as
+actionable only when it is both statistically supported and materially large
+in absolute time. A percentage-only failure on a sub-millisecond callback is
+not sufficient. Conversely, a smaller percentage change on a repeatedly
+executed multi-millisecond or multi-second stage may be important.
+
+The statistical runner is deliberately non-fail-fast and archives one
+technical log per selected group. A failed group does not suppress later
+groups, while `-FailOnAny` makes the final process exit non-zero. This gives
+an overnight run a complete result even when one toolchain or policy route is
+unavailable.
 
 Compared with LSODE2, the remaining Radau evidence is deliberately explicit:
 the release compact worker sweep is not presented as a portable Auto
@@ -393,3 +420,108 @@ publication (`ExprLegacy 0.015 ms`, `AtomViewNative 0.007 ms` in the compact
 small-route check). Continuation amortization is not declared closed yet: the
 previous overnight benchmark archived only `continuation_count=1`, so a new
 multi-count benchmark is still required.
+
+### Complete Overnight Release Corpus: 2026-10-05/06
+
+The complete release harness finished at
+`test_reports/Radau_release_manual/20261005T211620Z/` with `7` steps passed,
+`0` failed and `0` planned. It covered fast and ignored story suites,
+Lambdify worker processes `1/4/12`, the matched AOT/Lambdify matrix at worker
+count `12`, continuation, policy, lifecycle, telemetry and process-isolated
+handoff. Compact tables are the measurement artifacts; compiler/Criterion
+progress remains in the technical logs.
+
+The release evidence closes the following gates:
+
+- AOT/Lambdify endpoint and continuation parity is zero-drift for the covered
+  StiffScalar, Robertson, CombustionLike, ThreeBody and DiffusionChain rows.
+- ExprLegacy and AtomViewNative pass Dense/Sparse/Banded AOT matrix rows with
+  distinct artifact provenance, stable continuation reuse and typed lifecycle
+  failures for missing/mismatched prebuilt artifacts.
+- Process-isolated producer/consumer handoff passes all six frontend/layout
+  routes. Consumers perform no build, reconnect/link the published runtime,
+  and preserve endpoint parity.
+- `BuildIfMissing`, `RequirePrebuilt` and `RebuildAlways` report consistent
+  build/link/publication scopes. The targeted `link_ms` anomaly is not present
+  in the corrected lifecycle scope; link timing is separated from publication.
+- Continuation retention keeps prepared artifacts and build/link counts stable.
+  The benchmark matrix includes counts `1/4/16/64`, but no portable numerical
+  break-even threshold is asserted because cold setup and solve cost remain
+  workload-dependent.
+
+The performance conclusion is explicitly stage- and layout-qualified. On
+DiffusionChain `n=2048`, AtomView preparation is roughly `30.8 ms` versus
+`725--959 ms` for ExprLegacy in the matched Lambdify matrix. AOT callbacks are
+often much cheaper than Lambdify callbacks on structured layouts, while AOT
+full solve is faster on the large Banded case, close or slightly slower on
+Sparse, and materially slower on Dense. Dense full solve is dominated by the
+linear stage rather than symbolic callback preparation; no universal AOT or
+frontend winner is claimed.
+
+The worker sweep confirms numerical parity and a conservative policy boundary,
+not a portable Parallel crossover. Forced Parallel can lose to Sequential on
+small workloads and large Sparse callbacks; Auto avoids those cases. Release
+telemetry distinguishes the effective Rayon `worker_count` from the configured
+`RAYON_NUM_THREADS` request through `configured_worker_count`.
+`allocations` remains a logical Radau workspace/materialization event count,
+not a process-wide allocator measurement. Compact benchmark report version 3
+now records both `configured_worker_count` and `effective_worker_count` instead
+of overloading one `worker_count` label.
+
+Canonical compact reports are the four files under
+`test_reports/Radau_release_manual/20261005T211620Z/Radau_Bench/release/`,
+the `Radau_Diagnostics/release/` Dense attribution tables, the AOT lifecycle
+tables and the process-isolated handoff table. The complete corpus is enough
+for correctness, lifecycle and supported performance-boundary claims, but its
+single compact capture is not a hard statistical regression threshold.
+
+### Dense AOT Follow-up
+
+The Dense attribution story now reports absolute stage times and each stage's
+percentage of measured full-solve wall time. The next comparison is therefore
+`callback_ms`, `newton_ms`, `linear_ms`, `factorization_ms`, `real_solve_ms`
+and `complex_solve_ms` on the same trajectory and step configuration. A Dense
+AOT slowdown is actionable only if it survives matched `initial_h_abs`,
+accepted/rejected steps, Jacobian refreshes and factorization counts. If those
+counters match and `linear_ms` dominates, the next investigation belongs to
+the Dense factor/solve kernel; if they diverge, the controller or invalidation
+path must be investigated first.
+
+The release rerun at
+`test_reports/Radau_Diagnostics/release/numerical__Radau__tests__large_performance__dense_aot_full_solve_attribution_story.md`
+confirms this classification at `n=512`: AOT ExprLegacy took `55.203 ms`
+and AOT AtomViewNative `54.619 ms`, with identical `35` residual calls, one
+Jacobian call, three factorizations, five accepted steps and zero parity drift.
+The measured linear share was `97.0%` and `96.8%`, factorization share `69.2%`
+and `69.1%`, while callback share was only `0.8%` and `0.9%`. The Dense AOT
+full-solve issue is therefore not an AOT callback regression in this matched
+case; any further gain must start with the Dense linear/factorization path or
+with the Newton/linear interaction. The compact report now contains these
+stage-share columns for future `n=1024/2048` repetitions.
+
+### Statistical Baseline Capture: 2026-10-07
+
+The first repeated statistical Radau capture is archived at
+`test_reports/Radau_statistical_baseline/20261006T224358Z/`. All three groups
+completed successfully. The archive contains 630 compact rows across Lambdify,
+execution-policy and AOT matrices, with 20 samples per measured row, a
+three-second Criterion measurement window, `n=512`, and continuation counts
+`4/16`. Raw Criterion/compiler output remains under `technical/`; the compact
+evidence is under `tables/`.
+
+The most important result is stage-specific. In the matched Lambdify table,
+DiffusionChain Dense preparation is `8.91 ms` for AtomView versus `56.84 ms`
+for ExprLegacy. This does not imply an equal full-solve ratio: Sparse callback
+time is approximately `1.71 ms` versus `1.61 ms`, while full solve is
+approximately `1.75 ms` versus `2.25 ms` in favor of AtomView. Banded `1-1`
+shows the opposite full-solve direction despite faster AtomView callbacks:
+`2.84 ms` versus `3.34 ms` for callbacks, then `1.09 ms` versus `0.98 ms` for
+full solve. ThreeBody Dense favors AtomView much more strongly; small
+CombustionLike Dense rows are close or can favor ExprLegacy.
+
+These are host/profile-specific statistical baselines, not portable thresholds.
+The words `improved` and `regressed` in the Criterion-derived tables describe
+the local comparison state and must not be read as independent release
+regression evidence. A hard gate still requires a second matched capture with
+the same workload, layout, frontend, policy, worker and toolchain dimensions,
+plus an absolute materiality floor.

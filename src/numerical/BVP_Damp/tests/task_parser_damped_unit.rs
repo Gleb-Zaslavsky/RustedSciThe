@@ -8,6 +8,7 @@
 //! - Postprocessing configuration and execution
 
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
+use crate::command_interpreter::task_parser::ParseErrorKind;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy,
 };
@@ -22,6 +23,18 @@ use std::collections::HashMap;
 
 use super::*;
 use tempfile::tempdir;
+
+#[test]
+fn damped_adapter_keeps_typed_document_errors() {
+    let error = parse_bvp_damped_task_from_str("task\nsolver Damped")
+        .expect_err("malformed task header must fail");
+    match error {
+        BvpDampedTaskError::Document(error) => {
+            assert_eq!(error.kind, ParseErrorKind::InvalidSection)
+        }
+        other => panic!("expected typed document error, got {other:?}"),
+    }
+}
 
 use nalgebra::{DMatrix, DVector};
 

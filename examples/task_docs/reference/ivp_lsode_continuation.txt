@@ -1,0 +1,29 @@
+# Native stiff-solver task example: LSODE continuation.
+# LSODE is routed through its solver-owned native API by the task runner.
+
+task
+schema_version: 1
+solver: IVP
+method: LSODE
+
+equations
+arg: t
+parameters: rate
+parameter_values: 2.0
+y: -rate * y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+rtol: 1e-7
+atol: 1e-9
+max_step: 0.05
+
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: fresh
+restart_policy: restart_each

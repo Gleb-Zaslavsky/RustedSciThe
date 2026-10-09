@@ -455,3 +455,61 @@ match solve_bvp(&fun, &bc, x, y, None, None, None, None, 1e-6, 1000, 2, None) {
 ```
 
 This guide covers the essential aspects of using the BVP solver. For more complex problems, consider starting with simpler initial guesses and gradually increasing accuracy requirements.
+
+## Text task documents and backend selection
+
+The task-document route is intended for reproducible examples and batch runs;
+the typed native API remains the preferred application-facing interface. A
+minimal BVP_sci task can make the solver and numerical route explicit:
+
+```text
+# Comments are ignored by the task parser.
+solver: BVP_sci
+method: Dense
+frontend: ExprLegacy
+execution: Lambdify
+tolerance: 1e-6
+max_iterations: 100
+output_policy: none
+```
+
+`method` selects the matrix layout and `frontend` selects the symbolic route.
+They are separate dimensions: `ExprLegacy` and `AtomViewNative` describe how
+the residual and Jacobian are represented and prepared, while `Lambdify` and
+`AOT` describe how the prepared callbacks are executed. The task parser also
+accepts the BVP_Damp route as `solver: BVP`; do not confuse these two solver
+identifiers when comparing numerical results.
+
+There is no universal fastest matrix layout. Dense is a natural choice for
+small fully coupled systems, while Sparse or Banded can be better when the
+global collocation Jacobian has exploitable structure. Compare matched
+workloads rather than comparing different equations. Preparation, callback,
+linear solve, and full-solve timings must be reported separately: a faster
+symbolic frontend does not imply a faster dense factorization.
+
+For AOT task documents, use `aot_build_policy` with `BuildIfMissing`,
+`RequirePrebuilt`, or `RebuildAlways`, together with `output_dir`, `compiler`,
+and an optional publication/handoff directory. `RequirePrebuilt` is a strict
+consumer mode and reports missing, stale, provenance, compiler, link, and
+timeout failures as typed errors. The lifecycle record distinguishes cache
+lookup, materialization, build, link, publication, and runtime readiness from
+the numerical solve.
+
+Continuation is expressed with a `continuation` block, for example:
+
+```text
+continuation:
+  parameter: k
+  values: 1.0, 1.5, 2.0, 2.5
+  mode: prepared
+  restart_each: false
+```
+
+`fresh` reparses and prepares every segment, `warm` reuses the prepared model
+while rebinding parameters, and `prepared` requests the strongest reuse policy.
+An explicit restart may provide a new `y0`, `t0`, and `t_end` for a segment.
+Keep these policies distinct in performance reports and check memory retention
+for long series. `output_policy` may be `none`, `terminal`, `plotters`, or
+`gnuplot`; comments beginning with `#` are ignored. The shared task-document
+grammar and batch-runner conventions are described in
+[`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).

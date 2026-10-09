@@ -35,15 +35,13 @@ fn main() {
     // Явный ручной выбор семейства в стиле LSODE:
     .with_adams_only_controller();
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
 
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y = y[(y.nrows() - 1, 0)];
 
     println!("LSODE2 manual Adams-only guide");
     println!("status  = {}", solver.get_status().unwrap_or_default());

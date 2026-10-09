@@ -13,6 +13,15 @@ pub struct BlockTridiagonalLuConsistent {
     lower_fac: Vec<Vec<f64>>,
     upper_fac: Vec<Vec<f64>>,
     is_factorized: bool,
+    /// Cached structured factor residual from the current factorization.
+    /// Production callers reuse this O(n) diagnostic instead of reconstructing
+    /// a global dense matrix for telemetry and fallback decisions.
+    factor_residual_relative: f64,
+    /// Whether the current factorization passed the one-time diagnostics needed
+    /// before iterative refinement. Rechecking this for every RHS would repeat
+    /// factor-quality work in the Newton hot path even though the factorization
+    /// is unchanged.
+    refinement_allowed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,6 +66,8 @@ impl BlockTridiagonalLuConsistent {
             lower_fac,
             upper_fac,
             is_factorized: false,
+            factor_residual_relative: f64::INFINITY,
+            refinement_allowed: false,
         })
     }
 
@@ -104,6 +115,8 @@ impl BlockTridiagonalLuConsistent {
         let nb = self.n_blocks;
 
         self.is_factorized = false;
+        self.factor_residual_relative = f64::INFINITY;
+        self.refinement_allowed = false;
 
         for block_idx in 0..nb {
             block_copy(
@@ -157,10 +170,74 @@ impl BlockTridiagonalLuConsistent {
                 bs,
                 &mut self.diag_pivots[block_idx + 1],
             )?;
+
+            // The row permutation belongs to the whole current block row,
+            // not only to its diagonal Schur block. Carry it into the
+            // already computed lower factor so both PA=LU reconstruction and
+            // forward substitution use the same block-row ordering.
+            apply_pivots_to_block_rows(
+                &mut self.lower_fac[block_idx],
+                bs,
+                &self.diag_pivots[block_idx + 1],
+            )?;
         }
 
         self.is_factorized = true;
+        // Keep the production diagnostic on the block representation.  The
+        // dense oracle below is intentionally retained for tests and offline
+        // diagnostics, but calling it here would materialize three O(n^2)
+        // matrices and perform an O(n^3) multiplication after every refresh.
+        self.factor_residual_relative = self
+            .factor_residual_relative_blockwise(a)
+            .unwrap_or(f64::INFINITY);
+        self.refinement_allowed = self
+            .compute_refinement_allowed(self.factor_residual_relative)
+            .unwrap_or(false);
         Ok(())
+    }
+
+    fn compute_refinement_allowed(&self, factor_rr: f64) -> Result<bool, BandedError> {
+        const FACTOR_RELATIVE_RESIDUAL_MAX: f64 = 1.0e-4;
+        const MIN_ACCEPTABLE_ABS_DIAG_U: f64 = 1.0e-10;
+        const MAX_ACCEPTABLE_MULTIPLIER_NORM: f64 = 1.0e6;
+
+        if !factor_rr.is_finite() || factor_rr > FACTOR_RELATIVE_RESIDUAL_MAX {
+            return Ok(false);
+        }
+        let diagnostics = self.block_norm_diagnostics();
+        let min_abs_diag_u = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.min_abs_diag_u)
+            .fold(f64::INFINITY, f64::min);
+        let worst_multiplier = diagnostics
+            .iter()
+            .flat_map(|diagnostic| [diagnostic.lower_fac_linf, diagnostic.upper_fac_linf])
+            .flatten()
+            .fold(0.0_f64, f64::max);
+        Ok(min_abs_diag_u >= MIN_ACCEPTABLE_ABS_DIAG_U
+            && worst_multiplier <= MAX_ACCEPTABLE_MULTIPLIER_NORM)
+    }
+
+    /// Return the factor residual cached during the latest factorization.
+    pub fn cached_factor_residual_relative(&self) -> Option<f64> {
+        self.is_factorized
+            .then_some(self.factor_residual_relative)
+            .filter(|value| value.is_finite())
+    }
+
+    /// Return the pivot and multiplier extrema used by the refinement gate.
+    pub fn condition_diagnostics(&self) -> (f64, f64) {
+        let diagnostics = self.block_norm_diagnostics();
+        let min_abs_pivot = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.min_abs_diag_u)
+            .fold(f64::INFINITY, f64::min);
+        let max_multiplier_norm = diagnostics
+            .iter()
+            .flat_map(|diagnostic| [diagnostic.lower_fac_linf, diagnostic.upper_fac_linf])
+            .flatten()
+            .fold(0.0_f64, f64::max);
+        (min_abs_pivot, max_multiplier_norm)
     }
 
     pub fn solve_in_place(&self, rhs: &mut [f64]) -> Result<(), BandedError> {
@@ -176,19 +253,16 @@ impl BlockTridiagonalLuConsistent {
 
         for block_idx in 0..nb {
             let start = block_idx * bs;
-            let end = start + bs;
-            let prev = if block_idx > 0 {
-                let prev_start = (block_idx - 1) * bs;
-                let prev_end = prev_start + bs;
-                Some(rhs[prev_start..prev_end].to_vec())
-            } else {
-                None
-            };
-            let cur = &mut rhs[start..end];
+            // The previous block is already finalized. Split the RHS so it can
+            // be borrowed immutably without allocating a temporary Vec.
+            let (prefix, suffix) = rhs.split_at_mut(start);
+            let cur = &mut suffix[..bs];
 
             apply_pivots_to_vector(cur, &self.diag_pivots[block_idx])?;
 
-            if let Some(prev) = prev.as_ref() {
+            if block_idx > 0 {
+                let prev_start = (block_idx - 1) * bs;
+                let prev = &prefix[prev_start..prev_start + bs];
                 subtract_matvec_in_place(cur, &self.lower_fac[block_idx - 1], bs, prev);
             }
 
@@ -198,16 +272,13 @@ impl BlockTridiagonalLuConsistent {
         for block_idx in (0..nb).rev() {
             let start = block_idx * bs;
             let end = start + bs;
-            let next = if block_idx + 1 < nb {
-                let next_start = (block_idx + 1) * bs;
-                let next_end = next_start + bs;
-                Some(rhs[next_start..next_end].to_vec())
-            } else {
-                None
-            };
-            let cur = &mut rhs[start..end];
+            // The next block is already finalized. It lives in the disjoint
+            // suffix, so backward substitution also avoids a temporary Vec.
+            let (prefix, suffix) = rhs.split_at_mut(end);
+            let cur = &mut prefix[start..end];
 
-            if let Some(next) = next.as_ref() {
+            if block_idx + 1 < nb {
+                let next = &suffix[..bs];
                 subtract_matvec_in_place(cur, &self.upper_fac[block_idx], bs, next);
             }
 
@@ -297,7 +368,7 @@ impl BlockTridiagonalLuConsistent {
                 final_relative_residual: current_rr,
             });
         }
-        if !self.should_attempt_iterative_refinement(a, current_rr)? {
+        if !self.should_attempt_iterative_refinement(current_rr) {
             return Ok(IterativeRefinementReport {
                 requested_steps: refinement_steps,
                 accepted_steps: 0,
@@ -341,44 +412,15 @@ impl BlockTridiagonalLuConsistent {
         })
     }
 
-    fn should_attempt_iterative_refinement(
-        &self,
-        a: &BlockTridiagonal,
-        current_rr: f64,
-    ) -> Result<bool, BandedError> {
+    fn should_attempt_iterative_refinement(&self, current_rr: f64) -> bool {
         const REFINEMENT_ENTRY_RR_MAX: f64 = 1.0e-12;
-        const FACTOR_RELATIVE_RESIDUAL_MAX: f64 = 1.0e-4;
-        const MIN_ACCEPTABLE_ABS_DIAG_U: f64 = 1.0e-10;
-        const MAX_ACCEPTABLE_MULTIPLIER_NORM: f64 = 1.0e6;
 
         // If the direct solve already lands near machine precision, refinement
         // is more likely to inject noise than to help.
         if current_rr <= REFINEMENT_ENTRY_RR_MAX {
-            return Ok(false);
+            return false;
         }
-
-        // Refinement only makes sense when the stored factorization is a
-        // reasonably faithful surrogate for the original matrix.
-        let factor_rr = self.factor_residual_relative(a)?;
-        if !factor_rr.is_finite() || factor_rr > FACTOR_RELATIVE_RESIDUAL_MAX {
-            return Ok(false);
-        }
-
-        // Very small diagonal pivots or explosive block multipliers are strong
-        // signals that the correction solve is not a trustworthy direction.
-        let diagnostics = self.block_norm_diagnostics();
-        let min_abs_diag_u = diagnostics
-            .iter()
-            .map(|d| d.min_abs_diag_u)
-            .fold(f64::INFINITY, f64::min);
-        let worst_multiplier = diagnostics
-            .iter()
-            .flat_map(|d| [d.lower_fac_linf, d.upper_fac_linf])
-            .flatten()
-            .fold(0.0_f64, f64::max);
-
-        Ok(min_abs_diag_u >= MIN_ACCEPTABLE_ABS_DIAG_U
-            && worst_multiplier <= MAX_ACCEPTABLE_MULTIPLIER_NORM)
+        self.refinement_allowed
     }
 
     pub fn apply_block_permutations_to_dense_rows(
@@ -453,6 +495,98 @@ impl BlockTridiagonalLuConsistent {
         let (dense_l, dense_u) = self.reconstruct_lu_dense()?;
         let dense_lu = dense_matmul_square(dense_l.as_slice(), dense_u.as_slice())?;
         Ok(dense_linf_diff(dense_pa.as_slice(), dense_lu.as_slice()))
+    }
+
+    /// Compute the factorization residual without leaving the structured
+    /// representation.
+    ///
+    /// The residual compares the three non-zero block diagonals of `P*A` and
+    /// `L*U`.  Its work is linear in the number of block rows for a fixed
+    /// block size and it allocates no dense global matrix.  This is the
+    /// production quality gate used to decide whether iterative refinement is
+    /// safe.  [`Self::factor_residual_relative`] remains available as a slow,
+    /// dense oracle for tests and offline diagnostics.
+    pub fn factor_residual_relative_blockwise(
+        &self,
+        a: &BlockTridiagonal,
+    ) -> Result<f64, BandedError> {
+        if !self.is_factorized {
+            return Err(BandedError::NotFactorized);
+        }
+        if a.n_blocks() != self.n_blocks || a.block_size() != self.block_size {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let bs = self.block_size;
+        let mut numerator = 0.0_f64;
+        let mut denominator = 1.0_f64;
+
+        for block_row in 0..self.n_blocks {
+            for local_row in 0..bs {
+                // `P*A` uses the same swap sequence as the in-place block LU.
+                // Resolve one source row without allocating a permutation for
+                // every block row of a large collocation system.
+                let source_row = permuted_local_row(&self.diag_pivots[block_row], local_row);
+
+                let first_column = block_row.saturating_sub(1);
+                let last_column = (block_row + 1).min(self.n_blocks - 1);
+                for block_column in first_column..=last_column {
+                    for local_column in 0..bs {
+                        let a_value = if block_column + 1 == block_row {
+                            a.lower_block(block_column)
+                                .ok_or(BandedError::DimensionMismatch)?
+                                [idx(bs, source_row, local_column)]
+                        } else if block_column == block_row {
+                            a.diag_block(block_row)
+                                .ok_or(BandedError::DimensionMismatch)?
+                                [idx(bs, source_row, local_column)]
+                        } else {
+                            a.upper_block(block_row)
+                                .ok_or(BandedError::DimensionMismatch)?
+                                [idx(bs, source_row, local_column)]
+                        };
+
+                        let lu_value = if block_column + 1 == block_row {
+                            let lower = &self.lower_fac[block_column];
+                            let upper_diag = &self.diag_lu[block_column];
+                            (0..bs)
+                                .map(|k| {
+                                    lower[idx(bs, local_row, k)]
+                                        * packed_u_value(upper_diag, bs, k, local_column)
+                                })
+                                .sum()
+                        } else if block_column == block_row {
+                            let diag = &self.diag_lu[block_row];
+                            let mut value = (0..bs)
+                                .map(|k| {
+                                    packed_l_value(diag, bs, local_row, k)
+                                        * packed_u_value(diag, bs, k, local_column)
+                                })
+                                .sum::<f64>();
+                            if block_row > 0 {
+                                let lower = &self.lower_fac[block_row - 1];
+                                let upper = &self.upper_fac[block_row - 1];
+                                value += (0..bs)
+                                    .map(|k| {
+                                        lower[idx(bs, local_row, k)]
+                                            * upper[idx(bs, k, local_column)]
+                                    })
+                                    .sum::<f64>();
+                            }
+                            value
+                        } else {
+                            self.upper_fac[block_row][idx(bs, local_row, local_column)]
+                        };
+
+                        let difference = (a_value - lu_value).abs();
+                        numerator = numerator.max(difference);
+                        denominator = denominator.max(a_value.abs()).max(lu_value.abs());
+                    }
+                }
+            }
+        }
+
+        Ok(numerator / denominator)
     }
 
     pub fn factor_residual_relative(&self, a: &BlockTridiagonal) -> Result<f64, BandedError> {
@@ -847,6 +981,44 @@ fn permutation_from_swap_pivots(pivots: &[usize]) -> Vec<usize> {
         perm.swap(k, p);
     }
     perm
+}
+
+/// Resolve one output row of a swap-based permutation without constructing the
+/// full permutation vector.  This keeps the structured residual diagnostic
+/// allocation-free while preserving the exact row order used by the dense
+/// diagnostic oracle.
+fn permuted_local_row(pivots: &[usize], row: usize) -> usize {
+    let mut source = row;
+    // The factorization applies swaps from left to right. To recover the
+    // source row at a final output position, undo those swaps in reverse.
+    for (position, &pivot) in pivots.iter().enumerate().rev() {
+        if source == position {
+            source = pivot;
+        } else if source == pivot {
+            source = position;
+        }
+    }
+    source
+}
+
+#[inline]
+fn packed_u_value(lu: &[f64], bs: usize, row: usize, column: usize) -> f64 {
+    if row <= column {
+        lu[idx(bs, row, column)]
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn packed_l_value(lu: &[f64], bs: usize, row: usize, column: usize) -> f64 {
+    if row > column {
+        lu[idx(bs, row, column)]
+    } else if row == column {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn split_dense_lu_block(lu: &[f64], bs: usize) -> Result<(Vec<f64>, Vec<f64>), BandedError> {
@@ -1265,6 +1437,43 @@ mod tests {
     }
 
     #[test]
+    fn solve_applies_later_block_pivots_to_lower_coupling() {
+        // The second diagonal block pivots. This specifically guards the
+        // forward-substitution ordering b_k-L_k*y_(k-1), then P_k.
+        let mut a = BlockTridiagonal::zeros(3, 2).unwrap();
+        for block in 0..3 {
+            a.set_diag(block, 0, 0, 4.0).unwrap();
+            a.set_diag(block, 0, 1, 0.25).unwrap();
+            a.set_diag(block, 1, 0, 0.10).unwrap();
+            a.set_diag(block, 1, 1, 3.0).unwrap();
+        }
+        // Force a row swap in the middle block after its Schur update.
+        a.set_diag(1, 0, 0, 0.0).unwrap();
+        a.set_diag(1, 0, 1, 2.0).unwrap();
+        a.set_diag(1, 1, 0, 1.0).unwrap();
+        a.set_diag(1, 1, 1, 3.0).unwrap();
+        for block in 0..2 {
+            a.set_upper(block, 0, 0, 0.20).unwrap();
+            a.set_upper(block, 1, 1, -0.15).unwrap();
+            a.set_lower(block, 0, 0, 0.30).unwrap();
+            a.set_lower(block, 1, 1, 0.10).unwrap();
+        }
+
+        let dense = a.to_dense();
+        let x_true = vec![0.5, -1.0, 1.25, 0.75, -0.25, 2.0];
+        let mut rhs = dense_matvec(&dense, &x_true);
+        let mut lu = BlockTridiagonalLuConsistent::new(3, 2).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        assert!(
+            vec_diff_linf(&rhs, &x_true) < 1e-10,
+            "later-pivot solve drift={:e}",
+            vec_diff_linf(&rhs, &x_true)
+        );
+    }
+
+    #[test]
     fn consistent_factorization_rejects_combustion_like_singular_node_block() {
         let block_size = 6;
         let mut a = BlockTridiagonal::zeros(2, block_size).unwrap();
@@ -1318,6 +1527,60 @@ mod tests {
     }
 
     #[test]
+    fn consistent_factorization_solves_long_six_by_six_block_chain() {
+        // The production BVP collocation route aggregates two three-variable
+        // mesh nodes into a six-by-six block and may have hundreds of such
+        // blocks. Keep this small enough for a unit test while exercising the
+        // long-chain pivot/substitution path rather than only a two- or
+        // three-block synthetic case.
+        let n_blocks = 127;
+        let block_size = 6;
+        let mut a = BlockTridiagonal::zeros(n_blocks, block_size).unwrap();
+        for block in 0..n_blocks {
+            for row in 0..block_size {
+                for column in 0..block_size {
+                    let value = if row == column {
+                        4.0 + 0.01 * (block as f64) + 0.001 * (row as f64)
+                    } else if (row + 1) % block_size == column {
+                        0.03
+                    } else {
+                        0.0
+                    };
+                    if value != 0.0 {
+                        a.set_diag(block, row, column, value).unwrap();
+                    }
+                }
+            }
+            if block + 1 < n_blocks {
+                for row in 0..block_size {
+                    for column in 0..block_size {
+                        let upper = if row == column { 0.04 } else { 0.0 };
+                        let lower = if row == column { -0.05 } else { 0.0 };
+                        if upper != 0.0 {
+                            a.set_upper(block, row, column, upper).unwrap();
+                        }
+                        if lower != 0.0 {
+                            a.set_lower(block, row, column, lower).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+
+        let dense = a.to_dense();
+        let x_true: Vec<f64> = (0..dense.len())
+            .map(|index| 0.2 + 0.003 * index as f64)
+            .collect();
+        let mut rhs = dense_matvec(&dense, &x_true);
+        let mut lu = BlockTridiagonalLuConsistent::new(n_blocks, block_size).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        let drift = vec_diff_linf(&rhs, &x_true);
+        assert!(drift < 1e-10, "long six-by-six chain drift={drift:e}");
+    }
+
+    #[test]
     fn consistent_factorization_solves_multiple_rhs_on_stabilized_combustion_like_superblocks() {
         let a = combustion_like_superblock_chain(2, 2, 2.5e3);
         let dense = a.to_dense();
@@ -1354,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_combustion_like_superblocks_still_show_large_solve_drift() {
+    fn raw_combustion_like_superblocks_have_finite_direct_solve() {
         let a = combustion_like_superblock_chain(3, 2, 0.0);
         let dense = a.to_dense();
         let x_true: Vec<f64> = (0..dense.len())
@@ -1368,8 +1631,8 @@ mod tests {
         let drift = vec_diff_linf(&rhs, &x_true);
 
         assert!(
-            drift > 1.0e-6,
-            "raw combustion-like superblocks unexpectedly solve accurately: drift={drift:e}"
+            drift < 1.0e-10,
+            "raw combustion-like superblocks direct solve drift={drift:e}"
         );
     }
 
@@ -1380,10 +1643,19 @@ mod tests {
         lu.factor_from(&a).unwrap();
 
         let rel_fac = lu.factor_residual_relative(&a).unwrap();
+        let cached_rel_fac = lu.cached_factor_residual_relative().unwrap();
         let block_diag = lu.block_norm_diagnostics();
         let pivot_diag = lu.pivot_diagnostics();
 
         assert!(rel_fac >= 0.0);
+        assert!(cached_rel_fac >= 0.0);
+        // The two diagnostics use different accumulation orders. Their
+        // contract is route classification, not bitwise equality: both must
+        // agree that this factorization is inside the refinement safety gate.
+        assert!(
+            cached_rel_fac < 1.0e-4 && rel_fac < 1.0e-4,
+            "structured residual disagrees with dense safety classification: structured={cached_rel_fac:e}, oracle={rel_fac:e}"
+        );
         assert_eq!(block_diag.len(), 3);
         assert_eq!(pivot_diag.len(), 3);
         assert!(block_diag.iter().all(|d| d.diag_lu_linf.is_finite()));

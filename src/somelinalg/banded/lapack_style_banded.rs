@@ -64,8 +64,13 @@ impl LapackStyleBandedLuFaithful {
         // LAPACK uses NBMAX = 64; we'll allocate workspace for maximum possible panel
         let nb_max = 64;
         let work13_len = (nb_max + 1) * nb_max;
-        // WORK31 uses LAPACK LDWORK = NBMAX+1 rows, NBMAX columns
-        let work31_len = (nb_max + 1) * nb_max;
+        // WORK31 normally needs only LAPACK's NBMAX+1 rows.  A full scalar
+        // band, however, can have KL > NBMAX (the BVP endpoint safety route
+        // is one such case).  Retain the same panel width but provision all
+        // possible overflow rows so wide-band pivoting does not silently lose
+        // entries and report a false zero pivot.
+        let work31_ld = (kl + 1).max(nb_max + 1);
+        let work31_len = work31_ld * nb_max;
         Ok(Self {
             n,
             kl,
@@ -80,7 +85,7 @@ impl LapackStyleBandedLuFaithful {
             work13: vec![0.0; work13_len],
             work13_ld: nb_max + 1,
             work31: vec![0.0; work31_len],
-            work31_ld: nb_max + 1,
+            work31_ld,
             nb_max,
             panel_start: 0,
             panel_size: 0,

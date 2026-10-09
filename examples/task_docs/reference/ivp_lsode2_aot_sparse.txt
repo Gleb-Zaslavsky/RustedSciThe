@@ -1,0 +1,29 @@
+# LSODE2 task: dedicated LSODE2 configuration owns the stiff lifecycle.
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+lsode2_symbolic_execution: Aot
+lsode2_symbolic_assembly: AtomView
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: auto
+
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: prepared

@@ -35,8 +35,8 @@ use super::new::finite_difference::FiniteDifferenceJacobianCallback;
 use super::new::native_callbacks::{NativeJacobianFn, NativeResidualCallback, NativeResidualFn};
 use super::new::output::{RadauOutput, RadauOutputPolicy as InternalOutputPolicy};
 use super::new::solver::{
-    try_solve_dense_with_callbacks_with_output, try_solve_symbolic_dense_with_output,
-    RadauSolveResult,
+    RadauSolveResult, try_solve_dense_with_callbacks_with_output,
+    try_solve_symbolic_dense_with_output,
 };
 use super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
 
@@ -361,7 +361,10 @@ impl From<InternalError> for RadauError {
 /// Public telemetry report. Keys are stable names suitable for text/JSON
 /// export; timing scopes are diagnostic and parent/child scopes are not
 /// additive. `allocations` counts explicit workspace/materialization events
-/// observed by Radau, not every heap allocation in the process.
+/// observed by Radau, not every heap allocation in the process. `worker_count`
+/// is the effective Rayon pool size; `configured_worker_count` is the positive
+/// `RAYON_NUM_THREADS` request when present, or zero when the process did not
+/// provide one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadauTelemetryScopeKind {
     /// An inclusive top-level diagnostic scope.
@@ -532,6 +535,7 @@ impl RadauTelemetryReport {
             ("parallel_dispatches", c.parallel_dispatches),
             ("sequential_dispatches", c.sequential_dispatches),
             ("worker_count", c.worker_count),
+            ("configured_worker_count", c.configured_worker_count),
             ("aot_chunk_dispatches", c.aot_chunk_dispatches),
             ("aot_parallel_dispatches", c.aot_parallel_dispatches),
             ("aot_chunks", c.aot_chunks),
@@ -605,7 +609,10 @@ impl RadauTelemetryReport {
             let entry = report.counters.entry(key).or_default();
             if matches!(
                 key,
-                "parallel_dispatch_applicable" | "aot_chunking_applicable" | "worker_count"
+                "parallel_dispatch_applicable"
+                    | "aot_chunking_applicable"
+                    | "worker_count"
+                    | "configured_worker_count"
             ) {
                 *entry = (*entry).max(value);
             } else {

@@ -126,7 +126,7 @@
 //! - Clear error messages for debugging
 
 use crate::numerical::BDF::BDF_solver::{
-    BDF, BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
+    BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError, BDF,
 };
 pub use crate::numerical::BDF::BDF_solver::{BdfJacobianCallbackError, BdfJacobianSource};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
@@ -139,13 +139,13 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
+    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig, prepare_generated_symbolic_ivp_problem,
-    prepare_generated_symbolic_ivp_residual_problem,
+    SymbolicIvpGeneratedBackendConfig,
 };
 extern crate nalgebra as na;
-use crate::Utils::plots::plots_ref;
 use crate::numerical::BDF::common::NumberOrVec;
+use crate::Utils::plots::plots_ref;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
@@ -1583,6 +1583,12 @@ impl ODEsolver {
         Ok(())
     }
 
+    /// Reports whether symbolic/native callbacks and the selected linear
+    /// backend have already been prepared for continuation or restart.
+    pub fn is_backend_prepared(&self) -> bool {
+        self.backend_prepared
+    }
+
     fn try_generate_native_numeric(&mut self) -> Result<(), BdfConfigurationError> {
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
@@ -3011,7 +3017,7 @@ mod tests_generated_backend_heavy_dense_aot {
     use crate::symbolic::symbolic_ivp_generated::{
         DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
     };
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

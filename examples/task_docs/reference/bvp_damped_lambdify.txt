@@ -1,0 +1,31 @@
+# BVP_Damp task settings use the dedicated BVP_Damp adapter.
+# `BVP` is not the BVP_sci collocation route. Comments are ignored.
+task
+solver: BVP
+strategy: Damped
+# method chooses Dense/Sparse/Banded linear algebra; it does not choose the
+# symbolic frontend or Lambdify/AOT execution mode.
+method: Sparse
+frontend: AtomViewNative
+execution: Lambdify
+
+# arg is the independent variable; RHS entries follow unknowns order.
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+# Endpoint suffixes select left/right boundary values.
+boundary_conditions
+y_left: 1.0
+y_right: 0.0
+
+# This is an intentionally small interactive mesh.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 16
+
+# The scalar guess is expanded over the initial mesh.
+initial_guess
+y: 0.0

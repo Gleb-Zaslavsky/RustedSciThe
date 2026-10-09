@@ -11,30 +11,31 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks,
+    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
+    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
 };
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
+    NativeJacobianStorage,
 };
 use super::native_preflight::{
-    Lsode2NativeStepProbeSummary, run_native_step_preflight,
-    run_native_step_preflight_with_prepared_callbacks,
+    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
+    Lsode2NativeStepProbeSummary,
 };
 use super::native_step_engine::{
     Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
-};
 use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
 use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
 use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -382,6 +383,52 @@ impl Lsode2Solver {
         Ok(())
     }
 
+    /// Restarts a prepared LSODE2 runtime from a new state and interval.
+    ///
+    /// The BDF bridge retains prepared symbolic/generated callbacks and only
+    /// rebuilds mutable integration history, Jacobian values, and factors.
+    /// Native callback state and lifecycle telemetry remain attached to the
+    /// same prepared model.
+    pub fn try_restart_with_initial_state(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+    ) -> Result<(), Lsode2Error> {
+        if !t0.is_finite() || !t_bound.is_finite() || t0 == t_bound {
+            return Err(Lsode2Error::InvalidConfig(
+                "restart interval must be finite and nonzero".to_string(),
+            ));
+        }
+        if y0.is_empty() || y0.iter().any(|value| !value.is_finite()) {
+            return Err(Lsode2Error::InvalidConfig(
+                "restart state must be nonempty and finite".to_string(),
+            ));
+        }
+        if y0.len() != self.config.y0.len() {
+            return Err(Lsode2Error::InvalidConfig(
+                "restart state dimension differs from the prepared problem".to_string(),
+            ));
+        }
+
+        // The LSODE facade may have prepared only its native callback layer.
+        // The restart path delegates mutable integration state to the BDF
+        // bridge, so make that bridge prepared before handing it the segment.
+        self.prepare()?;
+        self.prepare_bridge()?;
+        self.inner
+            .try_restart_with_initial_state(t0, y0.clone(), t_bound)
+            .map_err(|error| Lsode2Error::InvalidConfig(error.to_string()))?;
+        self.config.t0 = t0;
+        self.config.y0 = y0;
+        self.config.t_bound = t_bound;
+        self.native_override_result = None;
+        self.native_override_status = None;
+        self.native_integration_preview = None;
+        self.native_integration_solve = None;
+        Ok(())
+    }
+
     /// Returns the generated-backend resolver after preparation.
     ///
     /// AOT preparation may publish a new resolver snapshot inside the BDF
@@ -621,6 +668,12 @@ impl Lsode2Solver {
             .unwrap_or_else(|| self.inner.get_status())
     }
 
+    /// Compatibility status accessor for older examples. New code should use
+    /// [`Self::status`] and handle the solver-owned string directly.
+    pub fn get_status(&self) -> Option<String> {
+        Some(self.status().to_owned())
+    }
+
     pub fn statistics(&self) -> IvpBackendStatistics {
         let bridge = self.inner.get_statistics();
         let bridge_has_activity = bridge.solve_calls > 0
@@ -704,6 +757,12 @@ impl Lsode2Solver {
                 .bridge_bdf_nlu_total
                 .max(native.native_linear_solve_calls),
         }
+    }
+
+    /// Compatibility statistics accessor for older examples. The native API
+    /// returns a concrete snapshot because a prepared solver always owns one.
+    pub fn get_statistics(&self) -> Option<IvpBackendStatistics> {
+        Some(self.statistics())
     }
 
     /// Returns LSODE2-native statistics collected at the facade level.

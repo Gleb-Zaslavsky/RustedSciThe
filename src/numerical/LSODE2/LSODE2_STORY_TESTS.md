@@ -38,6 +38,17 @@ debug reports are correctness or diagnostic evidence only. The environment
 variable `RST_TEST_REPORT_PROFILE` may override the profile label for an
 isolated child-process harness.
 
+## Compact Release Matrix
+
+`benches/lsode2_workloads.rs` owns the bounded cross-axis release evidence. It
+keeps one compact Tabled document covering `ExprLegacy` versus `AtomView`,
+Lambdify Sequential/Parallel/Auto, AOT whole/chunked routes,
+Dense/nalgebra, Sparse/faer and faithful Banded LU, representative scalar,
+chemical, orbital and diffusion workloads, warm continuation, parity and
+stage/counter telemetry. `scripts/lsode2_release_matrix.ps1` runs the story
+gates and this matrix independently, continuing after failures and separating
+compact `reports/` from raw `technical/` output.
+
 ## Current Release Gates
 
 The next release slice should repeat the Lambdify stage breakdown, large

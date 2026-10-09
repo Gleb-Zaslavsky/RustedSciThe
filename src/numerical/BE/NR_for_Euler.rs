@@ -6,8 +6,8 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
-    prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
+    SymbolicIvpGeneratedBackendConfig,
 };
 use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
@@ -1332,11 +1332,9 @@ mod tests {
         assert_eq!(uncapped, 1.0);
         assert_eq!(solver.statistics().residual_calls, 2);
         assert_eq!(solver.statistics().jacobian_calls, 2);
-        assert!(
-            solver
-                .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
-                .is_err()
-        );
+        assert!(solver
+            .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
+            .is_err());
     }
 
     #[test]
@@ -1360,11 +1358,9 @@ mod tests {
                 .as_slice(),
             &[2.0]
         );
-        assert!(
-            solver
-                .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
-                .is_err()
-        );
+        assert!(solver
+            .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
+            .is_err());
     }
 
     #[test]

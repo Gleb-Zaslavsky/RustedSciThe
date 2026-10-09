@@ -3,6 +3,7 @@ pub mod block_tridiag_bench_helpers;
 pub mod block_tridiagonal;
 pub mod block_tridiagonal_lu;
 pub mod block_tridiagonal_lu_consistent;
+pub mod bordered_block_tridiagonal;
 pub mod dense_block_kernels;
 pub mod error;
 pub mod general_lu;
@@ -42,6 +43,7 @@ pub use dense_block_kernels::{
 
 pub use block_tridiagonal_lu::BlockTridiagonalLu;
 pub use block_tridiagonal_lu_consistent::BlockTridiagonalLuConsistent;
+pub use bordered_block_tridiagonal::BorderedBlockTridiagonal;
 pub use solver_traits::{DirectLinearSolver, FaerSparseLuSolver};
 
 pub use solver_policy::{FallbackPolicy, LinearSolveError, LinearSolverConfig, LinearSolverPolicy};

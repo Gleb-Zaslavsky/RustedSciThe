@@ -224,14 +224,12 @@ fn case_10_lsode2_minimal_numerical() {
     )
     .with_faithful_bdf_solve(100_000, 100_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(cfg);
+    let mut solver =
+        RustedSciThe::numerical::LSODE2::Lsode2Solver::new(cfg).expect("LSODE2 preparation failed");
     solver.solve();
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y = y[(y.nrows() - 1, 0)];
     println!(
         "LSODE2(min) status = {}",
         solver.get_status().unwrap_or_default()
@@ -261,14 +259,12 @@ fn case_11_lsode2_minimal_lambdify() {
     })
     .with_faithful_bdf_solve(100_000, 100_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(cfg);
+    let mut solver =
+        RustedSciThe::numerical::LSODE2::Lsode2Solver::new(cfg).expect("LSODE2 preparation failed");
     solver.solve();
     let (t, y) = solver.get_result();
-    let final_t = t.as_ref().map(|mesh| mesh[mesh.len() - 1]).unwrap_or(0.0);
-    let final_y = y
-        .as_ref()
-        .map(|sol| sol[(sol.nrows() - 1, 0)])
-        .unwrap_or(f64::NAN);
+    let final_t = t[t.len() - 1];
+    let final_y = y[(y.nrows() - 1, 0)];
     println!(
         "LSODE2(lambdify) status = {}",
         solver.get_status().unwrap_or_default()

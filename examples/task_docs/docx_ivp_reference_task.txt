@@ -1,0 +1,19 @@
+﻿task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+parameters: a
+parameter_values: 2.0
+unknowns: y
+rhs: $-a * y + 1.0$
+
+initial_conditions
+t0: 0.0
+t_end: 0.5
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-6

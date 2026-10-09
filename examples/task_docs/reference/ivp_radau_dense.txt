@@ -1,0 +1,25 @@
+# Radau task contract. Use the dedicated Radau API for production settings.
+task
+solver: IVP
+method: Radau5
+
+equations
+arg: t
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+mode: prepared

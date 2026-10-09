@@ -57,8 +57,11 @@ pub struct NRBVP {
     adaptive: bool, // flag indicating if adaptive grid should be used
     pub new_grid_enabled: bool,  //flag indicating if the grid should be refined
     grid_refinemens: usize,      //
+    /// When set, a prepared continuation solve starts from `y` instead of
+    /// reloading the structural initial-guess matrix.
+    prepared_iterate: bool,
     number_of_refined_intervals: usize, //number of refined intervals
-    bandwidth: (usize, usize),   //bandwidth
+    bandwidth: (usize, usize),          //bandwidth
     generated_backend_config: GeneratedBackendConfig, // generated backend selection config
     numeric_rhs: Option<NumericBvpRhs>, // pure numeric RHS source for NumericOnly route
     numeric_jacobian: Option<NumericBvpJacobian>, // optional continuous RHS Jacobian

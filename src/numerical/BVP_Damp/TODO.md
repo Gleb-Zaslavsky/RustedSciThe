@@ -2922,3 +2922,21 @@ the comparison oracle.
 - [ ] Every optimization must preserve the current rollback checkpoint
   `ead446a`, the ExprLegacy oracle and the historical AtomView comparison
   route. No change is production-accepted from a single noisy run.
+
+## Compact Release Matrix And Reporting
+
+- [x] Add `benches/bvp_damp_workloads.rs` as a bounded Tabled dashboard across
+  Damped/Frozen, Dense/Sparse/Banded, ExprLegacy/AtomView,
+  Sequential/Parallel/Auto and prepared parameter continuation.
+- [x] Keep the dashboard non-fail-fast at row level: a route error is rendered
+  as a status row instead of aborting all remaining comparisons.
+- [x] Add `scripts/bvp_damp_release_matrix.ps1` with independent story/bench
+  steps, separate compact `reports/` and raw `technical/` directories, and
+  optional ignored stories, AOT rows and long Criterion instruments.
+- [x] Keep AOT compiler lifecycle opt-in for the compact matrix; default
+  Lambdify rows remain suitable for a bounded smoke/release check.
+- [ ] Run the full BVP_Damp release matrix and archive its compact tables after
+  the dashboard has been reviewed on the target release machine.
+- [ ] Add matched large-workload rows after the first bounded release slice;
+  do not infer production-sized break-even points from the default `n_steps=32`
+  dashboard.

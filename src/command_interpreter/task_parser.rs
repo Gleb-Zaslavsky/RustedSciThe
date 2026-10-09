@@ -129,13 +129,13 @@
 //! let result = parser.parse_document().unwrap();
 //! ```
 use nom::{
-    IResult, Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, alphanumeric1},
     combinator::{map, recognize},
     multi::many0,
     sequence::pair,
+    IResult, Parser,
 };
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -163,7 +163,7 @@ use tabled::{Table, Tabled};
 ///     Some("key: abc, next_key".to_string())
 /// );
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     /// The specific category of parsing error
     pub kind: ParseErrorKind,
@@ -206,7 +206,7 @@ pub struct ParseError {
 /// - Use `TemplateValidation` for missing required fields or unexpected sections
 /// - Use `PseudonymResolution` when pseudonym mappings fail or are ambiguous
 /// - Use `FileError` for any file I/O related issues during document loading
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseErrorKind {
     /// Section header is malformed, missing, or contains invalid characters.
     ///
@@ -267,6 +267,15 @@ pub enum ParseErrorKind {
     /// - Circular pseudonym references
     /// - Pseudonym configuration conflicts
     PseudonymResolution,
+
+    /// Two section or field aliases resolve to the same canonical name.
+    AliasCollision,
+
+    /// Two names become identical after the configured case normalization.
+    CaseNormalizationCollision,
+
+    /// The parser configuration itself is invalid before input parsing starts.
+    InvalidConfiguration,
 
     /// File system operation failed during document loading.
     ///
@@ -395,9 +404,33 @@ pub struct DocumentParser {
     pub field_name_pseudonims: Option<HashMap<String, String>>,
     pub string_result: Option<HashMap<String, HashMap<String, Option<Vec<String>>>>>,
     pub error: Option<String>,
+    configuration_error: Option<ParseError>,
 }
 
 impl DocumentParser {
+    /// Attach a source position to semantic diagnostics that are discovered
+    /// after the nom parser has already produced a map. The semantic pass
+    /// still knows the offending source token, so diagnostics should not fall
+    /// back to the old position-less `ParseError::simple` form.
+    fn semantic_error_at_token(
+        &self,
+        kind: ParseErrorKind,
+        context: String,
+        token: &str,
+    ) -> ParseError {
+        self.input
+            .find(token)
+            .map(|offset| {
+                create_positioned_error(
+                    kind.clone(),
+                    context.clone(),
+                    &self.input[offset..],
+                    &self.input,
+                )
+            })
+            .unwrap_or_else(|| ParseError::simple(kind, context))
+    }
+
     /// Create a new DocumentParser with input
     pub fn new(input: String) -> Self {
         Self {
@@ -408,6 +441,7 @@ impl DocumentParser {
             field_name_pseudonims: None,
             string_result: None,
             error: None,
+            configuration_error: None,
         }
     }
 
@@ -417,11 +451,78 @@ impl DocumentParser {
         self
     }
 
+    /// Parse the document while preserving the parser error category.
+    pub fn parse_document_typed(&mut self) -> Result<&DocumentMap, ParseError> {
+        if let Some(error) = &self.configuration_error {
+            return Err(error.clone());
+        }
+
+        let result = parse_document(&self.input)?;
+        let result = self.try_to_real_names_typed(Some(result))?.ok_or_else(|| {
+            ParseError::simple(
+                ParseErrorKind::InvalidSection,
+                "document parser returned no result".to_string(),
+            )
+        })?;
+        self.result = Some(result);
+        self.error = None;
+        Ok(self.result.as_ref().expect("result was just stored"))
+    }
+
+    /// Parse and validate a templated document with a typed error contract.
+    pub fn parse_document_as_typed(&mut self) -> Result<&DocumentMap, ParseError> {
+        if let Some(error) = &self.configuration_error {
+            return Err(error.clone());
+        }
+        if self.template.is_some() {
+            self.validate_template().map_err(|message| {
+                ParseError::simple(ParseErrorKind::TemplateValidation, message)
+            })?;
+        }
+
+        let template_for_parsing = self
+            .template
+            .as_ref()
+            .map(|template| self.convert_template_to_pseudonyms(template));
+        let result = parse_document_as(&self.input, template_for_parsing)?;
+        let result = self.try_to_real_names_typed(Some(result))?.ok_or_else(|| {
+            ParseError::simple(
+                ParseErrorKind::InvalidSection,
+                "document parser returned no result".to_string(),
+            )
+        })?;
+        if let Some(template) = &self.template {
+            self.validate_against_template(&result, template)
+                .map_err(|message| {
+                    ParseError::simple(ParseErrorKind::TemplateValidation, message)
+                })?;
+        }
+        self.result = Some(result);
+        self.error = None;
+        Ok(self.result.as_ref().expect("result was just stored"))
+    }
+
     /// Parse the document with enhanced error handling
     pub fn parse_document(&mut self) -> Result<&DocumentMap, String> {
+        if let Some(error) = &self.configuration_error {
+            let message = error.to_string();
+            self.error = Some(message.clone());
+            return Err(message);
+        }
         match parse_document(&self.input) {
             Ok(result) => {
-                let result = self.to_real_names(Some(result)).unwrap();
+                let result = self
+                    .try_to_real_names_typed(Some(result))
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        self.error = Some(message.clone());
+                        message
+                    })?;
+                let Some(result) = result else {
+                    let error = "document parser returned no result".to_string();
+                    self.error = Some(error.clone());
+                    return Err(error);
+                };
                 self.result = Some(result);
                 self.error = None;
                 Ok(self.result.as_ref().unwrap())
@@ -436,6 +537,11 @@ impl DocumentParser {
 
     /// Parse document with template support and validation
     pub fn parse_document_as(&mut self) -> Result<&DocumentMap, String> {
+        if let Some(error) = &self.configuration_error {
+            let message = error.to_string();
+            self.error = Some(message.clone());
+            return Err(message);
+        }
         // First validate template if present
         if let Some(_) = &self.template {
             if let Err(e) = self.validate_template() {
@@ -453,7 +559,18 @@ impl DocumentParser {
 
         match parse_document_as(&self.input, template_for_parsing) {
             Ok(result) => {
-                let result = self.to_real_names(Some(result)).unwrap();
+                let result = self
+                    .try_to_real_names_typed(Some(result))
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        self.error = Some(message.clone());
+                        message
+                    })?;
+                let Some(result) = result else {
+                    let error = "document parser returned no result".to_string();
+                    self.error = Some(error.clone());
+                    return Err(error);
+                };
 
                 // Validate parsed result against template
                 if let Some(template) = &self.template {
@@ -504,6 +621,11 @@ impl DocumentParser {
 
     /// Parse specific sections by titles (titles should be real names)
     pub fn parse_this_sections(&mut self, titles: Vec<String>) -> Result<&DocumentMap, String> {
+        if let Some(error) = &self.configuration_error {
+            let message = error.to_string();
+            self.error = Some(message.clone());
+            return Err(message);
+        }
         // First parse the entire document to discover which pseudonyms are actually used
         let full_doc = match parse_document(&self.input) {
             Ok(doc) => doc,
@@ -515,7 +637,18 @@ impl DocumentParser {
 
         match parse_this_sections(&self.input, parsing_titles) {
             Ok(result) => {
-                let result = self.to_real_names(Some(result)).unwrap();
+                let result = self
+                    .try_to_real_names_typed(Some(result))
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        self.error = Some(message.clone());
+                        message
+                    })?;
+                let Some(result) = result else {
+                    let error = "document parser returned no result".to_string();
+                    self.error = Some(error.clone());
+                    return Err(error);
+                };
                 self.result = Some(result);
                 self.error = None;
                 Ok(self.result.as_ref().unwrap())
@@ -847,56 +980,114 @@ impl DocumentParser {
     /// pseudonims are given as "real name of field":{vec!["names user can use for the name of field"]}
     /// Converts HashMap<String, Vec<String>> to HashMap<String, String>
     /// Each element of the Vec becomes a key, and the original key becomes its value
+    pub fn try_with_pseudonims(
+        &mut self,
+        headers_pseudonims: Option<HashMap<String, Vec<String>>>,
+        field_name_pseudonims: Option<HashMap<String, Vec<String>>>,
+    ) -> Result<(), String> {
+        self.try_with_pseudonims_typed(headers_pseudonims, field_name_pseudonims)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Configure aliases while retaining a structured parser error.
+    pub fn try_with_pseudonims_typed(
+        &mut self,
+        headers_pseudonims: Option<HashMap<String, Vec<String>>>,
+        field_name_pseudonims: Option<HashMap<String, Vec<String>>>,
+    ) -> Result<(), ParseError> {
+        let headers = headers_pseudonims
+            .as_ref()
+            .map(invert_vec_map_checked_typed)
+            .transpose()?;
+        let fields = field_name_pseudonims
+            .as_ref()
+            .map(invert_vec_map_checked_typed)
+            .transpose()?;
+        // Preserve the historical compatibility semantics: `None` means
+        // "leave this alias namespace unchanged", not "clear it".
+        if headers_pseudonims.is_some() {
+            self.headers_pseudonims = headers;
+        }
+        if field_name_pseudonims.is_some() {
+            self.field_name_pseudonims = fields;
+        }
+        self.configuration_error = None;
+        Ok(())
+    }
+
+    /// Compatibility wrapper for callers that cannot propagate setup errors.
     pub fn with_pseudonims(
         &mut self,
         headers_pseudonims: Option<HashMap<String, Vec<String>>>,
         field_name_pseudonims: Option<HashMap<String, Vec<String>>>,
     ) {
-        if let Some(headers_pseudonims) = headers_pseudonims {
-            let headers_pseudonims = invert_vec_map(&headers_pseudonims);
-            self.headers_pseudonims = Some(headers_pseudonims);
-        }
-
-        if let Some(field_name_pseudonims) = field_name_pseudonims {
-            let field_name_pseudonims = invert_vec_map(&field_name_pseudonims);
-            self.field_name_pseudonims = Some(field_name_pseudonims);
+        if let Err(error) =
+            self.try_with_pseudonims_typed(headers_pseudonims, field_name_pseudonims)
+        {
+            self.configuration_error = Some(error);
         }
     }
 
-    pub fn to_real_names(&self, result: Option<DocumentMap>) -> Option<DocumentMap> {
-        if let Some(mut doc_map) = result {
-            // Handle header pseudonyms
-            if let Some(headers_pseudonims) = &self.headers_pseudonims {
-                let mut new_doc_map = HashMap::new();
-                for (header, section_map) in doc_map {
-                    let real_header = headers_pseudonims
-                        .get(&header)
-                        .map(|s| s.clone())
-                        .unwrap_or(header);
-                    new_doc_map.insert(real_header, section_map);
-                }
-                doc_map = new_doc_map;
-            }
+    /// Resolve aliases and reject two source keys collapsing to one output key.
+    pub fn try_to_real_names(
+        &self,
+        result: Option<DocumentMap>,
+    ) -> Result<Option<DocumentMap>, String> {
+        self.try_to_real_names_typed(result)
+            .map_err(|error| error.to_string())
+    }
 
-            // Handle field name pseudonyms
-            if let Some(field_name_pseudonims) = &self.field_name_pseudonims {
-                for (_, section_map) in doc_map.iter_mut() {
-                    let mut new_section_map = HashMap::new();
-                    for (field_name, values) in section_map.drain() {
-                        let real_field_name = field_name_pseudonims
-                            .get(&field_name)
-                            .map(|s| s.clone())
-                            .unwrap_or(field_name);
-                        new_section_map.insert(real_field_name, values);
-                    }
-                    *section_map = new_section_map;
+    /// Resolve aliases without losing the collision category.
+    pub fn try_to_real_names_typed(
+        &self,
+        result: Option<DocumentMap>,
+    ) -> Result<Option<DocumentMap>, ParseError> {
+        let Some(mut doc_map) = result else {
+            return Ok(None);
+        };
+
+        if let Some(aliases) = &self.headers_pseudonims {
+            let mut resolved = DocumentMap::new();
+            for (header, section) in doc_map {
+                let source_header = header.clone();
+                let name = aliases.get(&header).cloned().unwrap_or(header);
+                if resolved.insert(name.clone(), section).is_some() {
+                    return Err(self.semantic_error_at_token(
+                        ParseErrorKind::AliasCollision,
+                        format!("section alias collision: multiple headers resolve to `{name}`"),
+                        &source_header,
+                    ));
                 }
             }
-
-            Some(doc_map)
-        } else {
-            None
+            doc_map = resolved;
         }
+
+        if let Some(aliases) = &self.field_name_pseudonims {
+            for (section, fields) in doc_map.iter_mut() {
+                let mut resolved = HashMap::new();
+                for (field, values) in fields.drain() {
+                    let source_field = field.clone();
+                    let name = aliases.get(&field).cloned().unwrap_or(field);
+                    if resolved.insert(name.clone(), values).is_some() {
+                        return Err(self.semantic_error_at_token(
+                            ParseErrorKind::AliasCollision,
+                            format!(
+                                "field alias collision in section `{section}`: multiple fields resolve to `{name}`"
+                            ),
+                            &source_field,
+                        ));
+                    }
+                }
+                *fields = resolved;
+            }
+        }
+
+        Ok(Some(doc_map))
+    }
+
+    /// Compatibility wrapper preserving the historical `Option` API.
+    pub fn to_real_names(&self, result: Option<DocumentMap>) -> Option<DocumentMap> {
+        self.try_to_real_names(result).ok().flatten()
     }
     /// Find actual pseudonyms used in the document that correspond to requested real names
     pub fn find_actual_pseudonyms(
@@ -1008,7 +1199,16 @@ impl DocumentParser {
         self.input = result;
     }
 
-    pub fn keys_to_lower_case(&mut self, exception: Option<Vec<String>>) {
+    pub fn try_keys_to_lower_case(&mut self, exception: Option<Vec<String>>) -> Result<(), String> {
+        self.try_keys_to_lower_case_typed(exception)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Normalize control keys without losing case-collision diagnostics.
+    pub fn try_keys_to_lower_case_typed(
+        &mut self,
+        exception: Option<Vec<String>>,
+    ) -> Result<(), ParseError> {
         if let Some(ref result) = self.result {
             let mut new_result = DocumentMap::new();
             for (key, value) in result {
@@ -1026,11 +1226,39 @@ impl DocumentParser {
                     } else {
                         nested_key.to_lowercase()
                     };
-                    new_section_map.insert(new_nested_key, nested_value.clone());
+                    if new_section_map
+                        .insert(new_nested_key.clone(), nested_value.clone())
+                        .is_some()
+                    {
+                        return Err(self.semantic_error_at_token(
+                            ParseErrorKind::CaseNormalizationCollision,
+                            format!(
+                                "case-normalization collision in section `{key}` for field `{new_nested_key}`"
+                            ),
+                            &nested_key,
+                        ));
+                    }
                 }
-                new_result.insert(new_key, new_section_map);
+                if new_result
+                    .insert(new_key.clone(), new_section_map)
+                    .is_some()
+                {
+                    return Err(self.semantic_error_at_token(
+                        ParseErrorKind::CaseNormalizationCollision,
+                        format!("case-normalization collision for section `{new_key}`"),
+                        &key,
+                    ));
+                }
             }
             self.result = Some(new_result);
+        }
+        Ok(())
+    }
+
+    /// Compatibility wrapper; task parsers should use the fallible variant.
+    pub fn keys_to_lower_case(&mut self, exception: Option<Vec<String>>) {
+        if let Err(error) = self.try_keys_to_lower_case(exception) {
+            self.error = Some(error);
         }
     }
 }
@@ -1044,6 +1272,35 @@ pub fn invert_vec_map(map: &HashMap<String, Vec<String>>) -> HashMap<String, Str
         }
     }
     result
+}
+
+/// Invert aliases without silently selecting the last declaration on collision.
+pub fn invert_vec_map_checked(
+    map: &HashMap<String, Vec<String>>,
+) -> Result<HashMap<String, String>, String> {
+    invert_vec_map_checked_typed(map).map_err(|error| error.to_string())
+}
+
+/// Invert aliases and retain a typed collision error for task adapters.
+pub fn invert_vec_map_checked_typed(
+    map: &HashMap<String, Vec<String>>,
+) -> Result<HashMap<String, String>, ParseError> {
+    let mut result = HashMap::new();
+    for (real_name, aliases) in map {
+        for alias in aliases {
+            if let Some(previous) = result.insert(alias.clone(), real_name.clone()) {
+                if previous != *real_name {
+                    return Err(ParseError::simple(
+                        ParseErrorKind::AliasCollision,
+                        format!(
+                            "pseudonym collision: `{alias}` maps to both `{previous}` and `{real_name}`"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 /// enum to represent different value types:
 #[derive(Debug, Clone, PartialEq)]

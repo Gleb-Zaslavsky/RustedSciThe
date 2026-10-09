@@ -3138,7 +3138,12 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
         return prepare_generated_symbolic_ivp_native_sparse_backend(&baseline_problem, &config);
     }
 
-    let baseline_problem = prepare_symbolic_ivp_problem(equations, variables, time_arg, options)?;
+    let telemetry = options.telemetry.clone();
+    let baseline_problem = measure_cold_stage(
+        &telemetry,
+        IvpColdStage::SharedSymbolicProblemPreparation,
+        || prepare_symbolic_ivp_problem(equations, variables, time_arg, options),
+    )?;
     let aot_source = &baseline_problem;
     let variable_refs = aot_source
         .variables

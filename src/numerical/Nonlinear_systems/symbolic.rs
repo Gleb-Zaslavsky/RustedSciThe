@@ -26,6 +26,7 @@
 
 use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
+use crate::numerical::Nonlinear_systems::symbolic_atom::AtomNativeSymbolicBackend;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
     SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
     select_symbolic_nonlinear_backend,
@@ -35,7 +36,10 @@ use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
     LinkedDenseAotBackend, resolve_linked_dense_backend,
 };
-use crate::symbolic::codegen::codegen_manifest::PreparedProblemManifest;
+use crate::symbolic::codegen::codegen_manifest::{
+    GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedJacobianLayout,
+    PreparedProblemManifest, PreparedSymbolicRoute,
+};
 use crate::symbolic::codegen::codegen_provider_api::{
     BackendKind, MatrixBackend, PreparedDenseProblem,
 };
@@ -64,6 +68,26 @@ impl SymbolicBackendKind {
         match self {
             Self::Lambdify => "lambdify",
             Self::Aot => "aot",
+        }
+    }
+}
+
+/// Symbolic frontend used by the in-process Lambdify backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SymbolicLambdifyFrontend {
+    /// Historical boxed `Expr` differentiation and callback path.
+    #[default]
+    ExprLegacy,
+    /// Packed AtomView differentiation and prepared callback path.
+    AtomViewNative,
+}
+
+impl SymbolicLambdifyFrontend {
+    /// Returns the stable label used in reports and diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExprLegacy => "expr-legacy",
+            Self::AtomViewNative => "atom-native",
         }
     }
 }
@@ -173,6 +197,12 @@ pub enum PreparationStage {
     ExpressionParsing,
     /// Import/materialization of an already constructed expression graph.
     ExpressionGraphMaterialization,
+    /// One-time conversion from the caller's Expr graph into packed Atoms.
+    AtomConversion,
+    /// Structural scan identifying variables used by each Atom equation.
+    AtomDependencyAnalysis,
+    /// Direct differentiation of packed Atom expressions.
+    AtomDifferentiation,
     /// Differentiation of residual expressions into a Jacobian.
     JacobianDifferentiation,
     /// Preparation of residual evaluator callbacks.
@@ -196,6 +226,9 @@ impl PreparationStage {
         Self::InputValidation,
         Self::ExpressionParsing,
         Self::ExpressionGraphMaterialization,
+        Self::AtomConversion,
+        Self::AtomDependencyAnalysis,
+        Self::AtomDifferentiation,
         Self::JacobianDifferentiation,
         Self::ResidualCallbackPreparation,
         Self::JacobianCallbackPreparation,
@@ -656,6 +689,8 @@ pub struct SymbolicProblemOptions {
     pub equation_parameter_values: Option<DVector<f64>>,
     /// Backend used to prepare the symbolic provider.
     pub backend_config: SymbolicBackendConfig,
+    /// Frontend used by the in-process Lambdify backend.
+    pub lambdify_frontend: SymbolicLambdifyFrontend,
     /// Runtime execution policy for the prepared Lambdify backend.
     pub lambdify_execution_policy: LambdifyExecutionPolicy,
     /// Optional detailed preparation-stage telemetry.
@@ -696,6 +731,17 @@ impl SymbolicProblemOptions {
     pub fn with_lambdify_execution_policy(mut self, policy: LambdifyExecutionPolicy) -> Self {
         self.lambdify_execution_policy = policy;
         self
+    }
+
+    /// Selects the symbolic frontend used by the Lambdify backend.
+    pub fn with_lambdify_frontend(mut self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.lambdify_frontend = frontend;
+        self
+    }
+
+    /// Selects the packed AtomView-native Lambdify frontend.
+    pub fn with_atom_native_frontend(self) -> Self {
+        self.with_lambdify_frontend(SymbolicLambdifyFrontend::AtomViewNative)
     }
 
     /// Enables or disables detailed preparation-stage telemetry.
@@ -760,6 +806,7 @@ pub struct PreparedSymbolicNonlinearAotProblem<'a> {
     flattened_input_names: Vec<&'a str>,
     residual_fn_name: String,
     jacobian_fn_name: String,
+    frontend: SymbolicLambdifyFrontend,
     residual_strategy: ResidualChunkingStrategy,
     jacobian_strategy: DenseJacobianChunkingStrategy,
 }
@@ -826,7 +873,40 @@ impl<'a> PreparedSymbolicNonlinearAotProblem<'a> {
 
     /// Returns an owned manifest for the prepared dense AOT problem.
     pub fn manifest(&self) -> PreparedProblemManifest {
-        PreparedProblemManifest::from(&self.as_prepared_problem())
+        let mut manifest = PreparedProblemManifest::from(&self.as_prepared_problem());
+        manifest.symbolic_route = match self.frontend {
+            SymbolicLambdifyFrontend::ExprLegacy => PreparedSymbolicRoute::ExprLegacy,
+            SymbolicLambdifyFrontend::AtomViewNative => {
+                // AtomNative intentionally does not retain an Expr Jacobian.
+                // Describe the dense ABI from the public problem shape rather
+                // than manufacturing an empty historical Expr plan. This is
+                // the identity consumed by the native Atom emitter.
+                let rows = self.equations.len();
+                let cols = self.variable_refs.len();
+                manifest.io.jacobian_rows = rows;
+                manifest.io.jacobian_cols = cols;
+                manifest.io.jacobian_nnz = None;
+                manifest.io.jacobian_layout = Some(PreparedJacobianLayout::Dense);
+                manifest.functions = GeneratedFunctionsManifest {
+                    residual_fn_name: "eval_nonlinear_residual".to_owned(),
+                    residual_chunk_names: vec!["eval_nonlinear_residual".to_owned()],
+                    residual_chunks: vec![GeneratedChunkManifest {
+                        fn_name: "eval_nonlinear_residual".to_owned(),
+                        offset: 0,
+                        len: rows,
+                    }],
+                    jacobian_fn_name: "eval_nonlinear_jacobian".to_owned(),
+                    jacobian_chunk_names: vec!["eval_nonlinear_jacobian".to_owned()],
+                    jacobian_chunks: vec![GeneratedChunkManifest {
+                        fn_name: "eval_nonlinear_jacobian".to_owned(),
+                        offset: 0,
+                        len: rows * cols,
+                    }],
+                };
+                PreparedSymbolicRoute::AtomViewNative
+            }
+        };
+        manifest
     }
 
     /// Returns the stable manifest-derived problem key used by registry layers.
@@ -1235,18 +1315,32 @@ impl PreparedSymbolicBackend {
         variables: &[String],
         equation_parameters: Option<&[String]>,
         execution_policy: LambdifyExecutionPolicy,
+        frontend: SymbolicLambdifyFrontend,
         config: &SymbolicBackendConfig,
         preparation_recorder: Option<&mut PreparationTelemetryRecorder>,
     ) -> Result<Self, SolveError> {
         match config.kind {
             SymbolicBackendKind::Lambdify => Ok(Self {
-                backend: Box::new(LegacyLambdifySymbolicBackend::from_expressions(
-                    equations,
-                    variables,
-                    equation_parameters,
-                    execution_policy,
-                    preparation_recorder,
-                )?),
+                backend: match frontend {
+                    SymbolicLambdifyFrontend::ExprLegacy => Box::new(
+                        LegacyLambdifySymbolicBackend::from_expressions(
+                            equations,
+                            variables,
+                            equation_parameters,
+                            execution_policy,
+                            preparation_recorder,
+                        )?,
+                    ),
+                    SymbolicLambdifyFrontend::AtomViewNative => Box::new(
+                        AtomNativeSymbolicBackend::from_expressions(
+                            equations,
+                            variables,
+                            equation_parameters,
+                            execution_policy,
+                            preparation_recorder,
+                        )?,
+                    ),
+                },
             }),
             SymbolicBackendKind::Aot => Err(SolveError::InvalidConfig(
                 "symbolic nonlinear AOT backend is not wired yet; use SymbolicBackendKind::Lambdify for now".to_string(),
@@ -1364,6 +1458,8 @@ impl PreparedSymbolicBackend {
 pub struct SymbolicNonlinearProblem {
     /// Backend configuration used to prepare the symbolic provider.
     backend_config: SymbolicBackendConfig,
+    /// Frontend selected for the prepared Lambdify route.
+    lambdify_frontend: SymbolicLambdifyFrontend,
     /// Prepared symbolic residual/Jacobian backend.
     backend: PreparedSymbolicBackend,
     /// Original symbolic equations.
@@ -1503,6 +1599,11 @@ impl PreparedSymbolicNonlinearProblem {
         self.problem.lambdify_execution_policy()
     }
 
+    /// Returns the symbolic frontend selected for the Lambdify route.
+    pub fn lambdify_frontend(&self) -> SymbolicLambdifyFrontend {
+        self.problem.lambdify_frontend()
+    }
+
     /// Builds an AOT manifest view without changing the prepared backend.
     pub fn prepare_dense_aot_problem(
         &self,
@@ -1612,6 +1713,7 @@ impl SymbolicNonlinearProblem {
             options.equation_parameters,
             options.equation_parameter_values,
             options.lambdify_execution_policy,
+            options.lambdify_frontend,
             options.backend_config,
             options.preparation_telemetry,
         )
@@ -1637,6 +1739,7 @@ impl SymbolicNonlinearProblem {
             options.equation_parameters,
             options.equation_parameter_values,
             options.lambdify_execution_policy,
+            options.lambdify_frontend,
             SymbolicBackendConfig::lambdify(),
             options.preparation_telemetry,
         )?;
@@ -1743,6 +1846,7 @@ impl SymbolicNonlinearProblem {
             equation_parameters,
             equation_parameter_values,
             LambdifyExecutionPolicy::default(),
+            SymbolicLambdifyFrontend::ExprLegacy,
             backend_config,
             PreparationTelemetryMode::Disabled,
         )
@@ -1755,6 +1859,7 @@ impl SymbolicNonlinearProblem {
         equation_parameters: Option<Vec<String>>,
         equation_parameter_values: Option<DVector<f64>>,
         lambdify_execution_policy: LambdifyExecutionPolicy,
+        lambdify_frontend: SymbolicLambdifyFrontend,
         backend_config: SymbolicBackendConfig,
         preparation_telemetry: PreparationTelemetryMode,
     ) -> Result<Self, SolveError> {
@@ -1881,6 +1986,7 @@ impl SymbolicNonlinearProblem {
             &variables,
             parameter_names,
             lambdify_execution_policy,
+            lambdify_frontend,
             &backend_config,
             preparation_recorder.as_mut(),
         )?;
@@ -1902,6 +2008,7 @@ impl SymbolicNonlinearProblem {
 
         Ok(Self {
             backend_config,
+            lambdify_frontend,
             backend,
             equations,
             symbolic_jacobian,
@@ -2180,6 +2287,11 @@ impl SymbolicNonlinearProblem {
         self.backend.lambdify_execution_policy()
     }
 
+    /// Returns the symbolic frontend selected during preparation.
+    pub fn lambdify_frontend(&self) -> SymbolicLambdifyFrontend {
+        self.lambdify_frontend
+    }
+
     /// Builds a dense AOT-ready prepared problem from the symbolic nonlinear system.
     ///
     /// This is the narrow bridge from the nonlinear symbolic frontend into the
@@ -2218,6 +2330,7 @@ impl SymbolicNonlinearProblem {
             flattened_input_names,
             residual_fn_name: "eval_nonlinear_residual".to_string(),
             jacobian_fn_name: "eval_nonlinear_jacobian".to_string(),
+            frontend: self.lambdify_frontend,
             residual_strategy: options.residual_strategy,
             jacobian_strategy: options.jacobian_strategy,
         }

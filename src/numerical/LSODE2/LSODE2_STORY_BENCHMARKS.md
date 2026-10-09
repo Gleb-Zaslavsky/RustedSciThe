@@ -101,6 +101,45 @@ The callback bench remains the source for callback-only residual/Jacobian and
 parameter-rebind measurements. Do not infer callback performance from a full
 solve row when factorization, controller work, or RHS work dominates.
 
+## Compact Matrix Runner
+
+For bounded release evidence with one compact Tabled report, use
+`benches/lsode2_workloads.rs`:
+
+```powershell
+$env:RST_TEST_REPORT_DIR = "test_reports/LSODE2_release_manual/compact"
+$env:RST_TEST_REPORT_PROFILE = "release"
+$env:RST_TEST_REPORT_ARCHIVE = "always"
+$env:RST_TEST_REPORT_STDOUT = "off"
+$env:LSODE2_BENCH_COMPACT_WORKLOADS = "stiff-scalar,robertson,combustion-like,three-body,diffusion-chain"
+$env:LSODE2_BENCH_COMPACT_DIFFUSION_DIMENSIONS = "32,128"
+$env:LSODE2_BENCH_COMPACT_MATRICES = "dense,sparse,banded"
+$env:LSODE2_BENCH_COMPACT_ROUTES = "lambdify-sequential,lambdify-auto,aot-whole"
+$env:LSODE2_BENCH_COMPACT_CONTINUATION_COUNTS = "1,4"
+cargo bench --no-default-features --bench lsode2_workloads -- --noplot
+```
+
+The table covers Dense/nalgebra, Sparse/faer and faithful Banded LU, both
+symbolic frontends, Lambdify policy routes, AOT preparation, representative
+workloads, warm parameter continuation and frontend parity. Add
+`lambdify-parallel` or `aot-parallel2` for explicit dispatch/chunking evidence.
+The default diffusion sizes are bounded; large statistical baselines remain
+owned by the detailed Criterion targets.
+
+Rows retain route-local failures in `status` and continue the matrix. They
+report preparation, solve and continuation wall-clock, symbolic/Atom/AOT
+stages, factorization, callbacks, steps, workers, dispatches, chunks and
+parity. Parent/child stage timings are diagnostic and non-additive.
+
+Use `scripts/lsode2_release_matrix.ps1` for the non-fail-fast release sequence.
+It puts compact tables in `reports/` and compiler/Criterion output in
+`technical/`; ignored stories and the multi-hour continuation Criterion target
+are opt-in:
+
+```powershell
+.\scripts\lsode2_release_matrix.ps1 -IncludeIgnoredStories -IncludeDetailedCriterion -IncludeLongContinuation
+```
+
 Run the long parameter-continuation amortization benchmark:
 
 ```powershell

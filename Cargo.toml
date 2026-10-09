@@ -30,6 +30,11 @@ include = [
     "!examples/**/*[tT][eE][sS][tT]*.md",
     "!examples/**/*[sS][tT][oO][rR][yY]*.md",
     "!examples/**/tests/**/*.md",
+    # TODO notes and office documents are repository-only documentation.
+    "!src/**/*[tT][oO][dD][oO]*",
+    "!scripts/**/*[tT][oO][dD][oO]*",
+    "!benches/**/*[tT][oO][dD][oO]*",
+    "!examples/**/*[tT][oO][dD][oO]*",
     # Generated AOT directories and non-source artifacts.
     "!src/**/aot/**/*",
     "!src/**/generated/**/*",
@@ -99,6 +104,9 @@ include = [
     "!**/*.c",
     "!**/*.cpp",
     "!**/*.h",
+    "!**/*.dll",
+    "!**/*.doc",
+    "!**/*.docx",
     "!**/*.[pP][nN][gG]",
     "!**/*.[jJ][pP][gG]",
     "!**/*.[jJ][pP][eE][gG]",

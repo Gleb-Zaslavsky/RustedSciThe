@@ -1,0 +1,38 @@
+# BVP continuation contract with a prepared symbolic model.
+# Comments are ignored. The task parser keeps this file suitable for batch use.
+task
+solver: BVP
+strategy: Damped
+# Dense is the linear layout here; frontend and execution are separate options.
+method: Dense
+
+equations
+arg: x
+unknowns: y
+# `parameters` declares symbolic names. `parameter_values` supplies their
+# initial numeric binding before the continuation section starts.
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+boundary_conditions
+y_left: 1.0
+y_right: 0.0
+
+# t0/t_end define the interval; n_steps defines the initial mesh.
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 16
+
+# The next prepared segment can reuse the previous converged profile.
+initial_guess
+y: 0.0
+
+# The parameter must be declared above. Values are processed in this order.
+continuation
+parameter: rate
+values: 0.5, 1.0, 2.0
+# false means previous solution/state is reused; true requests segment restart.
+mode: prepared
+restart_each: false

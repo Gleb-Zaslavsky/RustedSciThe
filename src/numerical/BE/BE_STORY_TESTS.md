@@ -238,3 +238,33 @@ cargo check --no-default-features --example rus_be_aot_guide
 
 The native and symbolic examples can be run directly. The AOT examples also
 require `tcc` on `PATH`; they skip cleanly when it is unavailable.
+
+## Compact release dashboard
+
+`benches/be_workloads.rs` is the bounded Tabled dashboard for BE. It keeps the
+BE-specific axes explicit: native analytic versus native finite-difference
+callbacks, Lambdify ExprLegacy versus AtomViewNative, optional dense AOT/tcc,
+canonical workloads, diffusion dimensions, and warm parameter rebind series.
+BE has no Parallel/Auto or Sparse/Banded solver axis, so those are intentionally
+not fabricated in this matrix.
+
+```powershell
+cargo bench --no-default-features --bench be_workloads -- --noplot
+```
+
+The non-fail-fast release runner is `scripts/be_release_matrix.ps1`. It stores
+compact reports below `test_reports/BE_release_manual/<stamp>/reports` and
+Cargo/compiler transcripts below the sibling `technical` directory. Each story
+module and detailed bench target is an independent step.
+
+```powershell
+.\scripts\be_release_matrix.ps1 -IncludeIgnoredStories -IncludeAot
+```
+
+Use `-IncludeCriterion` for the existing detailed Criterion targets and
+`-IncludeAllocationAudit` for the allocator-sensitive history audit. A bounded
+multi-size dashboard slice is available with comma-separated dimensions:
+
+```powershell
+.\scripts\be_release_matrix.ps1 -Dimensions "8,32,64" -Continuation 4
+```

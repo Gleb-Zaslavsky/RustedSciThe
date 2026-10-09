@@ -64,8 +64,8 @@ pub use crate::numerical::Nonlinear_systems::symbolic::{
     PreparationStageTiming, PreparationTelemetry, PreparationTelemetryMode,
     PreparedSymbolicNonlinearAotProblem, PreparedSymbolicNonlinearProblem, SymbolicArtifactAction,
     SymbolicArtifactPolicy, SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions,
-    SymbolicNonlinearProblem, SymbolicPreparationFailure, SymbolicPreparationReport,
-    SymbolicProblemOptions,
+    SymbolicLambdifyFrontend, SymbolicNonlinearProblem, SymbolicPreparationFailure,
+    SymbolicPreparationReport, SymbolicProblemOptions,
 };
 pub use crate::numerical::Nonlinear_systems::symbolic_aot::{
     generated_aot_crate_from_symbolic_nonlinear_problem, materialize_symbolic_nonlinear_aot_build,

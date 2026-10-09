@@ -37,12 +37,12 @@
 //! - CSE and other IR passes,
 //! - residual/Jacobian-specific batch code generation.
 
-use crate::symbolic::View::CodegenIR_atom::{AtomCsePolicy, Lowerer as AtomLowerer};
-use crate::symbolic::View::atom::AtomView;
-use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, CodegenTaskPlan};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_metadata::SignatureCache;
+use crate::symbolic::View::atom::AtomView;
+use crate::symbolic::View::state::Symbol;
+use crate::symbolic::View::CodegenIR_atom::{AtomCsePolicy, Lowerer as AtomLowerer};
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -182,14 +182,29 @@ impl LinearBlock {
 
     /// Evaluate into a caller-provided output slice for verification tests only.
     pub fn eval_into(&self, args: &[f64], out: &mut [f64]) {
+        let mut temps = vec![0.0_f64; self.num_temps];
+        self.eval_into_with_temps(args, &mut temps, out);
+    }
+
+    /// Evaluate into caller-owned register and output buffers.
+    ///
+    /// This is the allocation-free execution entry point used by the
+    /// AtomNative BVP callback path. The caller owns the temporary register
+    /// storage and can retain its capacity across repeated residual/Jacobian
+    /// evaluations and parameter continuation steps.
+    pub fn eval_into_with_temps(&self, args: &[f64], temps: &mut [f64], out: &mut [f64]) {
         assert!(
             out.len() >= self.outputs.len(),
             "output buffer is too small: expected at least {}, got {}",
             self.outputs.len(),
             out.len()
         );
-
-        let mut temps = vec![0.0_f64; self.num_temps];
+        assert!(
+            temps.len() >= self.num_temps,
+            "temporary buffer is too small: expected at least {}, got {}",
+            self.num_temps,
+            temps.len()
+        );
 
         for instr in &self.instructions {
             match *instr {
@@ -3131,9 +3146,7 @@ mod tests {
         let source = block.emit();
 
         assert_eq!(block.fn_name, "eval_sparse_values_chunk_1");
-        assert!(
-            source.contains("pub fn eval_sparse_values_chunk_1(args: &[f64], out: &mut [f64])")
-        );
+        assert!(source.contains("pub fn eval_sparse_values_chunk_1(args: &[f64], out: &mut [f64])"));
         assert!(
             source.contains("// Sparse Jacobian values block: 3 rows x 4 cols, 1 non-zero values")
         );

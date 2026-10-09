@@ -60,6 +60,26 @@ impl GeneralBandedLuPartialPivot {
         self.pivot_epsilon = eps.max(0.0);
     }
 
+    /// Return inexpensive post-factorization conditioning indicators.
+    ///
+    /// These are deliberately not presented as a condition number. They are
+    /// useful diagnostics for a small Schur system: a tiny U pivot or a large
+    /// lower multiplier explains why a successful factorization can still
+    /// amplify a Newton RHS dramatically.
+    pub fn condition_diagnostics(&self) -> Option<(f64, f64)> {
+        if !self.is_factorized {
+            return None;
+        }
+        let n = self.n();
+        let min_abs_pivot = (0..n)
+            .map(|index| self.dense_lu[idx(n, index, index)].abs())
+            .fold(f64::INFINITY, f64::min);
+        let max_multiplier_norm = (0..n)
+            .flat_map(|row| (0..row).map(move |column| self.dense_lu[idx(n, row, column)].abs()))
+            .fold(0.0_f64, f64::max);
+        Some((min_abs_pivot, max_multiplier_norm))
+    }
+
     fn reset_pivots(&mut self) {
         for (i, p) in self.pivots.iter_mut().enumerate() {
             *p = i;

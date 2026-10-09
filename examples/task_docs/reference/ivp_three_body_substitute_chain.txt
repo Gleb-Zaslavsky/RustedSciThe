@@ -1,0 +1,35 @@
+# Small nonlinear IVP with recursive substitute aliases.
+task
+schema_version: 1
+solver: IVP
+method: RK45
+
+equations
+arg: t
+unknowns: x, v
+rhs: v, force
+parameters: omega, damping
+parameter_values: 2.0, 0.1
+
+substitute
+spring: omega*omega*x
+dissipation: damping*v
+force: -spring - dissipation
+
+initial_conditions
+t0: 0.0
+t_end: 2.0
+y0: [1.0, 0.0]
+
+solver_options
+rtol: 1e-8
+atol: 1e-10
+max_step: 0.02
+
+continuation
+parameters: omega, damping
+omega_values: 1.0, 2.0
+damping_values: 0.05, 0.1
+mode: fresh
+restart_policy: restart_each
+monotonic: allow

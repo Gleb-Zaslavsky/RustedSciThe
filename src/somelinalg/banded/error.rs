@@ -25,6 +25,13 @@ pub enum BandedError {
         value: f64,
     },
 
+    #[error("non-finite {stage} solution value at index={index}, value={value}")]
+    NonFiniteSolution {
+        stage: &'static str,
+        index: usize,
+        value: f64,
+    },
+
     #[error("solver has not been factorized")]
     NotFactorized,
 

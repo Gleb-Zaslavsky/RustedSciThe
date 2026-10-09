@@ -1,4 +1,4 @@
-use log::info;
+use crate::numerical::Nonlinear_systems::engine::nonlinear_log_info;
 use nalgebra::{DMatrix, DVector};
 
 use strum_macros::Display;
@@ -68,7 +68,7 @@ impl TrustRegionScaling {
         let n_params = jacobian.ncols();
         let mut diag = DVector::zeros(n_params);
         Self::update_marquardt_scaling(jacobian, &mut diag);
-        info!("\n Diagonal scaling vector created!: {}", diag);
+        nonlinear_log_info!("\n Diagonal scaling vector created!: {}", diag);
         diag
     }
     /// Update Marquardt scaling with current Jacobian (source: GSL file scaling.c)
@@ -251,9 +251,11 @@ impl ReductionRatioSolver {
             0.0
         };
 
-        info!(
+        nonlinear_log_info!(
             "rho = {}, actual_reduction = {}, predicted_reduction = {}",
-            rho, actual_reduction, predicted_reduction
+            rho,
+            actual_reduction,
+            predicted_reduction
         );
 
         rho
@@ -274,7 +276,7 @@ impl ReductionRatioSolver {
         let norm_f_trial = Fy_new.norm_squared();
 
         if norm_f_trial >= norm_f {
-            info!("Cost increased, rejecting step");
+            nonlinear_log_info!("Cost increased, rejecting step");
             return -1.0; // reject immediately if cost increased
         }
 
@@ -290,15 +292,19 @@ impl ReductionRatioSolver {
 
         if predicted_reduction > 0.0 {
             let rho = actual_reduction / predicted_reduction;
-            info!(
+            nonlinear_log_info!(
                 "rho = {}, actual_reduction = {}, predicted_reduction = {}",
-                rho, actual_reduction, predicted_reduction
+                rho,
+                actual_reduction,
+                predicted_reduction
             );
             return rho;
         } else {
-            info!(
+            nonlinear_log_info!(
                 "rho = {}, actual_reduction = {}, predicted_reduction = {}",
-                -1.0, actual_reduction, predicted_reduction
+                -1.0,
+                actual_reduction,
+                predicted_reduction
             );
             return -1.0; // reject immediately if predicted reduction is negative
         }
@@ -382,7 +388,7 @@ pub fn scaled_norm_common(diag: &DVector<f64>, vector: &DVector<f64>) -> f64 {
     }
 
     let scaled_norm = sum_squares.sqrt();
-    info!("scaled norm ||step*D|| {}", scaled_norm);
+    nonlinear_log_info!("scaled norm ||step*D|| {}", scaled_norm);
     scaled_norm
 }
 /////////////////////////////GSL CONVERGENCE CRITERIA///////////////////////////////////////////////////////////
@@ -397,9 +403,9 @@ pub fn test_convergence_gsl(
 ) -> (bool, i32) {
     let gtol = gtol.unwrap_or(1e-6);
     let ftol = ftol.unwrap_or(1e-6);
-    info!("Checking convergence conditions:");
-    info!("  xtol = {}, gtol = {}, ftol = {}", xtol, gtol, ftol);
-    info!(
+    nonlinear_log_info!("Checking convergence conditions:");
+    nonlinear_log_info!("  xtol = {}, gtol = {}, ftol = {}", xtol, gtol, ftol);
+    nonlinear_log_info!(
         "  ||dx|| = {}, ||g|| = {}, ||f|| = {}",
         dx.norm(),
         g.norm(),
@@ -412,8 +418,8 @@ pub fn test_convergence_gsl(
     // ═══════════════════════════════════════════════════════════════════════
 
     if test_parameter_change(dx, x, xtol) {
-        info!("CONVERGED: Parameter change test passed");
-        info!("  ||dx|| components are all < xtol = {}", xtol);
+        nonlinear_log_info!("CONVERGED: Parameter change test passed");
+        nonlinear_log_info!("  ||dx|| components are all < xtol = {}", xtol);
         return (true, 1);
     }
 
@@ -432,16 +438,17 @@ pub fn test_convergence_gsl(
     // Gradient convergence threshold
     let gradient_threshold = gtol * phi.max(1.0);
 
-    info!("Gradient test:");
-    info!("  gnorm = {}", gnorm);
-    info!("  phi = 0.5 * ||f||² = {}", phi);
-    info!("  threshold = gtol * max(phi, 1) = {}", gradient_threshold);
+    nonlinear_log_info!("Gradient test:");
+    nonlinear_log_info!("  gnorm = {}", gnorm);
+    nonlinear_log_info!("  phi = 0.5 * ||f||² = {}", phi);
+    nonlinear_log_info!("  threshold = gtol * max(phi, 1) = {}", gradient_threshold);
 
     if gnorm <= gradient_threshold {
-        info!("CONVERGED: Gradient test passed");
-        info!(
+        nonlinear_log_info!("CONVERGED: Gradient test passed");
+        nonlinear_log_info!(
             "  Scaled gradient norm {} <= threshold {}",
-            gnorm, gradient_threshold
+            gnorm,
+            gradient_threshold
         );
         return (true, 2);
     }
@@ -460,13 +467,14 @@ pub fn test_convergence_gsl(
     // NO CONVERGENCE
     // ═══════════════════════════════════════════════════════════════════════
 
-    info!("No convergence detected:");
-    info!("  Parameter change test: FAILED");
-    info!(
+    nonlinear_log_info!("No convergence detected:");
+    nonlinear_log_info!("  Parameter change test: FAILED");
+    nonlinear_log_info!(
         "  Gradient test: gnorm = {} > threshold = {}",
-        gnorm, gradient_threshold
+        gnorm,
+        gradient_threshold
     );
-    info!("  Function change test: DISABLED (following GSL)");
+    nonlinear_log_info!("  Function change test: DISABLED (following GSL)");
 
     (false, 0)
 }
@@ -476,7 +484,7 @@ fn test_parameter_change(dx: &DVector<f64>, x: &DVector<f64>, xtol: f64) -> bool
     let n = dx.len();
     let xtol_squared = xtol * xtol;
 
-    info!("\n Parameter change test (component-wise):");
+    nonlinear_log_info!("\n Parameter change test (component-wise):");
 
     for i in 0..n {
         let dx_i = dx[i];
@@ -484,7 +492,7 @@ fn test_parameter_change(dx: &DVector<f64>, x: &DVector<f64>, xtol: f64) -> bool
 
         // Absolute tolerance test
         if dx_i.abs() > xtol {
-            info!(
+            nonlinear_log_info!(
                 "  Component {}: |dx| = {} > xtol = {} (FAIL absolute)",
                 i,
                 dx_i.abs(),
@@ -495,7 +503,7 @@ fn test_parameter_change(dx: &DVector<f64>, x: &DVector<f64>, xtol: f64) -> bool
 
         // Relative tolerance test
         if dx_i.abs() > xtol_squared * x_i.abs() {
-            info!(
+            nonlinear_log_info!(
                 "  Component {}: |dx| = {} > xtol² * |x| = {} (FAIL relative)",
                 i,
                 dx_i.abs(),
@@ -504,10 +512,10 @@ fn test_parameter_change(dx: &DVector<f64>, x: &DVector<f64>, xtol: f64) -> bool
             return false;
         }
 
-        info!("  Component {}: |dx| = {} (PASS both tests)", i, dx_i.abs());
+        nonlinear_log_info!("  Component {}: |dx| = {} (PASS both tests)", i, dx_i.abs());
     }
 
-    info!("All components passed parameter change test");
+    nonlinear_log_info!("All components passed parameter change test");
     true
 }
 
@@ -520,7 +528,7 @@ fn scaled_infnorm(x: &DVector<f64>, g: &DVector<f64>) -> f64 {
     let n = x.len();
     let mut max_scaled_grad: f64 = 0.0;
 
-    info!("\n Computing scaled gradient norm:");
+    nonlinear_log_info!("\n Computing scaled gradient norm:");
 
     for i in 0..n {
         let x_i = x[i];
@@ -535,7 +543,7 @@ fn scaled_infnorm(x: &DVector<f64>, g: &DVector<f64>) -> f64 {
         // Track maximum
         max_scaled_grad = max_scaled_grad.max(scaled_grad_i);
 
-        info!(
+        nonlinear_log_info!(
             "  Component {}: |g| = {}, scale = {}, scaled = {}",
             i,
             g_i.abs(),
@@ -544,7 +552,7 @@ fn scaled_infnorm(x: &DVector<f64>, g: &DVector<f64>) -> f64 {
         );
     }
 
-    info!("Maximum scaled gradient component: {}", max_scaled_grad);
+    nonlinear_log_info!("Maximum scaled gradient component: {}", max_scaled_grad);
     max_scaled_grad
 }
 
@@ -708,7 +716,7 @@ impl TrustRegionSubproblem {
         linear_solver: &str,
         scaling_method: &ScalingMethod,
     ) -> DVector<f64> {
-        info!("Solving trust region subproblem using Direct method");
+        nonlinear_log_info!("Solving trust region subproblem using Direct method");
 
         // Compute J^T * J
         let JtJ = jacobian.transpose() * jacobian;
@@ -724,7 +732,7 @@ impl TrustRegionSubproblem {
         let p = solve_linear_system(linear_solver.to_string(), &A, gradient)
             .expect("Failed to solve linear system in direct method");
 
-        info!("Direct method step norm: {}", p.norm());
+        nonlinear_log_info!("Direct method step norm: {}", p.norm());
         p
     }
     /// Simple dogleg method: Combines Gauss-Newton and steepest descent directions
@@ -738,7 +746,7 @@ impl TrustRegionSubproblem {
         linear_solver: &str,
         scaling_method: &ScalingMethod,
     ) -> DVector<f64> {
-        info!("Solving trust region subproblem using Simple Dogleg method");
+        nonlinear_log_info!("Solving trust region subproblem using Simple Dogleg method");
 
         // 1. Compute Gauss-Newton step (unregularized)
         let JtJ = jacobian.transpose() * jacobian;
@@ -756,7 +764,7 @@ impl TrustRegionSubproblem {
         let scaled_gn_norm = scaled_norm_common(scaling, &p_gn);
 
         if scaled_gn_norm <= delta {
-            info!("Gauss-Newton step accepted, norm: {}", scaled_gn_norm);
+            nonlinear_log_info!("Gauss-Newton step accepted, norm: {}", scaled_gn_norm);
             return p_gn;
         }
 
@@ -772,7 +780,7 @@ impl TrustRegionSubproblem {
         if scaled_sd_norm >= delta {
             // Use scaled steepest descent to boundary
             let tau = delta / scaled_sd_norm;
-            info!("Using steepest descent step with tau: {}", tau);
+            nonlinear_log_info!("Using steepest descent step with tau: {}", tau);
             return tau * p_sd;
         }
 
@@ -796,7 +804,7 @@ impl TrustRegionSubproblem {
         let t = t.clamp(0.0, 1.0);
         let p_dogleg = &p_sd + t * diff;
 
-        info!(
+        nonlinear_log_info!(
             "Dogleg step with t: {}, norm: {}",
             t,
             scaled_norm_common(scaling, &p_dogleg)

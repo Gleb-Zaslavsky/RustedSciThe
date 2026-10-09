@@ -6,7 +6,7 @@
 //! a `HashMap` so stage names cannot allocate during callback execution.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -254,10 +254,16 @@ pub enum IvpColdStage {
     AotProblemKeyConstruction,
     /// Preparation of a native Atom payload used to identify or build an AOT artifact.
     AotAtomPlanPreparation,
+    /// Inclusive envelope around shared symbolic-IVP problem preparation.
+    ///
+    /// This is intentionally separate from the child symbolic and evaluator
+    /// scopes. It accounts for work that crosses the shared preparation
+    /// boundary without making parent and child timings additive.
+    SharedSymbolicProblemPreparation,
 }
 
 impl IvpColdStage {
-    pub const COUNT: usize = 33;
+    pub const COUNT: usize = 34;
 
     const fn from_index(index: usize) -> Self {
         match index {
@@ -293,7 +299,8 @@ impl IvpColdStage {
             29 => Self::NativeJacobianEvaluatorPreparation,
             30 => Self::AotInputAbiPreparation,
             31 => Self::AotProblemKeyConstruction,
-            _ => Self::AotAtomPlanPreparation,
+            32 => Self::AotAtomPlanPreparation,
+            _ => Self::SharedSymbolicProblemPreparation,
         }
     }
 
@@ -332,6 +339,7 @@ impl IvpColdStage {
             Self::AotInputAbiPreparation => "aot_input_abi_preparation",
             Self::AotProblemKeyConstruction => "aot_problem_key_construction",
             Self::AotAtomPlanPreparation => "aot_atom_plan_preparation",
+            Self::SharedSymbolicProblemPreparation => "shared_symbolic_problem_preparation",
         }
     }
 }
@@ -507,10 +515,57 @@ pub struct IvpTelemetrySnapshot {
     /// only by `log_aot_event`, so it never adds locking to the hot path.
     pub aot_artifact_keys: Vec<String>,
     pub aot_chunk_dispatches: u64,
+    /// Number of AOT callback dispatch requests observed.
+    pub aot_dispatch_requests: u64,
+    /// Requests with more than one executable chunk.
+    pub aot_eligible_dispatches: u64,
+    /// Requests that actually selected Rayon parallel execution.
     pub aot_parallel_dispatches: u64,
+    /// Auto-policy requests that were eligible but correctly fell back to
+    /// sequential execution because the calibrated threshold was not met.
+    pub aot_sequential_fallbacks: u64,
+    /// Dispatches whose chunk callbacks completed successfully.
+    pub aot_completed_dispatches: u64,
+    /// Dispatches that returned a callback or layout error.
+    pub aot_failed_dispatches: u64,
     pub aot_chunks: u64,
     pub aot_worker_callbacks: u64,
 }
+
+/// Typed validation error for the lifecycle counters exported to downstream
+/// solver telemetry.  Validation is intentionally snapshot-only and never
+/// runs from generated callbacks or the numerical hot path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IvpTelemetryContractError {
+    CounterExceeds {
+        counter: &'static str,
+        value: u64,
+        bound: &'static str,
+        bound_value: u64,
+    },
+    RuntimeReadyWithoutArtifact,
+}
+
+impl fmt::Display for IvpTelemetryContractError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CounterExceeds {
+                counter,
+                value,
+                bound,
+                bound_value,
+            } => write!(formatter, "{counter}={value} exceeds {bound}={bound_value}"),
+            Self::RuntimeReadyWithoutArtifact => {
+                write!(
+                    formatter,
+                    "runtime_ready is nonzero but no artifact key was published"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for IvpTelemetryContractError {}
 
 impl IvpTelemetrySnapshot {
     pub fn cold_stage(&self, stage: IvpColdStage) -> IvpStageTiming {
@@ -528,6 +583,91 @@ impl IvpTelemetrySnapshot {
     /// solver work and makes reports easy to diff between dated runs.
     pub fn pretty_report(&self) -> String {
         self.to_string()
+    }
+
+    /// Validate counter relationships which must hold for every AOT report.
+    ///
+    /// Cache hits and consumer reconnects can make runtime readiness exceed a
+    /// single build/link event, so only monotonic per-attempt relationships
+    /// are enforced here.  This avoids encoding a false one-process lifecycle
+    /// assumption into process-isolated producer/consumer evidence.
+    pub fn validate_contract(&self) -> Result<(), IvpTelemetryContractError> {
+        let checks = [
+            (
+                "aot_build_successes",
+                self.aot_build_successes,
+                "aot_build_attempts",
+                self.aot_build_attempts,
+            ),
+            (
+                "aot_build_failures",
+                self.aot_build_failures,
+                "aot_build_attempts",
+                self.aot_build_attempts,
+            ),
+            (
+                "aot_build_retries",
+                self.aot_build_retries,
+                "aot_build_attempts",
+                self.aot_build_attempts,
+            ),
+            (
+                "aot_link_successes",
+                self.aot_link_successes,
+                "aot_link_attempts",
+                self.aot_link_attempts,
+            ),
+            (
+                "aot_link_failures",
+                self.aot_link_failures,
+                "aot_link_attempts",
+                self.aot_link_attempts,
+            ),
+            (
+                "aot_parallel_dispatches",
+                self.aot_parallel_dispatches,
+                "aot_chunk_dispatches",
+                self.aot_chunk_dispatches,
+            ),
+            (
+                "aot_eligible_dispatches",
+                self.aot_eligible_dispatches,
+                "aot_dispatch_requests",
+                self.aot_dispatch_requests,
+            ),
+            (
+                "aot_completed_dispatches",
+                self.aot_completed_dispatches,
+                "aot_dispatch_requests",
+                self.aot_dispatch_requests,
+            ),
+            (
+                "aot_failed_dispatches",
+                self.aot_failed_dispatches,
+                "aot_dispatch_requests",
+                self.aot_dispatch_requests,
+            ),
+            (
+                "aot_chunk_dispatches",
+                self.aot_chunk_dispatches,
+                "aot_chunks",
+                self.aot_chunks,
+            ),
+        ];
+        for (counter, value, bound, bound_value) in checks {
+            if value > bound_value {
+                return Err(IvpTelemetryContractError::CounterExceeds {
+                    counter,
+                    value,
+                    bound,
+                    bound_value,
+                });
+            }
+        }
+        if self.aot_runtime_ready > 0 && self.aot_artifact_keys.is_empty() {
+            return Err(IvpTelemetryContractError::RuntimeReadyWithoutArtifact);
+        }
+        Ok(())
     }
 }
 
@@ -619,7 +759,12 @@ impl fmt::Display for IvpTelemetrySnapshot {
             ("aot_link_failures", self.aot_link_failures),
             ("aot_runtime_ready", self.aot_runtime_ready),
             ("aot_chunk_dispatches", self.aot_chunk_dispatches),
+            ("aot_dispatch_requests", self.aot_dispatch_requests),
+            ("aot_eligible_dispatches", self.aot_eligible_dispatches),
             ("aot_parallel_dispatches", self.aot_parallel_dispatches),
+            ("aot_sequential_fallbacks", self.aot_sequential_fallbacks),
+            ("aot_completed_dispatches", self.aot_completed_dispatches),
+            ("aot_failed_dispatches", self.aot_failed_dispatches),
             ("aot_chunks", self.aot_chunks),
             ("aot_worker_callbacks", self.aot_worker_callbacks),
         ] {
@@ -738,7 +883,12 @@ struct IvpTelemetryInner {
     aot_runtime_ready: AtomicU64,
     aot_artifact_keys: Mutex<Vec<String>>,
     aot_chunk_dispatches: AtomicU64,
+    aot_dispatch_requests: AtomicU64,
+    aot_eligible_dispatches: AtomicU64,
     aot_parallel_dispatches: AtomicU64,
+    aot_sequential_fallbacks: AtomicU64,
+    aot_completed_dispatches: AtomicU64,
+    aot_failed_dispatches: AtomicU64,
     aot_chunks: AtomicU64,
     aot_worker_callbacks: AtomicU64,
 }
@@ -799,7 +949,12 @@ impl Default for IvpTelemetryInner {
             aot_runtime_ready: AtomicU64::new(0),
             aot_artifact_keys: Mutex::new(Vec::new()),
             aot_chunk_dispatches: AtomicU64::new(0),
+            aot_dispatch_requests: AtomicU64::new(0),
+            aot_eligible_dispatches: AtomicU64::new(0),
             aot_parallel_dispatches: AtomicU64::new(0),
+            aot_sequential_fallbacks: AtomicU64::new(0),
+            aot_completed_dispatches: AtomicU64::new(0),
+            aot_failed_dispatches: AtomicU64::new(0),
             aot_chunks: AtomicU64::new(0),
             aot_worker_callbacks: AtomicU64::new(0),
         }
@@ -929,6 +1084,15 @@ impl IvpTelemetry {
 
     pub fn set_lambdify_execution_policy(&self, policy: IvpLambdifyExecutionPolicy) {
         if let Some(inner) = &self.inner {
+            // Rayon may lazily initialize the process-global pool on the
+            // first worker-count query. Keep that one-time cost inside the
+            // policy setup scope; otherwise Auto can look like unexplained
+            // AOT preparation work in a cold wall-clock measurement.
+            let calibration_started = if matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. }) {
+                self.start_cold_stage(IvpColdStage::ParallelCalibration)
+            } else {
+                None
+            };
             inner
                 .lambdify_execution_policy
                 .store(lambdify_policy_tag(policy), Ordering::Relaxed);
@@ -940,10 +1104,8 @@ impl IvpTelemetry {
                 .store(rayon::current_num_threads() as u64, Ordering::Relaxed);
             let calibrated = match policy {
                 IvpLambdifyExecutionPolicy::Auto { .. } => {
-                    let started = self.start_cold_stage(IvpColdStage::ParallelCalibration);
                     let calibrated = crate::symbolic::codegen::codegen_orchestrator::
                         machine_min_work_per_parallel_job();
-                    self.record_cold_stage(IvpColdStage::ParallelCalibration, started);
                     calibrated
                 }
                 IvpLambdifyExecutionPolicy::Sequential
@@ -952,6 +1114,7 @@ impl IvpTelemetry {
             inner
                 .lambdify_auto_min_work_per_job
                 .store(calibrated as u64, Ordering::Relaxed);
+            self.record_cold_stage(IvpColdStage::ParallelCalibration, calibration_started);
         }
     }
 
@@ -1176,12 +1339,38 @@ impl IvpTelemetry {
         self.record_counter(|inner| &inner.aot_runtime_ready);
     }
 
-    pub fn record_aot_chunk_dispatch(&self, parallel: bool, chunks: usize) {
+    pub fn record_aot_chunk_dispatch(
+        &self,
+        policy: IvpLambdifyExecutionPolicy,
+        parallel: bool,
+        work: usize,
+        chunks: usize,
+    ) {
+        self.record_counter(|inner| &inner.aot_dispatch_requests);
+        if chunks > 1 {
+            self.record_counter(|inner| &inner.aot_eligible_dispatches);
+        }
         self.record_counter(|inner| &inner.aot_chunk_dispatches);
         if parallel {
             self.record_counter(|inner| &inner.aot_parallel_dispatches);
+        } else if chunks > 1
+            && matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. })
+            && work > 1
+        {
+            self.record_counter(|inner| &inner.aot_sequential_fallbacks);
         }
         self.add_counter(|inner| &inner.aot_chunks, chunks as u64);
+    }
+
+    /// Record whether all chunks in one dispatch completed.  This is kept
+    /// separate from the start counter so a callback failure cannot look like
+    /// a successful parallel handoff in a release report.
+    pub fn record_aot_dispatch_completed(&self, success: bool) {
+        if success {
+            self.record_counter(|inner| &inner.aot_completed_dispatches);
+        } else {
+            self.record_counter(|inner| &inner.aot_failed_dispatches);
+        }
     }
 
     pub fn record_aot_worker_callback(&self) {
@@ -1240,7 +1429,12 @@ impl IvpTelemetry {
                 aot_runtime_ready: 0,
                 aot_artifact_keys: Vec::new(),
                 aot_chunk_dispatches: 0,
+                aot_dispatch_requests: 0,
+                aot_eligible_dispatches: 0,
                 aot_parallel_dispatches: 0,
+                aot_sequential_fallbacks: 0,
+                aot_completed_dispatches: 0,
+                aot_failed_dispatches: 0,
                 aot_chunks: 0,
                 aot_worker_callbacks: 0,
             };
@@ -1321,7 +1515,12 @@ impl IvpTelemetry {
                 .map(|keys| keys.clone())
                 .unwrap_or_default(),
             aot_chunk_dispatches: inner.aot_chunk_dispatches.load(Ordering::Relaxed),
+            aot_dispatch_requests: inner.aot_dispatch_requests.load(Ordering::Relaxed),
+            aot_eligible_dispatches: inner.aot_eligible_dispatches.load(Ordering::Relaxed),
             aot_parallel_dispatches: inner.aot_parallel_dispatches.load(Ordering::Relaxed),
+            aot_sequential_fallbacks: inner.aot_sequential_fallbacks.load(Ordering::Relaxed),
+            aot_completed_dispatches: inner.aot_completed_dispatches.load(Ordering::Relaxed),
+            aot_failed_dispatches: inner.aot_failed_dispatches.load(Ordering::Relaxed),
             aot_chunks: inner.aot_chunks.load(Ordering::Relaxed),
             aot_worker_callbacks: inner.aot_worker_callbacks.load(Ordering::Relaxed),
         }
@@ -1452,6 +1651,33 @@ mod tests {
         assert_eq!(
             snapshot.cold_stage(IvpColdStage::SymbolicJacobian),
             IvpStageTiming::default()
+        );
+    }
+
+    #[test]
+    fn lifecycle_snapshot_rejects_inconsistent_counter_contracts() {
+        let mut snapshot = IvpTelemetry::counters().snapshot();
+        snapshot.aot_build_successes = 1;
+        let error = snapshot
+            .validate_contract()
+            .expect_err("successes without an attempt must be rejected");
+        assert!(matches!(
+            error,
+            IvpTelemetryContractError::CounterExceeds {
+                counter: "aot_build_successes",
+                bound: "aot_build_attempts",
+                ..
+            }
+        ));
+
+        let mut snapshot = IvpTelemetry::counters().snapshot();
+        snapshot.aot_runtime_ready = 1;
+        let error = snapshot
+            .validate_contract()
+            .expect_err("runtime readiness without provenance must be rejected");
+        assert_eq!(
+            error,
+            IvpTelemetryContractError::RuntimeReadyWithoutArtifact
         );
     }
 
@@ -1632,7 +1858,7 @@ mod tests {
             IvpColdStage::AotAtomPlanPreparation.label(),
             "aot_atom_plan_preparation"
         );
-        assert_eq!(IvpColdStage::COUNT, 33);
+        assert_eq!(IvpColdStage::COUNT, 34);
         assert_eq!(IvpWarmStage::Solve.label(), "solve");
         assert_eq!(IvpWarmStage::Summary.label(), "summary");
         assert_eq!(IvpWarmStage::COUNT, 25);

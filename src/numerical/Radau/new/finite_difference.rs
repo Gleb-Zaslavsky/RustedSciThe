@@ -6,7 +6,7 @@
 
 use nalgebra::DVector;
 
-use super::callbacks::{validate_callback_output, DenseJacobianCallback};
+use super::callbacks::{DenseJacobianCallback, validate_callback_output};
 use super::error::{RadauError, RadauStage};
 use super::native_callbacks::NativeResidualFn;
 

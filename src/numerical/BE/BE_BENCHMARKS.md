@@ -110,3 +110,18 @@ The symbolic frontend comparison is exploratory. It gates any future public BE
 frontend selector; preparation/callback wins alone do not establish a full-solve
 benefit. Compare absolute preparation and callback times at equal problem sizes,
 and keep ExprLegacy/AtomView parity as a prerequisite.
+
+## Compact Dashboard And Release Runner
+
+The release-facing summary is `benches/be_workloads.rs`. It reports one row per
+matched workload/dimension/route and separates solver preparation, first solve,
+and warm parameter continuation. The existing Criterion targets remain the
+detailed instruments for history assembly, symbolic frontend callbacks,
+Lambdify/AOT execution, and allocation auditing.
+
+The dashboard uses Tabled output and writes through the shared test-report
+utility; compiler and Criterion progress are not mixed into the compact report.
+`scripts/be_release_matrix.ps1` runs correctness stories, optional ignored
+lifecycle stories, the dashboard, and optional detailed benches independently.
+Failure of one step is recorded in `reports/release_summary.md` while later
+steps continue. Raw process output is kept only in `technical/`.

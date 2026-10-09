@@ -3426,3 +3426,408 @@ route. The existing dense ABI and numerical output layout remain unchanged,
 and no further adapter optimization is justified from this corpus alone. The
 large warm end-to-end AOT comparison in Section 53 remains a separate open
 performance gate.
+
+## Compact workload dashboard and release runner
+
+The nonlinear-system family now has a compact, non-Criterion dashboard at
+`benches/nonlinear_workloads.rs`. It is the stable entry point for release
+evidence and writes a Tabled report through `Utils::test_reporting`; Cargo and
+compiler output belongs only in the runner's `technical/` directory.
+
+The dashboard covers the public prepared-problem lifecycle on the same
+parameterized nonlinear workload:
+
+- Lambdify `Sequential` and thresholded `Parallel` callback policies;
+- optional dense generated AOT, enabled explicitly with `-IncludeAot`;
+- Newton, damped Newton, and MINPACK-style Levenberg-Marquardt;
+- dimensions, cold preparation stage timings, one solve, and prepared
+  parameter continuation;
+- residual/Jacobian callbacks, linear solves/factorizations, final residual,
+  termination, and typed preparation/solve failures.
+
+Run the independent release sequence with
+`scripts/nonlinear_systems_release_matrix.ps1`. Each step continues after a
+failure and records its exit status. Reports are kept directly under
+`test_reports/Nonlinear_systems_release_manual/<utc-stamp>`, while raw
+Cargo/compiler transcripts are kept under the sibling `technical` directory.
+The existing Criterion targets remain available for statistical microbenchmarks;
+the compact dashboard is intentionally the readable release summary.
+
+### Initial dashboard smoke evidence
+
+The first local smoke used `dimension=3`, Lambdify Sequential, Newton, and
+three parameter points. Preparation was `0.617 ms`; the single solve took
+`0.052 ms` and the two-step continuation aggregate took `0.011 ms`. Both
+phases converged with final residuals below `4e-15`. These values validate the
+reporting path only and are not release performance baselines.
+
+An opt-in AOT smoke at `n=3` also completed successfully: preparation was
+`230.974 ms`, of which `229.746 ms` was the generated build/materialization;
+the single solve was `0.024 ms` and one continuation solve was `0.002 ms`.
+This confirms the dashboard's AOT lifecycle row and reinforces that AOT cold
+build cost must remain separate from warm numerical solve measurements.
+
+### Dense AtomView frontend
+
+The dense nonlinear solver now has two explicit in-process symbolic frontends:
+`ExprLegacy` and `AtomViewNative`. Both implement the same prepared residual,
+Jacobian, parameter-binding, and solver contracts. `AtomViewNative` accepts the
+same public `Expr` input, converts it once during preparation, differentiates
+and evaluates on Atom storage, and writes directly into caller-owned dense
+buffers. The ordinary gates in
+`nonlinear_atom_native_story_tests.rs` cover residual/Jacobian parity, solver
+parity, parameter rebinding, and the `AtomConversion`/
+`AtomDifferentiation` preparation stages.
+
+The dashboard labels these routes independently as
+`lambdify/expr-legacy`, `lambdify/atom-native`, `aot/expr-legacy`, and
+`aot/atom-native`. The release runner can include both AOT routes explicitly.
+The generated Atom route shares the dense AOT ABI but lowers residual and
+Jacobian atoms directly; it does not silently convert an Atom Jacobian back to
+Expr. Performance conclusions still require a release baseline.
+
+The preparation table exposes `symbolic_jacobian_ms`, `atom_conversion_ms`,
+and `atom_jacobian_ms` separately. `n/a` means that a frontend-specific stage
+does not apply; it is not an unmeasured or fabricated zero. The AtomNative
+correctness gate also requires residual/Jacobian callback preparation,
+prepared-problem assembly, total wall time, and bounded unattributed time to be
+ present in the same detailed telemetry report.
+
+The ignored functional AOT parity gate
+`nonlinear_atom_native_story_tests::tests::atom_native_aot_matches_atom_lambdify_dense_story`
+now exercises the generated Atom route end to end. The local debug smoke completed
+with `prepare_ms=227.244`, AOT solve `0.131 ms`, AtomView Lambdify baseline solve
+`1.912 ms`, and `max_diff=0.000e0`. This is functional smoke evidence, not a
+release performance baseline; cold AOT preparation remains separate from warm
+numerical solve timing.
+
+The release `story_core` gate also keeps telemetry assertions resolution-safe:
+for a scalar solve, `linear_solves > 0` is the operation proof, while an
+individual duration may be exactly zero when the platform timer cannot resolve
+that stage. Such a row must not be classified as a solver failure.
+
+Sparse and Banded are not part of this dense nonlinear solver's scope. They are
+covered by the ODE solver families where their layout-specific linear stages
+are meaningful.
+
+### 2026-10-06 release baseline
+
+The first four-route release matrix is archived under
+`test_reports/Nonlinear_systems_release_manual/20261006T190351Z`. It covered
+dimensions `3,16,64`, Sequential and Parallel policies, Newton,
+Damped-Newton, and LM-Minpack, with a four-step continuation series. All
+steps completed successfully: the core story suite reported `179 passed,
+0 failed, 18 ignored`, the ignored suite reported `18 passed, 0 failed`, and
+both compact workload/preparation benches passed.
+
+The compact workload table confirms numerical parity across all routes: every
+row converged and the `n=64` final residuals remained in the `1e-14` range.
+Cold AOT preparation was dominated by materialization/build and measured
+`235.049/245.756/305.820 ms` for ExprLegacy versus
+`230.506/236.739/302.371 ms` for AtomViewNative at `n=3/16/64`.
+This is a small AtomView advantage, not yet a large-system performance claim.
+
+At `n=64`, AOT solve times were close: AtomView was slightly faster for
+Newton (`0.097` vs `0.101 ms`) and Damped-Newton (`0.051` vs `0.054 ms`),
+while LM-Minpack was also slightly faster for AtomView (`0.533` vs `0.581 ms`,
+an absolute difference of only `0.048 ms`). Lambdify AtomView was faster for
+the sequential Newton
+single solve (`0.084` vs `0.134 ms`) but slower for LM-Minpack
+(`0.761` vs `0.591 ms`) and for some damped continuation rows. The result is
+workload/method-sensitive; neither frontend is a universal winner.
+
+Parallel rows did not establish a break-even point. For example, the `n=64`
+Lambdify Newton single solve increased from `0.134` to `0.909 ms` for
+ExprLegacy and from `0.084` to `1.017 ms` for AtomView. The current dashboard
+does not expose worker/chunk/dispatch counters, so these rows are evidence
+that Parallel is not beneficial for this small workload, not an explanation
+of the dispatch path or a portable threshold.
+
+The preparation-telemetry bench separately measured cold preparation through
+`n=512`: total time grew to `8.531 ms`, with Jacobian differentiation
+(`2.450 ms`) and assembly (`2.221 ms`) the largest named stages. Prepared reuse
+at `n=512` was `0.609 ms`, while binding was below the displayed resolution.
+Telemetry collection remained within run-to-run noise of disabled collection
+(`10.405` vs `10.765 ms` at `n=512`).
+
+## Dense parity corpus and frontend matrix
+
+The dense nonlinear family now has explicit analogues of the LSODE2/Radau
+frontend parity and continuation stories without importing their ODE-specific
+layout axes. `nonlinear_backend_parity_story_tests.rs` checks the same coupled
+system through ExprLegacy/AtomViewNative and Sequential/Parallel, compares
+residuals and Jacobians componentwise, verifies Newton solution parity, and
+checks that a four-value parameter continuation reuses one prepared graph.
+These are ordinary debug correctness gates and do not require an AOT compiler.
+
+The ignored `dense_aot_frontends_match_lambdify_with_continuation_table` story
+adds the corresponding dense AOT evidence for both frontends. It keeps cold
+materialization/build timing separate from warm solve and continuation timing,
+and emits a compact Tabled report through `Utils::test_reporting`.
+
+The additional compact benchmark `benches/nonlinear_frontend_matrix.rs` uses
+three dense nonlinear corpus shapes: `quadratic-chain`, `nonlinear-poisson`,
+and `band-five`. Its rows contain frontend route, execution policy,
+preparation stage timings, callback stage timings, AOT build time when enabled,
+Newton residual/Jacobian timings, call counters, and warm continuation time.
+It deliberately reports `n/a` for stages that do not apply. The benchmark is
+invoked by `scripts/nonlinear_systems_release_matrix.ps1` as
+`compact_frontend_matrix`; AOT rows are opt-in with `-IncludeAot`.
+
+The new matrix remains dense-only. Unlike LSODE2 and Radau, Nonlinear_systems
+has no public Sparse/Banded linear backend, so copying those layout stories
+would test an unsupported API rather than improve coverage. Parallel is tested
+for correctness and measured beside Sequential, but a portable break-even
+criterion remains open until worker/chunk dispatch telemetry is exposed.
+
+Quick correctness command:
+
+```powershell
+cargo test --lib --no-default-features numerical::Nonlinear_systems::nonlinear_backend_parity_story_tests -- --nocapture --test-threads=1
+```
+
+The AOT parity story is intentionally separate and ignored:
+
+```powershell
+cargo test --release --lib --no-default-features numerical::Nonlinear_systems::nonlinear_backend_parity_story_tests -- --ignored --nocapture --test-threads=1
+```
+
+## 67. Public Opt-In Runtime Logging
+
+**Test:** `engine::tests::logging_is_disabled_by_default_and_enabled_only_per_solve`
+
+The generic nonlinear runtime previously had a mixed logging contract: the
+new engine checked `SolveOptions`, while older LM, damped-Newton, and
+trust-region paths called `log` directly. That made the default behavior look
+non-disableable when an application installed a logger.
+
+The production paths now use a nested thread-local logging scope installed by
+`SolverEngine::solve`. `SolveOptions::default()` and
+`DiagnosticsOptions::default()` keep logging disabled; public
+`with_logging(...)` enables the requested level for one solve, and
+`without_logging()` disables it again. The scope restores the previous value
+after nested or concurrent solves and does not change the global logger.
+
+The debug correctness gate passed. It verifies all three default-off levels,
+`Debug` opt-in, and restoration after disabling. Existing numerical behavior
+and telemetry are unchanged; story-test `println!` output remains reporting
+output rather than solver logging.
+
+## 68. Four-route release matrix: 2026-10-06
+
+The release runner completed every requested step and continued through the
+full matrix without an early exit:
+
+| step | result | duration |
+|---|---|---:|
+| `story_core` | passed | 775.6 s |
+| `story_ignored` | passed | 25.9 s |
+| `compact_workload_matrix` | passed | 328.0 s |
+| `compact_frontend_matrix` | passed | 174.1 s |
+| `preparation_telemetry` | passed | 155.9 s |
+
+Archive: `test_reports/Nonlinear_systems_release_manual/20261006T195457Z`.
+Compact Tabled reports are under the timestamp root; compiler and Cargo
+transcripts remain isolated under `technical/`.
+
+The matrix covered `quadratic-chain`, `nonlinear-poisson`, and `band-five`,
+dimensions `16, 64, 128`, Lambdify and AOT ExprLegacy/AtomViewNative routes,
+Sequential and Parallel policies, Newton/Damped-Newton/LM-Minpack, and four
+continuation binds. Every compact row converged. The reported final
+residuals were in the `1e-14` range at the largest dimension, with matching
+frontend results; this is a correctness and lifecycle pass, not evidence that
+the two frontends are bit-identical on every machine.
+
+### Performance interpretation
+
+The cold AOT rows are dominated by materialization/build. At dimension `128`,
+the frontend matrix measured approximately `550.6 ms` for AOT ExprLegacy and
+`575.1 ms` for AOT AtomViewNative on `quadratic-chain`; the corresponding
+`nonlinear-poisson` rows were `799.5 ms` and `833.3 ms`, and `band-five` rows
+were `841.5 ms` and `933.5 ms`. Warm AOT solves and continuation were close,
+so these cold differences must not be described as callback regressions.
+The parallel AOT rows omit `aot_ms` because they reuse prepared artifacts and
+are therefore not cold apples-to-apples rows.
+
+AtomViewNative was not a universal Lambdify preparation winner in this dense
+corpus. At dimension `64` on `quadratic-chain`, Lambdify preparation was
+`1.070 ms` for ExprLegacy versus `2.492 ms` for AtomViewNative; its Jacobian
+callback stage was `0.044 ms` versus `0.256 ms`. At dimension `128`, the same
+pattern was `1.971 ms` versus `8.201 ms` preparation. The result is
+workload/frontend-sensitive and should guide further profiling, not trigger a
+blind backend rewrite. The small two-dimensional frontend story remains a
+useful smoke case, but it is not representative of this larger corpus.
+
+Parallel also did not establish a break-even point. On the `n=64`
+`quadratic-chain` row, Lambdify ExprLegacy Newton solve increased from
+`0.151 ms` to `0.518 ms`, while AtomViewNative increased from `0.116 ms` to
+`0.804 ms`. The current table has no worker/chunk/dispatch counters, so this
+is evidence that Parallel is not beneficial for these workloads, not a
+portable threshold for the public policy.
+
+The dedicated preparation telemetry remained healthy: cold preparation grew
+to `8.254 ms` at `n=512`, while prepared reuse was `0.650 ms` for residual
+plus Jacobian evaluation. Collection was within measurement noise of the
+disabled path (`10.110 ms` collected versus `10.418 ms` disabled at `n=512`).
+The long `story_core` duration is itself a release-runner QoL issue and
+should be split into smaller resumable groups before another overnight run.
+
+The preparation-telemetry table was present and complete in
+`technical/preparation_telemetry.log`, but this run did not emit a sibling
+compact Markdown report for that table. This is a reporting plumbing gap, not
+a telemetry-data gap; future runs should archive the table under the report
+root just like the workload and frontend matrices.
+
+## 69. Preparation report and Atom dependency pruning
+
+The preparation telemetry bench now emits one compact Markdown report through
+the common reporting utility. The report contains cold preparation, prepared
+reuse, Newton attempts, and telemetry-overhead tables; it is written after
+measurement and therefore does not add filesystem work to a measured stage.
+The local verification report is
+`test_reports/Nonlinear_systems_local/Nonlinear_systems/release/nonlinear_preparation_telemetry.md`.
+
+The AtomNative preparation path had a concrete avoidable cost: it attempted
+Atom differentiation for every equation/variable pair, including variables
+absent from the equation. It now performs one dependency scan per Atom
+equation and skips provably zero derivative pairs. The preparation telemetry
+bench records `JacobianDifferentiation` work as `derivative_calls/items`, so
+future release tables can distinguish actual differentiation calls from the
+dense candidate-pair space.
+
+This is a structural fix, not yet a universal performance claim. On the
+small linear synthetic preparation fixture, the dependency scan overhead is
+comparable to the skipped derivative work; the first local post-change run
+measured `8.649 ms` at `n=512` versus the earlier `8.254 ms` run, which is
+within the kind of machine/run variation that must not be called a regression
+without repeated samples. The representative chain/Poisson/band-five matrix
+must be rerun before deciding whether further Atom differentiation work is
+needed.
+
+## 70. AtomNative route aligned with LSODE2/Radau preparation plans
+
+The dense AtomNative route now follows the same useful separation already
+used by LSODE2 and Radau without importing their ODE-specific matrix layouts:
+
+- one `Expr -> Atom` conversion;
+- one dependency scan with reusable flags and flat row offsets;
+- differentiation only for variables present in an equation;
+- flat nonzero `(row, column, evaluator)` metadata grouped by output column;
+- direct writes into the caller-owned dense `DMatrix` during callbacks.
+
+The route never converts Atom expressions back to `Expr`. ExprLegacy remains
+an independent compatibility frontend, so the two paths continue to provide
+an implementation cross-check rather than sharing a hidden evaluator.
+
+The post-change compact report is
+`test_reports/Nonlinear_systems_local_frontend_matrix_final/Nonlinear_systems/release/nonlinear_preparation_telemetry.md`.
+It runs five samples for both frontends across `n=3,15,40,128,256,512`.
+
+On the diagonal parameterized fixture, the `n=512` cold rows were:
+
+| frontend | total ms | Atom conversion ms | dependency ms | differentiation ms | Jacobian callback preparation ms |
+|---|---:|---:|---:|---:|---:|
+| ExprLegacy | 8.713 | n/a | n/a | 2.547 | 0.888 |
+| AtomViewNative | 4.652 | 1.427 | 0.136 | 0.128 | 0.093 |
+
+Prepared reuse also favored AtomViewNative on this fixture: Jacobian
+evaluation was `0.503 ms` versus `0.594 ms` at `n=512`. These are absolute wall-clock
+measurements for one diagonal workload, not a universal AtomView claim. They
+show that the route is instrumented and structurally efficient; the required
+follow-up is the same matrix on `quadratic-chain`, `nonlinear-poisson`, and
+`band-five`, where dependency density and expression shape differ.
+
+## 71. Large Release Matrix: 2026-10-07
+
+Archive: `test_reports/Nonlinear_systems_release_manual/20261007T064249Z/`.
+The release runner completed all seven steps with zero exit codes: core and
+ignored stories, workload dashboard, frontend matrix, preparation telemetry,
+Criterion solver matrix and allocation audit.
+
+The correctness evidence is strong for the current dense scope. The frontend
+matrix covers `quadratic-chain`, `nonlinear-poisson` and `band-five` at
+`n=16/64/128/256`, ExprLegacy and AtomViewNative, Sequential and Parallel,
+and Newton, Damped-Newton and LM-Minpack. All compact rows converged, with
+final residuals around `1e-14` at the largest dimensions.
+
+### Frontend and AOT interpretation
+
+AtomView is workload-sensitive rather than universally faster. At `n=256`
+Lambdify preparation was:
+
+| workload | ExprLegacy ms | AtomView ms | interpretation |
+|---|---:|---:|---|
+| quadratic-chain | 4.568 | 4.496 | effectively tied |
+| nonlinear-poisson | 6.435 | 7.517 | ExprLegacy faster |
+| band-five | 6.480 | 7.148 | ExprLegacy faster |
+
+Warm solve and continuation timings are similarly close and can change winner
+by workload. The small AtomNative story remains a smoke test, not a large-
+system performance claim.
+
+Cold AOT preparation at `n=256` was approximately `698.2/699.8 ms`
+ExprLegacy/AtomView for quadratic-chain, `1965.3/2036.1 ms` for
+nonlinear-Poisson and `2146.0/2181.9 ms` for band-five. The dominant cost is
+materialization/compiler work; the frontend difference is comparatively small.
+
+The AOT policy rows are not yet apple-to-apple preparation measurements. The
+first sequential row performs the cold build and reports `aot_ms`, while a
+later parallel row reuses the prepared artifact and reports `aot_ms=n/a`.
+Values such as `220--2180 ms` versus `0.4--21 ms` therefore describe cold
+versus cached lifecycle, not a Parallel speedup. This is now a release
+evidence/reporting debt.
+
+### Preparation, telemetry and allocation evidence
+
+The dedicated preparation report covers `n=3,15,40,128,256,512`. On its
+diagonal `n=512` fixture, cold preparation is `9.345 ms` ExprLegacy versus
+`4.468 ms` AtomNative; prepared repeated total is `0.618 ms` versus
+`0.552 ms`. Telemetry collection is effectively free at this scale:
+`10.457/10.334 ms` collected/disabled for ExprLegacy and
+`4.660/4.634 ms` for AtomNative.
+
+The allocation audit found a concrete workspace opportunity at `n=512`:
+reusable callback output reduces Newton from `38` allocations and `27.39 MB`
+to `28` and `16.88 MB`; damped Newton drops from `44` and `23.22 MB` to `36`
+and `14.82 MB`. These are complete-solve lifetime measurements and currently
+remain in `technical/allocation_audit.log`, so the next QoL step is a compact
+Markdown report rather than another raw run.
+
+The frontend matrix accepted only one continuation count and reports
+`continuation_count=4`; the comma-separated `1,4,16` setting was not a valid
+single-count value for that benchmark. The workload dashboard separately
+used aggregate count `16`. Continuation amortization is therefore not yet a
+complete count matrix.
+
+Parallel is not beneficial on many dense rows. For quadratic-chain at `n=256`,
+ExprLegacy Newton is `3.344 ms` Sequential versus `4.865 ms` Parallel, and
+AtomView is `3.479 ms` versus `5.336 ms`. This demonstrates dispatch overhead,
+but no portable break-even threshold can be claimed without worker/chunk/
+dispatch telemetry and a count matrix.
+
+## 72. Evidence Plumbing Follow-up: 2026-10-07
+
+The frontend matrix now treats `NONLINEAR_FRONTEND_CONTINUATION=1,4,16` as
+three explicit rows instead of falling back to a single count. Each row
+contains `continuation_count`; `solve_ms` is the initial solve and
+`continuation_ms` is the warm rebinding/continuation phase, so the two scopes
+are not double-counted.
+
+AOT rows now expose lifecycle labels:
+
+| label | meaning |
+|---|---|
+| `cold-rebuild` | `RebuildAlways`, a fresh build is required |
+| `cold-build-if-missing` | first `BuildIfMissing` row that materializes/builds |
+| `warm-cache-hit` | `BuildIfMissing` row reusing the prepared artifact |
+
+Rows with different lifecycle labels are not an apple-to-apple preparation
+comparison. The release runner exposes `-FrontendContinuation` and
+`-FrontendAotLifecycle` so a small targeted run can select either evidence
+mode without changing the workload-bench continuation setting.
+
+The allocation audit now writes the full counters/bytes/timing table to
+`nonlinear_allocation_audit.md`; the ownership-only TrustRegionLM mode writes
+its own compact table. The local smoke run passed for both changed benchmark
+targets. Criterion interval aggregation and worker/chunk/dispatch telemetry
+remain open and were intentionally not addressed by this local change.

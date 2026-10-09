@@ -288,6 +288,12 @@ pub mod NR_for_ODE;
 pub mod BVP_Damp;
 //
 pub mod BVP_api;
+/// Typed solver-discovery facade. Prefer this for quick cross-solver
+/// experiments; use the solver-specific modules for detailed configuration.
+pub use BVP_api::{
+    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpMatrixBackend, BvpProblem,
+    BvpSolution, BvpSolver, BvpSolverBuilder, BvpSolverKind, BvpSolverOptions,
+};
 /// BVP solver with collocation method
 /// rewritten in Rust from Python code from SciPy
 pub mod BVP_sci;

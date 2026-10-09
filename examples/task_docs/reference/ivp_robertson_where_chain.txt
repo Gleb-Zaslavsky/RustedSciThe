@@ -1,0 +1,36 @@
+# Robertson-style stiff IVP using a deliberately multi-level where graph.
+task
+schema_version: 1
+solver: IVP
+method: BDF
+
+equations
+arg: t
+unknowns: y1, y2, y3
+rhs: -forward + backward, forward - backward - decay, decay
+parameters: k1, k2, k3
+parameter_values: 0.04, 1.0e4, 3.0e7
+
+where
+forward: k1*y1
+backward: k2*y2*y3
+decay: k3*y2*y2
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: [1.0, 0.0, 0.0]
+
+solver_options
+rtol: 1e-6
+atol: 1e-10
+max_step: 0.05
+
+continuation
+parameters: k1, k3
+k1_values: 0.02, 0.04
+k3_values: 1.5e7, 3.0e7
+mode: fresh
+restart_policy: restart_with_state
+monotonic: allow
+y0_values: [1.0, 0.0, 0.0]

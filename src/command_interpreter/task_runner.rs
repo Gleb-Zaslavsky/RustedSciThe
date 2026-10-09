@@ -7,14 +7,15 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
+    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, parse_ivp_task_from_str,
-    run_ivp_task,
+    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
+    IvpTaskSpec,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
+use tabled::{Table, Tabled};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskDocumentKind {
@@ -82,6 +83,157 @@ impl std::error::Error for TaskRunnerError {
             Self::Bvp(err) => Some(err),
             _ => None,
         }
+    }
+}
+
+impl TaskRunnerError {
+    /// Stable compact category used by batch reports and machine-readable
+    /// wrappers. The full typed error remains available through `Display`.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "io",
+            Self::MissingSolverField | Self::UnsupportedSolver { .. } => "parse",
+            Self::Ivp(error) => error.category(),
+            Self::Bvp(_) => "bvp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchTaskStatus {
+    Passed,
+    Failed,
+}
+
+impl BatchTaskStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One compact result row from a batch task run.
+#[derive(Debug)]
+pub struct BatchTaskSummary {
+    pub path: PathBuf,
+    pub status: BatchTaskStatus,
+    pub kind: Option<TaskDocumentKind>,
+    pub error_category: Option<&'static str>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Tabled)]
+struct BatchTaskSummaryRow {
+    path: String,
+    status: String,
+    kind: String,
+    error_category: String,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+pub struct BatchTaskReport {
+    pub entries: Vec<BatchTaskSummary>,
+}
+
+impl BatchTaskReport {
+    pub fn passed_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.status == BatchTaskStatus::Passed)
+            .count()
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.status == BatchTaskStatus::Failed)
+            .count()
+    }
+
+    /// Renders only the stable result table; cargo/compiler diagnostics are
+    /// deliberately outside this API and belong in a technical log.
+    pub fn render_table(&self) -> String {
+        let rows = self
+            .entries
+            .iter()
+            .map(|entry| BatchTaskSummaryRow {
+                path: entry.path.display().to_string(),
+                status: entry.status.as_str().to_string(),
+                kind: entry
+                    .kind
+                    .map(task_kind_label)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                error_category: entry.error_category.unwrap_or("-").to_string(),
+                error: entry.error.as_deref().unwrap_or("-").to_string(),
+            })
+            .collect::<Vec<_>>();
+        Table::new(rows).to_string()
+    }
+
+    pub fn write_table(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        fs::write(path, self.render_table())
+    }
+}
+
+/// Runs every task independently and continues after parse, I/O, or solver
+/// failures. This is the library counterpart of a night-runner script.
+pub fn run_task_batch<I, P>(paths: I) -> BatchTaskReport
+where
+    I: IntoIterator<Item = P>,
+    P: Into<PathBuf>,
+{
+    let entries = paths
+        .into_iter()
+        .map(Into::into)
+        .map(|path| {
+            // Detect the family before execution so a semantic or solver
+            // failure still reports `ivp`/`bvp` instead of losing context.
+            let source = match fs::read_to_string(&path) {
+                Ok(source) => source,
+                Err(source) => {
+                    let error = TaskRunnerError::Io {
+                        path: path.clone(),
+                        source,
+                    };
+                    return BatchTaskSummary {
+                        path,
+                        status: BatchTaskStatus::Failed,
+                        kind: None,
+                        error_category: Some(error.category()),
+                        error: Some(error.to_string()),
+                    };
+                }
+            };
+            let detected_kind = detect_task_kind_from_str(&source).ok();
+            match run_task_from_str(&source) {
+                Ok(result) => BatchTaskSummary {
+                    path,
+                    status: BatchTaskStatus::Passed,
+                    kind: Some(result.kind()),
+                    error_category: None,
+                    error: None,
+                },
+                Err(error) => BatchTaskSummary {
+                    path,
+                    status: BatchTaskStatus::Failed,
+                    kind: detected_kind,
+                    error_category: Some(error.category()),
+                    error: Some(error.to_string()),
+                },
+            }
+        })
+        .collect();
+    BatchTaskReport { entries }
+}
+
+fn task_kind_label(kind: TaskDocumentKind) -> &'static str {
+    match kind {
+        TaskDocumentKind::Ivp => "ivp",
+        TaskDocumentKind::Bvp => "bvp",
     }
 }
 
@@ -291,10 +443,11 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
 fn ivp_method_label(method: &IvpMethodSpec) -> String {
     match method {
         IvpMethodSpec::NonStiff(name) => name.clone(),
-        IvpMethodSpec::Radau3 => "Radau3".to_string(),
         IvpMethodSpec::Radau5 => "Radau5".to_string(),
         IvpMethodSpec::Bdf => "BDF".to_string(),
         IvpMethodSpec::BackwardEuler => "BackwardEuler".to_string(),
+        IvpMethodSpec::Lsode => "LSODE".to_string(),
+        IvpMethodSpec::Lsoda => "LSODA".to_string(),
         IvpMethodSpec::Lsode2 => "LSODE2".to_string(),
     }
 }
@@ -303,6 +456,7 @@ fn ivp_method_label(method: &IvpMethodSpec) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn detect_task_kind_accepts_ivp_and_bvp_solver_lines() {
@@ -427,5 +581,51 @@ y: 0.0
         let text = fs::read_to_string(path).expect("BVP task doc should be readable");
         let spec = parse_task_spec_from_str(&text).expect("BVP task doc should parse");
         assert_eq!(spec.kind(), TaskDocumentKind::Bvp);
+    }
+
+    #[test]
+    fn batch_runner_continues_after_failure_and_writes_compact_typed_table() {
+        let directory = tempdir().expect("temporary task directory");
+        let valid_before = directory.path().join("valid_before.txt");
+        let invalid = directory.path().join("invalid.txt");
+        let valid_after = directory.path().join("valid_after.txt");
+        let valid = r#"
+task
+solver: IVP
+method: RK45
+
+equations
+arg: t
+y: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.01
+y0: 1.0
+
+solver_options
+step_size: 1e-3
+"#;
+        fs::write(&valid_before, valid).expect("write first task");
+        fs::write(&invalid, "task\nsolver: IVP\nmethod: UnknownMethod\n")
+            .expect("write invalid task");
+        fs::write(&valid_after, valid).expect("write second task");
+
+        let report = run_task_batch([valid_before, invalid, valid_after]);
+        assert_eq!(report.entries.len(), 3);
+        assert_eq!(report.passed_count(), 2);
+        assert_eq!(report.failed_count(), 1);
+        assert_eq!(report.entries[1].kind, Some(TaskDocumentKind::Ivp));
+        assert_eq!(report.entries[1].error_category, Some("configuration"));
+        let table = report.render_table();
+        assert!(table.contains("passed"));
+        assert!(table.contains("failed"));
+        assert!(table.contains("configuration"));
+
+        let table_path = directory.path().join("summary.md");
+        report
+            .write_table(&table_path)
+            .expect("write batch summary");
+        assert_eq!(fs::read_to_string(table_path).unwrap(), table);
     }
 }

@@ -45,6 +45,28 @@ AOT-only problem can execute. `BuildIfMissing` and `RequirePrebuilt` are
 lifecycle policies, not interchangeable solve methods; see the nonlinear
 `STORY_TESTS.md` ledger for the tested artifact contract.
 
+### Choosing the symbolic frontend
+
+The dense Lambdify backend exposes two frontends:
+
+```rust
+let expr_legacy = SymbolicProblemOptions::new()
+    .with_lambdify_frontend(SymbolicLambdifyFrontend::ExprLegacy);
+let atom_native = SymbolicProblemOptions::new()
+    .with_atom_native_frontend();
+```
+
+`ExprLegacy` is the compatibility default. `AtomViewNative` converts the
+public `Expr` input once, performs Jacobian differentiation on Atom storage,
+and evaluates residuals/Jacobians into caller-owned dense buffers. Generated
+dense AOT supports both frontends: the AtomView route lowers residuals and
+Jacobians directly from Atom storage through the shared dense AOT ABI, without
+converting generated expressions back to Expr.
+
+This solver is intentionally dense. Sparse and banded layouts are not silently
+emulated here; use an ODE solver such as LSODE2 when a layout-specific linear
+backend is required.
+
 ### Parameter Updates And Structural Rebuilds
 
 The order passed to `with_equation_parameters` is the parameter ABI. A call to
@@ -137,6 +159,23 @@ if let Err(failure) = attempt {
 The compatibility constructors remain unchanged and return `SolveError`
 directly. Failure telemetry is intended for reporting and debugging; it does
 not turn a failed preparation into a usable problem.
+
+### Optional Solver Logging
+
+Solver logging is disabled by default. The setting is scoped to one
+`SolverEngine` invocation and does not modify the process-wide logger:
+
+```rust
+let quiet = SolveOptions::default();
+let verbose = SolveOptions::default().with_logging(EngineLogLevel::Debug);
+let quiet_again = verbose.without_logging();
+```
+
+The same policy is available on `DiagnosticsOptions` through
+`with_logging(...)` and `without_logging()`. Runtime method diagnostics use
+this public option; they do not write directly to stdout. The default path
+therefore avoids log formatting and emission, while applications that install
+the `log` facade can opt into `Info`, `Warn`, or `Debug` records explicitly.
 
 ### AOT Artifact Lifecycle
 

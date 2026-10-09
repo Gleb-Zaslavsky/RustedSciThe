@@ -4405,3 +4405,32 @@ tridiagonal callback, worker scheduling dominates both Sparse and Banded work.
 for the future break-even study, not a reason to change the default policy.
 The next comparison must increase expression cost and/or band width while
 keeping the warmed pool, repetitions and callback boundaries identical.
+
+## Dashboard contract
+
+The release-facing performance surface is split into two layers:
+
+1. `bvp_damp_workloads` is a bounded Tabled dashboard for matched solver,
+   workload, matrix, frontend, execution-policy and continuation rows.
+2. `bvp_benches`, `bvp_frozen_runtime_benches` and `bvp_numeric_assembly` remain
+   detailed Criterion/allocator instruments and are optional runner steps.
+
+The dashboard reports `prepare_ms` separately from prepared `solve_ms` and
+`continuation_ms`. The latter is the cost of all solves after the first
+prepared solve in a row; continuation count one therefore has no continuation
+work. Telemetry scopes are diagnostic and may overlap, so they are not
+additive wall-clock partitions.
+
+`-NSteps "32,128"` can be used with the runner for a bounded size sweep. The
+dashboard keeps each size as a separate row, which makes workload growth
+visible without requiring the full historical Criterion matrix.
+
+The canonical non-fail-fast command is:
+
+```powershell
+.\scripts\bvp_damp_release_matrix.ps1 -IncludeIgnoredStories -IncludeAot -IncludeCriterion
+```
+
+Human-facing tables live under `reports/`; Cargo/compiler transcripts are
+kept under `technical/` and are consulted only for a failed or incomplete
+route.

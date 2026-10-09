@@ -153,7 +153,9 @@
 //! solver.set_postpocessing_from_hashmap(&mut parser);
 //! ```
 
-use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use crate::command_interpreter::task_parser::{
+    DocumentMap, DocumentParser, ParseError, Value,
+};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
 };
@@ -178,6 +180,7 @@ type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpDampedTaskError {
     Parser(String),
+    Document(ParseError),
     MissingSection(&'static str),
     MissingField {
         section: &'static str,
@@ -195,6 +198,7 @@ impl Display for BvpDampedTaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parser(message) => write!(f, "parser error: {}", message),
+            Self::Document(error) => write!(f, "document parser error: {}", error),
             Self::MissingSection(section) => write!(f, "missing section `{}`", section),
             Self::MissingField { section, field } => {
                 write!(f, "missing field `{}.{}`", section, field)
@@ -1093,12 +1097,13 @@ pub fn parse_bvp_damped_task_from_str(
 ) -> Result<BvpDampedTaskSpec, BvpDampedTaskError> {
     let mut parser = DocumentParser::new(input.to_owned());
     parser
-        .parse_document()
-        .map_err(BvpDampedTaskError::Parser)?;
-    parser.keys_to_lower_case(Some(vec![
+        .parse_document_typed()
+        .map_err(BvpDampedTaskError::Document)?;
+    parser.try_keys_to_lower_case_typed(Some(vec![
         "bounds".to_string(),
         "rel_tolerance".to_string(),
-    ]));
+    ]))
+    .map_err(BvpDampedTaskError::Document)?;
     let result = parser
         .get_result()
         .ok_or(BvpDampedTaskError::MissingSection("task document"))?;

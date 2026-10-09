@@ -1,0 +1,28 @@
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+parameters: a
+parameter_values: 2.0
+y: -a*y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 0.05
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+lsode2_linear_solver_policy: faer_sparse_lu
+lsode2_native_execution: faithful_bdf_solve
+
+postprocessing
+save_csv: false
+csv_path: ivp_decay_result.csv
+plot: false

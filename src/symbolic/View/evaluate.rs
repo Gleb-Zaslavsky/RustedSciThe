@@ -18,8 +18,8 @@ use once_cell::sync::Lazy;
 
 use super::{
     atom::{
-        Atom, AtomView,
         representation::{BorrowedRawAtom, KeyLookup},
+        Atom, AtomView,
     },
     coefficient::{Coefficient, CoefficientView},
     state::Symbol,
@@ -617,6 +617,117 @@ impl PreparedEvaluator {
                 match result {
                     Ok(value) => values[index] = value,
                     Err(error) => return Err((index, error)),
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Evaluate a batch of flat-ABI plans while borrowing the worker-local
+    /// workspace only once.
+    ///
+    /// BVP callbacks already own a reusable `[x, state..., parameters...]`
+    /// argument buffer.  The old AtomView adapter nevertheless called
+    /// `evaluate_thread_local` once per scalar entry, repeatedly crossing the
+    /// thread-local boundary.  Keep the flat ABI, but batch the entries so
+    /// residual and sparse/banded Jacobian callbacks get the same reuse
+    /// contract as the IVP-native path above.
+    pub(crate) fn evaluate_many_thread_local_flat<'a, I>(
+        evaluators: I,
+        values: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), (usize, String)>
+    where
+        I: IntoIterator<Item = &'a PreparedEvaluator>,
+    {
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            let mut count = 0usize;
+            for evaluator in evaluators {
+                if count >= output.len() {
+                    return Err((
+                        count,
+                        format!(
+                            "Prepared evaluator batch produced more than {} value(s)",
+                            output.len()
+                        ),
+                    ));
+                }
+
+                // Keep constants and identity variables out of the general
+                // interpreter.  This is especially important for sparse
+                // Jacobians where such entries are common.
+                let result = match evaluator.evaluate_fast_flat(values) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) if evaluator.plain_numeric => evaluator
+                        .evaluate_plain_numeric(PreparedInput::Flat(values), &mut workspace),
+                    Ok(None) => evaluator.evaluate_with_workspace(
+                        PreparedInput::Flat(values),
+                        &evaluator.function_map,
+                        &mut workspace,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(value) => output[count] = value,
+                    Err(error) => return Err((count, error)),
+                }
+                count += 1;
+            }
+
+            if count != output.len() {
+                return Err((
+                    count,
+                    format!(
+                        "Prepared evaluator batch produced {} value(s), expected {}",
+                        count,
+                        output.len()
+                    ),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Evaluate flat-ABI plans once and scatter their values into caller
+    /// storage.  This is used when a structurally sparse Jacobian is exposed
+    /// through a dense public layout: it avoids both a per-entry workspace
+    /// transition and a temporary dense-value buffer.
+    pub(crate) fn evaluate_many_thread_local_flat_scatter<'a, I>(
+        evaluators: I,
+        values: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), (usize, String)>
+    where
+        I: IntoIterator<Item = (usize, &'a PreparedEvaluator)>,
+    {
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            for (entry_index, (output_index, evaluator)) in evaluators.into_iter().enumerate() {
+                if output_index >= output.len() {
+                    return Err((
+                        entry_index,
+                        format!(
+                            "Prepared evaluator scatter index {output_index} exceeds output length {}",
+                            output.len()
+                        ),
+                    ));
+                }
+
+                let result = match evaluator.evaluate_fast_flat(values) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) if evaluator.plain_numeric => evaluator
+                        .evaluate_plain_numeric(PreparedInput::Flat(values), &mut workspace),
+                    Ok(None) => evaluator.evaluate_with_workspace(
+                        PreparedInput::Flat(values),
+                        &evaluator.function_map,
+                        &mut workspace,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(value) => output[output_index] = value,
+                    Err(error) => return Err((entry_index, error)),
                 }
             }
             Ok(())
@@ -1539,7 +1650,7 @@ mod test {
     use ahash::HashMap;
 
     use super::{
-        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator,
+        evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator, ExactSymbolMap, FunctionMap,
     };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
     use crate::{function, parse, symbol};
@@ -1693,6 +1804,54 @@ mod test {
         .unwrap_err();
         assert_eq!(error.0, 0);
         assert!(error.1.contains("batch expected 3 argument(s), got 2"));
+    }
+
+    #[test]
+    fn prepared_evaluator_flat_batch_reuses_one_workspace_scope() {
+        let x = symbol!("x");
+        let constant = prepare_evaluator(&parse!("6").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        let identity = prepare_evaluator(&parse!("x").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        let general =
+            prepare_evaluator(&parse!("x^2 + 1").unwrap(), &[x], &FunctionMap::new()).unwrap();
+
+        let mut output = [0.0; 3];
+        super::PreparedEvaluator::evaluate_many_thread_local_flat(
+            [&constant, &identity, &general],
+            &[3.0],
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output[0], 6.0);
+        assert_eq!(output[1], 3.0);
+        assert_eq!(output[2], 10.0);
+
+        let error = super::PreparedEvaluator::evaluate_many_thread_local_flat(
+            [&constant, &identity, &general],
+            &[3.0],
+            &mut [0.0; 2],
+        )
+        .unwrap_err();
+        assert_eq!(error.0, 2);
+        assert!(error.1.contains("produced more than 2 value(s)"));
+    }
+
+    #[test]
+    fn prepared_evaluator_flat_scatter_batch_writes_selected_slots() {
+        let x = symbol!("x");
+        let first =
+            prepare_evaluator(&parse!("x + 1").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        let second = prepare_evaluator(&parse!("x^2").unwrap(), &[x], &FunctionMap::new()).unwrap();
+        let mut output = [0.0; 4];
+
+        super::PreparedEvaluator::evaluate_many_thread_local_flat_scatter(
+            [(1, &first), (3, &second)],
+            &[2.0],
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, [0.0, 3.0, 0.0, 4.0]);
     }
 
     #[test]

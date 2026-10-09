@@ -1,5 +1,5 @@
 //! cargo run --example 8_ode_example_12_lsode2_three_body_problem
-//! 
+//!
 //! LSODE2: задача трёх тел
 //!
 //! Цель:
@@ -12,6 +12,7 @@
 //! Запуск:
 //! cargo run --example lsode2_three_body_problem --release
 
+use RustedSciThe::Utils::animation_2d::create_2d_animation;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2BackendConfig, Lsode2LinearSolverPolicy,
     Lsode2LinearSystemStructure, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
@@ -19,7 +20,6 @@ use RustedSciThe::numerical::LSODE2::{
 };
 use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::Utils::animation_2d::create_2d_animation;
 use nalgebra::{DMatrix, DVector, RowDVector};
 use std::collections::HashMap;
 use std::process::Command;
@@ -30,7 +30,6 @@ enum BackendFlavor {
     Lambdify,
     AotTcc,
 }
-
 
 fn command_available(command: &str) -> bool {
     let probe = if cfg!(windows) { "where" } else { "which" };
@@ -53,7 +52,11 @@ fn two_row_projection(solution: &DMatrix<f64>, x_index: usize, y_index: usize) -
 
 fn energy_and_center_of_mass_checks(solution: &DMatrix<f64>, times: &DVector<f64>) {
     assert_eq!(solution.nrows(), 12, "three-body state should have 12 rows");
-    assert_eq!(solution.ncols(), times.len(), "solution columns must match time samples");
+    assert_eq!(
+        solution.ncols(),
+        times.len(),
+        "solution columns must match time samples"
+    );
 
     let k = 39.47841760435743;
     let m0 = 1.0;
@@ -108,16 +111,14 @@ fn energy_and_center_of_mass_checks(solution: &DMatrix<f64>, times: &DVector<f64
         }
 
         max_energy_drift = max_energy_drift.max((energy - initial_energy).abs());
-        max_cm_velocity_drift = max_cm_velocity_drift.max(
-            ((cm_vx - initial_cm_vx).powi(2) + (cm_vy - initial_cm_vy).powi(2)).sqrt(),
-        );
+        max_cm_velocity_drift = max_cm_velocity_drift
+            .max(((cm_vx - initial_cm_vx).powi(2) + (cm_vy - initial_cm_vy).powi(2)).sqrt());
 
         let time = times[i];
         let expected_cm_x = initial_cm_x + initial_cm_vx * time;
         let expected_cm_y = initial_cm_y + initial_cm_vy * time;
-        max_cm_position_drift = max_cm_position_drift.max(
-            ((cm_x - expected_cm_x).powi(2) + (cm_y - expected_cm_y).powi(2)).sqrt(),
-        );
+        max_cm_position_drift = max_cm_position_drift
+            .max(((cm_x - expected_cm_x).powi(2) + (cm_y - expected_cm_y).powi(2)).sqrt());
     }
 
     println!("Energy / COM checks:");
@@ -251,7 +252,8 @@ fn three_body_solution(t_bound: f64, backend: BackendFlavor) -> (DMatrix<f64>, D
         .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
         .with_faithful_bdf_solve(250_000, 250_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
     assert!(
         matches!(
@@ -263,8 +265,6 @@ fn three_body_solution(t_bound: f64, backend: BackendFlavor) -> (DMatrix<f64>, D
     );
 
     let (t, y) = solver.get_result();
-    let t = t.expect("LSODE2 should produce a time mesh");
-    let y = y.expect("LSODE2 should produce a solution matrix");
     (y.transpose(), t)
 }
 

@@ -807,14 +807,58 @@ where
     L: Fn(&C) -> usize + Sync,
     E: Fn(&C, &[f64], &mut [f64]) -> Result<(), LinkedAotCallbackError> + Sync,
 {
-    let parallel = policy.should_parallel_with_tasks(out.len(), chunks.len());
-    telemetry.record_aot_chunk_dispatch(parallel, chunks.len());
+    // A policy may allow parallel work, but one logical chunk cannot produce
+    // useful parallelism. Treating it as a parallel dispatch would inflate
+    // telemetry and charge the callback for a scheduler handoff that never
+    // creates more than one task.
+    let parallel = chunks.len() > 1 && policy.should_parallel_with_tasks(out.len(), chunks.len());
+    telemetry.record_aot_chunk_dispatch(policy, parallel, out.len(), chunks.len());
     let dispatch_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotChunkDispatch);
 
-    if parallel {
-        let results: Result<Vec<(usize, Vec<f64>)>, LinkedAotCallbackError> = chunks
-            .par_iter()
-            .map(|chunk| {
+    let result = (|| -> Result<(), LinkedAotCallbackError> {
+        if parallel {
+            let results: Result<Vec<(usize, Vec<f64>)>, LinkedAotCallbackError> = chunks
+                .par_iter()
+                .map(|chunk| {
+                    let start = offset(chunk);
+                    let length = len(chunk);
+                    let end = start.checked_add(length).ok_or_else(|| {
+                        LinkedAotCallbackError::InvalidLayout {
+                            stage,
+                            message: format!("chunk range overflows: offset={start}, len={length}"),
+                        }
+                    })?;
+                    if end > out.len() {
+                        return Err(LinkedAotCallbackError::InvalidLayout {
+                            stage,
+                            message: format!(
+                                "chunk range [{start}, {end}) exceeds output length {}",
+                                out.len()
+                            ),
+                        });
+                    }
+                    telemetry.record_aot_worker_callback();
+                    let worker_scope =
+                        telemetry.scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
+                    let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+                    let mut local = vec![0.0; length];
+                    telemetry.record_allocation(length * std::mem::size_of::<f64>());
+                    let result = eval(chunk, args, local.as_mut_slice());
+                    drop(output_scope);
+                    drop(worker_scope);
+                    result.map(|()| (start, local))
+                })
+                .collect();
+            let results = results?;
+            let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
+            for (start, local) in results {
+                let end = start + local.len();
+                out[start..end].copy_from_slice(local.as_slice());
+                telemetry.record_copy_bytes(local.len() * std::mem::size_of::<f64>());
+            }
+            drop(output_scope);
+        } else {
+            for chunk in chunks {
                 let start = offset(chunk);
                 let length = len(chunk);
                 let end = start.checked_add(length).ok_or_else(|| {
@@ -835,52 +879,16 @@ where
                 telemetry.record_aot_worker_callback();
                 let worker_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
                 let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
-                let mut local = vec![0.0; length];
-                telemetry.record_allocation(length * std::mem::size_of::<f64>());
-                let result = eval(chunk, args, local.as_mut_slice());
+                eval(chunk, args, &mut out[start..end])?;
                 drop(output_scope);
                 drop(worker_scope);
-                result.map(|()| (start, local))
-            })
-            .collect();
-        let results = results?;
-        let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
-        for (start, local) in results {
-            let end = start + local.len();
-            out[start..end].copy_from_slice(local.as_slice());
-            telemetry.record_copy_bytes(local.len() * std::mem::size_of::<f64>());
-        }
-        drop(output_scope);
-    } else {
-        for chunk in chunks {
-            let start = offset(chunk);
-            let length = len(chunk);
-            let end =
-                start
-                    .checked_add(length)
-                    .ok_or_else(|| LinkedAotCallbackError::InvalidLayout {
-                        stage,
-                        message: format!("chunk range overflows: offset={start}, len={length}"),
-                    })?;
-            if end > out.len() {
-                return Err(LinkedAotCallbackError::InvalidLayout {
-                    stage,
-                    message: format!(
-                        "chunk range [{start}, {end}) exceeds output length {}",
-                        out.len()
-                    ),
-                });
             }
-            telemetry.record_aot_worker_callback();
-            let worker_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotWorkerExecution);
-            let output_scope = telemetry.scoped_warm_stage(IvpWarmStage::AotOutputWrite);
-            eval(chunk, args, &mut out[start..end])?;
-            drop(output_scope);
-            drop(worker_scope);
         }
-    }
+        Ok(())
+    })();
     drop(dispatch_scope);
-    Ok(())
+    telemetry.record_aot_dispatch_completed(result.is_ok());
+    result
 }
 
 fn linked_sparse_registry() -> &'static Mutex<BTreeMap<String, LinkedSparseAotBackend>> {
@@ -934,8 +942,8 @@ impl LinkedAotRuntimeRegistrySnapshot {
 /// This function is deliberately separate from callback resolution and is not
 /// used by production hot paths. Each backend-kind map is locked separately,
 /// so concurrent registration can make the combined view non-atomic.
-pub fn try_linked_aot_runtime_registry_snapshot()
--> Result<LinkedAotRuntimeRegistrySnapshot, LinkedAotRegistryError> {
+pub fn try_linked_aot_runtime_registry_snapshot(
+) -> Result<LinkedAotRuntimeRegistrySnapshot, LinkedAotRegistryError> {
     let sparse_problem_keys = linked_sparse_registry()
         .lock()
         .map_err(|_| LinkedAotRegistryError::LockPoisoned { registry: "sparse" })?
@@ -1609,11 +1617,9 @@ mod tests {
             .expect("fallible registry removal should succeed")
             .expect("registered backend should be removable");
         assert_eq!(removed.problem_key, key);
-        assert!(
-            try_resolve_linked_dense_backend(key)
-                .expect("fallible registry lookup should succeed")
-                .is_none()
-        );
+        assert!(try_resolve_linked_dense_backend(key)
+            .expect("fallible registry lookup should succeed")
+            .is_none());
     }
 
     #[test]
@@ -1687,6 +1693,10 @@ mod tests {
 
             let snapshot = telemetry.snapshot();
             assert_eq!(snapshot.aot_chunk_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_dispatch_requests, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_eligible_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_completed_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_failed_dispatches, 0, "policy={policy:?}");
             assert_eq!(snapshot.aot_chunks, 4, "policy={policy:?}");
             assert_eq!(snapshot.aot_worker_callbacks, 4, "policy={policy:?}");
             assert_eq!(
@@ -1793,6 +1803,10 @@ mod tests {
 
             let snapshot = telemetry.snapshot();
             assert_eq!(snapshot.aot_chunk_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_dispatch_requests, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_eligible_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_completed_dispatches, 2, "policy={policy:?}");
+            assert_eq!(snapshot.aot_failed_dispatches, 0, "policy={policy:?}");
             assert_eq!(snapshot.aot_chunks, 4, "policy={policy:?}");
             assert_eq!(snapshot.aot_worker_callbacks, 4, "policy={policy:?}");
             assert_eq!(
@@ -1977,11 +1991,9 @@ mod tests {
             .try_jacobian_values_eval(&[1.0], &mut values)
             .expect("compact callback should accept complete slot storage");
         assert_eq!(values[8], 8.0);
-        assert!(
-            backend
-                .try_jacobian_values_eval(&[1.0], &mut vec![0.0; 8])
-                .is_err()
-        );
+        assert!(backend
+            .try_jacobian_values_eval(&[1.0], &mut vec![0.0; 8])
+            .is_err());
     }
 
     #[test]

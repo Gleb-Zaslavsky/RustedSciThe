@@ -174,6 +174,7 @@ impl NRBVP {
             adaptive: false,
             new_grid_enabled: new_grid_enabled_,
             grid_refinemens: 0,
+            prepared_iterate: false,
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             generated_backend_config: GeneratedBackendConfig::default(),
@@ -1279,6 +1280,81 @@ impl NRBVP {
         self.p = p;
         self.y = y;
         self.initial_guess = initial_guess;
+    }
+
+    /// Replace the Newton initial guess without rebuilding symbolic callbacks.
+    ///
+    /// This is the state-side half of a prepared continuation restart. The
+    /// callback graph and generated backend remain valid; only numeric factor
+    /// state and the current iterate are discarded.
+    pub fn try_set_initial_guess(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let expected = (self.values.len(), self.n_steps);
+        if initial_guess.shape() != expected {
+            return Err(BvpBackendIntegrationError::InvalidProblem {
+                field: "initial_guess".to_string(),
+                message: format!(
+                    "expected shape {}x{}, got {}x{}",
+                    expected.0,
+                    expected.1,
+                    initial_guess.nrows(),
+                    initial_guess.ncols()
+                ),
+            });
+        }
+        if let Some(index) = initial_guess.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "initial_guess".to_string(),
+                index,
+            });
+        }
+        let flattened = DVector::from_vec(initial_guess.iter().copied().collect());
+        self.initial_guess = initial_guess;
+        self.result = None;
+        self.full_result = None;
+        self.grid_refinemens = 0;
+        self.prepared_iterate = false;
+        self.y = Vectors_type_casting(&flattened, self.effective_runtime_method());
+        self.invalidate_linear_runtime();
+        Ok(())
+    }
+
+    /// Install a warm-start Newton iterate without changing the prepared plan.
+    ///
+    /// Unlike [`Self::try_set_initial_guess`], this method does not mutate the
+    /// structural initial-guess fingerprint. It is therefore suitable for a
+    /// prepared parameter continuation where callbacks remain valid and only
+    /// the current numeric iterate changes.
+    pub fn try_set_prepared_iterate(
+        &mut self,
+        iterate: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let expected = (self.values.len(), self.n_steps);
+        if iterate.shape() != expected {
+            return Err(BvpBackendIntegrationError::InvalidProblem {
+                field: "prepared_iterate".to_string(),
+                message: format!(
+                    "expected shape {}x{}, got {}x{}",
+                    expected.0,
+                    expected.1,
+                    iterate.nrows(),
+                    iterate.ncols()
+                ),
+            });
+        }
+        if let Some(index) = iterate.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "prepared_iterate".to_string(),
+                index,
+            });
+        }
+        let flattened = DVector::from_vec(iterate.iter().copied().collect());
+        self.y = Vectors_type_casting(&flattened, self.effective_runtime_method());
+        self.prepared_iterate = true;
+        self.invalidate_linear_runtime();
+        Ok(())
     }
 
     /// Sets the parameter value (typically time or spatial coordinate)

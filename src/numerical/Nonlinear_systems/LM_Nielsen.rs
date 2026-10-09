@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
@@ -8,6 +7,7 @@ use crate::numerical::Nonlinear_systems::engine::{
     StepOutcome, eval_jacobian_with_runtime, eval_residual_with_runtime,
     measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
+use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 const ONE_THIRD: f64 = 1.0 / 3.0;
@@ -405,12 +405,12 @@ impl NonlinearMethod for NielsenLevenbergMarquardtMethodAdvanced {
         // source GSL trust.c, line ~200
         let delta = 0.3 * (1.0f64).max(scaled_norm_common(&scaling, x0));
 
-        info!(
+        nonlinear_log_info!(
             "Initialized Nielsen LM Advanced with {} scaling",
             self.scaling_method
         );
-        info!("  mu0 = {}, nu0 = {}, delta0 = {}", mu, self.nu_init, delta);
-        info!("  Reduction ratio method: {}", self.reduction_ratio_method);
+        nonlinear_log_info!("  mu0 = {}, nu0 = {}, delta0 = {}", mu, self.nu_init, delta);
+        nonlinear_log_info!("  Reduction ratio method: {}", self.reduction_ratio_method);
 
         Ok(NielsenLevenbergMarquardtStateAdvanced {
             mu: mu.max(1e-16),
@@ -471,7 +471,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
         // Check gradient tolerance
         if let Some(g_tol) = self.g_tolerance {
             if gradient.norm() < g_tol {
-                info!(
+                nonlinear_log_info!(
                     "Gradient tolerance satisfied: ||g|| = {:.6e}",
                     gradient.norm()
                 );
@@ -482,7 +482,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
         // Check function tolerance
         if let Some(f_tol) = self.f_tolerance {
             if state.residual_norm < f_tol {
-                info!(
+                nonlinear_log_info!(
                     "Function tolerance satisfied: ||f|| = {:.6e}",
                     state.residual_norm
                 );
@@ -516,10 +516,12 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
         Error: Returns special code 0 for no progress
         */
         for rejection_count in 0..self.max_rejections {
-            info!("=== Inner iteration {} ===", rejection_count);
-            info!(
+            nonlinear_log_info!("=== Inner iteration {} ===", rejection_count);
+            nonlinear_log_info!(
                 "Current: mu = {:.6e}, nu = {:.6e}, delta = {:.6e}",
-                method_state.mu, method_state.nu, method_state.delta
+                method_state.mu,
+                method_state.nu,
+                method_state.delta
             );
 
             // SOLVE TRUST REGION SUBPROBLEM with current parameters
@@ -540,14 +542,14 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 options.diagnostics.collect_statistics,
             )?;
 
-            info!("Step vector norm: {:.6e}", step.norm());
+            nonlinear_log_info!("Step vector norm: {:.6e}", step.norm());
 
             // Compute scaled step norm for convergence check
             let scaled_step_norm = scaled_norm_common(&method_state.scaling, &step);
-            info!("Scaled step norm = {:.6e}", scaled_step_norm);
+            nonlinear_log_info!("Scaled step norm = {:.6e}", scaled_step_norm);
 
             if scaled_step_norm < options.tolerance {
-                info!("Solution found (small step)!");
+                nonlinear_log_info!("Solution found (small step)!");
                 return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
             }
 
@@ -585,18 +587,18 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 self.reduction_ratio_method.clone(),
             );
 
-            info!("Step norm = {:.6e}, rho = {:.6e}", step.norm(), rho);
+            nonlinear_log_info!("Step norm = {:.6e}, rho = {:.6e}", step.norm(), rho);
 
             // UPDATE TRUST REGION RADIUS based on step quality
             if rho > 0.75 {
                 method_state.delta *= self.factor_up;
-                info!(
+                nonlinear_log_info!(
                     "Excellent step (rho > 0.75): expanding delta to {:.6e}",
                     method_state.delta
                 );
             } else if rho < 0.25 {
                 method_state.delta /= self.factor_down;
-                info!(
+                nonlinear_log_info!(
                     "Poor step (rho < 0.25): shrinking delta to {:.6e}",
                     method_state.delta
                 );
@@ -616,9 +618,10 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 method_state.mu = method_state.mu.max(1e-16);
                 method_state.nu = self.nu_init; // Reset nu
 
-                info!(
+                nonlinear_log_info!(
                     "Step ACCEPTED: mu updated to {:.6e}, nu reset to {:.6e}",
-                    method_state.mu, method_state.nu
+                    method_state.mu,
+                    method_state.nu
                 );
 
                 runtime.accepted_steps += 1;
@@ -628,7 +631,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 });
             } else {
                 // STEP REJECTED
-                info!(
+                nonlinear_log_info!(
                     "Step REJECTED (rho <= {}): consecutive rejections = {}",
                     self.rho_threshold,
                     rejection_count + 1
@@ -638,9 +641,10 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 method_state.mu *= method_state.nu;
                 method_state.nu *= 2.0;
 
-                info!(
+                nonlinear_log_info!(
                     "LM parameters updated for next attempt: mu = {:.6e}, nu = {:.6e}",
-                    method_state.mu, method_state.nu
+                    method_state.mu,
+                    method_state.nu
                 );
 
                 runtime.rejected_steps += 1;
@@ -651,7 +655,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
         }
 
         // Too many consecutive rejections
-        warn!(
+        nonlinear_log_warn!(
             "Too many consecutive rejections ({}). No progress possible.",
             self.max_rejections
         );

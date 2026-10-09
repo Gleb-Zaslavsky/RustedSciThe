@@ -251,7 +251,8 @@ fn three_body_solution(t_bound: f64, backend: BackendFlavor) -> (DMatrix<f64>, D
         .with_linear_solver_policy(Lsode2LinearSolverPolicy::Auto)
         .with_faithful_bdf_solve(250_000, 250_000);
 
-    let mut solver = UniversalODESolver::lsode2_with_problem_config(config);
+    let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
+        .expect("LSODE2 preparation failed");
     solver.solve();
     assert!(
         matches!(
@@ -263,8 +264,6 @@ fn three_body_solution(t_bound: f64, backend: BackendFlavor) -> (DMatrix<f64>, D
     );
 
     let (t, y) = solver.get_result();
-    let t = t.expect("LSODE2 should produce a time mesh");
-    let y = y.expect("LSODE2 should produce a solution matrix");
     (y.transpose(), t)
 }
 

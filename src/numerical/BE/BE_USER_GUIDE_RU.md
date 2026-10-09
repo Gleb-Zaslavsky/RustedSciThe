@@ -101,3 +101,65 @@ API и `nalgebra` для коротких импортов.
 
 См. [`BE_STORY_TESTS.md`](BE_STORY_TESTS.md), [`BE_BENCHMARKS.md`](BE_BENCHMARKS.md)
 и [`BE_PERFORMANCE_BASELINE.md`](BE_PERFORMANCE_BASELINE.md).
+
+## Текстовые task documents
+
+Используйте task document, если эксперимент BE должен быть воспроизводимым или
+входить в batch-запуск. Текстовый маршрут направляется в native Backward Euler
+adapter:
+
+```text
+task
+solver: IVP
+method: BackwardEuler
+
+equations
+arg: t
+parameters: k
+parameter_values: 2.0
+y: -k*y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0
+
+solver_options
+step_size: 1e-2
+tolerance: 1e-7
+max_iterations: 100
+
+postprocessing
+output_policy: none
+```
+
+`step_size` задаёт фиксированный шаг BE; последний шаг может быть обрезан до
+границы интервала. `tolerance` и `max_iterations` настраивают Newton solve.
+`output_policy` принимает `none`, `terminal`, `plotters` или `gnuplot`; `plot` —
+только compatibility alias. Комментарии, начинающиеся с `#`, игнорируются.
+
+Текстовый adapter намеренно уже native API. Он использует плотный BE route и
+не обещает sparse matrices, adaptive error control, reuse Jacobian/LU или
+локализацию событий. Для выбора `ExprLegacy`/`AtomViewNative`, аналитического
+или finite-difference Jacobian, AOT lifecycle, telemetry и точной continuation/
+restart policy используйте `BeSolverOptions` и типизированный BE API. `None`
+для native Jacobian означает finite differences, а не выбор другого
+символьного frontend.
+
+Continuation задаётся явно:
+
+```text
+continuation
+parameter: k
+values: 1.0, 2.0, 4.0
+mode: prepared
+restart_each: false
+```
+
+`fresh` подготавливает каждый сегмент заново, `warm` переиспользует callbacks,
+а `prepared` запрашивает максимально сильный reuse модели. При
+`restart_each: true` каждый сегмент начинается с объявленного initial state;
+для сегмента можно задать новые `y0`, `t0` или `t_end`. В отчётах отделяйте
+fresh/warm/prepared timings от времени численного решения. Общая грамматика и
+batch-runner описаны в
+[`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).

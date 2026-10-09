@@ -24,8 +24,12 @@ Sparse/Banded BDF performance belongs to the LSODE2 benchmark suite.
 | `bdf_backend_matrix` / `bdf_dense_backend_apple_to_apple` | Fully coupled dense n=32/64/100, all four execution/assembly routes | Separate cold preparation, prepared solve and fresh E2E; opt-in because each AOT build can be expensive |
 | `bdf_backend_matrix` / `bdf_dense_linear_kernel` | Deterministic dense shifted matrices, dimensions 32/64/100/512/1024 by default | Opt-in isolated clone, shifted assembly, nalgebra owned LU, legacy clone+LU, faer partial-pivot LU, and pre-factored nalgebra/faer solves; no solver/controller work |
 | `bdf_aot_continuation` | ExprLegacy-AOT vs AtomView-AOT, combustion-like/three-body default; diffusion opt-in; counts 1/4/16 | Warm parameter continuation with retained prepared callbacks vs fresh solver reconnect to the same prebuilt artifact; artifact build excluded; preflight verifies parity |
+| `bdf_workloads` | Compact Lambdify/AOT x ExprLegacy/AtomView matrix over stiff scalar, Robertson, combustion-like, three-body and selected diffusion dimensions | One `tabled` report with preparation, solve, continuation, callback counters, factorization counts, accepted steps, final magnitude, frontend parity and status; AOT uses an isolated `RebuildAlways` producer and `RequirePrebuilt` continuation consumers |
 
 The frontend groups use short bounded Criterion captures. The Lambdify frontend
+The compact policy extension additionally covers Lambdify Sequential/Parallel/Auto
+and AOT Whole/Parallel2 on matched workloads; it is the required BDF policy
+and chunking evidence rather than a universal performance claim.
 group defaults to three fixed-size workloads. Workload and diffusion-size
 expansion is explicit:
 
@@ -33,6 +37,37 @@ expansion is explicit:
 $env:BDF_BENCH_WORKLOADS = "stiff-scalar,robertson,combustion-like"
 cargo bench --no-default-features --bench bdf_symbolic_frontends -- --noplot
 ```
+
+For a compact reviewable workload matrix, use the dedicated target. It writes
+the table through `Utils::test_reporting`; compiler and Criterion output is not
+part of the Markdown report:
+
+```powershell
+$env:BDF_BENCH_COMPACT_REPORT = "1"
+$env:BDF_BENCH_COMPACT_ROUTES = "lambdify-sequential,lambdify-parallel,lambdify-auto,aot-whole,aot-parallel2"
+$env:BDF_BENCH_COMPACT_WORKLOADS = "stiff-scalar,robertson,combustion-like,diffusion-chain"
+$env:BDF_BENCH_DIFFUSION_DIMENSIONS = "16,64"
+$env:BDF_COMPACT_CONTINUATION_COUNTS = "1,4,16"
+cargo bench --no-default-features --bench bdf_workloads -- --noplot
+```
+
+The compact report has separate Lambdify and AOT rows for both `ExprLegacy`
+and `AtomView`. It covers stiff scalar, Robertson, combustion-like,
+three-body and diffusion-chain workloads when selected. The report has
+separate `prepare_ms`, `parallel_calibration_ms`,
+`prepare_without_calibration_ms`, `solve_ms` and `continuation_ms`
+columns. Callback/solver counters and `max_final_abs` are scoped to the
+initial warm solve; `continuation_ms` is a separate series measurement and
+does not add its callbacks or factorizations into those initial-solve
+counters. Telemetry columns are diagnostic and stage scopes are explicitly
+non-additive. `prepare_ms` is an inclusive wall-clock measurement around
+`try_generate()`. For `lambdify-auto`, it may include the one-time machine-local
+Rayon calibration; `parallel_calibration_ms` reports that nested stage and
+`prepare_without_calibration_ms` is a diagnostic subtraction, not an additive
+stage sum. Do not compare Auto cold preparation with Sequential cold
+preparation without accounting for this first-use calibration. The target's
+normal Criterion mode can be controlled with
+`BDF_BENCH_SAMPLE_SIZE` and `BDF_BENCH_MEASUREMENT_SECONDS`.
 
 For larger diffusion cases, for example:
 
@@ -119,6 +154,29 @@ cargo bench --no-default-features --bench bdf_backend_matrix -- 'bdf_backend_cal
 ```
 
 ## Release Capture Set Before Optimization
+
+The profile-aware non-fail-fast runner is
+`scripts/bdf_release_matrix.ps1`. It runs the fast BDF story suite, optionally
+the ignored story suite, the compact workload matrix, and optionally the
+historical detailed Criterion families. Each step continues after failure;
+compact reports go through `test_reporting` into a dedicated `reports/`
+subdirectory, while Cargo/compiler/Criterion transcripts are placed under a
+separate `technical/` subdirectory.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bdf_release_matrix.ps1 `
+  -Dimensions "16,64,128" `
+  -Workloads "stiff-scalar,robertson,combustion-like,diffusion-chain" `
+  -ContinuationCounts "1,4,16" `
+  -Routes "lambdify-sequential,lambdify-parallel,lambdify-auto,aot-whole,aot-parallel2" `
+  -IncludeIgnoredStories
+```
+
+Add `-IncludeDetailedBenches` only when the historical Criterion families are
+needed. Use `-PlanOnly` to inspect the queue and `-FailOnAny` when the final
+process exit code should enforce the complete campaign. Use `-Routes lambdify`
+or `-Routes aot` for a single frontend family; the default is the matched
+`lambdify,aot` matrix.
 
 Compile-only checks do not establish a performance baseline. Run the normal
 story suite, ignored release diagnostics and each Criterion family on the same

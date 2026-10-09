@@ -1594,6 +1594,30 @@ impl PreparedSymbolicIvpProblem {
         linked.evaluate_parts_into(time, parameters, state, output, args)
     }
 
+    /// Evaluate a linked dense AOT residual with an already-sized ABI slice.
+    ///
+    /// The public compatibility method accepts `Vec` because it can resize a
+    /// cold caller workspace. Solver adapters already own a correctly sized
+    /// buffer, so this boundary keeps the repeated callback path allocation
+    /// free.
+    pub(crate) fn try_evaluate_aot_residual_parts_with_args(
+        &self,
+        args: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        let Some(linked) = &self.linked_residual else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no linked AOT residual".to_string(),
+            });
+        };
+        linked
+            .linked
+            .try_residual_eval_with_policy(args, output, self.execution_policy, &self.telemetry)
+            .map_err(|error| IvpBackendError::GeneratedBackendFailure {
+                message: error.to_string(),
+            })
+    }
+
     /// Evaluate a linked dense AOT Jacobian directly into row-major storage.
     pub(crate) fn try_evaluate_aot_jacobian_parts(
         &self,
@@ -1609,6 +1633,26 @@ impl PreparedSymbolicIvpProblem {
             });
         };
         linked.evaluate_row_major_parts_into(time, parameters, state, output, args)
+    }
+
+    /// Evaluate a linked dense AOT Jacobian using caller-owned ABI storage.
+    /// This is the zero-allocation adapter used by the BVP collocation loop.
+    pub(crate) fn try_evaluate_aot_jacobian_parts_with_args(
+        &self,
+        args: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), IvpBackendError> {
+        let Some(linked) = &self._linked_dense else {
+            return Err(IvpBackendError::GeneratedBackendFailure {
+                message: "prepared problem has no linked AOT Jacobian".to_string(),
+            });
+        };
+        linked
+            .linked
+            .try_jacobian_eval_with_policy(args, output, self.execution_policy, &self.telemetry)
+            .map_err(|error| IvpBackendError::GeneratedBackendFailure {
+                message: error.to_string(),
+            })
     }
 
     /// Evaluates the prepared residual through the typed fallible boundary.

@@ -1,0 +1,14 @@
+# Backward Euler is a stiff solver; prefer its dedicated API for full control.
+task
+solver: IVP
+method: BackwardEuler
+
+equations
+arg: t
+unknowns: y
+rhs: -y
+
+initial_conditions
+t0: 0.0
+t_end: 1.0
+y0: 1.0

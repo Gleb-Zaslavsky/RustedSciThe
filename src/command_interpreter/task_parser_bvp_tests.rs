@@ -1,6 +1,59 @@
 use super::*;
+use crate::command_interpreter::task_parser::ParseErrorKind;
+use std::error::Error;
 use std::fs;
 use tempfile::tempdir;
+
+#[test]
+fn bvp_adapter_keeps_typed_document_errors() {
+    let error =
+        parse_bvp_task_from_str("task\nsolver BVP").expect_err("malformed task header must fail");
+    match error {
+        BvpTaskError::Document(error) => assert_eq!(error.kind, ParseErrorKind::InvalidSection),
+        other => panic!("expected typed document error, got {other:?}"),
+    }
+}
+
+#[test]
+fn bvp_document_semantic_errors_keep_source_location() {
+    let input = r#"
+task
+solver: BVP
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+z_left: 0.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 4
+
+initial_guess
+y: 0.0
+"#;
+    let error = parse_bvp_task_from_str(input)
+        .expect_err("an undeclared boundary state must be rejected");
+    match error {
+        BvpTaskError::SymbolDiagnostic {
+            message,
+            token,
+            line,
+            column,
+        } => {
+            assert!(message.contains("z_left"));
+            assert_eq!(token, "z_left");
+            assert!(line.is_some());
+            assert!(column.is_some());
+        }
+        other => panic!("expected a located BVP diagnostic, got {other:?}"),
+    }
+}
 
 fn parse_document_for_bvp(input: &str) -> DocumentMap {
     let mut parser = DocumentParser::new(input.to_string());
@@ -62,6 +115,504 @@ y: 0.0
     assert_eq!(spec.solver.strategy, BvpStrategySpec::Damped);
     assert_eq!(spec.equations.unknowns, vec!["y".to_string()]);
     assert_eq!(spec.mesh.n_steps, 20);
+}
+
+#[test]
+fn bvp_task_parser_rejects_invalid_mesh_before_solver_construction() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 1.0
+t_end: 1.0
+n_steps: 1
+
+initial_guess
+y: 0.0
+"#;
+
+    let error = parse_bvp_task_from_str(input).expect_err("invalid mesh must be rejected");
+    match error {
+        BvpTaskError::InvalidConfiguration { field, message } => {
+            assert_eq!(field, "mesh.t_end");
+            assert!(message.contains("greater than"));
+        }
+        other => panic!("expected typed mesh configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn bvp_task_parser_rejects_invalid_tolerance_before_solver_construction() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+tolerance: 0.0
+"#;
+
+    let error = parse_bvp_task_from_str(input).expect_err("invalid tolerance must be rejected");
+    match error {
+        BvpTaskError::InvalidConfiguration { field, .. } => {
+            assert_eq!(field, "solver_options.tolerance");
+        }
+        other => panic!("expected typed tolerance configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn bvp_task_file_errors_keep_io_source_and_category() {
+    let path = tempdir()
+        .expect("temp dir should be created")
+        .path()
+        .join("missing-bvp-task.txt");
+    let error = parse_bvp_task_from_file(Some(path)).expect_err("missing task must fail");
+    assert_eq!(error.category(), "io");
+    assert!(error.source().is_some());
+    assert!(matches!(error, BvpTaskError::Io { .. }));
+}
+
+#[test]
+fn bvp_sci_task_route_executes_through_the_new_lambdify_api() {
+    let input = r#"
+task
+solver: BVP_sci
+frontend: ExprLegacy
+execution: Lambdify
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+tolerance: 1e-2
+max_iterations: 20
+"#;
+
+    let run = run_bvp_task_from_str(input).expect("BVP_sci task should execute");
+    assert_eq!(run.specification.solver.family, BvpSolverFamilySpec::Sci);
+    assert_eq!(
+        run.specification.solver.frontend,
+        Some(BvpFrontendSpec::ExprLegacy)
+    );
+    assert_eq!(
+        run.specification.solver.execution,
+        Some(BvpExecutionSpec::Lambdify)
+    );
+    assert_eq!(run.continuation_segments.len(), 1);
+    let result = run.result.expect("BVP_sci should publish a matrix result");
+    assert_eq!(result.nrows(), 1);
+    assert_eq!(result.ncols(), 8);
+    assert!(result.iter().all(|value| value.is_finite()));
+
+    let aot_input = input.replace("execution: Lambdify", "execution: AOT");
+    let error = run_bvp_task_from_str(&aot_input).expect_err("AOT without output dir must fail");
+    match error {
+        BvpTaskError::BvpSci(error) => {
+            assert!(error.to_string().contains("output directory"));
+        }
+        other => panic!("expected typed BVP AOT preparation error, got {other:?}"),
+    }
+
+    let invalid_frontend = input.replace("frontend: ExprLegacy", "frontend: Lambdify");
+    let error = parse_bvp_task_from_str(&invalid_frontend)
+        .expect_err("execution route must not be accepted as a frontend");
+    match error {
+        BvpTaskError::UnsupportedRoute(message) => {
+            assert!(message.contains("unsupported BVP frontend"));
+        }
+        other => panic!("expected typed frontend error, got {other:?}"),
+    }
+}
+
+#[test]
+fn bvp_sci_task_route_executes_through_atom_native_frontend() {
+    let input = r#"
+task
+solver: BVP_sci
+frontend: AtomViewNative
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+tolerance: 1e-2
+max_iterations: 20
+"#;
+
+    let run = run_bvp_task_from_str(input).expect("BVP_sci AtomView task should execute");
+    assert_eq!(run.specification.solver.family, BvpSolverFamilySpec::Sci);
+    assert_eq!(
+        run.specification.solver.frontend,
+        Some(BvpFrontendSpec::AtomViewNative)
+    );
+    assert_eq!(run.specification.solver.execution, None);
+    assert_eq!(run.continuation_segments.len(), 1);
+    let result = run.result.expect("BVP_sci should publish a matrix result");
+    assert_eq!(result.nrows(), 1);
+    assert_eq!(result.ncols(), 8);
+    assert!(result.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn bvp_sci_task_runner_uses_typed_postprocessing_dataset() {
+    let dir = tempdir().expect("temp dir should be created");
+    let report_path = dir.path().join("bvp_sci_report.md");
+    let report_path = report_path.to_string_lossy().replace('\\', "/");
+    let input = format!(
+        r#"
+task
+solver: BVP_sci
+frontend: ExprLegacy
+execution: Lambdify
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+tolerance: 1e-2
+max_iterations: 20
+
+postprocessing
+write_report: true
+report_path: {report_path}
+"#
+    );
+
+    let run = run_bvp_task_from_str(&input).expect("BVP_sci postprocessing should execute");
+    assert!(run.result.is_some());
+    let report = fs::read_to_string(&report_path).expect("BVP_sci report should be written");
+    assert!(report.contains("axis: x"));
+    assert!(report.contains("variables: y"));
+}
+
+#[test]
+fn bvp_sci_task_runner_reuses_prepared_model_for_warm_continuation() {
+    let input = r#"
+task
+solver: BVP_sci
+frontend: AtomViewNative
+execution: Lambdify
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -p*y
+parameters: p
+parameter_values: 0.5
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 1.0
+
+solver_options
+tolerance: 1e-2
+max_iterations: 20
+
+continuation
+parameter: p
+values: 0.5, 1.0
+mode: warm
+"#;
+
+    let run = run_bvp_task_from_str(input).expect("warm BVP_sci continuation should execute");
+    assert_eq!(run.continuation_segments.len(), 2);
+    assert!(run
+        .continuation_segments
+        .iter()
+        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+}
+
+#[test]
+fn bvp_damp_fresh_continuation_executes_every_segment() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+continuation
+parameter: rate
+values: 0.5, 1.0
+mode: fresh
+"#;
+
+    let run = run_bvp_task_from_str(input).expect("BVP_Damp continuation should execute");
+    assert_eq!(run.continuation_segments.len(), 2);
+    assert!(run
+        .continuation_segments
+        .iter()
+        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+}
+
+#[test]
+fn bvp_damp_warm_continuation_reuses_prepared_callbacks() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+continuation
+parameter: rate
+values: 0.5, 1.0
+mode: warm
+"#;
+
+    let run = run_bvp_task_from_str(input).expect("BVP_Damp warm continuation should execute");
+    assert_eq!(run.continuation_segments.len(), 2);
+    assert_eq!(run.continuation_telemetry.fresh_preparations, 1);
+    assert_eq!(run.continuation_telemetry.prepared_reuses, 1);
+    assert!(run
+        .continuation_segments
+        .iter()
+        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+}
+
+#[test]
+fn bvp_damp_long_prepared_series_keeps_logical_workspace_bounded() {
+    let values = (0..16)
+        .map(|index| format!("{:.3}", 0.5 + index as f64 * 0.1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let input = format!(
+        r#"
+task
+solver: BVP
+strategy: Damped
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 0.5
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+continuation
+parameter: rate
+values: {values}
+mode: prepared
+restart_each: false
+"#
+    );
+
+    let run = run_bvp_task_from_str(&input).expect("long BVP_Damp continuation should execute");
+    let telemetry = &run.continuation_telemetry;
+    assert_eq!(telemetry.segments, 16);
+    assert_eq!(telemetry.fresh_preparations, 1);
+    assert_eq!(telemetry.prepared_reuses, 15);
+    assert_eq!(telemetry.mesh_restarts, 0);
+    assert_eq!(telemetry.initial_guess_restarts, 15);
+
+    let result = run
+        .result
+        .expect("long continuation should publish a result");
+    assert!(result.iter().all(|value| value.is_finite()));
+    assert_eq!(telemetry.peak_result_elements, result.len());
+    assert!(run
+        .continuation_segments
+        .iter()
+        .all(|segment| segment.result.len() == telemetry.peak_result_elements));
+}
+
+#[test]
+fn bvp_task_parser_accepts_typed_output_policy() {
+    let input = r#"
+task
+solver: BVP_sci
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 4
+
+initial_guess
+y: 1.0
+
+postprocessing
+output_policy: terminal
+"#;
+
+    let spec = parse_bvp_task_from_str(input).expect("typed output policy should parse");
+    assert_eq!(spec.postprocessing.output_policy, BvpOutputPolicy::Terminal);
+}
+
+#[test]
+fn bvp_task_parser_preserves_continuation_template() {
+    let input = r#"
+task
+solver: BVP
+strategy: Damped
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -rate*y
+parameters: rate
+parameter_values: 1.0
+
+boundary_conditions
+y_left: 1.0
+y_right: 0.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+continuation
+parameter: rate
+values: 0.5, 1.0
+mode: warm
+restart_each: true
+"#;
+
+    let spec = parse_bvp_task_from_str(input).expect("BVP continuation task should parse");
+    let continuation = spec
+        .continuation
+        .expect("BVP continuation should be present");
+    assert_eq!(continuation.parameter, "rate");
+    assert_eq!(continuation.values, vec![0.5, 1.0]);
+    assert_eq!(continuation.mode, ContinuationMode::Warm);
+    assert!(continuation.restart_each);
+    assert!(continuation.symbolic_rhs[0].to_string().contains("rate"));
 }
 
 #[test]

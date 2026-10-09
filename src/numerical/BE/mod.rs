@@ -7,10 +7,10 @@ pub mod NR_for_Euler;
 
 /// Common Backward Euler types for applications using the direct solver API.
 pub mod prelude {
-    pub use super::NR_for_Euler::{NRE, NreError, NreSolverOptions, NreStepMode};
+    pub use super::NR_for_Euler::{NreError, NreSolverOptions, NreStepMode, NRE};
     pub use super::{
-        BE, BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
-        BeSymbolicAssemblyBackend, BeTelemetryMode, DEFAULT_BE_MAX_STEPS,
+        BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
+        BeSymbolicAssemblyBackend, BeTelemetryMode, BE, DEFAULT_BE_MAX_STEPS,
     };
     pub use crate::symbolic::symbolic_engine::Expr;
     pub use crate::symbolic::symbolic_ivp_generated::{
@@ -19,14 +19,14 @@ pub mod prelude {
     pub use nalgebra::{DMatrix, DVector};
 }
 
-use self::NR_for_Euler::{NRE, NreError, NreStepMode};
+use self::NR_for_Euler::{NreError, NreStepMode, NRE};
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
-    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
-    SymbolicIvpGeneratedError, prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
+    SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
 };
 use log::info;
 use nalgebra::{DMatrix, DVector};
@@ -1356,6 +1356,54 @@ impl BE {
             self.newton.record_failure(error.failure_kind());
         }
         result
+    }
+
+    /// Restarts a prepared BE runtime from a new state and interval.
+    ///
+    /// Symbolic/native callbacks and their generated backend remain installed;
+    /// only integration state and the Newton initial guess are replaced. This
+    /// is the explicit-state counterpart of [`Self::try_continue_to`].
+    pub fn try_restart_with_initial_state(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+    ) -> Result<(), BeError> {
+        let equation_dimension =
+            (!self.newton.eq_system.is_empty()).then_some(self.newton.eq_system.len());
+        validate_be_configuration(
+            equation_dimension,
+            &self.newton.values,
+            &self.newton.arg,
+            self.newton.tolerance,
+            self.newton.max_iterations,
+            self.h,
+            t0,
+            t_bound,
+            &y0,
+        )?;
+        if y0.len() != self.y0.len() {
+            return Err(BeError::InvalidConfiguration(
+                "restart initial state dimension differs from the prepared problem",
+            ));
+        }
+
+        self.t0 = t0;
+        self.t_bound = t_bound;
+        self.y0 = y0.clone();
+        self.t = t0;
+        self.y = y0.clone();
+        self.t_old = None;
+        self.t_result = DVector::from_vec(vec![t0]);
+        self.y_result = DMatrix::from_row_slice(1, y0.len(), y0.as_slice());
+        self.status = BeStatus::Running;
+        self.message = None;
+        self.last_error = None;
+        self.telemetry_locked = false;
+        self.newton.set_t(t0);
+        self.newton.t_bound = Some(t_bound);
+        self.newton.set_initial_guess(y0);
+        Ok(())
     }
 
     fn try_continue_to_inner(&mut self, new_t_bound: f64) -> Result<(), BeError> {

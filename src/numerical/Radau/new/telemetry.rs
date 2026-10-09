@@ -120,8 +120,13 @@ pub(crate) struct RadauCounters {
     pub parallel_dispatches: u64,
     pub sequential_dispatches: u64,
     /// Rayon worker count observed for the selected callback policy. This is
-    /// metadata, not a count of worker callback invocations.
+    /// metadata, not a count of worker callback invocations. It is the
+    /// effective pool size returned by Rayon, not necessarily the value of
+    /// `RAYON_NUM_THREADS` requested by the process.
     pub worker_count: u64,
+    /// Positive `RAYON_NUM_THREADS` when the process supplied it, otherwise
+    /// zero. This is a request/provenance field, not an observed worker count.
+    pub configured_worker_count: u64,
     /// Chunk and worker activity imported from the shared AOT runtime.
     pub aot_chunk_dispatches: u64,
     pub aot_parallel_dispatches: u64,
@@ -281,6 +286,7 @@ impl RadauTelemetry {
                 parallel_dispatches: 0,
                 sequential_dispatches: 0,
                 worker_count: 0,
+                configured_worker_count: 0,
                 aot_chunk_dispatches: 0,
                 aot_parallel_dispatches: 0,
                 aot_chunks: 0,
@@ -487,6 +493,14 @@ impl RadauTelemetry {
             .counters
             .worker_count
             .max(rayon::current_num_threads() as u64);
+        if let Some(configured) = std::env::var("RAYON_NUM_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+        {
+            self.counters.configured_worker_count =
+                self.counters.configured_worker_count.max(configured);
+        }
         if policy.should_parallel_with_tasks(work, tasks) {
             self.counters.parallel_dispatches += 1;
         } else {
@@ -608,6 +622,10 @@ impl RadauTelemetry {
             .counters
             .worker_count
             .max(snapshot.counters.worker_count);
+        self.counters.configured_worker_count = self
+            .counters
+            .configured_worker_count
+            .max(snapshot.counters.configured_worker_count);
         self.counters.aot_chunk_dispatches += snapshot.counters.aot_chunk_dispatches;
         self.counters.aot_parallel_dispatches += snapshot.counters.aot_parallel_dispatches;
         self.counters.aot_chunks += snapshot.counters.aot_chunks;

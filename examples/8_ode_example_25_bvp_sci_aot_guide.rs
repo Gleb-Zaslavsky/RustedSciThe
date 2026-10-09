@@ -1,119 +1,96 @@
-//! Руководство по AOT-ветке BVP_sci.
+//! Руководство по AOT-ветке новой архитектуры `BVP_sci`.
 //!
-//! Этот пример показывает generated-backend route для `BVP_sci`:
-//! - sparse AtomView + `tcc`
-//! - banded AtomView + `tcc`
+//! AOT использует тот же collocation solver, что и Lambdify, но публикует
+//! скомпилированные callback-артефакты. В примере проверяются Dense, Sparse и
+//! Banded layout через AtomViewNative и политика `BuildIfMissing`. При первом
+//! запуске компилятор создаёт артефакт, а повторный запуск может использовать
+//! тот же каталог вывода.
 //!
-//! Первый прогон может собрать native artifact, а второй прогон использует тот
-//! же output directory и показывает cold-to-warm lifecycle в маленьком
-//! самодостаточном примере.
-//!
-//! Запуск:
-//! `cargo run --example rus_bvp_sci_aot_guide`
+//! Запуск требует `tcc` в PATH:
+//! `cargo run --example 8_ode_example_25_bvp_sci_aot_guide`
 
-use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use nalgebra::DMatrix;
-
-use RustedSciThe::numerical::BVP_sci::BVP_sci_symb::{BVPwrap, BvpSciSolverOptions};
+use RustedSciThe::numerical::BVP_sci::{
+    BvpSciAssembly, BvpSciBoundaryCallbacks, BvpSciExecution, BvpSciLambdifyPlan,
+    BvpSciMatrixLayout, BvpSciOptions, BvpSciSolver, BvpSciTelemetry,
+    SymbolicIvpGeneratedBackendConfig,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
-const N_STEPS: usize = 64;
-
-fn command_exists(name: &str) -> bool {
+fn compiler_available() -> bool {
     let locator = if cfg!(windows) { "where" } else { "which" };
     Command::new(locator)
-        .arg(name)
+        .arg("tcc")
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-fn initial_guess() -> DMatrix<f64> {
-    DMatrix::from_element(2, N_STEPS, 0.5)
-}
-
-fn base_options() -> BvpSciSolverOptions {
-    let equations = vec![Expr::parse_expression("z"), Expr::parse_expression("0.0")];
-    let boundary_conditions = HashMap::from([
-        ("y".to_string(), vec![(0usize, 0.0f64)]),
-        ("z".to_string(), vec![(1usize, 1.0f64)]),
-    ]);
-
-    BvpSciSolverOptions::new(
-        None,
-        Some(0.0),
-        Some(1.0),
-        Some(N_STEPS),
-        equations,
-        vec!["y".to_string(), "z".to_string()],
+fn run(layout: BvpSciMatrixLayout, output_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let telemetry = BvpSciTelemetry::timings();
+    let plan = BvpSciLambdifyPlan::prepare_aot(
+        BvpSciAssembly::AtomViewNative,
+        layout,
+        // Зависимость от состояния делает Jacobian непустым и проверяет
+        // настоящий AOT callback ABI, а не специальный constant-residual case.
+        vec![Expr::parse_expression("y0"), Expr::parse_expression("y1")],
+        vec!["y0".into(), "y1".into()],
         vec![],
-        None,
-        boundary_conditions,
-        "x".to_string(),
-        1e-8,
-        256,
-        initial_guess(),
-    )
-    .with_loglevel(Some("none".to_string()))
-}
-
-fn run_case(label: &str, mut solver: BVPwrap) {
-    solver
-        .try_solve()
-        .unwrap_or_else(|err| panic!("{label} failed: {err:?}"));
-    let result = solver.get_result().expect("solver should store a result");
-    let stats = solver.get_statistics();
-    let max_error = (0..result.ncols())
-        .map(|i| (result[(0, i)] - i as f64 / (N_STEPS - 1) as f64).abs())
-        .fold(0.0_f64, f64::max);
-
-    println!("{label}");
-    println!("  grid points      = {}", result.ncols());
-    println!("  max |y - x|      = {max_error:.3e}");
-    println!("  iterations       = {}", stats.number_of_iterations);
-    println!("  residual_ms      = {:.3}", stats.residual_ms_total);
-    println!("  jacobian_ms      = {:.3}", stats.jacobian_ms_total);
-    println!("  linear_ms        = {:.3}", stats.linear_system_ms_total);
-    println!("  symbolic_ms      = {:.3}", stats.symbolic_prepare_ms_total);
-    println!();
-}
-
-fn sparse_solver(output_dir: impl Into<PathBuf>) -> BVPwrap {
-    let output_dir = output_dir.into();
-    let _ = fs::create_dir_all(&output_dir);
-    BVPwrap::new_with_options(base_options().with_sparse_atomview_tcc(output_dir))
-}
-
-fn banded_solver(output_dir: impl Into<PathBuf>) -> BVPwrap {
-    let output_dir = output_dir.into();
-    let _ = fs::create_dir_all(&output_dir);
-    BVPwrap::new_with_options(base_options().with_banded_atomview_tcc(output_dir))
+        "x",
+        SymbolicIvpGeneratedBackendConfig::build_if_missing_release(output_dir).with_c_tcc(),
+        telemetry.clone(),
+    )?;
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _parameters, output| {
+            output[0] = ya[0];
+            output[1] = yb[1] - 1.0;
+            Ok(())
+        },
+        telemetry,
+    );
+    let options = BvpSciOptions::default()
+        .with_execution(BvpSciExecution::Aot)
+        .with_matrix_layout(layout)
+        .with_tolerance(1e-8);
+    let mut solver = BvpSciSolver::new(
+        plan,
+        boundary,
+        vec![0.0, 0.5, 1.0],
+        vec![0.0, 1.0, 0.5, 1.0, 1.0, 1.0],
+        vec![],
+        options,
+    )?;
+    let solution = solver.solve()?;
+    let snapshot = solver.plan().telemetry_snapshot();
+    println!(
+        "{layout:?} | {:.6e} | {:.3e} | {:.3} | {:.3} | {}",
+        solution.y[solution.y.len() - 2],
+        solution.residual_norm,
+        snapshot.preparation_ms.unwrap_or_default(),
+        snapshot.full_solve_ms.unwrap_or_default(),
+        snapshot.jacobian_evaluations,
+    );
+    Ok(())
 }
 
 fn main() {
-    println!("Руководство по AOT-ветке BVP_sci");
-    println!("================================");
-    println!("Здесь показан generated-backend route.");
-    println!("Одна и та же маленькая BVP решается в sparse и banded AOT форме.");
-    println!();
-
-    if !command_exists("tcc") {
-        println!("AOT-случаи пропущены: `tcc` не найден в PATH");
+    if !compiler_available() {
+        println!("AOT guide skipped: tcc was not found in PATH");
         return;
     }
-
-    let sparse_dir: PathBuf = "target/generated-bvp-sci-guides/aot-sparse-tcc".into();
-    let banded_dir: PathBuf = "target/generated-bvp-sci-guides/aot-banded-tcc".into();
-
-    println!("Sparse AOT:");
-    run_case("  первый прогон / sparse + tcc", sparse_solver(&sparse_dir));
-    run_case("  второй прогон / sparse + tcc", sparse_solver(&sparse_dir));
-
-    println!("Banded AOT:");
-    run_case("  первый прогон / banded + tcc", banded_solver(&banded_dir));
-    run_case("  второй прогон / banded + tcc", banded_solver(&banded_dir));
+    println!("layout | y(1) | residual_norm | preparation_ms | full_solve_ms | jacobian_calls");
+    let root = PathBuf::from("target/generated-bvp-sci-guides/aot");
+    for (name, layout) in [
+        ("dense", BvpSciMatrixLayout::Dense),
+        ("sparse", BvpSciMatrixLayout::Sparse),
+        ("banded", BvpSciMatrixLayout::Banded { lower: 1, upper: 1 }),
+    ] {
+        // Ошибка одного layout не скрывает результаты остальных строк.
+        if let Err(error) = run(layout, root.join(name)) {
+            eprintln!("AOT {name} failed: {error}");
+        }
+    }
 }
