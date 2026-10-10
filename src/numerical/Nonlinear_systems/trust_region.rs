@@ -1,7 +1,7 @@
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
-    measure_linear_system_operation, solve_linear_system,
+    eval_residual_with_runtime, measure_linear_operation, measure_linear_system_operation,
+    solve_linear_system, IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics,
+    SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_debug, nonlinear_log_info};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};

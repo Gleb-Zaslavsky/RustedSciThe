@@ -1978,7 +1978,15 @@ fn lsode2_solve_can_use_configured_native_preview_before_bridge() {
 
     assert_eq!(summary.native_statistics.algorithm_decision_calls, 1);
     assert!(summary.native_statistics.native_step_attempts > 0);
-    assert!(summary.native_statistics.bridge_bdf_nlu_total > 0);
+    assert!(
+        summary.native_statistics.bridge_solve_calls > 0,
+        "configured preview-before-bridge execution should run the bridge after its native preview; bridge_solve_calls={}, bridge_steps={}, bridge_nfev={}, bridge_nlu={}, stats_solve_calls={}",
+        summary.native_statistics.bridge_solve_calls,
+        summary.native_statistics.bridge_step_calls,
+        summary.native_statistics.bridge_bdf_nfev_total,
+        summary.native_statistics.bridge_bdf_nlu_total,
+        summary.statistics.solve_calls
+    );
     assert!(summary.native_integration_solve.is_none());
 }
 

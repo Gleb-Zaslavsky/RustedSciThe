@@ -55,7 +55,7 @@
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::cuda_lib_ffi::{
     flatten_diagonals, launch_multicolor_gs_fused,
 };
-use crate::somelinalg::iterative_solvers_gpu::bicgstab::ilu_preconditioner::{ILU0, ilu0_apply};
+use crate::somelinalg::iterative_solvers_gpu::bicgstab::ilu_preconditioner::{ilu0_apply, ILU0};
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::utils::{
     banded_spmv_f32, upload_banded_f32,
 };

@@ -1,13 +1,12 @@
+use super::errors::{LeastSquaresError, LeastSquaresStage};
 use nalgebra::{DMatrix, DVector};
 
-/// A least squares minimization problem.
-/// code from modules \numerical\optimization\problem_LM.rs, LM_optimization.rs, trust_region_LM.rs, utils.rs, qr_LM.rs
-///  is rewrite of Levenberg-Marquardt crate https://crates.io/crates/levenberg-marquardt
-///  We get rid of most of generics because in this crate we need only f64
-/// Thus code is more simple and clear
-/// This is what LevenbergMarquardt needs
-/// to compute the residuals and the Jacobian. See the [module documentation](index.html)
-/// for a usage example.
+/// A rectangular least-squares minimization problem.
+///
+/// The contract is intentionally f64-only because this crate's symbolic
+/// frontends and numerical linear algebra use f64. It is a maintained,
+/// simplified Levenberg-Marquardt problem contract with explicit residual and
+/// Jacobian shapes instead of the old generic compatibility layer.
 pub trait LeastSquaresProblem {
     /// Set the stored parameters `$\vec{x}$`.
     fn set_params(&mut self, x: &DVector<f64>);
@@ -20,12 +19,88 @@ pub trait LeastSquaresProblem {
 
     /// Compute the Jacobian of the residual vector.
     fn jacobian(&self) -> Option<DMatrix<f64>>;
+
+    /// Fallible residual callback. Existing `Option` implementations remain
+    /// source-compatible; symbolic adapters override this to preserve causes.
+    fn try_residuals(&self) -> Result<DVector<f64>, LeastSquaresError> {
+        self.residuals().ok_or(LeastSquaresError::CallbackFailed {
+            stage: LeastSquaresStage::Residual,
+        })
+    }
+
+    /// Fallible Jacobian callback; see [`Self::try_residuals`].
+    fn try_jacobian(&self) -> Result<DMatrix<f64>, LeastSquaresError> {
+        self.jacobian().ok_or(LeastSquaresError::CallbackFailed {
+            stage: LeastSquaresStage::Jacobian,
+        })
+    }
+
+    /// Returns whether a proposed LM trial point may be evaluated.
+    ///
+    /// The default rejects non-finite points before they reach user callbacks.
+    /// Symbolic or constrained adapters can override this to reject points
+    /// outside a declared variable domain, such as `x > 0` for `ln(x)`.
+    fn validate_trial(&self, x: &DVector<f64>) -> bool {
+        x.iter().all(|value| value.is_finite())
+    }
+}
+
+/// Closure-backed rectangular least-squares problem.
+///
+/// This adapter keeps symbolic frontends independent from the LM controller:
+/// a frontend owns preparation and evaluation, while this type only stores the
+/// current parameter vector and exposes the numerical problem contract.
+pub struct ClosureLeastSquaresProblem<R, J>
+where
+    R: Fn(&DVector<f64>) -> DVector<f64>,
+    J: Fn(&DVector<f64>) -> DMatrix<f64>,
+{
+    params: DVector<f64>,
+    residuals_fn: R,
+    jacobian_fn: J,
+}
+
+impl<R, J> ClosureLeastSquaresProblem<R, J>
+where
+    R: Fn(&DVector<f64>) -> DVector<f64>,
+    J: Fn(&DVector<f64>) -> DMatrix<f64>,
+{
+    /// Creates an adapter around prepared residual and Jacobian callbacks.
+    pub fn new(initial_guess: DVector<f64>, residuals_fn: R, jacobian_fn: J) -> Self {
+        Self {
+            params: initial_guess,
+            residuals_fn,
+            jacobian_fn,
+        }
+    }
+}
+
+impl<R, J> LeastSquaresProblem for ClosureLeastSquaresProblem<R, J>
+where
+    R: Fn(&DVector<f64>) -> DVector<f64>,
+    J: Fn(&DVector<f64>) -> DMatrix<f64>,
+{
+    fn set_params(&mut self, x: &DVector<f64>) {
+        self.params.copy_from(x);
+    }
+
+    fn params(&self) -> DVector<f64> {
+        self.params.clone()
+    }
+
+    fn residuals(&self) -> Option<DVector<f64>> {
+        Some((self.residuals_fn)(&self.params))
+    }
+
+    fn jacobian(&self) -> Option<DMatrix<f64>> {
+        Some((self.jacobian_fn)(&self.params))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::lm::LevenbergMarquardt;
     use super::*;
-    use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
 
     /// Simple quadratic problem: minimize ||Ax - b||^2
     /// where A = [[1, 2], [3, 4], [5, 6]] and b = [1, 2, 3]

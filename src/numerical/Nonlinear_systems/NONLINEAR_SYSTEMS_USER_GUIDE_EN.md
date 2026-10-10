@@ -438,3 +438,108 @@ cargo run --example nonlinear_aot_lifecycle_guide
 
 The older `nonlinear_systems_guide` remains available as a compatibility
 showcase for the legacy LM wrapper.
+
+## Rectangular Least-Squares Problems
+
+The canonical least-squares solver minimizes a residual vector `r(x)` and is
+useful for overdetermined or underdetermined models, noisy observations, and
+systems whose residuals cannot all be zero at once. It is separate from the
+root-finding contract: a root solver searches for `r(x) = 0`, while
+least-squares LM minimizes `0.5 * ||r(x)||^2` and reports the final objective.
+For an inconsistent fit, a nonzero final objective is expected.
+
+The shared `NonlinearSolver` selector has distinct `Root` and `LeastSquares`
+variants. The least-squares route is intentionally **not** a variant of
+`NonlinearSolverMethod`: that enum is consumed by the square-system root engine
+and returns `SolveResult`, whereas least-squares accepts its own rectangular
+problem contract and returns `MinimizationReport`.
+
+### Numerical Residual And Jacobian Callbacks
+
+Implement `LeastSquaresProblem` (or use `ClosureLeastSquaresProblem`) with the
+current parameter vector, a residual callback, and its Jacobian. This example
+fits a line to three observations; the inconsistent data leave a small
+nonzero residual at the optimum:
+
+```rust
+use nalgebra::{DMatrix, DVector};
+use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+
+let problem = ClosureLeastSquaresProblem::new(
+    DVector::from_vec(vec![0.0, 0.0]), // [intercept, slope]
+    |p| DVector::from_vec(vec![p[0] - 1.0, p[0] + p[1] - 2.0, p[0] + 2.0 * p[1] - 2.9]),
+    |_| DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 1.0, 1.0, 1.0, 2.0]),
+);
+
+let method = NonlinearSolver::LeastSquares(
+    LeastSquaresLevenbergMarquardt::new().with_tol(1e-10),
+);
+let (problem, report) = method.try_minimize_least_squares(problem)?;
+assert!(report.termination.was_successful());
+println!("fit={:?}, objective={:e}", problem.params(), report.objective_function);
+```
+
+`try_minimize_least_squares` preserves typed numerical and callback errors.
+Convergence and other valid termination outcomes are represented in
+`report.termination`; inspect `was_successful()` rather than assuming every
+returned report is a successful fit. Runtime telemetry is off by default and
+can be enabled with `LeastSquaresTelemetryMode::Counters` or `Detailed` on the
+LM method.
+
+### Symbolic Least-Squares Builder
+
+For symbolic residuals, `SymbolicLeastSquaresSolver` prepares the residual and
+Jacobian and then uses the same canonical LM core. This builder supports an
+initial guess, named unknowns, parameterized equations, opt-in telemetry, and
+user-declared positive variables:
+
+```rust
+use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+
+let mut solver = SymbolicLeastSquaresSolver::new()
+    .with_equations_str(vec![
+        "a - 1".into(),
+        "a + b - 2".into(),
+        "a + 2*b - 2.9".into(),
+    ])
+    .with_unknowns(vec!["a".into(), "b".into()])
+    .with_initial_guess(vec![0.0, 0.0])
+    .with_tolerance(1e-10)
+    .with_telemetry(LeastSquaresTelemetryMode::Detailed);
+
+let report = solver.try_solve()?;
+if report.termination.was_successful() {
+    let coefficients = solver.map_of_solutions.as_ref().expect("successful fit");
+    println!("{coefficients:?}; objective={:e}", report.objective_function);
+}
+```
+
+Use `try_solve`/`try_minimize_least_squares` for typed failures. The symbolic
+builder's `set_positive_variables` is an explicit user policy for any model
+whose domain requires selected variables to stay strictly positive; the
+solver does not infer constraints from an application domain. This protection
+is useful for logarithms and other restricted expressions, but is not limited
+to chemistry.
+
+### Reusing A Parameterized Symbolic Model
+
+Declare equation parameters separately from unknowns. Each call to
+`try_solve_with_params` rebinds numeric values and reuses the prepared
+symbolic residual/Jacobian; it does not repeat symbolic preparation. The
+wrapper uses its configured initial guess for every call, so this is a fresh
+solve per parameter value, not a warm-start continuation from the previous
+solution:
+
+```rust
+let mut solver = SymbolicLeastSquaresSolver::new()
+    .with_equations_str(vec!["a - target".into(), "2*a - 2*target".into()])
+    .with_unknowns(vec!["a".into()])
+    .with_parameters(vec!["target".into()])
+    .with_initial_guess(vec![0.0]);
+
+for target in [1.0, 2.0, 3.0] {
+    let report = solver.try_solve_with_params(vec![target])?;
+    assert!(report.termination.was_successful());
+    println!("target={target}, fit={:?}", solver.map_of_solutions);
+}
+```

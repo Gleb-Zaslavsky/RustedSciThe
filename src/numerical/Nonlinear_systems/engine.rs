@@ -33,7 +33,7 @@ pub enum EngineLogLevel {
     Warn,
 }
 
-/// States whether aggregate solve statistics were actually collected.
+/// States whether aggregate solve counters were actually collected.
 ///
 /// The numeric fields in [`SolveStatistics`] intentionally remain zero when
 /// collection is disabled for compatibility. Callers must inspect this flag
@@ -43,7 +43,7 @@ pub enum StatisticsAvailability {
     /// Statistics were not collected for this solve attempt.
     #[default]
     NotCollected,
-    /// Statistics and durations were collected for this solve attempt.
+    /// Statistics counters were collected for this solve attempt.
     Collected,
 }
 
@@ -183,8 +183,13 @@ pub struct IterationRecord {
 /// Aggregate counters for one solve.
 #[derive(Debug, Clone, Default)]
 pub struct SolveStatistics {
-    /// Whether the remaining counter and duration fields are measurements.
+    /// Whether the counter fields contain measurements.
     pub availability: StatisticsAvailability,
+    /// Whether duration fields were measured with a monotonic clock.
+    ///
+    /// Counter-only telemetry deliberately leaves this false so callers do
+    /// not mistake zero durations for measured zero-cost operations.
+    pub timings_collected: bool,
     /// Number of completed nonlinear iterations.
     pub iterations: usize,
     /// Residual evaluations.
@@ -205,10 +210,15 @@ pub struct SolveStatistics {
     pub linear_solves: usize,
     /// Linear factorizations constructed by the method.
     pub linear_factorizations: usize,
+    /// Trust-region or damping subproblem trials.
+    pub trust_region_trials: usize,
     /// Accepted trial steps.
     pub accepted_steps: usize,
     /// Rejected trial steps.
     pub rejected_steps: usize,
+    /// Trial points rejected before user callbacks because they violated a
+    /// declared domain or contained non-finite coordinates/residuals.
+    pub domain_rejections: usize,
     /// Trial points written into a reusable method workspace.
     pub reusable_trial_points: usize,
     /// Cumulative time spent evaluating residuals.
@@ -225,6 +235,9 @@ pub struct SolveStatistics {
     /// Cumulative time spent applying a prepared factorization to a right-hand
     /// side (the back-substitution/matrix-vector part).
     pub linear_system_solve_duration: Duration,
+    /// Inclusive time in the LM regularized least-squares trust-region solver.
+    /// This overlaps its triangular-solve substage and is diagnostic, not additive.
+    pub trust_region_subproblem_duration: Duration,
     /// Total numerical solve time, including callbacks and method work.
     pub total_duration: Duration,
     /// Per-iteration telemetry snapshots collected for this solve.
@@ -645,6 +658,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
         } else {
             StatisticsAvailability::NotCollected
         };
+        stats.timings_collected = collect_statistics;
         let mut history = if self.options.diagnostics.collect_history {
             Vec::with_capacity(self.options.max_iterations + 1)
         } else {

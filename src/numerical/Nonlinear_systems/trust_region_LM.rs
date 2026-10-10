@@ -8,13 +8,13 @@
 //! parameter update into the usual Newton-like step `x_{k+1} = x_k - p`.
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
     eval_residual_with_runtime, measure_linear_operation, scaled_norm, scaling_vector,
+    IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
+use crate::numerical::Nonlinear_systems::least_squares::trust_region::determine_lambda_and_parameter_update;
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
-use crate::numerical::optimization::qr_LM::PivotedQR;
-use crate::numerical::optimization::trust_region_LM::determine_lambda_and_parameter_update;
+use crate::somelinalg::least_squares_qr::PivotedQR;
 #[cfg(test)]
 use approx::assert_relative_eq;
 use nalgebra::{DMatrix, DVector};

@@ -293,10 +293,12 @@ mod tests {
         bvp_solver.solve();
 
         let x_mesh_final = bvp_solver.mesh();
-        let ressult = " exp(-x^2/4.0) ".to_string();
-        let expr = Expr::parse_expression(&ressult);
-        let exact_sol_func = expr.lambdify1D();
-        let exact_solution: Vec<f64> = x_mesh_final.iter().map(|&x| exact_sol_func(x)).collect();
+        // Keep this oracle independent of the symbolic parser's unary-minus
+        // precedence: the exact solution is exp(-(x^2)/4), not exp((-x)^2/4).
+        let exact_solution: Vec<f64> = x_mesh_final
+            .iter()
+            .map(|&x| (-x * x / 4.0).exp())
+            .collect();
         let sol: DMatrix<f64> = bvp_solver.get_result().unwrap();
         let numer: DVector<f64> = sol.column(0).to_owned().into();
         for i in 0..x_mesh_final.len() {

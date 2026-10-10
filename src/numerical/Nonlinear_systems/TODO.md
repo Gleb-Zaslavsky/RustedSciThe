@@ -1245,3 +1245,98 @@ gap.
   still separate follow-up work. Raw Criterion output remains technical
   evidence until a compact aggregate is defined without discarding its
   statistical intervals.
+
+## 2026-10-10 LM 0.15.0 Fidelity And Domain Policy
+
+The local canonical rectangular least-squares solver is compared against the
+installed `levenberg-marquardt 0.15.0` source at
+`C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\levenberg-marquardt-0.15.0`.
+The upstream implementation is the numerical reference for the ordinary
+finite, unconstrained problem. Our f64-only storage, symbolic frontends,
+typed errors, and opt-in telemetry remain local architecture.
+
+### Accepted faithful contract
+
+- [x] Add a direct cross-project parity fixture for the canonical LM route.
+  It compares upstream 0.15.0 and the local solver on residual callback
+  trajectories, objective, final parameters, evaluation count, and termination.
+  The debug A/B run passed seven cases with `1e-10` trajectory/parameter and
+  `1e-12` objective tolerances. Rosenbrock exercised five rejected trust-region
+  steps; wide and nearly-singular cases are included as well.
+- [ ] Preserve the upstream pivoted Householder QR, Givens diagonal
+  regularization, damping update, acceptance ratio, diagonal scaling, and
+  `ftol`/`xtol`/`gtol` termination order. Any change to these rules requires a
+  new named policy and a parity explanation.
+- [x] Align the rank-active QR triangular solve with upstream's nalgebra
+  `solve_upper_triangular_mut` operation instead of a hand-written reverse
+  substitution loop. The targeted zero-diagonal/rank-deficient QR test passes;
+  the cross-project parity fixture passes on the current rank-deficient and
+  underdetermined cases.
+- [x] Exercise wide and nearly-singular QR paths through the public LM solve in
+  both projects. The upstream crate keeps its QR helper private, so direct
+  cross-crate inspection of factor internals is not part of the public parity
+  contract; local QR-specific golden/regression tests remain in `somelinalg`.
+- [ ] Keep the upstream default behavior for finite unconstrained problems.
+  f64 specialization, dynamic matrix storage, workspace ownership, typed
+  errors, and telemetry must not change the numerical trajectory when their
+  policy is inactive.
+- [ ] Decide explicitly whether Cargo-level `minpack-compat` compatibility is
+  part of the public contract. The current `MINPACK_COMPAT` constant is local
+  and does not reproduce the upstream feature surface.
+
+### Required local extensions
+
+- [ ] Keep explicit variable-domain validation as a first-class, opt-in user
+  policy. Add a public positive-variable API such as `set_positive(...)` for
+  any model whose user requires strict `x > 0`, validating before
+  residual/Jacobian callbacks. Chemical and logarithmic models are examples,
+  not the scope boundary. Only named variables are constrained; multipliers
+  and other unconstrained quantities remain unrestricted.
+- [ ] Preserve the last accepted point after a rejected domain trial, reduce
+  the trust-region radius, increase damping, and retry within the configured
+  budget. Never clip a negative value, replace it with epsilon, or silently
+  take `abs(x)` because that changes the mathematical problem.
+- [ ] Distinguish domain rejection from callback failure. A non-finite value
+  at the initial point or in the accepted Jacobian is a typed numerical error;
+  a recoverable trial-domain violation may be retried; a user callback error
+  must retain its original source and stage.
+- [ ] Define the policy for non-finite trial residuals. If they are treated as
+  recoverable domain exits, record that explicitly and test overflow and
+  logarithm cases separately from callback failures.
+- [ ] Keep the independent `max_iterations` limit as an opt-in safety budget.
+  It is not an upstream LM parameter and must remain separate from the
+  upstream `patience * (n + 1)` residual-evaluation budget.
+- [ ] Keep telemetry disabled by default and preserve zero overhead semantics
+  for the disabled mode. Counters and timings must distinguish callback
+  evaluations, rejected trials, QR factorizations, triangular solves, outer
+  iterations, and domain rejections.
+- [ ] Make `try_*` APIs return typed errors without losing the original
+  callback/preparation cause. Convergence, stagnation, exhausted evaluation
+  budget, domain exhaustion, and numerical breakdown must remain distinct.
+
+### Audit result
+
+- [x] Locate and inspect the installed upstream 0.15.0 implementation.
+- [x] Verify by source comparison that the main LM formulas match upstream on
+  the ordinary finite path: pivoted QR, trust-region `lambda` search, predicted
+  and actual reduction, acceptance ratio, radius/damping updates, and the
+  `ftol`/`xtol`/`gtol` checks are structurally aligned.
+- [x] Run the local least-squares test group after the parity addition:
+  `47 passed, 0 failed`.
+- [x] Confirm that the local implementation contains intentional behavior
+  beyond upstream: domain-trial rejection, non-finite input checks, typed
+  failure propagation, optional outer-iteration limits, and telemetry.
+- [x] Run an upstream-vs-local differential trajectory test against the actual
+  `levenberg-marquardt 0.15.0` dev dependency. Seven matched fixtures pass;
+  compact per-case metrics are printed by the test. All measured trajectory,
+  final-parameter, and objective differences were zero; the rejected-trial
+  Rosenbrock row recorded five local rejected steps.
+- [ ] Keep the parity claim scoped to the tested ordinary finite path; local
+  domain/error/telemetry extensions are intentionally not upstream compatibility
+  claims. More random/property-generated parity cases may be useful later.
+
+The production decision is therefore: faithful upstream LM mathematics on the
+unconstrained finite path, with explicitly documented local domain/error/
+telemetry extensions. Positive-domain protection is available wherever the
+user decides it is required; the solver does not infer constraints from the
+application domain.

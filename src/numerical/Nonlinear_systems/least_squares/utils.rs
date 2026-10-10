@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 
-use crate::numerical::optimization::LM_optimization::MINPACK_COMPAT;
+use super::lm::MINPACK_COMPAT;
 use nalgebra::{Dim, RealField, U1, Vector, convert, storage::Storage};
 use num_traits::float::Float; // MINPACK_COMPAT
 // mod derivest;

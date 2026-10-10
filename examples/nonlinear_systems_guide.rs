@@ -10,7 +10,7 @@
 //! run cargo run --example nonlinear_systems_guide
 //!
 
-use RustedSciThe::numerical::optimization::sym_wrapper::LM;
+use RustedSciThe::numerical::Nonlinear_systems::least_squares::symbolic_solver::SymbolicLeastSquaresSolver;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn main() {
@@ -56,7 +56,7 @@ fn example_1_builder_string() {
     println!("System: x² + y² = 1, x = y");
     println!("Expected solution: x = y = ±√2/2 ≈ ±0.707\n");
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations_str(vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
         .with_initial_guess(vec![0.5, 0.5])
@@ -87,7 +87,7 @@ fn example_2_builder_expr() {
     let eq1 = Expr::parse_expression("x^2 + y^2 - 1");
     let eq2 = Expr::parse_expression("x - y");
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
         .with_initial_guess(vec![0.5, 0.5])
@@ -120,7 +120,7 @@ fn example_3_native_symbolic() {
     let eq1 = x.clone().pow(Expr::Const(2.0)) + y.clone().pow(Expr::Const(2.0)) - Expr::Const(1.0);
     let eq2 = x.clone() - y.clone();
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
         .with_initial_guess(vec![0.5, 0.5])
@@ -150,20 +150,13 @@ fn example_4_traditional_api() {
     println!("--------------------------------------------");
     println!("System: x² + y² = 1, x = y\n");
 
-    let mut solver = LM::new();
-    solver.eq_generate_from_str(
-        vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()],
-        Some(vec!["x".to_string(), "y".to_string()]),
-        None,
-        vec![0.5, 0.5],
-        Some(1e-8),
-        None,
-        None,
-        None,
-        None,
-    );
-    solver.set_loglevel("none".to_string());
-    solver.eq_generate();
+    let mut solver = SymbolicLeastSquaresSolver::new()
+        .with_equations_str(vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()])
+        .with_unknowns(vec!["x".to_string(), "y".to_string()])
+        .with_initial_guess(vec![0.5, 0.5])
+        .with_tolerance(1e-8)
+        .with_loglevel("none".to_string())
+        .build();
     solver.solve();
 
     if let Some(map) = solver.map_of_solutions {
@@ -177,7 +170,7 @@ fn example_4_rosenbrock() {
     println!("System: 10(y - x²) = 0, 1 - x = 0");
     println!("Expected solution: x = 1, y = 1\n");
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations_str(vec!["10*(y - x^2)".to_string(), "1 - x".to_string()])
         .with_initial_guess(vec![-1.2, 1.0])
         .with_tolerance(1e-8)
@@ -214,7 +207,7 @@ fn example_6_native_exponential() {
     let eq1 = Expr::exp(x.clone()) + y.clone() - Expr::Const(3.0);
     let eq2 = x.clone() + Expr::exp(y.clone()) - Expr::Const(3.0);
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_initial_guess(vec![0.5, 0.5])
         .with_f_tolerance(1e-8)
@@ -255,7 +248,7 @@ fn example_7_native_trigonometric() {
     let eq1 = Expr::sin(Box::new(x.clone())) + Expr::cos(Box::new(y.clone())) - Expr::Const(1.0);
     let eq2 = Expr::cos(Box::new(x.clone())) - Expr::sin(Box::new(y.clone()));
 
-    let mut solver = LM::new()
+    let mut solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_initial_guess(vec![0.5, 0.5])
         .with_tolerance(1e-7)
@@ -301,7 +294,7 @@ fn example_8_native_three_dimensional() {
     let eq2 = x.clone() * y.clone() + z.clone() - Expr::Const(0.5);
     let eq3 = x.clone() + y.clone() + z.clone() - Expr::Const(1.0);
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2, eq3])
         .with_unknowns(vec!["x".to_string(), "y".to_string(), "z".to_string()])
         .with_initial_guess(vec![0.3, 0.3, 0.4])
@@ -347,7 +340,7 @@ fn example_9_native_parametric() {
         - Expr::Const(1.0);
     let eq2 = x.clone() - y.clone();
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
         .with_parameters(vec!["a".to_string(), "b".to_string()])
@@ -377,7 +370,7 @@ fn example_9_native_parametric() {
         - Expr::Const(1.0);
     let eq2_2 = x2.clone() - y2.clone();
 
-    let solver2 = LM::new()
+    let solver2 = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1_2, eq2_2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
         .with_parameters(vec!["a".to_string(), "b".to_string()])
@@ -414,7 +407,7 @@ fn example_10_complex_native() {
     let eq1 = Expr::ln(x.clone()) + y.clone() - Expr::Const(2.0);
     let eq2 = x.clone() + Expr::ln(y.clone()) - Expr::Const(2.0);
 
-    let solver = LM::new()
+    let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_initial_guess(vec![1.0, 1.0])
         .with_tolerance(1e-8)
@@ -447,7 +440,7 @@ fn example_10_complex_native() {
     let eq1_div = x2.clone() / y2.clone() - Expr::Const(2.0);
     let eq2_div = x2.clone() + y2.clone() - Expr::Const(3.0);
 
-    let solver_div = LM::new()
+    let solver_div = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1_div, eq2_div])
         .with_initial_guess(vec![1.5, 1.0])
         .with_tolerance(1e-8)

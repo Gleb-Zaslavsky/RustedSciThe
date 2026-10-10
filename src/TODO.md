@@ -1840,7 +1840,7 @@ failures:
 ## 2026-06-22: VarPro migration to internal f64 Levenberg-Marquardt
 
 Goal: make `src/numerical/optimization/varpro/` a native part of this crate, backed by
-`LM_optimization.rs` and `problem_LM.rs`, with no dependency on the external
+the canonical `Nonlinear_systems::least_squares` core, with no dependency on the external
 `levenberg-marquardt` API shape, no scalar generics, no `nalgebra-lapack` path, and no
 external `test_assets` fixtures. Do not add symbolic Jacobian generation until the basic
 numeric VarPro pipeline is compiling and covered by focused tests.
@@ -1873,7 +1873,7 @@ Migration plan:
    Keep diagonal/unit weighting behavior and tests because it is part of the core VarPro API.
 
 4. Adapt `LevMarProblem` to the local LM trait.
-   Implement `crate::numerical::optimization::problem_LM::LeastSquaresProblem` for the SVD VarPro problem with exact signatures:
+   Implement `crate::numerical::Nonlinear_systems::least_squares::LeastSquaresProblem` for the SVD VarPro problem with exact signatures:
    `set_params(&mut self, &DVector<f64>)`,
    `params(&self) -> DVector<f64>`,
    `residuals(&self) -> Option<DVector<f64>>`,

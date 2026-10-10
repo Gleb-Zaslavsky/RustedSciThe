@@ -588,7 +588,7 @@ impl LapackStyleBandedLuFaithful {
                 // Find pivot offset within the column (0-based)
                 let jp_off = self.find_pivot_offset_workspace(jj, km);
                 let p = jj + jp_off; // pivot row (absolute)
-                // Store Fortran-style IPIV(JJ) = JP + JJ - J as 0-based relative value (p - j).
+                                     // Store Fortran-style IPIV(JJ) = JP + JJ - J as 0-based relative value (p - j).
                 self.ipiv[jj] = p.saturating_sub(j);
 
                 let pivot = self.ab_get(kv + jp_off, jj);
@@ -2172,7 +2172,7 @@ mod solver_comparison_tests {
     use crate::somelinalg::banded::ops::banded_matvec;
     use faer::linalg::solvers::Solve;
     use faer::sparse::{SparseColMat, Triplet};
-    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
 
     #[derive(Debug, Clone, Copy)]
     struct CompareMetrics {

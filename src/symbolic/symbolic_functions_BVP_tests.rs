@@ -238,6 +238,9 @@ fn compile_lambdified_problem_with_dense_backend_and_params_matches_expected_val
 #[test]
 fn compile_lambdified_problem_with_banded_backend_matches_expected_values() {
     let mut jacobian = build_node_major_banded_symbolic_case();
+    jacobian.set_lambdify_telemetry_mode(
+        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed,
+    );
     let variables = DVector::from_vec(vec![2.0, 3.0, 4.0, 5.0]);
     let expected_residual = DVector::from_vec(vec![5.0, 4.0, 19.0, 16.0]);
     let expected_jacobian = DMatrix::from_row_slice(
@@ -1203,10 +1206,15 @@ fn generate_bvp_with_atom_discretization_matches_legacy_banded_path() {
         .prepared_problem
         .atom_aot_plan()
         .expect("Banded AtomView selection must own its prepared native plan");
-    assert!(matches!(
-        plan.matrix_layout(),
-        crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Banded { .. }
-    ));
+    assert!(
+        matches!(
+            plan.matrix_layout(),
+            crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Banded { .. }
+                | crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::BandedCompact { .. }
+        ),
+        "unexpected AtomView Banded AOT layout: {:?}",
+        plan.matrix_layout()
+    );
     assert_eq!(plan.telemetry_snapshot().conversions, 0);
 
     let atom_direct = atom.direct_banded_problem();
@@ -1692,13 +1700,19 @@ fn atom_two_point_direct_generate_residual_diagnostics_with_explicit_h() {
         "[two-point direct generate explicit-h] max_index={}, max_diff={:.6e}, legacy={}, atom={}",
         max_index, max_diff, legacy_residual[max_index], atom_residual[max_index]
     );
+    assert!(
+        max_diff <= 1.0e-10,
+        "legacy and AtomView residual callbacks should agree, max diff={max_diff:.6e}"
+    );
     println!(
         "[two-point direct generate explicit-h] legacy_row_expr={}",
         legacy.vector_of_functions[max_index]
     );
     println!(
-        "[two-point direct generate explicit-h] atom_row_expr={}",
-        atom.vector_of_functions[max_index]
+        "[two-point direct generate explicit-h] atom_row_expr={:?}",
+        atom.atom_discretized_system
+            .as_ref()
+            .and_then(|system| system.vector_of_functions.get(max_index))
     );
 }
 

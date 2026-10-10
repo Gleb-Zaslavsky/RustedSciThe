@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.19"
+version = "0.4.20"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -115,6 +115,9 @@ include = [
     "!**/*.[sS][vV][gG]",
     # Cargo's license file is the one intentional text-file exception.
     "LICENSE.txt",
+    # Maintained task-document examples are executable documentation and must
+    # remain package inputs despite the global generated *.txt exclusion.
+    "examples/task_docs/reference/**/*.txt",
 ]
 
 
@@ -147,6 +150,22 @@ debug = false
 name = "bvp_benches"
 harness = false
 [[bench]]
+name = "bvp_damp_workloads"
+harness = false
+
+[[bench]]
+name = "bvp_sci_lambdify"
+harness = false
+[[bench]]
+name = "bvp_sci_aot"
+harness = false
+[[bench]]
+name = "bvp_sci_matched"
+harness = false
+[[bench]]
+name = "bvp_sci_linear_backend_micro"
+harness = false
+[[bench]]
 name = "lu_benches"
 harness = false
 [[bench]]
@@ -159,6 +178,9 @@ harness = false
 name = "block_tridiag_benches"
 harness = false
 [[bench]]
+name = "bordered_banded_benches"
+harness = false
+[[bench]]
 name = "nonlinear_systems_benches"
 harness = false
 [[bench]]
@@ -166,6 +188,12 @@ name = "nonlinear_systems_allocation_audit"
 harness = false
 [[bench]]
 name = "nonlinear_preparation_telemetry"
+harness = false
+[[bench]]
+name = "nonlinear_workloads"
+harness = false
+[[bench]]
+name = "nonlinear_frontend_matrix"
 harness = false
 [[bench]]
 name = "bvp_numeric_assembly"
@@ -186,6 +214,9 @@ harness = false
 name = "lsode2_parameter_continuation"
 harness = false
 [[bench]]
+name = "lsode2_workloads"
+harness = false
+[[bench]]
 name = "be_workload_benches"
 harness = false
 [[bench]]
@@ -193,6 +224,9 @@ name = "be_symbolic_frontend_benches"
 harness = false
 [[bench]]
 name = "be_symbolic_execution_benches"
+harness = false
+[[bench]]
+name = "be_workloads"
 harness = false
 [[bench]]
 name = "be_history_allocation_audit"
@@ -211,6 +245,9 @@ name = "bdf_backend_matrix"
 harness = false
 [[bench]]
 name = "bdf_aot_continuation"
+harness = false
+[[bench]]
+name = "bdf_workloads"
 harness = false
 [[bench]]
 name = "radau_workloads"
@@ -296,6 +333,10 @@ assert_matches = "1.5"
 mockall = "0.15.0"
 typed_test_gen = "0.1"
 
+
+[dev-dependencies]
+levenberg-marquardt = "=0.15.0"
+nalgebra_lm = { package = "nalgebra", version = "0.34" }
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }

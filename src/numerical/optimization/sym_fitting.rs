@@ -1,10 +1,81 @@
-use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
-use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
-use crate::numerical::optimization::sym_wrapper::NonlinearSystem;
+use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
+use crate::numerical::Nonlinear_systems::least_squares::{
+    LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode,
+    LeastSquaresTerminationReason, LevenbergMarquardt, MinimizationReport,
+    PreparedSymbolicLeastSquaresProblem,
+};
+use crate::numerical::Nonlinear_systems::symbolic::SymbolicProblemOptions;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
-use nalgebra::{DMatrix, DVector};
+use log::{log, Level};
+use nalgebra::DVector;
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
+/// Typed failures from input validation, symbolic preparation, and fitting.
+#[derive(Debug)]
+pub enum FittingError {
+    InvalidInput {
+        field: &'static str,
+    },
+    EquationParse(String),
+    DimensionMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    NonFiniteInput {
+        field: &'static str,
+        index: usize,
+    },
+    NoUnknowns,
+    Preparation(LeastSquaresError),
+    Solver(LeastSquaresError),
+    DidNotConverge {
+        termination: LeastSquaresTerminationReason,
+        evaluations: usize,
+        objective: f64,
+    },
+}
+
+impl Display for FittingError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput { field } => write!(f, "invalid fitting input: {field}"),
+            Self::EquationParse(message) => {
+                write!(f, "failed to parse fitting equation: {message}")
+            }
+            Self::DimensionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "fitting data length mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::NonFiniteInput { field, index } => {
+                write!(f, "non-finite fitting input {field}[{index}]")
+            }
+            Self::NoUnknowns => write!(f, "no fitting coefficients were found"),
+            Self::Preparation(source) => write!(f, "fitting preparation failed: {source}"),
+            Self::Solver(source) => write!(f, "fitting solve failed: {source}"),
+            Self::DidNotConverge {
+                termination,
+                evaluations,
+                objective,
+            } => write!(
+                f,
+                "fitting did not converge: {termination:?}; evaluations={evaluations}, objective={objective}"
+            ),
+        }
+    }
+}
+
+impl Error for FittingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Preparation(source) | Self::Solver(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// 1D fitting using Levenberg-Marquardt algorithm
 /// This is a wrapper around the Levenberg-Marquardt algorithm.
@@ -12,7 +83,6 @@ use std::collections::HashMap;
 pub struct Fitting {
     pub x_data: Vec<f64>,     // x data
     pub y_data: Vec<f64>,     // y data
-    pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
     pub equations: Vec<Expr>, // equations to fit, flattened row-major when there are many
     pub arg: String,
     pub unknown_coeffs: Vec<String>,   // vector of variables
@@ -25,14 +95,36 @@ pub struct Fitting {
     pub result: Option<DVector<f64>>,
     pub map_of_solutions: Option<HashMap<String, f64>>,
     pub r_ssquared: Option<f64>,
+    /// Telemetry snapshot for the most recent numerical solve attempt.
+    /// Check `availability` and `timings_collected` before interpreting zeros.
+    pub last_statistics: Option<SolveStatistics>,
+    telemetry_mode: LeastSquaresTelemetryMode,
+    log_level: Option<Level>,
+    /// Prepared rectangular frontend retained between repeated solves.
+    prepared_least_squares: Option<PreparedSymbolicLeastSquaresProblem>,
 }
 
 impl Fitting {
+    /// Invalidates the prepared frontend when its symbolic schema changes.
+    ///
+    /// Observation coordinates and target values are numeric callback inputs,
+    /// so changing data clears the previous result but keeps symbolic preparation.
+    fn invalidate_prepared(&mut self) {
+        self.prepared_least_squares = None;
+        self.clear_last_solution();
+    }
+
+    fn clear_last_solution(&mut self) {
+        self.result = None;
+        self.map_of_solutions = None;
+        self.r_ssquared = None;
+        self.last_statistics = None;
+    }
+
     pub fn new() -> Self {
         Fitting {
             x_data: Vec::new(),
             y_data: Vec::new(),
-            jacobian: Jacobian::new(),
             equations: vec![Expr::parse_expression("0")],
             unknown_coeffs: Vec::new(),
             arg: String::new(),
@@ -45,23 +137,30 @@ impl Fitting {
             result: None,
             map_of_solutions: None,
             r_ssquared: None,
+            prepared_least_squares: None,
+            last_statistics: None,
+            telemetry_mode: LeastSquaresTelemetryMode::Off,
+            log_level: None,
         }
     }
 
     /// Builder pattern: Set x data
     pub fn with_x_data(mut self, x_data: Vec<f64>) -> Self {
+        self.clear_last_solution();
         self.x_data = x_data;
         self
     }
 
     /// Builder pattern: Set y data
     pub fn with_y_data(mut self, y_data: Vec<f64>) -> Self {
+        self.clear_last_solution();
         self.y_data = y_data;
         self
     }
 
     /// Builder pattern: Set data (x and y together)
     pub fn with_data(mut self, x_data: Vec<f64>, y_data: Vec<f64>) -> Self {
+        self.clear_last_solution();
         self.x_data = x_data;
         self.y_data = y_data;
         self
@@ -69,6 +168,7 @@ impl Fitting {
 
     /// Builder pattern: Set equation from Expr
     pub fn with_equation(mut self, eq: Expr) -> Self {
+        self.invalidate_prepared();
         self.equations = vec![eq];
         self
     }
@@ -78,18 +178,30 @@ impl Fitting {
     /// The equations are flattened in row-major order when residuals and
     /// predictions are generated.
     pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
+        self.invalidate_prepared();
         self.equations = eq_system;
         self
     }
 
     /// Builder pattern: Set equation from string
     pub fn with_equation_str(mut self, eq_string: String) -> Self {
+        self.invalidate_prepared();
         self.equations = vec![Expr::parse_expression(&eq_string)];
         self
     }
 
+    /// Fallible equation-string builder for input that may be malformed.
+    pub fn try_with_equation_str(mut self, equation: &str) -> Result<Self, FittingError> {
+        let equation = Expr::try_parse_expression(equation)
+            .map_err(|error| FittingError::EquationParse(error.to_string()))?;
+        self.invalidate_prepared();
+        self.equations = vec![equation];
+        Ok(self)
+    }
+
     /// Builder pattern: Set target equations from a vector of strings.
     pub fn with_equations_str(mut self, eq_system_string: Vec<String>) -> Self {
+        self.invalidate_prepared();
         self.equations = eq_system_string
             .iter()
             .map(|x| Expr::parse_expression(x))
@@ -99,6 +211,7 @@ impl Fitting {
 
     /// Builder pattern: Set polynomial equation of given degree
     pub fn with_polynomial(mut self, degree: usize, arg: String) -> Self {
+        self.invalidate_prepared();
         let (eq, unknowns) = Expr::polyval(degree, &arg);
         self.equations = vec![eq];
         self.unknown_coeffs = unknowns;
@@ -108,77 +221,138 @@ impl Fitting {
 
     /// Builder pattern: Set unknown coefficients
     pub fn with_unknowns(mut self, unknowns: Vec<String>) -> Self {
+        self.invalidate_prepared();
         self.unknown_coeffs = unknowns;
         self
     }
 
     /// Builder pattern: Set argument variable
     pub fn with_arg(mut self, arg: String) -> Self {
+        self.invalidate_prepared();
         self.arg = arg;
         self
     }
 
     /// Builder pattern: Set initial guess
     pub fn with_initial_guess(mut self, initial_guess: Vec<f64>) -> Self {
+        self.clear_last_solution();
         self.initial_guess = initial_guess;
         self
     }
 
     /// Builder pattern: Set tolerance
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.clear_last_solution();
         self.tolerance = Some(tolerance);
         self
     }
 
     /// Builder pattern: Set function tolerance
     pub fn with_f_tolerance(mut self, f_tolerance: f64) -> Self {
+        self.clear_last_solution();
         self.f_tolerance = Some(f_tolerance);
         self
     }
 
     /// Builder pattern: Set gradient tolerance
     pub fn with_g_tolerance(mut self, g_tolerance: f64) -> Self {
+        self.clear_last_solution();
         self.g_tolerance = Some(g_tolerance);
         self
     }
 
     /// Builder pattern: Set scale diagonal
     pub fn with_scale_diag(mut self, scale_diag: bool) -> Self {
+        self.clear_last_solution();
         self.scale_diag = Some(scale_diag);
         self
     }
 
     /// Builder pattern: Set max iterations
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.clear_last_solution();
         self.max_iterations = Some(max_iterations);
         self
     }
 
-    /// Builder pattern: Build and fit (generates Jacobian and solves)
-    pub fn build(mut self) -> Self {
-        self.validate_and_infer();
-        self.eq_generate();
-        self.solve();
+    /// Enables optional counters or detailed least-squares timings.
+    /// Telemetry is disabled by default and Off adds no clock/counter work.
+    pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
         self
     }
 
-    /// Validate inputs and infer unknowns if not provided
-    fn validate_and_infer(&mut self) {
-        assert!(!self.x_data.is_empty(), "X data cannot be empty.");
-        assert!(!self.y_data.is_empty(), "Y data cannot be empty.");
-        assert!(
-            !self.initial_guess.is_empty(),
-            "Initial guess cannot be empty."
-        );
-        assert!(!self.arg.is_empty(), "Argument variable cannot be empty.");
+    /// Enables fitting log records through the host application's `log` facade.
+    /// No logger is installed or configured by this library.
+    pub fn with_logging(mut self, level: Level) -> Self {
+        self.log_level = Some(level);
+        self
+    }
+
+    /// Disables fitting log records (the default).
+    pub fn without_logging(mut self) -> Self {
+        self.log_level = None;
+        self
+    }
+
+    /// Statistics from the latest solve, if telemetry was enabled.
+    pub fn last_statistics(&self) -> Option<&SolveStatistics> {
+        self.last_statistics.as_ref()
+    }
+
+    /// Builder pattern: validate, prepare through the symbolic frontend, and solve.
+    pub fn build(self) -> Self {
+        self.try_build()
+            .expect("fitting build failed; use try_build for typed errors")
+    }
+
+    /// Fallible builder that validates, prepares, and solves the fit.
+    pub fn try_build(mut self) -> Result<Self, FittingError> {
+        self.try_solve()?;
+        Ok(self)
+    }
+
+    /// Validate the fitting data and infer unknown coefficient names.
+    fn try_validate_and_infer(&mut self) -> Result<(), FittingError> {
+        if self.x_data.is_empty() {
+            return Err(FittingError::InvalidInput { field: "x_data" });
+        }
+        if self.y_data.is_empty() {
+            return Err(FittingError::InvalidInput { field: "y_data" });
+        }
+        if self.initial_guess.is_empty() {
+            return Err(FittingError::InvalidInput {
+                field: "initial_guess",
+            });
+        }
+        if self.arg.is_empty() {
+            return Err(FittingError::InvalidInput { field: "arg" });
+        }
+        if self.equations.is_empty() {
+            return Err(FittingError::InvalidInput { field: "equations" });
+        }
 
         let equations = self.active_equations();
-        let expected_y_len = self.x_data.len() * equations.len();
-        assert_eq!(
-            self.y_data.len(),
-            expected_y_len,
-            "Y data must have length x_data.len() * equation_count."
-        );
+        let expected_y_len = self
+            .x_data
+            .len()
+            .checked_mul(equations.len())
+            .ok_or(FittingError::InvalidInput { field: "data size" })?;
+        if self.y_data.len() != expected_y_len {
+            return Err(FittingError::DimensionMismatch {
+                expected: expected_y_len,
+                actual: self.y_data.len(),
+            });
+        }
+        for (field, values) in [
+            ("x_data", self.x_data.as_slice()),
+            ("y_data", self.y_data.as_slice()),
+            ("initial_guess", self.initial_guess.as_slice()),
+        ] {
+            if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+                return Err(FittingError::NonFiniteInput { field, index });
+            }
+        }
 
         if self.unknown_coeffs.is_empty() {
             let mut args: Vec<String> = equations
@@ -189,18 +363,19 @@ impl Fitting {
             args.dedup();
             // Remove the independent variable from unknowns
             args.retain(|x| x != &self.arg);
-            assert!(
-                !args.is_empty(),
-                "No unknown coefficients found in equation."
-            );
+            if args.is_empty() {
+                return Err(FittingError::NoUnknowns);
+            }
             self.unknown_coeffs = args;
         }
 
-        assert_eq!(
-            self.unknown_coeffs.len(),
-            self.initial_guess.len(),
-            "Initial guess length must match number of unknown coefficients."
-        );
+        if self.unknown_coeffs.len() != self.initial_guess.len() {
+            return Err(FittingError::DimensionMismatch {
+                expected: self.unknown_coeffs.len(),
+                actual: self.initial_guess.len(),
+            });
+        }
+        Ok(())
     }
     pub fn set_fitting(
         &mut self,
@@ -216,9 +391,10 @@ impl Fitting {
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
     ) {
+        self.invalidate_prepared();
         self.x_data = x_data;
         self.y_data = y_data;
-        self.equations = vec![eq.clone()];
+        self.equations = vec![eq];
         self.arg = arg;
         self.initial_guess = initial_guess;
         self.tolerance = tolerance;
@@ -229,41 +405,13 @@ impl Fitting {
         let values = if let Some(values) = unknowns {
             values
         } else {
-            let mut args: Vec<String> = eq.all_arguments_are_variables();
+            let mut args: Vec<String> = self.equations[0].all_arguments_are_variables();
             args.sort();
             args.dedup();
 
             args
         };
-        self.unknown_coeffs = values.clone();
-        assert!(
-            !self.initial_guess.is_empty(),
-            "Initial guess should not be empty."
-        );
-        if let Some(tolerance) = tolerance {
-            assert!(
-                tolerance >= 0.0,
-                "Tolerance should be a non-negative number."
-            );
-        }
-        if let Some(max_iterations) = max_iterations {
-            assert!(
-                max_iterations > 0,
-                "Max iterations should be a positive number."
-            );
-        }
-        if let Some(g_tolerance) = g_tolerance {
-            assert!(
-                g_tolerance >= 0.0,
-                "Gradient tolerance should be a non-negative number."
-            );
-        }
-        if let Some(f_tolerance) = f_tolerance {
-            assert!(
-                f_tolerance >= 0.0,
-                "Function tolerance should be a non-negative number."
-            );
-        }
+        self.unknown_coeffs = values;
     }
     /// set fitting function as a vector of expressions
     pub fn set_fitting_system(
@@ -280,9 +428,10 @@ impl Fitting {
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
     ) {
+        self.invalidate_prepared();
         self.x_data = x_data;
         self.y_data = y_data;
-        self.equations = eq_system.clone();
+        self.equations = eq_system;
         self.arg = arg;
         self.initial_guess = initial_guess;
         self.tolerance = tolerance;
@@ -293,7 +442,8 @@ impl Fitting {
         let values = if let Some(values) = unknowns {
             values
         } else {
-            let mut args: Vec<String> = eq_system
+            let mut args: Vec<String> = self
+                .equations
                 .iter()
                 .flat_map(|x| x.all_arguments_are_variables())
                 .collect();
@@ -301,35 +451,7 @@ impl Fitting {
             args.dedup();
             args
         };
-        self.unknown_coeffs = values.clone();
-        assert!(
-            !self.initial_guess.is_empty(),
-            "Initial guess should not be empty."
-        );
-        if let Some(tolerance) = tolerance {
-            assert!(
-                tolerance >= 0.0,
-                "Tolerance should be a non-negative number."
-            );
-        }
-        if let Some(max_iterations) = max_iterations {
-            assert!(
-                max_iterations > 0,
-                "Max iterations should be a positive number."
-            );
-        }
-        if let Some(g_tolerance) = g_tolerance {
-            assert!(
-                g_tolerance >= 0.0,
-                "Gradient tolerance should be a non-negative number."
-            );
-        }
-        if let Some(f_tolerance) = f_tolerance {
-            assert!(
-                f_tolerance >= 0.0,
-                "Function tolerance should be a non-negative number."
-            );
-        }
+        self.unknown_coeffs = values;
     }
     /// set fitting function as a string
     pub fn fitting_generate_from_str(
@@ -346,8 +468,41 @@ impl Fitting {
         scale_diag: Option<bool>,
         max_iterations: Option<usize>, // max_iterations: usize,
     ) {
-        let eq = Expr::parse_expression(&eq_string);
+        self.try_fitting_generate_from_str(
+            x_data,
+            y_data,
+            eq_string,
+            unknowns,
+            arg,
+            initial_guess,
+            tolerance,
+            f_tolerance,
+            g_tolerance,
+            scale_diag,
+            max_iterations,
+        )
+        .expect("fitting input is invalid; use try_fitting_generate_from_str for typed errors");
+    }
 
+    /// Fallible counterpart that preserves symbolic parse failures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_fitting_generate_from_str(
+        &mut self,
+        x_data: Vec<f64>,
+        y_data: Vec<f64>,
+        eq_string: String,
+        unknowns: Option<Vec<String>>,
+        arg: String,
+        initial_guess: Vec<f64>,
+        tolerance: Option<f64>,
+        f_tolerance: Option<f64>,
+        g_tolerance: Option<f64>,
+        scale_diag: Option<bool>,
+        max_iterations: Option<usize>,
+    ) -> Result<(), FittingError> {
+        self.invalidate_prepared();
+        let eq = Expr::try_parse_expression(&eq_string)
+            .map_err(|error| FittingError::EquationParse(error.to_string()))?;
         self.set_fitting(
             x_data,
             y_data,
@@ -361,6 +516,7 @@ impl Fitting {
             scale_diag,
             max_iterations,
         );
+        Ok(())
     }
     /// set fitting function as a vector of expressions
     pub fn fitting_generate_from_vec(
@@ -407,7 +563,9 @@ impl Fitting {
     ) {
         // create polynomial equation
         let (eq, unknowns) = Expr::polyval(degree, &arg);
-        println!("polynom: {}", eq);
+        if let Some(level) = self.log_level {
+            log!(level, "generated fitting polynomial: {eq}");
+        }
         self.set_fitting(
             x_data,
             y_data,
@@ -423,13 +581,12 @@ impl Fitting {
         );
     }
     pub fn fit_linear(&mut self, x_data: Vec<f64>, y_data: Vec<f64>, guess: (f64, f64)) {
-        self.initial_guess = vec![guess.0, guess.1];
         self.poly_fitting(
-            x_data.clone(),
-            y_data.clone(),
+            x_data,
+            y_data,
             1,
             "x".to_string(),
-            self.initial_guess.clone(),
+            vec![guess.0, guess.1],
             None,
             None,
             None,
@@ -437,92 +594,118 @@ impl Fitting {
             None,
         );
     }
-    pub fn eq_generate(&mut self) {
-        let eq = self.active_equations();
-        let arg = self.arg.clone();
-        let x_data = self.x_data.clone();
-        let y_data = self.y_data.clone();
-        let eq = create_residiual_vec(&eq, arg, x_data, y_data);
-        let mut Jacobian_instance = Jacobian::new();
-        let unknown_coeffs = self.unknown_coeffs.clone();
-        let unknown_coeffs: Vec<&str> = unknown_coeffs.iter().map(|x| x.as_str()).collect();
-        Jacobian_instance.set_vector_of_functions(eq);
-        Jacobian_instance.set_variables(unknown_coeffs.clone());
-        Jacobian_instance.calc_jacobian();
-        Jacobian_instance.jacobian_generate(unknown_coeffs.clone());
-        Jacobian_instance.lambdify_funcvector(unknown_coeffs);
-        assert_eq!(
-            Jacobian_instance.vector_of_variables.len(),
-            self.initial_guess.len(),
-            "Initial guess and vector of variables should have the same length."
+    fn try_prepare_least_squares(&mut self) -> Result<(), FittingError> {
+        let equations = self.active_equations();
+        let options = SymbolicProblemOptions::new()
+            .with_variables(self.unknown_coeffs.clone())
+            .with_equation_parameters(vec![self.arg.clone()])
+            .with_lambdify_backend();
+        self.prepared_least_squares = Some(
+            PreparedSymbolicLeastSquaresProblem::from_expressions(equations.to_vec(), options)
+                .map_err(|error| FittingError::Preparation(error.into()))?,
         );
-        self.jacobian = Jacobian_instance;
+        Ok(())
     }
-    pub fn solve(&mut self) {
-        let residual = |x: &DVector<f64>| -> DVector<f64> {
-            let residual = &self
-                .jacobian
-                .evaluate_funvector_lambdified_DVector_unmut(x.clone().data.into());
-            residual.clone()
-        };
-        let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
-            let jacobian = &self
-                .jacobian
-                .evaluate_func_jacobian_DMatrix_unmut(x.clone().data.into());
-            jacobian.clone()
-        };
-        let problem = NonlinearSystem::new(
-            DVector::from_vec(self.initial_guess.clone()),
-            residual,
-            jacobian,
-        );
-        let LM = LevenbergMarquardt::new();
-        let LM = if let Some(max_iterations) = self.max_iterations {
-            let LM = LM.with_patience(max_iterations);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(tolerance) = self.tolerance {
-            let LM = LM.with_xtol(tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(g_tolerance) = self.g_tolerance {
-            let LM = LM.with_gtol(g_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(f_tolerance) = self.f_tolerance {
-            let LM = LM.with_ftol(f_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let (result, report) = LM.minimize(problem);
-        println!("Nonlinear System Example:");
-        println!("Termination: {:?}", report.termination);
-        println!("Evaluations: {}", report.number_of_evaluations);
-        println!("Final objective: {}", report.objective_function);
-        println!("Final params: {:?}", result.params());
-        if report.termination.was_successful() {
-            let solution = result.params();
-            self.result = Some(solution.clone());
-            let solution: Vec<f64> = solution.data.into();
-            let unknowns = self.unknown_coeffs.clone();
-            let map_of_solutions: HashMap<String, f64> = unknowns
-                .iter()
-                .zip(solution.iter())
-                .map(|(k, v)| (k.to_string(), *v))
-                .collect();
 
-            let map_of_solutions = map_of_solutions;
-            println!("Map of solutions: {:?}", map_of_solutions);
-            self.map_of_solutions = Some(map_of_solutions);
-            self.compare_with_data();
+    /// Fallible fitting entry point. A failed attempt clears any previous
+    /// solution before doing validation/preparation, so stale results cannot
+    /// be observed as the output of the latest request.
+    pub fn try_solve(&mut self) -> Result<MinimizationReport, FittingError> {
+        self.clear_last_solution();
+        self.try_validate_and_infer()?;
+        let mut solver = LevenbergMarquardt::new();
+        if let Some(max_iterations) = self.max_iterations {
+            solver = solver
+                .try_with_max_iterations(max_iterations)
+                .map_err(FittingError::Solver)?;
         }
+        if let Some(tolerance) = self.tolerance {
+            solver = solver
+                .try_with_xtol(tolerance)
+                .map_err(FittingError::Solver)?;
+        }
+        if let Some(g_tolerance) = self.g_tolerance {
+            solver = solver
+                .try_with_gtol(g_tolerance)
+                .map_err(FittingError::Solver)?;
+        }
+        if let Some(f_tolerance) = self.f_tolerance {
+            solver = solver
+                .try_with_ftol(f_tolerance)
+                .map_err(FittingError::Solver)?;
+        }
+        solver = solver
+            .with_scale_diag(self.scale_diag.unwrap_or(true))
+            .with_telemetry(self.telemetry_mode);
+
+        if self.prepared_least_squares.is_none() {
+            self.try_prepare_least_squares()?;
+        }
+        let prepared = self
+            .prepared_least_squares
+            .as_ref()
+            .ok_or(FittingError::InvalidInput {
+                field: "prepared model",
+            })?;
+        let bound = prepared
+            .bind_values_with_guess(
+                DVector::zeros(1),
+                DVector::from_vec(self.initial_guess.clone()),
+            )
+            .map_err(|error| FittingError::Solver(error.into()))?;
+        let problem = FittingLeastSquaresProblem::new(
+            bound,
+            &self.x_data,
+            &self.y_data,
+            self.active_equations().len(),
+        );
+
+        let (problem, report) = solver.minimize(problem);
+        self.last_statistics = Some(report.statistics.clone());
+        if let Some(error) = report.error.clone() {
+            return Err(FittingError::Solver(error));
+        }
+        if !report.termination.was_successful() {
+            return Err(FittingError::DidNotConverge {
+                termination: report.termination,
+                evaluations: report.number_of_evaluations,
+                objective: report.objective_function,
+            });
+        }
+
+        let solution = problem.params();
+        let solution_map = self
+            .unknown_coeffs
+            .iter()
+            .cloned()
+            .zip(solution.iter().copied())
+            .collect::<HashMap<_, _>>();
+        self.result = Some(solution);
+        self.map_of_solutions = Some(solution_map);
+        self.r_ssquared = Some(r_squared(
+            &self.y_data,
+            &evaluate_equations(
+                self.active_equations(),
+                &self.x_data,
+                self.map_of_solutions.as_ref().expect("just assigned"),
+            ),
+        ));
+        if let Some(level) = self.log_level {
+            log!(level, "fitting termination: {:?}", report.termination);
+            log!(
+                level,
+                "fitting evaluations: {}",
+                report.number_of_evaluations
+            );
+            log!(level, "fitting objective: {}", report.objective_function);
+        }
+        Ok(report)
+    }
+
+    /// Compatibility-friendly concise solve name; failures are returned,
+    /// never printed and discarded.
+    pub fn solve(&mut self) -> Result<MinimizationReport, FittingError> {
+        self.try_solve()
     }
     /// for those who din't want to mess with multiple parameters
 
@@ -534,7 +717,7 @@ impl Fitting {
         unknowns: Option<Vec<String>>,
         arg: String,
         initial_guess: Vec<f64>,
-    ) {
+    ) -> Result<MinimizationReport, FittingError> {
         self.fitting_generate_from_str(
             x_data,
             y_data,
@@ -548,26 +731,15 @@ impl Fitting {
             None,
             None,
         );
-        self.eq_generate();
-        self.solve();
-    }
-
-    fn compare_with_data(&mut self) {
-        let x_data = self.x_data.clone();
-        let y_data = self.y_data.clone();
-        let eq = self.active_equations();
-        let map_of_solutions = self.map_of_solutions.clone().unwrap();
-        let y_pred = evaluate_equations(&eq, &x_data, &map_of_solutions);
-        // calculate r squared
-        let r_squared = r_squared(&y_data, &y_pred);
-        self.r_ssquared = Some(r_squared);
-        println!("R squared: {}", r_squared);
+        self.try_solve()
     }
     /// extrapolate or interpolate function for arbitrary x values
     pub fn extra_interpolate(&self, x_values: Vec<f64>) -> Vec<f64> {
-        let eq = self.active_equations();
-        let map_of_solutions = self.map_of_solutions.clone().unwrap();
-        evaluate_equations(&eq, &x_values, &map_of_solutions)
+        evaluate_equations(
+            self.active_equations(),
+            &x_values,
+            self.map_of_solutions.as_ref().expect("fit has no solution"),
+        )
     }
     pub fn get_r_squared(&self) -> Option<f64> {
         self.r_ssquared
@@ -595,33 +767,108 @@ impl Fitting {
         self.get_map_of_solutions()
     }
 
-    fn active_equations(&self) -> Vec<Expr> {
-        self.equations.clone()
+    /// Borrow the fitted parameter map without cloning it.
+    pub fn solution_map_ref(&self) -> Option<&HashMap<String, f64>> {
+        self.map_of_solutions.as_ref()
+    }
+
+    fn active_equations(&self) -> &[Expr] {
+        &self.equations
     }
 }
 
-fn create_residiual_vec(
-    eq_system: &[Expr],
-    arg: String,
-    x_data: Vec<f64>,
-    y_data: Vec<f64>,
-) -> Vec<Expr> {
-    let mut residual_vec = Vec::new();
-    let x_len = x_data.len();
-    assert_eq!(
-        y_data.len(),
-        eq_system.len() * x_len,
-        "Flattened target data must match equation count times x data length."
-    );
-    for (eq_idx, eq) in eq_system.iter().enumerate() {
-        let y_offset = eq_idx * x_len;
-        for i in 0..x_len {
-            let eq_i = eq.clone().set_variable(&arg, x_data[i]);
-            let residual = eq_i.clone() - Expr::Const(y_data[y_offset + i]);
-            residual_vec.push(residual);
+/// Evaluates one prepared symbolic model across all observations.
+///
+/// The symbolic equation count stays independent of the number of data points;
+/// each observation is supplied as a numeric equation-parameter value.
+struct FittingLeastSquaresProblem<'a> {
+    model: crate::numerical::Nonlinear_systems::least_squares::BoundSymbolicLeastSquaresProblem<'a>,
+    params: DVector<f64>,
+    x_data: &'a [f64],
+    y_data: &'a [f64],
+    equation_count: usize,
+}
+
+impl<'a> FittingLeastSquaresProblem<'a> {
+    fn new(
+        model: crate::numerical::Nonlinear_systems::least_squares::BoundSymbolicLeastSquaresProblem<
+            'a,
+        >,
+        x_data: &'a [f64],
+        y_data: &'a [f64],
+        equation_count: usize,
+    ) -> Self {
+        let params = model.params();
+        Self {
+            model,
+            params,
+            x_data,
+            y_data,
+            equation_count,
         }
     }
-    residual_vec
+
+    fn evaluate_residuals(&self, params: &DVector<f64>) -> Result<DVector<f64>, LeastSquaresError> {
+        let mut residuals = DVector::zeros(self.y_data.len());
+        let mut point_parameter = DVector::zeros(1);
+        let mut point_residual = DVector::zeros(self.equation_count);
+        for (point_index, &x) in self.x_data.iter().enumerate() {
+            point_parameter[0] = x;
+            self.model
+                .residual_into_with_parameter_values(params, &point_parameter, &mut point_residual)
+                .map_err(|error| LeastSquaresError::Problem(error.into()))?;
+            for equation_index in 0..self.equation_count {
+                let output_index = equation_index * self.x_data.len() + point_index;
+                residuals[output_index] =
+                    point_residual[equation_index] - self.y_data[output_index];
+            }
+        }
+        Ok(residuals)
+    }
+
+    fn evaluate_jacobian(
+        &self,
+        params: &DVector<f64>,
+    ) -> Result<nalgebra::DMatrix<f64>, LeastSquaresError> {
+        let mut jacobian = nalgebra::DMatrix::zeros(self.y_data.len(), params.len());
+        let mut point_parameter = DVector::zeros(1);
+        let mut point_jacobian = nalgebra::DMatrix::zeros(self.equation_count, params.len());
+        for (point_index, &x) in self.x_data.iter().enumerate() {
+            point_parameter[0] = x;
+            self.model
+                .jacobian_into_with_parameter_values(params, &point_parameter, &mut point_jacobian)
+                .map_err(|error| LeastSquaresError::Problem(error.into()))?;
+            for equation_index in 0..self.equation_count {
+                let output_index = equation_index * self.x_data.len() + point_index;
+                for parameter_index in 0..params.len() {
+                    jacobian[(output_index, parameter_index)] =
+                        point_jacobian[(equation_index, parameter_index)];
+                }
+            }
+        }
+        Ok(jacobian)
+    }
+}
+
+impl LeastSquaresProblem for FittingLeastSquaresProblem<'_> {
+    fn set_params(&mut self, params: &DVector<f64>) {
+        self.params.copy_from(params);
+    }
+    fn params(&self) -> DVector<f64> {
+        self.params.clone()
+    }
+    fn residuals(&self) -> Option<DVector<f64>> {
+        self.try_residuals().ok()
+    }
+    fn jacobian(&self) -> Option<nalgebra::DMatrix<f64>> {
+        self.try_jacobian().ok()
+    }
+    fn try_residuals(&self) -> Result<DVector<f64>, LeastSquaresError> {
+        self.evaluate_residuals(&self.params)
+    }
+    fn try_jacobian(&self) -> Result<nalgebra::DMatrix<f64>, LeastSquaresError> {
+        self.evaluate_jacobian(&self.params)
+    }
 }
 
 fn evaluate_equations(
@@ -640,7 +887,7 @@ fn evaluate_equations(
     y_pred
 }
 
-pub fn r_squared(y_data: &Vec<f64>, y_pred: &Vec<f64>) -> f64 {
+pub fn r_squared(y_data: &[f64], y_pred: &[f64]) -> f64 {
     let y_mean = y_data.iter().sum::<f64>() / y_data.len() as f64;
     let ss_tot = y_data.iter().map(|y| (y - y_mean).powi(2)).sum::<f64>();
     let ss_res = y_data
@@ -656,6 +903,63 @@ pub fn r_squared(y_data: &Vec<f64>, y_pred: &Vec<f64>) -> f64 {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn fitting_prepares_equations_once_and_evaluates_observations_numerically() {
+        let mut fitting = Fitting::new()
+            .with_data(vec![0.0, 1.0, 2.0], vec![1.0, 3.0, 5.0, -2.0, -1.0, 0.0])
+            .with_equations(vec![
+                Expr::parse_expression("a*x + b"),
+                Expr::parse_expression("c*x + d"),
+            ])
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+            .with_initial_guess(vec![0.0; 4]);
+
+        fitting.try_validate_and_infer().unwrap();
+        fitting.try_prepare_least_squares().unwrap();
+        let prepared = fitting.prepared_least_squares.as_ref().unwrap();
+
+        assert_eq!(prepared.residual_count(), 2);
+        assert_eq!(prepared.jacobian_shape(), (2, 4));
+
+        let bound = prepared
+            .bind_values_with_guess(DVector::zeros(1), DVector::from_element(4, 0.0))
+            .unwrap();
+        let problem = FittingLeastSquaresProblem::new(
+            bound,
+            &fitting.x_data,
+            &fitting.y_data,
+            fitting.equations.len(),
+        );
+        assert_eq!(
+            problem.try_residuals().unwrap(),
+            DVector::from_vec(vec![-1.0, -3.0, -5.0, 2.0, 1.0, 0.0])
+        );
+        assert_eq!(
+            problem.try_jacobian().unwrap(),
+            nalgebra::DMatrix::from_row_slice(
+                6,
+                4,
+                &[
+                    0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                    0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 1.0,
+                ],
+            )
+        );
+        assert!(matches!(
+            problem.model.residual_with_parameter_values(
+                &DVector::from_element(4, 0.0),
+                &DVector::from_element(1, f64::NAN),
+            ),
+            Err(
+                crate::numerical::Nonlinear_systems::error::SolveError::NonFiniteParameterValue {
+                    index: 0,
+                    ..
+                }
+            )
+        ));
+    }
 
     #[test]
     fn linear_fitting_test() {
@@ -678,8 +982,7 @@ mod tests {
             None,
             None,
         );
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["a"], 2.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["b"], 0.0, epsilon = 1e-6);
@@ -709,8 +1012,7 @@ mod tests {
             None,
             None,
         );
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["a"], 5.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["b"], 2.0, epsilon = 1e-6);
@@ -741,8 +1043,7 @@ mod tests {
             None,
             None,
         );
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["a"], 1e-1, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["b"], 10.0, epsilon = 1e-6);
@@ -759,14 +1060,16 @@ mod tests {
         let unknown_coeffs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let eq = "a * x^2.0 + b * x + c".to_string();
         let mut sym_fitting = Fitting::new();
-        sym_fitting.easy_fitting(
-            x_data,
-            y_data,
-            eq,
-            Some(unknown_coeffs),
-            "x".to_string(),
-            initial_guess,
-        );
+        sym_fitting
+            .easy_fitting(
+                x_data,
+                y_data,
+                eq,
+                Some(unknown_coeffs),
+                "x".to_string(),
+                initial_guess,
+            )
+            .unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["a"], 5.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["b"], 2.0, epsilon = 1e-6);
@@ -796,8 +1099,7 @@ mod tests {
             None,
             None,
         );
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["c3"], 5.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["c2"], 2.0, epsilon = 1e-6);
@@ -811,8 +1113,7 @@ mod tests {
         let initial_guess = (1.0, 1.0);
         let mut sym_fitting = Fitting::new();
         sym_fitting.fit_linear(x_data, y_data, initial_guess);
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["c1"], 5.0, epsilon = 1e-6);
         assert_relative_eq!(map_of_solutions["c0"], 2.0, epsilon = 1e-6);
@@ -830,8 +1131,7 @@ mod tests {
         let initial_guess = (1.0, 1.0);
         let mut sym_fitting = Fitting::new();
         sym_fitting.fit_linear(x_data, y_data, initial_guess);
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map_of_solutions["c1"], 5.0, epsilon = 1e-2);
         assert_relative_eq!(map_of_solutions["c0"], 2.0, epsilon = 1e-2);
@@ -852,8 +1152,7 @@ mod tests {
         let initial_guess = (1.0, 1.0);
         let mut sym_fitting = Fitting::new();
         sym_fitting.fit_linear(x_data, y_data, initial_guess);
-        sym_fitting.eq_generate();
-        sym_fitting.solve();
+        sym_fitting.solve().unwrap();
         let map_of_solutions = sym_fitting.map_of_solutions.unwrap();
         println!("{:?}", map_of_solutions);
     }
@@ -978,8 +1277,7 @@ mod tests {
             None,
             None,
         );
-        fitting.eq_generate();
-        fitting.solve();
+        fitting.solve().unwrap();
 
         let map = fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map["a"], 1.5, epsilon = 1e-6);
@@ -1261,5 +1559,121 @@ mod tests {
         assert_relative_eq!(map["a"], 2.0, epsilon = 1e-5);
         assert_relative_eq!(map["b"], 3.0, epsilon = 1e-5);
         assert_relative_eq!(map["c"], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn symbolic_input_changes_invalidate_prepared_frontend() {
+        let mut fitting = Fitting::new()
+            .with_data(vec![0.0, 1.0], vec![1.0, 2.0])
+            .with_equation_str("a*x + b".to_string())
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![1.0, 1.0]);
+
+        fitting.solve().unwrap();
+        assert!(fitting.prepared_least_squares.is_some());
+
+        let fitting = fitting.with_equation_str("a*x^2 + b".to_string());
+        assert!(fitting.prepared_least_squares.is_none());
+    }
+
+    #[test]
+    fn new_observations_reuse_symbolic_preparation() {
+        let mut fitting = Fitting::new()
+            .with_data(vec![0.0, 1.0], vec![1.0, 3.0])
+            .with_equation_str("a*x + b".to_string())
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![0.0, 0.0]);
+        fitting.try_validate_and_infer().unwrap();
+        fitting.try_prepare_least_squares().unwrap();
+
+        let mut fitting = fitting.with_data(vec![2.0, 3.0], vec![5.0, 7.0]);
+        assert!(fitting.prepared_least_squares.is_some());
+        fitting.try_solve().unwrap();
+        let solution = fitting.solution_map().unwrap();
+        assert_relative_eq!(solution["a"], 2.0, epsilon = 1e-8);
+        assert_relative_eq!(solution["b"], 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn failed_repeat_solve_clears_previous_solution() {
+        let mut fitting = Fitting::new()
+            .with_data(vec![0.0, 1.0], vec![1.0, 2.0])
+            .with_equation_str("a*x + b".to_string())
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![1.0, 1.0])
+            .try_build()
+            .unwrap();
+        assert!(fitting.result.is_some());
+        assert!(fitting.map_of_solutions.is_some());
+
+        fitting.y_data.pop();
+        let error = fitting.try_solve().unwrap_err();
+        assert!(matches!(error, FittingError::DimensionMismatch { .. }));
+        assert!(fitting.result.is_none());
+        assert!(fitting.map_of_solutions.is_none());
+        assert!(fitting.r_squared().is_none());
+    }
+
+    #[test]
+    fn max_iterations_is_an_exact_iteration_cap_and_keeps_telemetry() {
+        let mut fitting = Fitting::new()
+            .with_data(
+                (0..30).map(|i| i as f64 * 0.1).collect(),
+                (0..30)
+                    .map(|i| (0.7 * i as f64 * 0.1).exp() + 2.0)
+                    .collect(),
+            )
+            .with_equation_str("exp(a*x) + b".to_string())
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![-1.0, 0.0])
+            .with_max_iterations(1)
+            .with_telemetry(LeastSquaresTelemetryMode::Counters);
+
+        let error = match fitting.try_solve() {
+            Err(error) => error,
+            Ok(_) => panic!("one iteration should not converge for this initial guess"),
+        };
+        assert!(matches!(
+            error,
+            FittingError::DidNotConverge {
+                termination: LeastSquaresTerminationReason::MaxIterationsReached { limit: 1 },
+                ..
+            }
+        ));
+        let stats = fitting.last_statistics().expect("counters were requested");
+        assert!(stats.availability.is_collected());
+        assert!(!stats.timings_collected);
+        assert_eq!(stats.iterations, 1);
+    }
+
+    #[test]
+    fn fitting_exposes_opt_in_least_squares_telemetry() {
+        let fitting = Fitting::new()
+            .with_data(vec![0.0, 1.0, 2.0], vec![1.0, 3.0, 5.0])
+            .with_equation_str("a*x + b".to_string())
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string(), "b".to_string()])
+            .with_initial_guess(vec![0.0, 0.0])
+            .with_scale_diag(false)
+            .with_telemetry(LeastSquaresTelemetryMode::Detailed)
+            .try_build()
+            .unwrap();
+
+        let stats = fitting.last_statistics().expect("telemetry was requested");
+        assert!(stats.availability.is_collected());
+        assert!(stats.timings_collected);
+        assert!(stats.jacobian_evaluations > 0);
+        assert!(stats.residual_evaluations > 0);
+        assert_relative_eq!(fitting.solution_map().unwrap()["a"], 2.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn malformed_equation_has_a_typed_parse_error() {
+        let result = Fitting::new().try_with_equation_str("(");
+        assert!(matches!(result, Err(FittingError::EquationParse(_))));
     }
 }

@@ -573,6 +573,24 @@ fn combustion_1000_compiled_banded_zig_bootstrap_smoke() {
         .as_ref()
         .map(|solution| relative_dense_residual(&dense_matrix, solution, rhs.as_slice()))
         .unwrap_or(f64::NAN);
+    let block_full_rr = block_metrics
+        .solution
+        .as_ref()
+        .map(|solution| relative_dense_residual(&dense_matrix, solution, rhs.as_slice()))
+        .unwrap_or(f64::NAN);
+    let block_default_max_diff = block_metrics
+        .solution
+        .as_ref()
+        .zip(default_metrics.solution.as_ref())
+        .map(|(block, default)| {
+            block
+                .iter()
+                .zip(default)
+                .fold(0.0_f64, |max_diff, (left, right)| {
+                    max_diff.max((left - right).abs())
+                })
+        })
+        .unwrap_or(f64::NAN);
 
     println!(
         "[BVP Damp Zig banded default] residual_len={}, matrix={}x{}, solver={}, status={}, solve_rr={:.3e}",
@@ -584,7 +602,7 @@ fn combustion_1000_compiled_banded_zig_bootstrap_smoke() {
         default_rr
     );
     println!(
-        "[BVP Damp Zig banded structured diagnostic] solver={}, layout={}, refinement={}, direct_rr={:.3e}, final_rr={:.3e}, max|x|={:.3e}, status={}",
+        "[BVP Damp Zig banded structured diagnostic] solver={}, layout={}, refinement={}, direct_rr={:.3e}, final_rr={:.3e}, full_matrix_rr={:.3e}, max|x|={:.3e}, diff_vs_lapack={:.3e}, status={}",
         block_metrics.linear_solver,
         block_metrics.layout,
         block_metrics
@@ -602,6 +620,7 @@ fn combustion_1000_compiled_banded_zig_bootstrap_smoke() {
             .as_ref()
             .map(|report| report.final_relative_residual)
             .unwrap_or(f64::NAN),
+        block_full_rr,
         block_metrics
             .solution
             .as_ref()
@@ -609,6 +628,7 @@ fn combustion_1000_compiled_banded_zig_bootstrap_smoke() {
                 .iter()
                 .fold(0.0_f64, |acc, value| acc.max(value.abs())))
             .unwrap_or(f64::NAN),
+        block_default_max_diff,
         block_metrics.status
     );
 
@@ -625,8 +645,16 @@ fn combustion_1000_compiled_banded_zig_bootstrap_smoke() {
         "the Zig-generated Banded default must use the faithful LAPACK route"
     );
     assert_eq!(
-        block_metrics.status, "diag",
-        "the structured block-tridiagonal diagnostic must not regress to green while its residual is unacceptable"
+        block_metrics.status, "ok",
+        "the structured block-tridiagonal solve should be green when its full-matrix residual is acceptable"
+    );
+    assert!(
+        block_full_rr.is_finite() && block_full_rr <= 1.0e-8,
+        "the structured block-tridiagonal solution should satisfy the original full matrix, got {block_full_rr:.6e}"
+    );
+    assert!(
+        block_default_max_diff.is_finite() && block_default_max_diff <= 1.0e-8,
+        "the structured solution should match the faithful LAPACK result, max difference={block_default_max_diff:.6e}"
     );
     assert!(
         default_rr.is_finite() && default_rr <= 1.0e-8,

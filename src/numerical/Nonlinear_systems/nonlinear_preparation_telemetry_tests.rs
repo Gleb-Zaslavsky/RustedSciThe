@@ -75,27 +75,21 @@ mod tests {
             );
         }
 
-        assert!(
-            report
-                .stage(PreparationStage::ExpressionGraphMaterialization)
-                .expect("stage should be listed")
-                .wall_time
-                .is_none()
-        );
-        assert!(
-            report
-                .stage(PreparationStage::AotMaterialization)
-                .expect("stage should be listed")
-                .wall_time
-                .is_none()
-        );
-        assert!(
-            report
-                .stage(PreparationStage::FinalValidation)
-                .expect("stage should be listed")
-                .wall_time
-                .is_none()
-        );
+        assert!(report
+            .stage(PreparationStage::ExpressionGraphMaterialization)
+            .expect("stage should be listed")
+            .wall_time
+            .is_none());
+        assert!(report
+            .stage(PreparationStage::AotMaterialization)
+            .expect("stage should be listed")
+            .wall_time
+            .is_none());
+        assert!(report
+            .stage(PreparationStage::FinalValidation)
+            .expect("stage should be listed")
+            .wall_time
+            .is_none());
     }
 
     #[test]
@@ -161,17 +155,15 @@ mod tests {
             SymbolicGeneratedBackendConfig::defaults(),
         )
         .expect("generated string preparation should succeed");
-        assert!(
-            prepared
-                .preparation_report
-                .detailed
-                .as_ref()
-                .expect("detailed report should be present")
-                .stage(PreparationStage::ExpressionParsing)
-                .expect("parsing stage should be listed")
-                .wall_time
-                .is_some()
-        );
+        assert!(prepared
+            .preparation_report
+            .detailed
+            .as_ref()
+            .expect("detailed report should be present")
+            .stage(PreparationStage::ExpressionParsing)
+            .expect("parsing stage should be listed")
+            .wall_time
+            .is_some());
 
         let error = match SymbolicNonlinearProblem::from_strings_with_generated_backend(
             vec!["x -".to_string()],
@@ -207,13 +199,11 @@ mod tests {
             .telemetry
             .expect("opt-in failure should retain partial telemetry");
         assert!(telemetry.total_wall_time > std::time::Duration::ZERO);
-        assert!(
-            telemetry
-                .stage(PreparationStage::ExpressionParsing)
-                .expect("parsing stage should be listed")
-                .wall_time
-                .is_some()
-        );
+        assert!(telemetry
+            .stage(PreparationStage::ExpressionParsing)
+            .expect("parsing stage should be listed")
+            .wall_time
+            .is_some());
 
         let disabled = match SymbolicNonlinearProblem::from_strings_with_options_detailed(
             vec!["x -".to_string()],

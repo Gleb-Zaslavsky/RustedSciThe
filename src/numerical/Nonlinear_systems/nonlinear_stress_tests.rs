@@ -8,19 +8,10 @@
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use nalgebra::{DMatrix, DVector};
 
-    use crate::numerical::Nonlinear_systems::LM_Nielsen::{
-        NielsenLevenbergMarquardtMethod, NielsenLevenbergMarquardtMethodAdvanced,
-    };
-    use crate::numerical::Nonlinear_systems::LM_vanilla::{
-        LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
-    };
-    use crate::numerical::Nonlinear_systems::NR_damped::{
-        DampedNewtonMethod, DampedNewtonMethodAdvanced,
-    };
     use crate::numerical::Nonlinear_systems::engine::{
         DiagnosticsOptions, NewtonMethod, SolveOptions,
     };
@@ -32,6 +23,15 @@ mod tests {
     use crate::numerical::Nonlinear_systems::trust_region::PowellDoglegMethod;
     use crate::numerical::Nonlinear_systems::trust_region::TrustRegionMethod;
     use crate::numerical::Nonlinear_systems::trust_region_LM::TrustRegionLMMethod;
+    use crate::numerical::Nonlinear_systems::LM_Nielsen::{
+        NielsenLevenbergMarquardtMethod, NielsenLevenbergMarquardtMethodAdvanced,
+    };
+    use crate::numerical::Nonlinear_systems::LM_vanilla::{
+        LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
+    };
+    use crate::numerical::Nonlinear_systems::NR_damped::{
+        DampedNewtonMethod, DampedNewtonMethodAdvanced,
+    };
 
     const NEARLY_SINGULAR_EPS: f64 = 1.0e-10;
 

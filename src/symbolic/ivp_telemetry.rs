@@ -1084,11 +1084,13 @@ impl IvpTelemetry {
 
     pub fn set_lambdify_execution_policy(&self, policy: IvpLambdifyExecutionPolicy) {
         if let Some(inner) = &self.inner {
+            let calibrates_parallel =
+                matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. });
             // Rayon may lazily initialize the process-global pool on the
             // first worker-count query. Keep that one-time cost inside the
             // policy setup scope; otherwise Auto can look like unexplained
             // AOT preparation work in a cold wall-clock measurement.
-            let calibration_started = if matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. }) {
+            let calibration_started = if calibrates_parallel {
                 self.start_cold_stage(IvpColdStage::ParallelCalibration)
             } else {
                 None
@@ -1114,7 +1116,9 @@ impl IvpTelemetry {
             inner
                 .lambdify_auto_min_work_per_job
                 .store(calibrated as u64, Ordering::Relaxed);
-            self.record_cold_stage(IvpColdStage::ParallelCalibration, calibration_started);
+            if calibrates_parallel {
+                self.record_cold_stage(IvpColdStage::ParallelCalibration, calibration_started);
+            }
         }
     }
 

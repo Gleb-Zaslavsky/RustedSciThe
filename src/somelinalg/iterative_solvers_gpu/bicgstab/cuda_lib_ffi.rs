@@ -73,7 +73,11 @@ pub fn multicolor_gs_fused_call(
         x_dev.unlock();
     }
 
-    if rc == 0 { Ok(()) } else { Err(rc) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(rc)
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////

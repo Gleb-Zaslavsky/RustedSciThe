@@ -58,6 +58,17 @@ pub use crate::numerical::Nonlinear_systems::trust_region_LM::{
 };
 
 // Symbolic problem adapter
+pub use crate::numerical::Nonlinear_systems::least_squares::{
+    ClosureLeastSquaresProblem, LeastSquaresError, LeastSquaresStage,
+    LevenbergMarquardt as LeastSquaresLevenbergMarquardt, LeastSquaresTelemetryMode,
+    MinimizationReport, PreparedSymbolicLeastSquaresProblem, SymbolicLeastSquaresSolver,
+};
+pub use crate::numerical::Nonlinear_systems::scalar_root::{
+    approx_equal, bisection, secant, ClosureFunction, FunctionWithDerivative, NonlinearFunction,
+    RootFindingConfig, RootFindingError, RootFindingMethod, RootFindingResult, ScalarRootFinder,
+    SymbolicFunction,
+};
+pub use crate::numerical::Nonlinear_systems::solver::NonlinearSolver;
 pub use crate::numerical::Nonlinear_systems::symbolic::{
     BoundSymbolicNonlinearProblem, LambdifyExecutionPolicy, NonlinearParameterSchema,
     NonlinearParameterValues, PreparationExecutionMode, PreparationInputKind, PreparationStage,

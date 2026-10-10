@@ -162,21 +162,15 @@ mod tests {
         );
         assert_eq!(crate_spec.manifest.backend_kind.as_str(), "aot");
         assert_eq!(crate_spec.manifest.matrix_backend.as_str(), "dense");
-        assert!(
-            crate_spec
-                .module_source
-                .contains("pub mod generated_nonlinear_symbolic_module")
-        );
-        assert!(
-            crate_spec
-                .module_source
-                .contains("pub fn eval_nonlinear_residual")
-        );
-        assert!(
-            crate_spec
-                .module_source
-                .contains("pub fn eval_nonlinear_jacobian")
-        );
+        assert!(crate_spec
+            .module_source
+            .contains("pub mod generated_nonlinear_symbolic_module"));
+        assert!(crate_spec
+            .module_source
+            .contains("pub fn eval_nonlinear_residual"));
+        assert!(crate_spec
+            .module_source
+            .contains("pub fn eval_nonlinear_jacobian"));
     }
 
     #[test]

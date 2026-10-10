@@ -1,5 +1,4 @@
-use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
-use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
+use crate::numerical::Nonlinear_systems::least_squares::{LeastSquaresProblem, LevenbergMarquardt};
 use crate::numerical::optimization::varpro::fit::FitResult;
 use crate::numerical::optimization::varpro::prelude::*;
 use crate::numerical::optimization::varpro::problem::{RhsType, SeparableProblem};

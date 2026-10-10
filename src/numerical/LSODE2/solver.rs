@@ -607,11 +607,18 @@ impl Lsode2Solver {
         let started = Instant::now();
         let _solve_scope = self.config.telemetry.scoped_warm_stage(IvpWarmStage::Solve);
         let bridge_accepted_before = self.native_statistics.bridge_accepted_steps;
+        let bridge_solve_calls_before = self.native_statistics.bridge_solve_calls;
         self.inner.main_loop();
         self.native_statistics
             .record_solve_duration(started.elapsed());
         self.native_statistics
             .sync_from_bridge(&self.inner.get_statistics());
+        // The BDF telemetry may be disabled, but this facade still knows that
+        // it invoked the bridge solve and must report that lifecycle event.
+        self.native_statistics.bridge_solve_calls = self
+            .native_statistics
+            .bridge_solve_calls
+            .max(bridge_solve_calls_before.saturating_add(1));
         let bridge_accepted_after = self.inner.get_result().0.len();
         self.native_statistics.bridge_accepted_steps = bridge_accepted_after;
         let accepted_steps_delta = bridge_accepted_after.saturating_sub(bridge_accepted_before);

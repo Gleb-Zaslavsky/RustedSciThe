@@ -26,8 +26,8 @@ mod tests {
     use crate::symbolic::codegen::c_backend::codegen_c_aot_registry::register_c_build_in_registry;
     use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::register_generated_c_dense_backend;
     use crate::symbolic::codegen::codegen_aot_driver::{
-        AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildResult,
         generated_aot_artifact_from_prepared_problem, generated_aot_build_request_from_artifact,
+        AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildResult,
     };
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;

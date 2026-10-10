@@ -1,5 +1,6 @@
 use RustedSciThe::numerical::BDF::BDF_api::{BdfSolverOptions, BdfTelemetryMode, ODEsolver};
 use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload, dense_coupled};
+use RustedSciThe::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use RustedSciThe::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetrySnapshot};
 use RustedSciThe::symbolic::symbolic_ivp::{
     IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
@@ -121,6 +122,22 @@ pub fn make_solver_with_telemetry(
     assembly: IvpSymbolicAssemblyBackend,
     telemetry_mode: BdfTelemetryMode,
 ) -> ODEsolver {
+    make_solver_with_telemetry_and_policy(
+        kind,
+        dimension,
+        assembly,
+        telemetry_mode,
+        IvpLambdifyExecutionPolicy::Sequential,
+    )
+}
+
+pub fn make_solver_with_telemetry_and_policy(
+    kind: WorkloadKind,
+    dimension: usize,
+    assembly: IvpSymbolicAssemblyBackend,
+    telemetry_mode: BdfTelemetryMode,
+    lambdify_policy: IvpLambdifyExecutionPolicy,
+) -> ODEsolver {
     let workload = build_workload(kind, dimension.max(1));
     let (t_bound, max_step) = match kind {
         WorkloadKind::StiffScalar => (0.05, 0.001),
@@ -144,6 +161,7 @@ pub fn make_solver_with_telemetry(
         Some(max_step),
     )
     .with_symbolic_assembly_backend(assembly)
+    .with_lambdify_execution_policy(lambdify_policy)
     .with_telemetry_mode(telemetry_mode);
     if !workload.parameter_names.is_empty() {
         options = options

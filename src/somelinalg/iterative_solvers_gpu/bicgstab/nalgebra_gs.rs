@@ -354,7 +354,7 @@ mod nalgebra_gs_test {
         // This should print: |1.5| >= 2.0? false
 
         // Create a random RHS for a non-trivial problem
-        use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+        use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
         let mut rng = StdRng::seed_from_u64(42);
         let x_true = DVector::from_fn(n, |_i, _j| rng.random());
         let b = &a * &x_true;
@@ -467,7 +467,11 @@ mod nalgebra_gs_test {
         // Create a meaningful RHS vector (e.g., a source term)
         let b = DVector::from_fn(n, |i, _j| {
             // Some simple source term, e.g., zero everywhere except a point source
-            if i == n / 4 { 1.0 } else { 0.0 }
+            if i == n / 4 {
+                1.0
+            } else {
+                0.0
+            }
         });
 
         let max_iter = 1000;

@@ -20,8 +20,8 @@ use crate::numerical::Nonlinear_systems::symbolic::{
 use crate::numerical::Nonlinear_systems::symbolic_aot::materialize_symbolic_nonlinear_aot_build;
 use crate::numerical::Nonlinear_systems::symbolic_aot_test_support::aot_solver_test_guard;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
-    select_symbolic_nonlinear_backend,
+    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
+    SymbolicBackendSelectionPolicy,
 };
 use crate::numerical::Nonlinear_systems::symbolic_generated::SymbolicGeneratedBackendConfig;
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
@@ -499,12 +499,10 @@ fn parameterized_dense_aot_vs_lambdify_warm_stage_story() {
     let aot_samples = collect_warm_solve_samples(&aot_bound, &solve_options, runs);
     let lambdify_samples = collect_warm_solve_samples(&lambdify_bound, &solve_options, runs);
     assert_eq!(aot_samples.len(), lambdify_samples.len());
-    assert!(
-        aot_samples
-            .iter()
-            .zip(&lambdify_samples)
-            .all(|(aot, lambdify)| aot.counters == lambdify.counters)
-    );
+    assert!(aot_samples
+        .iter()
+        .zip(&lambdify_samples)
+        .all(|(aot, lambdify)| aot.counters == lambdify.counters));
     let baseline = &lambdify_samples[0].x;
     let max_diff = aot_samples
         .iter()

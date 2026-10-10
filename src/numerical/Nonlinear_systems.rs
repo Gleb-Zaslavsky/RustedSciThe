@@ -5,6 +5,8 @@ pub mod LM_vanilla;
 pub mod NR_damped;
 pub mod engine;
 pub mod error;
+/// Canonical rectangular least-squares numerical core.
+pub mod least_squares;
 pub mod nonlinear_aot_ffi_transpose_story_tests;
 pub mod nonlinear_aot_large_story_tests;
 pub mod nonlinear_atom_native_story_tests;
@@ -65,6 +67,10 @@ pub mod nonlinear_solver_tests;
 pub mod nonlinear_stress_tests;
 pub mod prelude;
 pub mod problem;
+/// Scalar nonlinear root-finding algorithms.
+pub mod scalar_root;
+/// Unified root-finding and least-squares solver selection.
+pub mod solver;
 pub mod symbolic;
 pub mod symbolic_aot;
 pub mod symbolic_aot_lifecycle_tests;

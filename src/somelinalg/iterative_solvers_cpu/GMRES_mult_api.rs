@@ -3,8 +3,8 @@ use faer;
 use faer::mat::{Mat, MatRef};
 
 use faer::sparse::{SparseColMat, Triplet};
-use faer_gmres::JacobiPreconLinOp;
 use faer_gmres::gmres;
+use faer_gmres::JacobiPreconLinOp;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 

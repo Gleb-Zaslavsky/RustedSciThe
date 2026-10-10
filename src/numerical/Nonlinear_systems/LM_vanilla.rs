@@ -2,15 +2,15 @@ use std::borrow::Cow;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
-    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
+    eval_residual_with_runtime, measure_linear_operation, measure_linear_system_operation_owned,
+    scaled_norm, scaling_vector, IterationState, MethodWorkspace, NonlinearMethod,
+    RuntimeDiagnostics, SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 use crate::numerical::Nonlinear_systems::trust_region_LM::solve_trust_region_subproblem;
+use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 
 /// CLASSIC LEVENBERG-MARQUARDT ALGORITHM
 

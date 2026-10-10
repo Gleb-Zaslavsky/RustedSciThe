@@ -594,9 +594,7 @@ mod tests {
             max_difference < 1e-8,
             "long bordered solve mismatch: max_difference={max_difference:e}"
         );
-        let residual = structured
-            .residual_inf(&structured_solution, &rhs)
-            .unwrap();
+        let residual = structured.residual_inf(&structured_solution, &rhs).unwrap();
         assert!(residual < 1e-8, "long bordered residual={residual:e}");
     }
 }

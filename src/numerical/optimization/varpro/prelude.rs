@@ -4,7 +4,7 @@
 //! it easier to get started with the library.
 
 /// The local f64 least-squares trait used by the VarPro Levenberg-Marquardt bridge
-pub use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
+pub use crate::numerical::Nonlinear_systems::least_squares::LeastSquaresProblem;
 /// The trait for describing basis functions
 pub use crate::numerical::optimization::varpro::basis_function::BasisFunction;
 /// The trait for describing separable nonlinear models

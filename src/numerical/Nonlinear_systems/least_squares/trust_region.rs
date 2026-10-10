@@ -1,14 +1,15 @@
 //! Solver for the trust-region sub-problem in the LM algorithm.
 #![allow(clippy::excessive_precision)]
 
-use crate::numerical::optimization::qr_LM::LinearLeastSquaresDiagonalProblem;
-use crate::numerical::optimization::utils::{dwarf, enorm};
-use log::info;
+use super::utils::{dwarf, enorm};
+use crate::somelinalg::least_squares_qr::LinearLeastSquaresDiagonalProblem;
 use nalgebra::DVector;
 pub struct LMParameter {
     pub step: DVector<f64>,
     pub lambda: f64,
     pub dp_norm: f64,
+    /// Number of QR triangular solves performed while finding this step.
+    pub linear_solve_count: usize,
 }
 
 /// Approximately solve the LM trust-region subproblem.
@@ -48,6 +49,18 @@ pub fn determine_lambda_and_parameter_update(
     delta: f64,
     initial_lambda: f64,
 ) -> LMParameter {
+    determine_lambda_and_parameter_update_with_count(lls, diag, delta, initial_lambda, true)
+}
+
+/// Instrumentable form used by LM. When `collect_solve_count` is false, it
+/// avoids even the inner triangular-solve counter increments.
+pub fn determine_lambda_and_parameter_update_with_count(
+    lls: &mut LinearLeastSquaresDiagonalProblem,
+    diag: &DVector<f64>,
+    delta: f64,
+    initial_lambda: f64,
+    collect_solve_count: bool,
+) -> LMParameter {
     const P1: f64 = 0.1;
     debug_assert!(delta > 0.0);
     debug_assert!(initial_lambda >= 0.0);
@@ -55,20 +68,20 @@ pub fn determine_lambda_and_parameter_update(
 
     let is_non_singular = lls.is_non_singular();
     let (mut p, mut l) = lls.solve_with_zero_diagonal();
+    let mut linear_solve_count = usize::from(collect_solve_count);
     //  println!("p: {:?}", p);
     let mut diag_p = p.component_mul(diag);
     let mut diag_p_norm = enorm(&diag_p);
     let mut fp = diag_p_norm - delta;
     if fp <= delta * P1 {
-        info!("fp <= delta * convert(P1), diag_p_norm = {}", diag_p_norm);
         // we have a feasible p with lambda = 0
         return LMParameter {
             step: p,
             lambda: 0.0,
             dp_norm: diag_p_norm,
+            linear_solve_count,
         };
     }
-    info!("fp => delta * convert(P1) diag_p_norm = {}", diag_p_norm);
     // we now look for lambda > 0 with ||D p|| = delta
     // by using an approximate Newton iteration.
 
@@ -79,6 +92,7 @@ pub fn determine_lambda_and_parameter_update(
             *p_val *= *d_val;
         }
         p = l.solve(p);
+        linear_solve_count += usize::from(collect_solve_count);
         let norm = enorm(&p);
         ((fp / delta) / norm) / norm
     } else {
@@ -113,6 +127,7 @@ pub fn determine_lambda_and_parameter_update(
         let l_sqrt = f64::sqrt(lambda);
         diag_p.axpy(l_sqrt, diag, 0.0);
         let (p_new, l_new) = lls.solve_with_diagonal(&diag_p, p);
+        linear_solve_count += usize::from(collect_solve_count);
         p = p_new;
         l = l_new;
         diag_p = p.component_mul(diag);
@@ -133,6 +148,7 @@ pub fn determine_lambda_and_parameter_update(
                 *p_val *= *d_val;
             }
             p = l.solve(p);
+            linear_solve_count += usize::from(collect_solve_count);
             let norm = enorm(&p);
             ((fp / delta) / norm) / norm
         };
@@ -149,13 +165,14 @@ pub fn determine_lambda_and_parameter_update(
         step: p,
         lambda,
         dp_norm: diag_p_norm,
+        linear_solve_count,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::determine_lambda_and_parameter_update;
-    use crate::numerical::optimization::qr_LM::*;
+    use crate::somelinalg::least_squares_qr::*;
     use approx::assert_relative_eq;
     use nalgebra::*;
 

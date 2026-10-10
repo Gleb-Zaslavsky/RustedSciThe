@@ -17,12 +17,15 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use nalgebra::{DMatrix, DVector};
+use tabled::{Table, Tabled};
 
+use RustedSciThe::Utils::test_reporting::write_test_report;
 use RustedSciThe::numerical::Nonlinear_systems::error::SolveError;
 use RustedSciThe::numerical::Nonlinear_systems::prelude::{
     DampedNewtonMethod, DampedNewtonMethodAdvanced, DiagnosticsOptions, JacobianProvider,
@@ -79,6 +82,24 @@ struct AllocationSample {
     deallocations: usize,
     allocated_bytes: usize,
     deallocated_bytes: usize,
+}
+
+#[derive(Tabled)]
+struct AuditRow {
+    dimension: String,
+    scenario: String,
+    method: String,
+    allocations: String,
+    allocated_bytes: String,
+    deallocations: String,
+    deallocated_bytes: String,
+    elapsed_ms: String,
+    rejected_preflight: String,
+    iterations: String,
+    residual_calls: String,
+    jacobian_calls: String,
+    linear_solves: String,
+    status: String,
 }
 
 fn reset_counters() {
@@ -292,7 +313,7 @@ fn average(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-fn print_audit(
+fn audit_row(
     scenario: &str,
     method: &NonlinearSolverMethod,
     problem: &impl JacobianProvider,
@@ -300,7 +321,7 @@ fn print_audit(
     solve_options: SolveOptions,
     rejected_label: &str,
     dimension: usize,
-) {
+) -> AuditRow {
     const RUNS: usize = 5;
     let mut samples = [AllocationSample::default(); RUNS];
     let mut elapsed = [0.0; RUNS];
@@ -323,18 +344,25 @@ fn print_audit(
         .iter()
         .map(|sample| sample.deallocated_bytes as f64)
         .collect::<Vec<_>>();
-    println!(
-        "{dimension:9} | {scenario:25} | {:28} | runs={RUNS} | allocs={:.1} | alloc_bytes={:.1} | deallocs={:.1} | dealloc_bytes={:.1} | elapsed_ms={:.3} | rejected_preflight={rejected_label}",
-        method.name(),
-        average(&allocs),
-        average(&allocated_bytes),
-        average(&deallocs),
-        average(&deallocated_bytes),
-        average(&elapsed),
-    );
+    AuditRow {
+        dimension: dimension.to_string(),
+        scenario: scenario.to_owned(),
+        method: method.name().to_owned(),
+        allocations: format!("{:.1}", average(&allocs)),
+        allocated_bytes: format!("{:.1}", average(&allocated_bytes)),
+        deallocations: format!("{:.1}", average(&deallocs)),
+        deallocated_bytes: format!("{:.1}", average(&deallocated_bytes)),
+        elapsed_ms: format!("{:.3}", average(&elapsed)),
+        rejected_preflight: rejected_label.to_owned(),
+        iterations: "n/a".to_owned(),
+        residual_calls: "n/a".to_owned(),
+        jacobian_calls: "n/a".to_owned(),
+        linear_solves: "n/a".to_owned(),
+        status: "ok".to_owned(),
+    }
 }
 
-fn print_trust_region_ownership_audit() {
+fn trust_region_ownership_rows() -> Vec<AuditRow> {
     const DIMENSIONS: &[usize] = &[128, 512];
     const RUNS: usize = 5;
     let method = NonlinearSolverMethod::TrustRegionLM(TrustRegionLMMethod {
@@ -342,12 +370,7 @@ fn print_trust_region_ownership_audit() {
         ..TrustRegionLMMethod::default()
     });
 
-    println!(
-        "[Nonlinear TrustRegionLM ownership audit] runs={RUNS}; dimensions=128,512; allocation counters include the complete solve result lifetime"
-    );
-    println!(
-        "dimension | scenario                  | rejected | iterations | residuals | jacobians | linear | allocs mean | alloc_bytes mean | elapsed_ms mean | status"
-    );
+    let mut rows = Vec::new();
     for &dimension in DIMENSIONS {
         let problem = DenseQuadraticProblem { dimension };
         for (scenario, initial_value) in [("accepted", 0.9), ("rejection-heavy", 0.25)] {
@@ -387,19 +410,42 @@ fn print_trust_region_ownership_audit() {
                 .iter()
                 .map(|sample| sample.allocated_bytes as f64)
                 .collect::<Vec<_>>();
-            println!(
-                "{dimension:9} | {scenario:25} | {rejected_steps:8} | {iterations:10} | {residual_calls:9} | {jacobian_calls:9} | {linear_solves:6} | {:11.1} | {:16.1} | {:16.3} | ok",
-                average(&allocs),
-                average(&allocated_bytes),
-                average(&elapsed),
-            );
+            rows.push(AuditRow {
+                dimension: dimension.to_string(),
+                scenario: scenario.to_owned(),
+                method: method.name().to_owned(),
+                allocations: format!("{:.1}", average(&allocs)),
+                allocated_bytes: format!("{:.1}", average(&allocated_bytes)),
+                deallocations: "n/a".to_owned(),
+                deallocated_bytes: "n/a".to_owned(),
+                elapsed_ms: format!("{:.3}", average(&elapsed)),
+                rejected_preflight: rejected_steps.to_string(),
+                iterations: iterations.to_string(),
+                residual_calls: residual_calls.to_string(),
+                jacobian_calls: jacobian_calls.to_string(),
+                linear_solves: linear_solves.to_string(),
+                status: "ok".to_owned(),
+            });
         }
     }
+    rows
 }
 
 fn main() {
     if std::env::var_os("NONLINEAR_TRUST_REGION_OWNERSHIP_ONLY").is_some() {
-        print_trust_region_ownership_audit();
+        let rows = trust_region_ownership_rows();
+        let mut report = String::new();
+        writeln!(report, "# Nonlinear TrustRegionLM ownership audit\n").unwrap();
+        writeln!(report, "Runs use a counting allocator; allocation bytes cover the complete solve result lifetime and are not peak RSS.\n").unwrap();
+        report.push_str(&Table::new(&rows).to_string());
+        if let Err(error) = write_test_report(
+            "Nonlinear_systems",
+            "nonlinear_trust_region_ownership_audit",
+            &report,
+        ) {
+            eprintln!("[nonlinear allocation audit] report write failed: {error}");
+        }
+        println!("{report}");
         return;
     }
 
@@ -407,6 +453,7 @@ fn main() {
     let rejected_problem = RosenbrockProblem;
     let rejected_initial = DVector::from_vec(vec![-1.2, 1.0]);
     let all_methods = methods();
+    let mut rows = Vec::new();
 
     let preflight = NonlinearSolverMethod::DampedNewton(DampedNewtonMethod::default())
         .solve(
@@ -427,17 +474,11 @@ fn main() {
     );
     let rejected_preflight = preflight.statistics.rejected_steps.to_string();
 
-    println!(
-        "[Nonlinear allocation audit] runs=5; dimensions=32,128,512; allocation counters include the complete solve result lifetime"
-    );
-    println!(
-        "dimension | scenario                  | method | allocs | alloc_bytes | deallocs | dealloc_bytes | elapsed_ms | rejected_preflight"
-    );
     for &dimension in DIMENSIONS {
         let accepted_problem = DenseQuadraticProblem { dimension };
         let accepted_initial = DVector::from_element(dimension, 0.25);
         for method in &all_methods {
-            print_audit(
+            rows.push(audit_row(
                 "accepted/history-off",
                 method,
                 &accepted_problem,
@@ -445,13 +486,13 @@ fn main() {
                 options(false),
                 "not-measured",
                 dimension,
-            );
+            ));
         }
         // History is an explicit opt-in, so compare it at the smallest and
         // largest audit dimensions without doubling every intermediate row.
         if dimension == DIMENSIONS[0] || dimension == DIMENSIONS[DIMENSIONS.len() - 1] {
             for method in &all_methods {
-                print_audit(
+                rows.push(audit_row(
                     "accepted/history-on",
                     method,
                     &accepted_problem,
@@ -459,12 +500,12 @@ fn main() {
                     options(true),
                     "not-measured",
                     dimension,
-                );
+                ));
             }
         }
     }
     for method in &all_methods {
-        print_audit(
+        rows.push(audit_row(
             "rejected/history-off",
             method,
             &rejected_problem,
@@ -472,15 +513,9 @@ fn main() {
             options(false),
             &rejected_preflight,
             rejected_problem.dimension(),
-        );
+        ));
     }
 
-    println!(
-        "[Nonlinear allocation audit] reusable callback output comparison; same solve and options"
-    );
-    println!(
-        "dimension | scenario                  | method | allocs | alloc_bytes | deallocs | dealloc_bytes | elapsed_ms | rejected_preflight"
-    );
     for &dimension in DIMENSIONS {
         let reusable_problem = ReusableDenseQuadraticProblem { dimension };
         let accepted_initial = DVector::from_element(dimension, 0.25);
@@ -488,7 +523,7 @@ fn main() {
             NonlinearSolverMethod::Newton(NewtonMethod),
             NonlinearSolverMethod::DampedNewton(DampedNewtonMethod::default()),
         ] {
-            print_audit(
+            rows.push(audit_row(
                 "reusable-callback/history-off",
                 &method,
                 &reusable_problem,
@@ -496,7 +531,18 @@ fn main() {
                 options(false),
                 "not-measured",
                 dimension,
-            );
+            ));
         }
     }
+
+    let mut report = String::new();
+    writeln!(report, "# Nonlinear allocation audit\n").unwrap();
+    writeln!(report, "Runs=5. Allocation counters include the complete solve result lifetime and are not a peak-RSS measurement. Instrumentation overhead makes these rows unsuitable for ordinary wall-clock comparison.\n").unwrap();
+    report.push_str(&Table::new(&rows).to_string());
+    if let Err(error) =
+        write_test_report("Nonlinear_systems", "nonlinear_allocation_audit", &report)
+    {
+        eprintln!("[nonlinear allocation audit] report write failed: {error}");
+    }
+    println!("{report}");
 }

@@ -3,9 +3,9 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, eval_jacobian_with_runtime, eval_residual_with_runtime,
-    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
+    eval_jacobian_with_runtime, eval_residual_with_runtime, measure_linear_system_operation_owned,
+    scaled_norm, scaling_vector, IterationState, MethodWorkspace, NonlinearMethod,
+    RuntimeDiagnostics, SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};

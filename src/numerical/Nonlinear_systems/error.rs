@@ -61,6 +61,13 @@ pub enum SolveError {
         /// Upper bound.
         upper: f64,
     },
+    /// An initial unknown value is NaN or infinite.
+    NonFiniteInitialGuess {
+        /// Index of the invalid variable.
+        index: usize,
+        /// Invalid value.
+        value: f64,
+    },
     /// Residual evaluation failed.
     ResidualEvaluation(String),
     /// Jacobian evaluation failed.
@@ -129,6 +136,9 @@ impl Display for SolveError {
                 f,
                 "initial guess at index {index} = {value} violates bounds [{lower}, {upper}]"
             ),
+            SolveError::NonFiniteInitialGuess { index, value } => {
+                write!(f, "non-finite initial guess at index {index}: {value}")
+            }
             SolveError::ResidualEvaluation(msg) => write!(f, "residual evaluation failed: {msg}"),
             SolveError::JacobianEvaluation(msg) => write!(f, "jacobian evaluation failed: {msg}"),
             SolveError::CompiledAotRuntimeUnavailable(msg) => {

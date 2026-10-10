@@ -5,7 +5,7 @@ use super::{
     ops::{banded_matvec, residual_linf},
 };
 
-use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
 
 pub fn random_diag_dominant_banded(n: usize, kl: usize, ku: usize, seed: u64) -> Banded<f64> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -122,7 +122,7 @@ mod tests {
 #[cfg(test)]
 mod random_tests {
     use super::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     fn random_diag_dominant_banded(n: usize, kl: usize, ku: usize, seed: u64) -> Banded<f64> {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -185,7 +185,7 @@ mod random_tests {
 
 #[cfg(test)]
 mod lu_reconstruction_tests {
-    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
 
     use crate::somelinalg::banded::{
         banded_to_dense, dense_diff_linf, general_lu::GeneralBandedLuNoPivot, storage::Banded,
@@ -309,11 +309,11 @@ mod lu_reconstruction_tests {
 
 #[cfg(test)]
 mod robustness_tests {
-    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
 
-    use crate::somelinalg::banded::BlockTridiagonalLu;
     use crate::somelinalg::banded::block_tridiagonal::BlockTridiagonal;
     use crate::somelinalg::banded::error::BandedError;
+    use crate::somelinalg::banded::BlockTridiagonalLu;
 
     fn block_matvec(a: &BlockTridiagonal, x: &[f64]) -> Vec<f64> {
         let nb = a.n_blocks();

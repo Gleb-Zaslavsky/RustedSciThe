@@ -1,3 +1,9 @@
+//! Scalar root-finding methods for nonlinear equations `f(x) = 0`.
+//!
+//! Provides bisection, secant, Newton-Raphson, and Brent methods for closures
+//! and symbolic expressions. This belongs to nonlinear systems, not objective
+//! minimization or data fitting.
+
 use crate::symbolic::symbolic_engine::Expr;
 use std::fmt;
 

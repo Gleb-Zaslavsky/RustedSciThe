@@ -48,6 +48,6 @@ pub use solver_traits::{DirectLinearSolver, FaerSparseLuSolver};
 
 pub use solver_policy::{FallbackPolicy, LinearSolveError, LinearSolverConfig, LinearSolverPolicy};
 
-pub use linear_solver::{LinearSolver, LinearSystemRef, build_solver_for_system};
+pub use linear_solver::{build_solver_for_system, LinearSolver, LinearSystemRef};
 pub use node_major_layout::NodeMajorLayout;
 pub use solver_factory::factor_block_tridiagonal;

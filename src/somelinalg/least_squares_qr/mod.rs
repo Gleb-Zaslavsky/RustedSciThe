@@ -1,14 +1,84 @@
-//! Pivoted QR factorization and a specialized LLS solver.
+//! Column-pivoted QR factorization and diagonal-regularized least-squares kernels.
 //!
-//! The QR factorization is used to implement an efficient solver for the
-//! linear least squares problem which is repeatedly required to be
-//! solved in the LM algorithm.
+//! This module contains only dense linear algebra and has no dependency on a
+//! nonlinear solver or fitting API. It can therefore be reused by any method
+//! that needs rank-revealing QR or diagonal-regularized least-squares solves.
 #![allow(clippy::excessive_precision)]
 
-use crate::numerical::optimization::utils::{dot, enorm, epsmch};
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Dim, RealField, U1, Vector, storage::Storage};
 use num_traits::Float;
 use std::fmt::Display;
+
+#[inline]
+fn epsmch<F: RealField>() -> F {
+    F::default_epsilon()
+}
+
+#[inline]
+fn dot<F, N, AS, BS>(a: &Vector<F, N, AS>, b: &Vector<F, N, BS>) -> F
+where
+    F: RealField + Copy,
+    N: Dim,
+    AS: Storage<F, N, U1>,
+    BS: Storage<F, N, U1>,
+{
+    a.iter()
+        .zip(b.iter())
+        .fold(F::zero(), |sum, (left, right)| sum + *left * *right)
+}
+
+#[inline]
+fn enorm<F, N, VS>(vector: &Vector<F, N, VS>) -> F
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    VS: Storage<F, N, U1>,
+{
+    let mut large_sum = F::zero();
+    let mut middle_sum = F::zero();
+    let mut small_sum = F::zero();
+    let mut large_scale = F::zero();
+    let mut small_scale = F::zero();
+    let large_threshold =
+        Float::sqrt(<F as Float>::max_value()) / nalgebra::convert::<f64, F>(vector.nrows() as f64);
+    let small_threshold = Float::sqrt(<F as Float>::min_positive_value());
+
+    for value in vector.iter() {
+        let magnitude = value.abs();
+        if magnitude.is_nan() {
+            return magnitude;
+        }
+        if magnitude >= large_threshold || magnitude <= small_threshold {
+            if magnitude > small_threshold {
+                if magnitude > large_scale {
+                    large_sum = F::one() + large_sum * Float::powi(large_scale / magnitude, 2);
+                    large_scale = magnitude;
+                } else {
+                    large_sum += Float::powi(magnitude / large_scale, 2);
+                }
+            } else if magnitude > small_scale {
+                small_sum = F::one() + small_sum * Float::powi(small_scale / magnitude, 2);
+                small_scale = magnitude;
+            } else if magnitude != F::zero() {
+                small_sum += Float::powi(magnitude / small_scale, 2);
+            }
+        } else {
+            middle_sum += magnitude * magnitude;
+        }
+    }
+
+    if large_sum != F::zero() {
+        large_scale * Float::sqrt(large_sum + (middle_sum / large_scale) / large_scale)
+    } else if middle_sum != F::zero() {
+        Float::sqrt(if middle_sum >= small_scale {
+            middle_sum * (F::one() + (small_scale / middle_sum) * (small_scale * small_sum))
+        } else {
+            small_scale * ((middle_sum / small_scale) + (small_scale * small_sum))
+        })
+    } else {
+        small_scale * Float::sqrt(small_sum)
+    }
+}
 
 /// Pivoted QR decomposition.
 ///
@@ -281,7 +351,9 @@ impl LinearLeastSquaresDiagonalProblem {
                 if temp.is_nan() {
                     return None;
                 }
-                max = max.max(temp);
+                if temp > max {
+                    max = temp;
+                }
             }
         }
         Some(max)
@@ -310,7 +382,7 @@ impl LinearLeastSquaresDiagonalProblem {
         &mut self,
         diag: &DVector<f64>,
         mut out: DVector<f64>,
-    ) -> (DVector<f64>, CholeskyFactor) {
+    ) -> (DVector<f64>, CholeskyFactor<'_>) {
         out.copy_from(&self.qt_b);
         let mut rhs = self.eliminate_diag(diag, out);
         //  println!("rhs: {:?}", rhs);
@@ -319,9 +391,8 @@ impl LinearLeastSquaresDiagonalProblem {
     }
 
     /// Solve the least squares problem with a zero diagonal.
-    pub fn solve_with_zero_diagonal(&mut self) -> (DVector<f64>, CholeskyFactor) {
+    pub fn solve_with_zero_diagonal(&mut self) -> (DVector<f64>, CholeskyFactor<'_>) {
         let n = self.upper_r.ncols();
-        let l = self.upper_r.view_range(0..n, 0..n);
         self.work.copy_from(&self.qt_b);
         let rank = self.r_rank();
 
@@ -329,18 +400,10 @@ impl LinearLeastSquaresDiagonalProblem {
             self.work[i] = 0.0;
         }
 
-        // Solve upper triangular system
-        for i in (0..rank).rev() {
-            let mut sum = 0.0;
-            for j in (i + 1)..rank {
-                if i < l.nrows() && j < l.ncols() {
-                    sum += l[(i, j)] * self.work[j];
-                }
-            }
-            if i < l.nrows() && i < l.ncols() && l[(i, i)] != 0.0 {
-                self.work[i] = (self.work[i] - sum) / l[(i, i)];
-            }
-        }
+        // Match the upstream QR solve exactly on the active rank block.
+        self.upper_r
+            .view_range(0..rank, 0..rank)
+            .solve_upper_triangular_mut(&mut self.work.rows_range_mut(..rank));
 
         let mut x = DVector::zeros(n);
         for j in 0..n {
@@ -381,7 +444,10 @@ impl LinearLeastSquaresDiagonalProblem {
             .unwrap_or(self.l_diag.nrows())
     }
 
-    fn solve_after_elimination(&mut self, mut x: DVector<f64>) -> (DVector<f64>, CholeskyFactor) {
+    fn solve_after_elimination(
+        &mut self,
+        mut x: DVector<f64>,
+    ) -> (DVector<f64>, CholeskyFactor<'_>) {
         let rank = self.rank();
         let rhs = &mut self.work;
 

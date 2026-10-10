@@ -1,4 +1,5 @@
-use crate::numerical::optimization::sym_fitting::Fitting;
+use crate::numerical::Nonlinear_systems::least_squares::MinimizationReport;
+use crate::numerical::optimization::sym_fitting::{Fitting, FittingError};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashMap;
@@ -68,7 +69,7 @@ impl SewTwoFunctions {
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
-    ) {
+    ) -> Result<MinimizationReport, FittingError> {
         self.fitting.set_fitting(
             self.fitting_data.0.clone(),
             self.fitting_data.1.clone(),
@@ -82,8 +83,7 @@ impl SewTwoFunctions {
             scale_diag,
             max_iterations,
         );
-        self.fitting.eq_generate();
-        self.fitting.solve();
+        self.fitting.solve()
     }
     pub fn fit_easy(
         &mut self,
@@ -91,7 +91,7 @@ impl SewTwoFunctions {
         unknowns: Option<Vec<String>>,
         arg: String,
         initial_guess: Vec<f64>,
-    ) {
+    ) -> Result<MinimizationReport, FittingError> {
         self.fitting.easy_fitting(
             self.fitting_data.0.clone(),
             self.fitting_data.1.clone(),
@@ -99,7 +99,7 @@ impl SewTwoFunctions {
             unknowns,
             arg,
             initial_guess,
-        );
+        )
     }
     pub fn get_result(&self) -> Option<DVector<f64>> {
         self.fitting.result.clone()
@@ -183,7 +183,7 @@ impl SewMultipleFunctions {
         g_tolerance: Option<f64>,
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
-    ) {
+    ) -> Result<MinimizationReport, FittingError> {
         self.fitting.set_fitting(
             self.fitting_data.0.clone(),
             self.fitting_data.1.clone(),
@@ -197,8 +197,7 @@ impl SewMultipleFunctions {
             scale_diag,
             max_iterations,
         );
-        self.fitting.eq_generate();
-        self.fitting.solve();
+        self.fitting.solve()
     }
 
     pub fn fit_easy(
@@ -207,7 +206,7 @@ impl SewMultipleFunctions {
         unknowns: Option<Vec<String>>,
         arg: String,
         initial_guess: Vec<f64>,
-    ) {
+    ) -> Result<MinimizationReport, FittingError> {
         self.fitting.easy_fitting(
             self.fitting_data.0.clone(),
             self.fitting_data.1.clone(),
@@ -215,7 +214,7 @@ impl SewMultipleFunctions {
             unknowns,
             arg,
             initial_guess,
-        );
+        )
     }
 
     pub fn get_result(&self) -> Option<DVector<f64>> {
@@ -286,23 +285,25 @@ mod tests {
         for i in 0..x_data.len() {
             println!("x: {}, y: {}", x_data[i], y_data[i]);
         }
-        sew_two_functions.fit(
-            f.clone(),
-            Some(vec![
-                "A".to_string(),
-                "B".to_string(),
-                "C".to_string(),
-                "D".to_string(),
-                "E".to_string(),
-            ]),
-            "t".to_string(),
-            vec![1.0, 1.0, 1.0, 1.0, 1.0],
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        sew_two_functions
+            .fit(
+                f.clone(),
+                Some(vec![
+                    "A".to_string(),
+                    "B".to_string(),
+                    "C".to_string(),
+                    "D".to_string(),
+                    "E".to_string(),
+                ]),
+                "t".to_string(),
+                vec![1.0, 1.0, 1.0, 1.0, 1.0],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         let map_of_solutions = sew_two_functions.get_map_of_solutions();
         println!("{:?}", map_of_solutions);
         let r_ssquared = sew_two_functions.get_r_ssquared();
@@ -341,17 +342,19 @@ mod tests {
 
         // Fit with a general polynomial
         let target_eq = "A*x^3 + B*x^2 + C*x + D";
-        sew_multiple.fit_easy(
-            target_eq.to_string(),
-            Some(vec![
-                "A".to_string(),
-                "B".to_string(),
-                "C".to_string(),
-                "D".to_string(),
-            ]),
-            "x".to_string(),
-            vec![1.0, 1.0, 1.0, 1.0],
-        );
+        sew_multiple
+            .fit_easy(
+                target_eq.to_string(),
+                Some(vec![
+                    "A".to_string(),
+                    "B".to_string(),
+                    "C".to_string(),
+                    "D".to_string(),
+                ]),
+                "x".to_string(),
+                vec![1.0, 1.0, 1.0, 1.0],
+            )
+            .unwrap();
 
         let map_of_solutions = sew_multiple.get_map_of_solutions();
         println!("Multiple functions fit result: {:?}", map_of_solutions);

@@ -2751,7 +2751,7 @@ mod tests {
     const ISOLATED_RACE_PID_MARKER: &str = "[BVP_SCI_ISOLATED_RACE_PID]";
     const COLD_COOLDOWN_MS_ENV: &str = "BVP_SCI_COLD_COOLDOWN_MS";
     const COLD_CLEAN_ARTIFACTS_ENV: &str = "BVP_SCI_COLD_CLEAN_ARTIFACTS";
-    const COMBUSTION_3000_ISOLATED_STRESS_TEST_NAME: &str = "numerical::BVP_sci::BVP_sci_story_tests::tests::combustion_3000_sparse_isolated_stress_story";
+    const COMBUSTION_3000_ISOLATED_STRESS_TEST_NAME: &str = "numerical::BVP_sci::legacy::BVP_sci_story_tests::tests::combustion_3000_sparse_isolated_stress_story";
 
     /// Encode a `RaceRow` as a tab-separated string for child→parent IPC.
     /// Only the 9 hardcoded fields are serialized; solver-specific metrics

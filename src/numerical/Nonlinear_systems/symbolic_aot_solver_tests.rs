@@ -7,8 +7,6 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
-    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::numerical::Nonlinear_systems::engine::{
         DiagnosticsOptions, NewtonMethod, SolveOptions, SolverEngine, StatisticsAvailability,
     };
@@ -26,6 +24,8 @@ mod tests {
     };
     use crate::numerical::Nonlinear_systems::symbolic_backend::SymbolicBackendSelectionPolicy;
     use crate::numerical::Nonlinear_systems::symbolic_generated::SymbolicGeneratedBackendConfig;
+    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
+    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::symbolic::codegen::codegen_aot_runtime_link::unregister_linked_dense_backend;
     use crate::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;

@@ -1,4 +1,4 @@
-use crate::numerical::optimization::LM_optimization::MinimizationReport;
+use crate::numerical::Nonlinear_systems::least_squares::MinimizationReport;
 use crate::numerical::optimization::varpro::model::SeparableNonlinearModel;
 use crate::numerical::optimization::varpro::problem::{
     MultiRhs, RhsType, SeparableProblem, SingleRhs,

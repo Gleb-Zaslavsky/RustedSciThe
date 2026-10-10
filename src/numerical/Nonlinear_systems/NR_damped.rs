@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, eval_residual_norm_with_runtime, measure_linear_system_operation,
+    eval_residual_norm_with_runtime, measure_linear_system_operation, IterationState,
+    MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};

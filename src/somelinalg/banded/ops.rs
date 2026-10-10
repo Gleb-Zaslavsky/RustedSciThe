@@ -158,7 +158,7 @@ pub fn dense_diff_linf(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
 //===================================================================================================
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
 
     use super::{banded_matvec, residual_l2, residual_linf, vec_diff_linf};
     use crate::somelinalg::banded::{general_lu::GeneralBandedLuNoPivot, storage::Banded};

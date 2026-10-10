@@ -315,6 +315,8 @@ method: RK45
 
 equations
 arg: t
+parameters: a
+parameter_values: 2.0
 y: $a*y$
 
 where

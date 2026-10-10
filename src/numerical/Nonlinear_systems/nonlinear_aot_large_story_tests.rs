@@ -169,15 +169,12 @@ fn mean_counters(samples: &[WarmSample]) -> (f64, f64, f64, f64) {
 fn assert_same_counters(left: &[WarmSample], right: &[WarmSample]) {
     assert!(!left.is_empty() && !right.is_empty());
     assert_eq!(left[0].counters, right[0].counters);
-    assert!(
-        left.iter()
-            .all(|sample| sample.counters == left[0].counters)
-    );
-    assert!(
-        right
-            .iter()
-            .all(|sample| sample.counters == right[0].counters)
-    );
+    assert!(left
+        .iter()
+        .all(|sample| sample.counters == left[0].counters));
+    assert!(right
+        .iter()
+        .all(|sample| sample.counters == right[0].counters));
 }
 
 fn assert_solution_agreement(left: &[WarmSample], right: &[WarmSample]) {

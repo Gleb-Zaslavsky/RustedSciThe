@@ -1,23 +1,24 @@
-//! Symbolic wrapper for Levenberg-Marquardt optimization algorithm.
+//! High-level symbolic API for rectangular least-squares problems.
 //!
-//! This module provides a high-level interface for solving nonlinear least squares problems
-//! using symbolic expressions. It automatically generates analytical Jacobians and provides
-//! logging capabilities similar to the NR solver.
+//! Symbolic preparation is delegated to [`PreparedSymbolicLeastSquaresProblem`],
+//! while all numerical iterations go through the canonical least-squares solver
+//! selected by [`crate::numerical::Nonlinear_systems::solver::NonlinearSolver`].
 
-use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
-use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
+use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
+use crate::numerical::Nonlinear_systems::least_squares::{
+    LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode, LevenbergMarquardt,
+    PreparedSymbolicLeastSquaresProblem,
+};
+use crate::numerical::Nonlinear_systems::solver::NonlinearSolver;
+use crate::numerical::Nonlinear_systems::symbolic::SymbolicProblemOptions;
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
-use log::info;
-use nalgebra::{DMatrix, DVector};
-use simplelog::*;
+use log::{log, Level};
+use nalgebra::DVector;
 use std::collections::HashMap;
 
 /// Symbolic wrapper for Levenberg-Marquardt algorithm.
 /// Solves nonlinear least squares problems using symbolic expressions with analytical Jacobians.
-pub struct LM {
-    /// Jacobian instance containing symbolic functions and their derivatives
-    pub jacobian: Jacobian,
+pub struct SymbolicLeastSquaresSolver {
     /// Vector of symbolic equations to solve
     pub eq_system: Vec<Expr>,
     /// Variable names in the equations
@@ -40,15 +41,26 @@ pub struct LM {
     pub result: Option<DVector<f64>>,
     /// Solution mapped to variable names
     pub map_of_solutions: Option<HashMap<String, f64>>,
-    /// Logging level (debug, info, warn, error, off, none)
+    /// Statistics from the most recent mutable solve.
+    pub last_statistics: Option<SolveStatistics>,
+    /// Optional log level (debug, info, warn, error, off, none); `None` is silent.
+    /// This library wrapper never installs or changes a process-global logger.
     pub loglevel: Option<String>,
+    /// Symbolic variables whose numeric domain is strictly positive.
+    ///
+    /// This is required for expressions such as `ln(N0 / Np)`: the
+    /// trust-region controller can reject an invalid trial before it reaches
+    /// the symbolic callback.
+    positive_variables: Vec<String>,
+    /// Prepared shared symbolic frontend used by all solves.
+    prepared: Option<PreparedSymbolicLeastSquaresProblem>,
+    telemetry_mode: LeastSquaresTelemetryMode,
 }
 
-impl LM {
+impl SymbolicLeastSquaresSolver {
     /// Creates a new LM solver instance with default settings.
     pub fn new() -> Self {
-        LM {
-            jacobian: Jacobian::new(),
+        SymbolicLeastSquaresSolver {
             eq_system: Vec::new(),
             values: Vec::new(),
             parameters: None,
@@ -60,18 +72,24 @@ impl LM {
             max_iterations: None,
             result: None,
             map_of_solutions: None,
-            loglevel: Some("info".to_string()),
+            last_statistics: None,
+            loglevel: None,
+            positive_variables: Vec::new(),
+            prepared: None,
+            telemetry_mode: LeastSquaresTelemetryMode::Off,
         }
     }
 
     /// Builder pattern: Set equations from Expr vector
     pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
+        self.prepared = None;
         self.eq_system = eq_system;
         self
     }
 
     /// Builder pattern: Set equations from string vector
     pub fn with_equations_str(mut self, eq_system_string: Vec<String>) -> Self {
+        self.prepared = None;
         self.eq_system = eq_system_string
             .iter()
             .map(|x| Expr::parse_expression(x))
@@ -79,14 +97,39 @@ impl LM {
         self
     }
 
+    /// Fallible string-equation builder for callers that want parse errors
+    /// returned through the typed least-squares error channel.
+    pub fn try_with_equations_str(
+        mut self,
+        equations: Vec<String>,
+    ) -> Result<Self, LeastSquaresError> {
+        self.prepared = None;
+        self.eq_system = equations
+            .into_iter()
+            .enumerate()
+            .map(|(index, equation)| {
+                Expr::try_parse_expression(&equation).map_err(|error| {
+                    LeastSquaresError::Problem(
+                        crate::numerical::Nonlinear_systems::error::SolveError::InvalidConfig(
+                            format!("failed to parse least-squares equation {index}: {error}"),
+                        ),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
     /// Builder pattern: Set unknowns
     pub fn with_unknowns(mut self, unknowns: Vec<String>) -> Self {
+        self.prepared = None;
         self.values = unknowns;
         self
     }
 
     /// Builder pattern: Set parameters
     pub fn with_parameters(mut self, parameters: Vec<String>) -> Self {
+        self.prepared = None;
         self.parameters = Some(parameters);
         self
     }
@@ -133,15 +176,76 @@ impl LM {
         self
     }
 
+    /// Enables optional LM telemetry for solves through this symbolic wrapper.
+    pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
+        self
+    }
+
+    /// Fallible logging-level builder. `off` and `none` disable solver logs.
+    pub fn try_with_loglevel(mut self, loglevel: &str) -> Result<Self, LeastSquaresError> {
+        parse_log_level(loglevel)?;
+        self.loglevel = Some(loglevel.to_ascii_lowercase());
+        Ok(self)
+    }
+
     /// Builder pattern: Build and prepare solver (generates Jacobian)
     pub fn build(mut self) -> Self {
         self.validate_and_infer();
-        if self.parameters.is_some() {
-            self.eq_generate_with_params();
-        } else {
-            self.eq_generate();
-        }
+        self.prepare_symbolic()
+            .expect("symbolic least-squares preparation should succeed");
         self
+    }
+
+    /// Validates, prepares, and returns a symbolic solver without panic-based
+    /// input or preparation failures.
+    pub fn try_build(mut self) -> Result<Self, LeastSquaresError> {
+        self.try_validate_and_infer()?;
+        self.prepare_symbolic()?;
+        Ok(self)
+    }
+
+    fn try_validate_and_infer(&mut self) -> Result<(), LeastSquaresError> {
+        if self.eq_system.is_empty() {
+            return Err(LeastSquaresError::EmptyProblem {
+                stage:
+                    crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Residual,
+            });
+        }
+        if self.values.is_empty() {
+            let mut variables: Vec<String> = self
+                .eq_system
+                .iter()
+                .flat_map(Expr::all_arguments_are_variables)
+                .collect();
+            variables.sort();
+            variables.dedup();
+            self.values = variables;
+        }
+        if self.values.is_empty() {
+            return Err(LeastSquaresError::EmptyProblem {
+                stage: crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Parameters,
+            });
+        }
+        if self.initial_guess.len() != self.values.len() {
+            return Err(LeastSquaresError::DimensionMismatch {
+                stage: crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Parameters,
+                expected: self.values.len(),
+                actual: self.initial_guess.len(),
+            });
+        }
+        if let Some((index, _)) = self
+            .initial_guess
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(LeastSquaresError::NonFiniteValue {
+                stage: crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Parameters,
+                index,
+            });
+        }
+        Ok(())
     }
 
     /// Validate inputs and infer unknowns if not provided
@@ -179,8 +283,72 @@ impl LM {
         );
     }
 
+    /// Prepares the shared symbolic residual/Jacobian frontend once.
+    ///
+    /// The wrapper deliberately keeps the historical infallible builder
+    /// surface, so typed preparation errors are reported at this compatibility
+    /// boundary with the same explicit context as the old API.
+    fn prepare_symbolic(
+        &mut self,
+    ) -> Result<(), crate::numerical::Nonlinear_systems::error::SolveError> {
+        let mut options = SymbolicProblemOptions::new()
+            .with_variables(self.values.clone())
+            .with_lambdify_backend();
+        if let Some(parameters) = &self.parameters {
+            options = options.with_equation_parameters(parameters.clone());
+        }
+        let mut prepared =
+            PreparedSymbolicLeastSquaresProblem::from_expressions(self.eq_system.clone(), options)?;
+        if !self.positive_variables.is_empty() {
+            prepared.set_positive(&self.positive_variables)?;
+        }
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
+    fn ensure_prepared(&mut self) {
+        self.validate_and_infer();
+        if self.prepared.is_none() {
+            self.prepare_symbolic()
+                .expect("symbolic least-squares preparation should succeed");
+        }
+    }
+
     pub fn set_loglevel(&mut self, loglevel: String) {
         self.loglevel = Some(loglevel);
+    }
+
+    /// Fallible setter for opt-in logging; invalid levels do not panic.
+    pub fn try_set_loglevel(&mut self, loglevel: &str) -> Result<(), LeastSquaresError> {
+        parse_log_level(loglevel)?;
+        self.loglevel = Some(loglevel.to_ascii_lowercase());
+        Ok(())
+    }
+
+    fn log_level(&self) -> Option<Level> {
+        self.loglevel
+            .as_deref()
+            .and_then(|value| parse_log_level(value).ok().flatten())
+    }
+
+    /// Declares symbolic variables that must remain strictly positive.
+    ///
+    /// The declaration is retained when the equation system is rebuilt and
+    /// is applied to an already prepared frontend immediately. This keeps
+    /// domain handling explicit while avoiding any legacy callback generator.
+    pub fn set_positive_variables<S: AsRef<str>>(
+        &mut self,
+        names: &[S],
+    ) -> Result<(), crate::numerical::Nonlinear_systems::error::SolveError> {
+        let names = names
+            .iter()
+            .map(|name| name.as_ref().to_string())
+            .collect::<Vec<_>>();
+        if let Some(prepared) = &mut self.prepared {
+            prepared.set_positive(&names)?;
+        }
+        self.positive_variables = names;
+        Ok(())
     }
     /// Sets up the equation system with unknowns, parameters, and solver options.
     pub fn set_equation_system(
@@ -195,6 +363,7 @@ impl LM {
         scale_diag: Option<bool>,
         max_iterations: Option<usize>,
     ) {
+        self.prepared = None;
         self.eq_system = eq_system.clone();
         self.initial_guess = initial_guess;
         self.tolerance = tolerance;
@@ -282,142 +451,174 @@ impl LM {
             scale_diag,
             max_iterations,
         );
+        self.prepare_symbolic()
+            .expect("symbolic least-squares preparation should succeed");
     }
 
-    /// Generates symbolic Jacobian and function representations.
-    pub fn eq_generate(&mut self) {
-        let eq_system = self.eq_system.clone();
-        let mut Jacobian_instance = Jacobian::new();
-        let args = self.values.clone();
-        let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
-        Jacobian_instance.set_vector_of_functions(eq_system);
-        Jacobian_instance.set_variables(args.clone());
-        Jacobian_instance.calc_jacobian();
-        Jacobian_instance.lambdify_jacobian_DMatrix_parallel();
-        Jacobian_instance.lambdify_vector_funvector_DVector();
-        assert_eq!(
-            Jacobian_instance.vector_of_variables.len(),
-            self.initial_guess.len(),
-            "Initial guess and vector of variables should have the same length."
-        );
-        self.jacobian = Jacobian_instance;
+    fn configured_solver(&self) -> LevenbergMarquardt {
+        let mut solver = LevenbergMarquardt::new();
+        if let Some(max_iterations) = self.max_iterations {
+            solver = solver.with_patience(max_iterations);
+        }
+        if let Some(tolerance) = self.tolerance {
+            solver = solver.with_xtol(tolerance);
+        }
+        if let Some(g_tolerance) = self.g_tolerance {
+            solver = solver.with_gtol(g_tolerance);
+        }
+        if let Some(f_tolerance) = self.f_tolerance {
+            solver = solver.with_ftol(f_tolerance);
+        }
+        solver = solver.with_telemetry(self.telemetry_mode);
+        solver
     }
-    /// Generates symbolic Jacobian for parametric equations.
-    pub fn eq_generate_with_params(&mut self) {
-        let eq_system = self.eq_system.clone();
-        let mut Jacobian_instance = Jacobian::new();
-        let args = self.values.clone();
-        let args: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
-        Jacobian_instance.set_vector_of_functions(eq_system);
-        let params = self
-            .parameters
-            .clone()
-            .expect("for a problem with params - params must be set!");
-        Jacobian_instance.set_params(params);
-        Jacobian_instance.set_variables(args.clone());
-        Jacobian_instance.calc_jacobian();
-        Jacobian_instance.lambdify_jacobian_DMatrix_with_parameters_parallel();
-        Jacobian_instance.lambdify_vector_funvector_DVector_with_parameters_parallel();
-        assert_eq!(
-            Jacobian_instance.vector_of_variables.len(),
-            self.initial_guess.len(),
-            "Initial guess and vector of variables should have the same length."
-        );
-        self.jacobian = Jacobian_instance;
+
+    fn try_configured_solver(&self) -> Result<LevenbergMarquardt, LeastSquaresError> {
+        let mut solver = LevenbergMarquardt::new();
+        if let Some(max_iterations) = self.max_iterations {
+            solver = solver.try_with_patience(max_iterations)?;
+        }
+        if let Some(tolerance) = self.tolerance {
+            solver = solver.try_with_xtol(tolerance)?;
+        }
+        if let Some(g_tolerance) = self.g_tolerance {
+            solver = solver.try_with_gtol(g_tolerance)?;
+        }
+        if let Some(f_tolerance) = self.f_tolerance {
+            solver = solver.try_with_ftol(f_tolerance)?;
+        }
+        Ok(solver.with_telemetry(self.telemetry_mode))
     }
-    /// Solves the nonlinear system with optional logging.
-    pub fn solve(&mut self) {
-        let is_logging_disabled = self
-            .loglevel
-            .as_ref()
-            .map(|level| level == "off" || level == "none")
-            .unwrap_or(false);
 
-        if is_logging_disabled {
-            self.solve_internal();
-        } else {
-            let loglevel = self.loglevel.clone();
-            let log_option = if let Some(level) = loglevel {
-                match level.as_str() {
-                    "debug" => LevelFilter::Info,
-                    "info" => LevelFilter::Info,
-                    "warn" => LevelFilter::Warn,
-                    "error" => LevelFilter::Error,
-                    _ => panic!("loglevel must be debug, info, warn or error"),
-                }
-            } else {
-                LevelFilter::Info
-            };
+    fn try_ensure_prepared(&mut self) -> Result<(), LeastSquaresError> {
+        self.try_validate_and_infer()?;
+        if self.prepared.is_none() {
+            self.prepare_symbolic()?;
+        }
+        Ok(())
+    }
 
-            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
-                log_option,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            )]);
-
-            match logger_instance {
-                Ok(()) => {
-                    self.solve_internal();
-                    info!("Program ended");
-                }
-                Err(_) => {
-                    self.solve_internal();
-                }
+    /// Solves through a typed, panic-free path and stores the latest result and
+    /// telemetry snapshot on this wrapper.
+    pub fn try_solve(
+        &mut self,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
+        self.result = None;
+        self.map_of_solutions = None;
+        self.last_statistics = None;
+        self.try_ensure_prepared()?;
+        let prepared = self.prepared.as_ref().ok_or_else(|| {
+            LeastSquaresError::InvalidProblemShape {
+                stage: crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Configuration,
+            }
+        })?;
+        let problem =
+            prepared.bind_initial_with_guess(DVector::from_vec(self.initial_guess.clone()))?;
+        let solver = self.try_configured_solver()?;
+        let (problem, report) = solver.try_minimize(problem)?;
+        self.last_statistics = Some(report.statistics.clone());
+        if report.termination.was_successful() {
+            let solution = problem.params();
+            self.result = Some(solution.clone());
+            self.map_of_solutions = Some(
+                self.values
+                    .iter()
+                    .cloned()
+                    .zip(solution.iter().copied())
+                    .collect(),
+            );
+            if let Some(level) = self.log_level() {
+                log!(level, "Least-squares termination: {:?}", report.termination);
+                log!(
+                    level,
+                    "Least-squares objective: {}",
+                    report.objective_function
+                );
             }
         }
+        Ok(report)
+    }
+
+    /// Typed parameter-rebind solve. Symbolic preparation is reused, and the
+    /// returned report contains this solve's optional telemetry snapshot.
+    pub fn try_solve_with_params(
+        &mut self,
+        equation_parameters: Vec<f64>,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
+        self.result = None;
+        self.map_of_solutions = None;
+        self.last_statistics = None;
+        self.try_ensure_prepared()?;
+        let prepared = self.prepared.as_ref().ok_or_else(|| {
+            LeastSquaresError::InvalidProblemShape {
+                stage: crate::numerical::Nonlinear_systems::least_squares::LeastSquaresStage::Configuration,
+            }
+        })?;
+        let problem = prepared.bind_values_with_guess(
+            DVector::from_vec(equation_parameters),
+            DVector::from_vec(self.initial_guess.clone()),
+        )?;
+        let solver = self.try_configured_solver()?;
+        let (problem, report) = solver.try_minimize(problem)?;
+        self.last_statistics = Some(report.statistics.clone());
+        if report.termination.was_successful() {
+            let solution = problem.params();
+            self.result = Some(solution.clone());
+            self.map_of_solutions = Some(
+                self.values
+                    .iter()
+                    .cloned()
+                    .zip(solution.iter().copied())
+                    .collect(),
+            );
+        }
+        Ok(report)
+    }
+
+    /// Solves the nonlinear system with optional logging.
+    pub fn solve(&mut self) {
+        self.ensure_prepared();
+        self.solve_internal();
     }
 
     /// Internal solver implementation without logging setup.
     fn solve_internal(&mut self) {
-        let residual = |x: &DVector<f64>| -> DVector<f64> {
-            let residual = &self.jacobian.lambdified_function_DVector;
-            let residual = residual(x);
-            residual.clone()
+        let (solution, report) = {
+            let prepared = self
+                .prepared
+                .as_ref()
+                .expect("symbolic least-squares problem must be prepared");
+            let problem = prepared
+                .bind_initial_with_guess(DVector::from_vec(self.initial_guess.clone()))
+                .expect("symbolic initial guess should bind");
+            let solver = NonlinearSolver::LeastSquares(self.configured_solver());
+            let (result, report) = solver
+                .minimize_least_squares(problem)
+                .expect("least-squares selector should accept its prepared problem");
+            (result.params(), report)
         };
-        let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
-            let jacobian = &self.jacobian.lambdified_jacobian_DMatrix;
-            let jacobian = jacobian(x);
-            jacobian.clone()
-        };
-        let problem = NonlinearSystem::new(
-            DVector::from_vec(self.initial_guess.clone()),
-            residual,
-            jacobian,
-        );
-        let LM = LevenbergMarquardt::new();
-        let LM = if let Some(max_iterations) = self.max_iterations {
-            let LM = LM.with_patience(max_iterations);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(tolerance) = self.tolerance {
-            let LM = LM.with_xtol(tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(g_tolerance) = self.g_tolerance {
-            let LM = LM.with_gtol(g_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(f_tolerance) = self.f_tolerance {
-            let LM = LM.with_ftol(f_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let (result, report) = LM.minimize(problem);
-        info!("Nonlinear System Example:");
-        info!("Termination: {:?}", report.termination);
-        info!("Evaluations: {}", report.number_of_evaluations);
-        info!("Final objective: {}", report.objective_function);
-        info!("Final params: {:?}", result.params());
+        self.last_statistics = Some(report.statistics.clone());
+        if let Some(level) = self.log_level() {
+            log!(level, "Least-squares termination: {:?}", report.termination);
+            log!(
+                level,
+                "Least-squares evaluations: {}",
+                report.number_of_evaluations
+            );
+            log!(
+                level,
+                "Least-squares final objective: {}",
+                report.objective_function
+            );
+            log!(level, "Least-squares final parameters: {:?}", solution);
+        }
         if report.termination.was_successful() {
-            let solution = result.params();
             self.result = Some(solution.clone());
             let solution: Vec<f64> = solution.data.into();
             let unknowns = self.values.clone();
@@ -428,7 +629,9 @@ impl LM {
                 .collect();
 
             let map_of_solutions = map_of_solutions;
-            info!("Map of solutions: {:?}", map_of_solutions);
+            if let Some(level) = self.log_level() {
+                log!(level, "Least-squares solution map: {:?}", map_of_solutions);
+            }
             self.map_of_solutions = Some(map_of_solutions);
         }
     }
@@ -438,54 +641,39 @@ impl LM {
         &self,
         params: Vec<f64>,
     ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
-        let params_vec = DVector::from_vec(params);
-        let residual = |x: &DVector<f64>| -> DVector<f64> {
-            let residual = &self.jacobian.lambdified_function_with_params;
-            residual(&params_vec, x)
+        let (solution, report) = {
+            let prepared = self
+                .prepared
+                .as_ref()
+                .expect("symbolic least-squares problem must be prepared");
+            let problem = prepared
+                .bind_values_with_guess(
+                    DVector::from_vec(params),
+                    DVector::from_vec(self.initial_guess.clone()),
+                )
+                .expect("symbolic parameter values and initial guess should bind");
+            let solver = NonlinearSolver::LeastSquares(self.configured_solver());
+            let (result, report) = solver
+                .minimize_least_squares(problem)
+                .expect("least-squares selector should accept its prepared problem");
+            (result.params(), report)
         };
-
-        let jacobian = |x: &DVector<f64>| -> DMatrix<f64> {
-            let jacobian = &self.jacobian.lambdified_jacobian_DMatrix_with_params;
-            jacobian(&params_vec, x)
-        };
-        let problem = NonlinearSystem::new(
-            DVector::from_vec(self.initial_guess.clone()),
-            residual,
-            jacobian,
-        );
-        let LM = LevenbergMarquardt::new();
-        let LM = if let Some(max_iterations) = self.max_iterations {
-            let LM = LM.with_patience(max_iterations);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(tolerance) = self.tolerance {
-            let LM = LM.with_xtol(tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(g_tolerance) = self.g_tolerance {
-            let LM = LM.with_gtol(g_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let LM = if let Some(f_tolerance) = self.f_tolerance {
-            let LM = LM.with_ftol(f_tolerance);
-            LM
-        } else {
-            LM
-        };
-        let (result, report) = LM.minimize(problem);
-        info!("Nonlinear System Example:");
-        info!("Termination: {:?}", report.termination);
-        info!("Evaluations: {}", report.number_of_evaluations);
-        info!("Final objective: {}", report.objective_function);
-        info!("Final params: {:?}", result.params());
+        if let Some(level) = self.log_level() {
+            log!(level, "Least-squares termination: {:?}", report.termination);
+            log!(
+                level,
+                "Least-squares evaluations: {}",
+                report.number_of_evaluations
+            );
+            log!(
+                level,
+                "Least-squares final objective: {}",
+                report.objective_function
+            );
+            log!(level, "Least-squares final parameters: {:?}", solution);
+        }
         if report.termination.was_successful() {
-            let solution_: DVector<f64> = result.params();
+            let solution_: DVector<f64> = solution;
             // self.result = Some(solution.clone());
             let solution: Vec<f64> = solution_.clone().data.into();
             let unknowns = self.values.clone();
@@ -496,7 +684,9 @@ impl LM {
                 .collect();
 
             let map_of_solutions: HashMap<String, f64> = map_of_solutions;
-            info!("Map of solutions: {:?}", map_of_solutions);
+            if let Some(level) = self.log_level() {
+                log!(level, "Least-squares solution map: {:?}", map_of_solutions);
+            }
             return (Some(map_of_solutions), Some(solution_));
         } else {
             (None, None)
@@ -508,115 +698,37 @@ impl LM {
         &self,
         params: Vec<f64>,
     ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
-        let is_logging_disabled = self
-            .loglevel
-            .as_ref()
-            .map(|level| level == "off" || level == "none")
-            .unwrap_or(false);
-
-        let (map_of_solutions, solution) = if is_logging_disabled {
-            self.solve_with_params_unmut_internal(params)
-        } else {
-            let loglevel = self.loglevel.clone();
-            let log_option = if let Some(level) = loglevel {
-                match level.as_str() {
-                    "debug" => LevelFilter::Info,
-                    "info" => LevelFilter::Info,
-                    "warn" => LevelFilter::Warn,
-                    "error" => LevelFilter::Error,
-                    _ => panic!("loglevel must be debug, info, warn or error"),
-                }
-            } else {
-                LevelFilter::Info
-            };
-
-            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
-                log_option,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            )]);
-
-            match logger_instance {
-                Ok(()) => {
-                    let result = self.solve_with_params_unmut_internal(params);
-                    info!("Program ended");
-                    result
-                }
-                Err(_) => self.solve_with_params_unmut_internal(params),
-            }
-        };
-        (map_of_solutions, solution)
+        self.solve_with_params_unmut_internal(params)
     }
 
     pub fn solve_with_params(&mut self, params: Vec<f64>) {
+        self.ensure_prepared();
         let (map_of_solutions, solution) = self.solve_with_params_unmut(params);
         self.map_of_solutions = map_of_solutions;
         self.result = solution;
     }
 }
-//generic LeastSquaresProblem implementation that accepts closures for residuals and Jacobian:
 
-/// Generic nonlinear system that wraps residual and Jacobian functions.
-/// Used as adapter between closures and LeastSquaresProblem trait.
-pub struct NonlinearSystem<R, J>
-where
-    R: Fn(&DVector<f64>) -> DVector<f64>,
-    J: Fn(&DVector<f64>) -> DMatrix<f64>,
-{
-    /// Current parameter values
-    params: DVector<f64>,
-    /// Residual function closure
-    residuals_fn: R,
-    /// Jacobian function closure
-    jacobian_fn: J,
-}
-
-impl<R, J> NonlinearSystem<R, J>
-where
-    R: Fn(&DVector<f64>) -> DVector<f64>,
-    J: Fn(&DVector<f64>) -> DMatrix<f64>,
-{
-    /// Creates a new nonlinear system with function closures and initial parameter guess.
-    pub fn new(initial_guess: DVector<f64>, residuals_fn: R, jacobian_fn: J) -> Self {
-        Self {
-            params: initial_guess,
-            residuals_fn,
-            jacobian_fn,
-        }
-    }
-}
-
-impl<R, J> LeastSquaresProblem for NonlinearSystem<R, J>
-where
-    R: Fn(&DVector<f64>) -> DVector<f64>,
-    J: Fn(&DVector<f64>) -> DMatrix<f64>,
-{
-    fn set_params(&mut self, x: &DVector<f64>) {
-        self.params.copy_from(x);
-    }
-
-    fn params(&self) -> DVector<f64> {
-        self.params.clone()
-    }
-
-    fn residuals(&self) -> Option<DVector<f64>> {
-        Some((self.residuals_fn)(&self.params))
-    }
-
-    fn jacobian(&self) -> Option<DMatrix<f64>> {
-        Some((self.jacobian_fn)(&self.params))
+fn parse_log_level(value: &str) -> Result<Option<Level>, LeastSquaresError> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(None),
+        "debug" => Ok(Some(Level::Debug)),
+        "info" => Ok(Some(Level::Info)),
+        "warn" => Ok(Some(Level::Warn)),
+        "error" => Ok(Some(Level::Error)),
+        _ => Err(LeastSquaresError::InvalidLogLevel(value.to_string())),
     }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////TESTS////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-///
-///             TESTS FOR  Generic nonlinear system solver that accepts closures for residuals and Jacobian
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::optimization::LM_optimization::LevenbergMarquardt;
+    use crate::numerical::Nonlinear_systems::least_squares::{
+        ClosureLeastSquaresProblem as NonlinearSystem, LevenbergMarquardt,
+    };
+    use nalgebra::DMatrix;
 
     #[test]
     fn test_nonlinear_system_example() {
@@ -745,6 +857,86 @@ mod tests {
         assert!(residual1.abs() < 1e-10);
         assert!(residual2.abs() < 1e-10);
     }
+
+    #[test]
+    fn logging_is_opt_in_and_invalid_levels_are_typed() {
+        let solver = SymbolicLeastSquaresSolver::new();
+        assert!(solver.loglevel.is_none());
+        assert!(solver.log_level().is_none());
+
+        let result = SymbolicLeastSquaresSolver::new().try_with_loglevel("verbose");
+        assert!(matches!(result, Err(LeastSquaresError::InvalidLogLevel(_))));
+
+        let solver = SymbolicLeastSquaresSolver::new()
+            .try_with_loglevel("debug")
+            .expect("debug is supported");
+        assert_eq!(solver.log_level(), Some(Level::Debug));
+    }
+
+    #[test]
+    fn symbolic_try_build_and_solve_return_typed_input_errors() {
+        let build_result = SymbolicLeastSquaresSolver::new().try_build();
+        assert!(matches!(
+            build_result,
+            Err(LeastSquaresError::EmptyProblem { .. })
+        ));
+
+        let mut solver = SymbolicLeastSquaresSolver::new()
+            .with_equations_str(vec!["x - 1".to_string()])
+            .with_unknowns(vec!["x".to_string()])
+            .with_initial_guess(vec![]);
+        let error = solver
+            .try_solve()
+            .expect_err("initial-guess shape must fail before preparation");
+        assert!(matches!(error, LeastSquaresError::DimensionMismatch { .. }));
+
+        let parse_result =
+            SymbolicLeastSquaresSolver::new().try_with_equations_str(vec!["x + (".to_string()]);
+        assert!(matches!(parse_result, Err(LeastSquaresError::Problem(_))));
+    }
+
+    #[test]
+    fn symbolic_typed_parameter_solve_rebinds_without_repreparing() {
+        let mut solver = SymbolicLeastSquaresSolver::new()
+            .with_equations_str(vec!["x - a".to_string()])
+            .with_unknowns(vec!["x".to_string()])
+            .with_parameters(vec!["a".to_string()])
+            .with_initial_guess(vec![0.0])
+            .with_telemetry(LeastSquaresTelemetryMode::Counters)
+            .build();
+        let report = solver
+            .try_solve_with_params(vec![2.0])
+            .expect("parameter rebind should solve");
+        assert!(report.termination.was_successful());
+        assert!((solver.result.as_ref().expect("result")[0] - 2.0).abs() < 1e-8);
+        assert!(
+            solver
+                .last_statistics
+                .as_ref()
+                .expect("telemetry")
+                .residual_evaluations
+                > 0
+        );
+    }
+
+    #[test]
+    fn symbolic_wrapper_collects_opt_in_solver_statistics() {
+        let mut solver = SymbolicLeastSquaresSolver::new()
+            .with_equations_str(vec!["x - 1".to_string()])
+            .with_unknowns(vec!["x".to_string()])
+            .with_initial_guess(vec![0.0])
+            .with_telemetry(LeastSquaresTelemetryMode::Counters)
+            .build();
+        solver.solve();
+
+        let statistics = solver
+            .last_statistics
+            .as_ref()
+            .expect("solve should publish its telemetry snapshot");
+        assert!(statistics.availability.is_collected());
+        assert!(statistics.residual_evaluations > 0);
+        assert!(!statistics.timings_collected);
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 ///   
@@ -756,7 +948,7 @@ mod tests2 {
 
     #[test]
     fn test_builder_pattern_basic() {
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
             .with_initial_guess(vec![0.5, 0.5])
@@ -776,7 +968,7 @@ mod tests2 {
         let eq1 = Expr::parse_expression("x^2 + y^2 - 1");
         let eq2 = Expr::parse_expression("x - y");
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
             .with_initial_guess(vec![0.5, 0.5])
@@ -792,7 +984,7 @@ mod tests2 {
     #[test]
     fn test_builder_rosenbrock() {
         // Rosenbrock function: f1 = 10*(y - x^2), f2 = 1 - x
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec!["10*(y - x^2)".to_string(), "1 - x".to_string()])
             .with_initial_guess(vec![-1.2, 1.0])
             .with_tolerance(1e-8)
@@ -810,7 +1002,7 @@ mod tests2 {
     #[test]
     fn test_builder_exponential_system() {
         // exp(x) + y - 3 = 0, x + exp(y) - 3 = 0
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec![
                 "exp(x) + y - 3".to_string(),
                 "x + exp(y) - 3".to_string(),
@@ -831,7 +1023,7 @@ mod tests2 {
     #[test]
     fn test_builder_trigonometric_system() {
         // sin(x) + cos(y) - 1 = 0, cos(x) - sin(y) = 0
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec![
                 "sin(x) + cos(y) - 1".to_string(),
                 "cos(x) - sin(y)".to_string(),
@@ -849,7 +1041,7 @@ mod tests2 {
     #[test]
     fn test_builder_3d_system() {
         // x^2 + y^2 + z^2 - 1 = 0, x + y + z - 1 = 0, x - y = 0
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec![
                 "x^2 + y^2 + z^2 - 1".to_string(),
                 "x + y + z - 1".to_string(),
@@ -875,7 +1067,7 @@ mod tests2 {
         let vec_of_str = vec!["x^2 + y^2 - 1".to_string(), "x - y".to_string()];
         let initial_guess = vec![0.5, 0.5];
         let values = vec!["x".to_string(), "y".to_string()];
-        let mut LM = LM::new();
+        let mut LM = SymbolicLeastSquaresSolver::new();
         LM.eq_generate_from_str(
             vec_of_str,
             Some(values),
@@ -887,7 +1079,6 @@ mod tests2 {
             None,
             None,
         );
-        LM.eq_generate();
         LM.solve();
     }
 
@@ -898,7 +1089,7 @@ mod tests2 {
         let initial_guess = vec![0.5, 0.5];
         let values = vec!["x".to_string(), "y".to_string()];
         let params = vec!["a".to_string(), "b".to_string()];
-        let mut LM = LM::new();
+        let mut LM = SymbolicLeastSquaresSolver::new();
         LM.eq_generate_from_str(
             vec_of_str,
             Some(values),
@@ -911,7 +1102,6 @@ mod tests2 {
             None,
         );
         LM.set_loglevel("info".to_string());
-        LM.eq_generate_with_params();
         LM.solve_with_params(vec![1.0, 1.0]);
         let map = LM.map_of_solutions.unwrap();
         let expected = (2.0_f64).sqrt() / 2.0;
@@ -922,7 +1112,7 @@ mod tests2 {
     #[test]
     fn test_builder_with_params() {
         // Builder pattern with parameters
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec!["a*x^2 + b*y^2 - 1".to_string(), "x - y".to_string()])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
             .with_parameters(vec!["a".to_string(), "b".to_string()])
@@ -950,7 +1140,7 @@ mod tests2 {
             x.clone().pow(Expr::Const(2.0)) + y.clone().pow(Expr::Const(2.0)) - Expr::Const(1.0);
         let eq2 = x.clone() - y.clone();
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
             .with_initial_guess(vec![0.5, 0.5])
@@ -976,7 +1166,7 @@ mod tests2 {
         let eq1 = Expr::exp(x.clone()) + y.clone() - Expr::Const(3.0);
         let eq2 = x.clone() + Expr::exp(y.clone()) - Expr::Const(3.0);
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_initial_guess(vec![0.5, 0.5])
             .with_tolerance(1e-8)
@@ -1002,7 +1192,7 @@ mod tests2 {
             Expr::sin(Box::new(x.clone())) + Expr::cos(Box::new(y.clone())) - Expr::Const(1.0);
         let eq2 = Expr::cos(Box::new(x.clone())) - Expr::sin(Box::new(y.clone()));
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_initial_guess(vec![0.5, 0.5])
             .with_tolerance(1e-7)
@@ -1025,7 +1215,7 @@ mod tests2 {
         let eq1 = Expr::ln(x.clone()) + y.clone() - Expr::Const(2.0);
         let eq2 = x.clone() + Expr::ln(y.clone()) - Expr::Const(2.0);
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_initial_guess(vec![1.0, 1.0])
             .with_tolerance(1e-8)
@@ -1059,7 +1249,7 @@ mod tests2 {
         // x + y + z - 1 = 0
         let eq3 = x.clone() + y.clone() + z.clone() - Expr::Const(1.0);
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2, eq3])
             .with_unknowns(vec!["x".to_string(), "y".to_string(), "z".to_string()])
             .with_initial_guess(vec![0.3, 0.3, 0.4])
@@ -1097,7 +1287,7 @@ mod tests2 {
             - Expr::Const(1.0);
         let eq2 = x.clone() - y.clone();
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
             .with_parameters(vec!["a".to_string(), "b".to_string()])
@@ -1162,7 +1352,7 @@ mod tests2 {
         // solver
         let initial_guess = vec![0.1, 0.1, 0.2, 0.3, 2.0, 2.0];
         let unknowns: Vec<String> = symbolic.iter().map(|x| x.to_string()).collect();
-        let mut LM = LM::new();
+        let mut LM = SymbolicLeastSquaresSolver::new();
         LM.set_loglevel("none".to_string());
         LM.set_equation_system(
             full_system_sym.clone(),
@@ -1175,7 +1365,8 @@ mod tests2 {
             Some(true),
             None,
         );
-        LM.eq_generate();
+        LM.set_positive_variables(&["N0", "N1", "N2", "Np"])
+            .expect("chemical logarithm variables should have a valid domain");
         LM.solve();
         let map_of_solutions = LM.map_of_solutions.unwrap();
 
@@ -1208,7 +1399,7 @@ mod tests2 {
         let eq1 = x.clone() / y.clone() - Expr::Const(2.0);
         let eq2 = x.clone() + y.clone() - Expr::Const(3.0);
 
-        let solver = LM::new()
+        let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_initial_guess(vec![1.5, 1.0])
             .with_tolerance(1e-8)

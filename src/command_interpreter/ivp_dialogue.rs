@@ -220,7 +220,6 @@ fn build_ivp_task_template(config: &IvpTemplateConfig) -> String {
     template.push_str("atol: 1e-9\n");
     template.push_str("max_step: 1e-3\n");
     template.push_str("first_step: Some(1e-6)\n");
-    template.push_str("parallel: false\n");
 
     if config.method.is_lsode2() {
         if let Some(family) = config.method.lsode2_family_value() {
@@ -479,7 +478,7 @@ mod tests {
         let template = build_ivp_task_template(&IvpTemplateConfig::default());
         let spec = parse_ivp_task_from_str(&template).expect("dialogue template should parse");
 
-        assert_eq!(spec.solver.method, IvpMethodSpec::Lsode2);
+        assert_eq!(spec.solver.method, IvpMethodSpec::Lsoda);
         let lsode2 = spec
             .solver_options
             .lsode2

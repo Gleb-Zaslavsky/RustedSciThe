@@ -4,8 +4,8 @@ use faer::mat::{Mat, MatRef};
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::SparseColMat;
-use faer_gmres::JacobiPreconLinOp;
 use faer_gmres::restarted_gmres;
+use faer_gmres::JacobiPreconLinOp;
 use sprs::linalg::bicgstab::BiCGSTAB;
 use sprs::{CsMat, CsVec};
 pub fn solve_csmat(

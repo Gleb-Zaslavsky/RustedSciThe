@@ -80,35 +80,27 @@ mod tests {
             .detailed
             .as_ref()
             .expect("AtomNative telemetry should be collected");
-        assert!(
-            detailed
-                .stage(PreparationStage::AtomConversion)
-                .and_then(|stage| stage.wall_time)
-                .is_some()
-        );
-        assert!(
-            detailed
-                .stage(PreparationStage::AtomDependencyAnalysis)
-                .and_then(|stage| stage.wall_time)
-                .is_some()
-        );
-        assert!(
-            detailed
-                .stage(PreparationStage::AtomDifferentiation)
-                .and_then(|stage| stage.wall_time)
-                .is_some()
-        );
+        assert!(detailed
+            .stage(PreparationStage::AtomConversion)
+            .and_then(|stage| stage.wall_time)
+            .is_some());
+        assert!(detailed
+            .stage(PreparationStage::AtomDependencyAnalysis)
+            .and_then(|stage| stage.wall_time)
+            .is_some());
+        assert!(detailed
+            .stage(PreparationStage::AtomDifferentiation)
+            .and_then(|stage| stage.wall_time)
+            .is_some());
         for stage in [
             PreparationStage::ResidualCallbackPreparation,
             PreparationStage::JacobianCallbackPreparation,
             PreparationStage::PreparedProblemAssembly,
         ] {
-            assert!(
-                detailed
-                    .stage(stage)
-                    .and_then(|record| record.wall_time)
-                    .is_some()
-            );
+            assert!(detailed
+                .stage(stage)
+                .and_then(|record| record.wall_time)
+                .is_some());
         }
         assert!(detailed.total_wall_time >= Duration::ZERO);
         assert!(detailed.unattributed_wall_time <= detailed.total_wall_time);

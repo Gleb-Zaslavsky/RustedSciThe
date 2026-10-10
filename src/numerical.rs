@@ -481,5 +481,7 @@ pub mod Rosenbrock;
 /// shooting method for solving BVP
 pub mod ShootingBVP;
 pub mod data_processing;
+/// Shared interpolation and extrapolation algorithms.
+pub mod interpolation;
 /// collection of optimization algorithms
 pub mod optimization;

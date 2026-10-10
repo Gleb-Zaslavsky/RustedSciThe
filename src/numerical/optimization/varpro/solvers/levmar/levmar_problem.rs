@@ -1,4 +1,4 @@
-use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
+use crate::numerical::Nonlinear_systems::least_squares::LeastSquaresProblem;
 use crate::numerical::optimization::varpro::{
     model::SeparableNonlinearModel,
     problem::{RhsType, SeparableProblem},

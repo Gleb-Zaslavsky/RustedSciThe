@@ -160,7 +160,9 @@ use crate::symbolic::bvp::aot_adapters::{
 use crate::symbolic::bvp::aot_telemetry::{
     BvpAotColdStage, BvpAotLifecycleEvent, BvpAotTelemetryMode,
 };
-use crate::symbolic::bvp::atom_aot::{AtomAotPreparedPlan, AtomAotRuntimeError};
+use crate::symbolic::bvp::atom_aot::{
+    AtomAotMatrixLayout, AtomAotPreparedPlan, AtomAotRuntimeError,
+};
 use crate::symbolic::bvp::atom_lambdify;
 use crate::symbolic::bvp::direct::{
     BandedJacobianChunking, BandedLambdifyConfig, BandedStructurePlan, DirectBandedJacobianRuntime,
@@ -1018,39 +1020,45 @@ impl<'a> BvpSparseSolverProvider<'a> {
                     )?;
                 let flat_args =
                     flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
-                let Some(plan) = selected.prepared_problem.atom_aot_plan() else {
-                    return Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
-                        problem_key: selected.problem_key(),
-                    });
-                };
                 let parallel_config = self.parallel_config;
                 let chunks = linked_execution_chunk_count(&linked, parallel_config, false);
-                plan.record_worker_batch(
-                    if chunks > 1 {
-                        rayon::current_num_threads()
-                    } else {
-                        1
-                    },
-                    chunks,
-                );
-                plan.try_execute_residual_callback_with_chunks(
-                    &flat_args,
-                    out,
-                    chunks,
-                    |flat_args, out| {
-                        let callback_result = match parallel_config {
-                            Some(config) => try_eval_linked_residual_outputs(
-                                &linked,
-                                Some(config),
-                                flat_args,
-                                out,
-                            ),
-                            None => linked.try_residual_eval(flat_args, out),
-                        };
-                        callback_result
-                            .map_err(|error| map_linked_callback_error("residual", error))
-                    },
-                )
+                let callback = |flat_args: &[f64], callback_out: &mut [f64]| {
+                    let callback_result = match parallel_config {
+                        Some(config) => try_eval_linked_residual_outputs(
+                            &linked,
+                            Some(config),
+                            flat_args,
+                            callback_out,
+                        ),
+                        None => linked.try_residual_eval(flat_args, callback_out),
+                    };
+                    callback_result
+                        .map_err(|error| map_linked_callback_error("residual", error))
+                };
+                if let Some(plan) = selected.prepared_problem.atom_aot_plan() {
+                    plan.record_worker_batch(
+                        if chunks > 1 {
+                            rayon::current_num_threads()
+                        } else {
+                            1
+                        },
+                        chunks,
+                    );
+                    plan.try_execute_residual_callback_with_chunks(
+                        &flat_args,
+                        out,
+                        chunks,
+                        callback,
+                    )
+                } else if selected.prepared_problem.symbolic_assembly_backend
+                    == BvpSymbolicAssemblyBackend::ExprLegacy
+                {
+                    callback(&flat_args, out)
+                } else {
+                    Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
+                        problem_key: selected.problem_key(),
+                    })
+                }
             }
             _ => Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
                 problem_key: self.execution.selected().problem_key(),
@@ -1152,36 +1160,45 @@ impl<'a> BvpSparseSolverProvider<'a> {
                     )?;
                 let flat_args =
                     flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
-                let Some(plan) = selected.prepared_problem.atom_aot_plan() else {
-                    return Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
-                        problem_key: selected.problem_key(),
-                    });
-                };
                 let parallel_config = self.parallel_config;
                 let chunks = linked_execution_chunk_count(&linked, parallel_config, true);
-                plan.record_worker_batch(
-                    if chunks > 1 {
-                        rayon::current_num_threads()
-                    } else {
-                        1
-                    },
-                    chunks,
-                );
-                plan.try_execute_jacobian_callback_with_chunks(
-                    &flat_args,
-                    values_out,
-                    chunks,
-                    |flat_args, out| {
-                        let callback_result = match parallel_config {
-                            Some(config) => {
-                                try_eval_linked_sparse_values(&linked, Some(config), flat_args, out)
-                            }
-                            None => linked.try_jacobian_values_eval(flat_args, out),
-                        };
-                        callback_result
-                            .map_err(|error| map_linked_callback_error("Jacobian", error))
-                    },
-                )
+                let callback = |flat_args: &[f64], callback_out: &mut [f64]| {
+                    let callback_result = match parallel_config {
+                        Some(config) => try_eval_linked_sparse_values(
+                            &linked,
+                            Some(config),
+                            flat_args,
+                            callback_out,
+                        ),
+                        None => linked.try_jacobian_values_eval(flat_args, callback_out),
+                    };
+                    callback_result
+                        .map_err(|error| map_linked_callback_error("Jacobian", error))
+                };
+                if let Some(plan) = selected.prepared_problem.atom_aot_plan() {
+                    plan.record_worker_batch(
+                        if chunks > 1 {
+                            rayon::current_num_threads()
+                        } else {
+                            1
+                        },
+                        chunks,
+                    );
+                    plan.try_execute_jacobian_callback_with_chunks(
+                        &flat_args,
+                        values_out,
+                        chunks,
+                        callback,
+                    )
+                } else if selected.prepared_problem.symbolic_assembly_backend
+                    == BvpSymbolicAssemblyBackend::ExprLegacy
+                {
+                    callback(&flat_args, values_out)
+                } else {
+                    Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
+                        problem_key: selected.problem_key(),
+                    })
+                }
             }
             _ => Err(BvpBackendIntegrationError::CompiledAotRuntimeUnavailable {
                 problem_key: self.execution.selected().problem_key(),
@@ -2490,18 +2507,62 @@ impl BvpPreparedSparseAotProblem {
     ) -> Result<PreparedProblemManifest, BvpBackendIntegrationError> {
         if self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::AtomView {
             self.validate_atom_native_codegen_route(matrix_backend)?;
-            let adapter = self.try_aot_adapter().map_err(|error| {
-                BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                    message: error.to_string(),
+            let codegen = match self.try_aot_adapter() {
+                Ok(BvpAotAdapter::AtomView(adapter)) => {
+                    return adapter.prepared_manifest(matrix_backend).map_err(|error| {
+                        BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                            message: error.to_string(),
+                        }
+                    });
                 }
-            })?;
-            let BvpAotAdapter::AtomView(adapter) = adapter else {
-                return Err(BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                    message: "AtomView route did not expose an AtomView manifest adapter"
-                        .to_string(),
-                });
+                Err(BvpAotAdapterError::AtomViewPlanMissing) => {
+                    self.atom_codegen.clone().ok_or_else(|| {
+                        BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                            message: "AtomView route has no retained codegen payload".to_string(),
+                        }
+                    })?
+                }
+                Err(error) => {
+                    return Err(BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                        message: error.to_string(),
+                    });
+                }
+                Ok(BvpAotAdapter::ExprLegacy(_)) => {
+                    let Some(discretized) = self.atom_discretized_system.as_ref() else {
+                        return Err(BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                            message: "AtomView route has neither a prepared codegen payload nor a discretized system".to_string(),
+                        });
+                    };
+                    prepare_sparse_bvp_codegen_from_discretized_system_with_breakdown(
+                        discretized,
+                        &self.residual_fn_name,
+                        &self.jacobian_fn_name,
+                        self.param_names.clone(),
+                        self.bandwidth,
+                        self.residual_strategy,
+                        self.jacobian_strategy,
+                    )
+                    .0
+                }
             };
-            return adapter.prepared_manifest(matrix_backend).map_err(|error| {
+            let codegen = if matrix_backend == MatrixBackend::Banded
+                && !matches!(
+                    codegen.matrix_layout(),
+                    AtomAotMatrixLayout::BandedCompact { .. }
+                )
+            {
+                let (kl, ku) = self
+                    .bandwidth
+                    .unwrap_or_else(|| infer_atom_bandwidth(&codegen));
+                codegen.with_banded_layout(kl, ku).map_err(|error| {
+                    BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                        message: error.to_string(),
+                    }
+                })?
+            } else {
+                codegen
+            };
+            return codegen.prepared_aot_manifest(matrix_backend).map_err(|error| {
                 BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
                     message: error.to_string(),
                 }
@@ -2551,22 +2612,28 @@ impl BvpPreparedSparseAotProblem {
         if self.symbolic_assembly_backend != BvpSymbolicAssemblyBackend::AtomView {
             return Ok(());
         }
-        let adapter = self.try_aot_adapter().map_err(|error| {
-            BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                message: error.to_string(),
+        let codegen = match self.try_aot_adapter() {
+            Ok(BvpAotAdapter::AtomView(adapter)) => Some(adapter.codegen),
+            Err(BvpAotAdapterError::AtomViewPlanMissing) => self.atom_codegen.as_ref(),
+            _ => None,
+        };
+        let Some(codegen) = codegen else {
+            // Older prepared Jacobians may retain the native discretization
+            // without materializing an AOT owner yet. The codegen builder can
+            // prepare that route locally; reject only when no native payload
+            // remains at all.
+            if self.atom_discretized_system.is_some() {
+                return Ok(());
             }
-        })?;
-        let BvpAotAdapter::AtomView(adapter) = adapter else {
             return Err(BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                message: "AtomView route did not expose an AtomView AOT adapter".to_string(),
+                message: "AtomView route has neither a prepared codegen payload nor a discretized system".to_string(),
             });
         };
         if matrix_backend == MatrixBackend::Banded {
             let (kl, ku) = self
                 .bandwidth
-                .unwrap_or_else(|| infer_atom_bandwidth(adapter.codegen));
-            adapter
-                .codegen
+                .unwrap_or_else(|| infer_atom_bandwidth(codegen));
+            codegen
                 .clone()
                 .with_banded_layout(kl, ku)
                 .map_err(
@@ -2812,8 +2879,12 @@ impl BvpPreparedSparseAotProblem {
         if self.symbolic_assembly_backend != BvpSymbolicAssemblyBackend::AtomView {
             return Ok(None);
         }
-        if let Ok(BvpAotAdapter::AtomView(adapter)) = self.try_aot_adapter() {
-            let atom_codegen = adapter.codegen.clone();
+        let retained_atom_codegen = match self.try_aot_adapter() {
+            Ok(BvpAotAdapter::AtomView(adapter)) => Some(adapter.codegen.clone()),
+            Err(BvpAotAdapterError::AtomViewPlanMissing) => self.atom_codegen.clone(),
+            _ => None,
+        };
+        if let Some(atom_codegen) = retained_atom_codegen {
             let atom_breakdown = self.atom_codegen_prep_breakdown.clone().unwrap_or_default();
             let jacobian_begin = Instant::now();
             let atom_codegen = if matrix_backend == MatrixBackend::Banded {

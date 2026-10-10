@@ -63,12 +63,41 @@ fn continuation_counts() -> Vec<usize> {
         .unwrap_or_else(|| vec![4])
 }
 
+/// Number of Criterion samples for the non-compact statistical profile.
+///
+/// Compact release reports intentionally execute one bounded measurement per
+/// row. Criterion uses this value only when the compact early-return path is
+/// disabled, so an overnight statistical run can increase confidence without
+/// changing the release evidence format.
+fn criterion_sample_size() -> usize {
+    std::env::var("RADAU_BENCH_SAMPLE_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.max(10))
+        .unwrap_or(10)
+}
+
+/// Wall-clock measurement window for one Criterion benchmark group.
+fn criterion_measurement_time() -> Duration {
+    Duration::from_secs(
+        std::env::var("RADAU_BENCH_MEASUREMENT_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|value| value.max(1))
+            .unwrap_or(1),
+    )
+}
+
 fn policy_diffusion_dimensions() -> Vec<usize> {
     dimensions_from_env("RADAU_BENCH_POLICY_DIFFUSION_DIMENSIONS", &[16])
 }
 
 fn worker_label() -> String {
     std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "default".to_owned())
+}
+
+fn effective_worker_label() -> String {
+    rayon::current_num_threads().to_string()
 }
 
 fn aot_cases() -> Vec<(WorkloadKind, usize)> {
@@ -105,8 +134,8 @@ fn benchmark_radau_workloads(c: &mut Criterion) {
         return;
     }
     let mut group = c.benchmark_group("radau_workloads");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(criterion_sample_size());
+    group.measurement_time(criterion_measurement_time());
 
     for (workload, dimension) in canonical_cases() {
         let layouts = if workload == WorkloadKind::DiffusionChain {
@@ -330,7 +359,7 @@ fn compact_report_body(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "report_version: 2\nstatus: {}\nprofile: {}\nhost_os: {}\nhost_arch: {}\ncompiler: {}\nrow_count: {}\nworker_count: {}\ncontinuation_count: {}\n\n{}",
+        "report_version: 3\nstatus: {}\nprofile: {}\nhost_os: {}\nhost_arch: {}\ncompiler: {}\nrow_count: {}\nconfigured_worker_count: {}\neffective_worker_count: {}\ncontinuation_count: {}\n\n{}",
         compact_report_status(rows, complete),
         std::env::var("RST_TEST_REPORT_PROFILE").unwrap_or_else(|_| "bench".to_owned()),
         std::env::consts::OS,
@@ -342,6 +371,7 @@ fn compact_report_body(
         },
         rows.len(),
         worker_label(),
+        effective_worker_label(),
         continuation_counts,
         table
     )
@@ -733,8 +763,8 @@ fn run_compact_report() {
 /// baseline.
 fn benchmark_radau_policy_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("radau_execution_policy_matrix");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(criterion_sample_size());
+    group.measurement_time(criterion_measurement_time());
     let mut cases = Vec::new();
     for dimension in policy_diffusion_dimensions() {
         cases.push((
@@ -912,8 +942,8 @@ fn prepare_aot_benchmark(
 /// invoke filesystem and compiler work during a benchmark.
 fn benchmark_radau_aot(c: &mut Criterion) {
     let mut group = c.benchmark_group("radau_aot_vs_lambdify");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(criterion_sample_size());
+    group.measurement_time(criterion_measurement_time());
     let workloads = aot_cases();
 
     let policies = if std::env::var("RADAU_BENCH_POLICY_MATRIX").as_deref() == Ok("1") {

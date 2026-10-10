@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::numerical::Radau::Radau_main::RadauStatistics;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;

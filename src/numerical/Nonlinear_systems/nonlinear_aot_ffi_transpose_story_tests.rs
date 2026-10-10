@@ -16,8 +16,8 @@
 
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 use crate::numerical::Nonlinear_systems::symbolic::{
-    SymbolicDenseAotOptions, SymbolicNonlinearProblem, SymbolicProblemOptions,
-    copy_row_major_jacobian_into_column_major,
+    copy_row_major_jacobian_into_column_major, SymbolicDenseAotOptions, SymbolicNonlinearProblem,
+    SymbolicProblemOptions,
 };
 use crate::numerical::Nonlinear_systems::symbolic_aot_test_support::aot_solver_test_guard;
 use crate::numerical::Nonlinear_systems::symbolic_backend::SymbolicBackendSelectionPolicy;

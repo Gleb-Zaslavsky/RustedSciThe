@@ -1,11 +1,12 @@
-use crate::numerical::optimization::problem_LM::LeastSquaresProblem;
-use crate::numerical::optimization::qr_LM::{LinearLeastSquaresDiagonalProblem, PivotedQR};
-use crate::numerical::optimization::trust_region_LM::{
-    LMParameter, determine_lambda_and_parameter_update,
-};
-use crate::numerical::optimization::utils::{enorm, epsmch};
+use super::errors::{LeastSquaresError, LeastSquaresStage};
+use super::problem::LeastSquaresProblem;
+use super::trust_region::{determine_lambda_and_parameter_update_with_count, LMParameter};
+use super::utils::{enorm, epsmch};
+use crate::numerical::Nonlinear_systems::engine::{SolveStatistics, StatisticsAvailability};
+use crate::somelinalg::least_squares_qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
 use nalgebra::{DMatrix, DVector};
 use num_traits::Float;
+use std::time::Instant;
 // Global boolean flag to control MINPACK compatibility
 pub const MINPACK_COMPAT: bool = false; // Set to true for MINPACK compatibility, false for modern behavior
 
@@ -46,12 +47,46 @@ pub enum TerminationReason {
     NoImprovementPossible(&'static str),
     /// Maximum number of function evaluations was hit.
     LostPatience,
+    /// Maximum number of outer Jacobian/parameter iterations was hit.
+    MaxIterationsReached { limit: usize },
     /// The number of parameters n is zero.
     NoParameters,
     /// The number of residuals m is zero.
     NoResiduals,
     /// The dimensions of the problem are wrong.
     WrongDimensions(&'static str),
+    /// The trust-region trial repeatedly violated the declared variable domain.
+    DomainViolation,
+}
+
+/// Runtime telemetry level for the canonical least-squares solver.
+///
+/// The default is [`Self::Off`]: the LM hot path does not read the clock and
+/// does not update counters in that mode. [`Self::Counters`] adds cheap event
+/// counters without timing callback or linear-algebra stages. [`Self::Detailed`]
+/// additionally records monotonic durations in the shared
+/// [`SolveStatistics`] contract used by the other nonlinear solvers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum LeastSquaresTelemetryMode {
+    /// Do not collect runtime telemetry.
+    #[default]
+    Off,
+    /// Collect counters but do not read the clock.
+    Counters,
+    /// Collect counters and stage durations.
+    Detailed,
+}
+
+impl LeastSquaresTelemetryMode {
+    #[inline]
+    fn collects_counters(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    #[inline]
+    fn collects_timings(self) -> bool {
+        matches!(self, Self::Detailed)
+    }
 }
 
 impl TerminationReason {
@@ -93,6 +128,13 @@ pub struct MinimizationReport {
     pub number_of_evaluations: usize,
     /// Contains the value of x
     pub objective_function: f64,
+    /// Number of trial points rejected before residual evaluation.
+    pub rejected_domain_trials: usize,
+    /// Shared nonlinear-solver telemetry. Inspect `availability` and
+    /// `timings_collected` before interpreting numeric fields.
+    pub statistics: SolveStatistics,
+    /// Original typed callback/preparation error, when the termination was a failure.
+    pub error: Option<LeastSquaresError>,
 }
 /// Levenberg-Marquardt optimization algorithm.
 ///
@@ -107,7 +149,9 @@ pub struct LevenbergMarquardt {
     gtol: f64,
     stepbound: f64,
     patience: usize,
+    max_iterations: Option<usize>,
     scale_diag: bool,
+    telemetry_mode: LeastSquaresTelemetryMode,
 }
 
 impl Default for LevenbergMarquardt {
@@ -126,7 +170,9 @@ impl LevenbergMarquardt {
                 gtol: 0.0,
                 stepbound: 100.0,
                 patience: 100,
+                max_iterations: None,
                 scale_diag: true,
+                telemetry_mode: LeastSquaresTelemetryMode::Off,
             }
         } else {
             let user_tol = f64::EPSILON * 30.0;
@@ -136,7 +182,9 @@ impl LevenbergMarquardt {
                 gtol: user_tol,
                 stepbound: 100.0,
                 patience: 100,
+                max_iterations: None,
                 scale_diag: true,
+                telemetry_mode: LeastSquaresTelemetryMode::Off,
             }
         }
     }
@@ -152,8 +200,18 @@ impl LevenbergMarquardt {
 
     #[must_use]
     pub fn with_ftol(self, ftol: f64) -> Self {
-        assert!(!ftol.is_sign_negative(), "ftol must be >= 0");
-        Self { ftol, ..self }
+        self.try_with_ftol(ftol)
+            .expect("ftol must be finite and >= 0")
+    }
+
+    pub fn try_with_ftol(self, ftol: f64) -> Result<Self, LeastSquaresError> {
+        if !ftol.is_finite() || ftol < 0.0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "ftol",
+                value: ftol,
+            });
+        }
+        Ok(Self { ftol, ..self })
     }
 
     /// Set relative error between last two approximations.
@@ -167,8 +225,18 @@ impl LevenbergMarquardt {
     ///
     #[must_use]
     pub fn with_xtol(self, xtol: f64) -> Self {
-        assert!(!xtol.is_sign_negative(), "xtol must be >= 0");
-        Self { xtol, ..self }
+        self.try_with_xtol(xtol)
+            .expect("xtol must be finite and >= 0")
+    }
+
+    pub fn try_with_xtol(self, xtol: f64) -> Result<Self, LeastSquaresError> {
+        if !xtol.is_finite() || xtol < 0.0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "xtol",
+                value: xtol,
+            });
+        }
+        Ok(Self { xtol, ..self })
     }
     /// Set orthogonality desired between the residual vector and its derivative.
     ///
@@ -192,8 +260,18 @@ impl LevenbergMarquardt {
     /// Panics if `$\mathtt{gtol} < 0$`.
     #[must_use]
     pub fn with_gtol(self, gtol: f64) -> Self {
-        assert!(!gtol.is_sign_negative(), "gtol must be >= 0");
-        Self { gtol, ..self }
+        self.try_with_gtol(gtol)
+            .expect("gtol must be finite and >= 0")
+    }
+
+    pub fn try_with_gtol(self, gtol: f64) -> Result<Self, LeastSquaresError> {
+        if !gtol.is_finite() || gtol < 0.0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "gtol",
+                value: gtol,
+            });
+        }
+        Ok(Self { gtol, ..self })
     }
     /// Shortcut to set `tol` as in MINPACK `LMDER1`.
     ///
@@ -204,13 +282,22 @@ impl LevenbergMarquardt {
     /// Panics if `tol<=0`.
     #[must_use]
     pub fn with_tol(self, tol: f64) -> Self {
-        assert!(tol.is_sign_positive(), "tol must > 0");
-        Self {
+        self.try_with_tol(tol).expect("tol must be finite and > 0")
+    }
+
+    pub fn try_with_tol(self, tol: f64) -> Result<Self, LeastSquaresError> {
+        if !tol.is_finite() || tol <= 0.0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "tol",
+                value: tol,
+            });
+        }
+        Ok(Self {
             ftol: tol,
             xtol: tol,
             gtol: 0.0,
             ..self
-        }
+        })
     }
     /// Set factor for the initial step bound.
     ///
@@ -223,8 +310,18 @@ impl LevenbergMarquardt {
     /// Panics if `stepbound <= 0`.
     #[must_use]
     pub fn with_stepbound(self, stepbound: f64) -> Self {
-        assert!(stepbound.is_sign_positive(), "stepbound must be > 0");
-        Self { stepbound, ..self }
+        self.try_with_stepbound(stepbound)
+            .expect("stepbound must be finite and > 0")
+    }
+
+    pub fn try_with_stepbound(self, stepbound: f64) -> Result<Self, LeastSquaresError> {
+        if !stepbound.is_finite() || stepbound <= 0.0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "stepbound",
+                value: stepbound,
+            });
+        }
+        Ok(Self { stepbound, ..self })
     }
     /// Set factor for the maximal number of function evaluations.
     ///
@@ -236,13 +333,139 @@ impl LevenbergMarquardt {
     /// Panics if `patience <= 0`.
     #[must_use]
     pub fn with_patience(self, patience: usize) -> Self {
-        assert!(patience > 0, "patience must be > 0");
-        Self { patience, ..self }
+        self.try_with_patience(patience)
+            .expect("patience must be > 0")
+    }
+
+    /// Set an exact cap on outer LM iterations, independently of the
+    /// residual-evaluation budget controlled by [`Self::with_patience`].
+    #[must_use]
+    pub fn with_max_iterations(self, max_iterations: usize) -> Self {
+        self.try_with_max_iterations(max_iterations)
+            .expect("max_iterations must be > 0")
+    }
+
+    /// Fallible counterpart to [`Self::with_max_iterations`].
+    pub fn try_with_max_iterations(self, max_iterations: usize) -> Result<Self, LeastSquaresError> {
+        if max_iterations == 0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "max_iterations",
+                value: 0.0,
+            });
+        }
+        Ok(Self {
+            max_iterations: Some(max_iterations),
+            ..self
+        })
+    }
+
+    pub fn try_with_patience(self, patience: usize) -> Result<Self, LeastSquaresError> {
+        if patience == 0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "patience",
+                value: 0.0,
+            });
+        }
+        Ok(Self { patience, ..self })
     }
     /// Enable or disable whether the variables will be rescaled internally.
     #[must_use]
     pub fn with_scale_diag(self, scale_diag: bool) -> Self {
         Self { scale_diag, ..self }
+    }
+
+    /// Selects the amount of runtime telemetry collected by the solver.
+    ///
+    /// Telemetry is disabled by default. Detailed timing is intentionally
+    /// opt-in because callback and trust-region stages are often the hot path
+    /// for small least-squares systems.
+    #[must_use]
+    pub fn with_telemetry(self, mode: LeastSquaresTelemetryMode) -> Self {
+        Self {
+            telemetry_mode: mode,
+            ..self
+        }
+    }
+
+    /// Fallible counterpart to [`Self::minimize`]. Configuration and callback
+    /// failures are returned as typed errors; convergence/stagnation outcomes
+    /// remain in the report because they are valid solver terminations.
+    pub fn try_minimize<O>(&self, target: O) -> Result<(O, MinimizationReport), LeastSquaresError>
+    where
+        O: LeastSquaresProblem,
+    {
+        for (field, value, valid) in [
+            ("ftol", self.ftol, self.ftol.is_finite() && self.ftol >= 0.0),
+            ("xtol", self.xtol, self.xtol.is_finite() && self.xtol >= 0.0),
+            ("gtol", self.gtol, self.gtol.is_finite() && self.gtol >= 0.0),
+            (
+                "stepbound",
+                self.stepbound,
+                self.stepbound.is_finite() && self.stepbound > 0.0,
+            ),
+        ] {
+            if !valid {
+                return Err(LeastSquaresError::InvalidConfiguration { field, value });
+            }
+        }
+        if self.patience == 0 {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "patience",
+                value: 0.0,
+            });
+        }
+        if self.max_iterations == Some(0) {
+            return Err(LeastSquaresError::InvalidConfiguration {
+                field: "max_iterations",
+                value: 0.0,
+            });
+        }
+        let (target, report) = self.minimize(target);
+        if let Some(error) = report.error.clone() {
+            return Err(error);
+        }
+        match &report.termination {
+            TerminationReason::User("residuals") => Err(LeastSquaresError::CallbackFailed {
+                stage: LeastSquaresStage::Residual,
+            }),
+            TerminationReason::User("jacobian") => Err(LeastSquaresError::CallbackFailed {
+                stage: LeastSquaresStage::Jacobian,
+            }),
+            TerminationReason::Numerical("initial parameters") => {
+                Err(LeastSquaresError::NonFiniteValue {
+                    stage: LeastSquaresStage::Parameters,
+                    index: 0,
+                })
+            }
+            TerminationReason::Numerical(stage) => Err(LeastSquaresError::NumericalBreakdown {
+                stage: if stage.contains("residual") {
+                    LeastSquaresStage::Residual
+                } else if *stage == "jacobian" {
+                    LeastSquaresStage::Jacobian
+                } else if stage.contains("parameter") || stage.contains(" x") {
+                    LeastSquaresStage::Parameters
+                } else {
+                    LeastSquaresStage::TrustRegion
+                },
+            }),
+            TerminationReason::WrongDimensions(_) => Err(LeastSquaresError::InvalidProblemShape {
+                stage: LeastSquaresStage::TrustRegion,
+            }),
+            TerminationReason::NoParameters => Err(LeastSquaresError::EmptyProblem {
+                stage: LeastSquaresStage::Parameters,
+            }),
+            TerminationReason::NoResiduals => Err(LeastSquaresError::EmptyProblem {
+                stage: LeastSquaresStage::Residual,
+            }),
+            TerminationReason::DomainViolation => Err(LeastSquaresError::DomainViolation),
+            TerminationReason::LostPatience => Err(LeastSquaresError::MaxEvaluationsReached {
+                limit: report.number_of_evaluations,
+            }),
+            TerminationReason::MaxIterationsReached { limit } => {
+                Err(LeastSquaresError::MaxIterationsReached { limit: *limit })
+            }
+            _ => Ok((target, report)),
+        }
     }
     /// Try to solve the given least squares problem.
     ///
@@ -257,7 +480,14 @@ impl LevenbergMarquardt {
             Ok(res) => res,
         };
         let n = lm.x.nrows();
+        let mut iteration = 0usize;
         loop {
+            if let Some(limit) = lm.config.max_iterations {
+                if iteration >= limit {
+                    return lm.into_report(TerminationReason::MaxIterationsReached { limit });
+                }
+            }
+            lm.statistics.iterations = iteration + 1;
             // Build linear least squaress problem used for the trust-region subproblem
             let mut lls = {
                 let jacobian = match lm.jacobian() {
@@ -265,10 +495,29 @@ impl LevenbergMarquardt {
                     Ok(jacobian) => jacobian,
                 };
                 if jacobian.ncols() != n || jacobian.nrows() != lm.m {
+                    let (expected, actual) = if jacobian.nrows() != lm.m {
+                        (lm.m, jacobian.nrows())
+                    } else {
+                        (n, jacobian.ncols())
+                    };
+                    lm.failure_error = Some(LeastSquaresError::DimensionMismatch {
+                        stage: LeastSquaresStage::Jacobian,
+                        expected,
+                        actual,
+                    });
                     return lm.into_report(TerminationReason::WrongDimensions("jacobian"));
                 }
 
+                let qr_started = lm.solve_started.map(|_| Instant::now());
                 let qr = PivotedQR::new(jacobian);
+                if lm.config.telemetry_mode.collects_counters() {
+                    lm.statistics.linear_factorizations += 1;
+                }
+                if let Some(started) = qr_started {
+                    let elapsed = started.elapsed();
+                    lm.statistics.linear_factorization_duration += elapsed;
+                    lm.statistics.linear_solve_duration += elapsed;
+                }
                 qr.into_least_squares_diagonal_problem(residuals)
             };
             // Update the diagonal, initialize "delta" in first call
@@ -277,8 +526,25 @@ impl LevenbergMarquardt {
             };
 
             residuals = loop {
-                let param =
-                    determine_lambda_and_parameter_update(&mut lls, &lm.diag, lm.delta, lm.lambda);
+                if lm.config.telemetry_mode.collects_counters() {
+                    lm.statistics.trust_region_trials += 1;
+                }
+                let solve_started = lm.solve_started.map(|_| Instant::now());
+                let param = determine_lambda_and_parameter_update_with_count(
+                    &mut lls,
+                    &lm.diag,
+                    lm.delta,
+                    lm.lambda,
+                    lm.config.telemetry_mode.collects_counters(),
+                );
+                if let Some(started) = solve_started {
+                    let elapsed = started.elapsed();
+                    lm.statistics.linear_solve_duration += elapsed;
+                    lm.statistics.trust_region_subproblem_duration += elapsed;
+                }
+                if lm.config.telemetry_mode.collects_counters() {
+                    lm.statistics.linear_solves += param.linear_solve_count;
+                }
                 let tr_iteration = lm.trust_region_iteration(&mut lls, param);
                 match tr_iteration {
                     // successful parameter update, break and recompute Jacobian
@@ -289,6 +555,7 @@ impl LevenbergMarquardt {
                     Ok(None) => (),
                 }
             };
+            iteration += 1;
         }
     }
 }
@@ -305,6 +572,8 @@ where
     target: O,
     /// Statistics and termination reasons, used for return value
     report: MinimizationReport,
+    statistics: SolveStatistics,
+    solve_started: Option<Instant>,
     /// The delta from the trust-region algorithm
     delta: f64,
     lambda: f64,
@@ -320,6 +589,7 @@ where
     first_update: bool,
     max_fev: usize,
     m: usize,
+    failure_error: Option<LeastSquaresError>,
 }
 
 impl<'a, O> LM<'a, O>
@@ -330,26 +600,72 @@ where
         config: &'a LevenbergMarquardt,
         target: O,
     ) -> Result<(Self, DVector<f64>), (O, MinimizationReport)> {
+        let mut statistics = SolveStatistics::default();
+        statistics.availability = if config.telemetry_mode.collects_counters() {
+            StatisticsAvailability::Collected
+        } else {
+            StatisticsAvailability::NotCollected
+        };
+        statistics.timings_collected = config.telemetry_mode.collects_timings();
+        let solve_started = config.telemetry_mode.collects_timings().then(Instant::now);
         let mut report = MinimizationReport {
             termination: TerminationReason::ResidualsZero,
             number_of_evaluations: 1,
             objective_function: f64::NAN,
+            rejected_domain_trials: 0,
+            statistics: statistics.clone(),
+            error: None,
         };
         // Evaluate at start point
         let x = target.params();
-        let (residuals, residuals_norm) = if let Some(residuals) = target.residuals() {
-            let norm = enorm(&residuals);
-            report.objective_function = norm * norm * 0.5;
-            (residuals, norm)
-        } else {
+        if x.iter().any(|value| !value.is_finite()) {
+            let index = x.iter().position(|value| !value.is_finite()).unwrap_or(0);
             return Err((
                 target,
                 MinimizationReport {
-                    termination: TerminationReason::User("residuals"),
+                    termination: TerminationReason::Numerical("initial parameters"),
+                    error: Some(LeastSquaresError::NonFiniteValue {
+                        stage: LeastSquaresStage::Parameters,
+                        index,
+                    }),
                     ..report
                 },
             ));
+        }
+        let residual_started = solve_started.map(|_| Instant::now());
+        let (residuals, residuals_norm) = match target.try_residuals() {
+            Ok(residuals) => {
+                if config.telemetry_mode.collects_counters() {
+                    statistics.residual_evaluations += 1;
+                    statistics.state_residual_evaluations += 1;
+                }
+                if let Some(started) = residual_started {
+                    statistics.residual_duration += started.elapsed();
+                }
+                let norm = enorm(&residuals);
+                report.objective_function = norm * norm * 0.5;
+                (residuals, norm)
+            }
+            Err(error) => {
+                if config.telemetry_mode.collects_counters() {
+                    statistics.residual_evaluations += 1;
+                    statistics.state_residual_evaluations += 1;
+                }
+                if let Some(started) = residual_started {
+                    statistics.residual_duration += started.elapsed();
+                }
+                return Err((
+                    target,
+                    MinimizationReport {
+                        termination: TerminationReason::User("residuals"),
+                        statistics,
+                        error: Some(error),
+                        ..report
+                    },
+                ));
+            }
         };
+        report.statistics = statistics.clone();
         // Initialize diagonal
         let n = x.nrows();
         // Check n > 0
@@ -380,6 +696,9 @@ where
                 target,
                 MinimizationReport {
                     termination: TerminationReason::Numerical("residuals norm"),
+                    error: Some(LeastSquaresError::NumericalBreakdown {
+                        stage: LeastSquaresStage::Residual,
+                    }),
                     ..report
                 },
             ));
@@ -394,6 +713,8 @@ where
                 config,
                 target,
                 report,
+                statistics,
+                solve_started,
                 tmp: x.clone(),
                 x,
                 diag,
@@ -406,25 +727,75 @@ where
                 first_update: true,
                 max_fev: config.patience * (n + 1),
                 m,
+                failure_error: None,
             },
             residuals,
         ))
     }
 
     fn into_report(self, termination: TerminationReason) -> (O, MinimizationReport) {
+        let mut statistics = self.statistics;
+        if let Some(started) = self.solve_started {
+            statistics.total_duration = started.elapsed();
+        }
         (
             self.target,
             MinimizationReport {
                 termination,
+                rejected_domain_trials: self.report.rejected_domain_trials,
+                statistics,
+                error: self.failure_error.or(self.report.error),
                 ..self.report
             },
         )
     }
 
-    fn jacobian(&self) -> Result<DMatrix<f64>, TerminationReason> {
-        match self.target.jacobian() {
-            Some(jacobian) => Ok(jacobian),
-            None => Err(TerminationReason::User("jacobian")),
+    fn jacobian(&mut self) -> Result<DMatrix<f64>, TerminationReason> {
+        let started = self.solve_started.map(|_| Instant::now());
+        let jacobian = self.target.try_jacobian();
+        if self.config.telemetry_mode.collects_counters() {
+            self.statistics.jacobian_evaluations += 1;
+            self.statistics.state_jacobian_evaluations += 1;
+        }
+        if let Some(started) = started {
+            self.statistics.jacobian_duration += started.elapsed();
+        }
+        match jacobian {
+            Ok(jacobian) if jacobian.iter().all(|value| value.is_finite()) => Ok(jacobian),
+            Ok(jacobian) => {
+                let index = jacobian
+                    .iter()
+                    .position(|value| !value.is_finite())
+                    .unwrap_or(0);
+                self.failure_error = Some(LeastSquaresError::NonFiniteValue {
+                    stage: LeastSquaresStage::Jacobian,
+                    index,
+                });
+                Err(TerminationReason::Numerical("jacobian"))
+            }
+            Err(error) => {
+                self.failure_error = Some(error);
+                Err(TerminationReason::User("jacobian"))
+            }
+        }
+    }
+
+    fn trial_residuals(&mut self) -> Option<DVector<f64>> {
+        let started = self.solve_started.map(|_| Instant::now());
+        let residuals = self.target.try_residuals();
+        if self.config.telemetry_mode.collects_counters() {
+            self.statistics.residual_evaluations += 1;
+            self.statistics.trial_residual_evaluations += 1;
+        }
+        if let Some(started) = started {
+            self.statistics.residual_duration += started.elapsed();
+        }
+        match residuals {
+            Ok(values) => Some(values),
+            Err(error) => {
+                self.failure_error = Some(error);
+                None
+            }
         }
     }
     // Compute norm of scaled gradient and detect degeneracy
@@ -508,15 +879,69 @@ where
         // Compute new parameters: x - p
         self.tmp.copy_from(&self.x);
         self.tmp -= &param.step;
+
+        // Domain constraints are checked before invoking user callbacks. A
+        // rejected trial is recoverable: shrink the trust region, increase
+        // damping, restore the last accepted point, and retry.
+        if !self.target.validate_trial(&self.tmp) {
+            self.target.set_params(&self.x);
+            self.report.rejected_domain_trials += 1;
+            if self.config.telemetry_mode.collects_counters() {
+                self.statistics.domain_rejections += 1;
+                self.statistics.rejected_steps += 1;
+            }
+            let minimum_delta = epsmch::<f64>() * f64::max(self.xnorm, 1.0);
+            if self.delta <= minimum_delta
+                || self.report.number_of_evaluations + self.report.rejected_domain_trials
+                    >= self.max_fev
+            {
+                return Err(TerminationReason::DomainViolation);
+            }
+            self.delta *= 0.1;
+            self.lambda = if self.lambda == 0.0 {
+                1.0
+            } else {
+                self.lambda * 10.0
+            };
+            return Ok(None);
+        }
+
         // Evaluate
         self.target.set_params(&self.tmp);
         self.report.number_of_evaluations += 1;
         let new_objective_function;
-        let (residuals, new_residuals_norm) = if let Some(residuals) = self.target.residuals() {
+        let (residuals, new_residuals_norm) = if let Some(residuals) = self.trial_residuals() {
             if residuals.nrows() != self.m {
+                self.failure_error = Some(LeastSquaresError::DimensionMismatch {
+                    stage: LeastSquaresStage::Residual,
+                    expected: self.m,
+                    actual: residuals.nrows(),
+                });
                 return Err(TerminationReason::WrongDimensions("residuals"));
             }
             let norm = enorm(&residuals);
+            if !norm.is_finite() {
+                self.target.set_params(&self.x);
+                self.report.rejected_domain_trials += 1;
+                if self.config.telemetry_mode.collects_counters() {
+                    self.statistics.domain_rejections += 1;
+                    self.statistics.rejected_steps += 1;
+                }
+                let minimum_delta = epsmch::<f64>() * f64::max(self.xnorm, 1.0);
+                if self.delta <= minimum_delta
+                    || self.report.number_of_evaluations + self.report.rejected_domain_trials
+                        >= self.max_fev
+                {
+                    return Err(TerminationReason::DomainViolation);
+                }
+                self.delta *= 0.1;
+                self.lambda = if self.lambda == 0.0 {
+                    1.0
+                } else {
+                    self.lambda * 10.0
+                };
+                return Ok(None);
+            }
             new_objective_function = norm * norm * 0.5;
             (residuals, norm)
         } else {
@@ -552,6 +977,13 @@ where
         }
 
         let update_considered_good = ratio >= P0001;
+        if self.config.telemetry_mode.collects_counters() {
+            if update_considered_good {
+                self.statistics.accepted_steps += 1;
+            } else {
+                self.statistics.rejected_steps += 1;
+            }
+        }
         if update_considered_good {
             // update x, residuals and their norms
             core::mem::swap(&mut self.x, &mut self.tmp);

@@ -21,8 +21,8 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::numerical::Nonlinear_systems::engine::{solve_linear_system, LinearSolverKind};
     use crate::numerical::Nonlinear_systems::engine::{DiagnosticsOptions, SolveOptions};
-    use crate::numerical::Nonlinear_systems::engine::{LinearSolverKind, solve_linear_system};
     use crate::numerical::Nonlinear_systems::error::TerminationReason;
     use crate::numerical::Nonlinear_systems::prelude::{
         BacktrackingLevenbergMarquardtMethod, Bounds, JacobianProvider, LevenbergMarquardtMethod,
@@ -866,11 +866,9 @@ mod tests {
             denominators: &DVector<f64>,
             coordinate_shift: f64,
         ) -> Self {
-            assert!(
-                denominators
-                    .iter()
-                    .all(|value| value.is_finite() && *value != 0.0)
-            );
+            assert!(denominators
+                .iter()
+                .all(|value| value.is_finite() && *value != 0.0));
             assert!(coordinate_shift.is_finite());
             Self {
                 base,

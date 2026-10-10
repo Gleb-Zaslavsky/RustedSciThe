@@ -15,7 +15,7 @@ use crate::symbolic::codegen::codegen_aot_driver::generated_aot_crate_from_prepa
 use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, register_linked_dense_backend,
+    register_linked_dense_backend, LinkedDenseAotBackend,
 };
 use crate::symbolic::codegen::codegen_provider_api::PreparedProblem;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::{AotBuildProfile, AotBuildRequest};

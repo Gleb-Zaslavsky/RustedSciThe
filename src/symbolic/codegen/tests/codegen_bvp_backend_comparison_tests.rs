@@ -4941,7 +4941,11 @@ fn bvp_native_compact_builder_rejects_incomplete_atom_route_without_fallback() {
         )
         .expect("AtomView native preparation should return a typed result")
         .expect("AtomView fixture should own a native preparation payload");
+    // A missing plan alone is recoverable from retained native payloads.
+    // Remove every AtomView source to exercise the true no-fallback contract.
     incomplete.atom_aot_plan = None;
+    incomplete.atom_codegen = None;
+    incomplete.atom_discretized_system = None;
 
     let error = incomplete
         .try_generated_native_banded_aot_artifact_with_breakdown(

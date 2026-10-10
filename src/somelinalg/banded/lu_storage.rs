@@ -262,9 +262,9 @@ impl BandedLuStorage {
 mod tests {
     use super::BandedLuStorage;
     use super::*;
-    use crate::somelinalg::banded::GeneralBandedLuPartialPivot;
     use crate::somelinalg::banded::banded_matvec;
     use crate::somelinalg::banded::storage::Banded;
+    use crate::somelinalg::banded::GeneralBandedLuPartialPivot;
     fn dense_from_storage(s: &BandedLuStorage) -> Vec<Vec<f64>> {
         s.to_dense()
     }

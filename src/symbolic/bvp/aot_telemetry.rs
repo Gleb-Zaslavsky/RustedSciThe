@@ -579,7 +579,13 @@ impl BvpAotTelemetry {
 
     pub fn snapshot(&self) -> BvpAotTelemetrySnapshot {
         let Some(inner) = &self.inner else {
-            return BvpAotTelemetrySnapshot::default();
+            // Route identity is configuration metadata, not collected
+            // telemetry. Preserve it even when counters and timings are off.
+            return BvpAotTelemetrySnapshot {
+                mode: self.mode,
+                identity: self.identity,
+                ..BvpAotTelemetrySnapshot::default()
+            };
         };
         BvpAotTelemetrySnapshot {
             mode: self.mode,

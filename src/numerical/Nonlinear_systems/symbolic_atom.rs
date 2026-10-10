@@ -13,10 +13,10 @@ use super::symbolic::{
     SymbolicEvaluationBackend,
 };
 use crate::numerical::Nonlinear_systems::error::SolveError;
+use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::View::conversions::expr_to_atom;
 use crate::symbolic::View::evaluate::PreparedVariableContext;
 use crate::symbolic::View::{Atom, AtomView, FunctionMap, PreparedEvaluator, Symbol};
-use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::cell::RefCell;

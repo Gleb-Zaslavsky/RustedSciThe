@@ -9,13 +9,14 @@ use nalgebra::DVector;
 use thiserror::Error as ThisError;
 
 use crate::numerical::optimization::varpro::fit::FitResult;
-use crate::numerical::optimization::varpro::model::SeparableModel;
-use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
 use crate::numerical::optimization::varpro::model::builder::error::ModelBuildError;
+use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
+use crate::numerical::optimization::varpro::model::SeparableModel;
 use crate::numerical::optimization::varpro::problem::{
     SeparableProblemBuilder, SeparableProblemBuilderError, SingleRhs,
 };
 use crate::numerical::optimization::varpro::solvers::levmar::LevMarSolver;
+use crate::numerical::Nonlinear_systems::least_squares::LevenbergMarquardt;
 use crate::symbolic::symbolic_engine::Expr;
 
 /// Boxed VarPro basis function with one nonlinear scalar parameter.
@@ -263,6 +264,15 @@ impl SymbolicVarProBuilder {
 
     /// Build the model and solve the symbolic VarPro fitting problem.
     pub fn solve(self) -> Result<SymbolicVarProFit, SymbolicVarProError> {
+        let solver = LevenbergMarquardt::new().with_gtol(0.0);
+        self.solve_with_solver(solver)
+    }
+
+    /// Build and solve using an explicitly configured least-squares controller.
+    pub fn solve_with_solver(
+        self,
+        solver: LevenbergMarquardt,
+    ) -> Result<SymbolicVarProFit, SymbolicVarProError> {
         let y_data = self
             .y_data
             .clone()
@@ -272,7 +282,7 @@ impl SymbolicVarProBuilder {
             .observations(y_data)
             .build()?;
 
-        LevMarSolver::default()
+        LevMarSolver::with_solver(solver)
             .solve(problem)
             .map_err(|fit| SymbolicVarProError::SolverFailed {
                 termination: format!("{:?}", fit.minimization_report.termination),

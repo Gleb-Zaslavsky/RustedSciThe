@@ -11,3 +11,5 @@ pub mod RustedLINPACK;
 
 pub mod banded;
 pub mod iterative_solvers_gpu;
+/// Dense column-pivoted QR and diagonal least-squares kernels.
+pub mod least_squares_qr;

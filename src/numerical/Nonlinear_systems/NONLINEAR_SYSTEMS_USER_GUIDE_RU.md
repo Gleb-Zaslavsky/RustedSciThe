@@ -431,3 +431,109 @@ Atom-представлении и использует тот же dense ABI. �
 Этот решатель намеренно работает с плотными матрицами. Для Sparse и Banded
 следует использовать ODE-солверы, например LSODE2, где layout-specific
 линейные backend-ы являются частью контракта.
+
+## Прямоугольные задачи least-squares
+
+Канонический least-squares-солвер минимизирует вектор невязок `r(x)`. Он
+подходит для переопределённых и недоопределённых моделей, шумных наблюдений и
+задач, где невозможно одновременно обратить все невязки в ноль. Это другой
+контракт, чем поиск корня: root solver ищет `r(x) = 0`, а LM минимизирует
+`0.5 * ||r(x)||^2` и возвращает итоговую целевую функцию. Для несогласованной
+аппроксимации ненулевая итоговая невязка ожидаема.
+
+Общий селектор `NonlinearSolver` содержит отдельные варианты `Root` и
+`LeastSquares`. Least-squares **намеренно не является** вариантом
+`NonlinearSolverMethod`: этот enum используется движком поиска корня для
+квадратной системы и возвращает `SolveResult`; прямоугольный least-squares
+принимает собственный контракт задачи и возвращает `MinimizationReport`.
+
+### Численные callbacks невязки и Якобиана
+
+Реализуйте `LeastSquaresProblem` или используйте
+`ClosureLeastSquaresProblem`, задав текущий вектор параметров, невязку и её
+Якобиан. Ниже аппроксимируется прямая по трём наблюдениям. Данные
+несогласованы, поэтому в оптимуме останется небольшая ненулевая невязка:
+
+```rust
+use nalgebra::{DMatrix, DVector};
+use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+
+let problem = ClosureLeastSquaresProblem::new(
+    DVector::from_vec(vec![0.0, 0.0]), // [свободный член, наклон]
+    |p| DVector::from_vec(vec![p[0] - 1.0, p[0] + p[1] - 2.0, p[0] + 2.0 * p[1] - 2.9]),
+    |_| DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 1.0, 1.0, 1.0, 2.0]),
+);
+
+let method = NonlinearSolver::LeastSquares(
+    LeastSquaresLevenbergMarquardt::new().with_tol(1e-10),
+);
+let (problem, report) = method.try_minimize_least_squares(problem)?;
+assert!(report.termination.was_successful());
+println!("fit={:?}, objective={:e}", problem.params(), report.objective_function);
+```
+
+`try_minimize_least_squares` сохраняет типизированные ошибки численного
+метода и callbacks. Сходимость и другие допустимые исходы записаны в
+`report.termination`; проверяйте `was_successful()`, а не считайте любой
+возвращённый отчёт успешной подгонкой. Runtime-телеметрия по умолчанию
+отключена; её можно включить через `LeastSquaresTelemetryMode::Counters` или
+`Detailed` в настройках LM.
+
+### Символьный least-squares builder
+
+Для символьных невязок `SymbolicLeastSquaresSolver` подготавливает невязку и
+Якобиан, после чего использует тот же канонический LM core. Builder принимает
+начальное приближение, имена неизвестных, параметризованные уравнения,
+настройку телеметрии и явное объявление положительных переменных:
+
+```rust
+use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+
+let mut solver = SymbolicLeastSquaresSolver::new()
+    .with_equations_str(vec![
+        "a - 1".into(),
+        "a + b - 2".into(),
+        "a + 2*b - 2.9".into(),
+    ])
+    .with_unknowns(vec!["a".into(), "b".into()])
+    .with_initial_guess(vec![0.0, 0.0])
+    .with_tolerance(1e-10)
+    .with_telemetry(LeastSquaresTelemetryMode::Detailed);
+
+let report = solver.try_solve()?;
+if report.termination.was_successful() {
+    let coefficients = solver.map_of_solutions.as_ref().expect("успешная аппроксимация");
+    println!("{coefficients:?}; objective={:e}", report.objective_function);
+}
+```
+
+Для типизированной обработки ошибок используйте `try_solve` и
+`try_minimize_least_squares`. `set_positive_variables` — явная политика
+пользователя для любой задачи, в которой выбранные переменные должны
+оставаться строго положительными; солвер сам не выводит ограничения из
+предметной области. Это может быть полезно для логарифмов и других выражений
+с ограниченной областью определения, но не ограничивается химическими
+задачами.
+
+### Повторное использование параметризованной символьной модели
+
+Объявляйте параметры уравнений отдельно от неизвестных. Каждый вызов
+`try_solve_with_params` привязывает новые численные значения и повторно
+использует подготовленные символьные невязку и Якобиан, не выполняя символьную
+подготовку заново. Wrapper использует заданное в нём начальное приближение для
+каждого вызова, поэтому это отдельные fresh-решения, а не warm-start
+continuation от предыдущего результата:
+
+```rust
+let mut solver = SymbolicLeastSquaresSolver::new()
+    .with_equations_str(vec!["a - target".into(), "2*a - 2*target".into()])
+    .with_unknowns(vec!["a".into()])
+    .with_parameters(vec!["target".into()])
+    .with_initial_guess(vec![0.0]);
+
+for target in [1.0, 2.0, 3.0] {
+    let report = solver.try_solve_with_params(vec![target])?;
+    assert!(report.termination.was_successful());
+    println!("target={target}, fit={:?}", solver.map_of_solutions);
+}
+```

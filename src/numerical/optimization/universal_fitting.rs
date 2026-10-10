@@ -10,6 +10,7 @@ use crate::numerical::optimization::sym_fitting::Fitting;
 use crate::numerical::optimization::varpro::symbolic::{
     SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
 };
+use crate::numerical::Nonlinear_systems::least_squares::{LeastSquaresError, LevenbergMarquardt};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashMap;
@@ -66,6 +67,9 @@ pub enum UniversalFittingError {
     /// The VarPro backend failed while building or solving the problem.
     #[error(transparent)]
     VarPro(#[from] SymbolicVarProError),
+    /// A shared solver setting could not be applied to the selected backend.
+    #[error("invalid fitting solver configuration: {0}")]
+    SolverConfiguration(#[from] LeastSquaresError),
 }
 
 /// Depot-style wrapper over the symbolic LM and VarPro builders.
@@ -79,6 +83,11 @@ pub struct UniversalFitting {
     equations: Vec<Expr>,
     lm: Fitting,
     varpro: SymbolicVarProBuilder,
+    tolerance: Option<f64>,
+    f_tolerance: Option<f64>,
+    g_tolerance: Option<f64>,
+    max_iterations: Option<usize>,
+    scale_diag: Option<bool>,
 }
 
 impl UniversalFitting {
@@ -89,6 +98,11 @@ impl UniversalFitting {
             equations: Vec::new(),
             lm: Fitting::new(),
             varpro: SymbolicVarProBuilder::new("x"),
+            tolerance: None,
+            f_tolerance: None,
+            g_tolerance: None,
+            max_iterations: None,
+            scale_diag: None,
         }
     }
 
@@ -186,9 +200,11 @@ impl UniversalFitting {
         self
     }
 
-    /// Set the LM polynomial model.
+    /// Set the polynomial model and select the LM backend.
     pub fn with_polynomial(mut self, degree: usize, arg: String) -> Self {
+        self.method = Method::LM;
         self.lm = self.lm.with_polynomial(degree, arg);
+        self.equations = self.lm.equations.clone();
         self
     }
 
@@ -203,32 +219,37 @@ impl UniversalFitting {
         self.with_basis_expr(parameter_name, Expr::parse_expression(expression))
     }
 
-    /// Mirror the LM tolerance setting.
+    /// Set the parameter-step tolerance for the selected fitting backend.
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = Some(tolerance);
         self.lm = self.lm.with_tolerance(tolerance);
         self
     }
 
-    /// Mirror the LM function tolerance setting.
+    /// Set the objective tolerance for the selected fitting backend.
     pub fn with_f_tolerance(mut self, f_tolerance: f64) -> Self {
+        self.f_tolerance = Some(f_tolerance);
         self.lm = self.lm.with_f_tolerance(f_tolerance);
         self
     }
 
-    /// Mirror the LM gradient tolerance setting.
+    /// Set the gradient tolerance for the selected fitting backend.
     pub fn with_g_tolerance(mut self, g_tolerance: f64) -> Self {
+        self.g_tolerance = Some(g_tolerance);
         self.lm = self.lm.with_g_tolerance(g_tolerance);
         self
     }
 
-    /// Mirror the LM diagonal scaling setting.
+    /// Set diagonal scaling for the selected fitting backend.
     pub fn with_scale_diag(mut self, scale_diag: bool) -> Self {
+        self.scale_diag = Some(scale_diag);
         self.lm = self.lm.with_scale_diag(scale_diag);
         self
     }
 
-    /// Mirror the LM iteration budget.
+    /// Set the nonlinear iteration budget for the selected fitting backend.
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = Some(max_iterations);
         self.lm = self.lm.with_max_iterations(max_iterations);
         self
     }
@@ -242,7 +263,25 @@ impl UniversalFitting {
             }
             Method::VARPRO => {
                 let varpro = self.varpro.with_equations(self.equations);
-                Ok(UniversalFittingResult::VARPRO(varpro.solve()?))
+                let mut solver = LevenbergMarquardt::new().with_gtol(0.0);
+                if let Some(max_iterations) = self.max_iterations {
+                    solver = solver.try_with_max_iterations(max_iterations)?;
+                }
+                if let Some(tolerance) = self.tolerance {
+                    solver = solver.try_with_xtol(tolerance)?;
+                }
+                if let Some(f_tolerance) = self.f_tolerance {
+                    solver = solver.try_with_ftol(f_tolerance)?;
+                }
+                if let Some(g_tolerance) = self.g_tolerance {
+                    solver = solver.try_with_gtol(g_tolerance)?;
+                }
+                if let Some(scale_diag) = self.scale_diag {
+                    solver = solver.with_scale_diag(scale_diag);
+                }
+                Ok(UniversalFittingResult::VARPRO(
+                    varpro.solve_with_solver(solver)?,
+                ))
             }
         }
     }
@@ -304,6 +343,27 @@ mod tests {
     }
 
     #[test]
+    fn universal_polynomial_model_survives_build_dispatch() {
+        let x_data = (0..12).map(|x| x as f64 * 0.25).collect::<Vec<_>>();
+        let y_data = x_data
+            .iter()
+            .map(|&x| 2.0 * x * x + 3.0 * x + 1.0)
+            .collect::<Vec<_>>();
+
+        let result = UniversalFitting::new()
+            .with_data(x_data, y_data)
+            .with_polynomial(2, "x".to_string())
+            .with_initial_guess(vec![0.0; 3])
+            .build()
+            .unwrap();
+
+        let map = result.solution_map().unwrap();
+        assert_relative_eq!(map["c2"], 2.0, epsilon = 1e-7);
+        assert_relative_eq!(map["c1"], 3.0, epsilon = 1e-7);
+        assert_relative_eq!(map["c0"], 1.0, epsilon = 1e-7);
+    }
+
+    #[test]
     fn universal_varpro_fits_symbolic_exponential_with_offset() {
         let x_data = (0..25).map(|x| x as f64 * 0.2).collect::<Vec<_>>();
         let y_data = x_data
@@ -359,5 +419,52 @@ mod tests {
         assert_relative_eq!(map["c0"], 2.5, epsilon = 1e-2);
         assert_relative_eq!(map["c1"], 0.8, epsilon = 1e-2);
         assert_relative_eq!(result.r_squared().unwrap(), 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn universal_varpro_applies_shared_iteration_budget() {
+        let x_data = (0..30).map(|x| x as f64 * 0.1).collect::<Vec<_>>();
+        let y_data = x_data
+            .iter()
+            .map(|&x| 3.0 * (-x / 1.7).exp() + 0.4)
+            .collect::<Vec<_>>();
+
+        let result = UniversalFitting::new()
+            .with_varpro()
+            .with_data(x_data, y_data)
+            .with_arg("x".to_string())
+            .with_parameters(vec!["tau".to_string()])
+            .with_initial_guess(vec![20.0])
+            .with_basis_str("tau", "exp(-x/tau)")
+            .with_equation_str("1".to_string())
+            .with_max_iterations(1)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(UniversalFittingError::VarPro(
+                SymbolicVarProError::SolverFailed { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn universal_varpro_rejects_invalid_shared_tolerance() {
+        let result = UniversalFitting::new()
+            .with_varpro()
+            .with_data(vec![0.0, 1.0], vec![1.0, 0.5])
+            .with_arg("x".to_string())
+            .with_parameters(vec!["tau".to_string()])
+            .with_initial_guess(vec![1.0])
+            .with_basis_str("tau", "exp(-x/tau)")
+            .with_tolerance(-1.0)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(UniversalFittingError::SolverConfiguration(
+                LeastSquaresError::InvalidConfiguration { field: "xtol", .. }
+            ))
+        ));
     }
 }

@@ -28,13 +28,13 @@ use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
 use crate::numerical::Nonlinear_systems::symbolic_atom::AtomNativeSymbolicBackend;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
-    select_symbolic_nonlinear_backend,
+    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
+    SymbolicBackendSelectionPolicy,
 };
 use crate::numerical::Nonlinear_systems::symbolic_legacy::LegacyLambdifySymbolicBackend;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, resolve_linked_dense_backend,
+    resolve_linked_dense_backend, LinkedDenseAotBackend,
 };
 use crate::symbolic::codegen::codegen_manifest::{
     GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedJacobianLayout,
@@ -1521,6 +1521,26 @@ impl PreparedSymbolicNonlinearProblem {
         })
     }
 
+    /// Prepares a rectangular symbolic problem for a least-squares consumer.
+    pub(crate) fn from_expressions_rectangular(
+        equations: Vec<Expr>,
+        options: SymbolicProblemOptions,
+    ) -> Result<Self, SolveError> {
+        Ok(Self {
+            problem:
+                SymbolicNonlinearProblem::from_expressions_with_backend_and_policy_rectangular(
+                    equations,
+                    options.variables,
+                    options.equation_parameters,
+                    options.equation_parameter_values,
+                    options.lambdify_execution_policy,
+                    options.lambdify_frontend,
+                    options.backend_config,
+                    options.preparation_telemetry,
+                )?,
+        })
+    }
+
     /// Prepares a symbolic problem once from equation strings.
     pub fn from_strings(
         equations: Vec<String>,
@@ -1541,6 +1561,25 @@ impl PreparedSymbolicNonlinearProblem {
     ) -> Result<Self, SolveError> {
         Ok(Self {
             problem: SymbolicNonlinearProblem::from_expressions_with_backend_selection(
+                equations,
+                options,
+                policy,
+                resolver,
+                aot_options,
+            )?,
+        })
+    }
+
+    /// Prepares a rectangular symbolic problem through the shared AOT/Lambdify selector.
+    pub(crate) fn from_expressions_with_backend_selection_rectangular(
+        equations: Vec<Expr>,
+        options: SymbolicProblemOptions,
+        policy: SymbolicBackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        aot_options: SymbolicDenseAotOptions,
+    ) -> Result<Self, SolveError> {
+        Ok(Self {
+            problem: SymbolicNonlinearProblem::from_expressions_with_backend_selection_rectangular(
                 equations,
                 options,
                 policy,
@@ -1672,6 +1711,30 @@ impl PreparedSymbolicNonlinearProblem {
 }
 
 impl<'a> BoundSymbolicNonlinearProblem<'a> {
+    fn validate_explicit_parameter_values(&self, values: &DVector<f64>) -> Result<(), SolveError> {
+        let schema = self.prepared.parameter_schema().ok_or_else(|| {
+            SolveError::ParameterSchemaMismatch(
+                "explicit parameter values require a prepared parameter schema".to_string(),
+            )
+        })?;
+        if schema.len() != values.len() {
+            return Err(SolveError::DimensionMismatch {
+                expected: schema.len(),
+                actual: values.len(),
+                context: "explicit symbolic parameter values",
+            });
+        }
+        if let Some((index, value)) = values
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(SolveError::NonFiniteParameterValue { index, value });
+        }
+        Ok(())
+    }
+
     /// Returns the immutable prepared object behind this binding.
     pub fn prepared(&self) -> &'a PreparedSymbolicNonlinearProblem {
         self.prepared
@@ -1682,6 +1745,75 @@ impl<'a> BoundSymbolicNonlinearProblem<'a> {
         self.parameter_values
             .as_ref()
             .map(NonlinearParameterValues::as_vector)
+    }
+
+    /// Evaluates the prepared residual with caller-provided numeric equation parameters.
+    ///
+    /// This avoids rebinding (and symbolic preparation) when a prepared model is
+    /// evaluated repeatedly at different observation coordinates.
+    pub fn residual_with_parameter_values(
+        &self,
+        x: &DVector<f64>,
+        parameter_values: &DVector<f64>,
+    ) -> Result<DVector<f64>, SolveError> {
+        self.validate_explicit_parameter_values(parameter_values)?;
+        self.prepared
+            .problem
+            .residual_impl_with_parameter_values(x, Some(parameter_values))
+    }
+
+    /// Evaluates the prepared Jacobian with caller-provided numeric parameters.
+    pub fn jacobian_with_parameter_values(
+        &self,
+        x: &DVector<f64>,
+        parameter_values: &DVector<f64>,
+    ) -> Result<DMatrix<f64>, SolveError> {
+        self.validate_explicit_parameter_values(parameter_values)?;
+        self.prepared
+            .problem
+            .jacobian_impl_with_parameter_values(x, Some(parameter_values))
+    }
+
+    /// Fills residual storage using caller-provided numeric equation parameters.
+    pub fn residual_into_with_parameter_values(
+        &self,
+        x: &DVector<f64>,
+        parameter_values: &DVector<f64>,
+        out: &mut DVector<f64>,
+    ) -> Result<(), SolveError> {
+        self.validate_explicit_parameter_values(parameter_values)?;
+        self.prepared.problem.backend.residual_into(
+            x,
+            self.prepared
+                .problem
+                .parameter_schema
+                .as_ref()
+                .map(|schema| schema.names()),
+            Some(parameter_values),
+            &self.prepared.problem.variables,
+            out,
+        )
+    }
+
+    /// Fills Jacobian storage using caller-provided numeric equation parameters.
+    pub fn jacobian_into_with_parameter_values(
+        &self,
+        x: &DVector<f64>,
+        parameter_values: &DVector<f64>,
+        out: &mut DMatrix<f64>,
+    ) -> Result<(), SolveError> {
+        self.validate_explicit_parameter_values(parameter_values)?;
+        self.prepared.problem.backend.jacobian_into(
+            x,
+            self.prepared
+                .problem
+                .parameter_schema
+                .as_ref()
+                .map(|schema| schema.names()),
+            Some(parameter_values),
+            &self.prepared.problem.variables,
+            out,
+        )
     }
 }
 
@@ -1732,17 +1864,66 @@ impl SymbolicNonlinearProblem {
         resolver: Option<&AotResolver>,
         aot_options: SymbolicDenseAotOptions,
     ) -> Result<Self, SolveError> {
-        let preparation_started = Instant::now();
-        let mut problem = Self::from_expressions_with_backend_and_policy(
+        Self::from_expressions_with_backend_selection_mode(
             equations,
-            options.variables,
-            options.equation_parameters,
-            options.equation_parameter_values,
-            options.lambdify_execution_policy,
-            options.lambdify_frontend,
-            SymbolicBackendConfig::lambdify(),
-            options.preparation_telemetry,
-        )?;
+            options,
+            policy,
+            resolver,
+            aot_options,
+            true,
+        )
+    }
+
+    /// Builds a symbolic problem through backend selection without requiring a square shape.
+    pub(crate) fn from_expressions_with_backend_selection_rectangular(
+        equations: Vec<Expr>,
+        options: SymbolicProblemOptions,
+        policy: SymbolicBackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        aot_options: SymbolicDenseAotOptions,
+    ) -> Result<Self, SolveError> {
+        Self::from_expressions_with_backend_selection_mode(
+            equations,
+            options,
+            policy,
+            resolver,
+            aot_options,
+            false,
+        )
+    }
+
+    fn from_expressions_with_backend_selection_mode(
+        equations: Vec<Expr>,
+        options: SymbolicProblemOptions,
+        policy: SymbolicBackendSelectionPolicy,
+        resolver: Option<&AotResolver>,
+        aot_options: SymbolicDenseAotOptions,
+        require_square: bool,
+    ) -> Result<Self, SolveError> {
+        let preparation_started = Instant::now();
+        let mut problem = if require_square {
+            Self::from_expressions_with_backend_and_policy(
+                equations,
+                options.variables,
+                options.equation_parameters,
+                options.equation_parameter_values,
+                options.lambdify_execution_policy,
+                options.lambdify_frontend,
+                SymbolicBackendConfig::lambdify(),
+                options.preparation_telemetry,
+            )?
+        } else {
+            Self::from_expressions_with_backend_and_policy_rectangular(
+                equations,
+                options.variables,
+                options.equation_parameters,
+                options.equation_parameter_values,
+                options.lambdify_execution_policy,
+                options.lambdify_frontend,
+                SymbolicBackendConfig::lambdify(),
+                options.preparation_telemetry,
+            )?
+        };
 
         let selected = select_symbolic_nonlinear_backend(&problem, policy, resolver, aot_options);
         match selected.effective_backend {
@@ -1863,6 +2044,59 @@ impl SymbolicNonlinearProblem {
         backend_config: SymbolicBackendConfig,
         preparation_telemetry: PreparationTelemetryMode,
     ) -> Result<Self, SolveError> {
+        Self::from_expressions_with_backend_and_policy_shape(
+            equations,
+            variables,
+            equation_parameters,
+            equation_parameter_values,
+            lambdify_execution_policy,
+            lambdify_frontend,
+            backend_config,
+            preparation_telemetry,
+            true,
+        )
+    }
+
+    /// Builds a symbolic problem for a rectangular least-squares residual/Jacobian.
+    ///
+    /// This constructor shares the same backend preparation and telemetry as
+    /// the square nonlinear-system path, but deliberately leaves the
+    /// `equations.len() == variables.len()` check to the caller's contract.
+    pub(crate) fn from_expressions_with_backend_and_policy_rectangular(
+        equations: Vec<Expr>,
+        variables: Option<Vec<String>>,
+        equation_parameters: Option<Vec<String>>,
+        equation_parameter_values: Option<DVector<f64>>,
+        lambdify_execution_policy: LambdifyExecutionPolicy,
+        lambdify_frontend: SymbolicLambdifyFrontend,
+        backend_config: SymbolicBackendConfig,
+        preparation_telemetry: PreparationTelemetryMode,
+    ) -> Result<Self, SolveError> {
+        Self::from_expressions_with_backend_and_policy_shape(
+            equations,
+            variables,
+            equation_parameters,
+            equation_parameter_values,
+            lambdify_execution_policy,
+            lambdify_frontend,
+            backend_config,
+            preparation_telemetry,
+            false,
+        )
+    }
+
+    /// Shared symbolic preparation implementation for square and rectangular contracts.
+    fn from_expressions_with_backend_and_policy_shape(
+        equations: Vec<Expr>,
+        variables: Option<Vec<String>>,
+        equation_parameters: Option<Vec<String>>,
+        equation_parameter_values: Option<DVector<f64>>,
+        lambdify_execution_policy: LambdifyExecutionPolicy,
+        lambdify_frontend: SymbolicLambdifyFrontend,
+        backend_config: SymbolicBackendConfig,
+        preparation_telemetry: PreparationTelemetryMode,
+        require_square: bool,
+    ) -> Result<Self, SolveError> {
         let preparation_started = Instant::now();
         let input_validation_started = Instant::now();
         if equations.is_empty() {
@@ -1897,7 +2131,7 @@ impl SymbolicNonlinearProblem {
                 "failed to infer variables from symbolic equations".to_string(),
             ));
         }
-        if variables.len() != equations.len() {
+        if require_square && variables.len() != equations.len() {
             return Err(SolveError::DimensionMismatch {
                 expected: equations.len(),
                 actual: variables.len(),
@@ -2530,12 +2764,12 @@ impl<'a> JacobianProvider for BoundSymbolicNonlinearProblem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
-    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
-    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
     use crate::numerical::Nonlinear_systems::problem::Bounds;
     use crate::numerical::Nonlinear_systems::trust_region::*;
+    use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
+    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
+    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use approx::assert_relative_eq;
     use std::collections::HashMap;

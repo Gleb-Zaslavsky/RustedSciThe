@@ -202,6 +202,11 @@ impl PreparedSparseAtomBvpCodegen {
         }
     }
 
+    /// Returns the output ABI selected for this prepared Jacobian payload.
+    pub const fn matrix_layout(&self) -> AtomAotMatrixLayout {
+        self.matrix_layout
+    }
+
     /// Returns the typed AtomView AOT payload owned by this codegen bridge.
     ///
     /// This is intentionally fallible and does not materialize an `Expr`.

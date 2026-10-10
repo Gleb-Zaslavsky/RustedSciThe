@@ -137,13 +137,24 @@ fn lsode2_rising_temperature_2a_b_c_switches_bdf_to_adams() {
         algo.executed_family
     );
 
-    // final plateau check on A
-    let (_t, y) = solver.get_result();
-    let last = y[(y.nrows() - 1, 0)];
-    let prev = y[(y.nrows() - 2, 0)];
+    // A is decoupled and has the exact solution A(t)=1/(1+integral(k dt)).
+    // Check that trajectory instead of assuming the final two accepted points
+    // form a plateau; the temperature ramp leaves a small nonzero reaction rate.
+    let (times, y) = solver.get_result();
+    let last_t = times[times.len() - 1];
+    let intervals = 20_000usize;
+    let h = last_t / intervals as f64;
+    let rate = |t: f64| 1.0e6 * (-8.0e4 / (8.314 * (300.0 + t))).exp();
+    let mut weighted_rate = rate(0.0) + rate(last_t);
+    for i in 1..intervals {
+        weighted_rate += if i % 2 == 0 { 2.0 } else { 4.0 } * rate(i as f64 * h);
+    }
+    let expected_a = 1.0 / (1.0 + weighted_rate * h / 3.0);
+    let last_a = y[(y.nrows() - 1, 0)];
     assert!(
-        (last - prev).abs() < 1e-4,
-        "final A should be near-constant"
+        (last_a - expected_a).abs() < 5.0e-5,
+        "LSODE2 A(t) should match the independent scalar solution: t={last_t:.6}, actual={last_a:.8e}, expected={expected_a:.8e}, error={:.3e}",
+        (last_a - expected_a).abs()
     );
     let duration = start.elapsed();
     println!(
@@ -181,13 +192,24 @@ fn lsode2_rising_temperature_2a_b_c_switches_bdf_to_adams_bridge() {
         "expected BDF activity in the stiff phase"
     );
 
-    // final plateau check on A
-    let (_t, y) = solver.get_result();
-    let last = y[(y.nrows() - 1, 0)];
-    let prev = y[(y.nrows() - 2, 0)];
+    // A is decoupled and has the exact solution A(t)=1/(1+integral(k dt)).
+    // The final reaction rate is small but nonzero, so adjacent accepted
+    // states are not a reliable plateau correctness oracle.
+    let (times, y) = solver.get_result();
+    let last_t = times[times.len() - 1];
+    let intervals = 20_000usize;
+    let h = last_t / intervals as f64;
+    let rate = |t: f64| 1.0e6 * (-8.0e4 / (8.314 * (300.0 + t))).exp();
+    let mut weighted_rate = rate(0.0) + rate(last_t);
+    for i in 1..intervals {
+        weighted_rate += if i % 2 == 0 { 2.0 } else { 4.0 } * rate(i as f64 * h);
+    }
+    let expected_a = 1.0 / (1.0 + weighted_rate * h / 3.0);
+    let last_a = y[(y.nrows() - 1, 0)];
     assert!(
-        (last - prev).abs() < 1e-4,
-        "final A should be near-constant"
+        (last_a - expected_a).abs() < 5.0e-5,
+        "bridge A(t) should match the independent scalar solution: t={last_t:.6}, actual={last_a:.8e}, expected={expected_a:.8e}, error={:.3e}",
+        (last_a - expected_a).abs()
     );
     let duration = start.elapsed();
     println!(

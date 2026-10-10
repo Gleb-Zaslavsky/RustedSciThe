@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
-    StepOutcome, eval_residual_with_runtime, measure_linear_system_operation_owned,
+    eval_residual_with_runtime, measure_linear_system_operation_owned, IterationState,
+    MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;

@@ -1,11 +1,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 //!
-//! ATTENTION:  The varpro crate, which is designed for variable projection optimization, unfortunately relies on the levenberg-marcuards crate, which in turn uses nalgebra 0.34,
-//!  an outdated version of nalgebra. Therefore, I decided to port varpro to my library [varpro](src/numerical/optimization/varpro/), but it should rely on my version of
-//! levenberg-marcuardt [LM_optimization.rs](src/numerical/optimization/LM_optimization.rs) [problem_LM.rs](src/numerical/optimization/problem_LM.rs), which supports the latest version of nalgebra.
-//!  However, my version of levenberg-marcuardt is not generic and is only for f64.
-//! Also a aymbolic backend for jacobian added
+//! VarPro is maintained locally so it can use the crate's current nalgebra
+//! version and symbolic frontends. Its numerical controller is the canonical
+//! f64 rectangular LM core in
+//! [`crate::numerical::Nonlinear_systems::least_squares`].
 //!
 //! # Introduction
 //!

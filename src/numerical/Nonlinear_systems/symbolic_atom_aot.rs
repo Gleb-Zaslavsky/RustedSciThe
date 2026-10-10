@@ -10,13 +10,7 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     PreparedSymbolicNonlinearAotProblem, SymbolicDenseAotOptions, SymbolicLambdifyFrontend,
     SymbolicNonlinearProblem,
 };
-use crate::symbolic::View::atom::Atom;
-use crate::symbolic::View::jacobian::SparseAtomJacobianEntry;
-use crate::symbolic::View::state::Symbol;
 use crate::symbolic::bvp::atom_aot::{AtomAotMatrixLayout, AtomAotPreparedPlan};
-use crate::symbolic::codegen::CodegenIR::{
-    AtomOptimizationProfile, AtomTempReusePolicy, CodegenLanguage, CodegenModule, GeneratedBlock,
-};
 use crate::symbolic::codegen::codegen_manifest::{
     GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedProblemManifest,
 };
@@ -26,6 +20,12 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 };
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, SparseChunkingStrategy};
 use crate::symbolic::codegen::rust_backend::codegen_aot_crate::GeneratedAotCrate;
+use crate::symbolic::codegen::CodegenIR::{
+    AtomOptimizationProfile, AtomTempReusePolicy, CodegenLanguage, CodegenModule, GeneratedBlock,
+};
+use crate::symbolic::View::atom::Atom;
+use crate::symbolic::View::jacobian::SparseAtomJacobianEntry;
+use crate::symbolic::View::state::Symbol;
 use ahash::HashMap;
 use std::sync::Arc;
 
@@ -270,16 +270,12 @@ mod tests {
             generated.manifest.functions.jacobian_fn_name,
             "eval_nonlinear_jacobian"
         );
-        assert!(
-            generated
-                .module_source
-                .contains("pub fn eval_nonlinear_residual")
-        );
-        assert!(
-            generated
-                .module_source
-                .contains("pub fn eval_nonlinear_jacobian")
-        );
+        assert!(generated
+            .module_source
+            .contains("pub fn eval_nonlinear_residual"));
+        assert!(generated
+            .module_source
+            .contains("pub fn eval_nonlinear_jacobian"));
         assert!(!generated.module_source.contains("ExprLegacy"));
     }
 
