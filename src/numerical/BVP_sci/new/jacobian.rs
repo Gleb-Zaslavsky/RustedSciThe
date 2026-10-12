@@ -88,12 +88,11 @@ pub(crate) fn assemble_global_jacobian(
         }
     }
 
-    // Parameter derivatives are numerical only because the initial frontend
-    // contract deliberately exposes state Jacobians first. They are computed
-    // into reusable buffers and do not rebuild the prepared symbolic plan.
-    // The perturbation is relative to the current parameter magnitude, which
-    // avoids a fixed absolute step silently losing all signal for scaled
-    // continuation parameters.
+    // Symbolic Lambdify plans provide prepared `df/dp` evaluators here. Keep
+    // finite differences as the compatibility path for Numerical and AOT
+    // frontends until those routes publish an analytical parameter block.
+    // The fallback uses reusable buffers and a relative perturbation so a
+    // scaled continuation parameter does not silently lose all signal.
     if k > 0 && plan.has_parameter_jacobian() {
         for node in 0..m {
             let state = &y[node * n..(node + 1) * n];

@@ -62,3 +62,37 @@ fn main() {
     run(BvpSciMatrixLayout::Sparse);
     run(BvpSciMatrixLayout::Banded { lower: 5, upper: 5 });
 }
+
+// Optional SuperLU Sparse route
+// -----------------------------
+// SuperLU is an alternative factorization policy for the Sparse layout, not a
+// fourth matrix layout. StandardFaer remains the default. The small C ABI
+// bridge must be built for the target OS before enabling the Rust feature.
+// Build prerequisites are Git, CMake, Ninja and a C compiler; the scripts pin
+// SuperLU 6.0.1 and build its bundled CBLAS into the bridge.
+//
+// Windows (PowerShell; the script writes an ignored DLL under test_reports/):
+//   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_superlu_bridge.ps1
+//   $env:SUPERLU_LIBRARY = (Resolve-Path '.\test_reports\somelinalg_sparse_lu_reference\native\superlu_bridge.dll').Path
+//
+// Linux (the script writes an ignored shared object under test_reports/):
+//   bash scripts/build_superlu_bridge.sh
+//   export SUPERLU_LIBRARY="$(pwd)/test_reports/somelinalg_sparse_lu_reference/native/libsuperlu_bridge.so"
+//
+// Compile and run this guide with the optional feature enabled:
+//   cargo run --no-default-features --features superlu --example bvp_sci_backends_guide
+//
+// Select SuperLU through the builder (the default `new`/builder configuration
+// continues to use StandardFaer):
+//   let solver = BvpSciSolver::builder(rhs, state_names)
+//       .with_frontend(BvpSciAssembly::ExprLegacy)
+//       .with_superlu() // also selects BvpSciMatrixLayout::Sparse
+//       .with_mesh_and_initial_state(mesh, initial_state)
+//       .with_boundary_callback(boundary)
+//       .build()?;
+//
+// If the Cargo feature is disabled or the bridge cannot be loaded/validated,
+// BVP_sci warns and falls back to StandardFaer. Check
+// `telemetry_snapshot().superlu_fallbacks == 0` before treating a run as
+// SuperLU performance evidence. See `src/numerical/BVP_sci/SUPERLU_BACKEND.md`
+// for the complete native-build and release-matrix instructions.

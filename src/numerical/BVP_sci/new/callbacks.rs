@@ -51,14 +51,7 @@ pub trait BvpSciBoundary: Send + Sync {
 }
 
 type BoundaryFn = dyn Fn(&[f64], &[f64], &[f64], &mut [f64]) -> Result<(), String> + Send + Sync;
-type BoundaryJacobianFn = dyn Fn(
-        &[f64],
-        &[f64],
-        &[f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-    ) -> Result<(), String>
+type BoundaryJacobianFn = dyn Fn(&[f64], &[f64], &[f64], &mut [f64], &mut [f64], &mut [f64]) -> Result<(), String>
     + Send
     + Sync;
 
@@ -94,14 +87,7 @@ impl BvpSciBoundaryCallbacks {
     ) -> Self
     where
         F: Fn(&[f64], &[f64], &[f64], &mut [f64]) -> Result<(), String> + Send + Sync + 'static,
-        J: Fn(
-                &[f64],
-                &[f64],
-                &[f64],
-                &mut [f64],
-                &mut [f64],
-                &mut [f64],
-            ) -> Result<(), String>
+        J: Fn(&[f64], &[f64], &[f64], &mut [f64], &mut [f64], &mut [f64]) -> Result<(), String>
             + Send
             + Sync
             + 'static,
@@ -208,10 +194,18 @@ impl BvpSciBoundary for BvpSciBoundaryCallbacks {
         let expected_state = self.dimension.checked_mul(ya.len()).ok_or_else(|| {
             BvpSciNewError::InvalidConfiguration("boundary Jacobian size overflow".into())
         })?;
-        let expected_parameter = self.dimension.checked_mul(parameters.len()).ok_or_else(|| {
-            BvpSciNewError::InvalidConfiguration("boundary parameter Jacobian size overflow".into())
-        })?;
-        if dya.len() != expected_state || dyb.len() != expected_state || dp.len() != expected_parameter {
+        let expected_parameter = self
+            .dimension
+            .checked_mul(parameters.len())
+            .ok_or_else(|| {
+                BvpSciNewError::InvalidConfiguration(
+                    "boundary parameter Jacobian size overflow".into(),
+                )
+            })?;
+        if dya.len() != expected_state
+            || dyb.len() != expected_state
+            || dp.len() != expected_parameter
+        {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::JacobianCallback,
                 expected: expected_state,
@@ -219,11 +213,9 @@ impl BvpSciBoundary for BvpSciBoundaryCallbacks {
             });
         }
         let started = self.telemetry.start_timing();
-        jacobian(ya, yb, parameters, dya, dyb, dp).map_err(|message| {
-            BvpSciNewError::Callback {
-                stage: BvpSciStage::JacobianCallback,
-                message,
-            }
+        jacobian(ya, yb, parameters, dya, dyb, dp).map_err(|message| BvpSciNewError::Callback {
+            stage: BvpSciStage::JacobianCallback,
+            message,
         })?;
         if dya
             .iter()
@@ -236,7 +228,9 @@ impl BvpSciBoundary for BvpSciBoundaryCallbacks {
             });
         }
         self.telemetry.record_jacobian_evaluation(started);
-        self.telemetry.record_output_writes(dya.len() + dyb.len() + dp.len());
+        self.telemetry.record_boundary_jacobian_callback(started);
+        self.telemetry
+            .record_output_writes(dya.len() + dyb.len() + dp.len());
         Ok(true)
     }
 
@@ -287,14 +281,7 @@ mod tests {
             BvpSciTelemetry::disabled(),
         );
         let error = boundary
-            .evaluate_jacobian(
-                &[0.0],
-                &[0.0],
-                &[],
-                &mut [0.0],
-                &mut [0.0],
-                &mut [],
-            )
+            .evaluate_jacobian(&[0.0], &[0.0], &[], &mut [0.0], &mut [0.0], &mut [])
             .expect_err("non-finite analytical boundary Jacobian must be rejected");
 
         assert!(matches!(

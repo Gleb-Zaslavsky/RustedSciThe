@@ -36,12 +36,16 @@ pub mod solver;
 pub mod telemetry;
 pub mod workspace;
 
-pub use callbacks::{BvpSciBoundary, BvpSciBoundaryCallbacks};
+pub use crate::symbolic::symbolic_ivp_generated::{
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+};
 pub use builder::BvpSciSolverBuilder;
+pub use callbacks::{BvpSciBoundary, BvpSciBoundaryCallbacks};
 pub use config::{
     BvpSciAssembly, BvpSciExecution, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciOptions,
-    SCIPY_ARMIJO_SIGMA, SCIPY_BACKTRACKING_TAU, SCIPY_MAX_BACKTRACKING_TRIALS,
-    SCIPY_MAX_JACOBIAN_REFRESHES, SCIPY_MAX_MESH_ITERATIONS, SCIPY_MAX_NEWTON_ITERATIONS,
+    BvpSciSparseFactorization, SCIPY_ARMIJO_SIGMA, SCIPY_BACKTRACKING_TAU,
+    SCIPY_MAX_BACKTRACKING_TRIALS, SCIPY_MAX_JACOBIAN_REFRESHES, SCIPY_MAX_MESH_ITERATIONS,
+    SCIPY_MAX_NEWTON_ITERATIONS,
 };
 pub use error::{BvpSciAotFailureKind, BvpSciNewError, BvpSciStage, BvpSciStatus};
 pub use frontends::{AtomViewNativeLambdifyPlan, BvpSciAotPlan, ExprLegacyLambdifyPlan};
@@ -49,17 +53,18 @@ pub use numerical::{
     BvpSciNumericalPlan, NumericalJacobianCallback, NumericalParameterJacobianCallback,
     NumericalRhsCallback,
 };
-pub use crate::symbolic::symbolic_ivp_generated::{
-    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
-};
 pub use output::{BvpSciDenseOutput, BvpSciOutputPolicy, BvpSciSolution};
 pub use prepared::BvpSciLambdifyPlan;
 pub use singular::BvpSciSingularTerm;
 
 #[cfg(test)]
 mod story_tests;
+#[cfg(test)]
+mod story_tests_experimental;
 pub use solver::BvpSciSolver;
 pub use telemetry::{
-    BvpSciBandedRoute, BvpSciNewtonTraceEntry, BvpSciTelemetry, BvpSciTelemetryMode, BvpSciTelemetryScope,
-    BvpSciTelemetryScopeKind, BvpSciTelemetrySnapshot, BvpSciTelemetryStage, BvpSciTelemetryTimer,
+    BvpSciBandedFactorPhase, BvpSciBandedRoute, BvpSciLinearSystemCapture, BvpSciMeshPassSnapshot,
+    BvpSciNewtonTraceEntry, BvpSciSuperLuTelemetrySnapshot, BvpSciTelemetry,
+    BvpSciTelemetryMode, BvpSciTelemetryScope, BvpSciTelemetryScopeKind,
+    BvpSciTelemetrySnapshot, BvpSciTelemetryStage, BvpSciTelemetryTimer,
 };

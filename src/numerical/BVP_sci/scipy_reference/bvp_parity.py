@@ -26,9 +26,11 @@ def _load_instrumented_scipy_bvp():
     return instrument_module(module)
 
 
-def solve_reference(case: str) -> dict[str, object]:
+def solve_reference(case: str, *, capture_newton_trace: bool = False) -> dict[str, object]:
     solve_bvp = _load_instrumented_scipy_bvp()
-    telemetry = BvpTelemetry(capture_newton_trace=case == "shock-layer")
+    telemetry = BvpTelemetry(
+        capture_newton_trace=capture_newton_trace or case == "shock-layer"
+    )
     mesh = np.linspace(0.0, 1.0, 6)
     sample = np.linspace(0.0, 1.0, 9)
 
@@ -78,13 +80,13 @@ def solve_reference(case: str) -> dict[str, object]:
         df_dy_middle = np.zeros((n, n, x.size - 1))
         df_dy_middle[0, 1, :] = 1.0
         df_dy_middle[1, 0, :] = parameters[0]
-        # Match the current Lambdify contract: state Jacobians and boundary
-        # blocks are analytical, while parameter columns use forward FD.
-        _, df_dp = scipy_module["estimate_fun_jac"](fun, x, y, parameters, f)
+        # Compare the same exact derivative contract as Rust Lambdify,
+        # including the parameter column, independently of the FD parity cases.
+        df_dp = np.zeros((n, k, x.size))
+        df_dp[1, 0, :] = y[0, :]
         x_middle = x[:-1] + 0.5 * h
-        _, df_dp_middle = scipy_module["estimate_fun_jac"](
-            fun, x_middle, y_middle, parameters, f_middle
-        )
+        df_dp_middle = np.zeros((n, k, x.size - 1))
+        df_dp_middle[1, 0, :] = y_middle[0, :]
         dbc_dya = np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]])
         dbc_dyb = np.array([[0.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
         dbc_dp = np.array([[0.0], [0.0], [-1.0]])
@@ -441,11 +443,59 @@ def main() -> None:
                  "shock-layer", "singular-jacobian",
                  "boundary-tolerance-exhaustion", "validation"),
     )
-    parser.add_argument("--format", choices=("json", "tsv"), default="json")
+    parser.add_argument(
+        "--format", choices=("json", "tsv", "diagnostic-tsv"), default="json"
+    )
     args = parser.parse_args()
-    row = solve_reference(args.case)
+    row = solve_reference(
+        args.case, capture_newton_trace=args.format == "diagnostic-tsv"
+    )
     if args.format == "json":
         print(json.dumps(row, separators=(",", ":")))
+    elif args.format == "diagnostic-tsv":
+        fields = [
+            ("case", row["case"]),
+            ("scipy_version", row["scipy_version"]),
+            ("status", row["status"]),
+            ("success", int(row["success"])),
+            ("niter", row["niter"]),
+            ("nodes", row["nodes"]),
+            ("parameters", ",".join(map(str, row["parameters"]))),
+        ]
+        fields.extend(
+            (f"counter.{name}", value)
+            for name, value in sorted(row["telemetry"]["counters"].items())
+        )
+        fields.extend(
+            (f"time_ms.{name}", f"{value:.9f}")
+            for name, value in sorted(row["telemetry"]["timings_ms"].items())
+        )
+        mesh_passes = row["telemetry"].get("mesh_passes", [])
+        fields.append(("mesh_pass_count", len(mesh_passes)))
+        for index, mesh_pass in enumerate(mesh_passes):
+            prefix = f"mesh.{index}"
+            fields.extend((
+                (f"{prefix}.nodes", mesh_pass["mesh_nodes"]),
+                (f"{prefix}.dimension", mesh_pass["linear_system_dimension"]),
+            ))
+            fields.extend(
+                (f"{prefix}.counter.{name}", value)
+                for name, value in sorted(mesh_pass["counters"].items())
+            )
+            fields.extend(
+                (f"{prefix}.time_ms.{name}", f"{value:.9f}")
+                for name, value in sorted(mesh_pass["timings_ms"].items())
+            )
+            fields.append((f"{prefix}.time_ms.elapsed", f'{mesh_pass["elapsed_ms"]:.9f}'))
+        trace = row["telemetry"].get("newton_trace", [])
+        fields.extend(
+            (
+                ("counter.newton_trials", len(trace)),
+                ("counter.newton_accepted_trials", sum(item["accepted"] for item in trace)),
+                ("counter.newton_rejected_trials", sum(not item["accepted"] for item in trace)),
+            )
+        )
+        print("\t".join(f"{key}={value}" for key, value in fields))
     elif args.case == "global-jacobian":
         fields = (
             ("case", row["case"]),
@@ -483,22 +533,41 @@ def main() -> None:
             ("jacobian_builds", row["jacobian_builds"]),
             ("factorizations", row["factorizations"]),
             ("linear_solves", row["linear_solves"]),
+            ("mesh_pass_count", len(row["telemetry"].get("mesh_passes", []))),
             ("mesh_modify_calls", row["mesh_modify_calls"]),
             ("rhs_callback_calls", row["rhs_callback_calls"]),
             ("boundary_callback_calls", row["boundary_callback_calls"]),
             ("newton_trace", ";".join(
+                f'm{entry["mesh_pass"]}/n{entry["mesh_nodes"]}/d{entry["linear_system_dimension"]}:'
                 f'{entry["iteration"]}:{entry["trial"]}:a{entry["alpha"]:.4g}:'
                 f'{entry["cost"]:.4g}>{entry["cost_new"]:.4g}:'
                 f'{int(entry["accepted"])}'
                 for entry in row["newton_trace"]
             )),
             ("newton_convergence_trace", ";".join(
+                f'm{entry["mesh_pass"]}/n{entry["mesh_nodes"]}/d{entry["linear_system_dimension"]}:'
                 f'{entry["iteration"]}:r{entry["max_normalized_collocation_residual"]:.4g}:'
                 f'b{entry["normalized_boundary_residual"]:.4g}:'
                 f'{int(entry["converged"])}'
                 for entry in row["newton_convergence_trace"]
             )),
         )
+        fields = list(fields)
+        for index, mesh_pass in enumerate(row["telemetry"].get("mesh_passes", [])):
+            prefix = f"mesh.{index}"
+            fields.extend((
+                (f"{prefix}.nodes", mesh_pass["mesh_nodes"]),
+                (f"{prefix}.dimension", mesh_pass["linear_system_dimension"]),
+            ))
+            fields.extend(
+                (f"{prefix}.counter.{name}", value)
+                for name, value in sorted(mesh_pass["counters"].items())
+            )
+            fields.extend(
+                (f"{prefix}.time_ms.{name}", f"{value:.9f}")
+                for name, value in sorted(mesh_pass["timings_ms"].items())
+            )
+            fields.append((f"{prefix}.time_ms.elapsed", f'{mesh_pass["elapsed_ms"]:.9f}'))
         print("\t".join(f"{key}={value}" for key, value in fields))
 
 

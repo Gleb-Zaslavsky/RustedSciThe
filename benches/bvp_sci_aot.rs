@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use RustedSciThe::Utils::test_reporting::write_test_report;
 use RustedSciThe::numerical::BVP_sci::new::{
@@ -75,6 +76,8 @@ struct Row {
     jacobian_callback_ms: String,
     continuation_ms: String,
     continuation_vs_lambdify: String,
+    cold_total_16_vs_lambdify: String,
+    cold_break_even_callback_pairs: String,
     residual_calls: u64,
     jacobian_calls: u64,
     parallel_dispatches: u64,
@@ -90,7 +93,10 @@ struct Row {
     observed_workers: u64,
     runtime_ready: u64,
     build_attempts: u64,
+    build_successes: u64,
     link_attempts: u64,
+    link_successes: u64,
+    publication_calls: u64,
     max_rhs_diff: String,
     max_jacobian_diff: String,
     status: String,
@@ -264,8 +270,20 @@ fn run_row(frontend: Frontend, layout: Layout, dimension: usize, policy_name: &s
     let telemetry = BvpSciTelemetry::timings();
     let prepare_started = Instant::now();
     let plan = if frontend.is_aot() {
+        let phase = std::env::var("BVP_SCI_AOT_BENCH_PHASE").unwrap_or_default();
+        let mut artifact_root = output_root();
+        if phase == "cold-amortization" {
+            // A unique artifact namespace makes each measured AOT row pay a
+            // real build/link instead of inheriting a cache hit from a prior run.
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            artifact_root = artifact_root
+                .join("cold-amortization")
+                .join(format!("{}-{nonce}", std::process::id()));
+        }
         let mut config = RustedSciThe::numerical::BVP_sci::new::SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
-            output_root()
+            artifact_root
                 .join(frontend.label())
                 .join(layout.label())
                 .join(dimension.to_string()),
@@ -438,6 +456,8 @@ fn run_row(frontend: Frontend, layout: Layout, dimension: usize, policy_name: &s
         jacobian_callback_ms: format!("{jacobian_ms:.3}"),
         continuation_ms: format!("{continuation_ms:.3}"),
         continuation_vs_lambdify: "pending-baseline".into(),
+        cold_total_16_vs_lambdify: "not-measured".into(),
+        cold_break_even_callback_pairs: "not-measured".into(),
         residual_calls: telemetry.residual_evaluations,
         jacobian_calls: telemetry.jacobian_evaluations,
         parallel_dispatches: aot.map_or(telemetry.parallel_dispatches, |value| {
@@ -459,7 +479,12 @@ fn run_row(frontend: Frontend, layout: Layout, dimension: usize, policy_name: &s
         }),
         runtime_ready: aot.map_or(0, |value| value.aot_runtime_ready),
         build_attempts: aot.map_or(0, |value| value.aot_build_attempts),
+        build_successes: aot.map_or(0, |value| value.aot_build_successes),
         link_attempts: aot.map_or(0, |value| value.aot_link_attempts),
+        link_successes: aot.map_or(0, |value| value.aot_link_successes),
+        publication_calls: aot.map_or(0, |value| {
+            value.cold_stage(IvpColdStage::AotPublication).calls
+        }),
         max_rhs_diff: format!("{max_rhs_diff:.3e}"),
         max_jacobian_diff: format!("{max_jacobian_diff:.3e}"),
         status: "ok".into(),
@@ -517,6 +542,8 @@ fn failed_row(
         jacobian_callback_ms: "-".into(),
         continuation_ms: "-".into(),
         continuation_vs_lambdify: "not-applicable".into(),
+        cold_total_16_vs_lambdify: "not-applicable".into(),
+        cold_break_even_callback_pairs: "not-applicable".into(),
         residual_calls: 0,
         jacobian_calls: 0,
         parallel_dispatches: 0,
@@ -532,7 +559,10 @@ fn failed_row(
         observed_workers: 0,
         runtime_ready: 0,
         build_attempts: 0,
+        build_successes: 0,
         link_attempts: 0,
+        link_successes: 0,
+        publication_calls: 0,
         max_rhs_diff: "-".into(),
         max_jacobian_diff: "-".into(),
         status: format!("error: {error}"),
@@ -541,6 +571,7 @@ fn failed_row(
 
 #[derive(Debug, Tabled)]
 struct FullSolvePolicyRow {
+    workload: String,
     frontend: String,
     layout: String,
     dimension: usize,
@@ -556,6 +587,7 @@ struct FullSolvePolicyRow {
     mesh_defect_ms: String,
     mesh_refinement_ms: String,
     output_construction_ms: String,
+    exact_state_max_diff: String,
     callback_ms: String,
     residual_ms: String,
     jacobian_ms: String,
@@ -588,6 +620,7 @@ fn format_opt(value: Option<f64>) -> String {
 }
 
 fn aot_full_solve_row(
+    workload: &str,
     frontend: Frontend,
     layout: Layout,
     dimension: usize,
@@ -603,12 +636,14 @@ fn aot_full_solve_row(
     let mut residual_samples = Vec::with_capacity(repeats);
     let mut jacobian_samples = Vec::with_capacity(repeats);
     let mut factorization_samples = Vec::with_capacity(repeats);
+    let mut exact_state_diff_samples = Vec::with_capacity(repeats);
     let mut last_snapshot = None;
-    let (equations, states) = full_solve_equations(dimension);
+    let (equations, states) = full_solve_equations(dimension, workload);
 
     for _ in 0..repeats {
         let output_root = output_root()
             .join("policy-full-solve")
+            .join(workload)
             .join(frontend.label())
             .join(layout.label())
             .join(policy_name)
@@ -642,6 +677,7 @@ fn aot_full_solve_row(
             Err(error) => {
                 return (
                     aot_full_solve_error_row(
+                        workload,
                         frontend,
                         layout,
                         dimension,
@@ -701,6 +737,7 @@ fn aot_full_solve_row(
             Err(error) => {
                 return (
                     aot_full_solve_error_row(
+                        workload,
                         frontend,
                         layout,
                         dimension,
@@ -715,9 +752,37 @@ fn aot_full_solve_row(
             }
         };
         let solve_started = Instant::now();
-        if let Err(error) = solver.solve() {
+        let solution = match solver.solve() {
+            Ok(solution) => solution,
+            Err(error) => {
+                return (
+                    aot_full_solve_error_row(
+                        workload,
+                        frontend,
+                        layout,
+                        dimension,
+                        nodes,
+                        policy_name,
+                        workers,
+                        repeats,
+                        format!("solve: {error}"),
+                    ),
+                    None,
+                );
+            }
+        };
+        let mut exact_state_max_diff = 0.0_f64;
+        for (node, &x) in solution.x.iter().enumerate() {
+            let expected = (initial_parameter * x).exp() - 1.0;
+            for component in 0..dimension {
+                exact_state_max_diff = exact_state_max_diff
+                    .max((solution.y[node * dimension + component] - expected).abs());
+            }
+        }
+        if !exact_state_max_diff.is_finite() || exact_state_max_diff > 1e-3 {
             return (
                 aot_full_solve_error_row(
+                    workload,
                     frontend,
                     layout,
                     dimension,
@@ -725,11 +790,12 @@ fn aot_full_solve_row(
                     policy_name,
                     workers,
                     repeats,
-                    format!("solve: {error}"),
+                    format!("exact trajectory max error {exact_state_max_diff:.3e}"),
                 ),
                 None,
             );
         }
+        exact_state_diff_samples.push(exact_state_max_diff);
         let fallback_solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
         let snapshot = solver.plan().telemetry_snapshot();
         solve_samples.push(snapshot.full_solve_ms.unwrap_or(fallback_solve_ms));
@@ -744,6 +810,7 @@ fn aot_full_solve_row(
     let solve_median = median(&mut solve_samples);
     let aot = snapshot.aot.as_ref();
     let row = FullSolvePolicyRow {
+        workload: workload.into(),
         frontend: frontend.label().into(),
         layout: layout.label().into(),
         dimension,
@@ -759,6 +826,13 @@ fn aot_full_solve_row(
         mesh_defect_ms: format_opt(snapshot.mesh_defect_estimation_ms),
         mesh_refinement_ms: format_opt(snapshot.mesh_refinement_ms),
         output_construction_ms: format_opt(snapshot.output_construction_ms),
+        exact_state_max_diff: format!(
+            "{:.3e}",
+            exact_state_diff_samples
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max)
+        ),
         callback_ms: format!("{:.3}", median(&mut callback_samples)),
         residual_ms: format!("{:.3}", median(&mut residual_samples)),
         jacobian_ms: format!("{:.3}", median(&mut jacobian_samples)),
@@ -784,6 +858,7 @@ fn aot_full_solve_row(
 }
 
 fn aot_full_solve_error_row(
+    workload: &str,
     frontend: Frontend,
     layout: Layout,
     dimension: usize,
@@ -794,6 +869,7 @@ fn aot_full_solve_error_row(
     error: String,
 ) -> FullSolvePolicyRow {
     FullSolvePolicyRow {
+        workload: workload.into(),
         frontend: frontend.label().into(),
         layout: layout.label().into(),
         dimension,
@@ -809,6 +885,7 @@ fn aot_full_solve_error_row(
         mesh_defect_ms: "-".into(),
         mesh_refinement_ms: "-".into(),
         output_construction_ms: "-".into(),
+        exact_state_max_diff: "-".into(),
         callback_ms: "-".into(),
         residual_ms: "-".into(),
         jacobian_ms: "-".into(),
@@ -830,18 +907,38 @@ fn aot_full_solve_error_row(
     }
 }
 
-fn full_solve_equations(dimension: usize) -> (Vec<Expr>, Vec<String>) {
+fn full_solve_equations(dimension: usize, workload: &str) -> (Vec<Expr>, Vec<String>) {
     let states = (0..dimension)
         .map(|index| format!("y{index}"))
         .collect::<Vec<_>>();
     let equations = states
         .iter()
-        .map(|state| Expr::parse_expression(&format!("p*({state} + 1)")))
+        .enumerate()
+        .map(|(index, state)| {
+            let rhs = match workload {
+                "independent" => format!("p*({state} + 1)"),
+                "coupled-chain" if dimension > 1 => {
+                    let coupling = match (index > 0, index + 1 < dimension) {
+                        (false, true) => format!("{} - {state}", states[index + 1]),
+                        (true, false) => format!("{} - {state}", states[index - 1]),
+                        (true, true) => {
+                            format!("{} - 2*{state} + {}", states[index - 1], states[index + 1])
+                        }
+                        (false, false) => unreachable!("dimension is greater than one"),
+                    };
+                    format!("p*({state} + 1) + 0.25*({coupling})")
+                }
+                "coupled-chain" => format!("p*({state} + 1)"),
+                other => panic!("unknown AOT full-solve workload `{other}`"),
+            };
+            Expr::parse_expression(&rhs)
+        })
         .collect();
     (equations, states)
 }
 
 fn aot_full_solve_policy_report(
+    workload: &str,
     workers: usize,
     dimensions: &[usize],
     nodes: &[usize],
@@ -849,7 +946,7 @@ fn aot_full_solve_policy_report(
     policies: &[String],
     layouts: &[Layout],
     repeats: usize,
-) -> String {
+) -> (String, bool) {
     let mut rows = Vec::new();
     for &dimension in dimensions {
         for &node_count in nodes {
@@ -860,6 +957,7 @@ fn aot_full_solve_policy_report(
                     }
                     for policy_name in policies {
                         let (row, solve_ms) = aot_full_solve_row(
+                            workload,
                             frontend,
                             layout,
                             dimension,
@@ -880,6 +978,7 @@ fn aot_full_solve_policy_report(
             solve_ms,
             rendered.iter().find_map(|candidate: &FullSolvePolicyRow| {
                 (candidate.policy == "sequential"
+                    && candidate.workload == row.workload
                     && candidate.frontend == row.frontend
                     && candidate.layout == row.layout
                     && candidate.dimension == row.dimension
@@ -900,9 +999,10 @@ fn aot_full_solve_policy_report(
         }
         rendered.push(row);
     }
+    let has_failures = rendered.iter().any(|row| row.status != "ok");
     let table = Table::new(rendered).to_string();
     validate_markdown_table(&table);
-    table
+    (table, has_failures)
 }
 
 fn continuation_comparison(rows: &[Row], row: &Row) -> String {
@@ -933,6 +1033,50 @@ fn continuation_comparison(rows: &[Row], row: &Row) -> String {
     format!("vs {lambdify_frontend}: {delta:+.1}%")
 }
 
+fn cold_amortization(rows: &[Row], row: &Row) -> (String, String) {
+    let lambdify_frontend = match row.frontend.as_str() {
+        "aot-expr-legacy" => "lambdify-expr-legacy",
+        "aot-atom-native" => "lambdify-atom-native",
+        _ => return ("baseline".into(), "baseline".into()),
+    };
+    let Some(reference) = rows.iter().find(|candidate| {
+        candidate.frontend == lambdify_frontend
+            && candidate.layout == row.layout
+            && candidate.dimension == row.dimension
+            && candidate.policy == row.policy
+            && candidate.status == "ok"
+    }) else {
+        return ("missing-lambdify-row".into(), "missing-lambdify-row".into());
+    };
+    if row.status != "ok" || row.aot_cache_misses == 0 || row.aot_cache_hits != 0 {
+        return ("cache-not-cold".into(), "cache-not-cold".into());
+    }
+    let (Ok(aot_prepare), Ok(aot_series), Ok(lambda_prepare), Ok(lambda_series)) = (
+        row.preparation_ms.parse::<f64>(),
+        row.continuation_ms.parse::<f64>(),
+        reference.preparation_ms.parse::<f64>(),
+        reference.continuation_ms.parse::<f64>(),
+    ) else {
+        return ("not-applicable".into(), "not-applicable".into());
+    };
+    if lambda_series <= 0.0 || aot_series <= 0.0 {
+        return ("not-applicable".into(), "not-applicable".into());
+    }
+    let aot_total = aot_prepare + aot_series;
+    let lambda_total = lambda_prepare + lambda_series;
+    let delta = (aot_total / lambda_total - 1.0) * 100.0;
+    let aot_per_pair = aot_series / 16.0;
+    let lambda_per_pair = lambda_series / 16.0;
+    let break_even = if lambda_per_pair <= aot_per_pair {
+        "not-reached".into()
+    } else {
+        let count = ((aot_prepare - lambda_prepare).max(0.0) / (lambda_per_pair - aot_per_pair))
+            .ceil() as usize;
+        count.to_string()
+    };
+    (format!("{delta:+.1}% (cold+16)"), break_even)
+}
+
 fn main() {
     let phase = std::env::var("BVP_SCI_AOT_BENCH_PHASE").unwrap_or_else(|_| "matrix".into());
     let compiler = std::env::var("BVP_SCI_AOT_COMPILER").unwrap_or_else(|_| "tcc".into());
@@ -947,6 +1091,8 @@ fn main() {
             .filter_map(|value| value.parse().ok())
             .filter(|value: &usize| *value > 0)
             .collect::<Vec<_>>();
+        let workload = std::env::var("BVP_SCI_AOT_FULL_SOLVE_WORKLOAD")
+            .unwrap_or_else(|_| "independent".into());
         let nodes = parse_list("BVP_SCI_AOT_FULL_SOLVE_NODES", "16,64")
             .into_iter()
             .filter_map(|value| value.parse().ok())
@@ -962,27 +1108,33 @@ fn main() {
             .unwrap_or(3);
         let layouts = selected_layouts();
         let frontends = selected_frontends();
+        let (policy_table, policy_failures) = aot_full_solve_policy_report(
+            &workload,
+            workers,
+            &dimensions,
+            &nodes,
+            &frontends,
+            &policies,
+            &layouts,
+            repeats,
+        );
         let body = format!(
-            "# BVP_sci AOT full-solve execution-policy matrix\n\n- phase: `policy-full-solve`\n- workers_requested: {workers}\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- policies: {policies:?}\n- layouts: {:?}\n- rows report medians over {repeats} independent prepared solves\n- break-even uses inclusive `full_solve_ms` only, against Sequential for the same frontend/layout/dimension/nodes\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes, matched with the Lambdify policy matrix\n- callback/chunk speed is diagnostic and must not be interpreted as full-solve speedup\n- numerical collocation workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
+            "# BVP_sci AOT full-solve execution-policy matrix\n\n- phase: `policy-full-solve`\n- workload: `{workload}` (`independent` or nearest-neighbor `coupled-chain`)\n- workers_requested: {workers}\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- policies: {policies:?}\n- layouts: {:?}\n- rows report medians over {repeats} independent prepared solves\n- break-even uses inclusive `full_solve_ms` only, against Sequential for the same workload/frontend/layout/dimension/nodes\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes, matched with the Lambdify policy matrix\n- callback/chunk speed is diagnostic and must not be interpreted as full-solve speedup\n- numerical collocation workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
             layouts
                 .iter()
                 .map(|layout| layout.label())
                 .collect::<Vec<_>>(),
-            aot_full_solve_policy_report(
-                workers,
-                &dimensions,
-                &nodes,
-                &frontends,
-                &policies,
-                &layouts,
-                repeats,
-            )
+            policy_table
         );
         let report_name = std::env::var("BVP_SCI_AOT_BENCH_REPORT")
             .unwrap_or_else(|_| format!("aot_policy_full_solve_workers_{workers}"));
         let path = write_test_report("BVP_sci_AOT_Bench", &report_name, &body)
             .expect("write compact AOT full-solve policy report");
         println!("report={}", path.display());
+        if policy_failures {
+            eprintln!("AOT full-solve policy benchmark contains failed rows");
+            std::process::exit(1);
+        }
         return;
     }
     let mut rows = Vec::new();
@@ -996,18 +1148,77 @@ fn main() {
         }
     }
     let comparison_rows = rows.clone();
+    let mut lifecycle_failures = Vec::new();
     for row in &mut rows {
         row.continuation_vs_lambdify = continuation_comparison(&comparison_rows, row);
+        if phase == "cold-amortization" {
+            if row.frontend.starts_with("aot-")
+                && row.status == "ok"
+                && (row.aot_cache_misses == 0
+                    || row.aot_cache_hits != 0
+                    || row.build_attempts == 0
+                    || row.build_successes == 0
+                    || row.link_attempts == 0
+                    || row.link_successes == 0
+                    || row.publication_calls == 0)
+            {
+                let reason = format!(
+                    "{} / {} / n={}: expected cold miss, successful build/link/publication, got hits={}, misses={}, build_attempts={}, build_successes={}, link_attempts={}, link_successes={}, publication_calls={}",
+                    row.frontend,
+                    row.layout,
+                    row.dimension,
+                    row.aot_cache_hits,
+                    row.aot_cache_misses,
+                    row.build_attempts,
+                    row.build_successes,
+                    row.link_attempts,
+                    row.link_successes,
+                    row.publication_calls
+                );
+                lifecycle_failures.push(reason.clone());
+                row.status = format!("error: {reason}");
+            }
+            let (series_delta, break_even) = cold_amortization(&comparison_rows, row);
+            row.cold_total_16_vs_lambdify = series_delta;
+            row.cold_break_even_callback_pairs = break_even;
+        }
     }
     let table = Table::new(&rows).to_string();
     validate_markdown_table(&table);
-    let body = format!(
-        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-step residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
+    let row_failures = rows
+        .iter()
+        .filter(|row| row.status != "ok")
+        .map(|row| {
+            format!(
+                "{} / {} / n={}: {}",
+                row.frontend, row.layout, row.dimension, row.status
+            )
+        })
+        .collect::<Vec<_>>();
+    let failures = lifecycle_failures
+        .into_iter()
+        .chain(row_failures)
+        .collect::<Vec<_>>();
+    let failure_note = if failures.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n## Failed Rows\n\n- {}\n", failures.join("\n- "))
+    };
+    let mut body = format!(
+        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-pair residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT currently uses finite differences for parameter derivatives (`df/dp`); Lambdify ExprLegacy/AtomViewNative have prepared symbolic `df/dp`. Callback timings across these routes therefore include different work and are not strict apples-to-apples evidence\n- in `cold-amortization`, every AOT row gets a unique artifact namespace; require nonzero cache misses and zero hits. `cold_total_16_vs_lambdify` compares preparation plus one 16-pair callback series, while `cold_break_even_callback_pairs` projects the callback-only crossover count; neither is a full-solve break-even claim\n- this callback-only phase is not full BVP solve break-even evidence; use `policy-full-solve` with large matched dimensions/nodes for execution-policy break-even\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
         table
     );
+    body.push_str(
+        "\n\nThe callback-only dashboard times `df/dy` evaluation, not `df/dp`; it therefore does not measure the AOT finite-difference parameter-Jacobian overhead. The `df/dp` distinction is relevant to full parameterized BVP solves and must be read from solver-level telemetry/evidence.\n",
+    );
+    body.push_str(&failure_note);
     let report_name =
         std::env::var("BVP_SCI_AOT_BENCH_REPORT").unwrap_or_else(|_| format!("aot_{phase}"));
     let path = write_test_report("BVP_sci_AOT_Bench", &report_name, &body)
         .expect("write compact BVP_sci AOT report");
     println!("report={}", path.display());
+    if !failures.is_empty() {
+        eprintln!("AOT benchmark had {} invalid row(s)", failures.len());
+        std::process::exit(1);
+    }
 }

@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator
 
 _ACTIVE: ContextVar["BvpTelemetry | None"] = ContextVar("bvp_telemetry", default=None)
 _PHASE: ContextVar[str | None] = ContextVar("bvp_telemetry_phase", default=None)
+_MESH_PASS: ContextVar[dict[str, Any] | None] = ContextVar("bvp_telemetry_mesh_pass", default=None)
 
 _STAGES = (
     "solve_bvp",
@@ -45,10 +46,48 @@ class BvpTelemetry:
     capture_newton_trace: bool = False
     newton_trace: list[dict[str, Any]] = field(default_factory=list)
     newton_convergence_trace: list[dict[str, Any]] = field(default_factory=list)
+    mesh_passes: list[dict[str, Any]] = field(default_factory=list)
 
     def count(self, name: str, amount: int = 1) -> None:
         if self.enabled:
             self.counters[name] = self.counters.get(name, 0) + amount
+            active = _MESH_PASS.get()
+            if active is not None and active.get("owner") == id(self):
+                counters = active["counters"]
+                counters[name] = counters.get(name, 0) + amount
+
+    def begin_mesh_pass(self, state_dimension: int, mesh_nodes: int,
+                        parameter_count: int) -> dict[str, Any]:
+        """Start attribution for one SciPy outer solve pass on its current mesh."""
+        self.finish_mesh_pass()
+        record: dict[str, Any] = {
+            "owner": id(self),
+            "mesh_pass": len(self.mesh_passes),
+            "mesh_nodes": int(mesh_nodes),
+            "linear_system_dimension": int(state_dimension * mesh_nodes + parameter_count),
+            "counters": {
+                name: 0 for name in (
+                    "solve_newton_calls", "construct_global_jac_calls",
+                    "factorization_calls", "linear_solve_calls", "prepare_sys_calls",
+                    "rhs_callback_calls", "rhs_callback_state_points",
+                    "boundary_callback_calls", "rhs_jacobian_callback_calls",
+                    "rhs_jacobian_callback_state_points",
+                    "boundary_jacobian_callback_calls",
+                )
+            },
+            "timings_ms": {},
+            "_started_at": perf_counter(),
+        }
+        self.mesh_passes.append(record)
+        _MESH_PASS.set(record)
+        return record
+
+    def finish_mesh_pass(self) -> None:
+        active = _MESH_PASS.get()
+        if active is not None and active.get("owner") == id(self):
+            started = active.pop("_started_at", None)
+            if started is not None:
+                active["elapsed_ms"] = (perf_counter() - started) * 1e3
 
     @contextmanager
     def measure(self, name: str) -> Iterator[None]:
@@ -60,9 +99,13 @@ class BvpTelemetry:
         try:
             yield
         finally:
-            self.timings_ms[name] = self.timings_ms.get(name, 0.0) + (
-                perf_counter() - start
-            ) * 1e3
+            elapsed_ms = (perf_counter() - start) * 1e3
+            self.timings_ms[name] = self.timings_ms.get(name, 0.0) + elapsed_ms
+            active = _MESH_PASS.get()
+            if (name != "solve_bvp" and active is not None
+                    and active.get("owner") == id(self)):
+                timings = active["timings_ms"]
+                timings[name] = timings.get(name, 0.0) + elapsed_ms
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
@@ -83,6 +126,15 @@ class BvpTelemetry:
             snapshot["newton_convergence_trace"] = list(
                 self.newton_convergence_trace
             )
+        if self.enabled:
+            snapshot["mesh_passes"] = [
+                {
+                    **{key: value for key, value in record.items() if key != "owner"},
+                    "counters": dict(sorted(record["counters"].items())),
+                    "timings_ms": dict(sorted(record["timings_ms"].items())),
+                }
+                for record in self.mesh_passes
+            ]
         return snapshot
 
 
@@ -116,6 +168,9 @@ def _call_with_newton_trace(
                 if local_event == "line" and local_frame.f_lineno == decision_line:
                     values = local_frame.f_locals
                     telemetry.newton_trace.append({
+                        "mesh_pass": (_MESH_PASS.get() or {}).get("mesh_pass", 0),
+                        "mesh_nodes": int(values["m"]),
+                        "linear_system_dimension": int(values["n"] * values["m"] + values["p"].size),
                         "iteration": int(values["iteration"]),
                         "trial": int(values["trial"]),
                         "alpha": float(values["alpha"]),
@@ -145,12 +200,16 @@ def _call_with_newton_trace(
                         for value in values["bc_res"]
                     )
                     telemetry.newton_convergence_trace.append({
+                        "mesh_pass": (_MESH_PASS.get() or {}).get("mesh_pass", 0),
+                        "mesh_nodes": int(values["m"]),
+                        "linear_system_dimension": int(values["n"] * values["m"] + values["p"].size),
                         "iteration": int(values["iteration"]),
                         "njev": int(values["njev"]),
                         "max_normalized_collocation_residual": collocation_ratio,
                         "normalized_boundary_residual": boundary_ratio,
                         "converged": collocation_ratio < 1.0 and boundary_ratio < 1.0,
                     })
+                    telemetry.count("newton_iterations")
                 return trace_newton
 
             return trace_newton
@@ -181,6 +240,13 @@ def instrument_module(module: Any) -> Callable[..., Any]:
             telemetry = _ACTIVE.get()
             if telemetry is None or not telemetry.enabled:
                 return __original(*args, **kwargs)
+            if __name == "prepare_sys":
+                bound_stage = inspect.signature(__original).bind_partial(*args, **kwargs)
+                telemetry.begin_mesh_pass(
+                    int(bound_stage.arguments["n"]),
+                    int(bound_stage.arguments["m"]),
+                    int(bound_stage.arguments["k"]),
+                )
             phase = telemetry.phase(__name) if __name in {
                 "estimate_fun_jac", "estimate_bc_jac"
             } else _null_context()
@@ -222,9 +288,9 @@ def instrument_module(module: Any) -> Callable[..., Any]:
                              **kwargs: Any) -> Any:
         if telemetry is None or not telemetry.enabled:
             return solve_bvp(*args, **kwargs)
-        args = list(args)
-        fun = kwargs.get("fun", args[0] if args else None)
-        bc = kwargs.get("bc", args[1] if len(args) > 1 else None)
+        bound = inspect.signature(solve_bvp).bind_partial(*args, **kwargs)
+        fun = bound.arguments.get("fun")
+        bc = bound.arguments.get("bc")
         if fun is None or bc is None:
             raise TypeError("solve_bvp requires positional or keyword fun and bc")
 
@@ -232,32 +298,43 @@ def instrument_module(module: Any) -> Callable[..., Any]:
             @wraps(callback)
             def call(*cb_args: Any, **cb_kwargs: Any) -> Any:
                 phase = _PHASE.get()
-                label = "rhs" if kind == "rhs" else "boundary"
+                label = {
+                    "rhs": "rhs_callback",
+                    "boundary": "boundary_callback",
+                    "rhs_jacobian": "rhs_jacobian_callback",
+                    "boundary_jacobian": "boundary_jacobian_callback",
+                }[kind]
                 if phase == "estimate_fun_jac" and kind == "rhs":
                     telemetry.count("rhs_finite_difference_callback_calls")
                 if phase == "estimate_bc_jac" and kind == "boundary":
                     telemetry.count("boundary_finite_difference_callback_calls")
-                with telemetry.measure(f"{label}_callback"):
+                if kind in {"rhs", "rhs_jacobian"} and len(cb_args) > 1:
+                    values = cb_args[1]
+                    points = int(values.shape[-1]) if getattr(values, "ndim", 0) > 1 else 1
+                    telemetry.count(f"{label}_state_points", points)
+                with telemetry.measure(label):
                     return callback(*cb_args, **cb_kwargs)
 
             return call
 
-        wrapped_fun = timed_callback("rhs", fun)
-        wrapped_bc = timed_callback("boundary", bc)
-        if "fun" in kwargs:
-            kwargs["fun"] = wrapped_fun
-        elif args:
-            args[0] = wrapped_fun
-        if "bc" in kwargs:
-            kwargs["bc"] = wrapped_bc
-        elif len(args) > 1:
-            args[1] = wrapped_bc
+        bound.arguments["fun"] = timed_callback("rhs", fun)
+        bound.arguments["bc"] = timed_callback("boundary", bc)
+        for argument, kind in (
+            ("fun_jac", "rhs_jacobian"),
+            ("bc_jac", "boundary_jacobian"),
+        ):
+            callback = bound.arguments.get(argument)
+            if callback is not None:
+                bound.arguments[argument] = timed_callback(kind, callback)
 
         token = _ACTIVE.set(telemetry)
+        mesh_token = _MESH_PASS.set(None)
         try:
             with telemetry.measure("solve_bvp"):
-                return solve_bvp(*args, **kwargs)
+                return solve_bvp(*bound.args, **bound.kwargs)
         finally:
+            telemetry.finish_mesh_pass()
+            _MESH_PASS.reset(mesh_token)
             _ACTIVE.reset(token)
 
     return solve_with_telemetry

@@ -50,7 +50,12 @@ pub enum BvpSciTelemetryStage {
     Factorization,
     SparseSymbolicAnalysis,
     SparseNumericFactorization,
+    SuperLuAbiConversion,
+    SuperLuFactorFfi,
+    SuperLuNativeFactorization,
     LinearSolve,
+    SuperLuSolveFfi,
+    SuperLuNativeSolve,
     BandedStructuredFactorization,
     BandedScalarFallbackFactorization,
     BandedStructuredSolve,
@@ -74,6 +79,15 @@ pub enum BvpSciBandedRoute {
     SparseFallback,
 }
 
+/// Internal phases of the bordered-banded Schur factorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpSciBandedFactorPhase {
+    CoreFactor,
+    CoreToBorderSolve,
+    SchurAssembly,
+    BorderFactor,
+}
+
 /// Timing metadata used by compact reports and downstream aggregation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BvpSciTelemetryScope {
@@ -94,6 +108,11 @@ pub struct BvpSciTelemetryScope {
 /// the residual/Jacobian hot path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BvpSciNewtonTraceEntry {
+    /// Zero-based outer solve pass. A pass may revisit the same mesh when
+    /// Newton is retried without refinement.
+    pub mesh_pass: u64,
+    pub mesh_nodes: usize,
+    pub linear_system_dimension: usize,
     pub iteration: u64,
     pub residual_before: f64,
     pub residual_after: Option<f64>,
@@ -115,6 +134,116 @@ pub struct BvpSciNewtonTraceEntry {
     pub normalized_boundary_residual: f64,
 }
 
+/// Work and inclusive stage times attributed to one outer mesh solve pass.
+///
+/// This compact record is only collected in `Timings` mode. Its timings are
+/// per-pass deltas of the global counters/scopes, not allocator measurements.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BvpSciMeshPassSnapshot {
+    pub mesh_pass: u64,
+    pub mesh_nodes: usize,
+    pub linear_system_dimension: usize,
+    pub newton_passes: u64,
+    pub newton_iterations: u64,
+    pub jacobian_builds: u64,
+    pub backtracking_trials: u64,
+    pub accepted_steps: u64,
+    pub rejected_steps: u64,
+    pub rhs_calls: u64,
+    pub boundary_calls: u64,
+    pub rhs_jacobian_calls: u64,
+    pub parameter_jacobian_calls: u64,
+    pub boundary_jacobian_calls: u64,
+    pub collocation_evaluations: u64,
+    pub defect_probes: u64,
+    pub linear_assemblies: u64,
+    pub factorizations: u64,
+    pub linear_solves: u64,
+    pub mesh_refinements: u64,
+    pub mesh_points_added: u64,
+    pub sparse_symbolic_analyses: u64,
+    pub sparse_symbolic_reuses: u64,
+    pub sparse_numeric_factorizations: u64,
+    pub sparse_triplet_materializations: u64,
+    pub sparse_csc_assemblies: u64,
+    pub banded_core_factorizations: u64,
+    pub banded_core_to_border_solves: u64,
+    pub banded_schur_assemblies: u64,
+    pub banded_border_factorizations: u64,
+    pub banded_structured_factorizations: u64,
+    pub banded_scalar_fallback_factorizations: u64,
+    pub banded_sparse_fallback_factorizations: u64,
+    pub banded_structured_solves: u64,
+    pub banded_scalar_fallback_solves: u64,
+    pub banded_sparse_fallback_solves: u64,
+    pub elapsed_ms: f64,
+    pub newton_ms: Option<f64>,
+    pub rhs_callback_ms: Option<f64>,
+    pub jacobian_callback_ms: Option<f64>,
+    pub parameter_jacobian_callback_ms: Option<f64>,
+    pub boundary_callback_ms: Option<f64>,
+    pub linear_assembly_ms: Option<f64>,
+    pub factorization_ms: Option<f64>,
+    pub linear_solve_ms: Option<f64>,
+    pub sparse_symbolic_analysis_ms: Option<f64>,
+    pub sparse_symbolic_reuse_ms: Option<f64>,
+    pub sparse_numeric_factorization_ms: Option<f64>,
+    pub sparse_triplet_materialization_ms: Option<f64>,
+    pub sparse_csc_assembly_ms: Option<f64>,
+    pub banded_core_factorization_ms: Option<f64>,
+    pub banded_core_to_border_solve_ms: Option<f64>,
+    pub banded_schur_assembly_ms: Option<f64>,
+    pub banded_border_factorization_ms: Option<f64>,
+    pub banded_structured_factorization_ms: Option<f64>,
+    pub banded_scalar_fallback_factorization_ms: Option<f64>,
+    pub banded_sparse_fallback_factorization_ms: Option<f64>,
+    pub banded_structured_solve_ms: Option<f64>,
+    pub banded_scalar_fallback_solve_ms: Option<f64>,
+    pub banded_sparse_fallback_solve_ms: Option<f64>,
+    pub banded_residual_guard_ms: Option<f64>,
+    pub banded_rhs_permutation_ms: Option<f64>,
+    pub collocation_ms: Option<f64>,
+    pub defect_estimation_ms: Option<f64>,
+    pub mesh_refinement_ms: Option<f64>,
+}
+
+/// One explicitly requested numeric system captured at a selected mesh size.
+///
+/// Entries retain the collocation assembler's additive triplet semantics;
+/// each backend is responsible for resolving duplicate coordinates in its
+/// native representation. This diagnostic payload is absent unless enabled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BvpSciLinearSystemCapture {
+    pub dimension: usize,
+    pub mesh_nodes: usize,
+    pub entries: Vec<(usize, usize, f64)>,
+    pub rhs: Vec<f64>,
+}
+
+/// SuperLU-only lifecycle and timing data. Factor storage is reported as
+/// native storage entries and materialized CSC nonzeros, not estimated bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BvpSciSuperLuTelemetrySnapshot {
+    pub abi_conversions: u64,
+    pub factor_ffi_calls: u64,
+    pub native_factorization_calls: u64,
+    pub solve_ffi_calls: u64,
+    pub native_solve_calls: u64,
+    pub factor_l_storage_entries: u64,
+    pub factor_u_storage_entries: u64,
+    pub factor_l_csc_nnz: u64,
+    pub factor_u_csc_nnz: u64,
+    pub abi_conversion_ms: Option<f64>,
+    /// Rust wall around the native factor call; includes bridge setup/cleanup.
+    pub factor_ffi_ms: Option<f64>,
+    /// Native timer around ordering and SuperLU numeric factorization.
+    pub native_factorization_ms: Option<f64>,
+    /// Rust wall around the retained-factor solve call.
+    pub solve_ffi_ms: Option<f64>,
+    /// Native timer around SuperLU triangular solve only.
+    pub native_solve_ms: Option<f64>,
+}
+
 /// Point-in-time report for one prepared model and its numerical lifecycle.
 ///
 /// Counter fields are meaningful in both `Counters` and `Timings` modes.
@@ -132,6 +261,8 @@ pub struct BvpSciTelemetrySnapshot {
     pub rhs_calls: u64,
     pub boundary_calls: u64,
     pub jacobian_calls: u64,
+    pub parameter_jacobian_calls: u64,
+    pub boundary_jacobian_calls: u64,
     pub finite_difference_probes: u64,
     pub newton_iterations: u64,
     pub newton_jacobian_refreshes: u64,
@@ -140,14 +271,27 @@ pub struct BvpSciTelemetrySnapshot {
     pub newton_rejected_steps: u64,
     /// Detailed-only modified-Newton trace; empty in Off/Counters modes.
     pub newton_residual_history: Vec<BvpSciNewtonTraceEntry>,
+    /// Per-outer-pass work and timings, available only in `Timings` mode.
+    pub mesh_passes: Vec<BvpSciMeshPassSnapshot>,
     pub collocation_evaluations: u64,
     pub mesh_defect_probes: u64,
     pub mesh_refinements: u64,
     pub mesh_points_added: u64,
     pub linear_assemblies: u64,
     pub factorizations: u64,
+    /// Number of requested SuperLU routes that visibly fell back to faer.
+    pub superlu_fallbacks: u64,
+    /// Backend-specific work; default/empty unless the SuperLU route ran.
+    pub superlu: BvpSciSuperLuTelemetrySnapshot,
     pub sparse_symbolic_analyses: u64,
+    pub sparse_symbolic_reuses: u64,
     pub sparse_numeric_factorizations: u64,
+    pub sparse_triplet_materializations: u64,
+    pub sparse_csc_assemblies: u64,
+    pub banded_core_factorizations: u64,
+    pub banded_core_to_border_solves: u64,
+    pub banded_schur_assemblies: u64,
+    pub banded_border_factorizations: u64,
     pub linear_solves: u64,
     pub banded_structured_factorizations: u64,
     pub banded_scalar_fallback_factorizations: u64,
@@ -173,9 +317,14 @@ pub struct BvpSciTelemetrySnapshot {
     pub banded_border_min_abs_pivot: Option<f64>,
     /// Largest lower multiplier in the latest border Schur factor.
     pub banded_border_max_multiplier_norm: Option<f64>,
-    /// Infinity norm of the latest structured linear-solve residual.
+    /// Absolute infinity-norm residual of the most recent structured Banded
+    /// solve candidate, measured before the residual guard chooses a fallback.
+    /// This is not the residual of the final fallback solution when fallback
+    /// is selected.
     pub banded_last_residual_inf: Option<f64>,
-    /// Infinity norm of the latest reordered structured solution.
+    /// Infinity norm of the most recent structured Banded solve candidate,
+    /// measured before fallback selection. It may be very large when the
+    /// candidate is rejected and must not be read as the returned solution.
     pub banded_last_solution_inf: Option<f64>,
     pub parameter_rebinds: u64,
     pub continuation_solves: u64,
@@ -225,6 +374,12 @@ pub struct BvpSciTelemetrySnapshot {
     pub residual_evaluator_compilation_ms: Option<f64>,
     pub jacobian_evaluator_compilation_ms: Option<f64>,
     pub binding_ms: Option<f64>,
+    /// Exclusive callback times, split for cross-implementation diagnosis.
+    pub rhs_callback_ms: Option<f64>,
+    pub boundary_callback_ms: Option<f64>,
+    pub jacobian_callback_ms: Option<f64>,
+    pub parameter_jacobian_callback_ms: Option<f64>,
+    pub boundary_jacobian_callback_ms: Option<f64>,
     pub residual_evaluation_ms: Option<f64>,
     pub jacobian_evaluation_ms: Option<f64>,
     pub jacobian_output_assembly_ms: Option<f64>,
@@ -237,7 +392,14 @@ pub struct BvpSciTelemetrySnapshot {
     pub linear_assembly_ms: Option<f64>,
     pub factorization_ms: Option<f64>,
     pub sparse_symbolic_analysis_ms: Option<f64>,
+    pub sparse_symbolic_reuse_ms: Option<f64>,
     pub sparse_numeric_factorization_ms: Option<f64>,
+    pub sparse_triplet_materialization_ms: Option<f64>,
+    pub sparse_csc_assembly_ms: Option<f64>,
+    pub banded_core_factorization_ms: Option<f64>,
+    pub banded_core_to_border_solve_ms: Option<f64>,
+    pub banded_schur_assembly_ms: Option<f64>,
+    pub banded_border_factorization_ms: Option<f64>,
     /// Compatibility alias for the historical linear-solve timing field.
     pub solve_ms: Option<f64>,
     pub linear_solve_ms: Option<f64>,
@@ -351,6 +513,11 @@ impl BvpSciTelemetrySnapshot {
             self.residual_evaluator_compilation_ms,
             self.jacobian_evaluator_compilation_ms,
             self.binding_ms,
+            self.rhs_callback_ms,
+            self.boundary_callback_ms,
+            self.jacobian_callback_ms,
+            self.parameter_jacobian_callback_ms,
+            self.boundary_jacobian_callback_ms,
             self.residual_evaluation_ms,
             self.jacobian_evaluation_ms,
             self.jacobian_output_assembly_ms,
@@ -363,7 +530,19 @@ impl BvpSciTelemetrySnapshot {
             self.linear_assembly_ms,
             self.factorization_ms,
             self.sparse_symbolic_analysis_ms,
+            self.sparse_symbolic_reuse_ms,
             self.sparse_numeric_factorization_ms,
+            self.sparse_triplet_materialization_ms,
+            self.sparse_csc_assembly_ms,
+            self.superlu.abi_conversion_ms,
+            self.superlu.factor_ffi_ms,
+            self.superlu.native_factorization_ms,
+            self.superlu.solve_ffi_ms,
+            self.superlu.native_solve_ms,
+            self.banded_core_factorization_ms,
+            self.banded_core_to_border_solve_ms,
+            self.banded_schur_assembly_ms,
+            self.banded_border_factorization_ms,
             self.solve_ms,
             self.linear_solve_ms,
             self.full_solve_ms,
@@ -382,7 +561,7 @@ impl BvpSciTelemetrySnapshot {
         .into_iter()
         .any(|value| value.is_some());
         if self.mode != BvpSciTelemetryMode::Timings {
-            if !self.timing_scopes.is_empty() || has_timing_fields {
+            if !self.timing_scopes.is_empty() || !self.mesh_passes.is_empty() || has_timing_fields {
                 return Err(BvpSciTelemetryContractError::TimingDataWithoutTimingMode);
             }
         }
@@ -431,6 +610,8 @@ struct TelemetryInner {
     rhs_calls: AtomicU64,
     boundary_calls: AtomicU64,
     jacobian_calls: AtomicU64,
+    parameter_jacobian_calls: AtomicU64,
+    boundary_jacobian_calls: AtomicU64,
     finite_difference_probes: AtomicU64,
     newton_iterations: AtomicU64,
     newton_jacobian_refreshes: AtomicU64,
@@ -438,14 +619,34 @@ struct TelemetryInner {
     newton_accepted_steps: AtomicU64,
     newton_rejected_steps: AtomicU64,
     newton_residual_history: Option<Mutex<Vec<BvpSciNewtonTraceEntry>>>,
+    mesh_passes: Option<Mutex<Vec<BvpSciMeshPassSnapshot>>>,
+    linear_system_capture_min_dimension: AtomicU64,
+    linear_system_capture: Mutex<Option<BvpSciLinearSystemCapture>>,
     collocation_evaluations: AtomicU64,
     mesh_defect_probes: AtomicU64,
     mesh_refinements: AtomicU64,
     mesh_points_added: AtomicU64,
     linear_assemblies: AtomicU64,
     factorizations: AtomicU64,
+    superlu_fallbacks: AtomicU64,
+    superlu_abi_conversions: AtomicU64,
+    superlu_factor_ffi_calls: AtomicU64,
+    superlu_native_factorization_calls: AtomicU64,
+    superlu_solve_ffi_calls: AtomicU64,
+    superlu_native_solve_calls: AtomicU64,
+    superlu_factor_l_storage_entries: AtomicU64,
+    superlu_factor_u_storage_entries: AtomicU64,
+    superlu_factor_l_csc_nnz: AtomicU64,
+    superlu_factor_u_csc_nnz: AtomicU64,
     sparse_symbolic_analyses: AtomicU64,
+    sparse_symbolic_reuses: AtomicU64,
     sparse_numeric_factorizations: AtomicU64,
+    sparse_triplet_materializations: AtomicU64,
+    sparse_csc_assemblies: AtomicU64,
+    banded_core_factorizations: AtomicU64,
+    banded_core_to_border_solves: AtomicU64,
+    banded_schur_assemblies: AtomicU64,
+    banded_border_factorizations: AtomicU64,
     linear_solves: AtomicU64,
     banded_structured_factorizations: AtomicU64,
     banded_scalar_fallback_factorizations: AtomicU64,
@@ -496,6 +697,11 @@ struct TelemetryInner {
     residual_evaluator_compilation_ns: AtomicU64,
     jacobian_evaluator_compilation_ns: AtomicU64,
     binding_ns: AtomicU64,
+    rhs_callback_ns: AtomicU64,
+    boundary_callback_ns: AtomicU64,
+    jacobian_callback_ns: AtomicU64,
+    parameter_jacobian_callback_ns: AtomicU64,
+    boundary_jacobian_callback_ns: AtomicU64,
     residual_evaluation_ns: AtomicU64,
     jacobian_evaluation_ns: AtomicU64,
     jacobian_output_assembly_ns: AtomicU64,
@@ -508,11 +714,23 @@ struct TelemetryInner {
     linear_assembly_ns: AtomicU64,
     factorization_ns: AtomicU64,
     sparse_symbolic_analysis_ns: AtomicU64,
+    sparse_symbolic_reuse_ns: AtomicU64,
     sparse_numeric_factorization_ns: AtomicU64,
+    sparse_triplet_materialization_ns: AtomicU64,
+    sparse_csc_assembly_ns: AtomicU64,
+    superlu_abi_conversion_ns: AtomicU64,
+    superlu_factor_ffi_ns: AtomicU64,
+    superlu_native_factorization_ns: AtomicU64,
+    superlu_solve_ffi_ns: AtomicU64,
+    superlu_native_solve_ns: AtomicU64,
     solve_ns: AtomicU64,
     full_solve_ns: AtomicU64,
     last_full_solve_ns: AtomicU64,
     banded_structured_factorization_ns: AtomicU64,
+    banded_core_factorization_ns: AtomicU64,
+    banded_core_to_border_solve_ns: AtomicU64,
+    banded_schur_assembly_ns: AtomicU64,
+    banded_border_factorization_ns: AtomicU64,
     banded_scalar_fallback_factorization_ns: AtomicU64,
     banded_scalar_fallback_assembly_ns: AtomicU64,
     banded_structured_solve_ns: AtomicU64,
@@ -536,6 +754,7 @@ impl TelemetryInner {
         Self {
             newton_residual_history: (mode == BvpSciTelemetryMode::Timings)
                 .then(|| Mutex::new(Vec::new())),
+            mesh_passes: (mode == BvpSciTelemetryMode::Timings).then(|| Mutex::new(Vec::new())),
             banded_core_factor_residual_relative_bits: AtomicU64::new(u64::MAX),
             banded_min_abs_pivot_bits: AtomicU64::new(u64::MAX),
             banded_max_multiplier_norm_bits: AtomicU64::new(u64::MAX),
@@ -573,6 +792,18 @@ pub struct BvpSciTelemetryTimer {
     kind: BvpSciTelemetryTimerKind,
 }
 
+/// Delimits one outer mesh pass. Snapshot deltas are taken only at this
+/// controller boundary, keeping locks and snapshot work out of numerical
+/// callbacks and Newton's inner loop.
+pub struct BvpSciMeshPassTimer {
+    telemetry: BvpSciTelemetry,
+    baseline: BvpSciTelemetrySnapshot,
+    started: Instant,
+    mesh_pass: u64,
+    mesh_nodes: usize,
+    linear_system_dimension: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BvpSciTelemetryTimerKind {
     FullSolve,
@@ -598,6 +829,237 @@ impl Drop for BvpSciTelemetryTimer {
                     _ => return,
                 };
                 slot.fetch_add(elapsed, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for BvpSciMeshPassTimer {
+    fn drop(&mut self) {
+        let Some(inner) = &self.telemetry.inner else {
+            return;
+        };
+        let after = self.telemetry.snapshot();
+        let count_delta = |after: u64, before: u64| after.saturating_sub(before);
+        let time_delta = |after: Option<f64>, before: Option<f64>| match (after, before) {
+            (Some(after), Some(before)) => Some((after - before).max(0.0)),
+            (Some(after), None) => Some(after),
+            _ => None,
+        };
+        let record = BvpSciMeshPassSnapshot {
+            mesh_pass: self.mesh_pass,
+            mesh_nodes: self.mesh_nodes,
+            linear_system_dimension: self.linear_system_dimension,
+            newton_passes: count_delta(after.newton_scope_calls, self.baseline.newton_scope_calls),
+            newton_iterations: count_delta(
+                after.newton_iterations,
+                self.baseline.newton_iterations,
+            ),
+            jacobian_builds: count_delta(
+                after.newton_jacobian_refreshes,
+                self.baseline.newton_jacobian_refreshes,
+            ),
+            backtracking_trials: count_delta(
+                after.newton_backtracking_trials,
+                self.baseline.newton_backtracking_trials,
+            ),
+            accepted_steps: count_delta(
+                after.newton_accepted_steps,
+                self.baseline.newton_accepted_steps,
+            ),
+            rejected_steps: count_delta(
+                after.newton_rejected_steps,
+                self.baseline.newton_rejected_steps,
+            ),
+            rhs_calls: count_delta(after.rhs_calls, self.baseline.rhs_calls),
+            boundary_calls: count_delta(after.boundary_calls, self.baseline.boundary_calls),
+            rhs_jacobian_calls: count_delta(after.jacobian_calls, self.baseline.jacobian_calls),
+            parameter_jacobian_calls: count_delta(
+                after.parameter_jacobian_calls,
+                self.baseline.parameter_jacobian_calls,
+            ),
+            boundary_jacobian_calls: count_delta(
+                after.boundary_jacobian_calls,
+                self.baseline.boundary_jacobian_calls,
+            ),
+            collocation_evaluations: count_delta(
+                after.collocation_evaluations,
+                self.baseline.collocation_evaluations,
+            ),
+            defect_probes: count_delta(after.mesh_defect_probes, self.baseline.mesh_defect_probes),
+            linear_assemblies: count_delta(
+                after.linear_assemblies,
+                self.baseline.linear_assemblies,
+            ),
+            factorizations: count_delta(after.factorizations, self.baseline.factorizations),
+            linear_solves: count_delta(after.linear_solves, self.baseline.linear_solves),
+            mesh_refinements: count_delta(after.mesh_refinements, self.baseline.mesh_refinements),
+            mesh_points_added: count_delta(
+                after.mesh_points_added,
+                self.baseline.mesh_points_added,
+            ),
+            sparse_symbolic_analyses: count_delta(
+                after.sparse_symbolic_analyses,
+                self.baseline.sparse_symbolic_analyses,
+            ),
+            sparse_numeric_factorizations: count_delta(
+                after.sparse_numeric_factorizations,
+                self.baseline.sparse_numeric_factorizations,
+            ),
+            sparse_triplet_materializations: count_delta(
+                after.sparse_triplet_materializations,
+                self.baseline.sparse_triplet_materializations,
+            ),
+            sparse_csc_assemblies: count_delta(
+                after.sparse_csc_assemblies,
+                self.baseline.sparse_csc_assemblies,
+            ),
+            sparse_symbolic_reuses: count_delta(
+                after.sparse_symbolic_reuses,
+                self.baseline.sparse_symbolic_reuses,
+            ),
+            banded_core_factorizations: count_delta(
+                after.banded_core_factorizations,
+                self.baseline.banded_core_factorizations,
+            ),
+            banded_core_to_border_solves: count_delta(
+                after.banded_core_to_border_solves,
+                self.baseline.banded_core_to_border_solves,
+            ),
+            banded_schur_assemblies: count_delta(
+                after.banded_schur_assemblies,
+                self.baseline.banded_schur_assemblies,
+            ),
+            banded_border_factorizations: count_delta(
+                after.banded_border_factorizations,
+                self.baseline.banded_border_factorizations,
+            ),
+            banded_structured_factorizations: count_delta(
+                after.banded_structured_factorizations,
+                self.baseline.banded_structured_factorizations,
+            ),
+            banded_scalar_fallback_factorizations: count_delta(
+                after.banded_scalar_fallback_factorizations,
+                self.baseline.banded_scalar_fallback_factorizations,
+            ),
+            banded_sparse_fallback_factorizations: count_delta(
+                after.banded_sparse_fallback_factorizations,
+                self.baseline.banded_sparse_fallback_factorizations,
+            ),
+            banded_structured_solves: count_delta(
+                after.banded_structured_solves,
+                self.baseline.banded_structured_solves,
+            ),
+            banded_scalar_fallback_solves: count_delta(
+                after.banded_scalar_fallback_solves,
+                self.baseline.banded_scalar_fallback_solves,
+            ),
+            banded_sparse_fallback_solves: count_delta(
+                after.banded_sparse_fallback_solves,
+                self.baseline.banded_sparse_fallback_solves,
+            ),
+            elapsed_ms: self.started.elapsed().as_secs_f64() * 1e3,
+            newton_ms: time_delta(after.newton_ms, self.baseline.newton_ms),
+            rhs_callback_ms: time_delta(after.rhs_callback_ms, self.baseline.rhs_callback_ms),
+            jacobian_callback_ms: time_delta(
+                after.jacobian_callback_ms,
+                self.baseline.jacobian_callback_ms,
+            ),
+            parameter_jacobian_callback_ms: time_delta(
+                after.parameter_jacobian_callback_ms,
+                self.baseline.parameter_jacobian_callback_ms,
+            ),
+            boundary_callback_ms: time_delta(
+                after.boundary_callback_ms,
+                self.baseline.boundary_callback_ms,
+            ),
+            linear_assembly_ms: time_delta(
+                after.linear_assembly_ms,
+                self.baseline.linear_assembly_ms,
+            ),
+            factorization_ms: time_delta(after.factorization_ms, self.baseline.factorization_ms),
+            linear_solve_ms: time_delta(after.linear_solve_ms, self.baseline.linear_solve_ms),
+            sparse_symbolic_analysis_ms: time_delta(
+                after.sparse_symbolic_analysis_ms,
+                self.baseline.sparse_symbolic_analysis_ms,
+            ),
+            sparse_numeric_factorization_ms: time_delta(
+                after.sparse_numeric_factorization_ms,
+                self.baseline.sparse_numeric_factorization_ms,
+            ),
+            sparse_triplet_materialization_ms: time_delta(
+                after.sparse_triplet_materialization_ms,
+                self.baseline.sparse_triplet_materialization_ms,
+            ),
+            sparse_csc_assembly_ms: time_delta(
+                after.sparse_csc_assembly_ms,
+                self.baseline.sparse_csc_assembly_ms,
+            ),
+            sparse_symbolic_reuse_ms: time_delta(
+                after.sparse_symbolic_reuse_ms,
+                self.baseline.sparse_symbolic_reuse_ms,
+            ),
+            banded_core_factorization_ms: time_delta(
+                after.banded_core_factorization_ms,
+                self.baseline.banded_core_factorization_ms,
+            ),
+            banded_core_to_border_solve_ms: time_delta(
+                after.banded_core_to_border_solve_ms,
+                self.baseline.banded_core_to_border_solve_ms,
+            ),
+            banded_schur_assembly_ms: time_delta(
+                after.banded_schur_assembly_ms,
+                self.baseline.banded_schur_assembly_ms,
+            ),
+            banded_border_factorization_ms: time_delta(
+                after.banded_border_factorization_ms,
+                self.baseline.banded_border_factorization_ms,
+            ),
+            banded_structured_factorization_ms: time_delta(
+                after.banded_structured_factorization_ms,
+                self.baseline.banded_structured_factorization_ms,
+            ),
+            banded_scalar_fallback_factorization_ms: time_delta(
+                after.banded_scalar_fallback_factorization_ms,
+                self.baseline.banded_scalar_fallback_factorization_ms,
+            ),
+            banded_sparse_fallback_factorization_ms: time_delta(
+                after.banded_sparse_fallback_factorization_ms,
+                self.baseline.banded_sparse_fallback_factorization_ms,
+            ),
+            banded_structured_solve_ms: time_delta(
+                after.banded_structured_solve_ms,
+                self.baseline.banded_structured_solve_ms,
+            ),
+            banded_scalar_fallback_solve_ms: time_delta(
+                after.banded_scalar_fallback_solve_ms,
+                self.baseline.banded_scalar_fallback_solve_ms,
+            ),
+            banded_sparse_fallback_solve_ms: time_delta(
+                after.banded_sparse_fallback_solve_ms,
+                self.baseline.banded_sparse_fallback_solve_ms,
+            ),
+            banded_residual_guard_ms: time_delta(
+                after.banded_residual_guard_ms,
+                self.baseline.banded_residual_guard_ms,
+            ),
+            banded_rhs_permutation_ms: time_delta(
+                after.banded_rhs_permutation_ms,
+                self.baseline.banded_rhs_permutation_ms,
+            ),
+            collocation_ms: time_delta(after.collocation_ms, self.baseline.collocation_ms),
+            defect_estimation_ms: time_delta(
+                after.mesh_defect_estimation_ms,
+                self.baseline.mesh_defect_estimation_ms,
+            ),
+            mesh_refinement_ms: time_delta(
+                after.mesh_refinement_ms,
+                self.baseline.mesh_refinement_ms,
+            ),
+        };
+        if let Some(records) = &inner.mesh_passes {
+            if let Ok(mut records) = records.lock() {
+                records.push(record);
             }
         }
     }
@@ -641,6 +1103,59 @@ impl BvpSciTelemetry {
     /// Return the collection mode of this handle.
     pub fn mode(&self) -> BvpSciTelemetryMode {
         self.mode
+    }
+
+    /// Opt in to capturing the first assembled Newton system at or above the
+    /// requested global dimension. Capture is diagnostic-only and disabled by
+    /// default; production solves therefore do not clone matrix entries/RHS.
+    pub fn enable_linear_system_capture(&self, minimum_dimension: usize) {
+        if let Some(inner) = &self.inner {
+            inner.linear_system_capture_min_dimension.store(
+                minimum_dimension.max(1).min(u64::MAX as usize) as u64,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Return the captured matrix triplets and Newton RHS, if capture was
+    /// requested and a solve reached the configured dimension.
+    pub fn linear_system_capture(&self) -> Option<BvpSciLinearSystemCapture> {
+        self.inner.as_ref().and_then(|inner| {
+            inner
+                .linear_system_capture
+                .lock()
+                .ok()
+                .and_then(|capture| capture.clone())
+        })
+    }
+
+    /// Capture once at the first qualifying Newton solve. The early atomic
+    /// check keeps the default path to one predictable branch and no lock.
+    pub(crate) fn capture_linear_system_if_requested(
+        &self,
+        dimension: usize,
+        mesh_nodes: usize,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) {
+        let Some(inner) = &self.inner else { return };
+        let minimum = inner
+            .linear_system_capture_min_dimension
+            .load(Ordering::Relaxed);
+        if minimum == 0 || dimension < minimum as usize {
+            return;
+        }
+        let Ok(mut capture) = inner.linear_system_capture.lock() else {
+            return;
+        };
+        if capture.is_none() {
+            *capture = Some(BvpSciLinearSystemCapture {
+                dimension,
+                mesh_nodes,
+                entries: entries.to_vec(),
+                rhs: rhs.to_vec(),
+            });
+        }
     }
 
     /// Check whether two handles update the same counter storage.
@@ -705,6 +1220,28 @@ impl BvpSciTelemetry {
         })
     }
 
+    /// Start a per-mesh diagnostic scope. It is intentionally unavailable in
+    /// `Off` and `Counters` modes and is created once per outer controller
+    /// pass, never once per callback or Newton iteration.
+    pub fn start_mesh_pass(
+        &self,
+        mesh_pass: usize,
+        mesh_nodes: usize,
+        linear_system_dimension: usize,
+    ) -> Option<BvpSciMeshPassTimer> {
+        if self.mode != BvpSciTelemetryMode::Timings {
+            return None;
+        }
+        Some(BvpSciMeshPassTimer {
+            telemetry: self.clone(),
+            baseline: self.snapshot(),
+            started: Instant::now(),
+            mesh_pass: mesh_pass as u64,
+            mesh_nodes,
+            linear_system_dimension,
+        })
+    }
+
     #[inline]
     fn add_duration(slot: &AtomicU64, started: Option<Instant>) {
         if let Some(started) = started {
@@ -739,6 +1276,7 @@ impl BvpSciTelemetry {
     pub fn record_rhs(&self, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
         Self::record_call(&inner.rhs_calls, &inner.callback_ns, started, self.mode);
+        Self::add_duration(&inner.rhs_callback_ns, started);
     }
 
     #[inline]
@@ -800,6 +1338,7 @@ impl BvpSciTelemetry {
             started,
             self.mode,
         );
+        Self::add_duration(&inner.boundary_callback_ns, started);
     }
 
     #[inline]
@@ -811,6 +1350,31 @@ impl BvpSciTelemetry {
             started,
             self.mode,
         );
+        Self::add_duration(&inner.jacobian_callback_ns, started);
+    }
+
+    #[inline]
+    pub fn record_parameter_jacobian_callback(&self, started: Option<Instant>) {
+        let Some(inner) = &self.inner else { return };
+        Self::record_call(
+            &inner.parameter_jacobian_calls,
+            &inner.callback_ns,
+            started,
+            self.mode,
+        );
+        Self::add_duration(&inner.parameter_jacobian_callback_ns, started);
+    }
+
+    #[inline]
+    pub fn record_boundary_jacobian_callback(&self, started: Option<Instant>) {
+        let Some(inner) = &self.inner else { return };
+        Self::record_call(
+            &inner.boundary_jacobian_calls,
+            &inner.callback_ns,
+            started,
+            self.mode,
+        );
+        Self::add_duration(&inner.boundary_jacobian_callback_ns, started);
     }
 
     pub fn record_finite_difference_probe(&self) {
@@ -896,6 +1460,15 @@ impl BvpSciTelemetry {
         }
     }
 
+    /// Record a requested SuperLU route that could not load its native bridge
+    /// and therefore selected the established StandardFaer backend.
+    #[inline]
+    pub fn record_superlu_fallback(&self) {
+        if let Some(inner) = &self.inner {
+            inner.superlu_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Record the one-time faer sparse symbolic analysis for a fixed pattern.
     ///
     /// Parameter continuation and Newton refreshes should increment the
@@ -920,6 +1493,132 @@ impl BvpSciTelemetry {
                 .fetch_add(1, Ordering::Relaxed);
             Self::add_duration(&inner.sparse_numeric_factorization_ns, started);
         }
+    }
+
+    #[inline]
+    pub fn record_sparse_symbolic_reuse(&self, started: Option<Instant>) {
+        if let Some(inner) = &self.inner {
+            inner.sparse_symbolic_reuses.fetch_add(1, Ordering::Relaxed);
+            Self::add_duration(&inner.sparse_symbolic_reuse_ns, started);
+        }
+    }
+
+    #[inline]
+    pub fn record_sparse_triplet_materialization(&self, started: Option<Instant>) {
+        if let Some(inner) = &self.inner {
+            inner
+                .sparse_triplet_materializations
+                .fetch_add(1, Ordering::Relaxed);
+            Self::add_duration(&inner.sparse_triplet_materialization_ns, started);
+        }
+    }
+
+    #[inline]
+    pub fn record_sparse_csc_assembly(&self, started: Option<Instant>) {
+        if let Some(inner) = &self.inner {
+            inner.sparse_csc_assemblies.fetch_add(1, Ordering::Relaxed);
+            Self::add_duration(&inner.sparse_csc_assembly_ns, started);
+        }
+    }
+
+    /// Record conversion into SuperLU's checked 32-bit CSC ABI representation.
+    #[inline]
+    pub fn record_superlu_abi_conversion(&self, started: Option<Instant>) {
+        if let Some(inner) = &self.inner {
+            inner
+                .superlu_abi_conversions
+                .fetch_add(1, Ordering::Relaxed);
+            Self::add_duration(&inner.superlu_abi_conversion_ns, started);
+        }
+    }
+
+    /// Record one SuperLU factor call and, on success, its native time/fill.
+    #[inline]
+    pub fn record_superlu_factorization(
+        &self,
+        ffi_elapsed: Option<Duration>,
+        native_elapsed: Option<Duration>,
+        factor_storage: Option<(usize, usize, usize, usize)>,
+    ) {
+        let Some(inner) = &self.inner else { return };
+        inner
+            .superlu_factor_ffi_calls
+            .fetch_add(1, Ordering::Relaxed);
+        if native_elapsed.is_some() {
+            inner
+                .superlu_native_factorization_calls
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if self.mode == BvpSciTelemetryMode::Timings {
+            Self::add_duration_value(&inner.superlu_factor_ffi_ns, ffi_elapsed);
+            Self::add_duration_value(&inner.superlu_native_factorization_ns, native_elapsed);
+        }
+        if let Some((l_storage, u_storage, l_csc, u_csc)) = factor_storage {
+            inner
+                .superlu_factor_l_storage_entries
+                .store(l_storage as u64, Ordering::Relaxed);
+            inner
+                .superlu_factor_u_storage_entries
+                .store(u_storage as u64, Ordering::Relaxed);
+            inner
+                .superlu_factor_l_csc_nnz
+                .store(l_csc as u64, Ordering::Relaxed);
+            inner
+                .superlu_factor_u_csc_nnz
+                .store(u_csc as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Record one retained-factor SuperLU solve call.
+    #[inline]
+    pub fn record_superlu_solve(
+        &self,
+        ffi_elapsed: Option<Duration>,
+        native_elapsed: Option<Duration>,
+    ) {
+        let Some(inner) = &self.inner else { return };
+        inner
+            .superlu_solve_ffi_calls
+            .fetch_add(1, Ordering::Relaxed);
+        if native_elapsed.is_some() {
+            inner
+                .superlu_native_solve_calls
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if self.mode == BvpSciTelemetryMode::Timings {
+            Self::add_duration_value(&inner.superlu_solve_ffi_ns, ffi_elapsed);
+            Self::add_duration_value(&inner.superlu_native_solve_ns, native_elapsed);
+        }
+    }
+
+    #[inline]
+    pub fn record_banded_factor_phase(
+        &self,
+        phase: BvpSciBandedFactorPhase,
+        calls: usize,
+        elapsed: Duration,
+    ) {
+        let Some(inner) = &self.inner else { return };
+        let (counter, timer) = match phase {
+            BvpSciBandedFactorPhase::CoreFactor => (
+                &inner.banded_core_factorizations,
+                &inner.banded_core_factorization_ns,
+            ),
+            BvpSciBandedFactorPhase::CoreToBorderSolve => (
+                &inner.banded_core_to_border_solves,
+                &inner.banded_core_to_border_solve_ns,
+            ),
+            BvpSciBandedFactorPhase::SchurAssembly => (
+                &inner.banded_schur_assemblies,
+                &inner.banded_schur_assembly_ns,
+            ),
+            BvpSciBandedFactorPhase::BorderFactor => (
+                &inner.banded_border_factorizations,
+                &inner.banded_border_factorization_ns,
+            ),
+        };
+        counter.fetch_add(calls as u64, Ordering::Relaxed);
+        Self::add_duration_value(timer, Some(elapsed));
     }
 
     #[inline]
@@ -1296,6 +1995,8 @@ impl BvpSciTelemetry {
             rhs_calls: inner.rhs_calls.load(Ordering::Relaxed),
             boundary_calls: inner.boundary_calls.load(Ordering::Relaxed),
             jacobian_calls: inner.jacobian_calls.load(Ordering::Relaxed),
+            parameter_jacobian_calls: inner.parameter_jacobian_calls.load(Ordering::Relaxed),
+            boundary_jacobian_calls: inner.boundary_jacobian_calls.load(Ordering::Relaxed),
             finite_difference_probes: inner.finite_difference_probes.load(Ordering::Relaxed),
             newton_iterations: inner.newton_iterations.load(Ordering::Relaxed),
             newton_jacobian_refreshes: inner.newton_jacobian_refreshes.load(Ordering::Relaxed),
@@ -1308,15 +2009,76 @@ impl BvpSciTelemetry {
                 .and_then(|history| history.lock().ok())
                 .map(|history| history.clone())
                 .unwrap_or_default(),
+            mesh_passes: inner
+                .mesh_passes
+                .as_ref()
+                .and_then(|passes| passes.lock().ok())
+                .map(|passes| passes.clone())
+                .unwrap_or_default(),
             collocation_evaluations: inner.collocation_evaluations.load(Ordering::Relaxed),
             mesh_defect_probes: inner.mesh_defect_probes.load(Ordering::Relaxed),
             mesh_refinements: inner.mesh_refinements.load(Ordering::Relaxed),
             mesh_points_added: inner.mesh_points_added.load(Ordering::Relaxed),
             linear_assemblies: inner.linear_assemblies.load(Ordering::Relaxed),
             factorizations: inner.factorizations.load(Ordering::Relaxed),
+            superlu_fallbacks: inner.superlu_fallbacks.load(Ordering::Relaxed),
+            superlu: BvpSciSuperLuTelemetrySnapshot {
+                abi_conversions: inner.superlu_abi_conversions.load(Ordering::Relaxed),
+                factor_ffi_calls: inner.superlu_factor_ffi_calls.load(Ordering::Relaxed),
+                native_factorization_calls: inner
+                    .superlu_native_factorization_calls
+                    .load(Ordering::Relaxed),
+                solve_ffi_calls: inner.superlu_solve_ffi_calls.load(Ordering::Relaxed),
+                native_solve_calls: inner.superlu_native_solve_calls.load(Ordering::Relaxed),
+                factor_l_storage_entries: inner
+                    .superlu_factor_l_storage_entries
+                    .load(Ordering::Relaxed),
+                factor_u_storage_entries: inner
+                    .superlu_factor_u_storage_entries
+                    .load(Ordering::Relaxed),
+                factor_l_csc_nnz: inner.superlu_factor_l_csc_nnz.load(Ordering::Relaxed),
+                factor_u_csc_nnz: inner.superlu_factor_u_csc_nnz.load(Ordering::Relaxed),
+                abi_conversion_ms: timed(
+                    inner.superlu_abi_conversion_ns.load(Ordering::Relaxed),
+                    inner.superlu_abi_conversions.load(Ordering::Relaxed),
+                ),
+                factor_ffi_ms: timed(
+                    inner.superlu_factor_ffi_ns.load(Ordering::Relaxed),
+                    inner.superlu_factor_ffi_calls.load(Ordering::Relaxed),
+                ),
+                native_factorization_ms: timed(
+                    inner
+                        .superlu_native_factorization_ns
+                        .load(Ordering::Relaxed),
+                    inner
+                        .superlu_native_factorization_calls
+                        .load(Ordering::Relaxed),
+                ),
+                solve_ffi_ms: timed(
+                    inner.superlu_solve_ffi_ns.load(Ordering::Relaxed),
+                    inner.superlu_solve_ffi_calls.load(Ordering::Relaxed),
+                ),
+                native_solve_ms: timed(
+                    inner.superlu_native_solve_ns.load(Ordering::Relaxed),
+                    inner.superlu_native_solve_calls.load(Ordering::Relaxed),
+                ),
+            },
             sparse_symbolic_analyses: inner.sparse_symbolic_analyses.load(Ordering::Relaxed),
+            sparse_symbolic_reuses: inner.sparse_symbolic_reuses.load(Ordering::Relaxed),
             sparse_numeric_factorizations: inner
                 .sparse_numeric_factorizations
+                .load(Ordering::Relaxed),
+            sparse_triplet_materializations: inner
+                .sparse_triplet_materializations
+                .load(Ordering::Relaxed),
+            sparse_csc_assemblies: inner.sparse_csc_assemblies.load(Ordering::Relaxed),
+            banded_core_factorizations: inner.banded_core_factorizations.load(Ordering::Relaxed),
+            banded_core_to_border_solves: inner
+                .banded_core_to_border_solves
+                .load(Ordering::Relaxed),
+            banded_schur_assemblies: inner.banded_schur_assemblies.load(Ordering::Relaxed),
+            banded_border_factorizations: inner
+                .banded_border_factorizations
                 .load(Ordering::Relaxed),
             linear_solves: inner.linear_solves.load(Ordering::Relaxed),
             banded_structured_factorizations: inner
@@ -1455,6 +2217,26 @@ impl BvpSciTelemetry {
                 inner.binding_ns.load(Ordering::Relaxed),
                 inner.argument_bindings.load(Ordering::Relaxed),
             ),
+            rhs_callback_ms: timed(
+                inner.rhs_callback_ns.load(Ordering::Relaxed),
+                inner.rhs_calls.load(Ordering::Relaxed),
+            ),
+            boundary_callback_ms: timed(
+                inner.boundary_callback_ns.load(Ordering::Relaxed),
+                inner.boundary_calls.load(Ordering::Relaxed),
+            ),
+            jacobian_callback_ms: timed(
+                inner.jacobian_callback_ns.load(Ordering::Relaxed),
+                inner.jacobian_calls.load(Ordering::Relaxed),
+            ),
+            parameter_jacobian_callback_ms: timed(
+                inner.parameter_jacobian_callback_ns.load(Ordering::Relaxed),
+                inner.parameter_jacobian_calls.load(Ordering::Relaxed),
+            ),
+            boundary_jacobian_callback_ms: timed(
+                inner.boundary_jacobian_callback_ns.load(Ordering::Relaxed),
+                inner.boundary_jacobian_calls.load(Ordering::Relaxed),
+            ),
             residual_evaluation_ms: timed(
                 inner.residual_evaluation_ns.load(Ordering::Relaxed),
                 inner.residual_evaluations.load(Ordering::Relaxed),
@@ -1471,7 +2253,9 @@ impl BvpSciTelemetry {
                 inner.callback_ns.load(Ordering::Relaxed),
                 inner.rhs_calls.load(Ordering::Relaxed)
                     + inner.boundary_calls.load(Ordering::Relaxed)
-                    + inner.jacobian_calls.load(Ordering::Relaxed),
+                    + inner.jacobian_calls.load(Ordering::Relaxed)
+                    + inner.parameter_jacobian_calls.load(Ordering::Relaxed)
+                    + inner.boundary_jacobian_calls.load(Ordering::Relaxed),
             ),
             collocation_ms: timed(
                 inner.collocation_ns.load(Ordering::Relaxed),
@@ -1505,11 +2289,43 @@ impl BvpSciTelemetry {
                 inner.sparse_symbolic_analysis_ns.load(Ordering::Relaxed),
                 inner.sparse_symbolic_analyses.load(Ordering::Relaxed),
             ),
+            sparse_symbolic_reuse_ms: timed(
+                inner.sparse_symbolic_reuse_ns.load(Ordering::Relaxed),
+                inner.sparse_symbolic_reuses.load(Ordering::Relaxed),
+            ),
             sparse_numeric_factorization_ms: timed(
                 inner
                     .sparse_numeric_factorization_ns
                     .load(Ordering::Relaxed),
                 inner.sparse_numeric_factorizations.load(Ordering::Relaxed),
+            ),
+            sparse_triplet_materialization_ms: timed(
+                inner
+                    .sparse_triplet_materialization_ns
+                    .load(Ordering::Relaxed),
+                inner
+                    .sparse_triplet_materializations
+                    .load(Ordering::Relaxed),
+            ),
+            sparse_csc_assembly_ms: timed(
+                inner.sparse_csc_assembly_ns.load(Ordering::Relaxed),
+                inner.sparse_csc_assemblies.load(Ordering::Relaxed),
+            ),
+            banded_core_factorization_ms: timed(
+                inner.banded_core_factorization_ns.load(Ordering::Relaxed),
+                inner.banded_core_factorizations.load(Ordering::Relaxed),
+            ),
+            banded_core_to_border_solve_ms: timed(
+                inner.banded_core_to_border_solve_ns.load(Ordering::Relaxed),
+                inner.banded_core_to_border_solves.load(Ordering::Relaxed),
+            ),
+            banded_schur_assembly_ms: timed(
+                inner.banded_schur_assembly_ns.load(Ordering::Relaxed),
+                inner.banded_schur_assemblies.load(Ordering::Relaxed),
+            ),
+            banded_border_factorization_ms: timed(
+                inner.banded_border_factorization_ns.load(Ordering::Relaxed),
+                inner.banded_border_factorizations.load(Ordering::Relaxed),
             ),
             solve_ms: timed(
                 inner.solve_ns.load(Ordering::Relaxed),
@@ -1641,7 +2457,14 @@ impl BvpSciTelemetry {
                     BvpSciTelemetryStage::SparseNumericFactorization => {
                         snapshot.sparse_numeric_factorizations
                     }
+                    BvpSciTelemetryStage::SuperLuAbiConversion => snapshot.superlu.abi_conversions,
+                    BvpSciTelemetryStage::SuperLuFactorFfi => snapshot.superlu.factor_ffi_calls,
+                    BvpSciTelemetryStage::SuperLuNativeFactorization => {
+                        snapshot.superlu.native_factorization_calls
+                    }
                     BvpSciTelemetryStage::LinearSolve => snapshot.linear_solves,
+                    BvpSciTelemetryStage::SuperLuSolveFfi => snapshot.superlu.solve_ffi_calls,
+                    BvpSciTelemetryStage::SuperLuNativeSolve => snapshot.superlu.native_solve_calls,
                     BvpSciTelemetryStage::BandedStructuredFactorization => {
                         snapshot.banded_structured_factorizations
                     }
@@ -1783,9 +2606,34 @@ impl BvpSciTelemetry {
                     snapshot.sparse_numeric_factorization_ms,
                 ),
                 scope(
+                    BvpSciTelemetryStage::SuperLuAbiConversion,
+                    Some(BvpSciTelemetryStage::Factorization),
+                    snapshot.superlu.abi_conversion_ms,
+                ),
+                scope(
+                    BvpSciTelemetryStage::SuperLuFactorFfi,
+                    Some(BvpSciTelemetryStage::Factorization),
+                    snapshot.superlu.factor_ffi_ms,
+                ),
+                scope(
+                    BvpSciTelemetryStage::SuperLuNativeFactorization,
+                    Some(BvpSciTelemetryStage::SuperLuFactorFfi),
+                    snapshot.superlu.native_factorization_ms,
+                ),
+                scope(
                     BvpSciTelemetryStage::LinearSolve,
                     Some(BvpSciTelemetryStage::Newton),
                     snapshot.linear_solve_ms,
+                ),
+                scope(
+                    BvpSciTelemetryStage::SuperLuSolveFfi,
+                    Some(BvpSciTelemetryStage::LinearSolve),
+                    snapshot.superlu.solve_ffi_ms,
+                ),
+                scope(
+                    BvpSciTelemetryStage::SuperLuNativeSolve,
+                    Some(BvpSciTelemetryStage::SuperLuSolveFfi),
+                    snapshot.superlu.native_solve_ms,
                 ),
                 scope(
                     BvpSciTelemetryStage::BandedStructuredFactorization,
@@ -1828,6 +2676,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linear_system_capture_is_opt_in_and_keeps_only_first_qualifying_system() {
+        let telemetry = BvpSciTelemetry::timings();
+        assert!(telemetry.linear_system_capture().is_none());
+        telemetry.capture_linear_system_if_requested(128, 3, &[(0, 0, 2.0)], &[1.0]);
+        assert!(telemetry.linear_system_capture().is_none());
+
+        telemetry.enable_linear_system_capture(256);
+        telemetry.capture_linear_system_if_requested(128, 3, &[(0, 0, 2.0)], &[1.0]);
+        assert!(telemetry.linear_system_capture().is_none());
+        telemetry.capture_linear_system_if_requested(256, 5, &[(0, 0, 3.0)], &[4.0]);
+        telemetry.capture_linear_system_if_requested(512, 9, &[(0, 0, 8.0)], &[7.0]);
+
+        let captured = telemetry
+            .linear_system_capture()
+            .expect("first matrix meeting the requested dimension should be retained");
+        assert_eq!(captured.dimension, 256);
+        assert_eq!(captured.mesh_nodes, 5);
+        assert_eq!(captured.entries, vec![(0, 0, 3.0)]);
+        assert_eq!(captured.rhs, vec![4.0]);
+    }
+
+    #[test]
+    fn disabled_telemetry_never_captures_linear_systems() {
+        let telemetry = BvpSciTelemetry::disabled();
+        telemetry.enable_linear_system_capture(1);
+        telemetry.capture_linear_system_if_requested(2, 2, &[(0, 0, 1.0)], &[2.0]);
+        assert!(telemetry.linear_system_capture().is_none());
+    }
+
+    #[test]
     fn disabled_telemetry_has_no_runtime_storage_or_scopes() {
         let telemetry = BvpSciTelemetry::disabled();
         telemetry.record_banded_factorization(BvpSciBandedRoute::Structured, None);
@@ -1844,9 +2722,90 @@ mod tests {
     }
 
     #[test]
+    fn superlu_snapshot_separates_bridge_and_native_scopes() {
+        let telemetry = BvpSciTelemetry::timings();
+        telemetry.record_superlu_abi_conversion(Some(Instant::now()));
+        telemetry.record_superlu_factorization(
+            Some(Duration::from_micros(90)),
+            Some(Duration::from_micros(70)),
+            Some((120, 130, 100, 110)),
+        );
+        telemetry.record_superlu_solve(
+            Some(Duration::from_micros(12)),
+            Some(Duration::from_micros(8)),
+        );
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.superlu.abi_conversions, 1);
+        assert_eq!(snapshot.superlu.factor_ffi_calls, 1);
+        assert_eq!(snapshot.superlu.native_factorization_calls, 1);
+        assert_eq!(snapshot.superlu.solve_ffi_calls, 1);
+        assert_eq!(snapshot.superlu.native_solve_calls, 1);
+        assert_eq!(snapshot.superlu.factor_l_storage_entries, 120);
+        assert_eq!(snapshot.superlu.factor_u_storage_entries, 130);
+        assert_eq!(snapshot.superlu.factor_l_csc_nnz, 100);
+        assert_eq!(snapshot.superlu.factor_u_csc_nnz, 110);
+        assert!(snapshot.superlu.abi_conversion_ms.is_some());
+        assert_eq!(snapshot.superlu.factor_ffi_ms, Some(0.09));
+        assert_eq!(snapshot.superlu.native_factorization_ms, Some(0.07));
+        assert_eq!(snapshot.superlu.solve_ffi_ms, Some(0.012));
+        assert_eq!(snapshot.superlu.native_solve_ms, Some(0.008));
+
+        let scope = |stage| {
+            snapshot
+                .timing_scopes
+                .iter()
+                .find(|scope| scope.stage == stage)
+                .expect("SuperLU timing scope should be published")
+        };
+        assert_eq!(
+            scope(BvpSciTelemetryStage::SuperLuNativeFactorization).parent,
+            Some(BvpSciTelemetryStage::SuperLuFactorFfi)
+        );
+        assert_eq!(
+            scope(BvpSciTelemetryStage::SuperLuNativeSolve).parent,
+            Some(BvpSciTelemetryStage::SuperLuSolveFfi)
+        );
+        snapshot
+            .validate_contract()
+            .expect("SuperLU scopes should satisfy the timing contract");
+    }
+
+    #[test]
+    fn superlu_counters_mode_does_not_publish_timings() {
+        let telemetry = BvpSciTelemetry::counters();
+        telemetry.record_superlu_abi_conversion(None);
+        telemetry.record_superlu_factorization(
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(1)),
+            Some((4, 4, 4, 4)),
+        );
+        telemetry.record_superlu_solve(
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(1)),
+        );
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.superlu.abi_conversions, 1);
+        assert_eq!(snapshot.superlu.factor_ffi_calls, 1);
+        assert_eq!(snapshot.superlu.native_factorization_calls, 1);
+        assert_eq!(snapshot.superlu.solve_ffi_calls, 1);
+        assert_eq!(snapshot.superlu.native_solve_calls, 1);
+        assert!(snapshot.superlu.abi_conversion_ms.is_none());
+        assert!(snapshot.superlu.factor_ffi_ms.is_none());
+        assert!(snapshot.superlu.native_factorization_ms.is_none());
+        assert!(snapshot.superlu.solve_ffi_ms.is_none());
+        assert!(snapshot.superlu.native_solve_ms.is_none());
+    }
+
+    #[test]
     fn timing_snapshot_describes_nested_and_banded_routes() {
         let telemetry = BvpSciTelemetry::timings();
         assert!(telemetry.snapshot().full_solve_ms.is_none());
+        telemetry.record_rhs(telemetry.start_timing());
+        telemetry.record_boundary(telemetry.start_timing());
+        telemetry.record_jacobian(telemetry.start_timing());
+        telemetry.record_parameter_jacobian_callback(telemetry.start_timing());
+        telemetry.record_boundary_jacobian_callback(telemetry.start_timing());
         telemetry.record_banded_factorization(BvpSciBandedRoute::Structured, None);
         telemetry.record_banded_factorization(BvpSciBandedRoute::ScalarFallback, None);
         telemetry.record_banded_scalar_fallback_assembly(None);
@@ -1866,6 +2825,14 @@ mod tests {
         }
 
         let snapshot = telemetry.snapshot();
+        assert!(snapshot.rhs_callback_ms.is_some());
+        assert!(snapshot.boundary_callback_ms.is_some());
+        assert!(snapshot.jacobian_callback_ms.is_some());
+        assert_eq!(snapshot.parameter_jacobian_calls, 1);
+        assert_eq!(snapshot.boundary_jacobian_calls, 1);
+        assert!(snapshot.parameter_jacobian_callback_ms.is_some());
+        assert!(snapshot.boundary_jacobian_callback_ms.is_some());
+        assert!(snapshot.callback_ms.is_some());
         assert_eq!(snapshot.banded_structured_factorizations, 1);
         assert_eq!(snapshot.banded_scalar_fallback_factorizations, 1);
         assert_eq!(snapshot.banded_scalar_fallback_assemblies, 1);
@@ -1914,6 +2881,41 @@ mod tests {
             .expect("Newton phase scope is present");
         assert_eq!(newton.calls, 1);
         assert_eq!(newton.parent, Some(BvpSciTelemetryStage::FullSolve));
+    }
+
+    #[test]
+    fn mesh_pass_scope_captures_counter_and_stage_deltas() {
+        let telemetry = BvpSciTelemetry::timings();
+        {
+            let _pass = telemetry.start_mesh_pass(0, 5, 302);
+            let _newton = telemetry.start_stage(BvpSciTelemetryStage::Newton);
+            telemetry.record_newton_iteration();
+            telemetry.record_rhs(telemetry.start_timing());
+            telemetry.record_linear_assembly(telemetry.start_timing());
+            telemetry.record_factorization(telemetry.start_timing());
+            telemetry.record_linear_solve(telemetry.start_timing());
+        }
+        {
+            let _pass = telemetry.start_mesh_pass(1, 17, 1022);
+            let _newton = telemetry.start_stage(BvpSciTelemetryStage::Newton);
+            telemetry.record_newton_iteration();
+            telemetry.record_newton_iteration();
+            telemetry.record_rhs(telemetry.start_timing());
+        }
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.mesh_passes.len(), 2);
+        assert_eq!(snapshot.mesh_passes[0].mesh_nodes, 5);
+        assert_eq!(snapshot.mesh_passes[0].linear_system_dimension, 302);
+        assert_eq!(snapshot.mesh_passes[0].newton_iterations, 1);
+        assert_eq!(snapshot.mesh_passes[0].newton_passes, 1);
+        assert_eq!(snapshot.mesh_passes[0].factorizations, 1);
+        assert_eq!(snapshot.mesh_passes[0].linear_solves, 1);
+        assert!(snapshot.mesh_passes[0].factorization_ms.is_some());
+        assert_eq!(snapshot.mesh_passes[1].mesh_nodes, 17);
+        assert_eq!(snapshot.mesh_passes[1].newton_iterations, 2);
+        assert_eq!(snapshot.mesh_passes[1].newton_passes, 1);
+        assert_eq!(snapshot.mesh_passes[1].factorizations, 0);
     }
 
     #[test]

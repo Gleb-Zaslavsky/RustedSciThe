@@ -115,6 +115,41 @@ class BvpReferenceTelemetryTests(unittest.TestCase):
         self.assertEqual(row["newton_passes"], counters["solve_newton_calls"])
         self.assertEqual(row["jacobian_builds"], counters["construct_global_jac_calls"])
 
+    def test_diagnostic_tsv_separates_analytic_callback_cost_and_vectorized_work(self):
+        completed = subprocess.run(
+            [sys.executable, str(REFERENCE_DIR / "bvp_parity.py"),
+             "big-parameterized-analytic", "--format", "diagnostic-tsv"],
+            check=True, capture_output=True, text=True,
+        )
+        fields = dict(
+            part.split("=", 1)
+            for part in completed.stdout.strip().split("\t")
+        )
+        self.assertEqual(fields["success"], "1")
+        self.assertEqual(fields["status"], "0")
+        self.assertEqual(fields["nodes"], "17")
+        self.assertGreater(int(fields["counter.rhs_jacobian_callback_calls"]), 0)
+        self.assertGreater(int(fields["counter.rhs_jacobian_callback_state_points"]), 0)
+        self.assertGreater(int(fields["counter.boundary_jacobian_callback_calls"]), 0)
+        self.assertGreater(int(fields["counter.newton_trials"]), 0)
+        self.assertEqual(
+            int(fields["counter.newton_trials"]),
+            int(fields["counter.newton_accepted_trials"])
+            + int(fields["counter.newton_rejected_trials"]),
+        )
+        self.assertGreater(float(fields["time_ms.rhs_jacobian_callback"]), 0.0)
+        self.assertGreater(float(fields["time_ms.boundary_jacobian_callback"]), 0.0)
+        self.assertNotIn("counter.rhs_finite_difference_callback_calls", fields)
+        self.assertNotIn("counter.boundary_finite_difference_callback_calls", fields)
+        mesh_count = int(fields["mesh_pass_count"])
+        self.assertGreaterEqual(mesh_count, 2)
+        self.assertEqual(fields["mesh.0.nodes"], "5")
+        self.assertGreater(int(fields[f"mesh.{mesh_count - 1}.nodes"]), 5)
+        for index in range(mesh_count):
+            self.assertGreater(int(fields[f"mesh.{index}.dimension"]), 0)
+            self.assertIn(f"mesh.{index}.counter.solve_newton_calls", fields)
+            self.assertIn(f"mesh.{index}.time_ms.solve_newton", fields)
+
     def test_reference_runner_exposes_direct_global_jacobian_fixture(self):
         completed = subprocess.run(
             [sys.executable, str(REFERENCE_DIR / "bvp_parity.py"),

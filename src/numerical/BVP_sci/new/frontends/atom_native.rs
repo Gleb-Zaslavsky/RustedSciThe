@@ -7,14 +7,14 @@
 use crate::numerical::BVP_sci::new::config::BvpSciExecutionPolicy;
 use crate::numerical::BVP_sci::new::error::{BvpSciNewError, BvpSciStage};
 use crate::numerical::BVP_sci::new::telemetry::{BvpSciTelemetry, BvpSciTelemetrySnapshot};
-use crate::symbolic::codegen::CodegenIR::LinearBlock;
-use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::View::CodegenIR_atom::Lowerer as AtomLowerer;
 use crate::symbolic::View::atom::{Atom, AtomView};
 use crate::symbolic::View::coefficient::CoefficientView;
 use crate::symbolic::View::evaluate::{FunctionMap, PreparedEvaluator, PreparedVariableContext};
 use crate::symbolic::View::jacobian::PreparedSparseAtomSystem;
 use crate::symbolic::View::state::Symbol;
-use crate::symbolic::View::CodegenIR_atom::Lowerer as AtomLowerer;
+use crate::symbolic::codegen::CodegenIR::LinearBlock;
+use crate::symbolic::symbolic_engine::Expr;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,11 +45,13 @@ pub struct AtomViewNativeLambdifyPlan {
     // users, as it was with the previous callback closures.
     residuals: Vec<Arc<PreparedEvaluator>>,
     jacobian: Vec<(usize, usize, Arc<PreparedEvaluator>)>,
+    parameter_jacobian: Vec<(usize, usize, Arc<PreparedEvaluator>)>,
     /// Optional flat Atom IR blocks. They are present only when every
     /// residual/Jacobian expression is supported by the current lowering
     /// subset; otherwise the prepared evaluator path remains authoritative.
     linear_residual: Option<Arc<LinearBlock>>,
     linear_jacobian: Option<Arc<LinearBlock>>,
+    linear_parameter_jacobian: Option<Arc<LinearBlock>>,
     jacobian_nnz: usize,
     telemetry: BvpSciTelemetry,
     execution_policy: BvpSciExecutionPolicy,
@@ -128,11 +130,43 @@ impl AtomViewNativeLambdifyPlan {
         let context = PreparedVariableContext::new(symbols.as_slice());
         let function_map = FunctionMap::new();
 
+        // Keep parameter differentiation on packed Atoms as well. In
+        // particular, do not convert residuals back to Expr just to obtain
+        // `df/dp`; these evaluators share the same runtime argument ABI.
+        let parameter_symbols = &symbols[1 + state_names.len()..];
+        let parameter_symbolic_started = telemetry.start_timing();
+        let mut parameter_entries = Vec::new();
+        for (row, atom) in prepared.atoms().iter().enumerate() {
+            for (column, &parameter_symbol) in parameter_symbols.iter().enumerate() {
+                let derivative = atom.as_view().try_derivative(parameter_symbol).map_err(
+                    |error| {
+                        BvpSciNewError::SymbolicPreparation(format!(
+                            "parameter derivative at equation {row}, parameter {column}: {error}"
+                        ))
+                    },
+                )?;
+                if !derivative.is_zero() {
+                    parameter_entries.push((row, column, derivative));
+                }
+            }
+        }
+        telemetry.record_symbolic_jacobian(
+            parameter_symbolic_started,
+            (equation_count * parameter_names.len()) as u64,
+        );
+
         // Lower the complete callback families as shared straight-line IR.
         // This removes per-node interpreter dispatch and lets the callback
         // reuse registers without allocating a result vector. Unsupported
         // builtins/custom functions deliberately fall back to PreparedEvaluator.
         let lowering_started = telemetry.start_timing();
+        let linear_parameter_jacobian = try_lower_linear_block(
+            parameter_entries
+                .iter()
+                .map(|(_, _, derivative)| derivative.as_view())
+                .collect::<Vec<_>>(),
+            &symbols,
+        );
         let linear_residual = try_lower_linear_block(
             prepared
                 .atoms()
@@ -184,6 +218,22 @@ impl AtomViewNativeLambdifyPlan {
             jacobian_evaluator_started,
             jacobian.len() as u64,
         );
+
+        let parameter_evaluator_started = telemetry.start_timing();
+        let parameter_jacobian = parameter_entries
+            .into_iter()
+            .map(|(row, column, derivative)| {
+                let evaluator =
+                    PreparedEvaluator::new_with_context(&derivative, &context, &function_map)
+                        .map(Arc::new)
+                        .map_err(BvpSciNewError::SymbolicPreparation)?;
+                Ok((row, column, evaluator))
+            })
+            .collect::<Result<Vec<_>, BvpSciNewError>>()?;
+        telemetry.record_jacobian_evaluator_compilation(
+            parameter_evaluator_started,
+            parameter_jacobian.len() as u64,
+        );
         telemetry.record_preparation(started);
 
         Ok(Self {
@@ -193,6 +243,8 @@ impl AtomViewNativeLambdifyPlan {
             residuals,
             linear_residual,
             linear_jacobian,
+            linear_parameter_jacobian,
+            parameter_jacobian,
             jacobian_nnz: jacobian.len(),
             jacobian,
             telemetry,
@@ -222,6 +274,10 @@ impl AtomViewNativeLambdifyPlan {
 
     pub fn jacobian_nnz(&self) -> usize {
         self.jacobian_nnz
+    }
+
+    pub fn parameter_jacobian_nnz(&self) -> usize {
+        self.parameter_jacobian.len()
     }
 
     pub fn telemetry(&self) -> &BvpSciTelemetry {
@@ -484,6 +540,99 @@ impl AtomViewNativeLambdifyPlan {
         Ok(())
     }
 
+    /// Evaluate prepared Atom-native `df/dp` values into row-major `n x k` storage.
+    pub fn evaluate_parameter_jacobian(
+        &self,
+        x: f64,
+        state: &[f64],
+        parameters: &[f64],
+        arguments: &mut [f64],
+        output: &mut [f64],
+    ) -> Result<(), BvpSciNewError> {
+        self.fill_arguments(x, state, parameters, arguments)?;
+        let expected = self
+            .dimension()
+            .checked_mul(self.parameter_dimension())
+            .ok_or_else(|| {
+                BvpSciNewError::InvalidConfiguration("parameter Jacobian size overflow".into())
+            })?;
+        if output.len() != expected {
+            return Err(BvpSciNewError::ShapeMismatch {
+                stage: BvpSciStage::JacobianCallback,
+                expected,
+                actual: output.len(),
+            });
+        }
+        output.fill(0.0);
+        let started = self.telemetry.start_timing();
+        let evaluation_started = self.telemetry.start_timing();
+        self.telemetry
+            .record_dispatch(self.execution_policy, self.parameter_jacobian.len());
+        let evaluation = if self.parameter_jacobian.len() > 1
+            && self.execution_policy.should_parallel_with_tasks(
+                self.parameter_jacobian.len(),
+                self.parameter_jacobian.len(),
+            ) {
+            use rayon::prelude::*;
+            self.parameter_jacobian
+                .par_iter()
+                .enumerate()
+                .map(|(entry, (row, column, evaluator))| {
+                    evaluator
+                        .evaluate(arguments)
+                        .map(|value| (*row * self.parameter_dimension() + *column, value))
+                        .map_err(|message| (entry, message))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|values| {
+                    for (index, value) in values {
+                        output[index] = value;
+                    }
+                })
+        } else if let Some(block) = &self.linear_parameter_jacobian {
+            ATOM_LINEAR_WORKSPACE.with(|workspace| {
+                let mut workspace = workspace.borrow_mut();
+                workspace.temps.resize(block.num_temps, 0.0);
+                workspace.values.resize(self.parameter_jacobian.len(), 0.0);
+                let AtomLinearWorkspace { temps, values } = &mut *workspace;
+                block.eval_into_with_temps(arguments, temps, values);
+                for ((row, column, _), value) in self.parameter_jacobian.iter().zip(values.iter()) {
+                    output[row * self.parameter_dimension() + column] = *value;
+                }
+                Ok(())
+            })
+        } else {
+            PreparedEvaluator::evaluate_many_thread_local_flat_scatter(
+                self.parameter_jacobian
+                    .iter()
+                    .map(|(row, column, evaluator)| {
+                        (
+                            *row * self.parameter_dimension() + *column,
+                            evaluator.as_ref(),
+                        )
+                    }),
+                arguments,
+                output,
+            )
+        };
+        if let Err((index, message)) = evaluation {
+            return Err(BvpSciNewError::Callback {
+                stage: BvpSciStage::JacobianCallback,
+                message: format!("Atom parameter-Jacobian evaluator {index}: {message}"),
+            });
+        }
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err(BvpSciNewError::NonFinite {
+                stage: BvpSciStage::JacobianCallback,
+            });
+        }
+        self.telemetry
+            .record_jacobian_evaluation(evaluation_started);
+        self.telemetry.record_parameter_jacobian_callback(started);
+        self.telemetry.record_output_writes(output.len());
+        Ok(())
+    }
+
     /// Fixed structural order used by sparse and banded native storage.
     pub fn jacobian_pattern(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
         self.jacobian.iter().map(|(row, column, _)| (*row, *column))
@@ -622,9 +771,9 @@ fn validate_names(
 
 #[cfg(test)]
 mod tests {
-    use super::{try_lower_linear_block, AtomViewNativeLambdifyPlan};
+    use super::{AtomViewNativeLambdifyPlan, try_lower_linear_block};
+    use crate::Utils::test_reporting::write_test_report;
     use crate::numerical::BVP_sci::new::{BvpSciTelemetry, BvpSciTelemetryMode};
-    use crate::symbolic::symbolic_engine::Expr;
     use crate::symbolic::View::atom::Atom;
     use crate::symbolic::View::conversions::expr_to_atom;
     use crate::symbolic::View::evaluate::{
@@ -632,7 +781,7 @@ mod tests {
     };
     use crate::symbolic::View::jacobian::PreparedSparseAtomSystem;
     use crate::symbolic::View::state::Symbol;
-    use crate::Utils::test_reporting::write_test_report;
+    use crate::symbolic::symbolic_engine::Expr;
     use std::sync::Arc;
     use std::time::Instant;
     use tabled::{Table, Tabled};
@@ -826,7 +975,8 @@ mod tests {
         assert!(plan.linear_jacobian.is_some());
         let telemetry = plan.telemetry_snapshot();
         assert_eq!(telemetry.mode, BvpSciTelemetryMode::Timings);
-        assert_eq!(telemetry.symbolic_jacobian_derivations, 1);
+        // AtomNative prepares both state and parameter Jacobians once.
+        assert_eq!(telemetry.symbolic_jacobian_derivations, 2);
         assert!(telemetry.symbolic_jacobian_ms.is_some());
     }
 

@@ -47,3 +47,36 @@ fn main() {
     // широкой для этого маленького учебного Jacobian.
     run(BvpSciMatrixLayout::Banded { lower: 1, upper: 1 });
 }
+
+// Необязательный sparse-маршрут SuperLU
+// ------------------------------------
+// SuperLU — альтернативная политика факторизации для layout Sparse, а не
+// четвёртый layout. StandardFaer остаётся настройкой по умолчанию. C ABI
+// bridge нужно собрать отдельно для целевой ОС. Нужны Git, CMake, Ninja и C
+// compiler; скрипты фиксируют SuperLU 6.0.1 и собирают bridge вместе с
+// bundled CBLAS.
+//
+// Windows (PowerShell; DLL создаётся в игнорируемой папке test_reports/):
+//   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_superlu_bridge.ps1
+//   $env:SUPERLU_LIBRARY = (Resolve-Path '.\test_reports\somelinalg_sparse_lu_reference\native\superlu_bridge.dll').Path
+//
+// Linux (shared object создаётся там же):
+//   bash scripts/build_superlu_bridge.sh
+//   export SUPERLU_LIBRARY="$(pwd)/test_reports/somelinalg_sparse_lu_reference/native/libsuperlu_bridge.so"
+//
+// Соберите и запустите этот пример с необязательной Cargo feature:
+//   cargo run --no-default-features --features superlu --example bvp_sci_backends_guide
+//
+// Выбор в builder (обычный `new`/builder по-прежнему использует StandardFaer):
+//   let solver = BvpSciSolver::builder(rhs, state_names)
+//       .with_frontend(BvpSciAssembly::ExprLegacy)
+//       .with_superlu() // одновременно выбирает BvpSciMatrixLayout::Sparse
+//       .with_mesh_and_initial_state(mesh, initial_state)
+//       .with_boundary_callback(boundary)
+//       .build()?;
+//
+// Если Cargo feature выключена или bridge не загрузился/не прошёл проверку,
+// BVP_sci предупредит и перейдёт на StandardFaer. Перед замером убедитесь,
+// что `telemetry_snapshot().superlu_fallbacks == 0`, иначе это не замер
+// SuperLU. Полная инструкция по сборке и release-матрице находится в
+// `src/numerical/BVP_sci/SUPERLU_BACKEND.md`.

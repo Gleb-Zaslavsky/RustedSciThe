@@ -8,8 +8,9 @@
 //! implementation only for the low-level compatibility constructor.
 
 use crate::numerical::BVP_sci::new::{
-    BvpSciBandedRoute, BvpSciMatrixLayout, BvpSciTelemetry, BvpSciTelemetrySnapshot,
-    error::BvpSciNewError, linear::LinearSystemBackend,
+    BvpSciBandedFactorPhase, BvpSciBandedRoute, BvpSciMatrixLayout, BvpSciTelemetry,
+    BvpSciTelemetryMode, BvpSciTelemetrySnapshot, error::BvpSciNewError,
+    linear::LinearSystemBackend,
 };
 use crate::somelinalg::banded::{
     Banded, BandedError, BorderedBlockTridiagonal, GeneralBandedLuPartialPivot,
@@ -71,33 +72,32 @@ impl SparseSafetyFallback {
                 .copied()
                 .map(|(row, column, value)| Triplet::new(row, column, value))
                 .collect::<Vec<_>>();
-            let matrix = SparseColMat::<usize, f64>::try_new_from_triplets(
-                dimension,
-                dimension,
-                &triplets,
-            )
-            .map_err(|error| BvpSciNewError::LinearBackend {
-                message: format!("Banded sparse safety assembly failed: {error:?}"),
-            })?;
-            self.factorization = Some(matrix.sp_lu().map_err(|error| {
-                BvpSciNewError::LinearBackend {
-                    message: format!("Banded sparse safety factorization failed: {error:?}"),
-                }
-            })?);
+            let matrix =
+                SparseColMat::<usize, f64>::try_new_from_triplets(dimension, dimension, &triplets)
+                    .map_err(|error| BvpSciNewError::LinearBackend {
+                        message: format!("Banded sparse safety assembly failed: {error:?}"),
+                    })?;
+            self.factorization =
+                Some(
+                    matrix
+                        .sp_lu()
+                        .map_err(|error| BvpSciNewError::LinearBackend {
+                            message: format!(
+                                "Banded sparse safety factorization failed: {error:?}"
+                            ),
+                        })?,
+                );
         }
         Ok(())
     }
 
-    fn solve_in_place(
-        &mut self,
-        dimension: usize,
-        rhs: &mut [f64],
-    ) -> Result<(), BvpSciNewError> {
-        let factorization = self.factorization.as_ref().ok_or_else(|| {
-            BvpSciNewError::LinearBackend {
-                message: "Banded sparse safety factorization is unavailable".into(),
-            }
-        })?;
+    fn solve_in_place(&mut self, dimension: usize, rhs: &mut [f64]) -> Result<(), BvpSciNewError> {
+        let factorization =
+            self.factorization
+                .as_ref()
+                .ok_or_else(|| BvpSciNewError::LinearBackend {
+                    message: "Banded sparse safety factorization is unavailable".into(),
+                })?;
         let solution = factorization.solve(&faer::Col::from_fn(dimension, |index| rhs[index]));
         for index in 0..dimension {
             rhs[index] = solution[index];
@@ -270,10 +270,17 @@ pub struct BandedBackend {
     requested_upper: usize,
     lower: usize,
     upper: usize,
+    collocation_border_refinement_steps: usize,
     storage: Storage,
 }
 
 impl BandedBackend {
+    // The outer structured residual guard validates the assembled full solve
+    // and switches to the existing safety backend if a direct core solve is
+    // not accurate enough. Avoid paying iterative-refinement overhead for
+    // every column of T^-1 U during Schur construction.
+    const COLLLOCATION_BORDER_REFINEMENT_STEPS: usize = 0;
+
     /// Construct the scalar-band compatibility backend.
     pub fn new(dimension: usize, lower: usize, upper: usize) -> Result<Self, BvpSciNewError> {
         let (lower, upper, matrix, factorization) = scalar_storage(dimension, lower, upper)?;
@@ -283,6 +290,7 @@ impl BandedBackend {
             requested_upper: upper,
             lower,
             upper,
+            collocation_border_refinement_steps: Self::COLLLOCATION_BORDER_REFINEMENT_STEPS,
             storage: Storage::Scalar {
                 matrix,
                 factorization,
@@ -300,6 +308,32 @@ impl BandedBackend {
         node_count: usize,
         parameter_dimension: usize,
         telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
+        Self::new_for_collocation_with_refinement_steps(
+            dimension,
+            lower,
+            upper,
+            state_dimension,
+            node_count,
+            parameter_dimension,
+            telemetry,
+            Self::COLLLOCATION_BORDER_REFINEMENT_STEPS,
+        )
+    }
+
+    /// Diagnostic constructor for replaying one captured collocation matrix
+    /// with direct or iteratively refined core-to-border solves. Production
+    /// construction keeps its established policy through
+    /// [`Self::new_for_collocation`].
+    pub(crate) fn new_for_collocation_with_refinement_steps(
+        dimension: usize,
+        lower: usize,
+        upper: usize,
+        state_dimension: usize,
+        node_count: usize,
+        parameter_dimension: usize,
+        telemetry: BvpSciTelemetry,
+        refinement_steps: usize,
     ) -> Result<Self, BvpSciNewError> {
         if lower == usize::MAX || upper == usize::MAX {
             return Err(BvpSciNewError::InvalidConfiguration(
@@ -322,16 +356,14 @@ impl BandedBackend {
         // Large systems stay strictly on the bordered block path.
         let scalar_fallback = if dimension <= 256 {
             let matrix = scalar_matrix(dimension, dimension - 1, dimension - 1)?;
-            let mut factorization = GeneralBandedLuPartialPivot::new(
-                dimension,
-                dimension - 1,
-                dimension - 1,
-            )
-            .map_err(|error| {
-                BvpSciNewError::InvalidConfiguration(format!(
-                    "invalid BVP scalar fallback factorization: {error:?}"
-                ))
-            })?;
+            let mut factorization =
+                GeneralBandedLuPartialPivot::new(dimension, dimension - 1, dimension - 1).map_err(
+                    |error| {
+                        BvpSciNewError::InvalidConfiguration(format!(
+                            "invalid BVP scalar fallback factorization: {error:?}"
+                        ))
+                    },
+                )?;
             // This route is deliberately restricted to small systems.  Its
             // partial-pivot workspace is the robust O(n^3) safety net for a
             // wide scalar band; the normal production route remains the
@@ -350,6 +382,7 @@ impl BandedBackend {
             requested_upper: upper,
             lower: lower.min(dimension - 1),
             upper: upper.min(dimension - 1),
+            collocation_border_refinement_steps: refinement_steps,
             storage: Storage::Bordered {
                 system,
                 partition,
@@ -421,9 +454,7 @@ impl BandedBackend {
                 // evidence shows the structured route is universally safe.
                 let sparse_fallback_assembly_started = telemetry.start_timing();
                 sparse_fallback.assemble(entries);
-                telemetry.record_banded_sparse_fallback_assembly(
-                    sparse_fallback_assembly_started,
-                );
+                telemetry.record_banded_sparse_fallback_assembly(sparse_fallback_assembly_started);
                 system.clear_numeric();
                 if let Some(fallback) = scalar_fallback {
                     let fallback_assembly_started = telemetry.start_timing();
@@ -436,9 +467,7 @@ impl BandedBackend {
                         // global coordinates are additive contributions.
                         fallback.matrix[(row, column)] += value;
                     }
-                    telemetry.record_banded_scalar_fallback_assembly(
-                        fallback_assembly_started,
-                    );
+                    telemetry.record_banded_scalar_fallback_assembly(fallback_assembly_started);
                 }
                 for &(row, column, value) in entries {
                     let row = partition.row(row)?;
@@ -483,7 +512,36 @@ impl BandedBackend {
                 *scalar_fallback_factorized = false;
                 *use_sparse_fallback = false;
                 let structured_started = telemetry.start_timing();
-                let structured_result = system.factor();
+                let structured_result = if telemetry.mode() == BvpSciTelemetryMode::Timings {
+                    let result = system.factor_with_timings_and_refinement_steps(
+                        self.collocation_border_refinement_steps,
+                    );
+                    if let Ok(timings) = result.as_ref() {
+                        telemetry.record_banded_factor_phase(
+                            BvpSciBandedFactorPhase::CoreFactor,
+                            1,
+                            timings.core_factor,
+                        );
+                        telemetry.record_banded_factor_phase(
+                            BvpSciBandedFactorPhase::CoreToBorderSolve,
+                            timings.core_to_border_solve_count,
+                            timings.core_to_border_solves,
+                        );
+                        telemetry.record_banded_factor_phase(
+                            BvpSciBandedFactorPhase::SchurAssembly,
+                            1,
+                            timings.schur_assembly,
+                        );
+                        telemetry.record_banded_factor_phase(
+                            BvpSciBandedFactorPhase::BorderFactor,
+                            1,
+                            timings.border_factor,
+                        );
+                    }
+                    result.map(|_| ())
+                } else {
+                    system.factor_with_refinement_steps(self.collocation_border_refinement_steps)
+                };
                 telemetry
                     .record_banded_factorization(BvpSciBandedRoute::Structured, structured_started);
                 if let Some((factor_residual, min_abs_pivot, max_multiplier_norm)) =
@@ -601,10 +659,8 @@ impl BandedBackend {
                 if *use_sparse_fallback {
                     let sparse_started = telemetry.start_timing();
                     sparse_fallback.solve_in_place(self.dimension, rhs)?;
-                    telemetry.record_banded_solve(
-                        BvpSciBandedRoute::SparseFallback,
-                        sparse_started,
-                    );
+                    telemetry
+                        .record_banded_solve(BvpSciBandedRoute::SparseFallback, sparse_started);
                     return Ok(());
                 }
                 // The structured factorization uses [core, border] ordering,
@@ -888,6 +944,48 @@ mod tests {
     use crate::numerical::BVP_sci::new::telemetry::BvpSciTelemetry;
 
     #[test]
+    fn detailed_factorization_telemetry_splits_bordered_phases() {
+        let telemetry = BvpSciTelemetry::timings();
+        let mut backend = BandedBackend::new_for_collocation(3, 2, 2, 1, 3, 0, telemetry.clone())
+            .expect("small bordered system should initialize");
+        let entries = [(0, 0, 2.0), (1, 1, 3.0), (2, 2, 4.0)];
+        backend
+            .assemble(&entries)
+            .expect("identity-like system should assemble");
+        backend
+            .factor()
+            .expect("bordered factorization should succeed");
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.banded_structured_factorizations, 1);
+        assert_eq!(snapshot.banded_core_factorizations, 1);
+        assert_eq!(snapshot.banded_core_to_border_solves, 2);
+        assert_eq!(snapshot.banded_schur_assemblies, 1);
+        assert_eq!(snapshot.banded_border_factorizations, 1);
+        assert!(snapshot.banded_core_factorization_ms.is_some());
+        assert!(snapshot.banded_core_to_border_solve_ms.is_some());
+        assert!(snapshot.banded_schur_assembly_ms.is_some());
+        assert!(snapshot.banded_border_factorization_ms.is_some());
+        assert!(snapshot.validate_contract().is_ok());
+    }
+
+    #[test]
+    fn disabled_telemetry_does_not_collect_bordered_phase_timings() {
+        let telemetry = BvpSciTelemetry::disabled();
+        let mut backend = BandedBackend::new_for_collocation(3, 2, 2, 1, 3, 0, telemetry.clone())
+            .expect("small bordered system should initialize");
+        backend
+            .assemble(&[(0, 0, 2.0), (1, 1, 3.0), (2, 2, 4.0)])
+            .unwrap();
+        backend.factor().unwrap();
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.banded_core_factorizations, 0);
+        assert!(snapshot.banded_core_factorization_ms.is_none());
+        assert!(snapshot.banded_core_to_border_solve_ms.is_none());
+    }
+
+    #[test]
     fn bordered_collocation_partition_matches_known_large_solution() {
         // 260 unknowns deliberately exceed the scalar-fallback threshold. The
         // test therefore exercises the same structured route as large BVPs,
@@ -896,13 +994,9 @@ mod tests {
         let node_count = 130;
         let parameter_dimension = 0;
         let dimension = state_dimension * node_count + parameter_dimension;
-        let partition = CollocationPartition::new(
-            dimension,
-            state_dimension,
-            node_count,
-            parameter_dimension,
-        )
-        .unwrap();
+        let partition =
+            CollocationPartition::new(dimension, state_dimension, node_count, parameter_dimension)
+                .unwrap();
         let expected = (0..dimension)
             .map(|index| 0.5 + 0.001 * index as f64)
             .collect::<Vec<_>>();

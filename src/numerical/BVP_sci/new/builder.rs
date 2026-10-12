@@ -8,7 +8,7 @@
 use super::{
     BvpSciBoundaryCallbacks, BvpSciExecution, BvpSciExecutionPolicy, BvpSciLambdifyPlan,
     BvpSciMatrixLayout, BvpSciNewError, BvpSciOptions, BvpSciOutputPolicy, BvpSciSingularTerm,
-    BvpSciSolver, BvpSciTelemetry, BvpSciTelemetryMode,
+    BvpSciSolver, BvpSciSparseFactorization, BvpSciTelemetry, BvpSciTelemetryMode,
 };
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
@@ -33,6 +33,7 @@ pub struct BvpSciSolverBuilder {
     initial_state: Option<Vec<f64>>,
     parameters: Vec<f64>,
     options: BvpSciOptions,
+    sparse_factorization: BvpSciSparseFactorization,
     aot_config: Option<SymbolicIvpGeneratedBackendConfig>,
 }
 
@@ -56,6 +57,7 @@ impl BvpSciSolverBuilder {
             initial_state: None,
             parameters: Vec::new(),
             options,
+            sparse_factorization: BvpSciSparseFactorization::StandardFaer,
             aot_config: None,
         }
     }
@@ -143,6 +145,28 @@ impl BvpSciSolverBuilder {
         self
     }
 
+    /// Select an explicit sparse factorization policy.
+    /// StandardFaer remains the default.
+    pub fn with_sparse_factorization(mut self, strategy: BvpSciSparseFactorization) -> Self {
+        self.sparse_factorization = strategy;
+        self
+    }
+
+    /// Select the runtime-loaded SuperLU backend for Sparse layout.
+    ///
+    /// Build the bridge for the current platform and set `SUPERLU_LIBRARY` to
+    /// its path. If loading fails, the solver warns and uses StandardFaer.
+    pub fn with_superlu(self) -> Self {
+        self.with_matrix_layout(BvpSciMatrixLayout::Sparse)
+            .with_sparse_factorization(BvpSciSparseFactorization::SuperLu)
+    }
+
+    /// Compatibility alias for [`Self::with_superlu`].
+    #[deprecated(note = "use with_superlu")]
+    pub fn with_superlu_experimental(self) -> Self {
+        self.with_superlu()
+    }
+
     /// Set the collocation defect tolerance.
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
         self.options.tolerance = tolerance;
@@ -218,6 +242,7 @@ impl BvpSciSolverBuilder {
             initial_state,
             parameters,
             mut options,
+            sparse_factorization,
             aot_config,
         } = self;
         let mesh = mesh.ok_or_else(|| {
@@ -258,7 +283,7 @@ impl BvpSciSolverBuilder {
             (BvpSciExecution::Aot, None) => {
                 return Err(BvpSciNewError::InvalidConfiguration(
                     "AOT execution requires a generated backend configuration".into(),
-                ))
+                ));
             }
             (_, _) => BvpSciLambdifyPlan::prepare(
                 assembly,
@@ -279,6 +304,14 @@ impl BvpSciSolverBuilder {
             ),
             None => BvpSciBoundaryCallbacks::new(boundary_dimension, boundary_callback, telemetry),
         };
-        BvpSciSolver::new(plan, boundary, mesh, initial_state, parameters, options)
+        BvpSciSolver::new_with_sparse_factorization(
+            plan,
+            boundary,
+            mesh,
+            initial_state,
+            parameters,
+            options,
+            sparse_factorization,
+        )
     }
 }

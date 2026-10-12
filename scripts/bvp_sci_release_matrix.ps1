@@ -14,17 +14,27 @@ param(
     [string]$PolicyFullSolveLayouts = "sparse,banded",
     [string]$PolicyFullSolveFrontends = "expr-legacy,atom-native",
     [int]$PolicyFullSolveRepeats = 3,
+    [int]$SparseStrategyRepeats = 9,
+    [int]$SparseStrategyContinuation = 4,
+    [switch]$EnableSuperLu,
+    [string]$SuperLuLibraryPath = "",
+    [switch]$IncludeSuperLuBench,
+    [switch]$IncludeLinearBackendMicroBench,
+    [switch]$IncludeSciPyParityBench,
+    [string]$SciPyPython = "",
     [switch]$IncludeAot,
+    [switch]$IncludeSparseStrategyAb,
     [string]$AotDimensions = "2,8,32",
     [string]$AotFullSolveDimensions = "8,32",
     [string]$AotFullSolveNodes = "16,64",
+    [ValidateSet("independent", "coupled-chain")][string]$AotFullSolveWorkload = "independent",
     [string]$AotPolicyFullSolveWorkers = "1,2,4,8,12",
     [int]$AotPolicyFullSolveRepeats = 3,
     [int]$AotContinuationCount = 16,
     [string]$AotFrontends = "lambdify-expr-legacy,lambdify-atom-native,aot-expr-legacy,aot-atom-native",
     [string]$AotLayouts = "dense,sparse,banded",
     [string]$AotPolicies = "sequential,parallel,auto",
-    [string]$AotPhases = "matrix,continuation,policy",
+    [string]$AotPhases = "matrix,continuation,cold-amortization,policy",
     [string]$MatchedDimensions = "8,32",
     [string]$MatchedNodes = "16,64",
     [string]$MatchedCounts = "1,4,16",
@@ -48,6 +58,12 @@ param(
 # written below reports/; compiler and Criterion chatter stays in technical/
 # and is never mixed into measured Markdown artifacts.
 $ErrorActionPreference = "Continue"
+if ($IncludeSuperLuBench -and -not $EnableSuperLu) {
+    throw "-IncludeSuperLuBench requires -EnableSuperLu so the bridge feature is compiled."
+}
+if (($IncludeLinearBackendMicroBench -or $IncludeSciPyParityBench) -and -not $EnableSuperLu) {
+    throw "The SuperLU-inclusive linear/SciPy benches require -EnableSuperLu."
+}
 
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmss'Z'")
 $captureRoot = Join-Path (Get-Location) "test_reports\BVP_sci_release_manual\$stamp"
@@ -81,6 +97,7 @@ $env:BVP_SCI_AOT_BENCH_POLICIES = $AotPolicies
 $env:BVP_SCI_AOT_COMPILER = $AotCompiler
 $env:BVP_SCI_AOT_FULL_SOLVE_DIMENSIONS = $AotFullSolveDimensions
 $env:BVP_SCI_AOT_FULL_SOLVE_NODES = $AotFullSolveNodes
+$env:BVP_SCI_AOT_FULL_SOLVE_WORKLOAD = $AotFullSolveWorkload
 $env:BVP_SCI_AOT_POLICY_FULL_SOLVE_REPEATS = [Math]::Max(1, $AotPolicyFullSolveRepeats).ToString()
 $env:BVP_SCI_AOT_CONTINUATION_COUNT = [Math]::Max(1, $AotContinuationCount).ToString()
 $env:BVP_SCI_MATCHED_DIMENSIONS = $MatchedDimensions
@@ -89,6 +106,22 @@ $env:BVP_SCI_MATCHED_COUNTS = $MatchedCounts
 $env:BVP_SCI_MATCHED_REPEATS = [Math]::Max(1, $MatchedRepeats).ToString()
 $env:BVP_SCI_MATCHED_COMPILER = $AotCompiler
 $env:BVP_SCI_MATCHED_FAIL_ON_ERROR = "1"
+$superLuFeatureArgs = @()
+if ($EnableSuperLu -or $IncludeSuperLuBench) {
+    $superLuFeatureArgs = @("--features", "superlu")
+}
+$env:BVP_SCI_BENCH_SPARSE_FACTORIZATIONS = if ($EnableSuperLu) {
+    "standard-faer,superlu"
+} else {
+    "standard-faer"
+}
+if (-not [string]::IsNullOrWhiteSpace($SuperLuLibraryPath)) {
+    $env:SUPERLU_LIBRARY = (Resolve-Path -LiteralPath $SuperLuLibraryPath).Path
+}
+if (-not [string]::IsNullOrWhiteSpace($SciPyPython)) {
+    $env:BVP_SCIPY_PYTHON = (Resolve-Path -LiteralPath $SciPyPython).Path
+    $env:SOMELINALG_PYTHON = $env:BVP_SCIPY_PYTHON
+}
 
 $steps = New-Object System.Collections.Generic.List[object]
 
@@ -180,39 +213,77 @@ function Add-BvpSciStep {
 }
 
 Add-BvpSciStep "stories_fast" "story" {
-    cargo test --release --lib --no-default-features numerical::BVP_sci::new:: -- --nocapture --test-threads=1
+    cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new:: -- --nocapture --test-threads=1
 }
 
 if (-not $SkipIgnoredStories) {
     Add-BvpSciStep "stories_ignored" "story-ignored" {
-        cargo test --release --lib --no-default-features numerical::BVP_sci::new:: -- --ignored --nocapture --test-threads=1
+        cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new:: -- --ignored --skip story_tests_experimental --nocapture --test-threads=1
     }
     if (-not $SkipScaleEvidence) {
         Add-BvpSciStep "stories_banded_scale" "story-ignored" {
             $env:BVP_SCI_STORY_SCALE_NODES = $ScaleNodes
             $env:BVP_SCI_STORY_SCALE_WORKLOADS = $ScaleWorkloads
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::lambdify_layout_scale_matrix_reports_banded_route_costs -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::lambdify_layout_scale_matrix_reports_banded_route_costs -- --ignored --nocapture --test-threads=1
         }
     }
     if ($IncludeAot) {
         Add-BvpSciStep "stories_aot_contract" "story-ignored-aot" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_frontend_backend_contract_matrix_is_compact_and_parity_checked -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_frontend_backend_contract_matrix_is_compact_and_parity_checked -- --ignored --nocapture --test-threads=1
         }
         Add-BvpSciStep "stories_aot_solver" "story-ignored-aot" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_solver_route_continuation_and_policy_matrix_is_compact -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_solver_route_continuation_and_policy_matrix_is_compact -- --ignored --nocapture --test-threads=1
         }
         Add-BvpSciStep "stories_aot_full_solve" "story-ignored-aot" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_full_solve_matches_lambdify_on_medium_parameterized_systems -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_full_solve_matches_lambdify_on_medium_parameterized_systems -- --ignored --nocapture --test-threads=1
         }
         Add-BvpSciStep "stories_aot_lifecycle" "story-ignored-aot" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_lifecycle_policies_and_typed_failure_matrix_is_compact -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_lifecycle_policies_and_typed_failure_matrix_is_compact -- --ignored --nocapture --test-threads=1
         }
         Add-BvpSciStep "stories_aot_continuation_retention" "story-ignored-aot" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_continuation_restart_retention_matrix_is_compact -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_continuation_restart_retention_matrix_is_compact -- --ignored --nocapture --test-threads=1
         }
         Add-BvpSciStep "stories_aot_process_handoff" "story-ignored-aot-process" {
-            cargo test --release --lib --no-default-features numerical::BVP_sci::new::story_tests::aot_process_isolated_producer_consumer_handoff_matrix_is_compact -- --ignored --nocapture --test-threads=1
+            cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests::aot_process_isolated_producer_consumer_handoff_matrix_is_compact -- --ignored --nocapture --test-threads=1
         }
+    }
+}
+
+if ($IncludeSparseStrategyAb) {
+    Add-BvpSciStep "sparse_strategy_large_continuation_ab" "story-ignored-experimental-sparse-ab" {
+        $env:BVP_SCI_SPARSE_REUSE_REPEATS = [Math]::Max(1, $SparseStrategyRepeats).ToString()
+        $env:BVP_SCI_SPARSE_REUSE_CONTINUATION = [Math]::Min(16, [Math]::Max(1, $SparseStrategyContinuation)).ToString()
+        cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests_experimental::sparse_reusable_kernel_full_solve_continuation_ab_is_compact -- --ignored --nocapture --test-threads=1
+    }
+    Add-BvpSciStep "sparse_strategy_real_workloads_ab" "story-ignored-experimental-sparse-ab" {
+        $env:BVP_SCI_SPARSE_MATRIX_REPEATS = [Math]::Max(3, $SparseStrategyRepeats).ToString()
+        cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests_experimental::sparse_kernel_real_workload_matrix_ab_is_compact -- --ignored --nocapture --test-threads=1
+    }
+    Add-BvpSciStep "sparse_strategy_official_60_state_ab" "story-ignored-experimental-sparse-ab" {
+        $env:BVP_SCI_60_STATE_AB_REPEATS = [Math]::Max(1, $SparseStrategyRepeats).ToString()
+        $env:BVP_SCI_60_STATE_AB_CONTINUATION = [Math]::Min(4, [Math]::Max(1, $SparseStrategyContinuation)).ToString()
+        cargo test --release --lib --no-default-features @superLuFeatureArgs numerical::BVP_sci::new::story_tests_experimental::sparse_kernel_official_60_state_continuation_ab_is_compact -- --ignored --nocapture --test-threads=1
+    }
+}
+
+if (-not $SkipBench -and $IncludeSuperLuBench) {
+    Add-BvpSciStep "bench_superlu_full_solve_ab" "bench-experimental-superlu" {
+        cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_superlu_ab -- --noplot
+    }
+}
+
+if (-not $SkipBench -and $IncludeLinearBackendMicroBench) {
+    $env:BVP_SCI_LINEAR_MICRO_ROUTES = "dense,sparse,banded,superlu"
+    $env:BVP_SCI_LINEAR_MICRO_REPORT = "linear_backend_micro_superlu_matrix"
+    Add-BvpSciStep "bench_linear_backend_micro_superlu" "bench-linear-backend-superlu" {
+        cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_linear_backend_micro -- --noplot
+    }
+}
+
+if (-not $SkipBench -and $IncludeSciPyParityBench) {
+    $env:BVP_SCI_SCIPY_BENCH_REPORT = "python_vs_rust_numerical_core_superlu"
+    Add-BvpSciStep "bench_scipy_parity_superlu" "bench-scipy-parity-superlu" {
+        cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_scipy_parity -- --noplot
     }
 }
 
@@ -225,7 +296,7 @@ if (-not $SkipBench -and $IncludeAot) {
         $env:BVP_SCI_AOT_BENCH_PHASE = $aotPhase
         $env:BVP_SCI_AOT_BENCH_REPORT = "aot_$aotPhase"
         Add-BvpSciStep "bench_aot_$aotPhase" "bench-aot-$aotPhase" {
-            cargo bench --no-default-features --bench bvp_sci_aot -- --noplot
+            cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_aot -- --noplot
         }
     }
 
@@ -244,7 +315,7 @@ if (-not $SkipBench -and $IncludeAot) {
             $env:BVP_SCI_AOT_BENCH_PHASE = "policy-full-solve"
             $env:BVP_SCI_AOT_BENCH_REPORT = "aot_policy_full_solve_workers_$worker"
             Add-BvpSciStep "bench_aot_policy_full_solve_workers_$worker" "bench-aot-policy-full-solve" {
-                cargo bench --no-default-features --bench bvp_sci_aot -- --noplot
+                cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_aot -- --noplot
             }
         }
         if ($null -eq $previousRayonThreads) {
@@ -261,13 +332,13 @@ if (-not $SkipBench) {
     if ($IncludeAot -and -not $SkipMatchedFrontendBench) {
         $env:BVP_SCI_MATCHED_REPORT = "matched_full_solve_continuation"
         Add-BvpSciStep "bench_matched_frontend_full_solve" "bench-matched-frontend" {
-            cargo bench --no-default-features --bench bvp_sci_matched -- --noplot
+            cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_matched -- --noplot
         }
     }
     $env:BVP_SCI_BENCH_PHASE = "matrix"
     $env:BVP_SCI_BENCH_REPORT = "lambdify_matrix"
     Add-BvpSciStep "bench_lambdify_matrix" "bench-lambdify" {
-        cargo bench --no-default-features --bench bvp_sci_lambdify -- --noplot
+        cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_lambdify -- --noplot
     }
 }
 
@@ -275,7 +346,7 @@ if (-not $SkipBench -and -not $SkipContinuationBench) {
     $env:BVP_SCI_BENCH_PHASE = "continuation"
     $env:BVP_SCI_BENCH_REPORT = "lambdify_continuation"
     Add-BvpSciStep "bench_lambdify_continuation" "bench-lambdify-continuation" {
-        cargo bench --no-default-features --bench bvp_sci_lambdify -- --noplot
+    cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_lambdify -- --noplot
     }
 }
 
@@ -283,7 +354,7 @@ if (-not $SkipBench -and -not $SkipContinuationLifecycleBench) {
     $env:BVP_SCI_BENCH_PHASE = "continuation-lifecycle"
     $env:BVP_SCI_BENCH_REPORT = "lambdify_continuation_lifecycle"
     Add-BvpSciStep "bench_lambdify_continuation_lifecycle" "bench-lambdify-continuation-lifecycle" {
-        cargo bench --no-default-features --bench bvp_sci_lambdify -- --noplot
+    cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_lambdify -- --noplot
     }
 }
 
@@ -302,7 +373,7 @@ if (-not $SkipBench -and -not $SkipPolicyFullSolveBench) {
         $env:BVP_SCI_BENCH_PHASE = "policy-full-solve"
         $env:BVP_SCI_BENCH_REPORT = "lambdify_policy_full_solve_workers_$worker"
         Add-BvpSciStep "bench_lambdify_policy_full_solve_workers_$worker" "bench-lambdify-policy-full-solve" {
-            cargo bench --no-default-features --bench bvp_sci_lambdify -- --noplot
+                cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_lambdify -- --noplot
         }
     }
     if ($null -eq $previousRayonThreads) {
@@ -321,7 +392,7 @@ if (-not $SkipBench -and -not $SkipScaleEvidence) {
     $env:BVP_SCI_BENCH_CONTINUATION = "1"
     $env:BVP_SCI_BENCH_REPORT = "lambdify_banded_scale"
     Add-BvpSciStep "bench_lambdify_banded_scale" "bench-lambdify-banded-scale" {
-        cargo bench --no-default-features --bench bvp_sci_lambdify -- --noplot
+        cargo bench --no-default-features @superLuFeatureArgs --bench bvp_sci_lambdify -- --noplot
     }
 }
 
@@ -367,6 +438,8 @@ $summary = @(
     "- scale_workloads: $ScaleWorkloads",
     "- execution_policy: $Policy (min_work=$PolicyMinWork)",
     "- include_aot: $IncludeAot",
+    "- enable_superlu: $EnableSuperLu",
+    "- superlu_library: $(if ($env:SUPERLU_LIBRARY) { $env:SUPERLU_LIBRARY } else { 'unset; requested SuperLU uses the documented faer fallback' })",
     "- aot_dimensions: $AotDimensions",
     "- aot_full_solve_dimensions: $AotFullSolveDimensions",
     "- aot_full_solve_nodes: $AotFullSolveNodes",

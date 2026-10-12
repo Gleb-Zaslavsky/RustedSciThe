@@ -5,8 +5,8 @@
 //! matrix without putting Criterion/compiler chatter into the report table.
 
 use super::*;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, SolverParams, NRBVP};
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -78,6 +78,73 @@ fn layout_name(layout: BvpSciMatrixLayout) -> String {
 
 fn timing(value: Option<f64>) -> String {
     value.map(measured_ms).unwrap_or_else(|| "n/a".into())
+}
+
+fn sparse_factor_timing_ms(
+    snapshot: &BvpSciTelemetrySnapshot,
+    policy: BvpSciSparseFactorization,
+) -> Option<f64> {
+    #[allow(deprecated)]
+    let is_superlu = matches!(
+        policy,
+        BvpSciSparseFactorization::SuperLu | BvpSciSparseFactorization::SuperLuExperimental
+    );
+    if is_superlu {
+        snapshot.factorization_ms
+    } else {
+        snapshot.sparse_numeric_factorization_ms
+    }
+}
+
+fn sparse_policy_effective_backend(
+    snapshot: &BvpSciTelemetrySnapshot,
+    policy: BvpSciSparseFactorization,
+) -> &'static str {
+    if snapshot.superlu_fallbacks > 0 {
+        "StandardFaer-fallback"
+    } else {
+        #[allow(deprecated)]
+        match policy {
+            BvpSciSparseFactorization::SuperLu | BvpSciSparseFactorization::SuperLuExperimental => {
+                "SuperLU"
+            }
+            _ => "faer",
+        }
+    }
+}
+
+fn superlu_stage_summary(snapshot: &BvpSciTelemetrySnapshot) -> String {
+    let metrics = &snapshot.superlu;
+    if metrics.factor_ffi_calls == 0 && metrics.solve_ffi_calls == 0 {
+        return "-".into();
+    }
+    format!(
+        "calls abi/factor-ffi/native-factor/solve-ffi/native-solve={}/{}/{}/{}/{}; ms abi/factor-ffi/native-factor/solve-ffi/native-solve={}/{}/{}/{}/{}",
+        metrics.abi_conversions,
+        metrics.factor_ffi_calls,
+        metrics.native_factorization_calls,
+        metrics.solve_ffi_calls,
+        metrics.native_solve_calls,
+        timing(metrics.abi_conversion_ms),
+        timing(metrics.factor_ffi_ms),
+        timing(metrics.native_factorization_ms),
+        timing(metrics.solve_ffi_ms),
+        timing(metrics.native_solve_ms),
+    )
+}
+
+fn superlu_factor_fill_summary(snapshot: &BvpSciTelemetrySnapshot) -> String {
+    let metrics = &snapshot.superlu;
+    if metrics.factor_ffi_calls == 0 {
+        return "-".into();
+    }
+    format!(
+        "L storage/CSC={}/{}; U storage/CSC={}/{}",
+        metrics.factor_l_storage_entries,
+        metrics.factor_l_csc_nnz,
+        metrics.factor_u_storage_entries,
+        metrics.factor_u_csc_nnz,
+    )
 }
 
 fn measured_ms(value: f64) -> String {
@@ -189,11 +256,7 @@ fn build_bvp_damp_combustion(nodes: usize) -> NRBVP {
         names.len(),
         nodes,
         |row, _| {
-            if row == 2 {
-                1.0
-            } else {
-                0.0
-            }
+            if row == 2 { 1.0 } else { 0.0 }
         },
     );
     let rel_tolerance = names
@@ -294,6 +357,22 @@ fn build_solver(
     parameter: f64,
     execution_policy: BvpSciExecutionPolicy,
 ) -> (BvpSciSolver, Arc<AtomicU64>) {
+    build_solver_with_sparse_factorization(
+        assembly,
+        layout,
+        parameter,
+        execution_policy,
+        BvpSciSparseFactorization::StandardFaer,
+    )
+}
+
+fn build_solver_with_sparse_factorization(
+    assembly: BvpSciAssembly,
+    layout: BvpSciMatrixLayout,
+    parameter: f64,
+    execution_policy: BvpSciExecutionPolicy,
+    sparse_factorization: BvpSciSparseFactorization,
+) -> (BvpSciSolver, Arc<AtomicU64>) {
     let started = BvpSciTelemetry::timings();
     let plan = BvpSciLambdifyPlan::prepare(
         assembly,
@@ -331,17 +410,171 @@ fn build_solver(
     options.max_newton_iterations = 20;
     options.max_jacobian_refreshes = 10;
     (
-        BvpSciSolver::new(
+        BvpSciSolver::new_with_sparse_factorization(
             plan,
             boundary,
             vec![0.0, 0.5, 1.0],
             vec![0.0, (parameter * 0.5).exp() - 1.0, parameter.exp() - 1.0],
             vec![parameter],
             options,
+            sparse_factorization,
         )
         .expect("story solver should construct"),
         target,
     )
+}
+
+fn logistic_exact_state(parameter: f64, x: f64) -> f64 {
+    1.0 / (1.0 + 4.0 * (-parameter * x).exp())
+}
+
+fn build_large_logistic_sparse_solver(
+    sparse_factorization: BvpSciSparseFactorization,
+    nodes: usize,
+    initial_parameter: f64,
+) -> (BvpSciSolver, Arc<AtomicU64>) {
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::AtomViewNative,
+        &[Expr::parse_expression("p*y*(1-y)")],
+        &["y".into()],
+        &["p".into()],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("large logistic frontend should prepare");
+    let target = Arc::new(AtomicU64::new(initial_parameter.to_bits()));
+    let target_for_boundary = Arc::clone(&target);
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        move |ya, yb, _, output| {
+            let parameter = f64::from_bits(target_for_boundary.load(Ordering::Relaxed));
+            output[0] = ya[0] - 0.2;
+            output[1] = yb[0] - logistic_exact_state(parameter, 1.0);
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..nodes)
+        .map(|index| index as f64 / (nodes - 1) as f64)
+        .collect();
+    let mut initial_state = Vec::with_capacity(nodes);
+    for &x in &mesh {
+        let y = logistic_exact_state(initial_parameter, x);
+        let perturbation = 1e-3 * (std::f64::consts::PI * x).sin();
+        initial_state.push(y + perturbation);
+    }
+    let mut options = BvpSciOptions::default();
+    options.matrix_layout = BvpSciMatrixLayout::Sparse;
+    options.tolerance = 1e-6;
+    options.max_nodes = nodes.saturating_mul(2).max(nodes);
+    options.max_mesh_refinements = 4;
+    options.max_newton_iterations = 24;
+    options.max_jacobian_refreshes = 12;
+    let solver = BvpSciSolver::new_with_sparse_factorization(
+        plan,
+        boundary,
+        mesh,
+        initial_state,
+        vec![initial_parameter],
+        options,
+        sparse_factorization,
+    )
+    .expect("large logistic sparse solver should construct");
+    (solver, target)
+}
+
+fn build_official_large_parameterized_sparse_solver(
+    sparse_factorization: BvpSciSparseFactorization,
+) -> BvpSciSolver {
+    build_official_large_parameterized_sparse_solver_with_output(
+        sparse_factorization,
+        BvpSciOutputPolicy::MeshAndValues,
+    )
+}
+
+fn build_official_large_parameterized_sparse_solver_with_output(
+    sparse_factorization: BvpSciSparseFactorization,
+    output_policy: BvpSciOutputPolicy,
+) -> BvpSciSolver {
+    let systems = 30usize;
+    let dimension = systems * 2;
+    let telemetry = BvpSciTelemetry::timings();
+    let mut equations = Vec::with_capacity(dimension);
+    let mut state_names = Vec::with_capacity(dimension);
+    for system in 0..systems {
+        let even_name = format!("y{}", 2 * system);
+        let odd_name = format!("y{}", 2 * system + 1);
+        let parameter_name = format!("p{}", system % 2);
+        state_names.extend([even_name.clone(), odd_name.clone()]);
+        equations.push(Expr::parse_expression(&odd_name));
+        equations.push(Expr::parse_expression(&format!(
+            "-{parameter_name}*{parameter_name}*{even_name}"
+        )));
+    }
+    let parameter_names = vec!["p0".into(), "p1".into()];
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &equations,
+        &state_names,
+        &parameter_names,
+        "x",
+        telemetry.clone(),
+    )
+    .expect("official large ExprLegacy frontend should prepare");
+    let boundary = BvpSciBoundaryCallbacks::new_with_jacobian(
+        dimension + 2,
+        move |ya, yb, parameters, output| {
+            for system in 0..systems {
+                output[system] = ya[2 * system];
+                output[systems + system] = yb[2 * system];
+            }
+            output[dimension] = ya[1] - parameters[0];
+            output[dimension + 1] = ya[3] - parameters[1];
+            Ok(())
+        },
+        move |_ya, _yb, _parameters, dya, dyb, dp| {
+            dya.fill(0.0);
+            dyb.fill(0.0);
+            dp.fill(0.0);
+            for system in 0..systems {
+                dya[system * dimension + 2 * system] = 1.0;
+                dyb[(systems + system) * dimension + 2 * system] = 1.0;
+            }
+            dya[dimension * dimension + 1] = 1.0;
+            dya[(dimension + 1) * dimension + 3] = 1.0;
+            dp[dimension * 2] = -1.0;
+            dp[(dimension + 1) * 2 + 1] = -1.0;
+            Ok(())
+        },
+        telemetry,
+    );
+    let mesh: Vec<f64> = (0..5)
+        .map(|index| std::f64::consts::PI * index as f64 / 4.0)
+        .collect();
+    let mut options = BvpSciOptions::default();
+    options.matrix_layout = BvpSciMatrixLayout::Sparse;
+    options.tolerance = 1e-3;
+    options.max_nodes = 1000;
+    options.output_policy = output_policy;
+    BvpSciSolver::new_with_sparse_factorization(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![1.0; mesh.len() * dimension],
+        vec![0.5, 0.5],
+        options,
+        sparse_factorization,
+    )
+    .expect("official large parameterized sparse solver should construct")
+}
+
+fn median_and_mad(samples: &[f64]) -> (f64, f64) {
+    let mut ordered = samples.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let median = ordered[ordered.len() / 2];
+    let mut deviations: Vec<f64> = samples.iter().map(|value| (value - median).abs()).collect();
+    deviations.sort_by(f64::total_cmp);
+    (median, deviations[deviations.len() / 2])
 }
 
 fn build_bratu_solver(assembly: BvpSciAssembly, layout: BvpSciMatrixLayout) -> BvpSciSolver {
@@ -618,6 +851,40 @@ fn build_damp_exact_solver_with_nodes(
     layout: BvpSciMatrixLayout,
     nodes: usize,
 ) -> BvpSciSolver {
+    build_damp_exact_solver_with_nodes_and_telemetry(
+        workload,
+        assembly,
+        layout,
+        nodes,
+        BvpSciTelemetry::timings(),
+    )
+}
+
+fn build_damp_exact_solver_with_nodes_and_telemetry(
+    workload: DampExactWorkload,
+    assembly: BvpSciAssembly,
+    layout: BvpSciMatrixLayout,
+    nodes: usize,
+    telemetry: BvpSciTelemetry,
+) -> BvpSciSolver {
+    build_damp_exact_solver_with_nodes_telemetry_and_sparse_factorization(
+        workload,
+        assembly,
+        layout,
+        nodes,
+        telemetry,
+        BvpSciSparseFactorization::StandardFaer,
+    )
+}
+
+fn build_damp_exact_solver_with_nodes_telemetry_and_sparse_factorization(
+    workload: DampExactWorkload,
+    assembly: BvpSciAssembly,
+    layout: BvpSciMatrixLayout,
+    nodes: usize,
+    telemetry: BvpSciTelemetry,
+    sparse_factorization: BvpSciSparseFactorization,
+) -> BvpSciSolver {
     let (left, right) = workload.interval();
     let plan = BvpSciLambdifyPlan::prepare(
         assembly,
@@ -625,7 +892,7 @@ fn build_damp_exact_solver_with_nodes(
         &workload.state_names(),
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        telemetry,
     )
     .expect("BVP_Damp exact frontend should prepare");
     let left_state = workload.exact_state(left);
@@ -712,8 +979,16 @@ fn build_damp_exact_solver_with_nodes(
     if matches!(workload, DampExactWorkload::StiffDecay) {
         options.max_jacobian_refreshes = 30;
     }
-    BvpSciSolver::new(plan, boundary, x, y, vec![], options)
-        .expect("BVP_Damp exact solver should construct")
+    BvpSciSolver::new_with_sparse_factorization(
+        plan,
+        boundary,
+        x,
+        y,
+        vec![],
+        options,
+        sparse_factorization,
+    )
+    .expect("BVP_Damp exact solver should construct")
 }
 
 #[test]
@@ -798,7 +1073,7 @@ fn lambdify_frontend_backend_fidelity_matrix_is_compact_and_complete() {
     }
     crate::Utils::test_reporting::capture_test_block(format!(
         "# BVP_sci Lambdify frontend/backend fidelity\n\n{}",
-        Table::new(rows)
+        Table::new(&rows)
     ));
 }
 
@@ -831,8 +1106,9 @@ fn lambdify_continuation_keeps_preparation_and_reports_stage_counters() {
     assert!(telemetry.allocations > 0);
     assert!(telemetry.residual_evaluations > 0);
     assert!(telemetry.jacobian_evaluations > 0);
+    assert!(telemetry.parameter_jacobian_calls > 0);
     crate::Utils::test_reporting::capture_test_block(format!(
-        "# Continuation lifecycle\n\n- atom_conversions: {}\n- pattern_entries: {}\n- parameter_rebinds: {}\n- continuation_solves: {}\n- allocations: {}\n- residual_evaluations: {}\n- jacobian_evaluations: {}\n- factorization_ms: {:?}",
+        "# Continuation lifecycle\n\n- atom_conversions: {}\n- pattern_entries: {}\n- parameter_rebinds: {}\n- continuation_solves: {}\n- allocations: {}\n- residual_evaluations: {}\n- jacobian_evaluations: {}\n- parameter_jacobian_calls: {}\n- factorization_ms: {:?}",
         telemetry.atom_conversions,
         telemetry.pattern_entries,
         telemetry.parameter_rebinds,
@@ -840,8 +1116,968 @@ fn lambdify_continuation_keeps_preparation_and_reports_stage_counters() {
         telemetry.allocations,
         telemetry.residual_evaluations,
         telemetry.jacobian_evaluations,
+        telemetry.parameter_jacobian_calls,
         telemetry.factorization_ms,
     ));
+}
+
+// Experimental A/B implementation. Registration lives in
+// `story_tests_experimental` so exploratory evidence stays separate from
+// supported solver story tests.
+pub(super) fn run_sparse_reusable_kernel_full_solve_continuation_ab_is_compact() {
+    #[derive(Tabled)]
+    struct Row {
+        sparse_kernel: String,
+        effective_backend: String,
+        superlu_fallbacks: u64,
+        superlu_stage_ms: String,
+        superlu_factor_fill: String,
+        nodes: usize,
+        system_dimension: usize,
+        repeats: usize,
+        continuation_solves: usize,
+        prepare_median_mad_ms: String,
+        solve_series_median_mad_ms: String,
+        paired_series_delta_vs_standard_pct: String,
+        backend_factorizations: u64,
+        faer_numeric_factorizations: u64,
+        symbolic_analyses: u64,
+        symbolic_reuses: u64,
+        numeric_factor_median_mad_ms: String,
+        paired_factor_delta_vs_standard_pct: String,
+        max_final_mesh_diff: String,
+        max_final_state_diff: String,
+        status: String,
+    }
+
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "sparse_reusable_kernel_full_solve_continuation_ab",
+    );
+    let repeats = std::env::var("BVP_SCI_SPARSE_REUSE_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1);
+    let continuation_solves = std::env::var("BVP_SCI_SPARSE_REUSE_CONTINUATION")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(6)
+        .max(1);
+    let nodes = std::env::var("BVP_SCI_SPARSE_REUSE_NODES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(512)
+        .max(16);
+    let strategies = vec![
+        ("standard-faer", BvpSciSparseFactorization::StandardFaer),
+        (
+            "reusable-faer-experimental",
+            BvpSciSparseFactorization::ReusableFaerExperimental,
+        ),
+        (
+            "reusable-faer-simplicial-experimental",
+            BvpSciSparseFactorization::ReusableFaerSimplicialExperimental,
+        ),
+    ];
+    #[cfg(feature = "superlu")]
+    let strategies = {
+        let mut strategies = strategies;
+        strategies.push(("superlu", BvpSciSparseFactorization::SuperLu));
+        strategies
+    };
+    struct Sample {
+        prepare_ms: f64,
+        series_ms: f64,
+        factor_ms: f64,
+        snapshot: BvpSciTelemetrySnapshot,
+        x: Vec<f64>,
+        y: Vec<f64>,
+    }
+    let mut samples: Vec<Vec<Sample>> = (0..strategies.len())
+        .map(|_| Vec::with_capacity(repeats))
+        .collect();
+    let initial_parameter = 1.0;
+    let mut max_mesh_diffs = vec![0.0_f64; strategies.len()];
+    let mut max_state_diffs = vec![0.0_f64; strategies.len()];
+    let mut paired_series_deltas = vec![Vec::with_capacity(repeats); strategies.len()];
+    let mut paired_factor_deltas = vec![Vec::with_capacity(repeats); strategies.len()];
+
+    // Rotate policy order on each repetition to reduce systematic CPU/frequency
+    // drift between the first and last backend measured.
+    for repetition in 0..repeats {
+        let order: Vec<usize> = (0..strategies.len())
+            .map(|offset| (offset + repetition) % strategies.len())
+            .collect();
+        for policy_index in order {
+            let (name, strategy) = strategies[policy_index];
+            let prepare_started = Instant::now();
+            let (mut solver, target) =
+                build_large_logistic_sparse_solver(strategy, nodes, initial_parameter);
+            let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1e3;
+
+            let solve_started = Instant::now();
+            let mut solution = solver.solve().unwrap_or_else(|error| {
+                panic!("large logistic initial solve failed for {name}: {error:?}")
+            });
+            for index in 0..continuation_solves {
+                let parameter = initial_parameter + (index + 1) as f64 * 0.1;
+                target.store(parameter.to_bits(), Ordering::Relaxed);
+                solver
+                    .set_parameters(vec![parameter])
+                    .unwrap_or_else(|error| {
+                        panic!("large logistic parameter rebind failed for {name}: {error:?}")
+                    });
+                solution = solver.solve().unwrap_or_else(|error| {
+                    panic!("large logistic continuation failed for {name}: {error:?}")
+                });
+            }
+            let series_ms = solve_started.elapsed().as_secs_f64() * 1e3;
+            let snapshot = solver.plan().telemetry_snapshot();
+            let factor_ms = sparse_factor_timing_ms(&snapshot, strategy)
+                .expect("selected sparse factor timing should be recorded");
+            samples[policy_index].push(Sample {
+                prepare_ms,
+                series_ms,
+                factor_ms,
+                snapshot,
+                x: solution.x,
+                y: solution.y,
+            });
+        }
+
+        let reference = samples[0]
+            .last()
+            .expect("standard policy must be measured in every repetition");
+        for policy_index in 1..strategies.len() {
+            let candidate = samples[policy_index]
+                .last()
+                .expect("each policy must be measured in every repetition");
+            assert_eq!(candidate.x.len(), reference.x.len());
+            assert_eq!(candidate.y.len(), reference.y.len());
+            let mesh_diff = candidate
+                .x
+                .iter()
+                .zip(&reference.x)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0, f64::max);
+            let state_diff = candidate
+                .y
+                .iter()
+                .zip(&reference.y)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                mesh_diff < 1e-12,
+                "{name} mesh drift={mesh_diff:e}",
+                name = strategies[policy_index].0
+            );
+            assert!(
+                state_diff < 1e-7,
+                "{name} solution drift={state_diff:e}",
+                name = strategies[policy_index].0
+            );
+            max_mesh_diffs[policy_index] = max_mesh_diffs[policy_index].max(mesh_diff);
+            max_state_diffs[policy_index] = max_state_diffs[policy_index].max(state_diff);
+            paired_series_deltas[policy_index]
+                .push(100.0 * (candidate.series_ms - reference.series_ms) / reference.series_ms);
+            paired_factor_deltas[policy_index]
+                .push(100.0 * (candidate.factor_ms - reference.factor_ms) / reference.factor_ms);
+        }
+    }
+
+    let reference_counters = &samples[0]
+        .last()
+        .expect("standard policy must have a final sample")
+        .snapshot;
+    assert!(
+        reference_counters.sparse_numeric_factorizations > 0,
+        "large Bratu series must execute numeric sparse factorizations"
+    );
+    assert!(
+        reference_counters.sparse_symbolic_analyses > 0,
+        "large Bratu series must execute symbolic sparse analyses"
+    );
+    for (policy_index, (name, _)) in strategies.iter().enumerate().skip(1) {
+        let snapshot = &samples[policy_index]
+            .last()
+            .expect("all policies must have a final sample")
+            .snapshot;
+        assert_eq!(
+            snapshot.factorizations, reference_counters.factorizations,
+            "{name} backend factorization count differs from StandardFaer"
+        );
+        assert_eq!(
+            snapshot.linear_solves, reference_counters.linear_solves,
+            "{name} linear solve count differs from StandardFaer"
+        );
+        if !matches!(
+            strategies[policy_index].1,
+            BvpSciSparseFactorization::SuperLu
+        ) {
+            assert_eq!(
+                snapshot.sparse_numeric_factorizations,
+                reference_counters.sparse_numeric_factorizations,
+                "{name} numeric factorization count differs from StandardFaer"
+            );
+            assert_eq!(
+                snapshot.sparse_symbolic_analyses, reference_counters.sparse_symbolic_analyses,
+                "{name} symbolic analysis count differs from StandardFaer"
+            );
+            assert_eq!(
+                snapshot.sparse_symbolic_reuses, reference_counters.sparse_symbolic_reuses,
+                "{name} symbolic reuse count differs from StandardFaer"
+            );
+        }
+    }
+
+    let mut rows = Vec::with_capacity(strategies.len());
+    for (policy_index, (name, _)) in strategies.iter().enumerate() {
+        let preparations: Vec<f64> = samples[policy_index]
+            .iter()
+            .map(|sample| sample.prepare_ms)
+            .collect();
+        let series: Vec<f64> = samples[policy_index]
+            .iter()
+            .map(|sample| sample.series_ms)
+            .collect();
+        let factors: Vec<f64> = samples[policy_index]
+            .iter()
+            .map(|sample| sample.factor_ms)
+            .collect();
+        let (prepare_median, prepare_mad) = median_and_mad(&preparations);
+        let (series_median, series_mad) = median_and_mad(&series);
+        let (factor_median, factor_mad) = median_and_mad(&factors);
+        let snapshot = &samples[policy_index]
+            .last()
+            .expect("all policies must have measurements")
+            .snapshot;
+        let (series_delta, _) = if policy_index == 0 {
+            (0.0, 0.0)
+        } else {
+            median_and_mad(&paired_series_deltas[policy_index])
+        };
+        let (factor_delta, _) = if policy_index == 0 {
+            (0.0, 0.0)
+        } else {
+            median_and_mad(&paired_factor_deltas[policy_index])
+        };
+        rows.push(Row {
+            sparse_kernel: (*name).into(),
+            effective_backend: sparse_policy_effective_backend(
+                snapshot,
+                strategies[policy_index].1,
+            )
+            .into(),
+            superlu_fallbacks: snapshot.superlu_fallbacks,
+            superlu_stage_ms: superlu_stage_summary(snapshot),
+            superlu_factor_fill: superlu_factor_fill_summary(snapshot),
+            nodes,
+            system_dimension: nodes * 2,
+            repeats,
+            continuation_solves,
+            prepare_median_mad_ms: format!("{prepare_median:.3} / {prepare_mad:.3}"),
+            solve_series_median_mad_ms: format!("{series_median:.3} / {series_mad:.3}"),
+            paired_series_delta_vs_standard_pct: format!("{series_delta:+.2}%"),
+            backend_factorizations: snapshot.factorizations,
+            faer_numeric_factorizations: snapshot.sparse_numeric_factorizations,
+            symbolic_analyses: snapshot.sparse_symbolic_analyses,
+            symbolic_reuses: snapshot.sparse_symbolic_reuses,
+            numeric_factor_median_mad_ms: format!("{factor_median:.3} / {factor_mad:.3}"),
+            paired_factor_delta_vs_standard_pct: format!("{factor_delta:+.2}%"),
+            max_final_mesh_diff: format!("{:.3e}", max_mesh_diffs[policy_index]),
+            max_final_state_diff: format!("{:.3e}", max_state_diffs[policy_index]),
+            status: if strategies[policy_index].1 == BvpSciSparseFactorization::SuperLu
+                && snapshot.superlu_fallbacks > 0
+            {
+                "fallback-not-superlu".into()
+            } else {
+                "ok".into()
+            },
+        });
+    }
+
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "# Large nonlinear sparse LU full-solve and continuation A/B\n\nWorkload: parameterized logistic BVP with AtomViewNative, `{nodes}` initial mesh nodes/unknowns, one initial solve plus `{continuation_solves}` prepared parameter rebinds. Run `{repeats}` paired repetitions; strategy order rotates between repetitions. Time columns are median / median absolute deviation (MAD). Paired deltas are median per-repeat percent changes against StandardFaer. Factor time and counters are cumulative over the final series; they are diagnostic scopes, not additive with wall time.\n\n{}",
+        Table::new(&rows)
+    ));
+    assert!(
+        samples.iter().enumerate().all(|(index, policy_samples)| {
+            strategies[index].1 != BvpSciSparseFactorization::SuperLu
+                || policy_samples
+                    .iter()
+                    .all(|sample| sample.snapshot.superlu_fallbacks == 0)
+        }),
+        "requested SuperLU policy fell back; inspect the captured effective_backend column"
+    );
+}
+
+// Experimental policy matrix; the ignored test wrapper is in
+// `story_tests_experimental`.
+pub(super) fn run_sparse_kernel_real_workload_matrix_ab_is_compact() {
+    #[derive(Tabled)]
+    struct Row {
+        workload: String,
+        nodes: usize,
+        dimension: usize,
+        policy: String,
+        effective_backend: String,
+        superlu_fallbacks: u64,
+        superlu_stage_ms: String,
+        superlu_factor_fill: String,
+        repeats: usize,
+        prepare_median_mad_ms: String,
+        full_solve_median_mad_ms: String,
+        linear_assembly_ms: String,
+        factor_median_mad_ms: String,
+        linear_solve_ms: String,
+        paired_solve_delta_vs_standard_pct: String,
+        residual_calls: u64,
+        jacobian_calls: u64,
+        linear_solves: u64,
+        backend_factorizations: u64,
+        faer_numeric_factorizations: u64,
+        symbolic_analyses: u64,
+        symbolic_reuses: u64,
+        max_exact_error: String,
+        status: String,
+    }
+
+    struct Sample {
+        prepare_ms: f64,
+        solve_ms: f64,
+        factor_ms: f64,
+        exact_error: f64,
+        snapshot: BvpSciTelemetrySnapshot,
+        x: Vec<f64>,
+        y: Vec<f64>,
+    }
+
+    fn selected_workloads() -> Vec<DampExactWorkload> {
+        std::env::var("BVP_SCI_SPARSE_MATRIX_WORKLOADS")
+            .unwrap_or_else(|_| "stiff-decay,stiff-coupled".into())
+            .split(',')
+            .filter_map(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "stiff-decay" => Some(DampExactWorkload::StiffDecay),
+                "stiff-coupled" => Some(DampExactWorkload::StiffCoupled),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn workload_name(workload: DampExactWorkload) -> &'static str {
+        match workload {
+            DampExactWorkload::StiffDecay => "stiff-decay",
+            DampExactWorkload::StiffCoupled => "stiff-coupled",
+            _ => "unsupported",
+        }
+    }
+
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "sparse_kernel_real_workload_matrix_ab",
+    );
+    let repeats = std::env::var("BVP_SCI_SPARSE_MATRIX_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5)
+        .max(3);
+    let nodes_list: Vec<usize> = std::env::var("BVP_SCI_SPARSE_MATRIX_NODES")
+        .unwrap_or_else(|_| "64,256,1024".into())
+        .split(',')
+        .filter_map(|value| value.trim().parse().ok())
+        .filter(|nodes: &usize| *nodes >= 16)
+        .collect();
+    let strategies = vec![
+        ("standard-faer", BvpSciSparseFactorization::StandardFaer),
+        (
+            "reusable-faer-auto",
+            BvpSciSparseFactorization::ReusableFaerExperimental,
+        ),
+        (
+            "reusable-faer-simplicial",
+            BvpSciSparseFactorization::ReusableFaerSimplicialExperimental,
+        ),
+    ];
+    #[cfg(feature = "superlu")]
+    let strategies = {
+        let mut strategies = strategies;
+        strategies.push(("superlu", BvpSciSparseFactorization::SuperLu));
+        strategies
+    };
+    let mut rows = Vec::new();
+
+    for workload in selected_workloads() {
+        for &nodes in &nodes_list {
+            if matches!(workload, DampExactWorkload::StiffDecay) && nodes < 64 {
+                continue;
+            }
+            let mut samples: Vec<Vec<Sample>> = (0..strategies.len())
+                .map(|_| Vec::with_capacity(repeats))
+                .collect();
+            let mut paired_deltas: Vec<Vec<f64>> = (0..strategies.len())
+                .map(|_| Vec::with_capacity(repeats))
+                .collect();
+
+            // Interleave strategies so CPU frequency and thermal drift do not
+            // systematically favor one factorization policy.
+            for repetition in 0..repeats {
+                for offset in 0..strategies.len() {
+                    let policy_index = (offset + repetition) % strategies.len();
+                    let (_, strategy) = strategies[policy_index];
+                    let prepare_started = Instant::now();
+                    let mut solver =
+                        build_damp_exact_solver_with_nodes_telemetry_and_sparse_factorization(
+                            workload,
+                            BvpSciAssembly::AtomViewNative,
+                            BvpSciMatrixLayout::Sparse,
+                            nodes,
+                            BvpSciTelemetry::timings(),
+                            strategy,
+                        );
+                    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1e3;
+                    let solve_started = Instant::now();
+                    let solution = solver.solve().unwrap_or_else(|error| {
+                        panic!(
+                            "{} nodes={nodes} policy={} failed: {error:?}",
+                            workload_name(workload),
+                            strategies[policy_index].0
+                        )
+                    });
+                    let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
+                    let snapshot = solver.plan().telemetry_snapshot();
+                    let factor_ms = sparse_factor_timing_ms(&snapshot, strategy)
+                        .expect("selected Sparse backend should record factor time");
+                    let mut exact_error = 0.0_f64;
+                    for (node, &x) in solution.x.iter().enumerate() {
+                        let expected = workload.exact_state(x);
+                        for (component, expected_value) in expected.iter().enumerate() {
+                            let actual = solution.y[node * expected.len() + component];
+                            exact_error = exact_error.max((actual - expected_value).abs());
+                        }
+                    }
+                    assert!(
+                        exact_error < 1e-3,
+                        "{} nodes={nodes} exact-solution error={exact_error:e}",
+                        workload_name(workload)
+                    );
+                    samples[policy_index].push(Sample {
+                        prepare_ms,
+                        solve_ms,
+                        factor_ms,
+                        exact_error,
+                        snapshot,
+                        x: solution.x,
+                        y: solution.y,
+                    });
+                }
+
+                let reference = samples[0]
+                    .last()
+                    .expect("StandardFaer is measured once per repetition");
+                for policy_index in 1..strategies.len() {
+                    let candidate = samples[policy_index]
+                        .last()
+                        .expect("every policy is measured once per repetition");
+                    assert_eq!(candidate.x.len(), reference.x.len());
+                    assert_eq!(candidate.y.len(), reference.y.len());
+                    let mesh_diff = candidate
+                        .x
+                        .iter()
+                        .zip(&reference.x)
+                        .map(|(left, right)| (left - right).abs())
+                        .fold(0.0, f64::max);
+                    let state_diff = candidate
+                        .y
+                        .iter()
+                        .zip(&reference.y)
+                        .map(|(left, right)| (left - right).abs())
+                        .fold(0.0, f64::max);
+                    assert!(mesh_diff <= 1e-12, "mesh drift={mesh_diff:e}");
+                    assert!(state_diff <= 1e-8, "state drift={state_diff:e}");
+                    assert_eq!(
+                        candidate.snapshot.factorizations, reference.snapshot.factorizations,
+                        "backend factorization count differs for {} nodes={nodes}",
+                        strategies[policy_index].0
+                    );
+                    assert_eq!(
+                        candidate.snapshot.linear_solves, reference.snapshot.linear_solves,
+                        "linear solve count differs for {} nodes={nodes}",
+                        strategies[policy_index].0
+                    );
+                    if !matches!(
+                        strategies[policy_index].1,
+                        BvpSciSparseFactorization::SuperLu
+                    ) {
+                        assert_eq!(
+                            candidate.snapshot.sparse_numeric_factorizations,
+                            reference.snapshot.sparse_numeric_factorizations,
+                            "faer numeric factorization count differs for {} nodes={nodes}",
+                            strategies[policy_index].0
+                        );
+                        assert_eq!(
+                            candidate.snapshot.sparse_symbolic_analyses,
+                            reference.snapshot.sparse_symbolic_analyses,
+                            "faer symbolic analysis count differs for {} nodes={nodes}",
+                            strategies[policy_index].0
+                        );
+                        assert_eq!(
+                            candidate.snapshot.sparse_symbolic_reuses,
+                            reference.snapshot.sparse_symbolic_reuses,
+                            "faer symbolic reuse count differs for {} nodes={nodes}",
+                            strategies[policy_index].0
+                        );
+                    }
+                    assert!(
+                        (candidate.exact_error - reference.exact_error).abs() < 1e-8,
+                        "solution accuracy differs for {} nodes={nodes}",
+                        strategies[policy_index].0
+                    );
+                    paired_deltas[policy_index].push(
+                        100.0 * (candidate.solve_ms - reference.solve_ms) / reference.solve_ms,
+                    );
+                }
+            }
+
+            for (policy_index, (policy, _)) in strategies.iter().enumerate() {
+                let policy_samples = &samples[policy_index];
+                let (prepare_median, prepare_mad) = median_and_mad(
+                    &policy_samples
+                        .iter()
+                        .map(|sample| sample.prepare_ms)
+                        .collect::<Vec<_>>(),
+                );
+                let (solve_median, solve_mad) = median_and_mad(
+                    &policy_samples
+                        .iter()
+                        .map(|sample| sample.solve_ms)
+                        .collect::<Vec<_>>(),
+                );
+                let (factor_median, factor_mad) = median_and_mad(
+                    &policy_samples
+                        .iter()
+                        .map(|sample| sample.factor_ms)
+                        .collect::<Vec<_>>(),
+                );
+                let linear_assembly_median = median_and_mad(
+                    &policy_samples
+                        .iter()
+                        .map(|sample| {
+                            sample
+                                .snapshot
+                                .linear_assembly_ms
+                                .expect("linear assembly timing should be recorded")
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .0;
+                let linear_solve_median = median_and_mad(
+                    &policy_samples
+                        .iter()
+                        .map(|sample| {
+                            sample
+                                .snapshot
+                                .linear_solve_ms
+                                .expect("linear solve timing should be recorded")
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .0;
+                let reference = &samples[0][0].snapshot;
+                let snapshot = &policy_samples[0].snapshot;
+                let paired_delta = if policy_index == 0 {
+                    0.0
+                } else {
+                    median_and_mad(&paired_deltas[policy_index]).0
+                };
+                let max_exact_error = policy_samples
+                    .iter()
+                    .map(|sample| sample.exact_error)
+                    .fold(0.0, f64::max);
+                rows.push(Row {
+                    workload: workload_name(workload).into(),
+                    nodes,
+                    dimension: nodes * workload.state_names().len(),
+                    policy: (*policy).into(),
+                    effective_backend: sparse_policy_effective_backend(
+                        snapshot,
+                        strategies[policy_index].1,
+                    )
+                    .into(),
+                    superlu_fallbacks: snapshot.superlu_fallbacks,
+                    superlu_stage_ms: superlu_stage_summary(snapshot),
+                    superlu_factor_fill: superlu_factor_fill_summary(snapshot),
+                    repeats,
+                    prepare_median_mad_ms: format!("{prepare_median:.3}/{prepare_mad:.3}"),
+                    full_solve_median_mad_ms: format!("{solve_median:.3}/{solve_mad:.3}"),
+                    linear_assembly_ms: format!("{linear_assembly_median:.3}"),
+                    factor_median_mad_ms: format!("{factor_median:.3}/{factor_mad:.3}"),
+                    linear_solve_ms: format!("{linear_solve_median:.3}"),
+                    paired_solve_delta_vs_standard_pct: format!("{paired_delta:+.2}%"),
+                    residual_calls: snapshot.residual_evaluations,
+                    jacobian_calls: snapshot.jacobian_evaluations,
+                    linear_solves: snapshot.linear_solves,
+                    backend_factorizations: snapshot.factorizations,
+                    faer_numeric_factorizations: snapshot.sparse_numeric_factorizations,
+                    symbolic_analyses: snapshot.sparse_symbolic_analyses,
+                    symbolic_reuses: snapshot.sparse_symbolic_reuses,
+                    max_exact_error: format!("{max_exact_error:.3e}"),
+                    status: if strategies[policy_index].1 == BvpSciSparseFactorization::SuperLu
+                        && snapshot.superlu_fallbacks > 0
+                    {
+                        "fallback-not-superlu".into()
+                    } else if snapshot.factorizations == reference.factorizations
+                        && snapshot.linear_solves == reference.linear_solves
+                    {
+                        "ok".into()
+                    } else {
+                        "counter-mismatch".into()
+                    },
+                });
+            }
+        }
+    }
+
+    assert!(!rows.is_empty(), "workload selection must produce A/B rows");
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "# Sparse factorization policies on matched BVP workloads\n\nAtomViewNative full solves on fixed meshes; the only changed setting is the Sparse LU strategy. Standard, reusable AUTO, and forced simplicial are interleaved for `{repeats}` repetitions. Preparation, solve wall time, and cumulative factorization scope are reported separately; factor scopes are diagnostic, not additive. Banded-vs-Sparse layout evidence remains in `lambdify_layout_scale_matrix`.\n\n{}",
+        Table::new(&rows)
+    ));
+    assert!(
+        rows.iter().all(|row| row.status == "ok"),
+        "backend comparison contains fallback or counter mismatch; inspect the captured table"
+    );
+}
+
+// Experimental SuperLU promotion evidence on the official matched workload.
+// Keep it out of stable correctness gates until portability and native-memory
+// suitability are established.
+pub(super) fn run_sparse_kernel_official_60_state_continuation_ab_is_compact() {
+    #[derive(Tabled)]
+    struct Row {
+        policy: String,
+        effective_backend: String,
+        superlu_fallbacks: u64,
+        superlu_stage_ms: String,
+        superlu_factor_fill: String,
+        repeats: usize,
+        continuation_rebinds: usize,
+        initial_solve_median_mad_ms: String,
+        continuation_median_mad_ms: String,
+        full_series_median_mad_ms: String,
+        factor_median_mad_ms: String,
+        backend_factorizations: u64,
+        faer_symbolic_analyses: u64,
+        faer_symbolic_reuses: u64,
+        parameter_rebinds: u64,
+        continuation_solves: u64,
+        final_nodes: usize,
+        final_system_dimension: usize,
+        max_mesh_diff: String,
+        max_state_diff: String,
+        status: String,
+    }
+
+    struct Sample {
+        initial_solve_ms: f64,
+        continuation_ms: f64,
+        full_series_ms: f64,
+        factor_ms: f64,
+        snapshot: BvpSciTelemetrySnapshot,
+        trajectory: Vec<(Vec<f64>, Vec<f64>)>,
+    }
+
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "sparse_kernel_official_60_state_continuation_ab",
+    );
+    let repeats = std::env::var("BVP_SCI_60_STATE_AB_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5)
+        .max(1);
+    let continuation_rebinds = std::env::var("BVP_SCI_60_STATE_AB_CONTINUATION")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 4);
+    let parameter_series = [[0.55, 0.45], [0.60, 0.40], [0.45, 0.55], [0.50, 0.50]];
+    let strategies = vec![
+        ("standard-faer", BvpSciSparseFactorization::StandardFaer),
+        (
+            "reusable-faer-auto",
+            BvpSciSparseFactorization::ReusableFaerExperimental,
+        ),
+        (
+            "reusable-faer-simplicial",
+            BvpSciSparseFactorization::ReusableFaerSimplicialExperimental,
+        ),
+    ];
+    #[cfg(feature = "superlu")]
+    let strategies = {
+        let mut strategies = strategies;
+        strategies.push(("superlu", BvpSciSparseFactorization::SuperLu));
+        strategies
+    };
+    let mut samples: Vec<Vec<Sample>> = (0..strategies.len())
+        .map(|_| Vec::with_capacity(repeats))
+        .collect();
+    let mut paired_total_deltas = vec![Vec::with_capacity(repeats); strategies.len()];
+    let mut max_mesh_diffs = vec![0.0_f64; strategies.len()];
+    let mut max_state_diffs = vec![0.0_f64; strategies.len()];
+
+    for repetition in 0..repeats {
+        for offset in 0..strategies.len() {
+            let policy_index = (offset + repetition) % strategies.len();
+            let (_, strategy) = strategies[policy_index];
+            let mut solver = build_official_large_parameterized_sparse_solver(strategy);
+
+            let initial_started = Instant::now();
+            let solution = solver.solve().unwrap_or_else(|error| {
+                panic!("official 60-state initial solve failed: {error:?}")
+            });
+            assert_eq!(solution.status.code(), 0, "initial 60-state solve status");
+            assert!(solution.residual_norm.is_finite());
+            let mut trajectory = vec![(solution.x.clone(), solution.y.clone())];
+            let initial_solve_ms = initial_started.elapsed().as_secs_f64() * 1e3;
+
+            let continuation_started = Instant::now();
+            for parameters in parameter_series.iter().take(continuation_rebinds) {
+                solver
+                    .set_parameters(parameters.to_vec())
+                    .expect("valid 60-state parameter rebind");
+                let continued = solver.solve().unwrap_or_else(|error| {
+                    panic!("official 60-state continuation solve failed: {error:?}")
+                });
+                assert_eq!(continued.status.code(), 0, "continuation solve status");
+                assert!(continued.residual_norm.is_finite());
+                trajectory.push((continued.x.clone(), continued.y.clone()));
+            }
+            let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1e3;
+            let snapshot = solver.plan().telemetry_snapshot();
+            assert!(snapshot.factorizations > 0);
+            if !matches!(strategy, BvpSciSparseFactorization::SuperLu) {
+                assert!(snapshot.sparse_numeric_factorizations > 0);
+                assert!(snapshot.sparse_symbolic_analyses > 0);
+            }
+            assert_eq!(snapshot.parameter_rebinds, continuation_rebinds as u64);
+            assert_eq!(snapshot.continuation_solves, continuation_rebinds as u64);
+            if !matches!(strategy, BvpSciSparseFactorization::SuperLu) {
+                assert!(
+                    snapshot.sparse_symbolic_reuses > 0,
+                    "faer continuation must exercise same-pattern symbolic reuse"
+                );
+            }
+            let factor_ms = sparse_factor_timing_ms(&snapshot, strategy)
+                .expect("selected backend factorization timing should be present");
+            samples[policy_index].push(Sample {
+                initial_solve_ms,
+                continuation_ms,
+                full_series_ms: initial_solve_ms + continuation_ms,
+                factor_ms,
+                snapshot,
+                trajectory,
+            });
+        }
+
+        let reference = &samples[0]
+            .last()
+            .expect("StandardFaer should run once per repetition")
+            .trajectory;
+        for policy_index in 1..strategies.len() {
+            let candidate = &samples[policy_index]
+                .last()
+                .expect("each strategy should run once per repetition")
+                .trajectory;
+            assert_eq!(candidate.len(), reference.len(), "trajectory solve count");
+            for (segment, ((candidate_x, candidate_y), (reference_x, reference_y))) in
+                candidate.iter().zip(reference).enumerate()
+            {
+                assert_eq!(
+                    candidate_x.len(),
+                    reference_x.len(),
+                    "segment {segment} mesh size"
+                );
+                assert_eq!(
+                    candidate_y.len(),
+                    reference_y.len(),
+                    "segment {segment} state size"
+                );
+                let mesh_diff = candidate_x
+                    .iter()
+                    .zip(reference_x)
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f64, f64::max);
+                let state_diff = candidate_y
+                    .iter()
+                    .zip(reference_y)
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    mesh_diff < 1e-12,
+                    "segment {segment} mesh drift={mesh_diff:e}"
+                );
+                assert!(
+                    state_diff < 1e-7,
+                    "segment {segment} state drift={state_diff:e}"
+                );
+                max_mesh_diffs[policy_index] = max_mesh_diffs[policy_index].max(mesh_diff);
+                max_state_diffs[policy_index] = max_state_diffs[policy_index].max(state_diff);
+            }
+
+            let reference_sample = samples[0].last().unwrap();
+            let candidate_sample = samples[policy_index].last().unwrap();
+            for (counter_name, candidate_count, reference_count) in [
+                (
+                    "Newton scopes",
+                    candidate_sample.snapshot.newton_scope_calls,
+                    reference_sample.snapshot.newton_scope_calls,
+                ),
+                (
+                    "Jacobian evaluations",
+                    candidate_sample.snapshot.jacobian_evaluations,
+                    reference_sample.snapshot.jacobian_evaluations,
+                ),
+                (
+                    "backend factorizations",
+                    candidate_sample.snapshot.factorizations,
+                    reference_sample.snapshot.factorizations,
+                ),
+                (
+                    "linear solves",
+                    candidate_sample.snapshot.linear_solves,
+                    reference_sample.snapshot.linear_solves,
+                ),
+            ] {
+                assert_eq!(
+                    candidate_count, reference_count,
+                    "{} {counter_name} differ",
+                    strategies[policy_index].0
+                );
+            }
+            if !matches!(
+                strategies[policy_index].1,
+                BvpSciSparseFactorization::SuperLu
+            ) {
+                for (counter_name, candidate_count, reference_count) in [
+                    (
+                        "faer symbolic analyses",
+                        candidate_sample.snapshot.sparse_symbolic_analyses,
+                        reference_sample.snapshot.sparse_symbolic_analyses,
+                    ),
+                    (
+                        "faer symbolic reuses",
+                        candidate_sample.snapshot.sparse_symbolic_reuses,
+                        reference_sample.snapshot.sparse_symbolic_reuses,
+                    ),
+                ] {
+                    assert_eq!(
+                        candidate_count, reference_count,
+                        "{} {counter_name} differ",
+                        strategies[policy_index].0
+                    );
+                }
+            }
+            let reference_total = reference_sample.full_series_ms;
+            paired_total_deltas[policy_index].push(
+                100.0 * (candidate_sample.full_series_ms - reference_total) / reference_total,
+            );
+        }
+    }
+
+    let mut rows = Vec::with_capacity(strategies.len());
+    for (policy_index, (name, _)) in strategies.iter().enumerate() {
+        let policy_samples = &samples[policy_index];
+        let (initial_median, initial_mad) = median_and_mad(
+            &policy_samples
+                .iter()
+                .map(|sample| sample.initial_solve_ms)
+                .collect::<Vec<_>>(),
+        );
+        let (continuation_median, continuation_mad) = median_and_mad(
+            &policy_samples
+                .iter()
+                .map(|sample| sample.continuation_ms)
+                .collect::<Vec<_>>(),
+        );
+        let (series_median, series_mad) = median_and_mad(
+            &policy_samples
+                .iter()
+                .map(|sample| sample.full_series_ms)
+                .collect::<Vec<_>>(),
+        );
+        let (factor_median, factor_mad) = median_and_mad(
+            &policy_samples
+                .iter()
+                .map(|sample| sample.factor_ms)
+                .collect::<Vec<_>>(),
+        );
+        let snapshot = &policy_samples.last().unwrap().snapshot;
+        let paired_delta = if policy_index == 0 {
+            0.0
+        } else {
+            median_and_mad(&paired_total_deltas[policy_index]).0
+        };
+        rows.push(Row {
+            policy: (*name).into(),
+            effective_backend: sparse_policy_effective_backend(
+                snapshot,
+                strategies[policy_index].1,
+            )
+            .into(),
+            superlu_fallbacks: snapshot.superlu_fallbacks,
+            superlu_stage_ms: superlu_stage_summary(snapshot),
+            superlu_factor_fill: superlu_factor_fill_summary(snapshot),
+            repeats,
+            continuation_rebinds,
+            initial_solve_median_mad_ms: format!("{initial_median:.3}/{initial_mad:.3}"),
+            continuation_median_mad_ms: format!("{continuation_median:.3}/{continuation_mad:.3}"),
+            full_series_median_mad_ms: format!(
+                "{series_median:.3}/{series_mad:.3} ({paired_delta:+.2}%)"
+            ),
+            factor_median_mad_ms: format!("{factor_median:.3}/{factor_mad:.3}"),
+            backend_factorizations: snapshot.factorizations,
+            faer_symbolic_analyses: snapshot.sparse_symbolic_analyses,
+            faer_symbolic_reuses: snapshot.sparse_symbolic_reuses,
+            parameter_rebinds: snapshot.parameter_rebinds,
+            continuation_solves: snapshot.continuation_solves,
+            final_nodes: policy_samples
+                .last()
+                .unwrap()
+                .trajectory
+                .last()
+                .unwrap()
+                .0
+                .len(),
+            final_system_dimension: 60
+                * policy_samples
+                    .last()
+                    .unwrap()
+                    .trajectory
+                    .last()
+                    .unwrap()
+                    .0
+                    .len()
+                + 2,
+            max_mesh_diff: format!("{:.3e}", max_mesh_diffs[policy_index]),
+            max_state_diff: format!("{:.3e}", max_state_diffs[policy_index]),
+            status: if strategies[policy_index].1 == BvpSciSparseFactorization::SuperLu
+                && snapshot.superlu_fallbacks > 0
+            {
+                "fallback-not-superlu".into()
+            } else {
+                "ok".into()
+            },
+        });
+    }
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "# Official 60-state Sparse LU policy A/B\n\nSame 60-state/two-parameter equations and boundary conditions as the SciPy parity fixture, using the production ExprLegacy frontend and Sparse layout. Each sample includes an initial full solve followed by `{continuation_rebinds}` prepared parameter rebinds. Policies are interleaved; all trajectory meshes, states, and common Newton/Jacobian/factor/solve counters are checked against StandardFaer. Faer symbolic counters are reported separately because SuperLU has a different lifecycle. Times are median/MAD; factorization scopes overlap the solve wall clock and are not additive.\n\n{}",
+        Table::new(&rows)
+    ));
+    assert!(
+        rows.iter().all(|row| row.status == "ok"),
+        "official backend comparison contains a SuperLU fallback; inspect the captured table"
+    );
 }
 
 #[test]
@@ -978,13 +2214,86 @@ fn lambdify_restart_with_new_initial_state_preserves_prepared_frontend() {
 }
 
 #[test]
-fn lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry() {
+fn lambdify_symbolic_parameter_jacobian_matches_exact_derivative() {
+    #[derive(Tabled)]
+    struct ParameterJacobianRow {
+        frontend: String,
+        parameter_jacobian_nnz: usize,
+        symbolic_derivatives: u64,
+        callback_calls: u64,
+        fd_probes: u64,
+        max_value_error: String,
+        status: String,
+    }
+
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "lambdify_symbolic_parameter_jacobian",
+    );
+    let mut rows = Vec::new();
+    for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
+        let telemetry = BvpSciTelemetry::timings();
+        let plan = BvpSciLambdifyPlan::prepare(
+            assembly,
+            &[
+                Expr::parse_expression("p0*y0 + p1"),
+                Expr::parse_expression("p1*y0^2"),
+            ],
+            &["y0".into(), "y1".into()],
+            &["p0".into(), "p1".into()],
+            "x",
+            telemetry,
+        )
+        .expect("symbolic df/dp plan should prepare");
+        let mut arguments = vec![0.0; 5];
+        let mut actual = vec![0.0; 4];
+        assert!(
+            plan.evaluate_parameter_jacobian(
+                0.25,
+                &[3.0, 7.0],
+                &[2.0, 5.0],
+                &mut arguments,
+                &mut actual,
+            )
+            .expect("symbolic df/dp should evaluate")
+        );
+        let expected = [3.0, 1.0, 0.0, 9.0];
+        let max_value_error = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_value_error <= 1e-14, "{assembly:?}: {actual:?}");
+
+        let snapshot = plan.telemetry_snapshot();
+        assert_eq!(snapshot.finite_difference_probes, 0);
+        assert_eq!(snapshot.parameter_jacobian_calls, 1);
+        assert_eq!(plan.parameter_jacobian_nnz(), 3);
+        rows.push(ParameterJacobianRow {
+            frontend: format!("{assembly:?}"),
+            parameter_jacobian_nnz: plan.parameter_jacobian_nnz(),
+            symbolic_derivatives: snapshot.symbolic_jacobian_derivations,
+            callback_calls: snapshot.parameter_jacobian_calls,
+            fd_probes: snapshot.finite_difference_probes,
+            max_value_error: format!("{max_value_error:.3e}"),
+            status: "ok".into(),
+        });
+    }
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "# BVP_sci Lambdify symbolic parameter Jacobian\n\nExpected row-major `df/dp = [[y0, 1], [0, y0^2]]`; derivative compilation happens during preparation, with no runtime finite-difference probes.\n\n{}",
+        Table::new(rows)
+    ));
+}
+
+#[test]
+fn lambdify_symbolic_parameter_and_fd_boundary_jacobians_have_telemetry() {
     #[derive(Tabled)]
     struct JacobianContractRow {
         frontend: String,
         layout: String,
         symbolic_jacobian_derivations: u64,
         jacobian_evaluations: u64,
+        parameter_jacobian_calls: u64,
         finite_difference_probes: u64,
         jacobian_output_assemblies: u64,
         residual_evaluations: u64,
@@ -993,7 +2302,7 @@ fn lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry() 
 
     let _report = crate::Utils::test_reporting::TestReportCapture::new(
         "BVP_sci_new",
-        "lambdify_analytic_state_fd_parameter_boundary_jacobians",
+        "lambdify_symbolic_parameter_fd_boundary_jacobians",
     );
     let mut rows = Vec::new();
     for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
@@ -1011,6 +2320,7 @@ fn lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry() 
             let telemetry = solver.plan().telemetry_snapshot();
             assert!(telemetry.symbolic_jacobian_derivations > 0);
             assert!(telemetry.jacobian_evaluations > 0);
+            assert!(telemetry.parameter_jacobian_calls > 0);
             assert!(telemetry.finite_difference_probes > 0);
             assert!(telemetry.jacobian_output_assemblies > 0);
             assert!(telemetry.residual_evaluations > 0);
@@ -1019,6 +2329,7 @@ fn lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry() 
                 layout: layout_name(layout),
                 symbolic_jacobian_derivations: telemetry.symbolic_jacobian_derivations,
                 jacobian_evaluations: telemetry.jacobian_evaluations,
+                parameter_jacobian_calls: telemetry.parameter_jacobian_calls,
                 finite_difference_probes: telemetry.finite_difference_probes,
                 jacobian_output_assemblies: telemetry.jacobian_output_assemblies,
                 residual_evaluations: telemetry.residual_evaluations,
@@ -1031,7 +2342,7 @@ fn lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry() 
         }
     }
     crate::Utils::test_reporting::capture_test_block(format!(
-        "# BVP_sci Jacobian contract\n\n{}",
+        "# BVP_sci Jacobian contract\n\nRHS `df/dp` uses prepared symbolic Lambdify evaluators; the nonzero finite-difference probe count in these rows comes from the numerical boundary-Jacobian fallback.\n\n{}",
         Table::new(rows)
     ));
 }
@@ -2235,8 +3546,8 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
         banded_max_multiplier: String,
         banded_border_min_abs_pivot: String,
         banded_border_max_multiplier: String,
-        banded_linear_residual: String,
-        banded_solution_inf: String,
+        structured_candidate_residual_inf: String,
+        structured_candidate_solution_inf: String,
         sparse_fallback_assembly_ms: String,
         status: String,
     }
@@ -2415,8 +3726,12 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
                                 banded_border_max_multiplier: fmt(
                                     telemetry.banded_border_max_multiplier_norm
                                 ),
-                                banded_linear_residual: fmt(telemetry.banded_last_residual_inf),
-                                banded_solution_inf: fmt(telemetry.banded_last_solution_inf),
+                                structured_candidate_residual_inf: fmt(
+                                    telemetry.banded_last_residual_inf
+                                ),
+                                structured_candidate_solution_inf: fmt(
+                                    telemetry.banded_last_solution_inf
+                                ),
                                 sparse_fallback_assembly_ms: fmt(
                                     telemetry.banded_sparse_fallback_assembly_ms
                                 ),
@@ -2463,6 +3778,25 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
                     } else {
                         "-"
                     };
+                    if matches!(workload, DampExactWorkload::StiffCoupled)
+                        && layout_name(layout) == "Banded"
+                    {
+                        let candidate_residual = telemetry
+                            .banded_last_residual_inf
+                            .expect("structured candidate must reach the residual guard");
+                        assert!(
+                            !candidate_residual.is_finite() || candidate_residual > 1.0e-8,
+                            "stiff-coupled Banded candidate should be rejected by the residual guard; residual={candidate_residual:e}, route={banded_route}"
+                        );
+                        assert_ne!(
+                            banded_route, "structured",
+                            "a rejected structured candidate must return through a fallback"
+                        );
+                        assert!(
+                            max_exact_diff < 1.0e-8,
+                            "fallback solve must retain the accurate BVP solution: nodes={nodes}, error={max_exact_diff:e}"
+                        );
+                    }
                     assert!(
                         solution.residual_norm.is_finite(),
                         "non-finite residual in scale row"
@@ -2510,8 +3844,8 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
                         banded_border_max_multiplier: fmt(
                             telemetry.banded_border_max_multiplier_norm
                         ),
-                        banded_linear_residual: fmt(telemetry.banded_last_residual_inf),
-                        banded_solution_inf: fmt(telemetry.banded_last_solution_inf),
+                        structured_candidate_residual_inf: fmt(telemetry.banded_last_residual_inf),
+                        structured_candidate_solution_inf: fmt(telemetry.banded_last_solution_inf),
                         sparse_fallback_assembly_ms: fmt(
                             telemetry.banded_sparse_fallback_assembly_ms
                         ),
@@ -2531,6 +3865,162 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
         Table::new(rows)
     ));
     assert_eq!(failed_rows, 0, "scale matrix contains failed backend rows");
+}
+
+#[test]
+#[ignore = "captured stiff-coupled Banded direct-vs-refined diagnostic gate"]
+fn banded_stiff_coupled_captured_matrix_compares_core_refinement() {
+    use crate::numerical::BVP_sci::new::backends::BandedBackend;
+
+    #[derive(Tabled)]
+    struct RefinementRow {
+        workload: String,
+        nodes: usize,
+        refinement_steps: usize,
+        route: String,
+        factor_ms: String,
+        safety_factor_ms: String,
+        solve_ms: String,
+        residual_inf: String,
+        backward_error: String,
+        solution_inf: String,
+        fallback_factorizations: u64,
+        fallback_solves: u64,
+        status: String,
+    }
+
+    fn matrix_quality(
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+        solution: &[f64],
+    ) -> (f64, f64, f64) {
+        let mut residual_inf = 0.0_f64;
+        let mut matrix_inf = 0.0_f64;
+        let mut solution_inf = 0.0_f64;
+        for value in solution {
+            solution_inf = solution_inf.max(value.abs());
+            if !value.is_finite() {
+                return (f64::INFINITY, f64::INFINITY, solution_inf);
+            }
+        }
+        let mut row_sums = vec![0.0_f64; rhs.len()];
+        let mut residual = rhs.to_vec();
+        for &(row, column, value) in entries {
+            row_sums[row] += value.abs();
+            residual[row] -= value * solution[column];
+        }
+        for (row, value) in residual.into_iter().enumerate() {
+            residual_inf = residual_inf.max(value.abs());
+            matrix_inf = matrix_inf.max(row_sums[row]);
+        }
+        let rhs_inf = rhs.iter().copied().map(f64::abs).fold(0.0, f64::max);
+        let scale = (matrix_inf * solution_inf + rhs_inf).max(f64::MIN_POSITIVE);
+        (residual_inf, residual_inf / scale, solution_inf)
+    }
+
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "banded_stiff_coupled_refinement_ab",
+    );
+    let mut rows = Vec::new();
+    for nodes in [64, 256, 1024] {
+        let capture_telemetry = BvpSciTelemetry::timings();
+        capture_telemetry.enable_linear_system_capture(1);
+        let mut solver = build_damp_exact_solver_with_nodes_and_telemetry(
+            DampExactWorkload::StiffCoupled,
+            BvpSciAssembly::ExprLegacy,
+            BvpSciMatrixLayout::Banded {
+                lower: 256,
+                upper: 256,
+            },
+            nodes,
+            capture_telemetry.clone(),
+        );
+        solver
+            .solve()
+            .expect("the safety-routed stiff-coupled reference solve should converge");
+        let capture = capture_telemetry
+            .linear_system_capture()
+            .expect("the first Newton matrix and RHS should be captured");
+        let state_dimension = DampExactWorkload::StiffCoupled.state_names().len();
+
+        for refinement_steps in [0, 2] {
+            let telemetry = BvpSciTelemetry::timings();
+            let mut backend = BandedBackend::new_for_collocation_with_refinement_steps(
+                capture.dimension,
+                256,
+                256,
+                state_dimension,
+                capture.mesh_nodes,
+                0,
+                telemetry.clone(),
+                refinement_steps,
+            )
+            .expect("captured Banded matrix dimensions should be accepted");
+            backend
+                .assemble(&capture.entries)
+                .expect("captured Newton matrix should assemble in native Banded storage");
+            let factor_started = Instant::now();
+            backend
+                .factor()
+                .expect("Banded matrix factorization should succeed");
+            let factor_ms = factor_started.elapsed().as_secs_f64() * 1e3;
+            let mut solution = capture.rhs.clone();
+            let solve_started = Instant::now();
+            backend
+                .solve_in_place(&mut solution)
+                .expect("structured or guarded Banded solve should return a correction");
+            let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
+            let (residual_inf, backward_error, solution_inf) =
+                matrix_quality(&capture.entries, &capture.rhs, &solution);
+            let snapshot = telemetry.snapshot();
+            let route = if snapshot.banded_sparse_fallback_solves > 0 {
+                "sparse-fallback"
+            } else if snapshot.banded_scalar_fallback_solves > 0 {
+                "scalar-fallback"
+            } else {
+                "structured"
+            };
+            let fallback_factorizations = snapshot.banded_scalar_fallback_factorizations
+                + snapshot.banded_sparse_fallback_factorizations;
+            let fallback_solves =
+                snapshot.banded_scalar_fallback_solves + snapshot.banded_sparse_fallback_solves;
+            let safety_factor_ms = snapshot
+                .banded_scalar_fallback_factorization_ms
+                .or(snapshot.banded_sparse_fallback_factorization_ms)
+                .map(|elapsed| format!("{elapsed:.3}"))
+                .unwrap_or_else(|| "-".into());
+            let status = if backward_error.is_finite() && backward_error < 1e-10 {
+                "ok"
+            } else {
+                "bad-residual"
+            };
+            rows.push(RefinementRow {
+                workload: "stiff-coupled".into(),
+                nodes,
+                refinement_steps,
+                route: route.into(),
+                factor_ms: format!("{factor_ms:.3}"),
+                safety_factor_ms,
+                solve_ms: format!("{solve_ms:.3}"),
+                residual_inf: format!("{residual_inf:.3e}"),
+                backward_error: format!("{backward_error:.3e}"),
+                solution_inf: format!("{solution_inf:.3e}"),
+                fallback_factorizations,
+                fallback_solves,
+                status: status.into(),
+            });
+            assert_eq!(
+                status, "ok",
+                "captured matrix replay produced an inaccurate solve"
+            );
+        }
+    }
+
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "# BVP_sci stiff-coupled Banded refinement A/B\n\nRows replay the same captured first-Newton matrix/RHS for each mesh; factor/solve scopes are local to the replay and fallback counters identify the route actually returned.\n\n{}",
+        Table::new(&rows)
+    ));
 }
 
 #[test]
@@ -2694,6 +4184,7 @@ fn aot_solver_route_continuation_and_policy_matrix_is_compact() {
     struct SolverRow {
         frontend: String,
         layout: String,
+        sparse_factorization: String,
         policy: String,
         prepare_scope: String,
         prepare_ms: String,
@@ -2740,106 +4231,123 @@ fn aot_solver_route_continuation_and_policy_matrix_is_compact() {
     for (frontend_name, frontend) in frontends {
         for (layout_name, layout) in layouts {
             for (policy_name, execution_policy) in policies {
-                let telemetry = BvpSciTelemetry::timings();
-                let mut config = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
-                    output_root
-                        .join("solver")
-                        .join(frontend_name)
-                        .join(layout_name)
-                        .join(policy_name),
-                );
-                config = match std::env::var("BVP_SCI_AOT_COMPILER")
-                    .unwrap_or_else(|_| "tcc".into())
-                    .to_ascii_lowercase()
-                    .as_str()
+                let mut sparse_factorizations =
+                    vec![("StandardFaer", BvpSciSparseFactorization::StandardFaer)];
+                #[cfg(feature = "superlu")]
+                if layout == BvpSciMatrixLayout::Sparse
+                    && std::env::var_os("SUPERLU_LIBRARY").is_some()
                 {
-                    "gcc" => config.with_c_gcc(),
-                    _ => config.with_c_tcc(),
-                };
-                let prepare_started = Instant::now();
-                let plan = BvpSciLambdifyPlan::prepare_aot_with_policy(
-                    frontend,
-                    layout,
-                    equations.clone(),
-                    states.clone(),
-                    parameters.clone(),
-                    "x",
-                    config,
-                    telemetry,
-                    execution_policy,
-                )
-                .expect("AOT solver plan should prepare");
-                let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1e3;
-                let boundary = BvpSciBoundaryCallbacks::new(
-                    2,
-                    |ya, yb, _, output| {
-                        output[0] = ya[0];
-                        output[1] = yb[0];
-                        Ok(())
-                    },
-                    BvpSciTelemetry::disabled(),
-                );
-                let mut options = BvpSciOptions::default();
-                options.execution = BvpSciExecution::Aot;
-                options.assembly = Some(frontend);
-                options.matrix_layout = layout;
-                options.execution_policy = execution_policy;
-                options.max_nodes = 32;
-                options.max_mesh_refinements = 0;
-                options.tolerance = 1e-8;
-                let mut solver = BvpSciSolver::new(
-                    plan,
-                    boundary,
-                    vec![0.0, 0.5, 1.0],
-                    vec![0.0, 0.0, 0.0],
-                    vec![1.0],
-                    options,
-                )
-                .expect("AOT solver route should construct");
-                let solve_started = Instant::now();
-                let solution = solver.solve().expect("AOT solver route should converge");
-                let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
-                let continuation_started = Instant::now();
-                solver
-                    .set_parameters(vec![2.0])
-                    .expect("AOT continuation rebind should preserve schema");
-                let continued = solver
-                    .solve()
-                    .expect("AOT continuation solve should converge");
-                let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1e3;
-                assert!(solution.y.iter().all(|value| value.abs() < 1e-12));
-                assert!(continued.y.iter().all(|value| value.abs() < 1e-12));
-                let snapshot = solver.plan().telemetry_snapshot();
-                snapshot
-                    .validate_contract()
-                    .expect("AOT solver telemetry must satisfy its contract");
-                let aot = snapshot.aot.expect("solver AOT telemetry must be present");
-                assert!(aot.aot_runtime_ready > 0);
-                assert_eq!(snapshot.parameter_rebinds, 1);
-                assert_eq!(snapshot.continuation_solves, 1);
-                rows.push(SolverRow {
-                    frontend: frontend_name.into(),
-                    layout: layout_name.into(),
-                    policy: policy_name.into(),
-                    prepare_scope: "caller_wall_clock".into(),
-                    prepare_ms: measured_ms(prepare_ms),
-                    aot_prepare_ms: aot_stage_ms(
-                        &aot,
-                        crate::symbolic::ivp_telemetry::IvpColdStage::SolverPreparation,
-                    ),
-                    solve_ms: measured_ms(solve_ms),
-                    continuation_ms: measured_ms(continuation_ms),
-                    parameter_rebinds: snapshot.parameter_rebinds,
-                    continuation_solves: snapshot.continuation_solves,
-                    runtime_ready: aot.aot_runtime_ready,
-                    parallel_dispatches: aot.aot_parallel_dispatches,
-                    status: solution.status.code().to_string(),
-                });
+                    sparse_factorizations.push(("SuperLU", BvpSciSparseFactorization::SuperLu));
+                }
+                for (sparse_factorization_name, sparse_factorization) in &sparse_factorizations {
+                    let telemetry = BvpSciTelemetry::timings();
+                    let mut config = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
+                        output_root
+                            .join("solver")
+                            .join(frontend_name)
+                            .join(layout_name)
+                            .join(*sparse_factorization_name)
+                            .join(policy_name),
+                    );
+                    config = match std::env::var("BVP_SCI_AOT_COMPILER")
+                        .unwrap_or_else(|_| "tcc".into())
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "gcc" => config.with_c_gcc(),
+                        _ => config.with_c_tcc(),
+                    };
+                    let prepare_started = Instant::now();
+                    let plan = BvpSciLambdifyPlan::prepare_aot_with_policy(
+                        frontend,
+                        layout,
+                        equations.clone(),
+                        states.clone(),
+                        parameters.clone(),
+                        "x",
+                        config,
+                        telemetry,
+                        execution_policy,
+                    )
+                    .expect("AOT solver plan should prepare");
+                    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1e3;
+                    let boundary = BvpSciBoundaryCallbacks::new(
+                        2,
+                        |ya, yb, _, output| {
+                            output[0] = ya[0];
+                            output[1] = yb[0];
+                            Ok(())
+                        },
+                        BvpSciTelemetry::disabled(),
+                    );
+                    let mut options = BvpSciOptions::default();
+                    options.execution = BvpSciExecution::Aot;
+                    options.assembly = Some(frontend);
+                    options.matrix_layout = layout;
+                    options.execution_policy = execution_policy;
+                    options.max_nodes = 32;
+                    options.max_mesh_refinements = 0;
+                    options.tolerance = 1e-8;
+                    let mut solver = BvpSciSolver::new_with_sparse_factorization(
+                        plan,
+                        boundary,
+                        vec![0.0, 0.5, 1.0],
+                        vec![0.1, 0.1, 0.1],
+                        vec![1.0],
+                        options,
+                        *sparse_factorization,
+                    )
+                    .expect("AOT solver route should construct");
+                    let solve_started = Instant::now();
+                    let solution = solver.solve().expect("AOT solver route should converge");
+                    let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
+                    let continuation_started = Instant::now();
+                    solver
+                        .set_parameters(vec![2.0])
+                        .expect("AOT continuation rebind should preserve schema");
+                    let continued = solver
+                        .solve()
+                        .expect("AOT continuation solve should converge");
+                    let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1e3;
+                    assert!(solution.y.iter().all(|value| value.abs() < 1e-12));
+                    assert!(continued.y.iter().all(|value| value.abs() < 1e-12));
+                    let snapshot = solver.plan().telemetry_snapshot();
+                    snapshot
+                        .validate_contract()
+                        .expect("AOT solver telemetry must satisfy its contract");
+                    let aot = snapshot.aot.expect("solver AOT telemetry must be present");
+                    assert!(aot.aot_runtime_ready > 0);
+                    if *sparse_factorization == BvpSciSparseFactorization::SuperLu {
+                        assert_eq!(snapshot.superlu_fallbacks, 0);
+                        assert!(snapshot.superlu.native_factorization_calls > 0);
+                    }
+                    assert_eq!(snapshot.parameter_rebinds, 1);
+                    assert_eq!(snapshot.continuation_solves, 1);
+                    rows.push(SolverRow {
+                        frontend: frontend_name.into(),
+                        layout: layout_name.into(),
+                        sparse_factorization: (*sparse_factorization_name).into(),
+                        policy: policy_name.into(),
+                        prepare_scope: "caller_wall_clock".into(),
+                        prepare_ms: measured_ms(prepare_ms),
+                        aot_prepare_ms: aot_stage_ms(
+                            &aot,
+                            crate::symbolic::ivp_telemetry::IvpColdStage::SolverPreparation,
+                        ),
+                        solve_ms: measured_ms(solve_ms),
+                        continuation_ms: measured_ms(continuation_ms),
+                        parameter_rebinds: snapshot.parameter_rebinds,
+                        continuation_solves: snapshot.continuation_solves,
+                        runtime_ready: aot.aot_runtime_ready,
+                        parallel_dispatches: aot.aot_parallel_dispatches,
+                        status: solution.status.code().to_string(),
+                    });
+                }
             }
         }
     }
     crate::Utils::test_reporting::capture_test_block(format!(
-        "# BVP_sci AOT solver, continuation and policy matrix\n\n- exact fixture: y' = p*y with zero solution and zero boundary values\n- policy is fixed during AOT preparation\n- full-solve timings include numerical work and are not callback-only timings\n\n{}",
+        "# BVP_sci AOT solver, continuation and policy matrix\n\n- exact fixture: y' = p*y with zero solution and zero boundary values; a nonzero initial guess exercises Newton and factorization\n- Sparse factorization rows include SuperLU when its feature and bridge are configured\n- policy is fixed during AOT preparation\n- full-solve timings include numerical work and are not callback-only timings\n\n{}",
         Table::new(rows)
     ));
 }
@@ -3132,9 +4640,7 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
         "# BVP_sci AOT versus Lambdify full solve and continuation\n\n- lifecycle: BuildIfMissing + C/{compiler}\n- matched manufactured family: `y' = p*(y + 1)`, `y(0) = 0`, `y(1) = exp(p) - 1`\n- every route uses the same bounded non-exact initial profile and `p=2 -> 3` continuation\n- `full_solve_ms` is inclusive per public solve; callback, residual, Jacobian and factorization scopes are diagnostic and non-additive\n- residual/Jacobian timings are accumulated across the initial and continued solves and are comparable only within the matched fixture\n\n{}",
         Table::new(rows)
     );
-    crate::Utils::test_reporting::capture_test_block(
-        report.replace("p=2 -> 3", "p=0.5 -> 0.75")
-    );
+    crate::Utils::test_reporting::capture_test_block(report.replace("p=2 -> 3", "p=0.5 -> 0.75"));
 }
 
 #[test]
@@ -4331,8 +5837,7 @@ fn scipy_118_official_shock_layer_matches_refined_rust_solution() {
     assert_eq!(scipy_convergence.len(), 8);
     let scipy_boundary_case_ratio = scipy_convergence[2]
         .split(':')
-        .nth(1)
-        .and_then(|field| field.strip_prefix('r'))
+        .find_map(|field| field.strip_prefix('r'))
         .expect("SciPy normalized residual ratio")
         .parse::<f64>()
         .expect("SciPy normalized residual ratio");
@@ -4451,6 +5956,8 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
         rust_parameters: String,
         scipy_passes_jac_lu_solves: String,
         rust_passes_jac_lu_solves: String,
+        scipy_per_mesh_work: String,
+        rust_per_mesh_work: String,
         max_value_diff: String,
         max_derivative_diff: String,
         max_interval_residual_diff: String,
@@ -4470,6 +5977,7 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
         .collect::<Vec<_>>();
     let systems = 30usize;
     let dimension = systems * 2;
+    let telemetry = BvpSciTelemetry::timings();
     let rhs = BvpSciNumericalPlan::new(
         dimension,
         2,
@@ -4482,7 +5990,7 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
             }
             Ok(())
         },
-        BvpSciTelemetry::timings(),
+        telemetry.clone(),
     )
     .expect("large parameterized RHS plan")
     .with_rhs_jacobian(move |_x, _state, parameters, output| {
@@ -4530,7 +6038,7 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
             dp[(dimension + 1) * 2 + 1] = -1.0;
             Ok(())
         },
-        BvpSciTelemetry::disabled(),
+        telemetry,
     );
     let mesh: Vec<f64> = (0..5)
         .map(|index| std::f64::consts::PI * index as f64 / 4.0)
@@ -4558,12 +6066,73 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
     assert_eq!(reference["status"], "0");
     assert_eq!(solution.status.code(), 0);
     assert_eq!(solution.x.len().to_string(), reference["nodes"]);
+    assert!(telemetry.rhs_calls > 0);
+    assert_eq!(telemetry.jacobian_calls, telemetry.parameter_jacobian_calls);
+    assert!(telemetry.boundary_calls > 0);
+    assert!(telemetry.boundary_jacobian_calls > 0);
+    assert!(telemetry.rhs_callback_ms.is_some());
+    assert!(telemetry.jacobian_callback_ms.is_some());
+    assert!(telemetry.parameter_jacobian_callback_ms.is_some());
+    assert!(telemetry.boundary_callback_ms.is_some());
+    assert!(telemetry.boundary_jacobian_callback_ms.is_some());
     assert_scipy_counter_parity(
         "official large parameterized problem",
         &reference,
         &telemetry,
         telemetry.newton_scope_calls,
     );
+    let mesh_pass_count = reference["mesh_pass_count"]
+        .parse::<usize>()
+        .expect("SciPy mesh-pass count");
+    assert_eq!(telemetry.mesh_passes.len(), mesh_pass_count);
+    for (pass, rust_pass) in telemetry.mesh_passes.iter().enumerate() {
+        let prefix = format!("mesh.{pass}");
+        let scipy_nodes = reference[&format!("{prefix}.nodes")]
+            .parse::<usize>()
+            .expect("SciPy pass node count");
+        let scipy_dimension = reference[&format!("{prefix}.dimension")]
+            .parse::<usize>()
+            .expect("SciPy pass dimension");
+        assert_eq!(rust_pass.mesh_nodes, scipy_nodes, "mesh pass {pass} nodes");
+        assert_eq!(
+            rust_pass.linear_system_dimension, scipy_dimension,
+            "mesh pass {pass} system dimension"
+        );
+        assert!(
+            rust_pass.newton_ms.is_some(),
+            "mesh pass {pass} Newton timing"
+        );
+        assert!(
+            rust_pass.defect_estimation_ms.is_some(),
+            "mesh pass {pass} defect-estimation timing"
+        );
+        if rust_pass.factorizations > 0 {
+            assert!(
+                rust_pass.factorization_ms.is_some(),
+                "mesh pass {pass} factorization timing"
+            );
+        }
+        if rust_pass.linear_solves > 0 {
+            assert!(
+                rust_pass.linear_solve_ms.is_some(),
+                "mesh pass {pass} linear-solve timing"
+            );
+        }
+        for (counter, rust_count) in [
+            ("solve_newton_calls", rust_pass.newton_passes),
+            ("construct_global_jac_calls", rust_pass.jacobian_builds),
+            ("factorization_calls", rust_pass.factorizations),
+            ("linear_solve_calls", rust_pass.linear_solves),
+        ] {
+            let scipy_count = reference[&format!("{prefix}.counter.{counter}")]
+                .parse::<u64>()
+                .expect("SciPy per-mesh work counter");
+            assert_eq!(
+                rust_count, scipy_count,
+                "mesh pass {pass} {counter} work differs"
+            );
+        }
+    }
 
     let expected_parameters = reference["parameters"]
         .split(',')
@@ -4633,9 +6202,130 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
                 telemetry.factorizations,
                 telemetry.linear_solves
             ),
+            scipy_per_mesh_work: (0..mesh_pass_count)
+                .map(|pass| {
+                    format!(
+                        "{}:{}:{}/{}/{}",
+                        pass,
+                        reference[&format!("mesh.{pass}.nodes")],
+                        reference[&format!("mesh.{pass}.counter.construct_global_jac_calls")],
+                        reference[&format!("mesh.{pass}.counter.factorization_calls")],
+                        reference[&format!("mesh.{pass}.counter.linear_solve_calls")],
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";"),
+            rust_per_mesh_work: telemetry
+                .mesh_passes
+                .iter()
+                .map(|pass| {
+                    format!(
+                        "{}:{}:{}/{}/{}",
+                        pass.mesh_pass,
+                        pass.mesh_nodes,
+                        pass.jacobian_builds,
+                        pass.factorizations,
+                        pass.linear_solves,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";"),
             max_value_diff: format!("{max_value_diff:.3e}"),
             max_derivative_diff: format!("{max_derivative_diff:.3e}"),
             max_interval_residual_diff: format!("{max_interval_residual_diff:.3e}"),
+        }],
+    );
+}
+
+#[cfg(feature = "superlu")]
+#[test]
+#[ignore = "SuperLU/SciPy parity requires the built bridge and pinned SciPy runtime"]
+fn scipy_118_official_parameterized_superlu_backend_matches_reference() {
+    #[derive(Tabled)]
+    struct SuperLuSciPyRow {
+        workload: &'static str,
+        backend: &'static str,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_factorizations: String,
+        rust_factorizations: u64,
+        scipy_linear_solves: String,
+        rust_linear_solves: u64,
+        superlu_factor_calls: u64,
+        fallback_count: u64,
+        max_sample_value_diff: String,
+        status: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "big-parameterized-analytic");
+    let expected_values = parse_scipy_samples(&reference);
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy sample coordinate"))
+        .collect::<Vec<_>>();
+    let mut solver = build_official_large_parameterized_sparse_solver_with_output(
+        BvpSciSparseFactorization::SuperLu,
+        BvpSciOutputPolicy::DenseOutput,
+    );
+    let solution = solver
+        .solve()
+        .expect("official BVP should solve through the SuperLU backend");
+    let dense = solution
+        .dense_output()
+        .expect("SuperLU parity route requested dense output");
+    let telemetry = solver.plan().telemetry_snapshot();
+
+    assert_eq!(reference["status"], "0");
+    assert_eq!(solution.status.code().to_string(), reference["status"]);
+    assert_eq!(solution.x.len().to_string(), reference["nodes"]);
+    assert_eq!(
+        telemetry.superlu_fallbacks, 0,
+        "SuperLU must not silently fall back"
+    );
+    assert!(telemetry.superlu.native_factorization_calls > 0);
+    assert_scipy_counter_parity(
+        "official parameterized SuperLU backend",
+        &reference,
+        &telemetry,
+        telemetry.newton_scope_calls,
+    );
+
+    let mut max_sample_value_diff = 0.0_f64;
+    let mut actual = vec![0.0; dense.dimension()];
+    for (sample_index, &x) in sample_x.iter().enumerate() {
+        dense
+            .evaluate_into(x, &mut actual)
+            .expect("evaluate SuperLU solution on the SciPy sample grid");
+        for (component, value) in actual.iter().enumerate() {
+            max_sample_value_diff =
+                max_sample_value_diff.max((value - expected_values[component][sample_index]).abs());
+        }
+    }
+    assert!(
+        max_sample_value_diff < 2e-4,
+        "SuperLU/SciPy sample drift={max_sample_value_diff:e}"
+    );
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] official parameterized SuperLU backend",
+        &[SuperLuSciPyRow {
+            workload: "official 60-state parameterized BVP",
+            backend: "SuperLU opt-in",
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_factorizations: reference["factorizations"].clone(),
+            rust_factorizations: telemetry.factorizations,
+            scipy_linear_solves: reference["linear_solves"].clone(),
+            rust_linear_solves: telemetry.linear_solves,
+            superlu_factor_calls: telemetry.superlu.native_factorization_calls,
+            fallback_count: telemetry.superlu_fallbacks,
+            max_sample_value_diff: format!("{max_sample_value_diff:.3e}"),
+            status: "ok",
         }],
     );
 }

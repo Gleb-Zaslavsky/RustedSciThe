@@ -184,17 +184,32 @@ impl BvpSciLambdifyPlan {
         }
     }
 
+    /// Number of prepared symbolic/numerical `df/dp` entries, when available.
+    pub fn parameter_jacobian_nnz(&self) -> usize {
+        match self {
+            Self::Numerical(plan) if plan.has_rhs_parameter_jacobian() => {
+                plan.dimension().saturating_mul(plan.parameter_dimension())
+            }
+            Self::Numerical(_) | Self::Aot(_) => 0,
+            Self::ExprLegacy(plan) => plan.parameter_jacobian_nnz(),
+            Self::AtomViewNative(plan) => plan.parameter_jacobian_nnz(),
+        }
+    }
+
     /// Return the caller-owned scratch length required by the hot Jacobian
     /// callback. Compact AOT layouts may need more slots than the dense
     /// pointwise output that the collocation assembler ultimately consumes.
     pub fn jacobian_callback_scratch_len(&self) -> Result<usize, BvpSciNewError> {
         match self {
-            Self::Numerical(plan) => plan
-                .dimension()
-                .checked_mul(plan.dimension())
-                .ok_or_else(|| {
-                    BvpSciNewError::InvalidConfiguration("Jacobian scratch size overflow".into())
-                }),
+            Self::Numerical(plan) => {
+                plan.dimension()
+                    .checked_mul(plan.dimension())
+                    .ok_or_else(|| {
+                        BvpSciNewError::InvalidConfiguration(
+                            "Jacobian scratch size overflow".into(),
+                        )
+                    })
+            }
             Self::ExprLegacy(plan) => {
                 plan.dimension()
                     .checked_mul(plan.dimension())
@@ -288,7 +303,12 @@ impl BvpSciLambdifyPlan {
             Self::Numerical(plan) => {
                 let mut scratch = vec![0.0; output.len()];
                 plan.evaluate_jacobian_dense_with_scratch(
-                    x, state, parameters, arguments, output, &mut scratch,
+                    x,
+                    state,
+                    parameters,
+                    arguments,
+                    output,
+                    &mut scratch,
                 )
             }
             Self::ExprLegacy(plan) => {
@@ -330,9 +350,8 @@ impl BvpSciLambdifyPlan {
         }
     }
 
-    /// Evaluate an analytical `df/dp` block when the numerical frontend has
-    /// one. Other frontends return `false`, leaving the existing FD path in
-    /// the common Jacobian assembler responsible for parameter columns.
+    /// Evaluate the prepared analytical `df/dp` block when this frontend has
+    /// one. Numerical and AOT plans retain the common finite-difference path.
     pub fn evaluate_parameter_jacobian(
         &self,
         x: f64,
@@ -345,12 +364,24 @@ impl BvpSciLambdifyPlan {
             Self::Numerical(plan) => {
                 plan.evaluate_parameter_jacobian(x, state, parameters, arguments, output)
             }
+            Self::ExprLegacy(plan) => {
+                plan.evaluate_parameter_jacobian(x, state, parameters, arguments, output)?;
+                Ok(true)
+            }
+            Self::AtomViewNative(plan) => {
+                plan.evaluate_parameter_jacobian(x, state, parameters, arguments, output)?;
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
 
     pub fn has_parameter_jacobian(&self) -> bool {
-        matches!(self, Self::Numerical(plan) if plan.has_rhs_parameter_jacobian())
+        match self {
+            Self::Numerical(plan) => plan.has_rhs_parameter_jacobian(),
+            Self::ExprLegacy(_) | Self::AtomViewNative(_) => true,
+            Self::Aot(_) => false,
+        }
     }
 
     /// Evaluate Jacobian values directly in the prepared structural order.
@@ -370,7 +401,12 @@ impl BvpSciLambdifyPlan {
             Self::Numerical(plan) => {
                 let mut scratch = vec![0.0; values.len()];
                 plan.evaluate_jacobian_dense_with_scratch(
-                    x, state, parameters, arguments, values, &mut scratch,
+                    x,
+                    state,
+                    parameters,
+                    arguments,
+                    values,
+                    &mut scratch,
                 )
             }
             Self::ExprLegacy(plan) => {
@@ -442,15 +478,19 @@ mod tests {
         assert_eq!(atom.telemetry_snapshot().pattern_entries, 1);
         assert!(atom.telemetry_snapshot().expr_to_atom_ms.is_some());
         assert_eq!(atom.telemetry_snapshot().residual_evaluator_compilations, 1);
-        assert_eq!(atom.telemetry_snapshot().jacobian_evaluator_compilations, 1);
-        assert!(atom
-            .telemetry_snapshot()
-            .residual_evaluator_compilation_ms
-            .is_some());
-        assert!(atom
-            .telemetry_snapshot()
-            .jacobian_evaluator_compilation_ms
-            .is_some());
+        // The state Jacobian and symbolic parameter Jacobian have separate
+        // prepared evaluators; both are reused by continuation.
+        assert_eq!(atom.telemetry_snapshot().jacobian_evaluator_compilations, 2);
+        assert!(
+            atom.telemetry_snapshot()
+                .residual_evaluator_compilation_ms
+                .is_some()
+        );
+        assert!(
+            atom.telemetry_snapshot()
+                .jacobian_evaluator_compilation_ms
+                .is_some()
+        );
 
         // Parameter continuation changes callback values only. The prepared
         // symbolic structures and evaluator counts must remain unchanged.
@@ -460,8 +500,8 @@ mod tests {
         let continued = atom.telemetry_snapshot();
         assert_eq!(continued.atom_conversions, 1);
         assert_eq!(continued.pattern_entries, 1);
-        assert_eq!(continued.evaluator_compilations, 2);
+        assert_eq!(continued.evaluator_compilations, 3);
         assert_eq!(continued.residual_evaluator_compilations, 1);
-        assert_eq!(continued.jacobian_evaluator_compilations, 1);
+        assert_eq!(continued.jacobian_evaluator_compilations, 2);
     }
 }

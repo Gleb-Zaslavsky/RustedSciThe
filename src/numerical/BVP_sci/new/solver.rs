@@ -5,10 +5,12 @@ use std::sync::Arc;
 use super::{
     callbacks::{BvpSciBoundary, evaluate_boundary},
     collocation::{collocation_rms, evaluate_collocation, max_abs},
-    config::{BvpSciMatrixLayout, BvpSciOptions, SCIPY_MAX_MESH_ITERATIONS},
+    config::{
+        BvpSciMatrixLayout, BvpSciOptions, BvpSciSparseFactorization, SCIPY_MAX_MESH_ITERATIONS,
+    },
     error::{BvpSciNewError, BvpSciStage},
     jacobian::assemble_global_jacobian,
-    linear::NativeLinearBackend,
+    linear::BvpSciLinearBackend,
     output::{BvpSciDenseOutput, BvpSciSolution},
     prepared::BvpSciLambdifyPlan,
     singular::SingularTermRuntime,
@@ -28,6 +30,8 @@ pub struct BvpSciSolver {
     boundary: Arc<dyn BvpSciBoundary>,
     /// Validated controller and backend policies.
     options: BvpSciOptions,
+    /// Sparse factorization experiment selected when this runtime was built.
+    sparse_factorization: BvpSciSparseFactorization,
     /// Current strictly increasing adaptive mesh.
     x: Vec<f64>,
     /// Current node-major state values.
@@ -37,10 +41,10 @@ pub struct BvpSciSolver {
     /// Reusable collocation, callback and Jacobian assembly buffers.
     workspace: BvpSciCollocationWorkspace,
     /// Native linear backend selected for the current mesh.
-    backend: NativeLinearBackend,
+    backend: BvpSciLinearBackend,
     /// Trial state used by Newton backtracking and mesh defect probes.
     trial_state: Vec<f64>,
-    /// Trial parameter block used by parameter finite differences in Newton.
+    /// Trial parameter block retained for Numerical/AOT `df/dp` FD fallback.
     trial_parameters: Vec<f64>,
     /// Prepared pointwise SciPy singular-term correction, if configured.
     singular: Option<SingularTermRuntime>,
@@ -79,9 +83,38 @@ impl BvpSciSolver {
         plan: BvpSciLambdifyPlan,
         boundary: B,
         x: Vec<f64>,
+        y: Vec<f64>,
+        parameters: Vec<f64>,
+        options: BvpSciOptions,
+    ) -> Result<Self, BvpSciNewError>
+    where
+        B: BvpSciBoundary + 'static,
+    {
+        Self::new_with_sparse_factorization(
+            plan,
+            boundary,
+            x,
+            y,
+            parameters,
+            options,
+            BvpSciSparseFactorization::StandardFaer,
+        )
+    }
+
+    /// Construct a solver with an explicit sparse LU policy.
+    ///
+    /// `StandardFaer` remains the default. `SuperLu` is a supported opt-in
+    /// Sparse backend when the crate is built with `superlu` and the bridge
+    /// library is available at runtime; unavailable bridges warn and fall back
+    /// to StandardFaer. Reusable-Faer policies remain experimental.
+    pub fn new_with_sparse_factorization<B>(
+        plan: BvpSciLambdifyPlan,
+        boundary: B,
+        x: Vec<f64>,
         mut y: Vec<f64>,
         parameters: Vec<f64>,
         mut options: BvpSciOptions,
+        sparse_factorization: BvpSciSparseFactorization,
     ) -> Result<Self, BvpSciNewError>
     where
         B: BvpSciBoundary + 'static,
@@ -212,7 +245,7 @@ impl BvpSciSolver {
                     "BVP global linear-system dimension overflows usize".into(),
                 )
             })?;
-        let backend = NativeLinearBackend::new_for_collocation(
+        let backend = BvpSciLinearBackend::new_for_collocation(
             options.matrix_layout,
             total_dimension,
             plan.jacobian_nnz(),
@@ -220,6 +253,7 @@ impl BvpSciSolver {
             m,
             parameters.len(),
             telemetry.clone(),
+            sparse_factorization,
         )?;
         let trial_state = y.clone();
         let trial_parameters = parameters.clone();
@@ -227,6 +261,7 @@ impl BvpSciSolver {
             plan,
             boundary,
             options,
+            sparse_factorization,
             x,
             y,
             parameters,
@@ -320,7 +355,7 @@ impl BvpSciSolver {
                         "BVP restart linear-system dimension overflows usize".into(),
                     )
                 })?;
-            self.backend = NativeLinearBackend::new_for_collocation(
+            self.backend = BvpSciLinearBackend::new_for_collocation(
                 layout,
                 total_dimension,
                 self.plan.jacobian_nnz(),
@@ -328,6 +363,7 @@ impl BvpSciSolver {
                 x.len(),
                 self.parameters.len(),
                 self.plan.telemetry().clone(),
+                self.sparse_factorization,
             )?;
         }
         self.trial_state.resize(y.len(), 0.0);
@@ -360,7 +396,22 @@ impl BvpSciSolver {
             // A mesh pass has two phases: bounded Newton convergence on the
             // current grid, then a defect estimate that decides whether the
             // grid should grow. Symbolic preparation never belongs here.
-            let (newton_outcome, iterations) = self.solve_current_mesh(boundary_tolerance)?;
+            let state_dimension = self.plan.dimension();
+            let linear_system_dimension = state_dimension
+                .checked_mul(self.x.len())
+                .and_then(|dimension| dimension.checked_add(self.parameters.len()))
+                .ok_or_else(|| {
+                    BvpSciNewError::InvalidConfiguration(
+                        "BVP linear system dimension overflows usize".into(),
+                    )
+                })?;
+            let _mesh_pass = self.plan.telemetry().start_mesh_pass(
+                refinement,
+                self.x.len(),
+                linear_system_dimension,
+            );
+            let (newton_outcome, iterations) =
+                self.solve_current_mesh(boundary_tolerance, refinement, linear_system_dimension)?;
             outer_solve_attempts += 1;
             let norm = match newton_outcome {
                 NewtonMeshOutcome::Converged { norm, .. }
@@ -424,6 +475,8 @@ impl BvpSciSolver {
     fn solve_current_mesh(
         &mut self,
         boundary_tolerance: f64,
+        mesh_pass: usize,
+        linear_system_dimension: usize,
     ) -> Result<(NewtonMeshOutcome, usize), BvpSciNewError> {
         let _newton_timer = self
             .plan
@@ -494,6 +547,12 @@ impl BvpSciSolver {
                 {
                     *rhs = -*residual;
                 }
+                self.plan.telemetry().capture_linear_system_if_requested(
+                    linear_system_dimension,
+                    self.x.len(),
+                    &self.workspace.entries,
+                    &self.workspace.step,
+                );
                 let solve_started = self.plan.telemetry().start_timing();
                 self.backend.solve_in_place(&mut self.workspace.step)?;
                 self.plan.telemetry().record_linear_solve(solve_started);
@@ -640,6 +699,9 @@ impl BvpSciSolver {
                 self.plan.telemetry().record_newton_rejected_step();
                 self.plan.telemetry().record_newton_trace(
                     super::telemetry::BvpSciNewtonTraceEntry {
+                        mesh_pass: mesh_pass as u64,
+                        mesh_nodes: self.x.len(),
+                        linear_system_dimension,
                         iteration: iteration as u64,
                         residual_before: previous_norm,
                         residual_after: None,
@@ -687,6 +749,9 @@ impl BvpSciSolver {
             self.plan
                 .telemetry()
                 .record_newton_trace(super::telemetry::BvpSciNewtonTraceEntry {
+                    mesh_pass: mesh_pass as u64,
+                    mesh_nodes: self.x.len(),
+                    linear_system_dimension,
                     iteration: iteration as u64,
                     residual_before: previous_norm,
                     residual_after: accepted_norm,
@@ -956,7 +1021,7 @@ impl BvpSciSolver {
                     "BVP refined linear-system dimension overflows usize".into(),
                 )
             })?;
-        self.backend = NativeLinearBackend::new_for_collocation(
+        self.backend = BvpSciLinearBackend::new_for_collocation(
             layout,
             total_dimension,
             self.plan.jacobian_nnz(),
@@ -964,6 +1029,7 @@ impl BvpSciSolver {
             new_nodes,
             self.parameters.len(),
             self.plan.telemetry().clone(),
+            self.sparse_factorization,
         )?;
         self.trial_state.resize(new_y.len(), 0.0);
         self.x = new_x;
@@ -1287,6 +1353,18 @@ mod tests {
     }
 
     fn linear_problem(assembly: BvpSciAssembly, layout: BvpSciMatrixLayout) -> BvpSciSolver {
+        linear_problem_with_sparse_factorization(
+            assembly,
+            layout,
+            BvpSciSparseFactorization::StandardFaer,
+        )
+    }
+
+    fn linear_problem_with_sparse_factorization(
+        assembly: BvpSciAssembly,
+        layout: BvpSciMatrixLayout,
+        sparse_factorization: BvpSciSparseFactorization,
+    ) -> BvpSciSolver {
         let plan = BvpSciLambdifyPlan::prepare(
             assembly,
             &[Expr::parse_expression("1"), Expr::parse_expression("1")],
@@ -1308,13 +1386,14 @@ mod tests {
         let mut options = BvpSciOptions::default();
         options.matrix_layout = layout;
         options.tolerance = 1e-10;
-        BvpSciSolver::new(
+        BvpSciSolver::new_with_sparse_factorization(
             plan,
             boundary,
             vec![0.0, 0.5, 1.0],
             vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vec![],
             options,
+            sparse_factorization,
         )
         .unwrap()
     }
@@ -1336,6 +1415,92 @@ mod tests {
         let telemetry = solver.plan().telemetry_snapshot();
         assert_eq!(telemetry.sparse_symbolic_analyses, 1);
         assert!(telemetry.sparse_numeric_factorizations >= 1);
+    }
+
+    #[test]
+    fn reusable_sparse_experiment_is_opt_in_and_survives_restart() {
+        let mut solver = linear_problem_with_sparse_factorization(
+            BvpSciAssembly::ExprLegacy,
+            BvpSciMatrixLayout::Sparse,
+            BvpSciSparseFactorization::ReusableFaerExperimental,
+        );
+        assert_eq!(
+            solver.sparse_factorization,
+            BvpSciSparseFactorization::ReusableFaerExperimental
+        );
+        let first = solver
+            .solve()
+            .expect("experimental sparse BVP should solve");
+        assert_eq!(first.status, BvpSciStatus::Success);
+        assert!(first.residual_norm < 1e-10);
+
+        solver
+            .restart(vec![0.0, 0.25, 0.5, 0.75, 1.0], vec![0.0; 10])
+            .expect("experimental policy should permit mesh restart");
+        assert_eq!(
+            solver.sparse_factorization,
+            BvpSciSparseFactorization::ReusableFaerExperimental
+        );
+        let restarted = solver
+            .solve()
+            .expect("experimental sparse BVP should solve after restart");
+        assert_eq!(restarted.status, BvpSciStatus::Success);
+        assert!(restarted.residual_norm < 1e-10);
+        assert!((restarted.y[8] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn simplicial_reusable_sparse_experiment_is_opt_in_and_survives_restart() {
+        let mut solver = linear_problem_with_sparse_factorization(
+            BvpSciAssembly::ExprLegacy,
+            BvpSciMatrixLayout::Sparse,
+            BvpSciSparseFactorization::ReusableFaerSimplicialExperimental,
+        );
+        let first = solver
+            .solve()
+            .expect("experimental simplicial sparse BVP should solve");
+        assert_eq!(first.status, BvpSciStatus::Success);
+        assert!(first.residual_norm < 1e-10);
+        assert_eq!(
+            solver.sparse_factorization,
+            BvpSciSparseFactorization::ReusableFaerSimplicialExperimental
+        );
+
+        solver
+            .restart(vec![0.0, 0.25, 0.5, 0.75, 1.0], vec![0.0; 10])
+            .expect("simplicial experimental policy should permit mesh restart");
+        let restarted = solver
+            .solve()
+            .expect("simplicial sparse BVP should solve after restart");
+        assert_eq!(restarted.status, BvpSciStatus::Success);
+        assert!(restarted.residual_norm < 1e-10);
+        assert!((restarted.y[8] - 1.0).abs() < 1e-10);
+    }
+
+    #[cfg(feature = "superlu")]
+    #[test]
+    #[ignore = "requires the separately built SuperLU bridge DLL"]
+    fn superlu_backend_solves_bvp_and_survives_mesh_restart() {
+        let mut solver = linear_problem_with_sparse_factorization(
+            BvpSciAssembly::ExprLegacy,
+            BvpSciMatrixLayout::Sparse,
+            BvpSciSparseFactorization::SuperLu,
+        );
+        let first = solver.solve().expect("SuperLU-backed BVP should solve");
+        assert_eq!(first.status, BvpSciStatus::Success);
+        assert!(first.residual_norm < 1e-10);
+        assert!((first.y[4] - 1.0).abs() < 1e-10);
+        assert!(solver.plan().telemetry_snapshot().factorizations > 0);
+
+        solver
+            .restart(vec![0.0, 0.25, 0.5, 0.75, 1.0], vec![0.0; 10])
+            .expect("SuperLU policy should survive mesh restart");
+        let restarted = solver
+            .solve()
+            .expect("SuperLU-backed BVP should solve after restart");
+        assert_eq!(restarted.status, BvpSciStatus::Success);
+        assert!(restarted.residual_norm < 1e-10);
+        assert!((restarted.y[8] - 1.0).abs() < 1e-10);
     }
 
     #[test]

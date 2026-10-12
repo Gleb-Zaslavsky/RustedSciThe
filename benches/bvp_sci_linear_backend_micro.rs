@@ -11,6 +11,10 @@ use std::time::Instant;
 use RustedSciThe::Utils::test_reporting::write_test_report;
 use RustedSciThe::numerical::BVP_sci::new::backends::{BandedBackend, DenseBackend, SparseBackend};
 use RustedSciThe::numerical::BVP_sci::new::{BvpSciTelemetry, BvpSciTelemetrySnapshot};
+#[cfg(feature = "superlu")]
+use RustedSciThe::somelinalg::superlu::{CscMatrix, Factorization, SolverLibrary};
+#[cfg(feature = "superlu")]
+use faer::sparse::{SparseColMat, Triplet};
 use tabled::{Table, Tabled};
 
 #[derive(Clone, Copy)]
@@ -18,6 +22,8 @@ enum Route {
     Dense,
     Sparse,
     Banded,
+    #[cfg(feature = "superlu")]
+    SuperLu,
 }
 
 impl Route {
@@ -26,6 +32,8 @@ impl Route {
             "dense" => Some(Self::Dense),
             "sparse" => Some(Self::Sparse),
             "banded" => Some(Self::Banded),
+            #[cfg(feature = "superlu")]
+            "superlu" => Some(Self::SuperLu),
             _ => None,
         }
     }
@@ -35,6 +43,8 @@ impl Route {
             Self::Dense => "Dense",
             Self::Sparse => "Sparse/faer",
             Self::Banded => "Banded/structured",
+            #[cfg(feature = "superlu")]
+            Self::SuperLu => "Sparse/SuperLU",
         }
     }
 }
@@ -43,6 +53,70 @@ enum Backend {
     Dense(DenseBackend),
     Sparse(SparseBackend),
     Banded(BandedBackend),
+    #[cfg(feature = "superlu")]
+    SuperLu(SuperLuKernel),
+}
+
+#[cfg(feature = "superlu")]
+struct SuperLuKernel {
+    dimension: usize,
+    control: SolverLibrary,
+    matrix: Option<CscMatrix>,
+    factor: Option<Factorization>,
+}
+
+#[cfg(feature = "superlu")]
+impl SuperLuKernel {
+    fn new(dimension: usize) -> Self {
+        let path = std::env::var_os("SUPERLU_LIBRARY")
+            .expect("SuperLU microbench route requires SUPERLU_LIBRARY");
+        Self {
+            dimension,
+            control: SolverLibrary::load(path).expect("load SuperLU microbench bridge"),
+            matrix: None,
+            factor: None,
+        }
+    }
+
+    fn assemble(&mut self, entries: &[(usize, usize, f64)]) {
+        let triplets = entries
+            .iter()
+            .map(|&(row, column, value)| Triplet::new(row, column, value))
+            .collect::<Vec<_>>();
+        let matrix = SparseColMat::<usize, f64>::try_new_from_triplets(
+            self.dimension,
+            self.dimension,
+            &triplets,
+        )
+        .expect("microbench SuperLU matrix should assemble");
+        let (symbolic, values) = matrix.as_ref().parts();
+        self.matrix = Some(
+            CscMatrix::try_from_usize(
+                self.dimension,
+                symbolic.col_ptr(),
+                symbolic.row_idx(),
+                values,
+            )
+            .expect("microbench SuperLU CSC should fit its checked ABI"),
+        );
+        self.factor = None;
+    }
+
+    fn factor(&mut self) {
+        self.factor = Some(
+            self.control
+                .factorize(self.matrix.as_ref().expect("assemble before factor"))
+                .expect("microbench SuperLU factorization should succeed"),
+        );
+    }
+
+    fn solve(&mut self, rhs: &mut [f64]) {
+        self.factor
+            .as_mut()
+            .expect("factor before solve")
+            .solve_in_place(rhs)
+            .expect("microbench SuperLU solve should succeed");
+    }
 }
 
 impl Backend {
@@ -66,6 +140,8 @@ impl Backend {
                 )
                 .expect("microbench Banded backend should construct"),
             ),
+            #[cfg(feature = "superlu")]
+            Route::SuperLu => Self::SuperLu(SuperLuKernel::new(dimension)),
         }
     }
 
@@ -74,6 +150,11 @@ impl Backend {
             Self::Dense(backend) => backend.assemble(entries),
             Self::Sparse(backend) => backend.assemble(entries),
             Self::Banded(backend) => backend.assemble(entries),
+            #[cfg(feature = "superlu")]
+            Self::SuperLu(backend) => {
+                backend.assemble(entries);
+                Ok(())
+            }
         }
         .expect("microbench matrix should assemble");
     }
@@ -83,6 +164,11 @@ impl Backend {
             Self::Dense(backend) => backend.factor(),
             Self::Sparse(backend) => backend.factor(),
             Self::Banded(backend) => backend.factor(),
+            #[cfg(feature = "superlu")]
+            Self::SuperLu(backend) => {
+                backend.factor();
+                Ok(())
+            }
         }
         .expect("microbench matrix should factor");
     }
@@ -92,6 +178,11 @@ impl Backend {
             Self::Dense(backend) => backend.solve_in_place(rhs),
             Self::Sparse(backend) => backend.solve_in_place(rhs),
             Self::Banded(backend) => backend.solve_in_place(rhs),
+            #[cfg(feature = "superlu")]
+            Self::SuperLu(backend) => {
+                backend.solve(rhs);
+                Ok(())
+            }
         }
         .expect("microbench factorization should solve");
     }
@@ -101,6 +192,8 @@ impl Backend {
             Self::Sparse(backend) => Some(backend.telemetry_snapshot()),
             Self::Banded(backend) => backend.telemetry_snapshot(),
             Self::Dense(_) => None,
+            #[cfg(feature = "superlu")]
+            Self::SuperLu(_) => None,
         }
     }
 }

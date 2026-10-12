@@ -11,6 +11,22 @@ use super::{
     block_tridiagonal_lu_consistent::BlockTridiagonalLuConsistent, error::BandedError,
     general_lu_partial_pivot::GeneralBandedLuPartialPivot, storage::Banded,
 };
+use faer::linalg::matmul::matmul;
+use faer::{Accum, MatMut, MatRef, Par};
+use std::time::{Duration, Instant};
+
+/// Timings for the major phases of a bordered-banded factorization.
+///
+/// These are collected only by the explicit diagnostic entry point. The
+/// normal `factor` path does not read the clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BorderedFactorizationTimings {
+    pub core_factor: Duration,
+    pub core_to_border_solves: Duration,
+    pub schur_assembly: Duration,
+    pub border_factor: Duration,
+    pub core_to_border_solve_count: usize,
+}
 
 /// Factorization of
 ///
@@ -31,6 +47,7 @@ pub struct BorderedBlockTridiagonal {
     core_to_border_solved: Vec<f64>,
     border_to_core: Vec<f64>,
     border_matrix: Vec<f64>,
+    schur_product: Vec<f64>,
     schur_matrix: Banded<f64>,
     border_lu: GeneralBandedLuPartialPivot,
     core_workspace: Vec<f64>,
@@ -69,6 +86,7 @@ impl BorderedBlockTridiagonal {
             core_to_border_solved: vec![0.0; core_border_len],
             border_to_core: vec![0.0; core_border_len],
             border_matrix: vec![0.0; border_len],
+            schur_product: vec![0.0; border_len],
             schur_matrix,
             border_lu,
             core_workspace: vec![0.0; core_dimension],
@@ -118,6 +136,7 @@ impl BorderedBlockTridiagonal {
         self.core_to_border_solved.fill(0.0);
         self.border_to_core.fill(0.0);
         self.border_matrix.fill(0.0);
+        self.schur_product.fill(0.0);
         self.schur_matrix.as_mut_slice().fill(0.0);
         self.original_rhs.fill(0.0);
         self.is_factorized = false;
@@ -219,11 +238,56 @@ impl BorderedBlockTridiagonal {
 
     /// Factor the core and the dense Schur complement in place.
     pub fn factor(&mut self) -> Result<(), BandedError> {
+        self.factor_impl(false, 2).map(|_| ())
+    }
+
+    /// Factor and report phase timings for explicit diagnostics.
+    ///
+    /// Production callers should use `factor` unless they have explicitly
+    /// enabled detailed timing telemetry.
+    pub fn factor_with_timings(&mut self) -> Result<BorderedFactorizationTimings, BandedError> {
+        self.factor_impl(true, 2)
+            .map(|timings| timings.expect("timings requested"))
+    }
+
+    /// Factor with a caller-selected number of refinement steps for the
+    /// core-to-border solves used to form `T^-1 U`.
+    ///
+    /// This lets a structured backend compare direct triangular solves with
+    /// refined solves without changing the default behavior of `factor`.
+    pub fn factor_with_refinement_steps(
+        &mut self,
+        refinement_steps: usize,
+    ) -> Result<(), BandedError> {
+        self.factor_impl(false, refinement_steps).map(|_| ())
+    }
+
+    /// Diagnostic counterpart of [`Self::factor_with_refinement_steps`].
+    pub fn factor_with_timings_and_refinement_steps(
+        &mut self,
+        refinement_steps: usize,
+    ) -> Result<BorderedFactorizationTimings, BandedError> {
+        self.factor_impl(true, refinement_steps)
+            .map(|timings| timings.expect("timings requested"))
+    }
+
+    fn factor_impl(
+        &mut self,
+        measure: bool,
+        refinement_steps: usize,
+    ) -> Result<Option<BorderedFactorizationTimings>, BandedError> {
         self.is_factorized = false;
-        self.core_lu.factor_from(&self.core)?;
+        let mut timings = BorderedFactorizationTimings::default();
+        let started = measure.then(Instant::now);
+        let result = self.core_lu.factor_from(&self.core);
+        if let Some(started) = started {
+            timings.core_factor = started.elapsed();
+        }
+        result?;
 
         // Build T^-1 U one column at a time. Keep U intact so a later Newton
         // refactorization can reuse the same object with fresh coefficients.
+        let started = measure.then(Instant::now);
         for column in 0..self.border_size {
             for row in 0..self.core_dimension() {
                 self.core_workspace[row] = self.core_to_border[row * self.border_size + column];
@@ -232,33 +296,70 @@ impl BorderedBlockTridiagonal {
             // superblock chains can amplify its residual. The existing
             // native refinement path corrects that residual against `T`
             // without materializing a dense global matrix.
-            self.core_lu.solve_in_place_with_iterative_refinement(
-                &self.core,
-                &mut self.core_workspace,
-                2,
-            )?;
+            if refinement_steps == 0 {
+                self.core_lu.solve_in_place(&mut self.core_workspace)?;
+            } else {
+                self.core_lu.solve_in_place_with_iterative_refinement(
+                    &self.core,
+                    &mut self.core_workspace,
+                    refinement_steps,
+                )?;
+            }
             for row in 0..self.core_dimension() {
                 self.core_to_border_solved[row * self.border_size + column] =
                     self.core_workspace[row];
             }
         }
+        if let Some(started) = started {
+            timings.core_to_border_solves = started.elapsed();
+            timings.core_to_border_solve_count = self.border_size;
+        }
 
-        self.schur_matrix.as_mut_slice().fill(0.0);
+        let started = measure.then(Instant::now);
+        let border_to_core = MatRef::from_row_major_slice(
+            &self.border_to_core,
+            self.border_size,
+            self.core_dimension(),
+        );
+        let core_to_border = MatRef::from_row_major_slice(
+            &self.core_to_border_solved,
+            self.core_dimension(),
+            self.border_size,
+        );
+        {
+            let schur_product = MatMut::from_row_major_slice_mut(
+                &mut self.schur_product,
+                self.border_size,
+                self.border_size,
+            );
+            matmul(
+                schur_product,
+                Accum::Replace,
+                border_to_core,
+                core_to_border,
+                1.0,
+                Par::Seq,
+            );
+        }
         for row in 0..self.border_size {
             for column in 0..self.border_size {
-                let reduction = (0..self.core_dimension())
-                    .map(|core_row| {
-                        self.border_to_core[row * self.core_dimension() + core_row]
-                            * self.core_to_border_solved[core_row * self.border_size + column]
-                    })
-                    .sum::<f64>();
-                self.schur_matrix[(row, column)] =
-                    self.border_matrix[row * self.border_size + column] - reduction;
+                self.schur_matrix[(row, column)] = self.border_matrix
+                    [row * self.border_size + column]
+                    - self.schur_product[row * self.border_size + column];
             }
         }
-        self.border_lu.factor_from(&self.schur_matrix)?;
+        if let Some(started) = started {
+            timings.schur_assembly = started.elapsed();
+        }
+
+        let started = measure.then(Instant::now);
+        let result = self.border_lu.factor_from(&self.schur_matrix);
+        if let Some(started) = started {
+            timings.border_factor = started.elapsed();
+        }
+        result?;
         self.is_factorized = true;
-        Ok(())
+        Ok(measure.then_some(timings))
     }
 
     /// Solve the full system in place, with core variables first and border
@@ -544,6 +645,75 @@ mod tests {
         assert!((rhs[0] - 1.0).abs() < 1e-12);
         assert!((rhs[1] - 2.0).abs() < 1e-12);
         assert!((rhs[2] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn direct_core_to_border_solves_match_refined_factorization() {
+        let mut refined = parity_case_with_blocks(6);
+        let mut direct = parity_case_with_blocks(6);
+        refined.structured.factor().unwrap();
+        direct.structured.factor_with_refinement_steps(0).unwrap();
+
+        let original_rhs = refined.rhs.clone();
+        let mut refined_solution = refined.rhs;
+        let mut direct_solution = direct.rhs;
+        refined
+            .structured
+            .solve_in_place(&mut refined_solution)
+            .unwrap();
+        direct
+            .structured
+            .solve_in_place(&mut direct_solution)
+            .unwrap();
+
+        let max_solution_diff = refined_solution
+            .iter()
+            .zip(&direct_solution)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_solution_diff < 1.0e-12,
+            "solution diff={max_solution_diff:e}"
+        );
+        assert!(
+            refined
+                .structured
+                .residual_inf(&refined_solution, &original_rhs)
+                .unwrap()
+                < 1.0e-12
+        );
+        assert!(
+            direct
+                .structured
+                .residual_inf(&direct_solution, &original_rhs)
+                .unwrap()
+                < 1.0e-12
+        );
+    }
+
+    #[test]
+    fn faer_schur_product_matches_scalar_reference() {
+        let case = parity_case_with_blocks(7);
+        let mut system = case.structured;
+        system.factor_with_refinement_steps(0).unwrap();
+
+        for row in 0..system.border_size {
+            for column in 0..system.border_size {
+                let product = (0..system.core_dimension())
+                    .map(|core| {
+                        system.border_to_core[row * system.core_dimension() + core]
+                            * system.core_to_border_solved[core * system.border_size + column]
+                    })
+                    .sum::<f64>();
+                let expected = system.border_matrix[row * system.border_size + column] - product;
+                let actual = system.schur_matrix[(row, column)];
+                let scale = expected.abs().max(1.0);
+                assert!(
+                    (actual - expected).abs() <= 1.0e-12 * scale,
+                    "Schur ({row}, {column}) differs: actual={actual:e}, expected={expected:e}"
+                );
+            }
+        }
     }
 
     #[test]

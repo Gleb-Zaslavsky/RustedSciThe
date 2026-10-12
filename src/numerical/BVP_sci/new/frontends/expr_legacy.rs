@@ -24,6 +24,7 @@ pub struct ExprLegacyLambdifyPlan {
     parameter_names: Vec<String>,
     residuals: Vec<ScalarEvaluator>,
     jacobian: Vec<(usize, usize, ScalarEvaluator)>,
+    parameter_jacobian: Vec<(usize, usize, ScalarEvaluator)>,
     jacobian_nnz: usize,
     telemetry: BvpSciTelemetry,
     execution_policy: BvpSciExecutionPolicy,
@@ -88,6 +89,23 @@ impl ExprLegacyLambdifyPlan {
             (equations.len() * state_names.len()) as u64,
         );
 
+        // Parameter sensitivities are structural too: differentiate once at
+        // preparation and reuse these evaluators across mesh/Newton/continuation.
+        let parameter_symbolic_started = telemetry.start_timing();
+        let parameter_derivatives = equations
+            .iter()
+            .map(|equation| {
+                parameter_names
+                    .iter()
+                    .map(|parameter_name| equation.diff(parameter_name).simplify())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        telemetry.record_symbolic_jacobian(
+            parameter_symbolic_started,
+            (equations.len() * parameter_names.len()) as u64,
+        );
+
         // Compile only nonzero state derivatives. Sparse/Banded consume this
         // stable list directly, while dense callbacks scatter it into a small
         // pointwise block without changing symbolic representation.
@@ -110,6 +128,27 @@ impl ExprLegacyLambdifyPlan {
             }
         }
         telemetry.record_jacobian_evaluator_compilation(evaluator_started, jacobian_nnz as u64);
+
+        let evaluator_started = telemetry.start_timing();
+        let mut parameter_jacobian = Vec::new();
+        for (row, derivatives) in parameter_derivatives.iter().enumerate() {
+            for (column, derivative) in derivatives.iter().enumerate() {
+                if !derivative.is_zero() {
+                    parameter_jacobian.push((
+                        row,
+                        column,
+                        Arc::from(Expr::lambdify_borrowed_thread_safe(
+                            derivative,
+                            argument_refs.as_slice(),
+                        )),
+                    ));
+                }
+            }
+        }
+        telemetry.record_jacobian_evaluator_compilation(
+            evaluator_started,
+            parameter_jacobian.len() as u64,
+        );
         telemetry.record_preparation(started);
 
         Ok(Self {
@@ -118,6 +157,7 @@ impl ExprLegacyLambdifyPlan {
             parameter_names: parameter_names.to_vec(),
             residuals,
             jacobian,
+            parameter_jacobian,
             jacobian_nnz,
             telemetry,
             execution_policy: BvpSciExecutionPolicy::Sequential,
@@ -146,6 +186,81 @@ impl ExprLegacyLambdifyPlan {
 
     pub fn jacobian_nnz(&self) -> usize {
         self.jacobian_nnz
+    }
+
+    pub fn parameter_jacobian_nnz(&self) -> usize {
+        self.parameter_jacobian.len()
+    }
+
+    /// Evaluate prepared symbolic `df/dp` values into row-major `n x k` storage.
+    pub fn evaluate_parameter_jacobian(
+        &self,
+        x: f64,
+        state: &[f64],
+        parameters: &[f64],
+        arguments: &mut [f64],
+        output: &mut [f64],
+    ) -> Result<(), BvpSciNewError> {
+        self.fill_arguments(x, state, parameters, arguments)?;
+        let expected = self
+            .dimension()
+            .checked_mul(self.parameter_dimension())
+            .ok_or_else(|| {
+                BvpSciNewError::InvalidConfiguration("parameter Jacobian size overflow".into())
+            })?;
+        if output.len() != expected {
+            return Err(BvpSciNewError::ShapeMismatch {
+                stage: BvpSciStage::JacobianCallback,
+                expected,
+                actual: output.len(),
+            });
+        }
+        output.fill(0.0);
+        let started = self.telemetry.start_timing();
+        let evaluation_started = self.telemetry.start_timing();
+        self.telemetry
+            .record_dispatch(self.execution_policy, self.parameter_jacobian.len());
+        if self.parameter_jacobian.len() > 1
+            && self.execution_policy.should_parallel_with_tasks(
+                self.parameter_jacobian.len(),
+                self.parameter_jacobian.len(),
+            )
+        {
+            use rayon::prelude::*;
+            let values = self
+                .parameter_jacobian
+                .par_iter()
+                .map(|(row, column, evaluator)| {
+                    (
+                        row * self.parameter_dimension() + column,
+                        evaluator(arguments),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (index, value) in values {
+                if !value.is_finite() {
+                    return Err(BvpSciNewError::NonFinite {
+                        stage: BvpSciStage::JacobianCallback,
+                    });
+                }
+                output[index] = value;
+            }
+        } else {
+            for (row, column, evaluator) in &self.parameter_jacobian {
+                let value = evaluator(arguments);
+                if !value.is_finite() {
+                    return Err(BvpSciNewError::NonFinite {
+                        stage: BvpSciStage::JacobianCallback,
+                    });
+                }
+                output[row * self.parameter_dimension() + column] = value;
+            }
+        }
+        self.telemetry
+            .record_jacobian_evaluation(evaluation_started);
+        self.telemetry.record_parameter_jacobian_callback(started);
+        self.telemetry.record_output_writes(output.len());
+        Ok(())
     }
 
     /// Fixed structural order used by sparse and banded native storage.
@@ -184,8 +299,8 @@ impl ExprLegacyLambdifyPlan {
             .record_dispatch(self.execution_policy, self.residuals.len());
         if self.residuals.len() > 1
             && self
-            .execution_policy
-            .should_parallel_with_tasks(self.residuals.len(), self.residuals.len())
+                .execution_policy
+                .should_parallel_with_tasks(self.residuals.len(), self.residuals.len())
         {
             use rayon::prelude::*;
             output
@@ -237,8 +352,8 @@ impl ExprLegacyLambdifyPlan {
             .record_dispatch(self.execution_policy, self.jacobian.len());
         if self.jacobian.len() > 1
             && self
-            .execution_policy
-            .should_parallel_with_tasks(self.jacobian.len(), self.jacobian.len())
+                .execution_policy
+                .should_parallel_with_tasks(self.jacobian.len(), self.jacobian.len())
         {
             use rayon::prelude::*;
             let values = self
@@ -300,8 +415,8 @@ impl ExprLegacyLambdifyPlan {
             .record_dispatch(self.execution_policy, self.jacobian.len());
         if self.jacobian.len() > 1
             && self
-            .execution_policy
-            .should_parallel_with_tasks(self.jacobian.len(), self.jacobian.len())
+                .execution_policy
+                .should_parallel_with_tasks(self.jacobian.len(), self.jacobian.len())
         {
             use rayon::prelude::*;
             values

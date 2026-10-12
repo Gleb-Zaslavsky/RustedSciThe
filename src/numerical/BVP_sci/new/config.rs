@@ -46,6 +46,29 @@ pub enum BvpSciMatrixLayout {
     Banded { lower: usize, upper: usize },
 }
 
+/// Sparse factorization policy, separate from matrix layout.
+///
+/// The native matrix layout is independent of this sparse LU implementation
+/// policy. The default stays on the established faer route; SuperLU and
+/// reusable-faer policies are explicit opt-ins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BvpSciSparseFactorization {
+    #[default]
+    StandardFaer,
+    ReusableFaerExperimental,
+    /// Same reusable numeric workspace, with simplicial LU forced by the
+    /// symbolic analysis. This remains an opt-in experiment pending BVP A/B.
+    ReusableFaerSimplicialExperimental,
+    /// Runtime-loaded SuperLU 6.0.1 sparse LU, available with the `superlu`
+    /// Cargo feature and a separately built target-native bridge. If the
+    /// bridge cannot be loaded, construction visibly falls back to StandardFaer.
+    SuperLu,
+    /// Deprecated spelling retained as a source-compatibility alias for
+    /// `SuperLu`; new code should select `SuperLu`.
+    #[deprecated(note = "use BvpSciSparseFactorization::SuperLu")]
+    SuperLuExperimental,
+}
+
 /// Solver policies which do not belong in the numerical hot loop.
 ///
 /// The two iteration budgets deliberately remain explicit configuration rather

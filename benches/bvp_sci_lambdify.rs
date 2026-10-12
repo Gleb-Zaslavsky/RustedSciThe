@@ -14,7 +14,8 @@ use std::time::Instant;
 use RustedSciThe::Utils::test_reporting::write_test_report;
 use RustedSciThe::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciBoundaryCallbacks, BvpSciExecutionPolicy, BvpSciLambdifyPlan,
-    BvpSciMatrixLayout, BvpSciOptions, BvpSciSolver, BvpSciTelemetry, BvpSciTelemetrySnapshot,
+    BvpSciMatrixLayout, BvpSciOptions, BvpSciSolver, BvpSciSparseFactorization, BvpSciTelemetry,
+    BvpSciTelemetrySnapshot,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use tabled::{Table, Tabled};
@@ -187,6 +188,7 @@ struct Row {
     nodes: usize,
     frontend: String,
     layout: String,
+    sparse_factorization: String,
     continuation: usize,
     prepare_ms: String,
     solve_ms: String,
@@ -1273,6 +1275,26 @@ fn build_solver(
     parameter_index: usize,
     execution_policy: BvpSciExecutionPolicy,
 ) -> Result<(BvpSciSolver, Arc<AtomicU64>), String> {
+    build_solver_with_sparse_factorization(
+        workload,
+        frontend,
+        layout,
+        nodes,
+        parameter_index,
+        execution_policy,
+        BvpSciSparseFactorization::StandardFaer,
+    )
+}
+
+fn build_solver_with_sparse_factorization(
+    workload: Workload,
+    frontend: Frontend,
+    layout: Layout,
+    nodes: usize,
+    parameter_index: usize,
+    execution_policy: BvpSciExecutionPolicy,
+    sparse_factorization: BvpSciSparseFactorization,
+) -> Result<(BvpSciSolver, Arc<AtomicU64>), String> {
     let parameter_names = workload.parameter_names();
     let parameter = workload.parameter(parameter_index);
     let telemetry = BvpSciTelemetry::timings();
@@ -1420,9 +1442,17 @@ fn build_solver(
     } else {
         vec![0.0; x.len() * workload.dimension()]
     };
-    BvpSciSolver::new(plan, boundary, x, y, parameter, options)
-        .map(|solver| (solver, target))
-        .map_err(|error| error.to_string())
+    BvpSciSolver::new_with_sparse_factorization(
+        plan,
+        boundary,
+        x,
+        y,
+        parameter,
+        options,
+        sparse_factorization,
+    )
+    .map(|solver| (solver, target))
+    .map_err(|error| error.to_string())
 }
 
 fn run_row(
@@ -1431,6 +1461,7 @@ fn run_row(
     layout: Layout,
     nodes: usize,
     continuation: usize,
+    sparse_factorization: BvpSciSparseFactorization,
 ) -> Row {
     // The manufactured stiff system needs enough collocation intervals to
     // resolve its coupled profile.  Do not turn a too-coarse user selection
@@ -1443,13 +1474,28 @@ fn run_row(
         nodes
     };
     let prepare_started = Instant::now();
-    let (mut solver, target) =
-        match build_solver(workload, frontend, layout, nodes, 0, selected_policy()) {
-            Ok(solver) => solver,
-            Err(error) => {
-                return failed_row(workload, frontend, layout, nodes, continuation, error);
-            }
-        };
+    let (mut solver, target) = match build_solver_with_sparse_factorization(
+        workload,
+        frontend,
+        layout,
+        nodes,
+        0,
+        selected_policy(),
+        sparse_factorization,
+    ) {
+        Ok(solver) => solver,
+        Err(error) => {
+            return failed_row(
+                workload,
+                frontend,
+                layout,
+                nodes,
+                continuation,
+                sparse_factorization,
+                error,
+            );
+        }
+    };
     let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1e3;
     let solve_started = Instant::now();
     if let Err(error) = solver.solve() {
@@ -1459,6 +1505,7 @@ fn run_row(
             layout,
             nodes,
             continuation,
+            sparse_factorization,
             &solver,
             error,
         );
@@ -1487,6 +1534,7 @@ fn run_row(
                 layout,
                 nodes,
                 continuation,
+                sparse_factorization,
                 &solver,
                 error,
             );
@@ -1498,6 +1546,7 @@ fn run_row(
                 layout,
                 nodes,
                 continuation,
+                sparse_factorization,
                 &solver,
                 error,
             );
@@ -1506,6 +1555,8 @@ fn run_row(
     let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1e3;
     let continuation_steps = effective_continuation.saturating_sub(1);
     let telemetry = solver.plan().telemetry_snapshot();
+    let superlu_calls = telemetry.superlu.native_factorization_calls;
+    let fallback_count = telemetry.superlu_fallbacks;
     let fmt = |value: Option<f64>| {
         value
             .map(|value| format!("{value:.3}"))
@@ -1516,6 +1567,7 @@ fn run_row(
         nodes,
         frontend: frontend.label().into(),
         layout: layout.label().into(),
+        sparse_factorization: row_factorization_label(layout, sparse_factorization).into(),
         continuation: effective_continuation,
         prepare_ms: format!("{prepare_ms:.3}"),
         solve_ms: format!("{solve_ms:.3}"),
@@ -1606,7 +1658,13 @@ fn run_row(
         parallel_dispatches: telemetry.parallel_dispatches,
         sequential_dispatches: telemetry.sequential_dispatches,
         max_worker_threads: telemetry.max_worker_threads,
-        status: "ok".into(),
+        status: if matches!(sparse_factorization, BvpSciSparseFactorization::SuperLu)
+            && (fallback_count > 0 || superlu_calls == 0)
+        {
+            format!("error: SuperLU inactive (calls={superlu_calls}, fallbacks={fallback_count})")
+        } else {
+            "ok".into()
+        },
     }
 }
 
@@ -1616,6 +1674,7 @@ fn failed_row(
     layout: Layout,
     nodes: usize,
     continuation: usize,
+    sparse_factorization: BvpSciSparseFactorization,
     error: impl std::fmt::Display,
 ) -> Row {
     empty_row(
@@ -1624,6 +1683,7 @@ fn failed_row(
         layout,
         nodes,
         continuation,
+        sparse_factorization,
         format!("error: {error}"),
     )
 }
@@ -1662,6 +1722,7 @@ fn failed_solver_row(
     layout: Layout,
     nodes: usize,
     continuation: usize,
+    sparse_factorization: BvpSciSparseFactorization,
     solver: &BvpSciSolver,
     error: impl std::fmt::Display,
 ) -> Row {
@@ -1672,6 +1733,7 @@ fn failed_solver_row(
         layout,
         nodes,
         continuation,
+        sparse_factorization,
         format!("error: {error}"),
     );
     row.newton_jacobian_refreshes = telemetry.newton_jacobian_refreshes;
@@ -1717,6 +1779,7 @@ fn empty_row(
     layout: Layout,
     nodes: usize,
     continuation: usize,
+    sparse_factorization: BvpSciSparseFactorization,
     status: impl Into<String>,
 ) -> Row {
     Row {
@@ -1724,6 +1787,7 @@ fn empty_row(
         nodes,
         frontend: frontend.label().into(),
         layout: layout.label().into(),
+        sparse_factorization: row_factorization_label(layout, sparse_factorization).into(),
         continuation: if workload.parameter_names().is_empty() {
             1
         } else {
@@ -1798,6 +1862,55 @@ fn empty_row(
         max_worker_threads: 0,
         status: status.into(),
     }
+}
+
+fn sparse_factorization_label(policy: BvpSciSparseFactorization) -> &'static str {
+    match policy {
+        BvpSciSparseFactorization::StandardFaer => "StandardFaer",
+        BvpSciSparseFactorization::SuperLu => "SuperLU",
+        BvpSciSparseFactorization::ReusableFaerExperimental => "ReusableFaerExperimental",
+        BvpSciSparseFactorization::ReusableFaerSimplicialExperimental => {
+            "ReusableFaerSimplicialExperimental"
+        }
+        #[allow(deprecated)]
+        BvpSciSparseFactorization::SuperLuExperimental => "SuperLU (deprecated alias)",
+    }
+}
+
+fn row_factorization_label(layout: Layout, policy: BvpSciSparseFactorization) -> &'static str {
+    if matches!(layout, Layout::Sparse) {
+        sparse_factorization_label(policy)
+    } else {
+        "not-applicable"
+    }
+}
+
+fn selected_sparse_factorizations() -> Vec<BvpSciSparseFactorization> {
+    let values = std::env::var("BVP_SCI_BENCH_SPARSE_FACTORIZATIONS")
+        .unwrap_or_else(|_| "standard-faer".into());
+    let mut policies = Vec::new();
+    for value in values.split(',').map(str::trim) {
+        match value.to_ascii_lowercase().as_str() {
+            "standard-faer" | "faer" | "standard" => {
+                if !policies.contains(&BvpSciSparseFactorization::StandardFaer) {
+                    policies.push(BvpSciSparseFactorization::StandardFaer);
+                }
+            }
+            "superlu" => {
+                #[cfg(feature = "superlu")]
+                if !policies.contains(&BvpSciSparseFactorization::SuperLu) {
+                    policies.push(BvpSciSparseFactorization::SuperLu);
+                }
+                #[cfg(not(feature = "superlu"))]
+                eprintln!("[BVP_sci bench] SuperLU requested but feature is disabled");
+            }
+            _ => eprintln!("[BVP_sci bench] ignoring unknown Sparse factorization '{value}'"),
+        }
+    }
+    if policies.is_empty() {
+        policies.push(BvpSciSparseFactorization::StandardFaer);
+    }
+    policies
 }
 
 fn main() {
@@ -1938,6 +2051,7 @@ fn main() {
     } else {
         vec![continuation]
     };
+    let sparse_factorizations = selected_sparse_factorizations();
     let mut rows = Vec::new();
     for workload in [
         Workload::Linear,
@@ -1955,7 +2069,22 @@ fn main() {
             for frontend in [Frontend::ExprLegacy, Frontend::AtomNative] {
                 for layout in [Layout::Dense, Layout::Sparse, Layout::Banded] {
                     for &count in &counts {
-                        rows.push(run_row(workload, frontend, layout, dimension, count));
+                        let policies: &[BvpSciSparseFactorization] =
+                            if matches!(layout, Layout::Sparse) {
+                                &sparse_factorizations
+                            } else {
+                                &[BvpSciSparseFactorization::StandardFaer]
+                            };
+                        for &sparse_factorization in policies {
+                            rows.push(run_row(
+                                workload,
+                                frontend,
+                                layout,
+                                dimension,
+                                count,
+                                sparse_factorization,
+                            ));
+                        }
                     }
                 }
             }
@@ -1964,12 +2093,16 @@ fn main() {
     let table = Table::new(&rows).to_string();
     validate_markdown_table(&table);
     let body = format!(
-        "# BVP_sci Lambdify matrix\n\n- phase: {}\n- workloads: {:?}\n- nodes: {:?}\n- continuation: {}\n- policy: {:?}\n- AOT: not included\n- timing scopes: diagnostic and non-additive\n\n{}",
+        "# BVP_sci Lambdify matrix\n\n- phase: {}\n- workloads: {:?}\n- nodes: {:?}\n- continuation: {}\n- policy: {:?}\n- Sparse factorization routes: {:?}\n- AOT: not included\n- timing scopes: diagnostic and non-additive\n\n{}",
         phase,
         workloads,
         nodes,
         continuation,
         selected_policy(),
+        sparse_factorizations
+            .iter()
+            .map(|policy| sparse_factorization_label(*policy))
+            .collect::<Vec<_>>(),
         table
     );
     let report_name = std::env::var("BVP_SCI_BENCH_REPORT").unwrap_or_else(|_| {

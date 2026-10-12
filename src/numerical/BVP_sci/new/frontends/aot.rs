@@ -23,10 +23,10 @@ use crate::symbolic::symbolic_ivp::{
     IvpSymbolicAssemblyBackend, PreparedSymbolicIvpProblem, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
+    PreparedGeneratedSymbolicIvpProblem, PreparedGeneratedSymbolicIvpSparseBackend,
+    SelectedSymbolicIvpBackendKind, SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
     prepare_generated_symbolic_ivp_banded_backend, prepare_generated_symbolic_ivp_problem,
-    prepare_generated_symbolic_ivp_sparse_backend, PreparedGeneratedSymbolicIvpProblem,
-    PreparedGeneratedSymbolicIvpSparseBackend, SelectedSymbolicIvpBackendKind,
-    SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
+    prepare_generated_symbolic_ivp_sparse_backend,
 };
 use nalgebra::DVector;
 
@@ -116,7 +116,7 @@ impl BvpSciAotPlan {
             BvpSciAssembly::Numerical => {
                 return Err(BvpSciNewError::UnsupportedRoute(
                     "AOT preparation requires a symbolic ExprLegacy or AtomView assembly".into(),
-                ))
+                ));
             }
             BvpSciAssembly::ExprLegacy => IvpSymbolicAssemblyBackend::ExprLegacy,
             BvpSciAssembly::AtomViewNative => IvpSymbolicAssemblyBackend::AtomView,
@@ -719,7 +719,10 @@ mod tests {
             IvpLambdifyExecutionPolicy::Parallel { min_work: 0 },
         );
 
-        assert_ne!(config.residual_chunking_strategy, ResidualChunkingStrategy::Whole);
+        assert_ne!(
+            config.residual_chunking_strategy,
+            ResidualChunkingStrategy::Whole
+        );
         assert_eq!(
             config.aot_options.residual_strategy,
             config.residual_chunking_strategy

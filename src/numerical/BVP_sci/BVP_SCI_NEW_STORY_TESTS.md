@@ -122,7 +122,7 @@ prints a typed skip rather than failing the example.
 | `correctness` | Does the new core match SciPy/reference invariants? | fixed-mesh, adaptive, singular and output debug gates |
 | `backend_parity` | Do Dense, Sparse and Banded produce equivalent solutions? | initial linear gate |
 | `frontend_parity` | Do ExprLegacy and AtomView preserve numerical fidelity? | compact callback, solver and continuation matrix |
-| `jacobian_modes` | Do analytic state Jacobians and finite-difference parameter/BC blocks agree? | Lambdify state-Jacobian plus FD probe telemetry gate; generic user analytic BC callback is not yet part of this API |
+| `jacobian_modes` | Do state/parameter derivative sources agree across frontends? | Lambdify prepares symbolic `df/dy` and `df/dp`; boundary FD remains independently measured |
 | `continuation` | Are prepared structures reused without drift or retention growth? | fresh/prepared/warm lifecycle matrix, numeric-factorization contract and bounded logical workspace gate |
 | `lifecycle` | Are preparation, restart and rebind scopes classified correctly? | restart with new `y0`, rebind and typed failure gates |
 | `telemetry` | Are counters and timing scopes complete and non-invasive when off? | collocation/defect/linear/Banded route scope gate |
@@ -199,13 +199,15 @@ Jacobian factorization because the parameter-dependent operator changed. A
 restart with a new initial state keeps the prepared frontend and backend route;
 numeric workspace may grow only when adaptive refinement requires a larger mesh.
 
-The Jacobian-source gate records the current public contract rather than
-inventing an unsupported one: pointwise state Jacobians come from the prepared
-Lambdify plan, while parameter and boundary blocks use finite differences in
-reusable buffers. `finite_difference_probes`, Jacobian evaluations and output
-assembly are required to be non-zero in solved rows. AtomView now reports its
-Atom-native symbolic Jacobian derivation count and timing as well; its pattern
-scope remains inclusive and is not added to the derivation scope.
+The Jacobian-source gate checks that pointwise state and parameter Jacobians
+come from the prepared Lambdify plan. ExprLegacy differentiates Expr and
+AtomViewNative differentiates packed Atoms; both compile `df/dp` evaluators
+once and reuse them during continuation. The direct symbolic-parameter story
+checks exact row-major derivatives and zero runtime FD probes. Boundary
+Jacobian finite differences remain in reusable buffers where no analytic
+boundary callback is supplied. Numerical and AOT RHS plans still use the
+existing `df/dp` FD fallback. AtomView reports native symbolic derivation and
+lowering scopes; inclusive parent scopes must not be added to child scopes.
 
 The regularized Lane-Emden n=5 story uses the analytic solution
 `y=(1+x^2/3)^(-1/2)`, `y'=-x/3*(1+x^2/3)^(-3/2)` on `[1e-3, 1]`. It compares
@@ -363,7 +365,8 @@ The following fast story gates are active in debug mode:
 |---|---|
 | `lambdify_parameter_rebind_rebuilds_numeric_factorization_but_reuses_workspace` | one prepared AtomView/Sparse model; conversion and pattern stay stable, numeric factorization delta is visible, refinement-driven workspace growth is distinguished |
 | `lambdify_restart_with_new_initial_state_preserves_prepared_frontend` | ExprLegacy/AtomViewNative x Dense/Sparse/Banded, new `y0`, finite solution and unchanged frontend/pattern identity |
-| `lambdify_analytic_state_and_fd_parameter_boundary_jacobians_have_telemetry` | both frontends/layouts report analytic state-Jacobian evaluations plus FD parameter/BC probes and output assembly |
+| `lambdify_symbolic_parameter_jacobian_matches_exact_derivative` | ExprLegacy and AtomViewNative produce the exact row-major `df/dp` block, compile it once, and perform zero runtime FD probes |
+| `lambdify_symbolic_parameter_and_fd_boundary_jacobians_have_telemetry` | all frontend/layout rows report parameter-Jacobian callbacks separately from remaining boundary FD probes |
 | `lambdify_failure_and_exhaustion_paths_are_typed_and_compact` | non-finite parameter, restart shape/order and mesh exhaustion rows with typed error/status fields |
 | `medium_large_combustion_matches_bvp_damp_on_interpolated_trajectory` | ignored configurable cross-solver gate; local 64-node debug row passed with normalized drift `3.383e-3` |
 
@@ -892,7 +895,7 @@ The correctness evidence is broad rather than scalar-only:
 | ExprLegacy vs AtomViewNative frontend/layout matrix | all Dense/Sparse/Banded rows passed with zero or roundoff-level fidelity drift |
 | Bratu cross-solver gate against BVP_Damp | interpolated drift `1.667e-2`, status `ok` |
 | combustion cross-solver gate against BVP_Damp | 64-node drift `3.383e-3`, 128-node drift `1.680e-3`, status `ok` |
-| analytic state Jacobian plus FD parameter/boundary Jacobians | all six frontend/layout rows passed; five Jacobian evaluations and eight FD probes per row |
+| previous analytic-state plus FD-parameter/boundary baseline | all six rows passed; superseded for Lambdify `df/dp` by symbolic derivative preparation |
 | restart, fresh/prepared/warm continuation and retention | all rows passed; warm rows reported bounded logical workspace and reused prepared structure |
 | AOT process handoff | all six rows passed; consumer build attempts `0`, consumer reconnects `1` |
 
@@ -1900,3 +1903,588 @@ baseline. It confirms that the policy table now measures a real solve. The
 next release matrix must repeat it over worker counts and larger dimensions,
 and compare cold preparation, warm callbacks, continuation and inclusive
 full-solve time separately.
+
+## 2026-10-12 Banded Core-Solve Experiment
+
+The pinned SciPy 1.18.1 reference factors its global CSC collocation Jacobian
+with `scipy.sparse.linalg.splu` (SuperLU); it does not select a dedicated
+banded solver. Rust Banded remains a separate structure-aware algorithm: a
+block-tridiagonal core with a dense endpoint/parameter Schur border. The
+Sparse/faer route remains available as an independent backend and safety path.
+
+The first Banded-only experiment removed the two iterative-refinement steps
+from each core solve used to construct `T^-1 U`. The full structured solve
+residual guard remains active and can still hand off to the existing safety
+backend. The default `BorderedBlockTridiagonal::factor()` policy is unchanged;
+only BVP_sci's collocation Banded backend selects direct core solves. No
+`lapackFaithful` or IVP banded implementation was changed.
+
+Debug gates passed: direct and refined factorization agree on the independent
+bordered-system fixture with residual below `1e-12`; all three BVP_sci Banded
+backend tests passed; the active BVP_sci story suite passed `14/14` (23
+SciPy-runtime-gated stories were ignored in that invocation).
+
+The same-machine release comparison passed all matched rows and retained
+status, node count and solution parity. For the 1022x1022 captured matrix,
+Banded warm factor median changed from `21.674 ms` to `18.232 ms`; its full
+60-state solve median changed from `48.038 ms` to `42.186 ms`. The instrumented
+sum for ten `T^-1 U` solves fell from `106.252 ms` to `64.877 ms`. The final
+linear residual was `2.456e-20`, with no fallback. This is useful evidence for
+the direct-core policy, not yet a universal stability claim; stiff-coupled and
+larger-mesh evidence remains open.
+
+The follow-up replaced only the Schur product `V * T^-1 U` with faer GEMM,
+using row-major views and retained scratch storage. The scalar test oracle
+matches the generated Schur matrix within `1e-12`. On the same release matrix,
+Schur phase totals fell from `58.820` to `2.478 ms` across ten factorizations;
+Banded warm-factor median fell from `18.232` to `12.501 ms`, and full-solve
+median from `42.186` to `31.976 ms`. The report's matched rows all passed,
+matrix residual remained `2.456e-20`, and no fallback was selected. This
+change allocates no per-factor matrix buffer and does not convert the Banded
+layout to Sparse. The remaining Banded-specific release gate is direct-core
+stability on stiff-coupled/larger-mesh workloads; no shared IVP or
+`lapackFaithful` path was changed.
+
+Release report:
+`test_reports/BVP_sci_SciPy_Parity_Bench/release/same_matrix_banded_faer_gemm_20261012.md`.
+
+## 2026-10-12 Stiff-Coupled Banded Refinement A/B
+
+Added ignored story `banded_stiff_coupled_captured_matrix_compares_core_refinement`.
+It captures one first-Newton matrix and RHS from the same `stiff-coupled`
+workload at each mesh, then replays each exact system with 0 versus 2
+core-to-border iterative-refinement steps. This isolates the refinement policy
+from changes in the nonlinear trajectory. The returned route and scaled
+backward error are correctness evidence; debug timings are not performance
+evidence.
+
+| nodes | refinement steps | returned route | Banded factor (ms) | safety factor (ms) | solve (ms) | backward error | status |
+|---:|---:|---|---:|---:|---:|---:|---|
+| 64 | 0 | scalar fallback | 0.720 | 13.850 | 14.217 | 7.570e-17 | ok |
+| 64 | 2 | scalar fallback | 1.052 | 13.865 | 14.229 | 7.570e-17 | ok |
+| 256 | 0 | Sparse fallback | 2.822 | 4.415 | 7.067 | 6.885e-17 | ok |
+| 256 | 2 | Sparse fallback | 4.201 | 4.361 | 7.000 | 6.885e-17 | ok |
+| 1024 | 0 | Sparse fallback | 11.402 | 17.232 | 27.631 | 1.008e-16 | ok |
+| 1024 | 2 | Sparse fallback | 17.009 | 17.131 | 27.635 | 1.008e-16 | ok |
+
+The result does not show a stability benefit from adding two refinement steps
+at any tested mesh: both policies route through the same safety backend and
+return the same backward error. Release confirmation, captured from the same
+matrix/RHS pairs:
+
+| nodes | refinement steps | returned route | Banded factor (ms) | safety factor (ms) | solve (ms) | backward error | status |
+|---:|---:|---|---:|---:|---:|---:|---|
+| 64 | 0 | scalar fallback | 0.045 | 0.364 | 0.391 | 7.570e-17 | ok |
+| 64 | 2 | scalar fallback | 0.064 | 0.375 | 0.400 | 7.570e-17 | ok |
+| 256 | 0 | Sparse fallback | 0.154 | 0.257 | 0.309 | 6.885e-17 | ok |
+| 256 | 2 | Sparse fallback | 0.229 | 0.229 | 0.274 | 6.885e-17 | ok |
+| 1024 | 0 | Sparse fallback | 0.607 | 1.118 | 1.354 | 1.008e-16 | ok |
+| 1024 | 2 | Sparse fallback | 0.999 | 1.166 | 1.434 | 1.008e-16 | ok |
+
+The structured candidate still triggers the residual guard; the earlier scale
+story's large residuals describe that rejected candidate, not the final safety
+solve. Release timings likewise show no benefit from refinement: it increases
+structured factor time by about 40-65%, while the returned route and accuracy
+remain unchanged. These are single diagnostic replays, not a statistical
+benchmark. Release report:
+`test_reports/BVP_sci_release_manual/banded_refinement_ab_20261012/BVP_sci_new/release/banded_stiff_coupled_refinement_ab.md`.
+
+Reproduce the debug gate:
+
+```powershell
+cargo test --lib --no-default-features numerical::BVP_sci::new::story_tests::banded_stiff_coupled_captured_matrix_compares_core_refinement -- --ignored --nocapture --test-threads=1
+```
+
+The release run used the same command with `--release`; set
+`RST_TEST_REPORT_STDOUT=off` when the Markdown report should be the output
+instead of the compact table on stdout.
+
+## 2026-10-12 Captured Sparse LU Strategy A/B
+
+An exact `1022 x 1022` Newton CSC matrix was exported from the BVP SciPy-parity
+diagnostic and replayed through faer AUTO, forced-simplicial, and
+forced-supernodal symbolic policies. The fixture contains `124684` stored CSC
+coordinates and `4864` numerical nonzeros; SciPy SuperLU reports factor fill
+`L.nnz=2530`, `U.nnz=4224`.
+
+| faer policy | cold symbolic + numeric (ms) | warm numeric factor (ms) | solve (ms) | backward error |
+|---|---:|---:|---:|---:|
+| AUTO | 13.031 | 14.805 | 0.033 | 9.438e-17 |
+| forced simplicial | 9.396 | 6.998 | 0.061 | 8.651e-17 |
+| forced supernodal | 12.067 | 9.278 | 0.032 | 9.438e-17 |
+
+Forced simplicial is about `2.1x` faster than AUTO on this captured matrix's
+warm numeric refactor and retains excellent backward error. The measurement
+uses five release samples and one Newton matrix, so it is a promising policy
+candidate, not sufficient evidence to change the default. It is available only
+as an explicit experimental option. The ignored
+`sparse_reusable_kernel_full_solve_continuation_ab` story now compares standard
+faer, reusable AUTO, and reusable forced-simplicial. Its debug smoke passed
+with identical final mesh/state and factorization/reuse counts. A targeted
+release run (5 repeats, 8 continuation rebinds) reported:
+
+| policy | solve series median (ms) | cumulative numeric-factor time (ms) | numeric factors | symbolic analyses/reuses | final mesh/state diff |
+|---|---:|---:|---:|---:|---:|
+| Standard faer | 1.639 | 0.041 | 16 | 8 / 8 | 0 / 0 |
+| reusable AUTO | 1.607 | 0.031 | 16 | 8 / 8 | 0 / 0 |
+| reusable forced-simplicial | 1.602 | 0.029 | 16 | 8 / 8 | 0 / 0 |
+
+Forced simplicial improves the total series by about `2.3%` over Standard and
+only `0.3%` over reusable AUTO, despite reducing the measured numeric-factor
+scope. This supports correctness and a small workload-specific gain, not a
+default-policy change. The result is from one small parameterized problem;
+larger/nonlinear coverage and retained-memory measurement remain open. Release
+report:
+`test_reports/BVP_sci_sparse_reuse_ab/reports/BVP_sci_new/release/sparse_reusable_kernel_full_solve_continuation_ab.md`.
+Test and microbenchmark plans/results are tracked in
+`src/numerical/BVP_sci/scipy_reference/TODO.md` and
+`src/somelinalg/sparse_lu_reference/TODO.md`.
+
+## 2026-10-12 Large Nonlinear Sparse LU Continuation A/B
+
+To move beyond the tiny scalar fixture, the same three policies were compared
+on a parameterized nonlinear logistic BVP using AtomViewNative and Sparse
+layout, with 512 initial nodes (1024 unknowns). Each paired series performed
+one initial solve plus eight prepared parameter rebinds. Nine repetitions
+rotate the policy order evenly. Times are median / MAD; paired deltas are the
+median per-repetition percentage against StandardFaer.
+
+| policy | preparation median/MAD (ms) | solve series median/MAD (ms) | paired series delta | numeric factors | symbolic analyses/reuses | factor scope median/MAD (ms) | paired factor delta | final mesh/state diff |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Standard faer | 0.034 / 0.005 | 15.224 / 0.046 | baseline | 9 | 1 / 8 | 0.303 / 0.009 | baseline | 0 / 0 |
+| reusable AUTO | 0.023 / 0.004 | 14.888 / 0.030 | -2.57% | 9 | 1 / 8 | 0.140 / 0.002 | -53.49% | 0 / 0 |
+| reusable forced-simplicial | 0.029 / 0.006 | 14.872 / 0.005 | -2.44% | 9 | 1 / 8 | 0.139 / 0.002 | -54.77% | 0 / 0 |
+
+This larger repeated run supports a small but repeatable end-to-end benefit
+from the reusable numeric buffers on this workload: about 2.5%, while the
+series MAD is at most 0.3%. Most of the factor-scope reduction comes from
+retaining reusable buffers; forced simplicial is effectively tied with reusable
+AUTO (`0.016 ms`, about 0.1%, series-median difference). Therefore this run
+does not justify selecting the forced-simplicial policy over AUTO, nor changing
+the crate default. It is one workload, and retained/peak memory is not yet
+measured. Release report:
+`test_reports/BVP_sci_new/release/sparse_reusable_kernel_full_solve_continuation_ab.md`.
+
+The follow-up story `sparse_kernel_real_workload_matrix_ab_is_compact` extends
+the comparison to fixed-mesh `stiff-decay` and `stiff-coupled` BVPs at selectable
+mesh sizes. It holds AtomViewNative, equations, initial guesses, and Sparse
+layout fixed while alternating StandardFaer, reusable AUTO, and forced
+simplicial. The report includes preparation, full-solve, linear assembly,
+factorization and solve timings, discrete callback/linear counters, paired
+timing deltas, and exact-solution error. Banded-vs-Sparse layout evidence stays
+in the existing scale matrix, so the two reports together inform the migration
+decision without conflating layout and LU strategy.
+
+Debug smoke passed on both workloads at 64 and 128 nodes with three repetitions;
+those timings are not performance evidence. The release matrix at 64/256/1024
+nodes has now completed with 9 interleaved repetitions per policy. All 18
+workload/size/policy rows passed, with matching callback and linear-operation
+counters within each matched workload and identical reported exact-solution
+errors across the three factorization policies. However, each fixed-mesh solve
+performed only one numeric factorization and one symbolic analysis, with zero
+symbolic reuses. Therefore this matrix tests strategy overhead and correctness,
+not the amortized benefit of retaining factorization state.
+
+| workload | nodes | standard solve median (ms) | reusable AUTO paired delta | forced simplicial paired delta | factor medians: standard/AUTO/simplicial (ms) |
+|---|---:|---:|---:|---:|---:|
+| stiff-decay | 64 | 0.146 | -0.21% | -0.07% | 0.003 / 0.003 / 0.003 |
+| stiff-decay | 256 | 0.589 | -0.12% | -0.78% | 0.009 / 0.008 / 0.008 |
+| stiff-decay | 1024 | 2.335 | -0.96% | -1.62% | 0.033 / 0.040 / 0.032 |
+| stiff-coupled | 64 | 0.223 | -6.27% | +2.00% | 0.025 / 0.026 / 0.026 |
+| stiff-coupled | 256 | 0.826 | +3.88% | +1.74% | 0.087 / 0.100 / 0.098 |
+| stiff-coupled | 1024 | 3.574 | -3.03% | -3.45% | 0.429 / 0.446 / 0.423 |
+
+The per-size effects change sign and are small relative to the measured spread;
+there is no consistent one-shot full-solve winner. Keep StandardFaer as the
+default and both reusable policies opt-in. The Banded-vs-Sparse scale table
+shows a workload-dependent result: Banded's structured route is competitive
+for scalar `stiff-decay`, while `stiff-coupled` invokes scalar fallback at 64
+nodes and Sparse fallback at 256/1024 nodes, where it is slower or near-tied
+with direct Sparse. This is evidence against retiring Banded globally, not a
+matched comparison of LU strategies.
+
+The very large `stiff-coupled` values are now traced to the **structured
+candidate before fallback**, not to the returned solution. `solve_in_place`
+records the structured candidate's absolute residual and solution infinity norm,
+then applies the `1e-8` residual guard; if rejected, it solves the original RHS
+through scalar/Sparse fallback but leaves those candidate diagnostics intact.
+The BVP result itself remains accurate. The story table headings and telemetry
+field documentation now identify this scope, and the debug matrix asserts both
+that the candidate is rejected and that the returned stiff-coupled solution
+remains within `1e-8` of the exact solution. The targeted debug run passed for
+`stiff-coupled`, Banded, both frontends, and 64/256/1024 nodes (`6/6` rows).
+Both release reports:
+`test_reports/BVP_sci_sparse_reuse_ab/reports/BVP_sci_new/release/sparse_kernel_real_workload_matrix_ab.md`
+and
+`test_reports/BVP_sci_sparse_reuse_ab/reports/BVP_sci_new/release/lambdify_layout_scale_matrix.md`.
+
+An independent repeat and a multi-workload prepared/continuation comparison
+remain open; those are the relevant next gates for deciding whether reusable
+factorization should be promoted or Banded should be retired.
+
+## 2026-10-12 Official 60-State Sparse Strategy A/B
+
+Added `sparse_kernel_official_60_state_continuation_ab_is_compact` for the
+same 60-state/two-parameter equations and boundary conditions used by the
+SciPy parity fixture. It uses the supported production route, ExprLegacy plus
+Sparse, and changes only the Sparse factorization policy. Each sample runs one
+initial full solve and prepared parameter rebinds; each trajectory and the
+Newton/Jacobian/linear counters must match StandardFaer. The release runner can
+select this experiment independently with `-IncludeSparseStrategyAb`.
+
+The debug smoke used one repetition and one rebind. All policies ended on the
+same 17-node mesh; maximum state drift was `2.925e-9`. Counters matched at 7
+numeric factorizations, 3 symbolic analyses and 4 symbolic reuses. Debug full
+series times were 1.246 s StandardFaer, 1.180 s reusable AUTO and 1.296 s
+forced simplicial. These timings are only smoke output, not performance
+evidence.
+
+The targeted release run completed with 9 interleaved repetitions and 4
+prepared parameter rebinds per sample. All three policies passed, with the
+same 17-node final mesh and matching work counts: 14 numeric factorizations,
+3 symbolic analyses, 11 symbolic reuses, 4 parameter rebinds and 4 continuation
+solves. Mesh drift was zero; maximum state drift was `3.190e-9` for forced
+simplicial.
+
+| policy | initial solve median/MAD (ms) | continuation median/MAD (ms) | full series median/MAD (ms) | paired full-series delta | factor scope median/MAD (ms) |
+|---|---:|---:|---:|---:|---:|
+| StandardFaer | 40.738 / 15.811 | 185.118 / 54.691 | 233.131 / 72.356 | baseline | 183.378 / 73.991 |
+| reusable AUTO | 41.022 / 11.457 | 135.214 / 27.231 | 175.626 / 42.057 | -11.31% | 127.908 / 40.731 |
+| reusable forced-simplicial | 30.171 / 0.263 | 132.068 / 0.850 | 162.085 / 0.681 | -30.52% | 113.862 / 0.385 |
+
+The full-series medians favor reusable AUTO and especially forced-simplicial,
+while correctness and work counts remain matched. However, the StandardFaer
+and AUTO samples have large MADs (about 31% and 24% of their medians for the
+full series); forced-simplicial is unusually stable. Treat the measured gains
+as a strong candidate signal, not yet as grounds to change the default. The
+next gate is an independent release repeat, preferably after the machine is
+idle, and comparison of the per-sample paired deltas. Release report:
+`test_reports/BVP_sci_release_manual/20261012T174404Z/reports/BVP_sci_new/release/sparse_kernel_official_60_state_continuation_ab.md`.
+
+## 2026-10-12 Opt-in SuperLU backend debug gate
+
+The first implementation used an experimental `SuperLuExperimental` policy,
+compiled only with `superlu-experimental`; those spellings are retained as
+deprecated compatibility aliases. The current public interface is `SuperLu`
+and Cargo feature `superlu`. The normal public constructor remains
+StandardFaer. The bridge now retains native L/U factors between the BVP
+`factor()` and repeated `solve_in_place()` calls; it does not refactor for each
+Newton RHS.
+
+Debug checks passed for the direct 2x2 multi-RHS path and for an end-to-end
+linear BVP followed by a restart on a larger mesh. The existing one-shot
+SuperLU bridge test passed as well. These are correctness checks only; no
+release BVP A/B was run at that point. A matched production-path benchmark is
+now available in `benches/bvp_sci_superlu_ab.rs`; it compares StandardFaer and
+SuperLU full solves on the same two-state BVP over configurable mesh sizes,
+checks paired solution parity, and writes a compact report separating prepare,
+runtime setup, solve wall time, and linear stages. This is an initial
+decision-oriented speed gate, not broad workload evidence. The next gates are
+native factor-memory accounting, repeated release samples, and A/B on the
+official large BVP Jacobian. Until those pass, SuperLU remains explicitly
+opt-in and is not a replacement for faer.
+
+Run the release A/B after building the bridge:
+
+```powershell
+$env:SUPERLU_LIBRARY = (Resolve-Path ".\test_reports\somelinalg_sparse_lu_reference\native\superlu_bridge.dll").Path
+$env:BVP_SCI_SUPERLU_AB_NODES = "128,512,1024"
+$env:BVP_SCI_SUPERLU_AB_REPEATS = "5"
+cargo bench --no-default-features --features superlu --bench bvp_sci_superlu_ab -- --noplot
+```
+
+### Initial release A/B result
+
+Capture: `test_reports/BVP_sci_SuperLU_Bench/release/superlu_full_solve_ab.md`.
+All rows passed the solution parity gate; both backends used one Newton
+iteration and one factorization per solve.
+
+| Mesh nodes | System dimension | StandardFaer solve median (ms) | SuperLU solve median (ms) | SuperLU delta | Max paired solution difference |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 256 | 0.351 | 0.410 | +16.8% | 1.110e-16 |
+| 512 | 1024 | 1.406 | 1.459 | +3.8% | 6.661e-16 |
+| 1024 | 2048 | 2.812 | 2.908 | +3.4% | 1.322e-15 |
+
+The full-solve medians favor StandardFaer at all three sizes. The SuperLU
+factorization median was also slower (0.105/0.275/0.480 ms versus
+0.056/0.238/0.454 ms). This is valid evidence for that small synthetic linear
+workload only; it does not answer the reported slowdown on the official
+60-state problem. Runtime setup is reported separately and includes
+per-instance backend initialization, so it is not mixed into the `solve`
+comparison above.
+
+Reproduce the independent release repeat with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_sci_release_matrix.ps1 `
+  -SkipIgnoredStories -SkipBench -SkipScaleEvidence `
+  -IncludeSparseStrategyAb `
+  -SparseStrategyRepeats 9 `
+  -SparseStrategyContinuation 4
+```
+
+### Official 60-State SuperLU Comparison
+
+The previous two-state benchmark cannot explain the performance of the
+captured 60-state/two-parameter BVP. The experimental story
+`sparse_kernel_official_60_state_continuation_ab_is_compact` includes public
+policy `SuperLu` when compiled with `superlu`. It compares
+StandardFaer, reusable faer AUTO, reusable faer simplicial, and SuperLU on the
+same official equations, ExprLegacy frontend, Sparse layout, initial solve,
+and four prepared parameter rebinds. Common work counters and every segment's
+mesh/state are checked against StandardFaer; faer-only symbolic lifecycle
+counters are reported separately. Debug smoke passed for all four strategies,
+but debug timings are not performance evidence. SuperLU remains opt-in; this
+test does not change the user's default backend.
+
+Run the focused release comparison after the bridge DLL has been built:
+
+```powershell
+$env:SUPERLU_LIBRARY = (Resolve-Path ".\test_reports\somelinalg_sparse_lu_reference\native\superlu_bridge.dll").Path
+$env:BVP_SCI_60_STATE_AB_REPEATS = "9"
+$env:BVP_SCI_60_STATE_AB_CONTINUATION = "4"
+cargo test --release --lib --no-default-features --features superlu numerical::BVP_sci::new::story_tests_experimental::sparse_kernel_official_60_state_continuation_ab_is_compact -- --ignored --nocapture --test-threads=1
+```
+
+Release result: all four policies passed with identical common work counts:
+14 backend factorizations, 4 parameter rebinds and 4 continuation solves.
+Every route ended on the same 17-node mesh; maximum state drift versus
+StandardFaer was `3.190e-9` for reusable simplicial and `2.193e-9` for
+SuperLU. Thus the large speed difference is not explained by fewer nonlinear
+iterations or a different mesh.
+
+| policy | initial solve median/MAD (ms) | continuation median/MAD (ms) | full series median/MAD (ms) | paired full-series delta | factor scope median/MAD (ms) |
+|---|---:|---:|---:|---:|---:|
+| StandardFaer | 35.021 / 6.091 | 201.160 / 35.691 | 262.445 / 35.531 | baseline | 212.358 / 35.242 |
+| reusable faer AUTO | 32.314 / 6.033 | 158.142 / 36.938 | 190.456 / 44.707 | -7.49% | 142.000 / 44.164 |
+| reusable faer simplicial | 30.914 / 0.480 | 135.585 / 2.367 | 166.012 / 2.842 | -34.49% | 120.150 / 2.697 |
+| SuperLU opt-in | 14.847 / 0.261 | 67.857 / 0.998 | 82.371 / 1.414 | **-68.85%** | 36.904 / 0.646 |
+
+This is strong evidence that the earlier slowdown on this official workload
+is in the sparse linear backend rather than extra BVP iterations: common
+factorization/solve counters match, while SuperLU is about `3.2x` faster in
+full-series wall time than StandardFaer and about `2.0x` faster than reusable
+faer simplicial. The factor-stage result is consistent with that conclusion,
+but is diagnostic and not additive to solve time. The large, repeatable-looking
+separation and much lower SuperLU MAD make ordinary timing noise an unlikely
+explanation; an idle-machine repeat remains prudent before a default-policy
+change.
+
+Report:
+`test_reports/BVP_sci_new/release/sparse_kernel_official_60_state_continuation_ab.md`.
+The public `SuperLu` policy and `.with_superlu()` builder selection are now a
+supported optional backend behind Cargo feature `superlu`, not merely an
+exploratory candidate. It remains opt-in and StandardFaer remains the default:
+the evidence is workload-dependent. Linux runtime validation, native-library
+distribution and peak/retained memory accounting remain explicit release
+follow-ups. The small two-state benchmark is a workload-specific counterexample,
+not evidence against the official large workload result. Factorization scopes
+overlap solve wall time and are not additive. A/B sweeps that include reusable
+Faer experiments remain under `new::story_tests_experimental`; dedicated
+SuperLU correctness and SciPy-parity gates are part of the opt-in release
+matrix.
+
+### 2026-10-13 SuperLU Workload Matrix
+
+After setting `SUPERLU_LIBRARY` to the built bridge, the three SuperLU-enabled
+release stories passed with `effective_backend=SuperLU`, zero fallbacks, and
+matching work/correctness gates:
+
+| Workload | StandardFaer full solve/series | SuperLU full solve/series | Paired delta | Interpretation |
+|---|---:|---:|---:|---|
+| Official 60-state, 4 prepared rebinds | 227.820 ms | 80.193 ms | -64.99% | Large, repeatable advantage on this Sparse continuation workload |
+| AtomView logistic, 512 nodes, 6 rebinds | 11.346 ms | 11.995 ms | +5.47% | SuperLU is slower; factor scope 0.846 ms vs 0.225 ms |
+| Stiff-decay, 64/256/1024 nodes | 0.160/0.586/2.319 ms | 0.201/0.647/2.394 ms | +24.83/+9.89/+3.72% | Small-to-moderate slowdown on this fixed-mesh family |
+| Stiff-coupled, 64/256/1024 nodes | 0.229/0.917/3.527 ms | 0.288/0.969/3.582 ms | +25.86/+5.76/+1.55% | Near parity at the largest size; small deltas are within observed spread |
+
+The dedicated simple two-state release bench also completed with SuperLU
+loaded and no fallback. SuperLU solve medians were 0.386/1.460/2.812 ms at
+128/512/1024 nodes, versus 0.341/1.407/2.731 ms for StandardFaer. This bench
+does not show a speed win for that linear workload. Across all evidence,
+SuperLU is a useful opt-in choice for some structured sparse workloads, not a
+universal winner and not a default replacement. The three story reports and
+the dedicated bench report are archived in the user's `superlu_targeted`
+technical run and `test_reports/BVP_sci_SuperLU_Bench/release/` respectively.
+
+After rebuilding the current Windows bridge from the checked-in C source, a
+debug smoke of this test with one repetition and one prepared continuation
+reported `effective_backend=SuperLU`, `superlu_fallbacks=0`, matching work
+counts, the same final 17-node mesh, and `1.855e-9` maximum state drift. This
+confirms current FFI wiring and is not a timing result.
+
+### SuperLU Telemetry Debug Gate
+
+The SuperLU backend-specific telemetry now separates checked `usize -> i32`
+CSC ABI conversion, Rust wall around the factor/solve FFI calls, and the native
+SuperLU timers for factorization and triangular solve. Factor fill reports both
+SuperLU's internal L/U storage entries and SciPy-compatible materialized CSC
+nonzeros; these counts help diagnose fill but are not exact retained-memory
+bytes. Each SuperLU child scope is linked to the generic factorization or solve
+parent, so overlapping values must not be summed. Faer symbolic/numeric scopes
+remain inapplicable to this route.
+
+Debug tests verify that `Counters` mode publishes no SuperLU timings and that a
+real retained-factor bridge smoke observes one ABI conversion/factorization,
+two solves, and nonzero L/U fill. The three ignored policy A/B tables now
+include the SuperLU stage breakdown and fill fields. This instrumentation does
+not change the solver policy or the StandardFaer default.
+
+### 2026-10-13 Symbolic `df/dp` Debug Gate
+
+ExprLegacy and AtomViewNative now differentiate parameter columns during
+Lambdify preparation and reuse the resulting evaluators in the collocation
+Jacobian. A direct compact story checks the exact row-major block
+`[[y0, 1], [0, y0^2]]`: both frontends report three structural entries, one
+parameter-Jacobian callback, zero runtime finite-difference probes, and zero
+value error. The full parameterized frontend/layout continuation matrix and
+the Numerical finite-difference fallback test also pass in debug. Remaining
+finite-difference probes in the full-solve contract table are boundary
+Jacobian probes, not RHS `df/dp`; AOT keeps the existing fallback for now.
+No release performance evidence has been collected for this change yet.
+
+### 2026-10-13 Release Failure Triage
+
+The SuperLU-enabled release matrix at
+`test_reports/BVP_sci_release_manual/20261012T220656Z/release_summary.md`
+completed 31 steps and reported two failing test commands. Each command had
+two failed tests; all benchmark and AOT matrix steps passed. The fallback
+message about a simulated bridge load failure came from the passing test that
+deliberately checks the StandardFaer fallback path.
+
+The four failures were stale test assumptions or an unmatched parity fixture,
+not solver regressions:
+
+| Failed gate | Cause | Correction and debug result |
+|---|---|---|
+| AtomNative packed runtime | The assertion counted only the state Jacobian after symbolic `df/dp` added a second prepared derivative. | Expect two symbolic Jacobian derivations. Targeted debug test passes. |
+| Prepared frontend telemetry | The test expected one Jacobian evaluator, but state and parameter Jacobians are separately prepared; total evaluator count is three including residual. | Update the expected evaluator counts and document their meaning. Targeted debug test passes. |
+| SciPy global Jacobian | The fixture used forward finite differences for parameter columns, while Rust Lambdify uses exact symbolic `df/dp`; the `1e-12` entrywise tolerance compared unlike derivatives. | Feed SciPy the exact parameter derivative for this direct matrix fixture. Debug parity now reports matrix drift `8.674e-19` and residual drift `0`. |
+| SciPy shock-layer trace | The parser assumed the residual field was the second colon-delimited field; the trace now prefixes mesh pass, node count and system dimension. | Find the field by its `r` prefix. The targeted SciPy shock-layer debug gate passes and retains the documented one-solve branch difference. |
+
+Verification after corrections: the complete non-ignored BVP_sci debug suite
+passed `77/77` with `30` ignored. All four formerly failing tests passed
+individually in debug with the SuperLU feature enabled. The full ignored debug
+suite was started but stopped at the large AOT full-solve case, whose dense
+debug execution continued consuming CPU for several minutes; the two failing
+ignored parity cases were separately rerun and passed. At the time this triage
+entry was written, a new release run was still required; that requirement was
+subsequently satisfied by the all-green matrix recorded below.
+
+## 2026-10-12 Full Release Matrix: Cross-Axis Findings
+
+Evidence source:
+`test_reports/BVP_sci_release_manual/20261012T220656Z/`. The run covered
+Lambdify and AOT, ExprLegacy and AtomViewNative, Dense/Sparse/Banded, multiple
+workload families, continuation counts through 16, worker-count policy slices,
+and opt-in SuperLU. The release summary recorded 31 passed steps and two
+failed test commands; all benchmark steps had zero row-level failures. The
+four test failures were subsequently diagnosed and their targeted debug tests
+passed (see the preceding failure-triage section), so the performance tables
+are useful evidence but this run itself is not an all-green release gate.
+
+### Matrix Layout and Sparse Factorization
+
+The one-pass Lambdify workload matrix is diagnostic rather than a repeated
+statistical benchmark. Its main structural result is clear: Dense can be
+competitive on small/simple systems, but it becomes much more expensive when
+the global collocation Jacobian is large and sparse. At 128 nodes, the
+combustion-like rows were roughly `14.5 ms` Dense versus `1.1-1.3 ms` Sparse or
+Banded; on stiff-coupled, Sparse was about `0.41-0.55 ms` versus about `2.2 ms`
+Dense. Sparse and Banded are close enough that neither is a universal winner;
+the Jacobian structure and Banded route/fallback behavior matter.
+
+SuperLU is a factorization policy under Sparse, not another matrix layout. In
+the repeated official 60-state ExprLegacy/Sparse continuation A/B (nine paired
+repetitions; initial solve plus four prepared rebinds), all routes performed
+14 backend factorizations and four continuation solves and ended on the same
+17-node mesh. StandardFaer full-series median was `428.454 ms`; SuperLU was
+`80.634 ms` (`-81.30%` paired), with zero fallback and maximum state drift
+`2.339e-12`. Conversely, the simple two-state control favored StandardFaer,
+and the fixed-mesh stiff-decay/stiff-coupled comparisons were mixed and mostly
+near parity at the largest sizes. Keep StandardFaer as default; SuperLU is a
+supported opt-in whose value is workload-dependent. Factorization telemetry
+overlaps solve wall time and is not additive.
+
+### Frontend and Execution Route
+
+ExprLegacy and AtomViewNative reached roundoff-level parity in the matched
+matrix, but their preparation and callback profiles were not universally
+ordered. For the matched 32-state/64-node Dense workload, full-solve rows were
+about `268-271 ms` for both frontends/routes; Sparse rows were about
+`10-13 ms`. AtomView preparation could be several tenths of a millisecond
+above ExprLegacy (for example, `0.861 ms` vs `0.113 ms` in one Lambdify Dense
+row), an absolute cost that is small beside the large Dense solve but relevant
+for short/small jobs. The separate Atom preparation representation A/B found
+the dual-path variant added only about `5-7 us` over the single-representation
+variants on its small graphs; this does not support a large hidden duplicate
+preparation cost as the explanation for the broader Atom timings.
+
+Cached AOT full solves were close to Lambdify on matched work. Cold TCC
+compile/link was about `20-23 ms` in the measured small AOT case, while later
+rows reported cache hits and sub-millisecond preparation. Those later rows
+must not be used as if each paid a fresh build: this matrix does not establish
+a cold AOT continuation break-even count. AOT lifecycle tests did establish
+reuse: 16 parameter rebinds kept symbolic cold-call counts unchanged, with no
+workspace resize on an unchanged mesh and one expected resize after a mesh
+change. Numerical, callback and factorization scopes are diagnostic and may
+overlap.
+
+The worker-count slices requested 1/2/4/8/12 workers on small matched systems.
+They are useful dispatch/overhead checks, not evidence of a large-system
+parallel break-even; full-solve parallelism remains workload- and eligibility-
+dependent. Callback/chunk dispatch must not be reported as solve speedup.
+
+The compact reports supporting these findings are:
+
+- `reports/BVP_sci_new/release/sparse_kernel_official_60_state_continuation_ab.md`
+- `reports/BVP_sci_Matched_Bench/release/matched_full_solve_continuation.md`
+- `reports/BVP_sci_Lambdify_Bench/release/lambdify_matrix.md`
+- `reports/BVP_sci_Lambdify_Story/release/atom_native_preparation_representation_ab.md`
+- `reports/BVP_sci_AOT/release/aot_continuation_restart_retention_matrix.md`
+
+## 2026-10-12 Corrected Full Release Matrix Passed
+
+The follow-up full release run supersedes the earlier
+`completed_with_failures` result:
+`test_reports/BVP_sci_release_manual/20261012T225758Z/release_summary.md`.
+The runner completed all `33` steps with `0` failed steps and `0` row-level
+benchmark failures. The main story commands reported `77 passed / 30 ignored`
+and `27 passed / 0 failed`; all ignored release story gates, AOT lifecycle and
+process handoff cases, sparse-policy A/B stories, and selected benchmarks
+completed successfully.
+
+The console line
+`SuperLU was requested but unavailable (simulated bridge load failure)` is
+expected output from the test that deliberately injects a bridge-load failure
+and verifies the StandardFaer fallback. It is not evidence that the configured
+SuperLU release benchmarks fell back: the SuperLU A/B report explicitly marks
+fallback rows invalid, and the release suite's SuperLU-enabled evidence uses
+the configured bridge.
+
+This closes the immediate release-test failure blocker on the tested Windows
+machine and configuration. It does not close Linux bridge runtime validation,
+native-library distribution, or actual retained/peak factor-memory accounting;
+those remain platform and deployment follow-ups rather than failures of this
+release run.
+
+## 2026-10-13 Performance Questions Still Open
+
+Do not mark performance break-even as solved from the current matrix:
+
+- The official large Rust/SciPy full solve previously used StandardFaer.
+  Same-matrix evidence found SuperLU factorization comparable to or faster than
+  SciPy, but Rust CSC assembly remained more expensive. A repeated full
+  Rust-SuperLU versus SciPy run is required to see whether this changes the
+  end-to-end result.
+- AOT continuation rows after the initial compile often use cache hits. They
+  establish warm reuse, not universal cold-compile amortization. The new
+  `cold-amortization` dashboard phase isolates artifacts and reports
+  preparation plus a warm callback series; this is still not full BVP solve
+  break-even evidence.
+- Existing worker-count rows are mostly small-workload dispatch evidence.
+  Large matched full-solve comparisons are still required before claiming a
+  Parallel/Auto break-even point.
+- AOT currently finite-differences `df/dp`, whereas Lambdify has a prepared
+  symbolic parameter Jacobian. This changes callback work and must remain an
+  explicit caveat in AOT/Lambdify comparisons until an analytic AOT path is
+  implemented or the comparison controls for that difference.

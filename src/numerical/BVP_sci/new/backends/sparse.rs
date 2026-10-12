@@ -58,10 +58,14 @@ impl SparseBackend {
     pub fn assemble(&mut self, entries: &[(usize, usize, f64)]) -> Result<(), BvpSciNewError> {
         // Triplets are a temporary numeric assembly view, not a second global
         // layout. Duplicate coordinates are resolved by the sparse backend.
+        let triplet_started = self.telemetry.start_timing();
         let triplets: Vec<_> = entries
             .iter()
             .map(|&(row, column, value)| Triplet::new(row, column, value))
             .collect();
+        self.telemetry
+            .record_sparse_triplet_materialization(triplet_started);
+        let csc_started = self.telemetry.start_timing();
         let matrix = SparseColMat::<usize, f64>::try_new_from_triplets(
             self.dimension,
             self.dimension,
@@ -70,6 +74,7 @@ impl SparseBackend {
         .map_err(|error| BvpSciNewError::LinearBackend {
             message: format!("sparse CSC assembly failed: {error:?}"),
         })?;
+        self.telemetry.record_sparse_csc_assembly(csc_started);
         self.matrix = Some(matrix);
         self.factorization = None;
         Ok(())
@@ -86,7 +91,10 @@ impl SparseBackend {
             .ok_or_else(|| BvpSciNewError::LinearBackend {
                 message: "sparse backend was factored before assembly".into(),
             })?;
-        let symbolic = if let Some(symbolic) = self.symbolic.clone() {
+        let symbolic = if let Some(symbolic) = self.symbolic.as_ref() {
+            let started = self.telemetry.start_timing();
+            let symbolic = symbolic.clone();
+            self.telemetry.record_sparse_symbolic_reuse(started);
             symbolic
         } else {
             let started = self.telemetry.start_timing();
@@ -199,9 +207,38 @@ mod tests {
             .expect("continued sparse numeric factorization should succeed");
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.sparse_symbolic_analyses, 1);
+        assert_eq!(snapshot.sparse_symbolic_reuses, 1);
         assert_eq!(snapshot.sparse_numeric_factorizations, 2);
+        assert_eq!(snapshot.sparse_triplet_materializations, 2);
+        assert_eq!(snapshot.sparse_csc_assemblies, 2);
         assert!(snapshot.sparse_symbolic_analysis_ms.is_some());
+        assert!(snapshot.sparse_symbolic_reuse_ms.is_some());
         assert!(snapshot.sparse_numeric_factorization_ms.is_some());
+        assert!(snapshot.sparse_triplet_materialization_ms.is_some());
+        assert!(snapshot.sparse_csc_assembly_ms.is_some());
         assert!(snapshot.validate_contract().is_ok());
+    }
+
+    #[test]
+    fn disabled_telemetry_skips_sparse_phase_metrics() {
+        let telemetry = BvpSciTelemetry::disabled();
+        let mut backend = SparseBackend::new_with_telemetry(2, 2, telemetry.clone());
+        backend
+            .assemble(&[(0, 0, 2.0), (1, 1, 3.0)])
+            .expect("diagonal sparse matrix should assemble");
+        backend
+            .factor()
+            .expect("diagonal sparse matrix should factor");
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.sparse_triplet_materializations, 0);
+        assert_eq!(snapshot.sparse_csc_assemblies, 0);
+        assert_eq!(snapshot.sparse_symbolic_analyses, 0);
+        assert_eq!(snapshot.sparse_symbolic_reuses, 0);
+        assert_eq!(snapshot.sparse_numeric_factorizations, 0);
+        assert!(snapshot.sparse_triplet_materialization_ms.is_none());
+        assert!(snapshot.sparse_csc_assembly_ms.is_none());
+        assert!(snapshot.sparse_symbolic_analysis_ms.is_none());
+        assert!(snapshot.sparse_numeric_factorization_ms.is_none());
     }
 }

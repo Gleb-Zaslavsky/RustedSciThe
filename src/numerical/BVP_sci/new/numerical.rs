@@ -265,6 +265,7 @@ impl BvpSciNumericalPlan {
         })?;
         self.validate_finite(output, BvpSciStage::JacobianCallback)?;
         self.telemetry.record_jacobian_evaluation(started);
+        self.telemetry.record_parameter_jacobian_callback(started);
         self.telemetry.record_output_writes(output.len());
         Ok(true)
     }
