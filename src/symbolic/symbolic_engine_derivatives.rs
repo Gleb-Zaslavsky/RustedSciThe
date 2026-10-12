@@ -58,7 +58,7 @@
 //! 7. **IVP Specialization**: Special lambdification for Initial Value Problems where
 //!    one argument (time) is treated differently from state variables
 
-use faer::linalg::solvers::SelfAdjointEigen;
+
 
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
@@ -1381,9 +1381,9 @@ impl Expr {
 
 mod tests {
     use std::time::{Duration, Instant};
-
+    #[allow(dead_code)]
     const PERF_REPEATS: usize = 11;
-
+#[allow(dead_code)]
     fn median_duration<F>(mut f: F) -> Duration
     where
         F: FnMut(),

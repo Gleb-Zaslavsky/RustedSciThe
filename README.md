@@ -101,7 +101,7 @@ Distrust convergence.
 - **Symbolic modeling:** parse and transform expressions; differentiate and
   simplify them; substitute aliases; construct Jacobians, vectors, and matrices.
 - **Two symbolic representations:** the expression-tree `Expr` route and the
-  packed `Atom` / borrowed `AtomView` route, with prepared numerical evaluators.
+  packed `Atom` / borrowed `AtomNative` route, with prepared numerical evaluators.
 - **Code generation:** lower supported symbolic models through a shared IR to
   Rust, C, or Zig callbacks; select Lambdify or AOT where the solver supports it.
 - **Initial-value ODE solvers:** non-stiff explicit methods, LSODE2, Radau,
@@ -230,8 +230,8 @@ The engine includes:
   substitution, and derivative checks against numerical differences.
 - Indexed variables, symbolic vectors/matrices, Jacobian construction, and
   structural sparsity analysis.
-- **Expr** expression trees and **Atom/AtomView** packed representations.
-  AtomView provides borrowed access to expressions, normalization,
+- **Expr** expression trees and **Atom/AtomNative** packed representations.
+  AtomNative provides borrowed access to expressions, normalization,
   differentiation, reusable workspaces, and prepared numerical evaluators.
 - Conversion of symbolic models into callable numerical functions (Lambdify),
   including parameterized prepared models in the supported solver APIs.
@@ -250,7 +250,7 @@ Solver configuration separates several choices:
 | Axis | Choices | What changes |
 |:--|:--|:--|
 | Model input | Symbolic equations or numerical callbacks | Who supplies the model and derivatives |
-| Symbolic frontend | ExprLegacy / AtomViewNative (called AtomView in some APIs) | Representation used for symbolic preparation |
+| Symbolic frontend | ExprLegacy / AtomNative | Representation used for symbolic preparation |
 | Callback execution | Lambdify / AOT | In-process evaluation or generated compiled callbacks |
 | Linear layout/backend | Dense / Sparse / Banded, where supported | Matrix storage and factorization |
 | Evaluation policy | Sequential / Parallel / Auto, where supported | Callback dispatch and chunking |
@@ -263,7 +263,7 @@ Consult its guide for the supported contract. Several native callback routes
 accept an optional analytic Jacobian and use finite differences when it is absent.
 
 Dense can be appropriate for small fully coupled systems; Sparse and Banded
-exploit different structures. AtomView, AOT, and parallelism can each reduce
+exploit different structures. Atom, AOT, and parallelism can each reduce
 cost for suitable workloads, but preparation overhead and linear solves matter.
 Compare the same equations, tolerances, layout, and lifecycle.
 

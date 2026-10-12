@@ -299,6 +299,7 @@ pub(crate) struct PreparedNativeAtomJacobian {
 /// This is intentionally not collected during callbacks. It explains whether
 /// a warm-path regression comes from the Atom evaluator interpreter doing more
 /// work per entry, rather than from matrix assembly or the linear backend.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PreparedNativeJacobianMetrics {
     pub(crate) entries: usize,
@@ -313,6 +314,7 @@ pub(crate) struct PreparedNativeJacobianMetrics {
 }
 
 impl PreparedNativeAtomJacobian {
+    #[allow(dead_code)]
     pub(crate) fn metrics(&self) -> PreparedNativeJacobianMetrics {
         self.entries.iter().fold(
             PreparedNativeJacobianMetrics::default(),
@@ -2232,7 +2234,7 @@ fn prepare_native_atom_jacobian_from_explicit(
         entries: compiled?.into(),
     })
 }
-
+#[allow(dead_code)]
 fn compile_native_atom_residual(
     equations: &[Expr],
     time_arg: &str,
@@ -2402,6 +2404,7 @@ fn build_lambdify_args(
     Ok(args)
 }
 
+#[allow(dead_code)]
 fn build_linked_args(
     t: f64,
     y: &DVector<f64>,
@@ -3414,12 +3417,12 @@ mod tests {
         let legacy_telemetry = IvpTelemetry::counters();
         let compat_telemetry = IvpTelemetry::counters();
         let native_telemetry = IvpTelemetry::counters();
-        let mut legacy = make_problem(IvpSymbolicAssemblyBackend::ExprLegacy, legacy_telemetry);
-        let mut compat = make_problem(
+        let  legacy = make_problem(IvpSymbolicAssemblyBackend::ExprLegacy, legacy_telemetry);
+        let  compat = make_problem(
             IvpSymbolicAssemblyBackend::AtomViewExprCompat,
             compat_telemetry,
         );
-        let mut native = make_problem(IvpSymbolicAssemblyBackend::AtomView, native_telemetry);
+        let  native = make_problem(IvpSymbolicAssemblyBackend::AtomView, native_telemetry);
 
         for (parameter_value, time, state) in [
             (2.5_f64, 0.0, DVector::from_vec(vec![1.0, -0.5])),

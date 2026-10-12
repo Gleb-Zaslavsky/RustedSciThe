@@ -644,7 +644,7 @@ fn lsode2_view_three_boundary_real_jacobian_release_story() {
         );
     }
 }
-
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 struct ExprShapeMetrics {
     nonzero_entries: usize,

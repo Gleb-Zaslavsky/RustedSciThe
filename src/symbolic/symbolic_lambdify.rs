@@ -269,6 +269,7 @@ impl Expr {
     /// The single-output hot path still uses the generated closure backend in
     /// `lambdify2()`, because repeated Jacobian/residual evaluation is dominated
     /// by runtime rather than compile-time convenience.
+    #[allow(dead_code)]
     pub(crate) fn compile_ir(&self, vars: &[&str]) -> CompiledBatch {
         compile_many(std::slice::from_ref(self), vars)
     }
@@ -277,6 +278,7 @@ impl Expr {
     ///
     /// The current implementation is a minimal batch compiler without CSE. It is
     /// kept crate-private while the Phase 2 API settles.
+    #[allow(dead_code)]
     pub(crate) fn compile_many_ir(exprs: &[Expr], vars: &[&str]) -> CompiledBatch {
         compile_many(exprs, vars)
     }

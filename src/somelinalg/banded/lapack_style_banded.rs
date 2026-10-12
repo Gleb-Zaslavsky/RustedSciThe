@@ -485,7 +485,7 @@ impl LapackStyleBandedLuFaithful {
         }
         Ok(())
     }
-
+ #[allow(dead_code)]
     #[deprecated(note = "use factor_one_step_unblocked_lapack")]
     pub(crate) fn factor_one_step_unblocked_legacy(&mut self, j: usize) -> Result<(), BandedError> {
         self.factor_one_step_unblocked_lapack(j)
@@ -1423,7 +1423,7 @@ fn dense_linf_norm(a: &[Vec<f64>]) -> f64 {
         .map(|x| x.abs())
         .fold(0.0_f64, f64::max)
 }
-
+ #[allow(dead_code)]
 fn dense_matvec(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
     let n = a.len();
     let mut y = vec![0.0; n];
@@ -1436,7 +1436,7 @@ fn dense_matvec(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
 
     y
 }
-
+ #[allow(dead_code)]
 fn dense_relative_residual(a: &[Vec<f64>], x: &[f64], b: &[f64]) -> f64 {
     let ax = dense_matvec(a, x);
     let mut rmax = 0.0_f64;
@@ -1449,7 +1449,7 @@ fn dense_relative_residual(a: &[Vec<f64>], x: &[f64], b: &[f64]) -> f64 {
 
     rmax / bmax.max(1.0)
 }
-
+ #[allow(dead_code)]
 fn apply_ipiv_dense(rhs: &mut [f64], ipiv: &[usize]) {
     for (j, &p) in ipiv.iter().enumerate() {
         if p != j {
@@ -1457,6 +1457,7 @@ fn apply_ipiv_dense(rhs: &mut [f64], ipiv: &[usize]) {
         }
     }
 }
+ #[allow(dead_code)]
 fn dense_from_banded(a: &Banded<f64>) -> Vec<Vec<f64>> {
     let n = a.n();
     let mut out = vec![vec![0.0; n]; n];
@@ -1472,14 +1473,14 @@ fn dense_from_banded(a: &Banded<f64>) -> Vec<Vec<f64>> {
 
     out
 }
-
+ #[allow(dead_code)]
 fn max_abs_diff(x: &[f64], y: &[f64]) -> f64 {
     x.iter()
         .zip(y.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max)
 }
-
+ #[allow(dead_code)]
 fn dense_from_workspace_state(lu: &LapackStyleBandedLuFaithful) -> Vec<Vec<f64>> {
     let n = lu.n();
     let mut out = vec![vec![0.0; n]; n];
@@ -2172,7 +2173,7 @@ mod solver_comparison_tests {
     use crate::somelinalg::banded::ops::banded_matvec;
     use faer::linalg::solvers::Solve;
     use faer::sparse::{SparseColMat, Triplet};
-    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
+    use rand::{rngs::StdRng, RngExt, SeedableRng};
 
     #[derive(Debug, Clone, Copy)]
     struct CompareMetrics {

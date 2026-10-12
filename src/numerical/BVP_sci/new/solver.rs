@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::{
     callbacks::{BvpSciBoundary, evaluate_boundary},
     collocation::{collocation_rms, evaluate_collocation, max_abs},
-    config::{BvpSciMatrixLayout, BvpSciOptions},
+    config::{BvpSciMatrixLayout, BvpSciOptions, SCIPY_MAX_MESH_ITERATIONS},
     error::{BvpSciNewError, BvpSciStage},
     jacobian::assemble_global_jacobian,
     linear::NativeLinearBackend,
@@ -354,12 +354,14 @@ impl BvpSciSolver {
             .boundary_tolerance
             .unwrap_or(self.options.tolerance);
         let mut total_iterations = 0usize;
+        let mut outer_solve_attempts = 0usize;
 
         for refinement in 0..=self.options.max_mesh_refinements {
             // A mesh pass has two phases: bounded Newton convergence on the
             // current grid, then a defect estimate that decides whether the
             // grid should grow. Symbolic preparation never belongs here.
             let (newton_outcome, iterations) = self.solve_current_mesh(boundary_tolerance)?;
+            outer_solve_attempts += 1;
             let norm = match newton_outcome {
                 NewtonMeshOutcome::Converged { norm, .. }
                 | NewtonMeshOutcome::BudgetExhausted { norm, .. } => norm,
@@ -374,6 +376,19 @@ impl BvpSciSolver {
             let boundary_error = max_abs(&self.workspace.boundary_residual);
             if max_error <= self.options.tolerance && boundary_error <= boundary_tolerance {
                 return self.solution(norm.max(max_error), total_iterations, interval_errors);
+            }
+            // SciPy returns status 3 after ten outer solves when the defect is
+            // already acceptable (so no mesh points are requested) but the
+            // independent boundary tolerance remains unsatisfied. Do not let
+            // the mesh-refinement budget accidentally grant an eleventh
+            // same-grid solve.
+            if max_error <= self.options.tolerance
+                && boundary_error > boundary_tolerance
+                && outer_solve_attempts >= SCIPY_MAX_MESH_ITERATIONS
+            {
+                return Err(BvpSciNewError::BoundaryToleranceNotMet {
+                    tolerance: boundary_tolerance,
+                });
             }
             if refinement == self.options.max_mesh_refinements {
                 if max_error <= self.options.tolerance && boundary_error > boundary_tolerance {
@@ -635,6 +650,10 @@ impl BvpSciSolver {
                         backtracking_trials,
                         jacobian_refreshed,
                         accepted: false,
+                        max_normalized_collocation_residual: self
+                            .max_normalized_collocation_residual(),
+                        normalized_boundary_residual: max_abs(&self.workspace.boundary_residual)
+                            / boundary_tolerance,
                     },
                 );
                 // A rejected correction may have changed all callback scratch
@@ -678,6 +697,9 @@ impl BvpSciSolver {
                     backtracking_trials,
                     jacobian_refreshed,
                     accepted: true,
+                    max_normalized_collocation_residual: self.max_normalized_collocation_residual(),
+                    normalized_boundary_residual: max_abs(&self.workspace.boundary_residual)
+                        / boundary_tolerance,
                 });
             // SciPy stops immediately after the fourth Jacobian refresh,
             // before starting another fixed-Jacobian iteration. Preserve
@@ -754,6 +776,24 @@ impl BvpSciSolver {
                     })
                 });
         residual_ok && max_abs(&self.workspace.boundary_residual) < boundary_tolerance
+    }
+
+    fn max_normalized_collocation_residual(&self) -> f64 {
+        self.workspace
+            .collocation_residual
+            .chunks_exact(self.plan.dimension())
+            .zip(self.workspace.h.iter())
+            .zip(self.workspace.f_middle.chunks_exact(self.plan.dimension()))
+            .flat_map(|((residual, h), f_middle)| {
+                let tolerance = (2.0 / 3.0) * *h * 5.0e-2 * self.options.tolerance;
+                residual
+                    .iter()
+                    .zip(f_middle)
+                    .map(move |(residual, f_middle)| {
+                        residual.abs() / (tolerance * (1.0 + f_middle.abs()))
+                    })
+            })
+            .fold(0.0_f64, f64::max)
     }
 
     /// Estimate SciPy-style relative RMS defects with 5-point Lobatto

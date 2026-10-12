@@ -979,6 +979,52 @@ impl ODEsolver {
         self.Solver_instance.equal_step_count()
     }
 
+    /// Returns the current time, or the configured initial time before preparation.
+    pub fn current_time(&self) -> f64 {
+        if self.backend_prepared {
+            self.Solver_instance.current_time()
+        } else {
+            self.t0
+        }
+    }
+
+    /// Borrows the current state, or the configured initial state before preparation.
+    pub fn current_state(&self) -> &DVector<f64> {
+        if self.backend_prepared {
+            self.Solver_instance.current_state()
+        } else {
+            &self.y0
+        }
+    }
+
+    /// Returns the configured terminal time.
+    pub fn time_bound(&self) -> f64 {
+        self.t_bound
+    }
+
+    /// Returns the current controller proposal for the next step, if initialized.
+    pub fn proposed_step_size(&self) -> Option<f64> {
+        self.backend_prepared
+            .then(|| self.Solver_instance.proposed_step_size())
+            .flatten()
+    }
+
+    /// Returns the latest accepted interval as `(start, end)`, if one exists.
+    pub fn last_accepted_step_interval(&self) -> Option<(f64, f64)> {
+        self.backend_prepared
+            .then(|| self.Solver_instance.last_accepted_step_interval())
+            .flatten()
+    }
+
+    /// Returns the integration direction (`1.0` forward, `-1.0` backward, `0.0` for a zero-length interval).
+    pub fn integration_direction(&self) -> f64 {
+        if self.backend_prepared {
+            self.Solver_instance.integration_direction()
+        } else {
+            (self.t_bound - self.t0).signum()
+        }
+    }
+
     /// Installs a factory for the BDF Newton linear backend.
     ///
     /// `ODEsolver::try_generate` creates a fresh low-level BDF instance, so a
@@ -1826,7 +1872,6 @@ impl ODEsolver {
             return Err(error);
         }
 
-        self.Solver_instance.t_old = Some(t);
         if self.Solver_instance.direction * (self.Solver_instance.t - self.t_bound) >= 0.0 {
             self.status = BdfStatus::Finished;
         }
@@ -1968,6 +2013,8 @@ impl ODEsolver {
             stats.rejected_step_attempts_total += current
                 .rejected_step_attempts
                 .saturating_sub(previous.rejected_step_attempts);
+            stats.bdf_order_changes_total +=
+                current.order_changes.saturating_sub(previous.order_changes);
             stats.linear_solve_attempts_total += current
                 .linear_solve_attempts
                 .saturating_sub(previous.linear_solve_attempts);
@@ -2195,6 +2242,54 @@ mod tests {
     }
 
     #[test]
+    fn public_step_state_getters_cover_unprepared_and_completed_solver() {
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.2,
+            DVector::from_vec(vec![1.0]),
+            0.3,
+            0.1,
+            1e-8,
+            1e-10,
+            None,
+            false,
+            Some(0.05),
+        );
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_native_ode_callbacks_with_jacobian_source(
+            |_, y| -y,
+            BdfNativeJacobianSource::Constant(DMatrix::from_element(1, 1, -1.0)),
+        );
+
+        assert_eq!(solver.current_time(), 0.2);
+        assert_eq!(solver.current_state(), &DVector::from_vec(vec![1.0]));
+        assert_eq!(solver.time_bound(), 0.3);
+        assert_eq!(solver.proposed_step_size(), None);
+        assert_eq!(solver.last_accepted_step_interval(), None);
+        assert_eq!(solver.integration_direction(), 1.0);
+
+        solver.try_solve().expect("BDF solve");
+        assert_eq!(solver.current_time(), 0.3);
+        assert!((solver.current_state()[0] - (-0.1_f64).exp()).abs() < 2e-7);
+        assert_eq!(solver.time_bound(), 0.3);
+        assert!(solver.proposed_step_size().is_some_and(|step| step > 0.0));
+        let (start, end) = solver
+            .last_accepted_step_interval()
+            .expect("completed solve has an accepted step");
+        assert!(start < end);
+        assert_eq!(end, solver.current_time());
+        assert_eq!(solver.integration_direction(), 1.0);
+
+        let (_, trajectory) = solver.get_result_ref();
+        assert_eq!(
+            solver.current_state()[0],
+            trajectory[(trajectory.nrows() - 1, 0)]
+        );
+    }
+
+    #[test]
     fn unsupported_vectorized_rhs_fails_before_backend_preparation() {
         let options = BdfSolverOptions::for_bdf(
             vec![Expr::parse_expression("y")],
@@ -2279,7 +2374,7 @@ mod tests {
 
         solver.try_solve().unwrap();
 
-        assert_eq!(solver.get_statistics().bdf_njev_total, 1);
+        assert_eq!(solver.get_statistics().bdf_njev_total, 0);
         let (_, trajectory) = solver.get_result_ref();
         let final_state = trajectory[(trajectory.nrows() - 1, 0)];
         assert!((final_state - (-0.2_f64).exp()).abs() < 2e-6);
@@ -2317,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_native_jacobian_factory_skips_initial_finite_difference_work() {
+    fn generated_native_jacobian_factory_avoids_initial_finite_difference_probes() {
         let options = BdfSolverOptions::for_bdf(
             vec![Expr::parse_expression("-rate*y")],
             vec!["y".to_string()],
@@ -2347,6 +2442,9 @@ mod tests {
             counters.rhs_evaluations, 1,
             "only the initial RHS is needed"
         );
+        // The analytic Jacobian is evaluated once during initialization to
+        // validate and retain its initial value; the RHS count confirms that
+        // no finite-difference probe evaluations were needed.
         assert_eq!(counters.jacobian_evaluations, 1);
 
         solver

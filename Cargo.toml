@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.20"
+version = "0.4.21"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -16,6 +16,12 @@ include = [
     "!/.kilo/**/*",
     "!Cargo.toml.orig",
     "src/**/*",
+    # Python reference project is repository-only, not part of the Rust crate.
+    "!src/numerical/optimization/gavin_reference/**",
+    # Vendored SciPy IVP references are repository-only, not crate payload.
+    "!src/numerical/ivp_scipy_reference/**",
+    # Vendored SciPy BVP reference is repository-only, not crate payload.
+    "!src/numerical/BVP_sci/scipy_reference/**",
     "scripts/**/*",
     "examples/**/*",
     "benches/**/*",
@@ -163,6 +169,9 @@ harness = false
 name = "bvp_sci_matched"
 harness = false
 [[bench]]
+name = "bvp_sci_scipy_parity"
+harness = false
+[[bench]]
 name = "bvp_sci_linear_backend_micro"
 harness = false
 [[bench]]
@@ -251,6 +260,10 @@ name = "bdf_workloads"
 harness = false
 [[bench]]
 name = "radau_workloads"
+harness = false
+
+[[bench]]
+name = "gavin_fitting"
 harness = false
 
 [profile.bench]
@@ -542,3 +555,9 @@ path = "examples/rus/bdf_aot_guide.rs"
 [[example]]
 name = "rus_universal_ode_example"
 path = "examples/rus/universal_ode_example.rs"
+[[example]]
+name = "rus_universal_fitting_guide"
+path = "examples/rus/universal_fitting_guide.rs"
+[[example]]
+name = "rus_gavin_fitting_guide"
+path = "examples/rus/gavin_fitting_guide.rs"

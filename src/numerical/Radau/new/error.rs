@@ -27,7 +27,7 @@ pub(crate) enum RadauConfigError {
     InvalidAbsoluteTolerance,
     #[error("maximum step must be positive or infinity")]
     InvalidMaximumStep,
-    #[error("first step must be finite and positive")]
+    #[error("first step must be finite, positive, and no larger than the integration interval")]
     InvalidFirstStep,
     #[error("step, Newton, and retry budgets must be non-zero")]
     EmptyIterationBudget,

@@ -1,6 +1,6 @@
 use super::*;
 use crate::numerical::BDF::common::{
-    ArgumentValidationError, check_arguments, scale_func, select_initial_step,
+    check_arguments, scale_func, select_initial_step, ArgumentValidationError,
 };
 
 #[test]
@@ -116,6 +116,45 @@ fn in_place_tolerance_scale_matches_public_scale_contract() {
         fill_tolerance_scale(&mut actual, &rtol, &atol, &state);
         assert_eq!(actual, expected);
     }
+}
+
+#[test]
+fn read_only_step_state_getters_track_low_level_accepted_steps() {
+    let mut solver = BDF::new();
+    solver
+        .try_set_initial_with_jacobian_source(
+            Box::new(|_, y| -y),
+            0.2,
+            DVector::from_vec(vec![1.0]),
+            0.3,
+            0.1,
+            NumberOrVec::Number(1e-8),
+            NumberOrVec::Number(1e-10),
+            BdfJacobianSource::Constant(BdfJacobian::from_dense(DMatrix::from_element(
+                1, 1, -1.0,
+            ))),
+            None,
+            false,
+            Some(0.05),
+        )
+        .expect("initialize BDF");
+
+    assert_eq!(solver.current_time(), 0.2);
+    assert_eq!(solver.current_state(), &DVector::from_vec(vec![1.0]));
+    assert_eq!(solver.time_bound(), 0.3);
+    assert_eq!(solver.proposed_step_size(), Some(0.05));
+    assert_eq!(solver.last_accepted_step_interval(), None);
+    assert_eq!(solver.integration_direction(), 1.0);
+
+    let (accepted, error) = solver._step_impl();
+    assert!(accepted, "first BDF step failed: {error:?}");
+    let (start, end) = solver
+        .last_accepted_step_interval()
+        .expect("low-level step records the accepted interval");
+    assert_eq!(start, 0.2);
+    assert_eq!(end, solver.current_time());
+    assert!(end > start);
+    assert!(solver.proposed_step_size().is_some_and(|step| step > 0.0));
 }
 
 #[test]
@@ -371,7 +410,7 @@ fn stiff_decay_matches_exponential_reference_and_reports_work() {
     assert_eq!(solver.t, t_bound);
     assert!(abs_error < 2e-11, "stiff decay error={abs_error:e}");
     assert!(max_order_seen >= 2, "controller did not increase order");
-    assert_eq!(counters.jacobian_evaluations, 1);
+    assert_eq!(counters.jacobian_evaluations, 0);
     assert!(counters.rhs_evaluations > 0);
     assert!(counters.factorization_attempts > 0);
     assert!(counters.linear_solve_attempts > 0);
@@ -635,6 +674,33 @@ fn proposed_time_reports_no_progress_when_addition_rounds_back_to_t() {
     let result = proposed_step_time(t, 0.25, 1.0, t + 4.0);
 
     assert_eq!(result, Err(BdfStepError::NoProgress));
+}
+
+#[test]
+fn non_finite_forward_time_resolution_reports_typed_underflow() {
+    let mut solver = BDF::new();
+    solver
+        .try_set_initial(
+            Box::new(|_, y| DVector::zeros(y.len())),
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+            0.1,
+            NumberOrVec::Number(1e-6),
+            NumberOrVec::Number(1e-8),
+            None,
+            None,
+            false,
+            Some(0.01),
+        )
+        .expect("valid low-level initialization");
+    // Exercise the representability guard at a state where next_up is infinity.
+    solver.t = f64::MAX;
+
+    let (accepted, error) = solver._step_impl();
+
+    assert!(!accepted);
+    assert_eq!(error, Some(BdfStepError::StepSizeUnderflow));
 }
 
 #[test]
@@ -1063,7 +1129,7 @@ fn vectorized_rhs_is_rejected_without_mutating_solver() {
 }
 
 #[test]
-fn explicit_constant_jacobian_is_reused_and_counted_once() {
+fn explicit_constant_jacobian_is_reused_without_counting_an_evaluation() {
     let mut solver = BDF::new();
     solver.set_operation_counters_enabled(true);
     solver
@@ -1096,8 +1162,47 @@ fn explicit_constant_jacobian_is_reused_and_counted_once() {
         solver.jacobian_refresh_policy,
         JacobianRefreshPolicy::Constant
     );
-    assert_eq!(solver.operation_counters().jacobian_evaluations, 1);
+    assert_eq!(solver.operation_counters().jacobian_evaluations, 0);
     assert!((solver.y[0] - (-0.2_f64).exp()).abs() < 2e-6);
+}
+
+#[test]
+fn constant_jacobian_newton_failure_reduces_step_without_same_candidate_retry() {
+    let callback_times = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed_times = std::rc::Rc::clone(&callback_times);
+    let mut solver = BDF::new();
+    solver
+        .try_set_initial_with_jacobian_source(
+            Box::new(move |t, y| {
+                observed_times.borrow_mut().push(t);
+                -1000.0 * y
+            }),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            0.1,
+            0.1,
+            NumberOrVec::Number(1e-6),
+            NumberOrVec::Number(1e-10),
+            BdfJacobianSource::Constant(BdfJacobian::from_dense(DMatrix::zeros(1, 1))),
+            None,
+            false,
+            Some(0.1),
+        )
+        .unwrap();
+
+    let (accepted, error) = solver._step_impl();
+    assert!(accepted, "reduced-step retry should recover: {error:?}");
+    assert!(solver.t < 0.1, "the failed full step must be reduced");
+
+    let calls_at_original_candidate = callback_times
+        .borrow()
+        .iter()
+        .filter(|&&time| (time - 0.1).abs() < 1e-14)
+        .count();
+    assert!(
+        calls_at_original_candidate <= 4,
+        "constant-J Newton failure must not retry the same candidate; observed {calls_at_original_candidate} RHS calls at t=0.1"
+    );
 }
 
 #[test]
@@ -1223,12 +1328,10 @@ fn finite_difference_jacobian_scales_steps_per_component() {
     );
     assert!(result.matrix[(0, 1)].abs() < 1e-12);
     assert!(result.matrix[(1, 0)].abs() < 1e-12);
-    assert!(
-        result
-            .factor
-            .iter()
-            .all(|value| value.is_finite() && *value > 0.0)
-    );
+    assert!(result
+        .factor
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
 }
 
 #[test]

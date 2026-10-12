@@ -3839,7 +3839,7 @@ mod tests {
         .expect("values without schema should fail");
         assert!(matches!(no_schema, SolveError::InvalidParameterSchema(_)));
 
-        let mut unbound = SymbolicNonlinearProblem::from_strings_with_options(
+        let unbound = SymbolicNonlinearProblem::from_strings_with_options(
             vec!["a*x".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string()])

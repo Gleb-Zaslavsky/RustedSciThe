@@ -100,6 +100,7 @@ impl NativeAtomJacobianRuntime {
 
     /// Returns cold-path evaluator shape diagnostics for the prepared Atom
     /// Jacobian. This is used by performance stories, never by callbacks.
+    #[allow(dead_code)]
     pub(crate) fn plan_metrics(
         &self,
     ) -> crate::symbolic::symbolic_ivp::PreparedNativeJacobianMetrics {

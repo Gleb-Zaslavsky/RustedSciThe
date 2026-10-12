@@ -17,6 +17,7 @@ mod native_callbacks;
 mod performance;
 mod policy_stories;
 mod process_isolated;
+mod scipy_parity;
 mod story_support;
 mod telemetry_stories;
 mod workloads;

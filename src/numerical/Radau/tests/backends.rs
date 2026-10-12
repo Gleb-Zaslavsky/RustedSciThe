@@ -234,6 +234,7 @@ fn dense_backend_dispatch_reports_assembly_factor_and_solve_scopes() {
     assert_eq!(telemetry.counters.factorizations, 1);
     assert_eq!(telemetry.counters.real_solves, 1);
     assert_eq!(telemetry.counters.complex_solves, 1);
+    assert_eq!(telemetry.counters.linear_solves, 2);
     assert_eq!(telemetry.counters.invalidations, 1);
     assert!(telemetry.timings.jacobian_assembly_ms.is_finite());
     assert!(telemetry.timings.factorization_ms.is_finite());

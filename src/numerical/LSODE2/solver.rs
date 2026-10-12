@@ -735,6 +735,7 @@ impl Lsode2Solver {
             accepted_steps_total: bridge.accepted_steps_total,
             candidate_step_attempts_total: bridge.candidate_step_attempts_total,
             rejected_step_attempts_total: bridge.rejected_step_attempts_total,
+            bdf_order_changes_total: 0,
             linear_solve_attempts_total: bridge.linear_solve_attempts_total,
             nonlinear_solve_calls: native.bridge_nonlinear_solve_calls.max(
                 native.native_nonlinear_converged_count + native.native_nonlinear_continue_count,

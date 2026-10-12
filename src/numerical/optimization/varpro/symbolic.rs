@@ -8,15 +8,15 @@
 use nalgebra::DVector;
 use thiserror::Error as ThisError;
 
+use crate::numerical::Nonlinear_systems::least_squares::LevenbergMarquardt;
 use crate::numerical::optimization::varpro::fit::FitResult;
-use crate::numerical::optimization::varpro::model::builder::error::ModelBuildError;
-use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
 use crate::numerical::optimization::varpro::model::SeparableModel;
+use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
+use crate::numerical::optimization::varpro::model::builder::error::ModelBuildError;
 use crate::numerical::optimization::varpro::problem::{
     SeparableProblemBuilder, SeparableProblemBuilderError, SingleRhs,
 };
 use crate::numerical::optimization::varpro::solvers::levmar::LevMarSolver;
-use crate::numerical::Nonlinear_systems::least_squares::LevenbergMarquardt;
 use crate::symbolic::symbolic_engine::Expr;
 
 /// Boxed VarPro basis function with one nonlinear scalar parameter.

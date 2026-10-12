@@ -149,6 +149,7 @@ pub(crate) struct RadauCounters {
 pub(crate) struct RadauAdaptiveStepTrace {
     pub h_abs: f64,
     pub error_norm: f64,
+    pub newton_iterations: usize,
     pub accepted: bool,
     pub was_retry: bool,
     pub next_h_abs: f64,
@@ -419,8 +420,14 @@ impl RadauTelemetry {
         match stage {
             RadauLinearStage::JacobianAssembly => self.counters.jacobian_assemblies += 1,
             RadauLinearStage::Factorization => self.counters.factorizations += 1,
-            RadauLinearStage::RealSolve => self.counters.real_solves += 1,
-            RadauLinearStage::ComplexSolve => self.counters.complex_solves += 1,
+            RadauLinearStage::RealSolve => {
+                self.counters.real_solves += 1;
+                self.counters.linear_solves += 1;
+            }
+            RadauLinearStage::ComplexSolve => {
+                self.counters.complex_solves += 1;
+                self.counters.linear_solves += 1;
+            }
             RadauLinearStage::Invalidate => self.counters.invalidations += 1,
         }
     }

@@ -107,6 +107,12 @@ pub struct BvpSciNewtonTraceEntry {
     pub backtracking_trials: u64,
     pub jacobian_refreshed: bool,
     pub accepted: bool,
+    /// Largest component-wise collocation residual divided by SciPy's Newton
+    /// stopping threshold at the last evaluated trial state.
+    pub max_normalized_collocation_residual: f64,
+    /// Largest boundary residual divided by the independent boundary
+    /// tolerance at the last evaluated trial state.
+    pub normalized_boundary_residual: f64,
 }
 
 /// Point-in-time report for one prepared model and its numerical lifecycle.

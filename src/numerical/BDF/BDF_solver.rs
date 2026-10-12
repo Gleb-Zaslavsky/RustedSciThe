@@ -104,7 +104,7 @@ use log::info;
 use std::f64;
 
 use crate::numerical::BDF::common::{
-    NumberOrVec, newton_tol, norm, try_select_initial_step, validate_tol,
+    newton_tol, norm, try_select_initial_step, validate_tol, NumberOrVec,
 };
 use crate::somelinalg::banded::storage::Banded;
 use faer::sparse::Triplet;
@@ -140,12 +140,16 @@ impl std::error::Error for BdfStepError {}
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BdfOperationCounters {
     pub rhs_evaluations: usize,
+    /// Actual callback/finite-difference evaluations; installing a constant
+    /// matrix does not count as evaluating a Jacobian.
     pub jacobian_evaluations: usize,
     pub factorization_attempts: usize,
     pub linear_solve_attempts: usize,
     pub candidate_step_attempts: usize,
     pub accepted_steps: usize,
     pub rejected_step_attempts: usize,
+    /// Number of accepted controller updates that changed the BDF order.
+    pub order_changes: usize,
     pub nonlinear_solves: usize,
     pub nonlinear_iterations: usize,
     pub linear_factorization_ms_total: f64,
@@ -1218,6 +1222,7 @@ pub struct BDF {
     candidate_step_attempts: usize,
     accepted_steps: usize,
     rejected_step_attempts: usize,
+    order_changes: usize,
     nonlinear_solves: usize,
     nonlinear_iterations: usize,
     collect_operation_timings: bool,
@@ -1338,6 +1343,7 @@ impl BDF {
             candidate_step_attempts: 0,
             accepted_steps: 0,
             rejected_step_attempts: 0,
+            order_changes: 0,
             nonlinear_solves: 0,
             nonlinear_iterations: 0,
             collect_operation_timings: false,
@@ -1373,6 +1379,7 @@ impl BDF {
             accepted_steps: self.accepted_steps,
             candidate_step_attempts: self.candidate_step_attempts,
             rejected_step_attempts: self.rejected_step_attempts,
+            order_changes: self.order_changes,
             nonlinear_solves: self.nonlinear_solves,
             nonlinear_iterations: self.nonlinear_iterations,
             linear_factorization_ms_total: self.linear_factorization_ms_total,
@@ -1399,6 +1406,44 @@ impl BDF {
         }
     }
 
+    /// Returns the current integration time without exposing mutable solver state.
+    pub fn current_time(&self) -> f64 {
+        self.t
+    }
+
+    /// Borrows the current solution state without cloning it.
+    pub fn current_state(&self) -> &DVector<f64> {
+        &self.y
+    }
+
+    /// Returns the configured terminal time.
+    pub fn time_bound(&self) -> f64 {
+        self.t_bound
+    }
+
+    /// Returns the magnitude of the next proposed step, if the solver is initialized.
+    ///
+    /// The value is the controller's current proposal, not necessarily the size
+    /// of the last accepted step (which may have been clipped at `t_bound`).
+    pub fn proposed_step_size(&self) -> Option<f64> {
+        (self.h_abs.is_finite() && self.h_abs > 0.0).then_some(self.h_abs)
+    }
+
+    /// Returns the most recently accepted interval as `(start, end)`.
+    ///
+    /// No interval is available before the first accepted step. This accessor
+    /// reports only scalar metadata and does not copy the Nordsieck workspace.
+    pub fn last_accepted_step_interval(&self) -> Option<(f64, f64)> {
+        self.t_old
+            .filter(|&previous| previous != self.t)
+            .map(|previous| (previous, self.t))
+    }
+
+    /// Returns the direction of integration (`1.0` forward, `-1.0` backward).
+    pub fn integration_direction(&self) -> f64 {
+        self.direction
+    }
+
     /// Enables optional counters; configure this before `set_initial` so the
     /// RHS wrapper also captures initialization and finite-difference calls.
     /// Changing it after initialization does not rewrap the existing callbacks;
@@ -1413,6 +1458,7 @@ impl BDF {
             self.candidate_step_attempts = 0;
             self.accepted_steps = 0;
             self.rejected_step_attempts = 0;
+            self.order_changes = 0;
             self.nonlinear_solves = 0;
             self.nonlinear_iterations = 0;
             self.linear_factorization_ms_total = 0.0;
@@ -1425,6 +1471,7 @@ impl BDF {
             self.candidate_step_attempts = 0;
             self.accepted_steps = 0;
             self.rejected_step_attempts = 0;
+            self.order_changes = 0;
             self.nonlinear_solves = 0;
             self.nonlinear_iterations = 0;
             self.linear_factorization_ms_total = 0.0;
@@ -2053,9 +2100,6 @@ impl BDF {
                 self.jac_factor = None;
                 self.jacobian_refresh_policy = JacobianRefreshPolicy::Constant;
                 self.J = jacobian;
-                if self.collect_operation_counters {
-                    self.njev += 1;
-                }
             }
             PreparedBdfJacobianSource::FiniteDifference { initial, factor } => {
                 self.J = initial;
@@ -2163,7 +2207,10 @@ impl BDF {
         let mut linear_factorization = self.linear_factorization.take();
         // `J` is only current at the state where it was last evaluated. A
         // failed Newton solve may refresh it once at the current predictor.
-        let mut current_jac = false;
+        // SciPy treats a constant Jacobian as already current: if Newton
+        // fails, there is no callable Jacobian to refresh, so reduce the step
+        // instead of retrying the same candidate with the same matrix.
+        let mut current_jac = self.jacobian_refresh_policy == JacobianRefreshPolicy::Constant;
         let mut newton_failed = false;
         let mut last_newton_failure = None;
         let mut step_accepted = false;
@@ -2432,6 +2479,7 @@ impl BDF {
         }
         self.n_equal_steps += 1;
         self.t = t_new;
+        self.t_old = Some(t);
         self.y.copy_from(&newton_workspace.state);
         self.h_abs = h_abs;
         if let Some(jacobian) = jacobian_override {
@@ -2473,6 +2521,9 @@ impl BDF {
             &scale,
             safety,
         );
+        if self.collect_operation_counters && new_order != order {
+            self.order_changes += 1;
+        }
         self.order = new_order;
         self.h_abs *= factor;
         change_D(&mut D, self.order, factor);

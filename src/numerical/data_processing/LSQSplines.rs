@@ -799,6 +799,7 @@ fn build_normal_equations_banded(
      */
 /// Legacy-реализация полосатого Cholesky для `BandedMatrix`.
 /// В текущем решателе не используется, но оставлена как reference/отладка.
+#[allow(dead_code)]
 fn cholesky_banded(G: &mut BandedMatrix) -> Result<(), LssError> {
     let n = G.n;
     let bw = G.bandwidth;

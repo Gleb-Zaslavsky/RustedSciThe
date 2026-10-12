@@ -413,7 +413,7 @@ pub struct LMMinpackState {
     diag: DVector<f64>,
     /// function and jacobian eval counters (method-local)
     nfev: usize,
-    njev: usize,
+    _njev: usize,
 }
 
 impl LevenbergMarquardtMinpack {
@@ -539,7 +539,7 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             // The generic engine has already evaluated F(x0) before calling
             // method initialization, matching MINPACK's initial NFEV = 1.
             nfev: 1,
-            njev: 0,
+            _njev: 0,
         })
     }
 
@@ -881,7 +881,7 @@ mod lm_minpack_tests {
             delta: 10.0,
             diag: DVector::from_element(1, 1.0),
             nfev: 0,
-            njev: 0,
+            _njev: 0,
         };
 
         // MINPACK leaves both values unchanged for 0.25 < ratio < 0.75.

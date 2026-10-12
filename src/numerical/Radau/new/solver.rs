@@ -5,7 +5,7 @@
 //! already-tested step/session layers.
 
 use super::callbacks::{
-    DenseJacobianCallback, ResidualCallback, SymbolicCallbackSession, validate_callback_output,
+    validate_callback_output, DenseJacobianCallback, ResidualCallback, SymbolicCallbackSession,
 };
 use super::config::{RadauConfig, RadauMatrixLayout};
 use super::controller::{
@@ -18,7 +18,7 @@ use super::output::{RadauOutput, RadauOutputCollector};
 use super::session::RadauSession;
 use super::state::RadauSolverState;
 use super::step::{
-    RadauStepResult, try_radau5_step_with_rejection, try_radau5_symbolic_step_with_backend,
+    try_radau5_step_with_rejection, try_radau5_symbolic_step_with_backend, RadauStepResult,
 };
 use super::telemetry::{RadauAdaptiveStepTrace, RadauCallbackStage};
 use super::workspace::RadauWorkspace;
@@ -448,6 +448,9 @@ where
     let mut trial = vec![0.0; y0.len()];
     let mut retries = 0usize;
     let mut rejected = false;
+    // Retry sizes are local to the current accepted-state interval. Keep the
+    // prior accepted-step controller history unchanged until commit succeeds.
+    let mut retry_state: Option<(f64, Option<f64>, Option<f64>)> = None;
 
     while !is_finished(state.t, config) {
         if state.attempts >= config.max_steps {
@@ -462,12 +465,11 @@ where
                 h: state.direction * minimum,
             });
         }
-        let (h_candidate, h_abs_old, error_norm_old) = if state.h_abs > config.max_step {
-            (config.max_step, None, None)
-        } else if state.h_abs < minimum {
-            (minimum, None, None)
-        } else {
-            (state.h_abs, state.h_abs_old, state.error_norm_old)
+        let (h_candidate, h_abs_old, error_norm_old) = match retry_state {
+            Some((retry_h, old_h, old_error)) => (retry_h, old_h, old_error),
+            None if state.h_abs > config.max_step => (config.max_step, None, None),
+            None if state.h_abs < minimum => (minimum, None, None),
+            None => (state.h_abs, state.h_abs_old, state.error_norm_old),
         };
         let h_abs = clamp_step_to_bound(state.t, h_candidate, config);
         let h = state.direction * h_abs;
@@ -496,10 +498,12 @@ where
                 }
                 let next_h_abs = (h_abs * factor).min(config.max_step);
                 state.commit(next_t, &trial, next_h_abs, result.error_norm);
+                retry_state = None;
                 runner.record_step(true);
                 runner.record_adaptive_step(RadauAdaptiveStepTrace {
                     h_abs,
                     error_norm: result.error_norm,
+                    newton_iterations: result.iterations,
                     accepted: true,
                     was_retry: rejected,
                     next_h_abs,
@@ -533,11 +537,16 @@ where
                     });
                 }
                 let factor = predict_factor(h_abs, h_abs_old, result.error_norm, error_norm_old);
-                let next_h_abs = h_abs * factor.min(1.0).max(0.2);
-                state.h_abs = next_h_abs;
+                // SciPy applies the Newton-iteration safety factor on error
+                // rejection as well as acceptance. Omitting it changes the
+                // very next trial step and can produce a different mesh.
+                let rejected_factor = (safety_factor(result.iterations) * factor).max(0.2);
+                let next_h_abs = h_abs * rejected_factor;
+                retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
                 runner.record_adaptive_step(RadauAdaptiveStepTrace {
                     h_abs,
                     error_norm: result.error_norm,
+                    newton_iterations: result.iterations,
                     accepted: false,
                     was_retry: rejected,
                     next_h_abs,
@@ -552,7 +561,7 @@ where
                     stage: RadauStage::StepControl,
                 });
             }
-            Err(RadauError::NewtonFailure { .. }) => {
+            Err(RadauError::NewtonFailure { iterations }) => {
                 // Newton failure is recoverable at the controller level: the
                 // current trial is discarded and the step is retried with a
                 // conservative half-size.  Other typed errors are fatal and
@@ -568,6 +577,7 @@ where
                     runner.record_adaptive_step(RadauAdaptiveStepTrace {
                         h_abs,
                         error_norm: f64::INFINITY,
+                        newton_iterations: iterations,
                         accepted: false,
                         was_retry: rejected,
                         next_h_abs: h_abs,
@@ -583,10 +593,11 @@ where
                     });
                 }
                 let next_h_abs = h_abs * 0.5;
-                state.h_abs = next_h_abs;
+                retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
                 runner.record_adaptive_step(RadauAdaptiveStepTrace {
                     h_abs,
                     error_norm: f64::INFINITY,
+                    newton_iterations: iterations,
                     accepted: false,
                     was_retry: rejected,
                     next_h_abs,

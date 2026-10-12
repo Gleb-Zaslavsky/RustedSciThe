@@ -691,7 +691,7 @@ fn perform_requested_build(
                 match build.execute() {
                     Ok(executed) if executed.succeeded() => {
                         built_now = true;
-                        if let Err(error) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key)
+                        if let Err(_) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key)
                         {
                         }
                         Ok(build)
@@ -973,7 +973,7 @@ impl SymbolicNonlinearProblem {
                             preparation_report,
                         })
                     }
-                    Err(SolveError::CompiledAotRuntimeUnavailable(message))
+                    Err(SolveError::CompiledAotRuntimeUnavailable(_message))
                         if config.effective_backend_policy()
                             == SymbolicBackendSelectionPolicy::PreferAotThenLambdify =>
                     {

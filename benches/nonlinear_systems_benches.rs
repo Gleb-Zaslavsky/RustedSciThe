@@ -79,7 +79,7 @@ fn legacy_lambdify_problem(dimension: usize) -> Jacobian {
     jacobian.lambdify_jacobian_DMatrix_parallel();
     jacobian
 }
-
+#[allow(dead_code)]
 fn sparse_chain_data(dimension: usize) -> (Vec<String>, Vec<String>, DVector<f64>) {
     sparse_corpus_data(SparseCorpus::QuadraticChain, dimension)
 }

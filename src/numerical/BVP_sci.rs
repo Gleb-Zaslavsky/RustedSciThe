@@ -91,7 +91,9 @@ pub(crate) use legacy::BVP_sci_banded;
 pub(crate) use legacy::BVP_sci_bordered_banded;
 pub(crate) use legacy::BVP_sci_bordered_solver;
 pub(crate) use legacy::BVP_sci_faer;
+#[allow(unused)]
 pub(crate) use legacy::BVP_sci_nalgebra;
+#[allow(unused)]
 pub(crate) use legacy::BVP_sci_numerical;
 pub(crate) use legacy::BVP_sci_symb;
 pub(crate) use legacy::BVP_sci_symbolic_functions;

@@ -191,23 +191,81 @@ Keep the BDF/NDF numerical core faithful to a pinned SciPy reference where the
 algorithms are intended to match. Our symbolic frontends, generated backends,
 parameter continuation and optional telemetry remain BDF extensions around
 that core; they do not justify silent changes to error control or Newton policy.
-The checked-in `bdf.py` is modified and is not yet identified with an exact
-upstream version. Use the [SciPy 1.14.1 BDF source](https://github.com/scipy/scipy/blob/v1.14.1/scipy/integrate/_ivp/bdf.py)
-as a provisional comparison until the original rewrite revision is identified.
+The Python reference project now pins official SciPy `v1.18.1`; its clean
+upstream `bdf.py` SHA-256 is
+`72A6DB9B5237B901D3BFBBE1485C48983AA4296CB2AAAA945E9D98A4F1D912A4`. The
+vendored Python source has opt-in telemetry hooks only and is compared against
+that pinned implementation. The historical Rust rewrite revision is still
+unknown. Earlier BDF audits used SciPy `v1.14.1`; those findings are historical
+and must be revalidated against `v1.18.1` before being treated as current
+fidelity evidence.
+
+### SciPy 1.18.1 Source Audit (2026-10-11)
+
+This source review is paired with an expanded cross-language trace across ten
+workloads. The comparison is against the pinned,
+telemetry-instrumented reference source; telemetry hooks are excluded from the
+numerical contract.
+
+| Numerical stage | SciPy 1.18.1 | Rust BDF | Audit result |
+| --- | --- | --- | --- |
+| NDF coefficients and initial difference table | `bdf.py`: `kappa`, `gamma`, `alpha`, `error_const`, `D[0:2]` | `BDF_solver.rs`: runtime initialization | Coefficient formulas and order-1 initialization match. |
+| Step clipping and predictor | `_step_impl_core`: max/min-step adjustment, final-bound clipping, predictor `sum(D[:order+1])`, `psi` | `_step_impl`: same bounds, `proposed_step_time`, predictor and `psi` | Matched forward/backward, rejection, auto-first-step and endpoint cases pass; the one final-bound LU difference is isolated to rounding and documented below. Rust additionally returns typed no-progress/underflow errors. |
+| Newton iteration | `solve_bdf_system`: 4 iterations, scaled correction norm, rate test, accumulated correction | `solve_bdf_system`: same iteration budget and rate tests using reusable workspace | Same stopping equations. Rust validates RHS dimension/finiteness and returns typed retry causes. |
+| Constant-J Newton failure | `current_jac = self.jac is None`; failure skips same-J refresh and halves step | Previously initialized `current_jac=false`, causing an unnecessary second Newton solve at the same candidate although constant J cannot refresh | Fixed: initialize `current_jac` from `JacobianRefreshPolicy::Constant`. Regression `constant_jacobian_newton_failure_reduces_step_without_same_candidate_retry` passes. |
+| State-dependent/FD Jacobian refresh and LU | Refresh once after failed Newton when `current_jac` is false; refactor shifted matrix; error-based rejection retains LU, order/step change invalidates it | Corresponding refresh policies and factorization lifetime in `_step_impl` | Standard matched FD case agrees on `njev`, `nlu`, accepted/rejected steps, order changes, Newton and linear solve counts. The stale constant-J retry case differs by one LU (`245` Rust vs `244` SciPy), localized to the final boundary step: Rust clips a candidate that rounds just beyond `t_bound` and invalidates LU; SciPy lands on the bound and reuses LU. All prior 278 accepted-step LU deltas match; this is a documented endpoint-rounding branch difference, not a hidden controller/retry divergence. |
+| Local error and order controller | Accepted-state scale; current and adjacent-order error estimates; argmax of three order factors; cap factor at 10 | `fill_tolerance_scale` on converged state; `select_order_and_step_factor`; configurable `max_order_cap` | Default cap 5 and equations match by inspection. Matched stories now compare accepted/rejected attempts and order-change totals (stiff scalar `6`, Robertson `4`, FD `6`, backward `6`, auto-first-step `4`, equal to SciPy 1.18.1). `max_order_cap < 5` is a Rust API extension. |
+| Dense output | `BdfDenseOutput` cumulative-product polynomial over the stored difference table | No public Rust BDF dense-output evaluator; accepted adaptive trajectory is exposed | Three shared interior-time checks compare SciPy dense interpolation with independent Rust solves ending at those times. This strengthens trajectory evidence but does not validate Rust's interpolation implementation; direct parity remains unavailable until Rust exposes an evaluator. |
+| Initial-step selection and finite-difference Jacobian | `common.py::select_initial_step`, `num_jac` | `common.rs::try_select_initial_step`, adaptive dense FD helper | Auto-first-step scalar case matches final state and native work counters. FD case has identical accepted/rejected steps, `njev=2`, and `nlu=47`. SciPy reports `nfev=506`, while raw RHS callbacks are 510 (2 FD baseline + 2 FD probes); Rust reports 509 actual callbacks because it reuses the initial RHS as the initial FD baseline. Thus `nfev` differs by design, not by an unexplained callback discrepancy. |
+
+Debug evidence: the pinned SciPy 1.18.1 story passes ten matched cases: constant/FD Jacobians, stale constant-J retry, Robertson, backward integration, automatic first step, short HIRES, combustion-like kinetics, a non-autonomous mixed-scale system and a fully coupled dense system. It compares final states plus three shared interior times; maximum scaled drift is `1.109e-7` at final state and `0.404` across samples, under the explicit gate of `2`. Accepted/rejected attempts, order changes, Newton work and linear solves match. FD `nfev` deltas are explained by SciPy excluding finite-difference baseline/probe calls while Rust reuses its initial RHS. Attempt-level LU tracing localizes the sole factorization difference (`245` vs `244`) to final-boundary rounding; all preceding 278 per-step LU deltas match. This is a documented floating-point branch difference, not an unexplained algorithm divergence. Separate Rust-only contracts cover `max_steps`, callback errors, no-progress and typed underflow; SciPy has no equivalent for the configured step budget, and callback/error APIs differ. Direct dense-output parity remains unavailable because standalone Rust BDF has no public evaluator.
+
+**Parity conclusion (2026-10-12):** Rust BDF numerical-core parity is closed for
+the matched SciPy 1.18.1 workload/controller matrix above. This is not full
+SciPy API or interpolation parity. The 2026-10-11 release campaign's SciPy
+parity story and Python-vs-Rust benchmark passed; its only failing stage was
+`stories_fast`, with two test-contract issues subsequently corrected. The BDF
+debug module now passes `91/91` non-ignored tests. A post-fix release fast-story
+rerun remains part of the broader release confirmation.
+
+The opt-in release benchmark passed on the local Windows 11 machine with pinned
+Python 3.14.6 / NumPy 2.5.4 / SciPy 1.18.1, two warmups and nine telemetry-off
+samples. It compares SciPy `BDF` construction+integration+accepted-state capture
+against Rust `ODEsolver::try_solve` numerical initialization/integration and
+normal result collection; Rust symbolic preparation/configuration is excluded.
+The latest SciPy/Rust median milliseconds were: stiff scalar `10.720/0.148`,
+Robertson `1.996/0.031`, stiff scalar FD `10.765/0.147`, backward scalar
+`1.800/0.024`, and automatic first step `4.588/0.065`. Accepted/rejected counts
+matched in all five. FD `nfev` was `506/509` for the already documented
+initial-baseline reuse; maximum final-state scaled drift was `1.109e-7`. This
+is a local measurement with explicitly different lifecycle boundaries, not a
+stable cross-machine baseline. Compact report:
+`test_reports/BDF_SciPy_Parity/release/numerical__BDF__scipy_parity__bdf_python_vs_rust_numerical_core_release_benchmark.md`.
+
+The ignored cross-language story now runs ten matched cases and checks three
+interior sample times as well as final state. Mapped-counter parity accounts for
+SciPy's FD `nfev` exclusions and the single endpoint-rounding LU branch; the
+table retains raw values and FD operation counts. The stale-J retry trace still
+matches per-step factorization counts for the first 278 accepted steps. Rust
+interior values come from separate integrations to the sample times because
+there is no public Rust dense-output evaluator; this is stronger trajectory
+sampling, not interpolation-implementation parity. Existing independent
+correctness gates remain separate: exact scalar/non-autonomous solutions,
+Robertson invariants, and the piecewise continuation comparison with analytic,
+LSODE2 and BE references.
+Compact report:
+`test_reports/BDF_SciPy_Parity/debug/numerical__BDF__scipy_parity__bdf_rust_vs_scipy_matched_workloads_story.md`.
 
 Implementation order:
 
-1. **BD-23, numerical fidelity audit.** Compare step clipping, NDF coefficients,
-   Newton stopping/retry, Jacobian refresh/LU reuse, error scales, order choice,
-   and initial-step selection line by line. Record intentional extensions and
-   corrections; correct unexplained divergences before optimizing. Add analytic
-   and stiff reference tests that check final/intermediate accuracy, accepted /
-   rejected work, RHS/Jacobian evaluations and factorizations. Do not require
-   identical adaptive meshes. New direct stiff-decay and stiff-logistic tests
-   pass in debug against independent closed-form solutions and emit operation
-   counters. The adjacent-order scale regression also passes in debug and
-   distinguishes accepted-state from predictor scaling. Remaining: compare
-   accuracy/work with the pinned reference and confirm the controller in release.
+1. **BD-23, numerical fidelity audit.** [x core; interpolation API open] The
+   pinned SciPy 1.18.1 source audit and ten-workload debug parity story cover
+   controller, Jacobian lifecycle, order changes, endpoint clipping, forward/
+   backward integration and three shared trajectory samples. The only native
+   counter deltas are classified: FD `nfev` accounting and one final-bound LU
+   rounding branch. Direct interpolation implementation parity is unavailable
+   until standalone BDF exposes a public dense-output evaluator. Do not require
+   identical adaptive meshes.
 2. **BD-24, Jacobian API semantics.** [~] The legacy `jac_sparsity` and
    `vectorized` fields remain for source compatibility, but are no longer
    silently ignored: a supplied sparsity mask on the FD route and
@@ -218,8 +276,10 @@ Implementation order:
    failure.
    The active dense FD path now uses per-component `max(|y_i|, atol_i)` scales,
    RHS-directed perturbations, a retained per-component perturbation factor,
-   round-off retry and factor adaptation against SciPy 1.14.1. Independent tests
-   cover mixed component scales and a round-off-sensitive derivative. The
+   round-off retry and factor adaptation, originally compared against SciPy
+   1.14.1. Independent tests cover mixed component scales and a round-off-
+   sensitive derivative. Revalidate this contract against the pinned SciPy
+   1.18.1 reference before treating the comparison as current fidelity evidence. The
    low-level API now exposes `BdfJacobianSource::{FiniteDifference,
    StateDependent, Constant}`; legacy `Option<jac>` adapts to FD or
    state-dependent semantics. Initial constant and callback Jacobians are

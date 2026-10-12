@@ -4,9 +4,11 @@ use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresTerminationReason, LevenbergMarquardt, MinimizationReport,
     PreparedSymbolicLeastSquaresProblem,
 };
-use crate::numerical::Nonlinear_systems::symbolic::SymbolicProblemOptions;
+use crate::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, SymbolicLambdifyFrontend, SymbolicProblemOptions,
+};
 use crate::symbolic::symbolic_engine::Expr;
-use log::{log, Level};
+use log::{Level, log};
 use nalgebra::DVector;
 use std::collections::HashMap;
 use std::error::Error;
@@ -100,6 +102,8 @@ pub struct Fitting {
     pub last_statistics: Option<SolveStatistics>,
     telemetry_mode: LeastSquaresTelemetryMode,
     log_level: Option<Level>,
+    symbolic_frontend: SymbolicLambdifyFrontend,
+    lambdify_execution_policy: LambdifyExecutionPolicy,
     /// Prepared rectangular frontend retained between repeated solves.
     prepared_least_squares: Option<PreparedSymbolicLeastSquaresProblem>,
 }
@@ -141,6 +145,8 @@ impl Fitting {
             last_statistics: None,
             telemetry_mode: LeastSquaresTelemetryMode::Off,
             log_level: None,
+            symbolic_frontend: SymbolicLambdifyFrontend::ExprLegacy,
+            lambdify_execution_policy: LambdifyExecutionPolicy::Sequential,
         }
     }
 
@@ -280,6 +286,25 @@ impl Fitting {
     pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
         self.telemetry_mode = mode;
         self
+    }
+
+    /// Selects the in-process symbolic representation used during preparation.
+    pub fn with_symbolic_frontend(mut self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.invalidate_prepared();
+        self.symbolic_frontend = frontend;
+        self
+    }
+
+    /// Selects sequential or thresholded parallel callback evaluation.
+    pub fn with_lambdify_execution_policy(mut self, policy: LambdifyExecutionPolicy) -> Self {
+        self.invalidate_prepared();
+        self.lambdify_execution_policy = policy;
+        self
+    }
+
+    /// Returns the symbolic frontend selected for the current prepared model.
+    pub fn symbolic_frontend(&self) -> SymbolicLambdifyFrontend {
+        self.symbolic_frontend
     }
 
     /// Enables fitting log records through the host application's `log` facade.
@@ -599,7 +624,9 @@ impl Fitting {
         let options = SymbolicProblemOptions::new()
             .with_variables(self.unknown_coeffs.clone())
             .with_equation_parameters(vec![self.arg.clone()])
-            .with_lambdify_backend();
+            .with_lambdify_backend()
+            .with_lambdify_frontend(self.symbolic_frontend)
+            .with_lambdify_execution_policy(self.lambdify_execution_policy);
         self.prepared_least_squares = Some(
             PreparedSymbolicLeastSquaresProblem::from_expressions(equations.to_vec(), options)
                 .map_err(|error| FittingError::Preparation(error.into()))?,
@@ -1120,7 +1147,6 @@ mod tests {
     }
     #[test]
     fn test_noisy_linear_fit() {
-        use rand::Rng;
         let x_data = (0..1000).map(|x| x as f64).collect::<Vec<f64>>();
         // to y data add some noise from -0.05 to 0.05
         let y_data = x_data

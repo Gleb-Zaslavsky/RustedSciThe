@@ -500,6 +500,7 @@ mod tests {
             accepted_steps_total: 0,
             candidate_step_attempts_total: 0,
             rejected_step_attempts_total: 0,
+            bdf_order_changes_total: 0,
             linear_solve_attempts_total: 0,
             nonlinear_solve_calls: 4,
             nonlinear_iterations_total: 9,

@@ -83,6 +83,101 @@ Telemetry is opt-in and defaults to `RadauTelemetryMode::Off`.
 | Disabled mode | no counters or timings are accumulated | `telemetry_off_keeps_counters_and_timings_empty` |
 | Typed failures | shape, non-finite output, callback source error and invalid configuration remain classified | `error_contracts` module |
 | Native FD attribution | finite-difference residual probes are reported separately from Jacobian callback count | `native_residual_only_uses_finite_difference_jacobian` |
+| SciPy numerical parity | matched stiff-scalar, Robertson and combustion-like workloads; endpoints plus three common dense-output samples, native SciPy counters, raw callback/FD/LU/solve counts and Robertson controller trace | `radau_rust_vs_scipy_matched_workload_and_counter_semantics_story` (ignored; requires `IVP_SCIPY_PYTHON`) |
+| Extended SciPy fidelity | backward solve, auto initial-step parity on backward stiff scalar and forward HIRES, nearby Robertson tolerance, oversized `first_step` rejection, underflow and accepted-step budget semantics | `radau_scipy_extended_direction_initial_step_and_failure_story` (ignored; debug cross-language story) |
+| Extended SciPy fidelity | backward solve, auto initial-step parity on backward stiff scalar and forward HIRES, oversized `first_step` rejection, underflow and accepted-step budget semantics | `radau_scipy_extended_direction_initial_step_and_failure_story` (ignored; debug cross-language story) |
+| Independent solver gate | Non-analytic Robertson shared workload; same interval/tolerances/step cap; Radau compared against validated LSODE2/BDF | `radau_robertson_matches_independent_lsode2_reference` |
+| Python wall vs Rust numerical core timing | release-only, matched analytic-Jacobian workloads; Python construction+integration vs Rust pre-prepared `solve()`, telemetry disabled, 3 warmups and 21 measured repeats | `radau_scipy_release_core_timing_benchmark_story` (ignored; release only) |
+
+The vendored Python reference has an opt-in instrumentation layer. Counter
+units are deliberately explicit: SciPy `nfev` excludes finite-difference
+probes; Rust `factorizations` counts one real/complex shifted pair while SciPy
+`nlu` counts both LU calls; solve counts compare Rust's real+complex solves to
+Python `solve_lu` calls. The first mapping is recorded as a contract to verify,
+not an assertion that adaptive counters must all match. Cross-language times
+are diagnostic only.
+
+The independent Robertson gate also compares Radau with LSODE2/BDF on the
+same shared symbolic IVP. Exact scalar and coupled-invariant gates remain
+separate, so agreement between adaptive solvers is not the only correctness
+oracle. Its compact report is written under `test_reports/Radau_CrossSolver/`.
+
+The ignored cross-language story requires NumPy and SciPy in the selected
+Python environment. SciPy `v1.18.1` is the pinned source of truth; the report
+records Python/NumPy/SciPy versions and source hashes. The matched fixtures
+compare endpoints and dense-output samples at 25%, 50%, and 75% of the interval
+for stiff scalar, Robertson, and combustion-like problems. Run it with
+`IVP_SCIPY_PYTHON=<python.exe>` set; timings are not a performance gate because
+the measured runtime boundaries differ.
+
+The extended debug story passed on 2026-10-11 with SciPy 1.18.1. Backward
+stiff-scalar selected `h=2.5e-3` in both implementations, accepted 4 steps,
+and had scaled final/sample errors `2.826e-6` / `2.174e-7`. Forward HIRES
+selected `h=5.931127e-4` in both, accepted 139 and rejected 5 steps in each;
+scaled final/sample errors were `3.673e-2` / `7.736e-2`, within the shared
+20-scale envelope. The nearby Robertson case (`rtol=8e-8`, explicit
+`first_step=2e-4`) accepts 20/rejects 2 in both solvers and each calls the
+Jacobian 7 times; the base `rtol=1e-7` case has 19 accepted steps and retains
+the single backend-sensitive Jacobian-refresh/Newton-retry delta. Both reject
+`first_step=0.2` over a `0.1` interval before
+stepping; this exposed and fixed the Rust config drift (typed
+`InvalidFirstStep`). At `t=1e16`, both report step underflow (Rust retains
+`StepUnderflow`; SciPy status is `failed`). Rust's `max_steps` exhaustion is
+compared with a clearly labeled one-accepted-step external SciPy driver cap;
+this is not claimed as a native SciPy option. The underflow counters are not
+identical by design: Rust rejects the clipped interval before a Newton trial,
+while SciPy performs one doomed trial and records one rejected step before
+failing on the next attempt. This is an early representability guard, not a
+status/correctness mismatch. Full table:
+`test_reports/Radau_SciPy_Parity/debug/numerical__Radau__tests__scipy_parity__radau_scipy_extended_direction_initial_step_and_failure_story.md`.
+
+Initial debug parity work (2026-10-11, SciPy 1.18.1) exposed and fixed the
+aggregate Rust `linear_solves` telemetry defect; a Dense backend story now
+locks `linear_solves == real_solves + complex_solves`. Per-attempt traces then
+found two controller defects in Rust: the error-rejection branch omitted the
+SciPy Newton safety multiplier, and retry sizes overwrote accepted-step history
+used by the two-step controller. Both fixes made the Robertson accepted-step
+trace agree with SciPy to floating-point roundoff (19 accepted steps, one error
+rejection, 12 LU pairs in both implementations).
+
+The remaining work-count delta is localized to the final clipped Robertson
+step. SciPy's stale-J Newton attempt fails after two iterations, refreshes J,
+and succeeds on retry; Rust converges using stale J. This explains SciPy's
+extra Jacobian callback, two Newton iterations, four linear solves, and six
+RHS stage evaluations. This is an expected backend-dependent branch, not an
+intentional controller-policy difference: Rust uses its own in-place real and
+complex Dense LU, while SciPy uses LAPACK and complex arithmetic. The endpoint
+scaled error is `6.061e-3`; the maximum of the three sampled trajectory errors
+is `2.749e-3`, both inside the configured envelope. The nearby Robertson
+tolerance removes the Jacobian/retry-count delta, confirming that it tracks the
+numerical boundary rather than a stable controller mismatch. HIRES is an
+independent 8-state stiff case with matched step and Jacobian counts. For
+stiff-scalar and
+combustion-like, accepted steps/Newton work match; Rust reports 35 residual
+calls versus SciPy `nfev=36` because SciPy evaluates the final endpoint RHS
+eagerly while Rust evaluates it lazily only if another step needs it.
+
+The first release-only timing comparison (2026-10-11) uses three workloads,
+three warmups and 21 measured repetitions. Python measures solver construction
+plus integration with a ready analytic Jacobian and the same three sampled
+outputs; Rust measures `solve()` on a pre-prepared native callback model, so
+Rust symbolic preparation is excluded. Telemetry is disabled in both paths.
+Median timings in milliseconds:
+
+| Workload | Rust numerical core | Python wall | Python/Rust |
+| --- | ---: | ---: | ---: |
+| stiff-scalar | 0.0065 (p10 0.0063, p90 0.0071) | 0.4633 (min 0.4537, p90 0.6287) | 71.28x |
+| Robertson | 0.0216 (p10 0.0214, p90 0.0219) | 2.0500 (min 2.0198, p90 2.4336) | 94.91x |
+| combustion-like | 0.0073 (p10 0.0072, p90 0.0074) | 0.4982 (min 0.4870, p90 0.6488) | 68.25x |
+
+This is an intentionally asymmetric scope comparison, not a pure language
+speedup or an end-to-end symbolic-solver comparison: Rust excludes symbolic
+preparation, while SciPy receives an already available analytic Jacobian.
+The runner enforces Python 3.14.6, NumPy 2.5.4, and SciPy 1.18.1.
+Interpret the ratios as Python wall-clock cost relative to the Rust numerical
+core under this contract only. The compact report is
+`test_reports/Radau_SciPy_Parity/release/numerical__Radau__tests__scipy_parity__radau_scipy_release_core_timing_benchmark_story.md`;
+repeat captures on the same host before treating it as a statistical baseline.
 
 The callback and linear timing fields are inclusive within their own stage but
 are not additive with parent preparation/solve scopes. Reports must preserve
@@ -498,6 +593,24 @@ full-solve issue is therefore not an AOT callback regression in this matched
 case; any further gain must start with the Dense linear/factorization path or
 with the Newton/linear interaction. The compact report now contains these
 stage-share columns for future `n=1024/2048` repetitions.
+
+### Complete Release Test Pass: 2026-10-11
+
+The full Radau test namespace, including ignored tests, completed successfully
+with `180 passed, 0 failed, 0 ignored` using
+`cargo test --release --lib --no-default-features numerical::Radau -- --include-ignored --nocapture --test-threads=1`.
+This includes the pinned SciPy parity stories, release timing story, AOT
+lifecycle/policy tests, continuation stories, telemetry contracts and the
+process-isolated producer/consumer handoff. The run log is
+`test_reports/Radau_release_manual/all_tests_20261011T193922Z/technical/radau_all_tests.log`;
+all 48 Markdown report artifacts under the run root (current reports and
+archives) have `status: passed`. The two visible legacy `panicked at` messages
+are expected panic-contract tests; both test cases themselves passed.
+
+This successful full run closes the planned Radau correctness, fidelity,
+lifecycle and ignored-story release gate for the currently documented scope.
+The remaining TODO entries are explicitly future extensions or optional
+statistical/performance-baseline work, not failures of this release gate.
 
 ### Statistical Baseline Capture: 2026-10-07
 

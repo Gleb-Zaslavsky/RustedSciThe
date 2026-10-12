@@ -35,8 +35,8 @@ use super::new::finite_difference::FiniteDifferenceJacobianCallback;
 use super::new::native_callbacks::{NativeJacobianFn, NativeResidualCallback, NativeResidualFn};
 use super::new::output::{RadauOutput, RadauOutputPolicy as InternalOutputPolicy};
 use super::new::solver::{
-    RadauSolveResult, try_solve_dense_with_callbacks_with_output,
-    try_solve_symbolic_dense_with_output,
+    try_solve_dense_with_callbacks_with_output, try_solve_symbolic_dense_with_output,
+    RadauSolveResult,
 };
 use super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
 
@@ -391,6 +391,7 @@ pub struct RadauTelemetryScopeMetadata {
 pub struct RadauAdaptiveStepTelemetry {
     pub h_abs: f64,
     pub error_norm: f64,
+    pub newton_iterations: usize,
     pub accepted: bool,
     pub was_retry: bool,
     pub next_h_abs: f64,
@@ -502,6 +503,7 @@ impl RadauTelemetryReport {
             ("jacobian_calls", c.jacobian_calls),
             ("linear_solves", c.linear_solves),
             ("newton_iterations", c.newton_iterations),
+            ("error_estimates", c.error_estimates),
             ("accepted_steps", c.accepted_steps),
             ("rejected_steps", c.rejected_steps),
             ("allocations", c.allocations),
@@ -592,6 +594,7 @@ impl RadauTelemetryReport {
                 .map(|step| RadauAdaptiveStepTelemetry {
                     h_abs: step.h_abs,
                     error_norm: step.error_norm,
+                    newton_iterations: step.newton_iterations,
                     accepted: step.accepted,
                     was_retry: step.was_retry,
                     next_h_abs: step.next_h_abs,

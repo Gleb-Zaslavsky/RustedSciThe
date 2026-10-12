@@ -9,9 +9,23 @@ use super::super::new::callbacks::PreparedSymbolicCallbacks;
 use super::super::new::config::{RadauAssembly, RadauConfig, RadauExecution, RadauMatrixLayout};
 use super::super::new::solver::try_solve_symbolic_dense;
 use super::super::new::telemetry::{RadauTelemetry, RadauTelemetryMode};
+use crate::numerical::LSODE2::{Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::ivp_workloads::{
     WorkloadKind, build_workload, parameter_continuation_target,
 };
+use tabled::{Table, Tabled};
+
+#[derive(Debug, Tabled)]
+struct CrossSolverRow {
+    workload: &'static str,
+    reference_solver: &'static str,
+    dimension: usize,
+    interval: String,
+    rtol: String,
+    atol: String,
+    scaled_final_state_error: String,
+    gate: &'static str,
+}
 
 struct Case {
     callbacks: PreparedSymbolicCallbacks,
@@ -296,6 +310,75 @@ fn structured_parameter_continuation_matches_fresh_reference_for_both_frontends(
             );
         }
     }
+}
+
+#[test]
+fn radau_robertson_matches_independent_lsode2_reference() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "Radau_CrossSolver",
+        "numerical::Radau::tests::workloads::radau_robertson_matches_independent_lsode2_reference",
+    );
+    let workload = build_workload(WorkloadKind::Robertson, 3);
+    let t_bound = 0.002;
+    let max_step = 0.00025;
+
+    let mut bdf_config = Lsode2ProblemConfig::new(
+        workload.equations.clone(),
+        workload.variables.clone(),
+        workload.time_variable.clone(),
+        0.0,
+        workload.initial_state.clone(),
+        t_bound,
+        max_step,
+        1.0e-7,
+        1.0e-10,
+    )
+    .with_equation_parameters(workload.parameter_names.clone())
+    .with_equation_parameter_values(workload.parameter_values.clone());
+    bdf_config.first_step = Some(max_step * 0.2);
+    let mut bdf = Lsode2Solver::new(bdf_config).expect("LSODE2 Robertson config");
+    bdf.solve().expect("LSODE2 Robertson solve");
+    let (_, bdf_states) = bdf.get_result();
+    assert!(bdf_states.nrows() > 0, "LSODE2 returned no states");
+    let bdf_final = bdf_states.row(bdf_states.nrows() - 1);
+
+    let mut radau = case(
+        WorkloadKind::Robertson,
+        3,
+        RadauAssembly::ExprLegacy,
+        RadauMatrixLayout::Dense,
+    );
+    radau.config.t_bound = t_bound;
+    radau.config.first_step = Some(max_step * 0.2);
+    radau.config.max_step = max_step;
+    radau.config.rtol = 1.0e-7;
+    radau.config.atol = 1.0e-10;
+    let radau_final = solve(&mut radau);
+
+    let scaled_error = radau_final
+        .iter()
+        .zip(bdf_final.iter())
+        .map(|(radau_value, bdf_value)| {
+            (radau_value - bdf_value).abs() / (1.0e-10 + 1.0e-7 * bdf_value.abs())
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        scaled_error < 20.0,
+        "Radau/LSODE2 Robertson scaled final-state difference={scaled_error:.3e}"
+    );
+    crate::Utils::test_reporting::capture_test_block(format!(
+        "Shared Robertson equations and initial state; both solvers use t=[0, {t_bound}], max_step={max_step}, rtol=1e-7, atol=1e-10. Independent solver check complements, but does not replace, the SciPy fidelity fixtures.\n{}",
+        Table::new([CrossSolverRow {
+            workload: "Robertson",
+            reference_solver: "LSODE2/BDF",
+            dimension: 3,
+            interval: format!("[0, {t_bound}]"),
+            rtol: "1e-7".to_owned(),
+            atol: "1e-10".to_owned(),
+            scaled_final_state_error: format!("{scaled_error:.3e}"),
+            gate: "< 20",
+        }])
+    ));
 }
 
 fn kind_dimension(kind: WorkloadKind) -> usize {

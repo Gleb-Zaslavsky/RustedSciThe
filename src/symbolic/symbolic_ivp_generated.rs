@@ -120,6 +120,8 @@ pub struct IvpBackendStatistics {
     pub candidate_step_attempts_total: usize,
     /// BDF rejected candidate steps, including internal retries.
     pub rejected_step_attempts_total: usize,
+    /// Accepted BDF controller updates that changed the method order.
+    pub bdf_order_changes_total: usize,
     /// BDF linear-solve attempts, including failed solves.
     pub linear_solve_attempts_total: usize,
     pub nonlinear_solve_calls: usize,
@@ -130,7 +132,8 @@ pub struct IvpBackendStatistics {
     pub jacobian_ms_total: f64,
     /// BDF RHS calls; includes initialization and finite-difference probes.
     pub bdf_nfev_total: usize,
-    /// BDF Jacobian evaluations, including the initial Jacobian.
+    /// BDF Jacobian evaluations, including the initial callback/FD evaluation.
+    /// A user-supplied constant matrix is not an evaluation and is not counted.
     pub bdf_njev_total: usize,
     /// BDF shifted-Jacobian factorization attempts, including failures.
     pub bdf_nlu_total: usize,
@@ -172,7 +175,7 @@ impl IvpBackendStatistics {
 
     pub fn table_report(&self) -> String {
         format!(
-            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_matrix_assembly_ms={:.3}(nested) linear_solve_ms={:.3}(nested) bdf_step_snapshot_ms={:.3}(nested) bdf_predictor_setup_ms={:.3}(nested) bdf_newton_rhs_assembly_ms={:.3}(nested) bdf_newton_correction_norm_ms={:.3}(nested) bdf_newton_state_update_ms={:.3}(nested) bdf_error_estimate_ms={:.3}(nested) bdf_nordsieck_update_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} linear_solve_attempts={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
+            "prepare_calls={} prepare_ms_total={:.3} solve_calls={} solve_ms_total={:.3} integration_loop_ms={:.3}(nested) bdf_step_ms={:.3}(nested) output_collection_ms={:.3}(nested) result_assembly_ms={:.3}(nested) linear_factorization_ms={:.3}(nested) linear_matrix_assembly_ms={:.3}(nested) linear_solve_ms={:.3}(nested) bdf_step_snapshot_ms={:.3}(nested) bdf_predictor_setup_ms={:.3}(nested) bdf_newton_rhs_assembly_ms={:.3}(nested) bdf_newton_correction_norm_ms={:.3}(nested) bdf_newton_state_update_ms={:.3}(nested) bdf_error_estimate_ms={:.3}(nested) bdf_nordsieck_update_ms={:.3}(nested) steps={} accepted_steps={} candidate_steps={} rejected_step_attempts={} order_changes={} linear_solve_attempts={} nonlinear_solves={} nonlinear_iters_total={} nonlinear_iters_avg={:.3} residual_calls={} residual_ms_total={:.3} residual_ms_avg={:.6} jacobian_calls={} jacobian_ms_total={:.3} jacobian_ms_avg={:.6} bdf[nfev/njev/nlu]={}/{}/{}",
             self.backend_prepare_calls,
             self.backend_prepare_ms_total,
             self.solve_calls,
@@ -195,6 +198,7 @@ impl IvpBackendStatistics {
             self.accepted_steps_total,
             self.candidate_step_attempts_total,
             self.rejected_step_attempts_total,
+            self.bdf_order_changes_total,
             self.linear_solve_attempts_total,
             self.nonlinear_solve_calls,
             self.nonlinear_iterations_total,

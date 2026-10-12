@@ -812,7 +812,7 @@ mod tests_real_odes {
         radau.solve();
 
         assert_eq!(radau.status, "finished");
-        let (_, y_result) = radau.get_result();
+        let (_, _y_result) = radau.get_result();
         //let y_res = y_result.unwrap();
 
         // Check that solution remains bounded
@@ -1216,7 +1216,7 @@ mod tests_real_odes_parallel {
         radau.solve();
 
         assert_eq!(radau.status, "finished");
-        let (_, y_result) = radau.get_result();
+        let (_, _y_result) = radau.get_result();
         //let y_res = y_result.unwrap();
 
         // Check that solution remains bounded

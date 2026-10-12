@@ -2,7 +2,7 @@ use crate::global::THRESHOLD as T;
 use crate::numerical::Radau::Radau_newton::RadauNewton;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use log::info;
+
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::sync::Mutex;
@@ -235,6 +235,7 @@ impl RadauNewton {
     /// which already dispatches to the parallel Jacobian/function generation
     /// path when `self.parallel` is enabled. Keeping this thin wrapper avoids a
     /// second independently evolving solver pipeline.
+    #[allow(dead_code)]
     pub fn eq_generate_parallel(&mut self) {
         self.set_parallel(true);
         self.eq_generate();

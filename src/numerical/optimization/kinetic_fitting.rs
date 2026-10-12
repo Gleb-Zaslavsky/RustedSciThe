@@ -307,6 +307,16 @@ impl Fit {
                 .with_tolerance(self.tolerance)
                 .with_max_iterations(self.max_iter)
                 .build(),
+            Method::GAVIN => UniversalFitting::new()
+                .with_gavin()
+                .with_data(self.x_data.clone(), self.y_data.clone())
+                .with_equation(self.kinetic_model.equation())
+                .with_arg(self.kinetic_model.arg_name().to_string())
+                .with_unknowns(self.kinetic_model.vec_of_params())
+                .with_initial_guess(initial_guess)
+                .with_tolerance(self.tolerance)
+                .with_max_iterations(self.max_iter)
+                .build(),
             Method::VARPRO => {
                 let mut universal = UniversalFitting::new()
                     .with_method(Method::VARPRO)
@@ -347,6 +357,16 @@ impl Fit {
                     .ok_or(KineticFittingError::MissingSolutionMap)?;
                 self.map_of_solutions = Some(self.remap_varpro_solution(map));
                 self.r2 = fit.r_squared().unwrap_or(0.0);
+                Ok(self)
+            }
+            UniversalFittingResult::GAVIN(fit) => {
+                self.map_of_solutions = Some(
+                    fit.parameter_names
+                        .into_iter()
+                        .zip(fit.fit.parameters.iter().copied())
+                        .collect(),
+                );
+                self.r2 = fit.fit.r_squared.unwrap_or(0.0);
                 Ok(self)
             }
         }
@@ -405,6 +425,7 @@ impl Fit {
         }
         let expected_guess_len = match self.kinetic_model.preferred_method() {
             Method::LM => self.kinetic_model.vec_of_params().len(),
+            Method::GAVIN => self.kinetic_model.vec_of_params().len(),
             Method::VARPRO => self
                 .kinetic_model
                 .varpro_unknowns()
@@ -427,6 +448,10 @@ impl Fit {
     fn effective_initial_guess(&self) -> Vec<f64> {
         match self.kinetic_model.preferred_method() {
             Method::LM => self
+                .initial_guess
+                .clone()
+                .unwrap_or_else(|| self.kinetic_model.vec_of_initial_guess()),
+            Method::GAVIN => self
                 .initial_guess
                 .clone()
                 .unwrap_or_else(|| self.kinetic_model.vec_of_initial_guess()),

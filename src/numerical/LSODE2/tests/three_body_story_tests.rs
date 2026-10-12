@@ -548,7 +548,7 @@ fn lsode2_three_body_problem_backend_story_dashboard() {
     baseline_solver
         .prepare()
         .expect("baseline prepare should succeed");
-    let baseline_summary = baseline_solver
+    let _baseline_summary = baseline_solver
         .solve_with_summary()
         .expect("baseline three-body solve should finish");
     let (baseline_times, baseline_solution) = baseline_solver.get_result();

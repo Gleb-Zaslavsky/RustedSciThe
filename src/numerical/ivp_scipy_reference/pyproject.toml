@@ -1,0 +1,13 @@
+[project]
+name = "rustedscithe-ivp-scipy-reference"
+version = "0.1.0"
+description = "Repository-only SciPy Radau and BDF references for numerical parity tests"
+requires-python = "==3.14.*"
+dependencies = [
+    "numpy==2.5.4",
+    "scipy==1.18.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

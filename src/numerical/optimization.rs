@@ -2,34 +2,35 @@
 //! - Levenberg-Marquardt algorithm for:
 //!         - solving nonlinear equation system
 //!         - fitting data  
-//! LM uses analytical Jacobian matrix
-//! - H.P.Gavin's Levenberg-Marquardt algorithm
+//! The canonical least-squares LM accepts numerical residual/Jacobian
+//! providers; the separate Gavin LM supports finite-difference/Broyden,
+//! user-provided analytic, and prepared symbolic Jacobian routes.
 //!
-/// not production ready
-pub mod Gavin_chi;
 /// Compatibility re-export; interpolation now lives in `numerical::interpolation`.
 pub use crate::numerical::interpolation::ppoly as PPoly;
 /// some special cases of fitting
 pub mod fitting_features;
 /// Compatibility re-export; interpolation now lives in `numerical::interpolation`.
 pub use crate::numerical::interpolation::inter_n_extrapolate;
+/// Builder-pattern symbolic fitting adapter over Gavin's distinct LM controller.
+pub mod gavin_fitting;
 pub mod kinetic_fitting;
-mod lm_gavin;
-/// H.P.Gavin's Levenberg-Marquardt algorithm
+/// H.P. Gavin's Levenberg-Marquardt implementation with FD/Broyden, analytic,
+/// and prepared-symbolic Jacobian routes.
 ///
 /// Example#1
 /// ```
-///  use RustedSciThe::numerical::optimization::lm_gavin2::{LevenbergMarquardt, PolynomialModel};
+///  use RustedSciThe::numerical::optimization::lm_gavin::{LevenbergMarquardt, PolynomialModel};
 /// use nalgebra::DVector;
 /// use nalgebra::dvector;
-///  use crate::RustedSciThe::numerical::optimization::lm_gavin2::ObjectiveFunction;
+///  use crate::RustedSciThe::numerical::optimization::lm_gavin::ObjectiveFunction;
 ///  // you can define your own objective function
 ///   let model = PolynomialModel::new(2); // Quadratic
 ///        let mut lm = LevenbergMarquardt::new(model);
 ///
 ///        let t = DVector::from_vec((0..10).map(|i| i as f64).collect());
 ///        let p_true = dvector![1.0, 2.0, 0.5]; // 1 + 2x + 0.5x^2
-///        let y_true = lm.objective_fn.evaluate(&t, &p_true);
+///        let y_true = lm.objective_fn.evaluate(&t, &p_true).expect("model evaluation");
 ///
 ///        let p_initial = dvector![0.8, 1.8, 0.4];
 ///
@@ -42,7 +43,7 @@ mod lm_gavin;
 ///            Err(e) => panic!("Polynomial LM fitting failed: {}", e),
 ///        }
 ///  ```
-pub mod lm_gavin2;
+pub mod lm_gavin;
 /// nonlinear equation system solver implementation for fittting data. Fiitting function is symbolic expression.
 ///
 /// Example#1
@@ -109,3 +110,7 @@ pub mod sym_fitting;
 pub mod universal_fitting;
 pub mod varpro;
 pub use universal_fitting::{Method, UniversalFitting, UniversalFittingResult};
+
+#[cfg(test)]
+#[path = "optimization/gavin_story_tests.rs"]
+mod gavin_story_tests;

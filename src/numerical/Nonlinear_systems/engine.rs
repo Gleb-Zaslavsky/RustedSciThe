@@ -1598,6 +1598,7 @@ mod tests {
     }
 
     struct ScalarQuadraticProblem;
+    #[allow(dead_code)]
     struct CoupledPlainProblem;
 
     struct ReusableRosenbrockProblem {

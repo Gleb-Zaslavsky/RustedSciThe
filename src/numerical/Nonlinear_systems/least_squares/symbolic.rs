@@ -282,6 +282,24 @@ impl<'a> LeastSquaresProblem for BoundSymbolicLeastSquaresProblem<'a> {
     }
 
     fn validate_trial(&self, x: &DVector<f64>) -> bool {
+        BoundSymbolicLeastSquaresProblem::validate_trial(self, x)
+    }
+}
+
+impl<'a> BoundSymbolicLeastSquaresProblem<'a> {
+    /// Returns the report for the one-time shared symbolic preparation.
+    pub fn preparation_report(&self) -> &SymbolicPreparationReport {
+        self.bound.prepared().preparation_report()
+    }
+
+    /// Returns the backend selected during shared symbolic preparation.
+    pub fn backend_kind(&self) -> SymbolicBackendKind {
+        self.bound.prepared().backend_kind()
+    }
+
+    /// Checks finiteness and declared domain constraints without evaluating
+    /// the symbolic residual or Jacobian callbacks.
+    pub fn validate_trial(&self, x: &DVector<f64>) -> bool {
         x.len() == self.params.len()
             && x.iter().all(|value| value.is_finite())
             && self
@@ -289,9 +307,17 @@ impl<'a> LeastSquaresProblem for BoundSymbolicLeastSquaresProblem<'a> {
                 .iter()
                 .all(|&index| x.get(index).is_some_and(|value| *value > 0.0))
     }
-}
 
-impl<'a> BoundSymbolicLeastSquaresProblem<'a> {
+    /// Returns the number of prepared equations.
+    pub fn residual_count(&self) -> usize {
+        self.bound.prepared().as_problem().equations().len()
+    }
+
+    /// Returns the number of fitted symbolic variables.
+    pub fn parameter_count(&self) -> usize {
+        self.bound.prepared().variables().len()
+    }
+
     /// Evaluates the residual vector with typed symbolic/runtime errors preserved.
     pub fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
         NonlinearProblem::residual(&self.bound, x)
@@ -370,6 +396,14 @@ impl<'a> BoundSymbolicLeastSquaresProblem<'a> {
     /// Returns whether the selected backend supports direct Jacobian output.
     pub fn supports_jacobian_into(&self) -> bool {
         JacobianProvider::supports_jacobian_into(&self.bound)
+    }
+
+    /// Returns the number of named numeric parameters required by this model.
+    pub fn equation_parameter_count(&self) -> usize {
+        self.bound
+            .prepared()
+            .parameter_schema()
+            .map_or(0, |schema| schema.len())
     }
 }
 

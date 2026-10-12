@@ -6,6 +6,7 @@ param(
     [int]$SampleSize = 10,
     [int]$MeasurementSeconds = 1,
     [switch]$IncludeIgnoredStories,
+    [switch]$IncludeSciPyBenchmark,
     [switch]$IncludeDetailedBenches,
     [switch]$PlanOnly,
     [switch]$FailOnAny
@@ -100,6 +101,12 @@ Add-BdfStep "stories_fast" "story" {
 if ($IncludeIgnoredStories) {
     Add-BdfStep "stories_ignored" "story-ignored" {
         cargo test --release --lib --no-default-features numerical::BDF:: -- --ignored --nocapture --test-threads=1
+    }
+}
+
+if ($IncludeSciPyBenchmark) {
+    Add-BdfStep "benchmark_scipy_vs_rust_core" "benchmark-python-rust" {
+        cargo test --release --lib --no-default-features numerical::BDF::scipy_parity::bdf_python_vs_rust_numerical_core_release_benchmark -- --ignored --nocapture --test-threads=1
     }
 }
 

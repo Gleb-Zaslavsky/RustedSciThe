@@ -1,3 +1,4 @@
+ #![allow(dead_code)]
 //! AtomView-native Lambdify callback builders for BVP systems.
 //!
 //! This module intentionally does not belong to `legacy_lambdify`: the
@@ -569,7 +570,7 @@ pub(crate) fn sparse_residual_with_binding_and_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac, MatrixType, VectorType};
+
     use crate::symbolic::View::jacobian::SparseAtomJacobianEntry;
     use crate::symbolic::View::parser;
     use nalgebra::DVector;
@@ -613,7 +614,7 @@ mod tests {
     #[test]
     fn atomview_callback_reuses_compiled_functions_after_numeric_rebind() {
         let binding = BvpParameterBindingHandle::new(Some(vec![1.0]));
-        let mut callback = dense_residual_with_binding(
+        let  callback = dense_residual_with_binding(
             vec![parser::parse("p + x").expect("test Atom expression must parse")],
             vec!["p".to_string(), "x".to_string()],
             binding.clone(),
@@ -727,7 +728,7 @@ mod tests {
         ];
         let sequential = BvpLambdifyExecutionPolicy::Sequential;
         let parallel = BvpLambdifyExecutionPolicy::Parallel { min_work: 0 };
-        let mut seq_residual = dense_residual_with_binding_and_policy(
+        let seq_residual = dense_residual_with_binding_and_policy(
             residuals.clone(),
             arguments.clone(),
             binding.clone(),
@@ -735,7 +736,7 @@ mod tests {
             BvpLambdifyTelemetry::disabled(),
             sequential,
         );
-        let mut par_residual = dense_residual_with_binding_and_policy(
+        let par_residual = dense_residual_with_binding_and_policy(
             residuals,
             arguments.clone(),
             binding.clone(),

@@ -1,17 +1,26 @@
-//! High-level fitting facade over the symbolic LM and VarPro frontends.
+//! High-level fitting facade over classic LM, Gavin LM, and VarPro frontends.
 //!
 //! `UniversalFitting` is a small depot-style wrapper that lets callers choose
 //! the backend late in the builder chain. By default it uses the classic
-//! symbolic Levenberg-Marquardt path from `sym_fitting`. If `with_varpro()` or
-//! `with_method(Method::VARPRO)` is used, the same wrapper dispatches to the
-//! symbolic VarPro frontend.
+//! symbolic Levenberg-Marquardt path from `sym_fitting`. `with_gavin()` selects
+//! Gavin's distinct damping/Broyden controller, while `with_varpro()` selects
+//! symbolic variable projection. Controller-specific options remain explicit
+//! and unsupported shared options return a typed error.
 
+use crate::numerical::Nonlinear_systems::least_squares::{
+    LeastSquaresError, LeastSquaresTelemetryMode, LevenbergMarquardt,
+};
+use crate::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
+};
+use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
+use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
 use crate::numerical::optimization::sym_fitting::Fitting;
 use crate::numerical::optimization::varpro::symbolic::{
     SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
 };
-use crate::numerical::Nonlinear_systems::least_squares::{LeastSquaresError, LevenbergMarquardt};
 use crate::symbolic::symbolic_engine::Expr;
+use log::Level;
 use nalgebra::DVector;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -23,6 +32,8 @@ pub enum Method {
     LM,
     /// Symbolic variable projection fitting.
     VARPRO,
+    /// H.P. Gavin's symbolic LM controller with FD/Broyden updates.
+    GAVIN,
 }
 
 /// Result returned by [`UniversalFitting::build`].
@@ -31,6 +42,8 @@ pub enum UniversalFittingResult {
     LM(Fitting),
     /// The symbolic VarPro pipeline.
     VARPRO(SymbolicVarProFit),
+    /// Gavin's independently controlled symbolic LM fit.
+    GAVIN(GavinSymbolicFitResult),
 }
 
 impl UniversalFittingResult {
@@ -42,6 +55,13 @@ impl UniversalFittingResult {
         match self {
             UniversalFittingResult::LM(fitting) => fitting.solution_map(),
             UniversalFittingResult::VARPRO(fit) => fit.solution_map(),
+            UniversalFittingResult::GAVIN(fit) => Some(
+                fit.parameter_names
+                    .iter()
+                    .cloned()
+                    .zip(fit.fit.parameters.iter().copied())
+                    .collect(),
+            ),
         }
     }
 
@@ -52,6 +72,7 @@ impl UniversalFittingResult {
         match self {
             UniversalFittingResult::LM(fitting) => fitting.r_squared(),
             UniversalFittingResult::VARPRO(fit) => fit.r_squared(),
+            UniversalFittingResult::GAVIN(fit) => fit.fit.r_squared,
         }
     }
 
@@ -70,9 +91,18 @@ pub enum UniversalFittingError {
     /// A shared solver setting could not be applied to the selected backend.
     #[error("invalid fitting solver configuration: {0}")]
     SolverConfiguration(#[from] LeastSquaresError),
+    /// A Gavin-specific symbolic preparation or solve failed.
+    #[error(transparent)]
+    Gavin(#[from] crate::numerical::optimization::lm_gavin::GavinLmError),
+    /// A requested shared option has no equivalent in the selected controller.
+    #[error("option '{option}' is not supported by fitting method {method:?}")]
+    UnsupportedOption {
+        method: Method,
+        option: &'static str,
+    },
 }
 
-/// Depot-style wrapper over the symbolic LM and VarPro builders.
+/// Unified facade over the classic LM, Gavin LM, and VarPro fitting builders.
 ///
 /// Common configuration such as data, unknown names, initial guesses and the
 /// independent variable name is mirrored into both backends. Backend-specific
@@ -83,11 +113,17 @@ pub struct UniversalFitting {
     equations: Vec<Expr>,
     lm: Fitting,
     varpro: SymbolicVarProBuilder,
+    gavin: GavinSymbolicFitting,
+    frontend: SymbolicLambdifyFrontend,
+    execution_policy: LambdifyExecutionPolicy,
+    telemetry_mode: LeastSquaresTelemetryMode,
+    logging_enabled: bool,
     tolerance: Option<f64>,
     f_tolerance: Option<f64>,
     g_tolerance: Option<f64>,
     max_iterations: Option<usize>,
     scale_diag: Option<bool>,
+    gavin_controls: Option<(usize, f64, f64, f64)>,
 }
 
 impl UniversalFitting {
@@ -98,11 +134,17 @@ impl UniversalFitting {
             equations: Vec::new(),
             lm: Fitting::new(),
             varpro: SymbolicVarProBuilder::new("x"),
+            gavin: GavinSymbolicFitting::new(),
+            frontend: SymbolicLambdifyFrontend::ExprLegacy,
+            execution_policy: LambdifyExecutionPolicy::Sequential,
+            telemetry_mode: LeastSquaresTelemetryMode::Off,
+            logging_enabled: false,
             tolerance: None,
             f_tolerance: None,
             g_tolerance: None,
             max_iterations: None,
             scale_diag: None,
+            gavin_controls: None,
         }
     }
 
@@ -117,9 +159,15 @@ impl UniversalFitting {
         self.with_method(Method::VARPRO)
     }
 
+    /// Shortcut for [`with_method`](Self::with_method) with [`Method::GAVIN`].
+    pub fn with_gavin(self) -> Self {
+        self.with_method(Method::GAVIN)
+    }
+
     /// Set the independent variable data.
     pub fn with_x_data(mut self, x_data: Vec<f64>) -> Self {
         self.varpro = self.varpro.with_x_data(DVector::from_vec(x_data.clone()));
+        self.gavin = self.gavin.with_x_data(x_data.clone());
         self.lm = self.lm.with_x_data(x_data);
         self
     }
@@ -127,12 +175,14 @@ impl UniversalFitting {
     /// Set the observed data.
     pub fn with_y_data(mut self, y_data: Vec<f64>) -> Self {
         self.varpro = self.varpro.with_y_data(DVector::from_vec(y_data.clone()));
+        self.gavin = self.gavin.with_observations(y_data.clone());
         self.lm = self.lm.with_y_data(y_data);
         self
     }
 
     /// Set independent variable and observed data together.
     pub fn with_data(mut self, x_data: Vec<f64>, y_data: Vec<f64>) -> Self {
+        self.gavin = self.gavin.with_data(x_data.clone(), y_data.clone());
         self.varpro = self.varpro.with_data(
             DVector::from_vec(x_data.clone()),
             DVector::from_vec(y_data.clone()),
@@ -142,26 +192,39 @@ impl UniversalFitting {
     }
 
     /// Set the unknown names for both backends.
-    pub fn with_unknowns(mut self, unknowns: Vec<String>) -> Self {
+    pub fn with_unknowns<I, S>(mut self, unknowns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let unknowns = unknowns.into_iter().map(Into::into).collect::<Vec<_>>();
+        self.gavin = self.gavin.with_unknowns(unknowns.clone());
         self.varpro = self.varpro.with_parameters(unknowns.clone());
         self.lm = self.lm.with_unknowns(unknowns);
         self
     }
 
     /// Alias for [`with_unknowns`](Self::with_unknowns).
-    pub fn with_parameters(self, parameters: Vec<String>) -> Self {
+    pub fn with_parameters<I, S>(self, parameters: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         self.with_unknowns(parameters)
     }
 
     /// Set the initial guess for both backends.
     pub fn with_initial_guess(mut self, initial_guess: Vec<f64>) -> Self {
+        self.gavin = self.gavin.with_initial_guess(initial_guess.clone());
         self.varpro = self.varpro.with_initial_parameters(initial_guess.clone());
         self.lm = self.lm.with_initial_guess(initial_guess);
         self
     }
 
     /// Set the symbolic name of the independent variable.
-    pub fn with_arg(mut self, arg: String) -> Self {
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        let arg = arg.into();
+        self.gavin = self.gavin.with_sample_parameter(arg.clone());
         self.varpro = self.varpro.with_arg(arg.clone());
         self.lm = self.lm.with_arg(arg);
         self
@@ -173,6 +236,7 @@ impl UniversalFitting {
     /// For the VarPro backend, they are treated as invariant/background terms.
     pub fn with_equation(mut self, eq: Expr) -> Self {
         self.equations = vec![eq];
+        self.gavin = self.gavin.with_equations(self.equations.clone());
         self
     }
 
@@ -182,21 +246,28 @@ impl UniversalFitting {
     /// For the VarPro backend, they are treated as invariant/background terms.
     pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
         self.equations = eq_system;
+        self.gavin = self.gavin.with_equations(self.equations.clone());
         self
     }
 
     /// Set one symbolic model expression from a string.
-    pub fn with_equation_str(mut self, eq_string: String) -> Self {
-        self.equations = vec![Expr::parse_expression(&eq_string)];
+    pub fn with_equation_str(mut self, eq_string: impl AsRef<str>) -> Self {
+        self.equations = vec![Expr::parse_expression(eq_string.as_ref())];
+        self.gavin = self.gavin.with_equations(self.equations.clone());
         self
     }
 
     /// Set a symbolic expression system from strings.
-    pub fn with_equations_str(mut self, eq_system_string: Vec<String>) -> Self {
+    pub fn with_equations_str<I, S>(mut self, eq_system_string: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         self.equations = eq_system_string
             .into_iter()
-            .map(|expr| Expr::parse_expression(&expr))
+            .map(|expr| Expr::parse_expression(expr.as_ref()))
             .collect();
+        self.gavin = self.gavin.with_equations(self.equations.clone());
         self
     }
 
@@ -205,6 +276,7 @@ impl UniversalFitting {
         self.method = Method::LM;
         self.lm = self.lm.with_polynomial(degree, arg);
         self.equations = self.lm.equations.clone();
+        self.gavin = self.gavin.with_equations(self.equations.clone());
         self
     }
 
@@ -254,16 +326,143 @@ impl UniversalFitting {
         self
     }
 
+    /// Selects the symbolic representation for supported Lambdify solvers.
+    /// ExprLegacy remains the default. VarPro currently accepts ExprLegacy only.
+    pub fn with_symbolic_frontend(mut self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.frontend = frontend;
+        self.lm = self.lm.with_symbolic_frontend(frontend);
+        self.gavin = self.gavin.with_frontend(frontend);
+        self
+    }
+
+    /// Short alias for [`with_symbolic_frontend`](Self::with_symbolic_frontend).
+    pub fn with_frontend(self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.with_symbolic_frontend(frontend)
+    }
+
+    /// Configures sequential or thresholded parallel prepared callback evaluation.
+    pub fn with_lambdify_execution_policy(mut self, policy: LambdifyExecutionPolicy) -> Self {
+        self.execution_policy = policy;
+        self.lm = self.lm.with_lambdify_execution_policy(policy);
+        self.gavin = self.gavin.with_lambdify_execution_policy(policy);
+        self
+    }
+
+    /// Configures runtime telemetry; all methods are disabled by default.
+    /// Gavin currently has one complete telemetry level, so either enabled
+    /// least-squares level requests its full snapshot.
+    pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
+        self.lm = self.lm.with_telemetry(mode);
+        self.gavin = self
+            .gavin
+            .with_telemetry(mode != LeastSquaresTelemetryMode::Off);
+        self
+    }
+
+    /// Enables or disables logging through the application's installed `log` logger.
+    /// Logging is off by default; VarPro emits a completion summary while LM
+    /// and Gavin retain their solver-specific details.
+    pub fn with_logging(mut self, enabled: bool) -> Self {
+        self.logging_enabled = enabled;
+        self.lm = if enabled {
+            self.lm.with_logging(Level::Info)
+        } else {
+            self.lm.without_logging()
+        };
+        self.gavin = self.gavin.with_logging(enabled);
+        self
+    }
+
+    /// Select Gavin's damping update policy when using [`Method::GAVIN`].
+    pub fn with_gavin_update_policy(mut self, policy: GavinLmUpdatePolicy) -> Self {
+        self.gavin = self.gavin.with_update_policy(policy);
+        self
+    }
+
+    /// Enable Gavin solve telemetry when using [`Method::GAVIN`].
+    pub fn with_gavin_telemetry(self, enabled: bool) -> Self {
+        self.with_telemetry(if enabled {
+            LeastSquaresTelemetryMode::Detailed
+        } else {
+            LeastSquaresTelemetryMode::Off
+        })
+    }
+
+    /// Select Gavin's ExprLegacy or AtomView symbolic frontend.
+    pub fn with_gavin_frontend(self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.with_symbolic_frontend(frontend)
+    }
+
+    /// Select Gavin's optional instance-local log output.
+    pub fn with_gavin_logging(self, enabled: bool) -> Self {
+        self.with_logging(enabled)
+    }
+
+    /// Set Gavin's iteration budget, gradient tolerance, step tolerance, and
+    /// gain-ratio threshold without borrowing similarly named controls from
+    /// the other methods.
+    pub fn with_gavin_solver_controls(
+        mut self,
+        max_iterations: usize,
+        gradient_tolerance: f64,
+        parameter_step_tolerance: f64,
+        gain_ratio_threshold: f64,
+    ) -> Self {
+        self.gavin_controls = Some((
+            max_iterations,
+            gradient_tolerance,
+            parameter_step_tolerance,
+            gain_ratio_threshold,
+        ));
+        self
+    }
+
+    /// Set nonnegative per-observation weights on the Gavin route.
+    pub fn with_gavin_weights(mut self, weights: Vec<f64>) -> Self {
+        self.gavin = self.gavin.with_weights(weights);
+        self
+    }
+
+    /// Require selected fitted parameters to remain strictly positive.
+    pub fn with_gavin_positive_parameters<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.gavin = self.gavin.with_positive_parameters(names);
+        self
+    }
+
     /// Build and solve the selected backend.
     pub fn build(self) -> Result<UniversalFittingResult, UniversalFittingError> {
         match self.method {
             Method::LM => {
-                let lm = self.lm.with_equations(self.equations);
+                let lm = self
+                    .lm
+                    .with_equations(self.equations)
+                    .with_symbolic_frontend(self.frontend)
+                    .with_lambdify_execution_policy(self.execution_policy)
+                    .with_telemetry(self.telemetry_mode);
                 Ok(UniversalFittingResult::LM(lm.build()))
             }
             Method::VARPRO => {
+                if self.frontend != SymbolicLambdifyFrontend::ExprLegacy {
+                    return Err(UniversalFittingError::UnsupportedOption {
+                        method: Method::VARPRO,
+                        option: "symbolic_frontend=AtomViewNative",
+                    });
+                }
+                if self.execution_policy != LambdifyExecutionPolicy::Sequential {
+                    return Err(UniversalFittingError::UnsupportedOption {
+                        method: Method::VARPRO,
+                        option: "lambdify_execution_policy",
+                    });
+                }
                 let varpro = self.varpro.with_equations(self.equations);
-                let mut solver = LevenbergMarquardt::new().with_gtol(0.0);
+                let mut solver = LevenbergMarquardt::new()
+                    .with_gtol(0.0)
+                    .with_telemetry(self.telemetry_mode);
                 if let Some(max_iterations) = self.max_iterations {
                     solver = solver.try_with_max_iterations(max_iterations)?;
                 }
@@ -279,8 +478,45 @@ impl UniversalFitting {
                 if let Some(scale_diag) = self.scale_diag {
                     solver = solver.with_scale_diag(scale_diag);
                 }
-                Ok(UniversalFittingResult::VARPRO(
-                    varpro.solve_with_solver(solver)?,
+                let fit = varpro.solve_with_solver(solver)?;
+                if self.logging_enabled {
+                    log::info!(
+                        "UniversalFitting VarPro finished: termination={:?}, objective={:.6e}, evaluations={}",
+                        fit.minimization_report.termination,
+                        fit.minimization_report.objective_function,
+                        fit.minimization_report.number_of_evaluations
+                    );
+                }
+                Ok(UniversalFittingResult::VARPRO(fit))
+            }
+            Method::GAVIN => {
+                if self.f_tolerance.is_some() {
+                    return Err(UniversalFittingError::UnsupportedOption {
+                        method: Method::GAVIN,
+                        option: "f_tolerance",
+                    });
+                }
+                if self.scale_diag.is_some() {
+                    return Err(UniversalFittingError::UnsupportedOption {
+                        method: Method::GAVIN,
+                        option: "scale_diag",
+                    });
+                }
+                let controls = self.gavin_controls.unwrap_or((
+                    self.max_iterations.unwrap_or(1000),
+                    self.g_tolerance.unwrap_or(1e-3),
+                    self.tolerance.unwrap_or(1e-3),
+                    1e-1,
+                ));
+                Ok(UniversalFittingResult::GAVIN(
+                    self.gavin
+                        .with_equations(self.equations)
+                        .with_frontend(self.frontend)
+                        .with_lambdify_execution_policy(self.execution_policy)
+                        .with_telemetry(self.telemetry_mode != LeastSquaresTelemetryMode::Off)
+                        .with_logging(self.logging_enabled)
+                        .with_solver_controls(controls.0, controls.1, controls.2, controls.3)
+                        .try_solve()?,
                 ))
             }
         }
@@ -315,11 +551,42 @@ mod tests {
         let fitting = match result {
             UniversalFittingResult::LM(fitting) => fitting,
             UniversalFittingResult::VARPRO(_) => panic!("expected LM result"),
+            UniversalFittingResult::GAVIN(_) => panic!("expected LM result"),
         };
 
         let map = fitting.map_of_solutions.unwrap();
         assert_relative_eq!(map["a"], 3.0, epsilon = 1e-6);
         assert_relative_eq!(map["b"], 2.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn universal_lm_accepts_common_frontend_telemetry_and_slice_builders() {
+        let x = (0..12).map(|index| index as f64).collect::<Vec<_>>();
+        let y = x.iter().map(|&value| 2.0 * value + 1.0).collect::<Vec<_>>();
+        let result = UniversalFitting::new()
+            .with_data(x, y)
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.0, 0.0])
+            .with_frontend(SymbolicLambdifyFrontend::AtomViewNative)
+            .with_telemetry(LeastSquaresTelemetryMode::Counters)
+            .build()
+            .unwrap();
+
+        let UniversalFittingResult::LM(fit) = result else {
+            panic!("expected classic LM result");
+        };
+        assert_eq!(
+            fit.symbolic_frontend(),
+            SymbolicLambdifyFrontend::AtomViewNative
+        );
+        assert!(fit.last_statistics.is_some());
+        assert_relative_eq!(
+            fit.map_of_solutions.as_ref().unwrap()["a"],
+            2.0,
+            epsilon = 1e-8
+        );
     }
 
     #[test]
@@ -379,12 +646,15 @@ mod tests {
             .with_initial_guess(vec![1.2])
             .with_basis_str("tau", "exp(-x/tau)")
             .with_equation_str("1".to_string())
+            .with_telemetry(LeastSquaresTelemetryMode::Detailed)
+            .with_logging(true)
             .build()
             .unwrap();
 
         let fit = match result {
             UniversalFittingResult::VARPRO(fit) => fit,
             UniversalFittingResult::LM(_) => panic!("expected VarPro result"),
+            UniversalFittingResult::GAVIN(_) => panic!("expected VarPro result"),
         };
 
         let nonlinear = fit.nonlinear_parameters();
@@ -393,6 +663,7 @@ mod tests {
         let linear = fit.linear_coefficients().unwrap();
         assert_relative_eq!(linear[0], 2.5, epsilon = 1e-2);
         assert_relative_eq!(linear[1], 0.8, epsilon = 1e-2);
+        assert!(fit.minimization_report.statistics.timings_collected);
     }
 
     #[test]
@@ -465,6 +736,108 @@ mod tests {
             Err(UniversalFittingError::SolverConfiguration(
                 LeastSquaresError::InvalidConfiguration { field: "xtol", .. }
             ))
+        ));
+    }
+
+    #[test]
+    fn universal_varpro_rejects_atom_frontend_with_typed_error() {
+        let result = UniversalFitting::new()
+            .with_varpro()
+            .with_frontend(SymbolicLambdifyFrontend::AtomViewNative)
+            .with_data(vec![0.0, 1.0], vec![1.0, 0.5])
+            .with_arg("x")
+            .with_parameters(["tau"])
+            .with_initial_guess(vec![1.0])
+            .with_basis_str("tau", "exp(-x/tau)")
+            .with_equation_str("1")
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(UniversalFittingError::UnsupportedOption {
+                method: Method::VARPRO,
+                option: "symbolic_frontend=AtomViewNative"
+            })
+        ));
+    }
+
+    #[test]
+    fn universal_gavin_fits_nonlinear_model_and_preserves_diagnostics() {
+        let x = (0..40).map(|i| i as f64 * 0.1).collect::<Vec<_>>();
+        let y = x
+            .iter()
+            .map(|&x| 1.7 * (-x / 1.3).exp() + 0.25)
+            .collect::<Vec<_>>();
+
+        let result = UniversalFitting::new()
+            .with_gavin()
+            .with_data(x, y)
+            .with_equation_str("a*exp(-x/tau)+b".to_owned())
+            .with_arg("x".to_owned())
+            .with_unknowns(vec!["a".to_owned(), "tau".to_owned(), "b".to_owned()])
+            .with_initial_guess(vec![1.4, 1.6, 0.1])
+            .with_gavin_telemetry(true)
+            .with_logging(true)
+            .build()
+            .expect("Gavin universal route should fit the nonlinear model");
+
+        let fit = match &result {
+            UniversalFittingResult::GAVIN(fit) => fit,
+            _ => panic!("expected Gavin result"),
+        };
+        assert!(fit.fit.termination.is_converged());
+        assert_eq!(
+            fit.frontend,
+            SymbolicLambdifyFrontend::ExprLegacy,
+            "Gavin defaults to ExprLegacy unless a frontend is explicitly selected"
+        );
+        assert!((fit.fit.parameters[0] - 1.7).abs() < 2e-2);
+        assert!((fit.fit.parameters[1] - 1.3).abs() < 2e-2);
+        assert!((fit.fit.parameters[2] - 0.25).abs() < 2e-2);
+        assert!(fit.telemetry.as_ref().unwrap().objective_evaluations > 0);
+        let map = result.solution_map().unwrap();
+        assert!((map["tau"] - fit.fit.parameters[1]).abs() < f64::EPSILON);
+        assert!(result.r_squared().unwrap() > 0.999);
+    }
+
+    #[test]
+    fn universal_gavin_common_settings_select_atom_and_gate_telemetry() {
+        let x = (0..10).map(|index| index as f64 * 0.2).collect::<Vec<_>>();
+        let y = x.iter().map(|&value| 1.7 * value + 0.4).collect::<Vec<_>>();
+        let result = UniversalFitting::new()
+            .with_gavin()
+            .with_data(x, y)
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.2, 0.2])
+            .with_frontend(SymbolicLambdifyFrontend::AtomViewNative)
+            .with_telemetry(LeastSquaresTelemetryMode::Off)
+            .with_logging(false)
+            .build()
+            .unwrap();
+
+        let UniversalFittingResult::GAVIN(fit) = result else {
+            panic!("expected Gavin result");
+        };
+        assert_eq!(fit.frontend, SymbolicLambdifyFrontend::AtomViewNative);
+        assert!(fit.telemetry.is_none());
+        assert_relative_eq!(fit.fit.parameters[0], 1.7, epsilon = 1e-6);
+        assert_relative_eq!(fit.fit.parameters[1], 0.4, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn universal_gavin_rejects_options_without_equivalent_semantics() {
+        let result = UniversalFitting::new()
+            .with_gavin()
+            .with_f_tolerance(1e-8)
+            .build();
+        assert!(matches!(
+            result,
+            Err(UniversalFittingError::UnsupportedOption {
+                method: Method::GAVIN,
+                option: "f_tolerance"
+            })
         ));
     }
 }

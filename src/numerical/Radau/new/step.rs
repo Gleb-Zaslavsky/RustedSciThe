@@ -7,7 +7,7 @@
 
 use super::{
     callbacks::{
-        DenseJacobianCallback, RadauStepCallbacks, ResidualCallback, validate_callback_output,
+        validate_callback_output, DenseJacobianCallback, RadauStepCallbacks, ResidualCallback,
     },
     coefficients::RadauIia5,
     config::RadauConfig,
@@ -303,12 +303,15 @@ where
         let rate = previous_norm.map(|previous| current_norm / previous);
         convergence_rate = rate;
         if let Some(rate) = rate {
+            // SciPy's loop index is zero-based (`k`), while `iterations` here
+            // is one-based. Preserve its remaining-iteration exponent:
+            // `max_newton_iterations - k` == `max_newton_iterations + 1 - iterations`.
+            let remaining_iterations = config
+                .max_newton_iterations
+                .saturating_add(1)
+                .saturating_sub(iterations);
             if rate >= 1.0
-                || rate.powi(
-                    (config.max_newton_iterations - iterations.min(config.max_newton_iterations))
-                        as i32,
-                ) / (1.0 - rate)
-                    * current_norm
+                || rate.powi(remaining_iterations as i32) / (1.0 - rate) * current_norm
                     > newton_tolerance
             {
                 break false;

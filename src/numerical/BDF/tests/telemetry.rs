@@ -164,7 +164,10 @@ fn timings_mode_collects_calls_and_durations() {
     assert!(stats.result_assembly_ms_total > 0.0);
     assert!(stats.linear_factorization_ms_total > 0.0);
     assert!(stats.linear_solve_ms_total > 0.0);
-    assert!(stats.bdf_step_snapshot_ms_total > 0.0);
+    // Snapshotting a tiny scalar workspace can complete below the platform
+    // clock's measurable resolution, so zero is a valid elapsed duration.
+    assert!(stats.bdf_step_snapshot_ms_total.is_finite());
+    assert!(stats.bdf_step_snapshot_ms_total >= 0.0);
     assert!(stats.bdf_step_predictor_setup_ms_total > 0.0);
     assert!(stats.bdf_newton_rhs_assembly_ms_total > 0.0);
     assert!(stats.bdf_newton_correction_norm_ms_total > 0.0);

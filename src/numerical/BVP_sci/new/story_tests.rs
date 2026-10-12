@@ -3683,3 +3683,2008 @@ fn aot_process_handoff_child() {
             .unwrap_or("-"),
     );
 }
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_linear_reference_matches_rust_on_common_evaluation_grid() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        case: &'static str,
+        scipy_status: String,
+        rust_status: String,
+        sample_points: usize,
+        scipy_jac_lu_solve: String,
+        rust_jac_lu_solve: String,
+        max_abs_diff: String,
+        status: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fields = scipy_bvp_reference_row(&root, "linear");
+    assert_eq!(fields.get("case").map(String::as_str), Some("linear"));
+    assert_eq!(fields.get("success").map(String::as_str), Some("1"));
+    assert_eq!(fields.get("status").map(String::as_str), Some("0"));
+    let scipy_values = fields["sample_y"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy sample value"))
+        .collect::<Vec<_>>();
+    let sample_count = scipy_values.len();
+    let samples = (0..sample_count)
+        .map(|index| index as f64 / (sample_count - 1) as f64)
+        .collect::<Vec<_>>();
+
+    let mut rust = build_damp_exact_solver(
+        DampExactWorkload::Linear,
+        BvpSciAssembly::ExprLegacy,
+        BvpSciMatrixLayout::Dense,
+    );
+    let rust_solution = rust.solve().expect("Rust linear BVP should converge");
+    let mut max_abs_diff = 0.0_f64;
+    for (x, expected) in samples.iter().zip(scipy_values.iter()) {
+        let actual = interpolate_node_major(&rust_solution.x, &rust_solution.y, 1, *x)[0];
+        max_abs_diff = max_abs_diff.max((actual - expected).abs());
+    }
+    assert!(
+        max_abs_diff <= 1e-8,
+        "SciPy/Rust sampled drift={max_abs_diff:e}"
+    );
+    let rust_telemetry = rust.plan().telemetry_snapshot();
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] common-grid numerical gate",
+        &[ParityRow {
+            case: "linear y'=1",
+            scipy_status: fields["status"].to_owned(),
+            rust_status: format!("{}", rust_solution.status.code()),
+            sample_points: sample_count,
+            scipy_jac_lu_solve: format!(
+                "{}/{}/{}",
+                fields["jacobian_builds"], fields["factorizations"], fields["linear_solves"]
+            ),
+            rust_jac_lu_solve: format!(
+                "{}/{}/{}",
+                rust_telemetry.newton_jacobian_refreshes,
+                rust_telemetry.factorizations,
+                rust_telemetry.linear_solves
+            ),
+            max_abs_diff: format!("{max_abs_diff:.3e}"),
+            status: "ok",
+        }],
+    );
+}
+
+fn scipy_bvp_reference_row(root: &Path, case: &str) -> HashMap<String, String> {
+    let python = std::env::var_os("BVP_SCIPY_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let local = root.join(".venv-gavin-win/Scripts/python.exe");
+            if local.exists() {
+                local
+            } else {
+                PathBuf::from("python")
+            }
+        });
+    let runner = root.join("src/numerical/BVP_sci/scipy_reference/bvp_parity.py");
+    let output = Command::new(&python)
+        .arg(&runner)
+        .arg(case)
+        .arg("--format")
+        .arg("tsv")
+        .output()
+        .unwrap_or_else(|error| panic!("failed to launch SciPy {case} reference: {error}"));
+    assert!(
+        output.status.success(),
+        "SciPy {case} reference failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split('\t')
+        .filter_map(|field| field.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_invalid_inputs_map_to_typed_rust_errors() {
+    #[derive(Tabled)]
+    struct ValidationRow {
+        input: &'static str,
+        scipy_exception: String,
+        rust_error: &'static str,
+        result: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "validation");
+    let expected: HashMap<_, _> = reference["validation_failures"]
+        .split(',')
+        .filter_map(|field| field.split_once(':'))
+        .collect();
+
+    let plan = || {
+        let numerical = BvpSciNumericalPlan::new(
+            1,
+            0,
+            |_x, _y, _parameters, output| {
+                output[0] = 1.0;
+                Ok(())
+            },
+            BvpSciTelemetry::disabled(),
+        )
+        .expect("validation numerical plan");
+        BvpSciLambdifyPlan::prepare_numerical(numerical)
+    };
+    let boundary = || {
+        BvpSciBoundaryCallbacks::new(
+            1,
+            |ya, _yb, _parameters, output| {
+                output[0] = ya[0];
+                Ok(())
+            },
+            BvpSciTelemetry::disabled(),
+        )
+    };
+    let options = BvpSciOptions::default();
+    let invalid_mesh = BvpSciSolver::new(
+        plan(),
+        boundary(),
+        vec![0.0, 0.5, 0.4],
+        vec![0.0; 3],
+        vec![],
+        options.clone(),
+    )
+    .err()
+    .expect("non-increasing mesh must be rejected");
+    assert!(matches!(
+        invalid_mesh,
+        BvpSciNewError::InvalidConfiguration(_)
+    ));
+    let invalid_state_shape = BvpSciSolver::new(
+        plan(),
+        boundary(),
+        vec![0.0, 0.5, 1.0],
+        vec![0.0; 2],
+        vec![],
+        options,
+    )
+    .err()
+    .expect("state/mesh shape mismatch must be rejected");
+    assert!(matches!(
+        invalid_state_shape,
+        BvpSciNewError::ShapeMismatch {
+            stage: BvpSciStage::NumericalCore,
+            ..
+        }
+    ));
+    let invalid_boundary_shape = BvpSciSolver::new(
+        plan(),
+        BvpSciBoundaryCallbacks::new(
+            0,
+            |_ya, _yb, _parameters, _output| Ok(()),
+            BvpSciTelemetry::disabled(),
+        ),
+        vec![0.0, 0.5, 1.0],
+        vec![0.0; 3],
+        vec![],
+        BvpSciOptions::default(),
+    )
+    .err()
+    .expect("boundary dimension mismatch must be rejected");
+    assert!(matches!(
+        invalid_boundary_shape,
+        BvpSciNewError::ShapeMismatch {
+            stage: BvpSciStage::BoundaryCallback,
+            ..
+        }
+    ));
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] official input validation categories",
+        &[
+            ValidationRow {
+                input: "non-increasing mesh",
+                scipy_exception: expected["non_increasing_mesh"].into(),
+                rust_error: "InvalidConfiguration",
+                result: "rejected",
+            },
+            ValidationRow {
+                input: "state/mesh shape mismatch",
+                scipy_exception: expected["state_shape"].into(),
+                rust_error: "ShapeMismatch(NumericalCore)",
+                result: "rejected",
+            },
+            ValidationRow {
+                input: "boundary residual shape mismatch",
+                scipy_exception: expected["boundary_shape"].into(),
+                rust_error: "ShapeMismatch(BoundaryCallback)",
+                result: "rejected",
+            },
+        ],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_global_collocation_jacobian_matches_entry_by_entry() {
+    #[derive(Tabled)]
+    struct JacobianParityRow {
+        shape: String,
+        entries: usize,
+        max_matrix_diff: String,
+        max_residual_diff: String,
+        result: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "global-jacobian");
+    let scipy_jacobian = reference["global_jacobian"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy Jacobian entry"))
+        .collect::<Vec<_>>();
+    let scipy_residual = reference["collocation_residual"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy collocation residual"))
+        .collect::<Vec<_>>();
+    let dimension = 2usize;
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("z"), Expr::parse_expression("p*y")],
+        &["y".into(), "z".into()],
+        &["p".into()],
+        "x",
+        BvpSciTelemetry::disabled(),
+    )
+    .expect("direct Jacobian parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new_with_jacobian(
+        dimension + 1,
+        |ya, yb, parameters, output| {
+            output[0] = ya[0];
+            output[1] = yb[1];
+            output[2] = ya[1] - parameters[0];
+            Ok(())
+        },
+        |_, _, _, dya, dyb, dp| {
+            dya.copy_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+            dyb.copy_from_slice(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            dp.copy_from_slice(&[0.0, 0.0, -1.0]);
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh = [0.0, 0.4, 1.0];
+    let state_node_major = [1.0, 0.25, 0.9, 0.3, 0.7, -0.1];
+    let parameters = [1.3];
+    let mut workspace = super::workspace::BvpSciCollocationWorkspace::new(
+        dimension,
+        mesh.len(),
+        parameters.len(),
+        &BvpSciTelemetry::disabled(),
+    )
+    .expect("direct Jacobian parity workspace");
+    super::collocation::evaluate_collocation(
+        &plan,
+        &mesh,
+        &state_node_major,
+        &parameters,
+        None,
+        &mut workspace,
+    )
+    .expect("Rust collocation residual");
+    super::jacobian::assemble_global_jacobian(
+        &plan,
+        &boundary,
+        &mesh,
+        &state_node_major,
+        &parameters,
+        None,
+        &mut workspace,
+    )
+    .expect("Rust global Jacobian");
+
+    let system_size = dimension * mesh.len() + parameters.len();
+    assert_eq!(scipy_jacobian.len(), system_size * system_size);
+    let mut rust_jacobian = vec![0.0; system_size * system_size];
+    for &(row, column, value) in &workspace.entries {
+        rust_jacobian[row * system_size + column] += value;
+    }
+    let max_matrix_diff = rust_jacobian
+        .iter()
+        .zip(&scipy_jacobian)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    let max_residual_diff = workspace
+        .collocation_residual
+        .iter()
+        .zip(&scipy_residual)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_matrix_diff < 1e-12,
+        "global matrix drift={max_matrix_diff:e}"
+    );
+    assert!(
+        max_residual_diff < 1e-12,
+        "collocation residual drift={max_residual_diff:e}"
+    );
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] direct global collocation Jacobian",
+        &[JacobianParityRow {
+            shape: format!("{system_size}x{system_size}"),
+            entries: scipy_jacobian.len(),
+            max_matrix_diff: format!("{max_matrix_diff:.3e}"),
+            max_residual_diff: format!("{max_residual_diff:.3e}"),
+            result: "entrywise-match",
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_refined_bratu_matches_dense_output_and_interval_defects() {
+    #[derive(Tabled)]
+    struct RefinedOutputRow {
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        max_value_diff: String,
+        max_derivative_diff: String,
+        max_interval_residual_diff: String,
+        counters: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "bratu-refine");
+    let expected_values = parse_scipy_samples(&reference);
+    let expected_derivatives = parse_scipy_derivatives(&reference);
+    let expected_residuals = reference["rms_residuals"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy interval residual"))
+        .collect::<Vec<_>>();
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy sample coordinate"))
+        .collect::<Vec<_>>();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &bratu_equations(),
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("refined Bratu parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0];
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..6).map(|index| index as f64 / 5.0).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-8;
+    options.max_nodes = 200;
+    options.max_mesh_refinements = 20;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * 2],
+        vec![],
+        options,
+    )
+    .expect("refined Bratu solver");
+    let solution = rust.solve().expect("refined Bratu should converge");
+    let dense = solution.dense_output().expect("refined Bratu dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    assert_eq!(reference["status"], "0");
+    assert_eq!(solution.status.code(), 0);
+    assert_eq!(
+        solution.x.len().to_string(),
+        reference["nodes"],
+        "adaptive mesh nodes must match for interval-residual parity"
+    );
+    assert_scipy_counter_parity(
+        "refined Bratu",
+        &reference,
+        &telemetry,
+        telemetry.newton_scope_calls,
+    );
+
+    let mut max_value_diff = 0.0_f64;
+    let mut max_derivative_diff = 0.0_f64;
+    for (point, x) in sample_x.iter().enumerate() {
+        let values = dense.evaluate(*x).expect("refined Bratu value");
+        let derivatives = dense
+            .evaluate_derivative(*x)
+            .expect("refined Bratu derivative");
+        for component in 0..values.len() {
+            max_value_diff =
+                max_value_diff.max((values[component] - expected_values[component][point]).abs());
+            max_derivative_diff = max_derivative_diff
+                .max((derivatives[component] - expected_derivatives[component][point]).abs());
+        }
+    }
+    let max_interval_residual_diff = solution
+        .interval_residuals
+        .iter()
+        .zip(&expected_residuals)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_value_diff < 1e-7,
+        "Bratu refined value drift={max_value_diff:e}"
+    );
+    assert!(
+        max_derivative_diff < 1e-6,
+        "Bratu refined derivative drift={max_derivative_diff:e}"
+    );
+    assert_eq!(solution.interval_residuals.len(), expected_residuals.len());
+    assert!(
+        max_interval_residual_diff < 1e-10,
+        "Bratu refined RMS defect drift={max_interval_residual_diff:e}"
+    );
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] refined Bratu dense output and defects",
+        &[RefinedOutputRow {
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            max_value_diff: format!("{max_value_diff:.3e}"),
+            max_derivative_diff: format!("{max_derivative_diff:.3e}"),
+            max_interval_residual_diff: format!("{max_interval_residual_diff:.3e}"),
+            counters: "exact",
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_boundary_tolerance_exhaustion_maps_to_rust_status_three() {
+    #[derive(Tabled)]
+    struct StatusThreeRow {
+        scipy_status: String,
+        rust_status: String,
+        scipy_passes: String,
+        rust_passes: String,
+        scipy_factorizations: String,
+        rust_factorizations: String,
+        scipy_mesh_changes: String,
+        rust_mesh_changes: String,
+        mapping: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "boundary-tolerance-exhaustion");
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("0")],
+        &["y".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("status-three parity plan");
+    let boundary_tolerance = f64::EPSILON / 16.0;
+    let boundary = BvpSciBoundaryCallbacks::new(
+        1,
+        |ya, _, _, output| {
+            output[0] = (ya[0] - 1.0) + f64::EPSILON / 4.0;
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5).map(|index| index as f64 / 4.0).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.boundary_tolerance = Some(boundary_tolerance);
+    options.max_nodes = 100;
+    options.max_mesh_refinements = 10;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![1.0; mesh.len()],
+        vec![],
+        options,
+    )
+    .expect("status-three parity solver");
+    let error = rust
+        .solve()
+        .expect_err("sub-ulp boundary residual cannot be corrected");
+    let telemetry = rust.plan().telemetry_snapshot();
+    let rust_status = error.status().map(|status| status.code());
+    assert_eq!(reference["status"], "3");
+    assert_eq!(rust_status, Some(3), "Rust typed failure: {error:?}");
+    assert_scipy_counter_parity(
+        "boundary tolerance exhaustion",
+        &reference,
+        &telemetry,
+        telemetry.newton_scope_calls,
+    );
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] boundary-tolerance exhaustion status 3",
+        &[StatusThreeRow {
+            scipy_status: reference["status"].clone(),
+            rust_status: rust_status.unwrap().to_string(),
+            scipy_passes: reference["newton_passes"].clone(),
+            rust_passes: telemetry.newton_scope_calls.to_string(),
+            scipy_factorizations: reference["factorizations"].clone(),
+            rust_factorizations: telemetry.factorizations.to_string(),
+            scipy_mesh_changes: reference["mesh_modify_calls"].clone(),
+            rust_mesh_changes: telemetry.mesh_refinements.to_string(),
+            mapping: "status and counters match",
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_official_shock_layer_matches_refined_rust_solution() {
+    #[derive(Tabled)]
+    struct ShockParityRow {
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_passes_jac_lu_solves: String,
+        rust_passes_jac_lu_solves: String,
+        scipy_linear_solves: String,
+        rust_linear_solves: String,
+        scipy_trial_trace: String,
+        scipy_convergence_trace: String,
+        rust_trial_trace: String,
+        counter_difference_reason: &'static str,
+        max_value_diff: String,
+        max_derivative_diff: String,
+        max_interval_residual_diff: String,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "shock-layer");
+    let expected_values = parse_scipy_samples(&reference);
+    let expected_derivatives = parse_scipy_derivatives(&reference);
+    let expected_residuals = reference["rms_residuals"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy shock residual"))
+        .collect::<Vec<_>>();
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy shock sample"))
+        .collect::<Vec<_>>();
+    let epsilon = 1e-3;
+    let plan = BvpSciNumericalPlan::new(
+        2,
+        0,
+        move |x, y, _, output| {
+            output[0] = y[1];
+            output[1] = -(x * y[1]
+                + epsilon * std::f64::consts::PI.powi(2) * (std::f64::consts::PI * x).cos()
+                + std::f64::consts::PI * x * (std::f64::consts::PI * x).sin())
+                / epsilon;
+            Ok(())
+        },
+        BvpSciTelemetry::timings(),
+    )
+    .expect("shock-layer numerical plan");
+    let plan = BvpSciLambdifyPlan::prepare_numerical(plan);
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0] + 2.0;
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5).map(|index| -1.0 + 0.5 * index as f64).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.max_nodes = 1000;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * 2],
+        vec![],
+        options,
+    )
+    .expect("shock-layer solver");
+    let solution = rust.solve().expect("shock-layer should converge");
+    let dense = solution.dense_output().expect("shock-layer dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    assert_eq!(reference["status"], "0");
+    assert_eq!(solution.status.code(), 0);
+    assert_eq!(solution.x.len().to_string(), reference["nodes"]);
+    for (key, actual) in [
+        ("newton_passes", telemetry.newton_scope_calls),
+        ("jacobian_builds", telemetry.newton_jacobian_refreshes),
+        ("factorizations", telemetry.factorizations),
+        ("mesh_modify_calls", telemetry.mesh_refinements),
+    ] {
+        assert_eq!(
+            reference[key].parse::<u64>().expect("SciPy counter"),
+            actual,
+            "official shock-layer {key} counter differs"
+        );
+    }
+    let scipy_linear_solves = reference["linear_solves"]
+        .parse::<u64>()
+        .expect("SciPy linear-solve count");
+    assert_eq!(
+        telemetry.linear_solves,
+        scipy_linear_solves + 1,
+        "shock-layer's documented near-threshold branch adds one fixed-Jacobian solve"
+    );
+    let scipy_convergence = reference["newton_convergence_trace"]
+        .split(';')
+        .collect::<Vec<_>>();
+    assert_eq!(scipy_convergence.len(), 8);
+    let scipy_boundary_case_ratio = scipy_convergence[2]
+        .split(':')
+        .nth(1)
+        .and_then(|field| field.strip_prefix('r'))
+        .expect("SciPy normalized residual ratio")
+        .parse::<f64>()
+        .expect("SciPy normalized residual ratio");
+    let rust_trace = &telemetry.newton_residual_history;
+    assert_eq!(rust_trace.len(), scipy_convergence.len() + 1);
+    assert!(
+        scipy_boundary_case_ratio < 1.0
+            && rust_trace[2].max_normalized_collocation_residual > 1.0
+            && rust_trace[3].max_normalized_collocation_residual < 1.0,
+        "the additional solve must be explained by crossing the same strict residual threshold"
+    );
+    let mut max_value_diff = 0.0_f64;
+    let mut max_derivative_diff = 0.0_f64;
+    for (point, x) in sample_x.iter().enumerate() {
+        let values = dense.evaluate(*x).expect("shock-layer value");
+        let derivatives = dense
+            .evaluate_derivative(*x)
+            .expect("shock-layer derivative");
+        for component in 0..values.len() {
+            max_value_diff =
+                max_value_diff.max((values[component] - expected_values[component][point]).abs());
+            max_derivative_diff = max_derivative_diff
+                .max((derivatives[component] - expected_derivatives[component][point]).abs());
+        }
+    }
+    let max_interval_residual_diff = solution
+        .interval_residuals
+        .iter()
+        .zip(&expected_residuals)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_value_diff < 1e-5,
+        "shock-layer value drift={max_value_diff:e}"
+    );
+    assert!(
+        max_derivative_diff < 1e-3,
+        "shock-layer derivative drift={max_derivative_diff:e}"
+    );
+    assert_eq!(solution.interval_residuals.len(), expected_residuals.len());
+    assert!(
+        max_interval_residual_diff < 1e-10,
+        "shock-layer RMS defect drift={max_interval_residual_diff:e}"
+    );
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] official shock-layer workload",
+        &[ShockParityRow {
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                reference["newton_passes"],
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                telemetry.newton_scope_calls,
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            scipy_linear_solves: reference["linear_solves"].clone(),
+            rust_linear_solves: telemetry.linear_solves.to_string(),
+            scipy_trial_trace: reference["newton_trace"]
+                .split(';')
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+                .join(";"),
+            scipy_convergence_trace: reference["newton_convergence_trace"]
+                .split(';')
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+                .join(";"),
+            rust_trial_trace: telemetry
+                .newton_residual_history
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "i{}:j{}:c{:.3e}>{:.3e}:r{:.3e}:b{:.3e}:a{:.3}:t{}",
+                        entry.iteration,
+                        u8::from(entry.jacobian_refreshed),
+                        entry.affine_cost_before,
+                        entry.affine_cost_after.unwrap_or(f64::NAN),
+                        entry.max_normalized_collocation_residual,
+                        entry.normalized_boundary_residual,
+                        entry.armijo_alpha,
+                        entry.backtracking_trials
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";"),
+            counter_difference_reason: "nalgebra/SuperLU roundoff crosses threshold; one extra solve",
+            max_value_diff: format!("{max_value_diff:.3e}"),
+            max_derivative_diff: format!("{max_derivative_diff:.3e}"),
+            max_interval_residual_diff: format!("{max_interval_residual_diff:.3e}"),
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_official_large_parameterized_problem_matches_rust() {
+    #[derive(Tabled)]
+    struct LargeParameterizedRow {
+        dimension: usize,
+        parameter_count: usize,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_parameters: String,
+        rust_parameters: String,
+        scipy_passes_jac_lu_solves: String,
+        rust_passes_jac_lu_solves: String,
+        max_value_diff: String,
+        max_derivative_diff: String,
+        max_interval_residual_diff: String,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "big-parameterized-analytic");
+    let expected_values = parse_scipy_samples(&reference);
+    let expected_derivatives = parse_scipy_derivatives(&reference);
+    let expected_residuals = reference["rms_residuals"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy large residual"))
+        .collect::<Vec<_>>();
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy large sample"))
+        .collect::<Vec<_>>();
+    let systems = 30usize;
+    let dimension = systems * 2;
+    let rhs = BvpSciNumericalPlan::new(
+        dimension,
+        2,
+        move |_x, state, parameters, output| {
+            for system in 0..systems {
+                let parameter = if system % 2 == 0 { 0 } else { 1 };
+                output[2 * system] = state[2 * system + 1];
+                output[2 * system + 1] =
+                    -(parameters[parameter] * parameters[parameter]) * state[2 * system];
+            }
+            Ok(())
+        },
+        BvpSciTelemetry::timings(),
+    )
+    .expect("large parameterized RHS plan")
+    .with_rhs_jacobian(move |_x, _state, parameters, output| {
+        output.fill(0.0);
+        for system in 0..systems {
+            let parameter = if system % 2 == 0 { 0 } else { 1 };
+            output[(2 * system) * dimension + (2 * system + 1)] = 1.0;
+            output[(2 * system + 1) * dimension + 2 * system] =
+                -(parameters[parameter] * parameters[parameter]);
+        }
+        Ok(())
+    })
+    .with_rhs_parameter_jacobian(move |_x, state, parameters, output| {
+        output.fill(0.0);
+        for system in 0..systems {
+            let parameter = if system % 2 == 0 { 0 } else { 1 };
+            output[(2 * system + 1) * 2 + parameter] =
+                -2.0 * parameters[parameter] * state[2 * system];
+        }
+        Ok(())
+    });
+    let plan = BvpSciLambdifyPlan::prepare_numerical(rhs);
+    let boundary = BvpSciBoundaryCallbacks::new_with_jacobian(
+        dimension + 2,
+        move |ya, yb, parameters, output| {
+            for system in 0..systems {
+                output[system] = ya[2 * system];
+                output[systems + system] = yb[2 * system];
+            }
+            output[dimension] = ya[1] - parameters[0];
+            output[dimension + 1] = ya[3] - parameters[1];
+            Ok(())
+        },
+        move |_ya, _yb, _parameters, dya, dyb, dp| {
+            dya.fill(0.0);
+            dyb.fill(0.0);
+            dp.fill(0.0);
+            for system in 0..systems {
+                dya[system * dimension + 2 * system] = 1.0;
+                dyb[(systems + system) * dimension + 2 * system] = 1.0;
+            }
+            dya[dimension * dimension + 1] = 1.0;
+            dya[(dimension + 1) * dimension + 3] = 1.0;
+            dp[dimension * 2] = -1.0;
+            dp[(dimension + 1) * 2 + 1] = -1.0;
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5)
+        .map(|index| std::f64::consts::PI * index as f64 / 4.0)
+        .collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.max_nodes = 1000;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![1.0; mesh.len() * dimension],
+        vec![0.5, 0.5],
+        options,
+    )
+    .expect("large parameterized solver");
+    let solution = rust
+        .solve()
+        .expect("official large parameterized system should converge");
+    let dense = solution
+        .dense_output()
+        .expect("large parameterized dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    assert_eq!(reference["status"], "0");
+    assert_eq!(solution.status.code(), 0);
+    assert_eq!(solution.x.len().to_string(), reference["nodes"]);
+    assert_scipy_counter_parity(
+        "official large parameterized problem",
+        &reference,
+        &telemetry,
+        telemetry.newton_scope_calls,
+    );
+
+    let expected_parameters = reference["parameters"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy parameter"))
+        .collect::<Vec<_>>();
+    let max_parameter_diff = solution
+        .parameters
+        .iter()
+        .zip(&expected_parameters)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    let mut max_value_diff = max_parameter_diff;
+    let mut max_derivative_diff = 0.0_f64;
+    for (point, x) in sample_x.iter().enumerate() {
+        let values = dense.evaluate(*x).expect("large parameterized state");
+        let derivatives = dense
+            .evaluate_derivative(*x)
+            .expect("large parameterized derivative");
+        for component in 0..dimension {
+            max_value_diff =
+                max_value_diff.max((values[component] - expected_values[component][point]).abs());
+            max_derivative_diff = max_derivative_diff
+                .max((derivatives[component] - expected_derivatives[component][point]).abs());
+        }
+    }
+    let max_interval_residual_diff = solution
+        .interval_residuals
+        .iter()
+        .zip(&expected_residuals)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_value_diff < 2e-4,
+        "large parameterized value drift={max_value_diff:e}"
+    );
+    assert!(
+        max_derivative_diff < 2e-3,
+        "large parameterized derivative drift={max_derivative_diff:e}"
+    );
+    assert_eq!(solution.interval_residuals.len(), expected_residuals.len());
+    assert!(
+        max_interval_residual_diff < 1e-9,
+        "large parameterized RMS defect drift={max_interval_residual_diff:e}"
+    );
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] official large parameterized problem",
+        &[LargeParameterizedRow {
+            dimension,
+            parameter_count: solution.parameters.len(),
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_parameters: format!("{expected_parameters:?}"),
+            rust_parameters: format!("{:?}", solution.parameters),
+            scipy_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                reference["newton_passes"],
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                telemetry.newton_scope_calls,
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            max_value_diff: format!("{max_value_diff:.3e}"),
+            max_derivative_diff: format!("{max_derivative_diff:.3e}"),
+            max_interval_residual_diff: format!("{max_interval_residual_diff:.3e}"),
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_exponential_two_point_problem_matches_exact_jacobian_trace() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        reference_route: &'static str,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_newton_jac_lu_solve: String,
+        rust_newton_jac_lu_solve: String,
+        max_sample_diff: String,
+        max_derivative_diff: String,
+        max_interval_residual_diff: String,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sample_x: Vec<f64> = (0..9).map(|index| index as f64 / 8.0).collect();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("z"), Expr::parse_expression("y")],
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("exponential SciPy parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0] - 1.0;
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5).map(|index| index as f64 / 4.0).collect();
+    let mut options = BvpSciOptions::default();
+    // Match the official SciPy test_no_params tolerance rather than imposing
+    // a stricter unrelated threshold on this algorithm-parity case.
+    options.tolerance = 1e-3;
+    options.max_nodes = 100;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * 2],
+        vec![],
+        options,
+    )
+    .expect("exponential SciPy parity solver");
+    let rust_solution = rust.solve().expect("Rust exponential BVP should converge");
+    let dense = rust_solution.dense_output().expect("Rust dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    let rust_passes = telemetry.newton_scope_calls;
+    let mut rows = Vec::new();
+
+    for (case, route) in [
+        ("exponential", "SciPy finite-difference Jacobians"),
+        ("exponential-analytic", "SciPy exact Jacobians"),
+    ] {
+        let reference = scipy_bvp_reference_row(&root, case);
+        let expected = parse_scipy_samples(&reference);
+        let expected_derivatives = parse_scipy_derivatives(&reference);
+        let expected_residuals = reference["rms_residuals"]
+            .split(',')
+            .map(|value| value.parse::<f64>().expect("SciPy interval residual"))
+            .collect::<Vec<_>>();
+        let mut max_diff = 0.0_f64;
+        let mut max_derivative_diff = 0.0_f64;
+        for (column, x) in sample_x.iter().enumerate() {
+            let actual = dense
+                .evaluate(*x)
+                .expect("sample Rust exponential solution");
+            let actual_derivative = dense
+                .evaluate_derivative(*x)
+                .expect("sample Rust exponential derivative");
+            for (component, value) in actual.iter().enumerate() {
+                max_diff = max_diff.max((value - expected[component][column]).abs());
+                max_derivative_diff = max_derivative_diff.max(
+                    (actual_derivative[component] - expected_derivatives[component][column]).abs(),
+                );
+            }
+        }
+        let max_interval_residual_diff = rust_solution
+            .interval_residuals
+            .iter()
+            .zip(&expected_residuals)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff < 2e-5,
+            "{case} SciPy/Rust drift={max_diff:e} exceeded the shared tol=1e-3 accuracy envelope"
+        );
+        assert!(
+            max_derivative_diff < 2e-5,
+            "{case} dense-output derivative drift={max_derivative_diff:e}"
+        );
+        assert_eq!(
+            rust_solution.interval_residuals.len(),
+            expected_residuals.len()
+        );
+        assert!(
+            max_interval_residual_diff < 1e-10,
+            "{case} interval residual drift={max_interval_residual_diff:e}"
+        );
+        assert_scipy_counter_parity(case, &reference, &telemetry, rust_passes);
+        rows.push(ParityRow {
+            reference_route: route,
+            scipy_status: reference["status"].clone(),
+            rust_status: rust_solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: rust_solution.x.len().to_string(),
+            scipy_newton_jac_lu_solve: format!(
+                "{}/{}/{}/{}",
+                reference["newton_passes"],
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_newton_jac_lu_solve: format!(
+                "{}/{}/{}/{}",
+                rust_passes,
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            max_sample_diff: format!("{max_diff:.3e}"),
+            max_derivative_diff: format!("{max_derivative_diff:.3e}"),
+            max_interval_residual_diff: format!("{max_interval_residual_diff:.3e}"),
+        });
+    }
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] exponential two-point BVP and Jacobian routes",
+        &rows,
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_sturm_liouville_unknown_parameter_matches_reference_routes() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        scipy_jacobian: &'static str,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_parameter: String,
+        rust_parameter: String,
+        scipy_jac_lu_solves: String,
+        rust_jac_lu_solves: String,
+        rust_newton_trace: String,
+        max_sample_diff: String,
+        counter_parity: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let equations = [
+        Expr::parse_expression("z"),
+        // Parenthesize the positive power before applying unary minus so the
+        // fixture does not depend on the expression parser's unary precedence.
+        Expr::parse_expression("-(p^2)*y"),
+    ];
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &equations,
+        &["y".into(), "z".into()],
+        &["p".into()],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("Sturm-Liouville parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        3,
+        |ya, yb, parameters, output| {
+            output[0] = ya[0];
+            output[1] = yb[0];
+            output[2] = ya[1] - parameters[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5)
+        .map(|index| std::f64::consts::PI * index as f64 / 4.0)
+        .collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.max_nodes = 100;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let initial = vec![1.0; mesh.len() * 2];
+    let mut rust = BvpSciSolver::new(plan, boundary, mesh, initial, vec![0.5], options)
+        .expect("Sturm-Liouville parity solver");
+    let solution = rust
+        .solve()
+        .expect("Rust Sturm-Liouville BVP should converge");
+    let dense = solution
+        .dense_output()
+        .expect("Sturm-Liouville dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    let rust_passes = telemetry.newton_scope_calls;
+    let mut rows = Vec::new();
+
+    for (case, jacobian_kind) in [
+        ("sturm-liouville", "finite differences"),
+        ("sturm-liouville-analytic", "analytic callbacks"),
+    ] {
+        let reference = scipy_bvp_reference_row(&root, case);
+        let expected = parse_scipy_samples(&reference);
+        let sample_x = reference["sample_x"]
+            .split(',')
+            .map(|value| value.parse::<f64>().expect("SciPy sample coordinate"))
+            .collect::<Vec<_>>();
+        let mut max_diff = (solution.parameters[0]
+            - reference["parameters"]
+                .parse::<f64>()
+                .expect("SciPy parameter"))
+        .abs();
+        for (column, x) in sample_x.iter().enumerate() {
+            let actual = dense.evaluate(*x).expect("sample Rust parameter solution");
+            for (component, value) in actual.iter().enumerate() {
+                max_diff = max_diff.max((value - expected[component][column]).abs());
+            }
+        }
+        assert!(
+            max_diff < 1e-4,
+            "{case} SciPy/Rust parameter/trajectory drift={max_diff:e}; rust_p={:?}, scipy_p={}, nodes={}",
+            solution.parameters,
+            reference["parameters"],
+            solution.x.len()
+        );
+        let scipy_counts_match = [
+            ("newton_passes", rust_passes),
+            ("jacobian_builds", telemetry.newton_jacobian_refreshes),
+            ("factorizations", telemetry.factorizations),
+            ("linear_solves", telemetry.linear_solves),
+            ("mesh_modify_calls", telemetry.mesh_refinements),
+        ]
+        .iter()
+        .all(|(key, actual)| reference[*key].parse::<u64>().ok() == Some(*actual));
+        let rust_newton_trace = telemetry
+            .newton_residual_history
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}:{:.1e}:a{:.3}:j{}",
+                    entry.iteration,
+                    entry.residual_before,
+                    entry.armijo_alpha,
+                    u8::from(entry.jacobian_refreshed)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        rows.push(ParityRow {
+            scipy_jacobian: jacobian_kind,
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_parameter: reference["parameters"].clone(),
+            rust_parameter: format!("{:.9}", solution.parameters[0]),
+            scipy_jac_lu_solves: format!(
+                "{}/{}/{}",
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_jac_lu_solves: format!(
+                "{}/{}/{}",
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            rust_newton_trace,
+            max_sample_diff: format!("{max_diff:.3e}"),
+            counter_parity: if scipy_counts_match {
+                "exact"
+            } else {
+                "counter-drift"
+            },
+        });
+    }
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] Sturm-Liouville unknown parameter",
+        &rows,
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_nonlinear_boundary_conditions_match_rust_callbacks() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_passes_jac_lu_solves: String,
+        rust_passes_jac_lu_solves: String,
+        max_sample_diff: String,
+        counter_parity: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "nonlinear-boundary");
+    let expected = parse_scipy_samples(&reference);
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy sample coordinate"))
+        .collect::<Vec<_>>();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("z"), Expr::parse_expression("0")],
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("nonlinear-boundary parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            let (kappa, io_a, io_c, voltage, factor) = (1.64, 0.01, 1.0e-4, 0.5, 38.9);
+            let h_a = -ya[0];
+            let current_a = io_a * ((factor * h_a).exp() - (-factor * h_a).exp());
+            let h_c = voltage - yb[0] - 1.0;
+            let current_c = io_c * ((factor * h_c).exp() - (-factor * h_c).exp());
+            output[0] = current_a + kappa * ya[1];
+            output[1] = current_c - kappa * yb[1];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5).map(|index| 0.1 * index as f64 / 4.0).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.max_nodes = 100;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * 2],
+        vec![],
+        options,
+    )
+    .expect("nonlinear-boundary parity solver");
+    let solution = rust
+        .solve()
+        .expect("Rust nonlinear-boundary BVP should converge");
+    let dense = solution
+        .dense_output()
+        .expect("nonlinear-boundary dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    let rust_passes = telemetry.newton_scope_calls;
+    let counters_match = [
+        ("newton_passes", rust_passes),
+        ("jacobian_builds", telemetry.newton_jacobian_refreshes),
+        ("factorizations", telemetry.factorizations),
+        ("linear_solves", telemetry.linear_solves),
+        ("mesh_modify_calls", telemetry.mesh_refinements),
+    ]
+    .iter()
+    .all(|(key, actual)| reference[*key].parse::<u64>().ok() == Some(*actual));
+    let mut max_diff = 0.0_f64;
+    for (column, x) in sample_x.iter().enumerate() {
+        let actual = dense.evaluate(*x).expect("nonlinear-boundary sample");
+        for (component, value) in actual.iter().enumerate() {
+            max_diff = max_diff.max((value - expected[component][column]).abs());
+        }
+    }
+    assert!(
+        max_diff < 1e-8,
+        "nonlinear boundary SciPy/Rust drift={max_diff:e}"
+    );
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] nonlinear boundary-value callbacks",
+        &[ParityRow {
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                reference["newton_passes"],
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_passes_jac_lu_solves: format!(
+                "{}/{}/{}/{}",
+                rust_passes,
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            max_sample_diff: format!("{max_diff:.3e}"),
+            counter_parity: if counters_match {
+                "exact"
+            } else {
+                "counter-drift"
+            },
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_large_independent_system_matches_rust_dense_core() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        dimension: usize,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_jac_lu_solves: String,
+        rust_jac_lu_solves: String,
+        max_sample_diff: String,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "big-problem");
+    let expected = parse_scipy_samples(&reference);
+    let sample_x = reference["sample_x"]
+        .split(',')
+        .map(|value| value.parse::<f64>().expect("SciPy sample coordinate"))
+        .collect::<Vec<_>>();
+    let systems = 30usize;
+    let dimension = systems * 2;
+    let states = (0..systems)
+        .flat_map(|index| [format!("y{index}"), format!("z{index}")])
+        .collect::<Vec<_>>();
+    let equations = (0..systems)
+        .flat_map(|index| {
+            [
+                Expr::parse_expression(&format!("z{index}")),
+                Expr::parse_expression("0"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &equations,
+        &states,
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("large independent parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        dimension,
+        move |ya, yb, _, output| {
+            for index in 0..systems {
+                output[index] = ya[index * 2];
+                output[systems + index] = yb[index * 2] - 1.0;
+            }
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..5).map(|index| index as f64 / 4.0).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-3;
+    options.max_nodes = 100;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * dimension],
+        vec![],
+        options,
+    )
+    .expect("large independent parity solver");
+    let solution = rust
+        .solve()
+        .expect("Rust large independent BVP should converge");
+    let dense = solution.dense_output().expect("large-system dense output");
+    let telemetry = rust.plan().telemetry_snapshot();
+    assert_scipy_counter_parity(
+        "big-problem",
+        &reference,
+        &telemetry,
+        telemetry.newton_scope_calls,
+    );
+    let mut max_diff = 0.0_f64;
+    for (column, x) in sample_x.iter().enumerate() {
+        let actual = dense.evaluate(*x).expect("large-system sample");
+        for (component, value) in actual.iter().enumerate() {
+            max_diff = max_diff.max((value - expected[component][column]).abs());
+        }
+    }
+    assert!(max_diff < 1e-10, "large SciPy/Rust drift={max_diff:e}");
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] official large independent BVP",
+        &[ParityRow {
+            dimension,
+            scipy_status: reference["status"].clone(),
+            rust_status: solution.status.code().to_string(),
+            scipy_nodes: reference["nodes"].clone(),
+            rust_nodes: solution.x.len().to_string(),
+            scipy_jac_lu_solves: format!(
+                "{}/{}/{}",
+                reference["jacobian_builds"],
+                reference["factorizations"],
+                reference["linear_solves"]
+            ),
+            rust_jac_lu_solves: format!(
+                "{}/{}/{}",
+                telemetry.newton_jacobian_refreshes,
+                telemetry.factorizations,
+                telemetry.linear_solves
+            ),
+            max_sample_diff: format!("{max_diff:.3e}"),
+        }],
+    );
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_singular_collocation_jacobian_maps_to_rust_typed_failure() {
+    #[derive(Tabled)]
+    struct FailureRow {
+        scipy_status: String,
+        rust_status: String,
+        scipy_factorization_calls: String,
+        rust_factorizations: String,
+        rust_error: String,
+        parity: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reference = scipy_bvp_reference_row(&root, "singular-jacobian");
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("0"), Expr::parse_expression("0")],
+        &["y0".into(), "y1".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("singular Jacobian plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0];
+            output[1] = yb[0] - 1.0;
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-5;
+    options.max_nodes = 5;
+    let mut rust = BvpSciSolver::new(
+        plan,
+        boundary,
+        vec![0.0, 1.0],
+        vec![0.0; 4],
+        vec![],
+        options,
+    )
+    .expect("singular Jacobian solver construction");
+    let error = rust
+        .solve()
+        .expect_err("incompatible constant ODE and endpoint constraints are singular");
+    let rust_status = error.status().map(|status| status.code());
+    let rust_telemetry = rust.plan().telemetry_snapshot();
+    let scipy_status = reference["status"].parse::<u8>().expect("SciPy status");
+    let status_parity = rust_status == Some(scipy_status);
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] singular global collocation Jacobian",
+        &[FailureRow {
+            scipy_status: scipy_status.to_string(),
+            rust_status: rust_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unmapped".into()),
+            scipy_factorization_calls: reference["factorizations"].clone(),
+            rust_factorizations: rust_telemetry.factorizations.to_string(),
+            rust_error: format!("{error:?}"),
+            parity: if status_parity {
+                "status-match"
+            } else {
+                "status-gap"
+            },
+        }],
+    );
+    assert!(
+        status_parity,
+        "SciPy status {scipy_status} must map to Rust typed error/status; got {error:?}"
+    );
+}
+
+fn parse_scipy_samples(fields: &HashMap<String, String>) -> Vec<Vec<f64>> {
+    fields["sample_y"]
+        .split(';')
+        .map(|component| {
+            component
+                .split(',')
+                .map(|value| value.parse::<f64>().expect("SciPy sample value"))
+                .collect()
+        })
+        .collect()
+}
+
+fn parse_scipy_derivatives(fields: &HashMap<String, String>) -> Vec<Vec<f64>> {
+    fields["sample_dy"]
+        .split(';')
+        .map(|component| {
+            component
+                .split(',')
+                .map(|value| value.parse::<f64>().expect("SciPy sample derivative"))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "cross-language parity gate requires pinned SciPy Python runtime"]
+fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
+    #[derive(Tabled)]
+    struct ParityRow {
+        case: &'static str,
+        scipy_status: String,
+        rust_status: String,
+        scipy_nodes: String,
+        rust_nodes: String,
+        scipy_passes: String,
+        rust_passes: String,
+        scipy_jac: String,
+        rust_jac: String,
+        scipy_lu: String,
+        rust_lu: String,
+        scipy_solves: String,
+        rust_solves: String,
+        scipy_mesh_calls: String,
+        rust_mesh_changes: String,
+        max_sample_diff: String,
+        status: &'static str,
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sample_x: Vec<f64> = (0..9).map(|i| i as f64 / 8.0).collect();
+    let mut rows = Vec::new();
+
+    let bratu_reference = scipy_bvp_reference_row(&root, "bratu");
+    let bratu_expected = parse_scipy_samples(&bratu_reference);
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &bratu_equations(),
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("Bratu parity plan");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0];
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh: Vec<f64> = (0..6).map(|i| i as f64 / 5.0).collect();
+    let mut options = BvpSciOptions::default();
+    options.tolerance = 1e-5;
+    options.max_nodes = 200;
+    options.max_mesh_refinements = 10;
+    options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut bratu = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        vec![0.0; mesh.len() * 2],
+        vec![],
+        options,
+    )
+    .expect("Bratu parity solver");
+    let bratu_solution = bratu.solve().expect("Rust Bratu should converge");
+    let bratu_dense = bratu_solution.dense_output().expect("Bratu dense output");
+    let mut bratu_diff = 0.0_f64;
+    for (column, x) in sample_x.iter().enumerate() {
+        let actual = bratu_dense.evaluate(*x).expect("Bratu sample");
+        for (component, state) in actual.iter().enumerate() {
+            bratu_diff = bratu_diff.max((state - bratu_expected[component][column]).abs());
+        }
+    }
+    assert!(bratu_diff < 5e-4, "Bratu SciPy/Rust drift={bratu_diff:e}");
+    let bratu_telemetry = bratu.plan().telemetry_snapshot();
+    assert_scipy_counter_parity(
+        "Bratu",
+        &bratu_reference,
+        &bratu_telemetry,
+        bratu_telemetry.newton_scope_calls,
+    );
+    rows.push(ParityRow {
+        case: "Bratu nonlinear",
+        scipy_status: bratu_reference["status"].clone(),
+        rust_status: bratu_solution.status.code().to_string(),
+        scipy_nodes: bratu_reference["nodes"].clone(),
+        rust_nodes: bratu_solution.x.len().to_string(),
+        scipy_passes: bratu_reference["newton_passes"].clone(),
+        rust_passes: bratu_telemetry.newton_scope_calls.to_string(),
+        scipy_jac: bratu_reference["jacobian_builds"].clone(),
+        rust_jac: bratu_telemetry.newton_jacobian_refreshes.to_string(),
+        scipy_lu: bratu_reference["factorizations"].clone(),
+        rust_lu: bratu_telemetry.factorizations.to_string(),
+        scipy_solves: bratu_reference["linear_solves"].clone(),
+        rust_solves: bratu_telemetry.linear_solves.to_string(),
+        scipy_mesh_calls: bratu_reference["mesh_modify_calls"].clone(),
+        rust_mesh_changes: bratu_telemetry.mesh_refinements.to_string(),
+        max_sample_diff: format!("{bratu_diff:.3e}"),
+        status: "ok",
+    });
+
+    let parameter_reference = scipy_bvp_reference_row(&root, "unknown-parameter");
+    let parameter_expected = parse_scipy_samples(&parameter_reference);
+    let parameter_plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("p")],
+        &["y".into()],
+        &["p".into()],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("unknown-parameter parity plan");
+    let parameter_boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0];
+            output[1] = yb[0] - 1.0;
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let parameter_mesh: Vec<f64> = (0..6).map(|i| i as f64 / 5.0).collect();
+    let parameter_initial: Vec<f64> = parameter_mesh.iter().map(|x| 0.8 * x).collect();
+    let mut parameter_options = BvpSciOptions::default();
+    parameter_options.tolerance = 1e-8;
+    parameter_options.max_nodes = 100;
+    parameter_options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    let mut parameter_solver = BvpSciSolver::new(
+        parameter_plan,
+        parameter_boundary,
+        parameter_mesh,
+        parameter_initial,
+        vec![0.8],
+        parameter_options,
+    )
+    .expect("unknown-parameter solver");
+    let parameter_solution = parameter_solver
+        .solve()
+        .expect("unknown-parameter solve should converge");
+    let parameter_dense = parameter_solution
+        .dense_output()
+        .expect("parameter dense output");
+    let mut parameter_diff = (parameter_solution.parameters[0] - 1.0).abs();
+    for (column, x) in sample_x.iter().enumerate() {
+        let actual = parameter_dense.evaluate(*x).expect("parameter sample")[0];
+        parameter_diff = parameter_diff.max((actual - parameter_expected[0][column]).abs());
+    }
+    assert!(
+        parameter_diff < 1e-8,
+        "unknown parameter parity drift={parameter_diff:e}"
+    );
+    let parameter_telemetry = parameter_solver.plan().telemetry_snapshot();
+    assert_scipy_counter_parity(
+        "unknown parameter",
+        &parameter_reference,
+        &parameter_telemetry,
+        parameter_telemetry.newton_scope_calls,
+    );
+    rows.push(ParityRow {
+        case: "unknown parameter",
+        scipy_status: parameter_reference["status"].clone(),
+        rust_status: parameter_solution.status.code().to_string(),
+        scipy_nodes: parameter_reference["nodes"].clone(),
+        rust_nodes: parameter_solution.x.len().to_string(),
+        scipy_passes: parameter_reference["newton_passes"].clone(),
+        rust_passes: parameter_telemetry.newton_scope_calls.to_string(),
+        scipy_jac: parameter_reference["jacobian_builds"].clone(),
+        rust_jac: parameter_telemetry.newton_jacobian_refreshes.to_string(),
+        scipy_lu: parameter_reference["factorizations"].clone(),
+        rust_lu: parameter_telemetry.factorizations.to_string(),
+        scipy_solves: parameter_reference["linear_solves"].clone(),
+        rust_solves: parameter_telemetry.linear_solves.to_string(),
+        scipy_mesh_calls: parameter_reference["mesh_modify_calls"].clone(),
+        rust_mesh_changes: parameter_telemetry.mesh_refinements.to_string(),
+        max_sample_diff: format!("{parameter_diff:.3e}"),
+        status: "ok",
+    });
+
+    let singular_reference = scipy_bvp_reference_row(&root, "singular");
+    let singular_expected = parse_scipy_samples(&singular_reference);
+    let singular_plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("z"), Expr::parse_expression("-y^5")],
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("singular Lane-Emden plan");
+    let singular_boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[1];
+            output[1] = yb[0] - (3.0_f64 / 4.0).sqrt();
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let singular_mesh: Vec<f64> = (0..10).map(|i| i as f64 / 9.0).collect();
+    let initial_state: Vec<f64> = singular_mesh
+        .iter()
+        .flat_map(|_| [(3.0_f64 / 4.0).sqrt(), 1e-4])
+        .collect();
+    let mut singular_options = BvpSciOptions::default();
+    singular_options.tolerance = 1e-3;
+    singular_options.max_nodes = 100;
+    singular_options.output_policy = BvpSciOutputPolicy::DenseOutput;
+    singular_options.singular_term = Some(
+        BvpSciSingularTerm::new(2, vec![0.0, 0.0, 0.0, -2.0])
+            .expect("valid SciPy singular-term matrix"),
+    );
+    let mut singular = BvpSciSolver::new(
+        singular_plan,
+        singular_boundary,
+        singular_mesh,
+        initial_state,
+        vec![],
+        singular_options,
+    )
+    .expect("singular Lane-Emden solver");
+    let singular_solution = singular.solve().expect("Rust singular BVP should converge");
+    let singular_dense = singular_solution
+        .dense_output()
+        .expect("singular dense output");
+    let mut singular_diff = 0.0_f64;
+    for (column, x) in sample_x.iter().enumerate() {
+        let actual = singular_dense.evaluate(*x).expect("singular sample");
+        for (component, state) in actual.iter().enumerate() {
+            singular_diff = singular_diff.max((state - singular_expected[component][column]).abs());
+        }
+    }
+    assert!(
+        singular_diff < 2e-3,
+        "singular SciPy/Rust drift={singular_diff:e}"
+    );
+    let singular_telemetry = singular.plan().telemetry_snapshot();
+    assert_scipy_counter_parity(
+        "Lane-Emden singular",
+        &singular_reference,
+        &singular_telemetry,
+        singular_telemetry.newton_scope_calls,
+    );
+    rows.push(ParityRow {
+        case: "Lane-Emden singular S",
+        scipy_status: singular_reference["status"].clone(),
+        rust_status: singular_solution.status.code().to_string(),
+        scipy_nodes: singular_reference["nodes"].clone(),
+        rust_nodes: singular_solution.x.len().to_string(),
+        scipy_passes: singular_reference["newton_passes"].clone(),
+        rust_passes: singular_telemetry.newton_scope_calls.to_string(),
+        scipy_jac: singular_reference["jacobian_builds"].clone(),
+        rust_jac: singular_telemetry.newton_jacobian_refreshes.to_string(),
+        scipy_lu: singular_reference["factorizations"].clone(),
+        rust_lu: singular_telemetry.factorizations.to_string(),
+        scipy_solves: singular_reference["linear_solves"].clone(),
+        rust_solves: singular_telemetry.linear_solves.to_string(),
+        scipy_mesh_calls: singular_reference["mesh_modify_calls"].clone(),
+        rust_mesh_changes: singular_telemetry.mesh_refinements.to_string(),
+        max_sample_diff: format!("{singular_diff:.3e}"),
+        status: "ok",
+    });
+
+    let exhausted_reference = scipy_bvp_reference_row(&root, "bratu-exhaustion");
+    let exhausted_plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &bratu_equations(),
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("exhaustion plan");
+    let exhausted_boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0];
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::timings(),
+    );
+    let exhausted_mesh: Vec<f64> = (0..6).map(|i| i as f64 / 5.0).collect();
+    let mut exhausted_options = BvpSciOptions::default();
+    exhausted_options.tolerance = 1e-8;
+    exhausted_options.max_nodes = 8;
+    exhausted_options.max_mesh_refinements = 10;
+    let mut exhausted = BvpSciSolver::new(
+        exhausted_plan,
+        exhausted_boundary,
+        exhausted_mesh.clone(),
+        vec![0.0; exhausted_mesh.len() * 2],
+        vec![],
+        exhausted_options,
+    )
+    .expect("exhaustion solver");
+    let error = exhausted
+        .solve()
+        .expect_err("eight-node budget must exhaust");
+    assert_eq!(error.status().map(|status| status.code()), Some(1));
+    assert_eq!(exhausted_reference["status"], "1");
+    let exhausted_telemetry = exhausted.plan().telemetry_snapshot();
+    assert_scipy_counter_parity(
+        "Bratu max-nodes",
+        &exhausted_reference,
+        &exhausted_telemetry,
+        exhausted_telemetry.newton_scope_calls,
+    );
+    rows.push(ParityRow {
+        case: "Bratu max-nodes",
+        scipy_status: exhausted_reference["status"].clone(),
+        rust_status: error.status().unwrap().code().to_string(),
+        scipy_nodes: exhausted_reference["nodes"].clone(),
+        rust_nodes: "budget error".into(),
+        scipy_passes: exhausted_reference["newton_passes"].clone(),
+        rust_passes: exhausted_telemetry.newton_scope_calls.to_string(),
+        scipy_jac: exhausted_reference["jacobian_builds"].clone(),
+        rust_jac: exhausted_telemetry.newton_jacobian_refreshes.to_string(),
+        scipy_lu: exhausted_reference["factorizations"].clone(),
+        rust_lu: exhausted_telemetry.factorizations.to_string(),
+        scipy_solves: exhausted_reference["linear_solves"].clone(),
+        rust_solves: exhausted_telemetry.linear_solves.to_string(),
+        scipy_mesh_calls: exhausted_reference["mesh_modify_calls"].clone(),
+        rust_mesh_changes: exhausted_telemetry.mesh_refinements.to_string(),
+        max_sample_diff: "n/a".into(),
+        status: "status-mapped",
+    });
+
+    let tight_reference = scipy_bvp_reference_row(&root, "exponential-tight");
+    let tight_plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("z"), Expr::parse_expression("y")],
+        &["y".into(), "z".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::timings(),
+    )
+    .expect("tight exponential plan");
+    let tight_boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        |ya, yb, _, output| {
+            output[0] = ya[0] - 1.0;
+            output[1] = yb[0];
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let tight_mesh: Vec<f64> = (0..5).map(|index| index as f64 / 4.0).collect();
+    let mut tight_options = BvpSciOptions::default();
+    tight_options.tolerance = 1e-8;
+    tight_options.max_nodes = 100;
+    let mut tight = BvpSciSolver::new(
+        tight_plan,
+        tight_boundary,
+        tight_mesh.clone(),
+        vec![0.0; tight_mesh.len() * 2],
+        vec![],
+        tight_options,
+    )
+    .expect("tight exponential solver");
+    let tight_error = tight
+        .solve()
+        .expect_err("strict exponential case should hit the shared node budget");
+    let tight_telemetry = tight.plan().telemetry_snapshot();
+    assert_eq!(tight_reference["status"], "1");
+    assert_eq!(tight_error.status().map(|status| status.code()), Some(1));
+    assert_scipy_counter_parity(
+        "exponential tight max-nodes",
+        &tight_reference,
+        &tight_telemetry,
+        tight_telemetry.newton_scope_calls,
+    );
+    rows.push(ParityRow {
+        case: "exponential tol=1e-8 max-nodes",
+        scipy_status: tight_reference["status"].clone(),
+        rust_status: tight_error.status().unwrap().code().to_string(),
+        scipy_nodes: tight_reference["nodes"].clone(),
+        rust_nodes: "typed budget error".into(),
+        scipy_passes: tight_reference["newton_passes"].clone(),
+        rust_passes: tight_telemetry.newton_scope_calls.to_string(),
+        scipy_jac: tight_reference["jacobian_builds"].clone(),
+        rust_jac: tight_telemetry.newton_jacobian_refreshes.to_string(),
+        scipy_lu: tight_reference["factorizations"].clone(),
+        rust_lu: tight_telemetry.factorizations.to_string(),
+        scipy_solves: tight_reference["linear_solves"].clone(),
+        rust_solves: tight_telemetry.linear_solves.to_string(),
+        scipy_mesh_calls: tight_reference["mesh_modify_calls"].clone(),
+        rust_mesh_changes: tight_telemetry.mesh_refinements.to_string(),
+        max_sample_diff: "n/a (SciPy status 1)".into(),
+        status: "status-mapped",
+    });
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[BVP_sci SciPy 1.18.1 parity] nonlinear, singular and exhaustion cases",
+        &rows,
+    );
+}
+
+fn assert_scipy_counter_parity(
+    case: &str,
+    scipy: &HashMap<String, String>,
+    rust: &super::BvpSciTelemetrySnapshot,
+    rust_passes: u64,
+) {
+    let check = |key: &str, actual: u64, meaning: &str| {
+        let expected = scipy[key]
+            .parse::<u64>()
+            .unwrap_or_else(|error| panic!("{case} SciPy {key} is not an integer: {error}"));
+        assert_eq!(
+            actual, expected,
+            "{case} {meaning} counter differs: Rust={actual}, SciPy={expected}"
+        );
+    };
+    check("newton_passes", rust_passes, "outer Newton pass");
+    check(
+        "jacobian_builds",
+        rust.newton_jacobian_refreshes,
+        "global Jacobian build",
+    );
+    check("factorizations", rust.factorizations, "LU factorization");
+    check("linear_solves", rust.linear_solves, "linear solve");
+    check(
+        "mesh_modify_calls",
+        rust.mesh_refinements,
+        "accepted mesh modification",
+    );
+}

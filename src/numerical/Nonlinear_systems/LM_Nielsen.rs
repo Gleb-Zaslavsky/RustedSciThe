@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn nielsen_lm_advanced_without_column_scaling() {
-        let mut method = NielsenLevenbergMarquardtMethodAdvanced::default();
+        let method = NielsenLevenbergMarquardtMethodAdvanced::default();
         //  method.use_column_scaling = false;
 
         let options = SolveOptions {

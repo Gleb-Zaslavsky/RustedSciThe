@@ -118,7 +118,10 @@ impl RadauConfig {
             return Err(RadauConfigError::InvalidMaximumStep.into());
         }
         if let Some(first_step) = self.first_step {
-            if !first_step.is_finite() || first_step <= 0.0 {
+            if !first_step.is_finite()
+                || first_step <= 0.0
+                || first_step > (self.t_bound - self.t0).abs()
+            {
                 return Err(RadauConfigError::InvalidFirstStep.into());
             }
         }

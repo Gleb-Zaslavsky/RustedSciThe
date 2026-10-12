@@ -1,3 +1,4 @@
+#[allow(unused)]
 mod normalization_examples {
     use crate::symbolic::View::atom::Atom;
     use crate::{function, parse, symbol};

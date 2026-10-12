@@ -116,6 +116,7 @@ where
 
 #[inline]
 /// Dot product between two vectors
+#[allow(dead_code)]
 pub(crate) fn dot<F, N, AS, BS>(a: &Vector<F, N, AS>, b: &Vector<F, N, BS>) -> F
 where
     F: nalgebra::RealField + Copy,

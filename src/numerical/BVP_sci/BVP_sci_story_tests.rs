@@ -856,7 +856,7 @@ mod tests {
             "-".to_string()
         }
     }
-
+    #[allow(dead_code)]
     fn fmt_agg_short(value: Aggregate) -> String {
         if value.mean.is_finite() {
             format!("{:.3} +/- {:.3}", value.mean, value.stddev)

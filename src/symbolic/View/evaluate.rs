@@ -1653,7 +1653,7 @@ mod test {
         evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator, ExactSymbolMap, FunctionMap,
     };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
-    use crate::{function, parse, symbol};
+    use crate::{ parse, symbol};
 
     #[test]
     fn evaluate_like_original_example() {

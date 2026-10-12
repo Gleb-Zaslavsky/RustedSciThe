@@ -69,7 +69,7 @@ fn bdf_nonautonomous_full_trajectory_matches_closed_form() {
     let stats = solver.get_statistics();
     assert_eq!(
         stats.bdf_njev_total, 1,
-        "analytic Jacobian is evaluated once"
+        "state-dependent analytic Jacobian is evaluated once"
     );
     assert_eq!(
         stats.candidate_step_attempts_total,
@@ -150,11 +150,14 @@ fn bdf_constant_jacobian_work_is_independent_of_newton_refreshes() {
     let (_, states) = solver.get_result_ref();
     let error = (states[(states.nrows() - 1, 0)] - (-rate * t_bound).exp()).abs();
     assert!(error <= 2e-8, "constant-J final error={error:e}");
-    assert_eq!(stats.bdf_njev_total, 1);
+    assert_eq!(
+        stats.bdf_njev_total, 0,
+        "a supplied constant matrix is not a callback evaluation"
+    );
     assert!(stats.accepted_steps_total > 0);
     assert!(stats.bdf_nlu_total <= stats.linear_solve_attempts_total);
     println!(
-        "[BDF constant-J work] final_abs_error={error:.3e} rhs={} jac={} factorizations={} linear_solves={} accepted={} rejected={} status=ok",
+        "[BDF constant-J work] final_abs_error={error:.3e} rhs={} jac_evaluations={} factorizations={} linear_solves={} accepted={} rejected={} status=ok",
         stats.bdf_nfev_total,
         stats.bdf_njev_total,
         stats.bdf_nlu_total,

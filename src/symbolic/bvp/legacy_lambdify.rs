@@ -1,3 +1,4 @@
+ #![allow(dead_code)]
 //! Legacy BVP Lambdify runtime support.
 //!
 //! This module deliberately contains only compatibility instrumentation and
@@ -420,7 +421,7 @@ mod tests {
         LegacyLambdifyTelemetry, dense_residual_with_binding, faer_sparse_jacobian_with_binding,
         faer_sparse_residual_with_binding,
     };
-    use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac, MatrixType, VectorType};
+
     use crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle;
     use crate::symbolic::symbolic_engine::Expr;
     use faer::col::Col;
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn exprlegacy_callback_reuses_compiled_functions_after_numeric_rebind() {
         let binding = BvpParameterBindingHandle::new(Some(vec![1.0]));
-        let mut callback = dense_residual_with_binding(
+        let callback = dense_residual_with_binding(
             vec![Expr::parse_expression("p + x")],
             vec!["p".to_string(), "x".to_string()],
             binding.clone(),

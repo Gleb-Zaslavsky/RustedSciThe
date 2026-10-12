@@ -31,6 +31,7 @@ groups : ndarray of int, shape (n,)
 
 extern crate nalgebra as na;
 extern crate rand;
+#[allow(dead_code)]
 pub fn is_sparse_int(matrix: &DMatrix<i64>, threshold: f64) -> bool {
     let (rows, cols) = matrix.shape();
     let total_elements = (rows * cols) as f64;
@@ -47,7 +48,7 @@ pub enum OrderEnum {
     Vector(Vec<usize>),
     Scalar(usize),
 }
-
+#[allow(dead_code)]
 /// randomly shuffle columns
 pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
     //turn A into matrix of only ones and zeros
@@ -97,7 +98,7 @@ pub fn group_columns(A: &DMatrix<f64>, order: OrderEnum) -> Vec<usize> {
 
     result
 }
-
+#[allow(dead_code)]
 fn group_dense(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
     let mut groups = vec![-1; n];
     let mut current_group = 0;
@@ -136,7 +137,7 @@ fn group_dense(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
 
     groups.iter().map(|&x| x as usize).collect()
 }
-
+#[allow(dead_code)]
 fn group_sparse(m: usize, n: usize, A: &DMatrix<i64>) -> Vec<usize> {
     let mut groups = vec![-1; n];
     let mut current_group = 0;

@@ -118,7 +118,7 @@ impl TraversalCache {
     pub(crate) fn variables(&mut self, expr: &Expr) -> Vec<String> {
         self.metadata(expr).variables
     }
-
+#[allow(dead_code)]
     /// Return the structural signature of an expression.
     pub(crate) fn signature(&mut self, expr: &Expr) -> u64 {
         self.metadata(expr).signature
@@ -175,6 +175,7 @@ impl TraversalCache {
 }
 
 /// Compute a structural signature with a fresh traversal cache.
+#[allow(dead_code)]
 pub(crate) fn structural_signature(expr: &Expr) -> u64 {
     let mut cache = SignatureCache::new();
     cache.signature(expr)

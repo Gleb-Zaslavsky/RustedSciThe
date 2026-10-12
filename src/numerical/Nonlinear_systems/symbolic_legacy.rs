@@ -27,7 +27,7 @@ thread_local! {
     /// for every residual/Jacobian callback while retaining a Sync backend.
     static LAMBDIFY_INPUT_WORKSPACE: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
-
+#[allow(dead_code)]
 pub(crate) fn lambdify_input_workspace_capacity() -> usize {
     LAMBDIFY_INPUT_WORKSPACE.with(|workspace| workspace.borrow().capacity())
 }

@@ -42,6 +42,14 @@ fn invalid_configuration_is_classified_before_numerical_work() {
         ),
         (
             RadauConfig {
+                t_bound: 0.1,
+                first_step: Some(0.2),
+                ..RadauConfig::default()
+            },
+            RadauConfigError::InvalidFirstStep,
+        ),
+        (
+            RadauConfig {
                 max_steps: 0,
                 ..RadauConfig::default()
             },

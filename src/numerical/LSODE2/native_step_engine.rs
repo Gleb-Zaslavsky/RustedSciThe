@@ -192,8 +192,10 @@ fn should_force_refresh_on_first_correction(
 ) -> bool {
     retry_refresh_requested || predictor_ipup.needs_update()
 }
-#[allow(dead_code)]
+
+#[allow(private_interfaces)]
 pub enum Lsode2NativeStepEngine {
+    
     Dense(Box<Lsode2NativeStepEngineImpl<DenseLuBdfLinearBackend>>),
     Sparse(Box<Lsode2NativeStepEngineImpl<FaerSparseBdfLinearBackend>>),
     Banded(Box<Lsode2NativeStepEngineImpl<FaithfulBandedBdfLinearBackend>>),

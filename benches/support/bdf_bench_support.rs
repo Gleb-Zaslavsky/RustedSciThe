@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use RustedSciThe::numerical::BDF::BDF_api::{BdfSolverOptions, BdfTelemetryMode, ODEsolver};
 use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload, dense_coupled};
 use RustedSciThe::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;

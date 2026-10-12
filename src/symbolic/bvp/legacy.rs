@@ -5270,7 +5270,7 @@ impl Jacobian {
         self.direct_banded_problem()
             .is_block_tridiagonal_candidate()
     }
-
+    #[allow(dead_code)]
     /// Compatibility adapter retaining the historical closure-only API.
     pub(crate) fn generate_banded_jacobian_assembly_from_plan_parallel(
         &self,

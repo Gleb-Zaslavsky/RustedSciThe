@@ -1,6 +1,6 @@
 use crate::somelinalg::banded::{Banded, BlockTridiagonal};
-use faer::sparse::{SparseColMat, Triplet};
-use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
+use faer::sparse::{ Triplet};
+use rand::{rngs::StdRng,  RngExt, SeedableRng};
 pub fn generate_block_tridiagonal_dense(
     n_blocks: usize,
     block_size: usize,

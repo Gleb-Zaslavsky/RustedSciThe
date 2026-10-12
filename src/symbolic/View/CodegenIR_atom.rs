@@ -640,7 +640,7 @@ impl BlockDagBuilder {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
+#[allow(dead_code)]
 fn combine_sig(tag: u64, parts: &[u64]) -> u64 {
     let mut acc = 0x9E37_79B9_7F4A_7C15u64 ^ tag;
     for p in parts {
@@ -648,7 +648,7 @@ fn combine_sig(tag: u64, parts: &[u64]) -> u64 {
     }
     acc
 }
-
+#[allow(dead_code)]
 fn combine_sig_step(acc: u64, part: u64) -> u64 {
     acc ^ part
         .wrapping_add(0x9E37_79B9_7F4A_7C15u64)
@@ -682,7 +682,7 @@ fn coeff_to_f64(view: AtomView<'_>) -> f64 {
 mod tests {
     use super::*;
     use crate::symbolic::View::atom::Atom;
-    use crate::{function, parse, symbol};
+    use crate::{ parse, symbol};
     fn eval(ir: &LinearExpr, inputs: &[f64]) -> f64 {
         let mut regs = vec![0f64; ir.num_temps];
         for instr in &ir.instructions {

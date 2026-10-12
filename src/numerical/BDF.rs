@@ -42,3 +42,7 @@ mod performance_story_tests;
 #[cfg(test)]
 #[path = "BDF/tests/numerical_fidelity_story_tests.rs"]
 mod numerical_fidelity_story_tests;
+
+#[cfg(test)]
+#[path = "BDF/tests/scipy_parity.rs"]
+mod scipy_parity;

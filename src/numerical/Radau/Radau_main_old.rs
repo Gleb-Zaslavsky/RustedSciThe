@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use core::fmt::Display;
 
 /// Radau IIA method for solving systems of ordinary differential equations

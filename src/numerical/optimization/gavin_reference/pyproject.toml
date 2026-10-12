@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rustedscithe-gavin-lm-reference"
+version = "0.1.0"
+description = "Python reference implementation used for Gavin LM parity checks"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+plots = ["matplotlib", "seaborn"]
+
+[tool.setuptools]
+py-modules = ["levenberg_marquardt"]

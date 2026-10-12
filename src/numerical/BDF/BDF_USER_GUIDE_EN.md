@@ -116,3 +116,44 @@ The standalone solver stores dense Jacobians and uses dense linear algebra.
 Do not pass a dense `jac_sparsity` promise expecting sparse execution. For large
 diffusion or banded systems, LSODE2 is the supported route and provides the
 structured matrix backends and their corresponding telemetry and story tests.
+
+## Numerical-Core Parity With SciPy
+
+The numerical controller was checked against the pinned official SciPy 1.18.1
+BDF implementation in `src/numerical/ivp_scipy_reference`. The reference adds
+observational telemetry only; it does not change SciPy's formulas or controller
+branches. The matched Rust/Python story covers ten workloads: constant and
+finite-difference Jacobians, a deliberately stale constant Jacobian and retry,
+Robertson, backward integration, automatic first-step selection, HIRES,
+combustion-like kinetics, a non-autonomous mixed-scale system, and a fully
+coupled dense system.
+
+The comparison checks final states, three common interior times, solver state
+metadata, and mapped work counters. The maximum scaled final-state drift was
+`1.109e-7`; the maximum scaled interior-sample drift was `0.405`, below the
+explicit acceptance threshold of `2`. Accepted/rejected steps, order changes,
+Newton work, and linear solves matched in the tested cases. The release timing
+benchmark separately compares SciPy construction/integration/state capture
+with Rust numerical initialization/integration/result collection; symbolic
+preparation is excluded, so its timings are not full-API or universal speed
+claims.
+
+The remaining counter differences have specific explanations, not unexplained
+algorithm changes. SciPy's `nfev` excludes finite-difference Jacobian probes;
+Rust counts actual RHS callbacks and reuses the initial RHS as the initial FD
+baseline. In the matched FD case this gives SciPy `nfev=506` and Rust `nfev=509`
+(510 raw SciPy RHS callbacks). A deliberately stale-Jacobian case has one
+additional Rust LU (`245` vs `244`): at the final bound, floating-point
+rounding makes Rust clip a candidate just beyond the bound and invalidate LU,
+while SciPy reaches the bound and reuses it. The preceding per-step LU counts
+match, and the trajectory remains within the parity envelope.
+
+This is numerical-core parity evidence for the covered cases, not bitwise
+identity or complete SciPy API parity. Rust's configurable `max_steps`, typed
+callback/error contracts, and no-progress/underflow behavior are Rust API
+features with independent tests. Rust BDF currently has no public dense-output
+evaluator: interior values were checked against separate Rust solves at the
+same times, not against a Rust interpolation implementation. These are explicit
+scope boundaries rather than unresolved controller mismatches. The full
+post-fix release matrix should still be rerun before treating the broader BDF
+release campaign as completely green.

@@ -553,7 +553,7 @@ impl DoglegState {
     pub fn predicted_reduction(
         &mut self,
         jacobian: &DMatrix<f64>,
-        residual: &DVector<f64>,
+        _residual: &DVector<f64>,
         gradient: &DVector<f64>,
         dx: &DVector<f64>,
     ) -> Result<f64, DoglegError> {
