@@ -23,7 +23,7 @@
 use RustedSciThe::numerical::LSODE2::{
     Lsode2LinearSystemStructure, Lsode2NumericProblemOptions, Lsode2ProblemConfig,
 };
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+
 use nalgebra::{DMatrix, DVector};
 
 fn numeric_options() -> Lsode2NumericProblemOptions {
@@ -54,7 +54,7 @@ fn numeric_options() -> Lsode2NumericProblemOptions {
 fn run_and_report(title: &str, config: Lsode2ProblemConfig) {
     let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
         .expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
     let (t, y) = solver.get_result();
     let final_t = t[t.len() - 1];
     let final_y = y[(y.nrows() - 1, 0)];

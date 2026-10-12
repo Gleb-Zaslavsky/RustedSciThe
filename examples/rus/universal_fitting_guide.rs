@@ -1,8 +1,10 @@
 //! Руководство по Universal fitting.
 //!
-//! Это high-level wrapper над двумя backend-ами:
+//! Это high-level wrapper над несколькими методами подгонки:
 //! - LM для классической symbolic least-squares fitting,
 //! - VarPro для separable models, где backend выбирается через `Method`.
+//! - Gavin LM с отдельным контроллером демпфирования и Broyden-обновлениями.
+//! Для Gavin см. отдельный запускаемый пример `rus_gavin_fitting_guide`.
 //!
 //! run cargo run --example universal_fitting_guide
 
@@ -36,7 +38,9 @@ fn universal_lm() {
 
     let lm = match result {
         UniversalFittingResult::LM(fit) => fit,
-        UniversalFittingResult::VARPRO(_) => panic!("ожидался результат LM"),
+        UniversalFittingResult::VARPRO(_) | UniversalFittingResult::GAVIN(_) => {
+            panic!("ожидался результат LM")
+        }
     };
 
     let map = lm
@@ -72,7 +76,9 @@ fn universal_varpro() {
 
     let fit = match result {
         UniversalFittingResult::VARPRO(fit) => fit,
-        UniversalFittingResult::LM(_) => panic!("ожидался результат VarPro"),
+        UniversalFittingResult::LM(_) | UniversalFittingResult::GAVIN(_) => {
+            panic!("ожидался результат VarPro")
+        }
     };
 
     let nonlinear = fit.nonlinear_parameters();

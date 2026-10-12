@@ -16,7 +16,7 @@ use RustedSciThe::numerical::LSODE2::{
 };
 use RustedSciThe::numerical::NR_for_ODE::NRODE;
 use RustedSciThe::numerical::ODE_api::ODEsolver;
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
@@ -226,7 +226,7 @@ fn case_10_lsode2_minimal_numerical() {
 
     let mut solver =
         RustedSciThe::numerical::LSODE2::Lsode2Solver::new(cfg).expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
     let (t, y) = solver.get_result();
     let final_t = t[t.len() - 1];
     let final_y = y[(y.nrows() - 1, 0)];
@@ -261,7 +261,7 @@ fn case_11_lsode2_minimal_lambdify() {
 
     let mut solver =
         RustedSciThe::numerical::LSODE2::Lsode2Solver::new(cfg).expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
     let (t, y) = solver.get_result();
     let final_t = t[t.len() - 1];
     let final_y = y[(y.nrows() - 1, 0)];

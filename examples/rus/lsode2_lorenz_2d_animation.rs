@@ -15,7 +15,7 @@ use RustedSciThe::numerical::LSODE2::{
     Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
     Lsode2SymbolicExecutionMode,
 };
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 
@@ -46,7 +46,7 @@ fn solve_lorenz_xy(t_bound: f64) -> (DMatrix<f64>, DVector<f64>) {
 
     let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
         .expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
     assert_eq!(
         solver.get_status().as_deref(),
         Some("finished_native_faithful")

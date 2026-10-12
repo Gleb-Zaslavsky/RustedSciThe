@@ -18,13 +18,13 @@ use RustedSciThe::numerical::LSODE2::{
     Lsode2LinearSystemStructure, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector, RowDVector};
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::Instant;
-
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendFlavor {
     Lambdify,
@@ -254,7 +254,7 @@ fn three_body_solution(t_bound: f64, backend: BackendFlavor) -> (DMatrix<f64>, D
 
     let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
         .expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
     assert!(
         matches!(
             solver.get_status().as_deref(),

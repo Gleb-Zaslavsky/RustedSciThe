@@ -10,11 +10,10 @@
 //!
 
 use RustedSciThe::numerical::LSODE2::{
-    Lsode2ControllerConfig, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
-    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
-    Lsode2SymbolicExecutionMode,
+    Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2ProblemConfig,
+    Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 
@@ -48,7 +47,7 @@ fn main() {
 
     let mut solver = RustedSciThe::numerical::LSODE2::Lsode2Solver::new(config)
         .expect("LSODE2 preparation failed");
-    solver.solve();
+    let _ = solver.solve();
 
     let (t, y) = solver.get_result();
     let final_t = t[t.len() - 1];

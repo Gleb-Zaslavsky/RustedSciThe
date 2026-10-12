@@ -1,10 +1,11 @@
 //! Universal fitting guide.
 //!
-//! This guide demonstrates the high-level depot wrapper over both fitting
-//! backends:
+//! This guide demonstrates the high-level wrapper over the fitting methods:
 //! - LM for classic symbolic least squares,
 //! - VarPro when the model is separable and you want to choose the backend
 //!   through `Method`.
+//! - Gavin LM for its separate damping/Broyden controller. A dedicated
+//!   builder example is available as `rus_gavin_fitting_guide`.
 //!
 //! run cargo run --example universal_fitting_guide
 
@@ -38,7 +39,9 @@ fn universal_lm() {
 
     let lm = match result {
         UniversalFittingResult::LM(fit) => fit,
-        UniversalFittingResult::VARPRO(_) => panic!("expected LM result"),
+        UniversalFittingResult::VARPRO(_) | UniversalFittingResult::GAVIN(_) => {
+            panic!("expected LM result")
+        }
     };
 
     let map = lm
@@ -74,7 +77,9 @@ fn universal_varpro() {
 
     let fit = match result {
         UniversalFittingResult::VARPRO(fit) => fit,
-        UniversalFittingResult::LM(_) => panic!("expected VarPro result"),
+        UniversalFittingResult::LM(_) | UniversalFittingResult::GAVIN(_) => {
+            panic!("expected VarPro result")
+        }
     };
 
     let nonlinear = fit.nonlinear_parameters();
