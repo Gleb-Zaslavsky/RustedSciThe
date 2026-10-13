@@ -6,7 +6,6 @@ use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
-use std::time::Instant;
 pub struct nonstiffODE {
     eq_system: Vec<Expr>,
     values: Vec<String>,
@@ -182,7 +181,6 @@ impl nonstiffODE {
         }
     }
     pub fn main_loop(&mut self) {
-        let start = Instant::now();
         let mut integr_status: Option<i8> = None;
         let mut y: Vec<DVector<f64>> = Vec::new();
         let mut t: Vec<f64> = Vec::new();
@@ -248,9 +246,6 @@ impl nonstiffODE {
         }
         let y_res: DMatrix<f64> = DMatrix::from_vec(cols, rows, flat_vec).transpose();
         let t_res = DVector::from_vec(t);
-        let duration = start.elapsed();
-        println!("Program took {} milliseconds to run", duration.as_millis());
-
         self.t_result = t_res;
         self.y_result = y_res;
     }
@@ -347,7 +342,6 @@ impl RK45 {
         t0: f64,
         h: f64,
     ) {
-        println!("step {}", h);
         self.f = f;
         self.y0 = y0.clone();
         self.t0 = t0;

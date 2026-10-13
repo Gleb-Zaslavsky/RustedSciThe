@@ -7,11 +7,11 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
+    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
-    IvpTaskSpec,
+    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, parse_ivp_task_from_str,
+    run_ivp_task,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +94,34 @@ impl TaskRunnerError {
             Self::Io { .. } => "io",
             Self::MissingSolverField | Self::UnsupportedSolver { .. } => "parse",
             Self::Ivp(error) => error.category(),
-            Self::Bvp(_) => "bvp",
+            Self::Bvp(error) => error.category(),
+        }
+    }
+
+    /// Stable process exit code for the executable task shell.
+    ///
+    /// Batch execution has its own aggregate code in the CLI; this mapping is
+    /// for one task and keeps parse, solver, and output failures distinguishable
+    /// to scripts without exposing solver-specific error types there.
+    pub fn exit_code(&self) -> i32 {
+        let category = self.category();
+        match category {
+            "io" | "postprocess" => 5,
+            "solver"
+            | "solver_result"
+            | "solver_exhaustion"
+            | "solver_singular"
+            | "solver_tolerance"
+            | "solver_linear"
+            | "callback"
+            | "aot_compiler"
+            | "aot_link"
+            | "aot_timeout"
+            | "aot_artifact"
+            | "aot_publication"
+            | "aot_runtime"
+            | "aot_handoff" => 6,
+            _ => 3,
         }
     }
 }
@@ -174,9 +201,83 @@ impl BatchTaskReport {
         Table::new(rows).to_string()
     }
 
-    pub fn write_table(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
-        fs::write(path, self.render_table())
+    /// Renders the same stable batch facts as a small machine-readable JSON
+    /// document. This intentionally avoids compiler and solver trace output.
+    pub fn render_json(&self) -> String {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let kind = entry
+                    .kind
+                    .map(task_kind_label)
+                    .map(json_string)
+                    .unwrap_or_else(|| "null".to_string());
+                let error_category = entry
+                    .error_category
+                    .map(json_string)
+                    .unwrap_or_else(|| "null".to_string());
+                let error = entry
+                    .error
+                    .as_deref()
+                    .map(json_string)
+                    .unwrap_or_else(|| "null".to_string());
+                format!(
+                    "    {{\"path\":{},\"status\":{},\"kind\":{},\"error_category\":{},\"error\":{}}}",
+                    json_string(&entry.path.display().to_string()),
+                    json_string(entry.status.as_str()),
+                    kind,
+                    error_category,
+                    error
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            "{{\n  \"passed\": {},\n  \"failed\": {},\n  \"entries\": [\n{}\n  ]\n}}\n",
+            self.passed_count(),
+            self.failed_count(),
+            entries
+        )
     }
+
+    pub fn write_table(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        self.write_rendered(path, &self.render_table())
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        self.write_rendered(path, &self.render_json())
+    }
+
+    fn write_rendered(&self, path: impl AsRef<Path>, contents: &str) -> std::io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(path, contents)
+    }
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", character as u32))
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// Runs every task independently and continues after parse, I/O, or solver
@@ -190,6 +291,7 @@ where
         .into_iter()
         .map(Into::into)
         .map(|path| {
+            let path = resolve_task_path(path);
             // Detect the family before execution so a semantic or solver
             // failure still reports `ivp`/`bvp` instead of losing context.
             let source = match fs::read_to_string(&path) {
@@ -209,13 +311,25 @@ where
                 }
             };
             let detected_kind = detect_task_kind_from_str(&source).ok();
-            match run_task_from_str(&source) {
-                Ok(result) => BatchTaskSummary {
-                    path,
-                    status: BatchTaskStatus::Passed,
-                    kind: Some(result.kind()),
-                    error_category: None,
-                    error: None,
+            match parse_task_spec_from_str(&source).map(|mut spec| {
+                anchor_task_paths(&mut spec, &path);
+                spec
+            }) {
+                Ok(spec) => match run_task_from_spec(spec) {
+                    Ok(_) => BatchTaskSummary {
+                        path,
+                        status: BatchTaskStatus::Passed,
+                        kind: detected_kind,
+                        error_category: None,
+                        error: None,
+                    },
+                    Err(error) => BatchTaskSummary {
+                        path,
+                        status: BatchTaskStatus::Failed,
+                        kind: detected_kind,
+                        error_category: Some(error.category()),
+                        error: Some(error.to_string()),
+                    },
                 },
                 Err(error) => BatchTaskSummary {
                     path,
@@ -228,6 +342,219 @@ where
         })
         .collect();
     BatchTaskReport { entries }
+}
+
+/// Resolves task paths for stable batch reports while retaining non-existing
+/// paths as absolute diagnostics instead of hiding them behind the current
+/// working directory.
+fn resolve_task_path(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(&path))
+            .unwrap_or_else(|_| PathBuf::from(".").join(path))
+    };
+    fs::canonicalize(&absolute).unwrap_or(absolute)
+}
+
+/// Anchors task-relative output paths to the task document directory.
+///
+/// Task documents are often launched from a project root, a report directory,
+/// or a batch runner. Resolving their output paths once at the runner boundary
+/// prevents those launch locations from changing where artifacts are written.
+pub fn anchor_task_paths(spec: &mut ParsedTaskSpec, task_path: impl AsRef<Path>) {
+    let task_path = task_path.as_ref();
+    let absolute_task_path = if task_path.is_absolute() {
+        task_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(task_path))
+            .unwrap_or_else(|_| task_path.to_path_buf())
+    };
+    let base = absolute_task_path.parent().unwrap_or_else(|| Path::new("."));
+    match spec {
+        ParsedTaskSpec::Ivp(spec) => {
+            anchor_enabled_default(
+                &mut spec.postprocessing.csv_path,
+                spec.postprocessing.save_csv,
+                "ivp_result.csv",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.txt_path,
+                spec.postprocessing.save_txt,
+                "ivp_result.txt",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.report_path,
+                spec.postprocessing.write_report,
+                "ivp_report.md",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.plotters_dir,
+                spec.postprocessing.plotters_png,
+                "ivp_plotters",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.gnuplot_dir,
+                spec.postprocessing.gnuplot_png,
+                "ivp_gnuplot",
+                base,
+            );
+        }
+        ParsedTaskSpec::Bvp(spec) => {
+            anchor_enabled_default(
+                &mut spec.postprocessing.csv_path,
+                spec.postprocessing.save_csv,
+                "bvp_result.csv",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.txt_path,
+                spec.postprocessing.save_txt,
+                "bvp_result.txt",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.report_path,
+                spec.postprocessing.write_report,
+                "bvp_report.md",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.plotters_dir,
+                spec.postprocessing.plotters_png,
+                "bvp_plotters",
+                base,
+            );
+            anchor_enabled_default(
+                &mut spec.postprocessing.gnuplot_dir,
+                spec.postprocessing.gnuplot_png,
+                "bvp_gnuplot",
+                base,
+            );
+            anchor_optional_string(
+                &mut spec.solver_options.generated_backend.aot_output_dir,
+                base,
+            );
+            anchor_optional_string(
+                &mut spec.solver_options.generated_backend.aot_handoff_path,
+                base,
+            );
+        }
+    }
+}
+
+fn anchor_optional_string(value: &mut Option<String>, base: &Path) {
+    let Some(value_string) = value.as_mut() else {
+        return;
+    };
+    let path = Path::new(value_string);
+    if path.is_relative() {
+        *value_string = base.join(path).to_string_lossy().into_owned();
+    }
+}
+
+fn anchor_enabled_default(value: &mut Option<String>, enabled: bool, default: &str, base: &Path) {
+    if enabled && value.is_none() {
+        *value = Some(base.join(default).to_string_lossy().into_owned());
+    }
+    anchor_optional_string(value, base);
+}
+
+/// Returns user-visible filesystem outputs, excluding terminal rendering and
+/// reusable AOT cache directories. The CLI uses this list to prevent an
+/// accidental single-run overwrite unless the user explicitly opts in.
+pub fn requested_output_paths(spec: &ParsedTaskSpec) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    match spec {
+        ParsedTaskSpec::Ivp(spec) => {
+            if spec.postprocessing.save_csv {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.csv_path,
+                    "ivp_result.csv",
+                ));
+            }
+            if spec.postprocessing.save_txt {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.txt_path,
+                    "ivp_result.txt",
+                ));
+            }
+            if spec.postprocessing.write_report {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.report_path,
+                    "ivp_report.md",
+                ));
+            }
+            if spec.postprocessing.plotters_png {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.plotters_dir,
+                    "ivp_plotters",
+                ));
+            }
+            if spec.postprocessing.gnuplot_png {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.gnuplot_dir,
+                    "ivp_gnuplot",
+                ));
+            }
+        }
+        ParsedTaskSpec::Bvp(spec) => {
+            if spec.postprocessing.save_csv {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.csv_path,
+                    "bvp_result.csv",
+                ));
+            }
+            if spec.postprocessing.save_txt {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.txt_path,
+                    "bvp_result.txt",
+                ));
+            }
+            if spec.postprocessing.write_report {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.report_path,
+                    "bvp_report.md",
+                ));
+            }
+            if spec.postprocessing.plotters_png
+                || matches!(
+                    spec.postprocessing.output_policy,
+                    crate::command_interpreter::task_parser_bvp::BvpOutputPolicy::Plotters
+                )
+            {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.plotters_dir,
+                    "bvp_plotters",
+                ));
+            }
+            if spec.postprocessing.gnuplot_png
+                || matches!(
+                    spec.postprocessing.output_policy,
+                    crate::command_interpreter::task_parser_bvp::BvpOutputPolicy::Gnuplot
+                )
+            {
+                paths.push(path_from_option_or_default(
+                    &spec.postprocessing.gnuplot_dir,
+                    "bvp_gnuplot",
+                ));
+            }
+        }
+    }
+    paths
+}
+
+fn path_from_option_or_default(value: &Option<String>, default: &str) -> PathBuf {
+    value
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(default))
 }
 
 fn task_kind_label(kind: TaskDocumentKind) -> &'static str {
@@ -270,7 +597,8 @@ pub fn detect_task_kind_from_str(input: &str) -> Result<TaskDocumentKind, TaskRu
         let solver = value.trim().to_ascii_lowercase();
         return match solver.as_str() {
             "ivp" => Ok(TaskDocumentKind::Ivp),
-            "bvp" => Ok(TaskDocumentKind::Bvp),
+            "bvp" | "bvp_damp" | "bvp_damped" | "bvp_sci" | "bvpsci" | "bvp_scipy"
+            | "scipy_bvp" => Ok(TaskDocumentKind::Bvp),
             _ => Err(TaskRunnerError::UnsupportedSolver { value: solver }),
         };
     }
@@ -364,15 +692,40 @@ fn render_ivp_preview(spec: &IvpTaskSpec) -> String {
 fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
     let mut out = String::new();
     out.push_str("[Task preview] BVP\n");
+    let family = match spec.solver.family {
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+    };
     out.push_str(&format!(
-        "solver=BVP, strategy={:?}, backend={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
-        spec.solver.strategy,
-        spec.solver.backend,
-        spec.equations.arg,
-        spec.mesh.t0,
-        spec.mesh.t_end,
-        spec.mesh.n_steps
+        "solver={family}, layout={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
+        spec.solver.backend, spec.equations.arg, spec.mesh.t0, spec.mesh.t_end, spec.mesh.n_steps
     ));
+    if spec.solver.family == crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp
+    {
+        out.push_str(&format!(
+            "strategy={:?}, scheme={}\n",
+            spec.solver.strategy, spec.solver.scheme
+        ));
+    } else {
+        out.push_str(&format!(
+            "frontend={:?}, execution={:?}, callback_policy={:?}, tolerance={}, max_nodes={}\n",
+            spec.solver.frontend.unwrap_or(
+                crate::command_interpreter::task_parser_bvp::BvpFrontendSpec::ExprLegacy
+            ),
+            spec.solver
+                .execution
+                .unwrap_or(crate::command_interpreter::task_parser_bvp::BvpExecutionSpec::Lambdify),
+            spec.solver_options
+                .execution_policy
+                .unwrap_or(crate::numerical::BVP_sci::new::BvpSciExecutionPolicy::Sequential),
+            spec.solver_options.tolerance.unwrap_or(1e-3),
+            spec.solver_options.max_nodes.unwrap_or_else(|| spec
+                .mesh
+                .n_steps
+                .saturating_mul(16)
+                .max(128)),
+        ));
+    }
     out.push_str("equations:\n");
     out.push_str("idx | unknown | rhs\n");
     out.push_str("-------------------\n");
@@ -398,6 +751,240 @@ fn render_ivp_check(spec: &IvpTaskSpec) -> String {
         spec.initial_conditions.t0,
         spec.initial_conditions.t_end
     ));
+    let options = &spec.solver_options;
+    out.push_str(&format!(
+        "options: tolerance={:?}, rtol={:?}, atol={:?}, step_size={:?}, max_step={:?}, first_step={:?}, max_iterations={:?}, vectorized={:?}, parallel={:?}, neighborhood_check={:?}\n",
+        options.tolerance,
+        options.rtol,
+        options.atol,
+        options.step_size,
+        options.max_step,
+        options.first_step,
+        options.max_iterations,
+        options.vectorized,
+        options.parallel,
+        options.neighborhood_check,
+    ));
+    if options.symbolic_assembly.is_some()
+        || options.symbolic_execution.is_some()
+        || options.matrix_layout.is_some()
+        || options.execution_policy.is_some()
+        || options.telemetry.is_some()
+    {
+        out.push_str(&format!(
+            "native_options: symbolic_frontend={:?}, symbolic_execution={:?}, matrix_layout={:?}, execution_policy={:?}, telemetry={:?}\n",
+            options.symbolic_assembly,
+            options.symbolic_execution,
+            options.matrix_layout,
+            options.execution_policy,
+            options.telemetry,
+        ));
+    }
+    if let Some(lsode2) = &options.lsode2 {
+        out.push_str(&format!("lsode2_options={lsode2:?}\n"));
+    }
+    if let Some(continuation) = &spec.continuation {
+        out.push_str(&format!(
+            "continuation: parameters={}, segments={}, mode={:?}, restart_each={}, monotonicity={:?}\n",
+            continuation.parameters.join(","),
+            continuation.value_grid.len(),
+            continuation.mode,
+            continuation.restart_each,
+            continuation.monotonicity,
+        ));
+    } else {
+        out.push_str("continuation: none\n");
+    }
+    out.push_str(&format!(
+        "outputs: {}\n",
+        render_ivp_output_targets(&spec.postprocessing)
+    ));
+    out.push_str("fully substituted equations:\n");
+    out.push_str("idx | unknown | rhs\n");
+    out.push_str("-------------------\n");
+    for (idx, (name, rhs)) in spec
+        .equations
+        .unknowns
+        .iter()
+        .zip(spec.equations.rhs.iter())
+        .enumerate()
+    {
+        out.push_str(&format!("{idx:>3} | {name} | {rhs}\n"));
+    }
+    out.push_str("preflight=valid; integration has not been run\n");
+    out
+}
+
+fn render_ivp_output_targets(output: &crate::command_interpreter::task_parser_ivp::PostprocessingSpec) -> String {
+    let mut targets = Vec::new();
+    if output.save_csv {
+        targets.push(format!(
+            "csv:{}",
+            output.csv_path.as_deref().unwrap_or("ivp_result.csv")
+        ));
+    }
+    if output.save_txt {
+        targets.push(format!(
+            "text:{}",
+            output.txt_path.as_deref().unwrap_or("ivp_result.txt")
+        ));
+    }
+    if output.write_report {
+        targets.push(format!(
+            "report:{}",
+            output.report_path.as_deref().unwrap_or("ivp_report.md")
+        ));
+    }
+    if output.plotters_png {
+        targets.push(format!(
+            "plotters:{}",
+            output.plotters_dir.as_deref().unwrap_or("ivp_plotters")
+        ));
+    }
+    if output.gnuplot_png {
+        targets.push(format!(
+            "gnuplot:{}",
+            output.gnuplot_dir.as_deref().unwrap_or("ivp_gnuplot")
+        ));
+    }
+    if output.terminal_plot {
+        targets.push("terminal".to_string());
+    }
+    if targets.is_empty() {
+        "none".to_string()
+    } else {
+        targets.join(",")
+    }
+}
+
+fn render_bvp_check(spec: &BvpTaskSpec) -> String {
+    let mut out = String::new();
+    out.push_str("[Task check] BVP\n");
+    let family = match spec.solver.family {
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+    };
+    let capabilities =
+        crate::command_interpreter::task_parser_bvp::bvp_solver_capabilities(spec.solver.family);
+    out.push_str(&format!("solver_family={family}\n"));
+    out.push_str(&format!(
+        "capabilities: frontends={}, executions={}, layouts={}, continuation={}, singular_term={}\n",
+        capabilities.frontends.join("/"),
+        capabilities.executions.join("/"),
+        capabilities.layouts.join("/"),
+        capabilities.supports_continuation,
+        capabilities.supports_singular_term,
+    ));
+    out.push_str(&format!("matrix_layout={:?}\n", spec.solver.backend));
+    out.push_str(&format!(
+        "domain={}..{}, initial_nodes={}\n",
+        spec.mesh.t0, spec.mesh.t_end, spec.mesh.n_steps
+    ));
+    if let Some(continuation) = &spec.continuation {
+        out.push_str(&format!(
+            "continuation: parameters={}, segments={}, mode={:?}, restart_each={}, restart_policy={:?}, monotonicity={:?}\n",
+            continuation.parameters.join(","),
+            continuation.value_grid.len(),
+            continuation.mode,
+            continuation.restart_each,
+            continuation.restart_policy,
+            continuation.monotonicity,
+        ));
+    } else {
+        out.push_str("continuation: none\n");
+    }
+    match spec.solver.family {
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => {
+            out.push_str(&format!(
+                "strategy={:?}, scheme={}\n",
+                spec.solver.strategy, spec.solver.scheme
+            ));
+            out.push_str(&format!(
+                "symbolic_frontend={:?}, execution={:?}\n",
+                spec.solver.frontend, spec.solver.execution
+            ));
+        }
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => {
+            let execution_policy = spec
+                .solver_options
+                .execution_policy
+                .unwrap_or(crate::numerical::BVP_sci::new::BvpSciExecutionPolicy::Sequential);
+            let sparse_factorization = spec
+                .solver_options
+                .sparse_factorization
+                .unwrap_or(crate::numerical::BVP_sci::new::BvpSciSparseFactorization::StandardFaer);
+            out.push_str(&format!(
+                "symbolic_frontend={:?}, execution={:?}, callback_policy={:?}\n",
+                spec.solver.frontend.unwrap_or(
+                    crate::command_interpreter::task_parser_bvp::BvpFrontendSpec::ExprLegacy
+                ),
+                spec.solver.execution.unwrap_or(
+                    crate::command_interpreter::task_parser_bvp::BvpExecutionSpec::Lambdify
+                ),
+                execution_policy
+            ));
+            out.push_str(&format!(
+                "tolerance={}, boundary_tolerance={}, max_nodes={}, newton_iterations={}, jacobian_refreshes={}, mesh_refinements={}, backtracking_trials={}\n",
+                spec.solver_options.tolerance.unwrap_or(1e-3),
+                spec.solver_options.boundary_tolerance.unwrap_or(spec.solver_options.tolerance.unwrap_or(1e-3)),
+                spec.solver_options.max_nodes.unwrap_or_else(|| spec.mesh.n_steps.saturating_mul(16).max(128)),
+                spec.solver_options.max_newton_iterations.or(spec.solver_options.max_iterations).unwrap_or(8),
+                spec.solver_options.max_jacobian_refreshes.unwrap_or(4),
+                spec.solver_options.max_mesh_refinements.unwrap_or(10),
+                spec.solver_options.max_backtracking_steps.unwrap_or(4),
+            ));
+            out.push_str(&format!(
+                "telemetry={}, output_policy={}, sparse_factorization={:?}\n",
+                spec.solver_options
+                    .telemetry
+                    .map(|value| format!("{value:?}"))
+                    .unwrap_or_else(|| "Off".to_string()),
+                spec.solver_options
+                    .output_policy
+                    .map(|value| format!("{value:?}"))
+                    .unwrap_or_else(|| "MeshAndValues".to_string()),
+                sparse_factorization,
+            ));
+            if sparse_factorization
+                == crate::numerical::BVP_sci::new::BvpSciSparseFactorization::SuperLu
+            {
+                out.push_str("SuperLU requirement: Cargo feature `superlu` plus SUPERLU_LIBRARY; unavailable bridge falls back to StandardFaer at runtime\n");
+            }
+            if matches!(
+                spec.solver.execution,
+                Some(crate::command_interpreter::task_parser_bvp::BvpExecutionSpec::Aot)
+            ) {
+                out.push_str(&format!(
+                    "AOT preflight: lifecycle={}, output_dir={}, codegen={}, compiler={}\n",
+                    spec.solver_options
+                        .generated_backend
+                        .aot_build_policy
+                        .as_deref()
+                        .unwrap_or("build_if_missing"),
+                    spec.solver_options
+                        .generated_backend
+                        .aot_output_dir
+                        .as_deref()
+                        .unwrap_or("<required>"),
+                    spec.solver_options
+                        .generated_backend
+                        .aot_codegen_backend
+                        .as_deref()
+                        .unwrap_or("default"),
+                    spec.solver_options
+                        .generated_backend
+                        .aot_c_compiler
+                        .as_deref()
+                        .unwrap_or("toolchain default"),
+                ));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "outputs: {}\n",
+        render_bvp_output_targets(&spec.postprocessing)
+    ));
+    out.push_str("preflight=valid; numerical convergence has not been evaluated\n");
     out.push_str("fully substituted equations:\n");
     out.push_str("idx | unknown | rhs\n");
     out.push_str("-------------------\n");
@@ -413,31 +1000,48 @@ fn render_ivp_check(spec: &IvpTaskSpec) -> String {
     out
 }
 
-fn render_bvp_check(spec: &BvpTaskSpec) -> String {
-    let mut out = String::new();
-    out.push_str("[Task check] BVP\n");
-    out.push_str(&format!(
-        "solver=BVP, strategy={:?}, backend={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
-        spec.solver.strategy,
-        spec.solver.backend,
-        spec.equations.arg,
-        spec.mesh.t0,
-        spec.mesh.t_end,
-        spec.mesh.n_steps
-    ));
-    out.push_str("fully substituted equations:\n");
-    out.push_str("idx | unknown | rhs\n");
-    out.push_str("-------------------\n");
-    for (idx, (name, rhs)) in spec
-        .equations
-        .unknowns
-        .iter()
-        .zip(spec.equations.rhs.iter())
-        .enumerate()
-    {
-        out.push_str(&format!("{idx:>3} | {name} | {rhs}\n"));
+fn render_bvp_output_targets(
+    output: &crate::command_interpreter::task_parser_bvp::BvpPostprocessingSpec,
+) -> String {
+    let mut targets = Vec::new();
+    if output.save_csv {
+        targets.push(format!(
+            "csv:{}",
+            output.csv_path.as_deref().unwrap_or("bvp_result.csv")
+        ));
     }
-    out
+    if output.save_txt {
+        targets.push(format!(
+            "text:{}",
+            output.txt_path.as_deref().unwrap_or("bvp_result.txt")
+        ));
+    }
+    if output.write_report {
+        targets.push(format!(
+            "report:{}",
+            output.report_path.as_deref().unwrap_or("bvp_report.md")
+        ));
+    }
+    if output.plotters_png {
+        targets.push(format!(
+            "plotters:{}",
+            output.plotters_dir.as_deref().unwrap_or("bvp_plotters")
+        ));
+    }
+    if output.gnuplot_png {
+        targets.push(format!(
+            "gnuplot:{}",
+            output.gnuplot_dir.as_deref().unwrap_or("bvp_gnuplot")
+        ));
+    }
+    if output.terminal_plot {
+        targets.push("terminal".to_string());
+    }
+    if targets.is_empty() {
+        "none".to_string()
+    } else {
+        targets.join(",")
+    }
 }
 
 fn ivp_method_label(method: &IvpMethodSpec) -> String {
@@ -559,6 +1163,43 @@ y: 0.0
         assert!(check.contains("fully substituted equations"));
         assert!(check.contains('4'));
         assert!(!check.contains("gain:"));
+    }
+
+    #[test]
+    fn bvp_preflight_reports_resolved_bvp_sci_route_and_limits() {
+        let task = r#"
+task
+solver: BVP_sci
+frontend: AtomViewNative
+execution: Lambdify
+method: Sparse
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+max_nodes: 200
+max_newton_iterations: 6
+"#;
+        let parsed = parse_task_spec_from_str(task).expect("task should parse");
+        let check = render_task_check(&parsed);
+        assert!(check.contains("solver_family=BVP_sci"));
+        assert!(check.contains("symbolic_frontend=AtomViewNative"));
+        assert!(check.contains("max_nodes=200"));
+        assert!(check.contains("preflight=valid; numerical convergence has not been evaluated"));
     }
 
     #[test]

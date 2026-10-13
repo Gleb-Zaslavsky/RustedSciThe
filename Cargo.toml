@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.21"
+version = "0.4.23"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -22,6 +22,8 @@ include = [
     "!src/numerical/ivp_scipy_reference/**",
     # Vendored SciPy BVP reference is repository-only, not crate payload.
     "!src/numerical/BVP_sci/scipy_reference/**",
+    # Sparse LU reference corpus is repository-only, not crate payload.
+    "!src/somelinalg/sparse_lu_reference/**",
     "scripts/**/*",
     "examples/**/*",
     "benches/**/*",
@@ -38,6 +40,8 @@ include = [
     "!examples/**/tests/**/*.md",
     # TODO notes and office documents are repository-only documentation.
     "!src/**/*[tT][oO][dD][oO]*",
+    # CLI integration-test source is repository-only, not part of crate payload.
+    "!src/command_interpreter/task_shell_cli_contract.rs",
     "!scripts/**/*[tT][oO][dD][oO]*",
     "!benches/**/*[tT][oO][dD][oO]*",
     "!examples/**/*[tT][oO][dD][oO]*",
@@ -111,6 +115,9 @@ include = [
     "!**/*.cpp",
     "!**/*.h",
     "!**/*.dll",
+    "!**/*.so",
+    "!**/*.dylib",
+    "!**/*.a",
     "!**/*.doc",
     "!**/*.docx",
     "!**/*.[pP][nN][gG]",
@@ -124,6 +131,8 @@ include = [
     # Maintained task-document examples are executable documentation and must
     # remain package inputs despite the global generated *.txt exclusion.
     "examples/task_docs/reference/**/*.txt",
+    # Required source for the optional, separately built native SuperLU bridge.
+    "src/somelinalg/sparse_lu_reference/superlu_bridge.c",
 ]
 
 
@@ -138,6 +147,10 @@ cuda = ["arrayfire"]
 # }
 lapack = ["dep:lapack"]
 openblas-system = ["lapack", "dep:openblas-src"]
+# Optional SuperLU backend; the native bridge is built separately per target.
+superlu = []
+# Compatibility alias for the original diagnostic feature name.
+superlu-experimental = ["superlu"]
 
 [package.metadata.rust-analyzer]
 cargo = { features = ["arrayfire", "cuda"] }
@@ -175,10 +188,17 @@ harness = false
 name = "bvp_sci_linear_backend_micro"
 harness = false
 [[bench]]
+name = "bvp_sci_superlu_ab"
+harness = false
+required-features = ["superlu"]
+[[bench]]
 name = "lu_benches"
 harness = false
 [[bench]]
 name = "faer_sparse_benches"
+harness = false
+[[bench]]
+name = "somelinalg_sparse_lu_reference"
 harness = false
 [[bench]]
 name = "faer_sparse_vs_lapack_style_benches"
@@ -277,13 +297,14 @@ incremental = false
 panic = "abort"
 
 [dependencies]
+dyn-stack = "0.13.2"
 arrayfire = { version = "3.8.0", package = "arrayfire_fork", optional = true }
 itertools = "0.15.0"
 nalgebra = { version = "0.35.0", features = [ "sparse"] }
 nalgebra-sparse = "0.12.0"
 num-traits = "0.2.17"
-sprs = "0.11.4"
-rand = "0.10.2"
+sprs = "0.11.6"
+rand = "0.10.3"
 ndarray = "0.17.2"
 num = "0.4.3"
 num-complex = "0.4.6"
@@ -300,12 +321,12 @@ regex = "1.13.1"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 simplelog = "0.12.2"
-log = "0.4.33"
+log = "0.4.34"
 chrono = "0.4.41"
 loc = "0.5.0"
-toml = "1.1.4+spec-1.1.0"
+toml = "1.1.8+spec-1.1.0"
 sysinfo = "0.39.6"
-tabled = "0.21.0"
+tabled = "0.22.0"
 sys-info = "0.9.1"
 criterion = "0.8.2"
 enum_dispatch = "0.3.13"
@@ -313,14 +334,14 @@ src = "0.0.6"
 nom = "8.0.0"
 tempfile = "3.27.0"
 fs2 = "0.4.3"
-cfg-if = "1.0.4"
-gauss-quad = "0.3.0"
+cfg-if = "1.0.5"
+gauss-quad = "0.3.2"
 prettytable = "0.10.0"
 textplots = "0.8.7"
-wide = "1.5.0"
-bevy = "0.19.0"
-thiserror = "2.0.19"
-fastLowess = "2.0.0"
+wide = "1.7.1"
+bevy = "0.20.0"
+thiserror = "2.0.21"
+fastLowess = "5.0.0"
 bspline = "1.1.0"
 lapack = { version = "0.20", optional = true }
 openblas-src = { version = "0.10.16", default-features = false, features = ["system"], optional = true }
@@ -328,7 +349,7 @@ openblas-src = { version = "0.10.16", default-features = false, features = ["sys
 
 colored = "3.1.1"
 dialoguer = "0.12.0"
-clap = { version = "4.6.4", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 
 
 ahash = "0.8"
@@ -336,7 +357,7 @@ append-only-vec = "0.1"
 byteorder = "1.5"
 bytes = "1.12.1"
 once_cell = "1.19"
-smallvec = "1.15.2"
+smallvec = "1.16.3"
 smartstring = "1.0"
 libloading = "0.9.0"
 
@@ -561,3 +582,7 @@ path = "examples/rus/universal_fitting_guide.rs"
 [[example]]
 name = "rus_gavin_fitting_guide"
 path = "examples/rus/gavin_fitting_guide.rs"
+
+[[test]]
+name = "task_shell_cli_contract_tracked"
+path = "src/command_interpreter/task_shell_cli_contract.rs"

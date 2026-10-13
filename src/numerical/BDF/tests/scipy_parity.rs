@@ -1,4 +1,20 @@
 //! Cross-language numerical-core checks against the pinned SciPy BDF source.
+//!
+//! PowerShell setup: point `IVP_SCIPY_PYTHON` at the pinned virtual environment
+//! and verify that this exact interpreter can import both dependencies before
+//! running any ignored cross-language story:
+//!
+//! ```powershell
+//! $env:IVP_SCIPY_PYTHON = (Resolve-Path .\.venv-gavin-win\Scripts\python.exe).Path
+//! & $env:IVP_SCIPY_PYTHON -c "import sys, numpy, scipy; print(sys.executable); print('NumPy', numpy.__version__); print('SciPy', scipy.__version__)"
+//! ```
+//!
+//! Run parity in debug; run the timing benchmark in release only:
+//!
+//! ```powershell
+//! cargo test --lib --no-default-features numerical::BDF::scipy_parity::bdf_rust_vs_scipy_matched_workloads_story -- --ignored --nocapture --test-threads=1
+//! cargo test --release --lib --no-default-features numerical::BDF::scipy_parity::bdf_python_vs_rust_numerical_core_release_benchmark -- --ignored --nocapture --test-threads=1
+//! ```
 
 use crate::numerical::BDF::common::NumberOrVec;
 use crate::numerical::BDF::BDF_api::{

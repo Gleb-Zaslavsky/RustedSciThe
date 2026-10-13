@@ -129,13 +129,13 @@
 //! let result = parser.parse_document().unwrap();
 //! ```
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, alphanumeric1},
     combinator::{map, recognize},
     multi::many0,
     sequence::pair,
-    IResult, Parser,
 };
 use std::collections::HashMap;
 use std::fmt::Debug;

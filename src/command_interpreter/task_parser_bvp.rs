@@ -1,7 +1,7 @@
 //! BVP task-shell built on top of the generic [`DocumentParser`].
 //!
-//! This module mirrors the IVP task shell, but targets the historical
-//! [`crate::numerical::BVP_api::BVP`] facade.
+//! This module routes BVP task documents to either the mature BVP_Damp API or
+//! the maintained SciPy-like BVP_sci API.
 //!
 //! The parser supports two usage modes:
 //! - full end-to-end task documents, where equations, boundary conditions,
@@ -26,18 +26,20 @@
 //! - postprocessing is routed through the unified postprocessing facade, while
 //!   the historical plot flag remains available for legacy plotters output
 
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_common::{
-    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode, ContinuationSpec,
-    SharedEquationParseError,
+    ContinuationMode, ContinuationSpec, SharedEquationParseError, parse_continuation_spec,
+    parse_symbolic_equation_system,
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use crate::numerical::BVP_api::BVP;
 use crate::numerical::BVP_sci::new::{
-    BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciNewError, BvpSciOptions,
-    BvpSciSolver,
+    BvpSciAssembly, BvpSciExecution, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciNewError,
+    BvpSciOptions, BvpSciOutputPolicy, BvpSciSingularTerm, BvpSciSolver, BvpSciSparseFactorization,
+    BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
 use crate::somelinalg::banded::{LinearSolverConfig, LinearSolverPolicy};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
@@ -49,7 +51,6 @@ use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
-use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -75,6 +76,48 @@ pub enum BvpTaskKindSpec {
 pub enum BvpSolverFamilySpec {
     Damp,
     Sci,
+}
+
+/// Static CLI/parser description of the choices intentionally exposed for one
+/// BVP family. This is descriptive metadata, not a second solver config.
+#[derive(Debug, Clone, Copy)]
+pub struct BvpSolverCapabilityDescriptor {
+    pub family: BvpSolverFamilySpec,
+    pub name: &'static str,
+    pub frontends: &'static [&'static str],
+    pub executions: &'static [&'static str],
+    pub layouts: &'static [&'static str],
+    pub supports_continuation: bool,
+    pub supports_singular_term: bool,
+}
+
+const BVP_DAMP_CAPABILITIES: BvpSolverCapabilityDescriptor = BvpSolverCapabilityDescriptor {
+    family: BvpSolverFamilySpec::Damp,
+    name: "BVP_Damp",
+    frontends: &["ExprLegacy", "AtomViewNative"],
+    executions: &["Lambdify", "AOT"],
+    layouts: &["Dense", "Sparse", "Banded"],
+    supports_continuation: true,
+    supports_singular_term: false,
+};
+
+const BVP_SCI_CAPABILITIES: BvpSolverCapabilityDescriptor = BvpSolverCapabilityDescriptor {
+    family: BvpSolverFamilySpec::Sci,
+    name: "BVP_sci",
+    frontends: &["ExprLegacy", "AtomViewNative"],
+    executions: &["Lambdify", "AOT"],
+    layouts: &["Dense", "Sparse", "Banded"],
+    supports_continuation: true,
+    supports_singular_term: true,
+};
+
+pub fn bvp_solver_capabilities(
+    family: BvpSolverFamilySpec,
+) -> &'static BvpSolverCapabilityDescriptor {
+    match family {
+        BvpSolverFamilySpec::Damp => &BVP_DAMP_CAPABILITIES,
+        BvpSolverFamilySpec::Sci => &BVP_SCI_CAPABILITIES,
+    }
 }
 
 /// Symbolic representation used to build residual/Jacobian callbacks.
@@ -233,7 +276,24 @@ pub struct BvpInitialGuessSpec {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BvpSolverOptionsSpec {
     pub tolerance: Option<f64>,
+    pub boundary_tolerance: Option<f64>,
+    /// Compatibility alias for BVP_sci `max_newton_iterations` and the
+    /// existing BVP_Damp iteration budget.
     pub max_iterations: Option<usize>,
+    pub max_nodes: Option<usize>,
+    pub max_newton_iterations: Option<usize>,
+    pub max_jacobian_refreshes: Option<usize>,
+    pub max_mesh_refinements: Option<usize>,
+    pub max_backtracking_steps: Option<usize>,
+    pub banded_lower: Option<usize>,
+    pub banded_upper: Option<usize>,
+    pub sparse_factorization: Option<BvpSciSparseFactorization>,
+    pub execution_policy: Option<BvpSciExecutionPolicy>,
+    pub execution_min_work: Option<usize>,
+    pub telemetry: Option<BvpSciTelemetryMode>,
+    pub output_policy: Option<BvpSciOutputPolicy>,
+    pub singular_term_a: Option<f64>,
+    pub singular_term_matrix: Option<Vec<f64>>,
     pub linear_sys_method: Option<String>,
     pub loglevel: Option<String>,
     pub generated_backend: BvpGeneratedBackendSpec,
@@ -425,6 +485,101 @@ pub struct BvpTaskRunResult {
     /// Execution-level facts needed to distinguish fresh and prepared task
     /// runs without scraping solver logs.
     pub continuation_telemetry: BvpTaskContinuationTelemetry,
+    /// Compact native telemetry when the selected solver exposes it. `None`
+    /// means this solver route has no task-level telemetry adapter.
+    pub runtime_telemetry: Option<BvpTaskRuntimeTelemetry>,
+}
+
+/// Runtime facts retained for task-shell summaries without storing the full
+/// potentially large solver trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BvpTaskRuntimeTelemetry {
+    pub mode: BvpSciTelemetryMode,
+    pub requested_sparse_factorization: Option<BvpSciSparseFactorization>,
+    pub sparse_backend_outcome: BvpTaskSparseBackendOutcome,
+    /// `None` means counters were disabled, not that no fallback occurred.
+    pub superlu_fallbacks: Option<u64>,
+    pub superlu_factorizations: Option<u64>,
+    pub linear_factorizations: Option<u64>,
+    pub linear_solves: Option<u64>,
+}
+
+/// Effective sparse route as observed by solver telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BvpTaskSparseBackendOutcome {
+    NotApplicable,
+    StandardFaer,
+    SuperLu,
+    StandardFaerFallback,
+    NotObserved,
+}
+
+impl BvpTaskRuntimeTelemetry {
+    fn for_spec(spec: &BvpTaskSpec) -> Self {
+        let mode = spec
+            .solver_options
+            .telemetry
+            .unwrap_or(BvpSciTelemetryMode::Off);
+        let sparse = spec.solver.backend == BvpLinearBackendSpec::Sparse;
+        let requested_sparse_factorization = sparse.then(|| {
+            spec.solver_options
+                .sparse_factorization
+                .unwrap_or(BvpSciSparseFactorization::StandardFaer)
+        });
+        let counters_enabled = mode != BvpSciTelemetryMode::Off;
+        Self {
+            mode,
+            requested_sparse_factorization,
+            sparse_backend_outcome: match (requested_sparse_factorization, counters_enabled) {
+                (None, _) => BvpTaskSparseBackendOutcome::NotApplicable,
+                (Some(BvpSciSparseFactorization::StandardFaer), _) => {
+                    BvpTaskSparseBackendOutcome::StandardFaer
+                }
+                (Some(BvpSciSparseFactorization::SuperLu), false) => {
+                    BvpTaskSparseBackendOutcome::NotObserved
+                }
+                _ => BvpTaskSparseBackendOutcome::NotObserved,
+            },
+            superlu_fallbacks: counters_enabled.then_some(0),
+            superlu_factorizations: counters_enabled.then_some(0),
+            linear_factorizations: counters_enabled.then_some(0),
+            linear_solves: counters_enabled.then_some(0),
+        }
+    }
+
+    fn record(&mut self, snapshot: &BvpSciTelemetrySnapshot) {
+        if snapshot.mode == BvpSciTelemetryMode::Off {
+            return;
+        }
+        if let Some(total) = &mut self.superlu_fallbacks {
+            *total += snapshot.superlu_fallbacks;
+        }
+        if let Some(total) = &mut self.superlu_factorizations {
+            *total += snapshot.superlu.native_factorization_calls;
+        }
+        if let Some(total) = &mut self.linear_factorizations {
+            *total += snapshot.factorizations;
+        }
+        if let Some(total) = &mut self.linear_solves {
+            *total += snapshot.linear_solves;
+        }
+
+        self.sparse_backend_outcome = match self.requested_sparse_factorization {
+            None => BvpTaskSparseBackendOutcome::NotApplicable,
+            Some(BvpSciSparseFactorization::StandardFaer) => {
+                BvpTaskSparseBackendOutcome::StandardFaer
+            }
+            Some(BvpSciSparseFactorization::SuperLu) if snapshot.superlu_fallbacks > 0 => {
+                BvpTaskSparseBackendOutcome::StandardFaerFallback
+            }
+            Some(BvpSciSparseFactorization::SuperLu)
+                if snapshot.superlu.native_factorization_calls > 0 =>
+            {
+                BvpTaskSparseBackendOutcome::SuperLu
+            }
+            Some(_) => BvpTaskSparseBackendOutcome::NotObserved,
+        };
+    }
 }
 
 /// Compact continuation lifecycle telemetry owned by the task runner.
@@ -445,6 +600,34 @@ pub struct BvpTaskSegmentResult {
     pub parameters: Vec<f64>,
     pub result: DMatrix<f64>,
 }
+
+/// Typed failure produced after a BVP solver returned without a usable result.
+///
+/// This is intentionally separate from the native solver error. A native
+/// backend can complete its call successfully while still violating the task
+/// runner's result contract, for example by returning no matrix or a matrix
+/// whose shape cannot represent the declared state vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BvpSolverResultFailure {
+    NoResult { solver: &'static str },
+    InvalidShape {
+        solver: &'static str,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for BvpSolverResultFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoResult { solver } => write!(f, "{solver} produced no result"),
+            Self::InvalidShape { solver, message } => {
+                write!(f, "{solver} returned an invalid result: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BvpSolverResultFailure {}
 
 /// Parser/build error for BVP task documents.
 #[derive(Debug)]
@@ -472,6 +655,10 @@ pub enum BvpTaskError {
     UnknownStrategy(String),
     UnknownBackend(String),
     UnsupportedRoute(String),
+    UnsupportedOption {
+        option: String,
+        solver: String,
+    },
     UnsupportedContinuation(String),
     BvpDamp(BvpBackendIntegrationError),
     BvpSci(BvpSciNewError),
@@ -489,6 +676,10 @@ pub enum BvpTaskError {
     },
     Postprocess(PostprocessError),
     Semantic(String),
+    /// Typed result-contract failure. The older `Solver(String)` variant is
+    /// retained for external compatibility with legacy adapters.
+    SolverResult(BvpSolverResultFailure),
+    /// Legacy unclassified solver message kept as a compatibility adapter.
     Solver(String),
 }
 
@@ -508,8 +699,11 @@ impl BvpTaskError {
             | Self::SymbolDiagnostic { .. }
             | Self::Semantic(_) => "configuration",
             Self::UnsupportedRoute(_) => "unsupported_route",
+            Self::UnsupportedOption { .. } => "unsupported_option",
             Self::UnsupportedContinuation(_) => "continuation",
-            Self::BvpSci(_) | Self::BvpDamp(_) | Self::Solver(_) => "solver",
+            Self::BvpSci(error) => bvp_sci_error_category(error),
+            Self::BvpDamp(_) | Self::Solver(_) => "solver",
+            Self::SolverResult(_) => "solver_result",
             Self::Postprocess(_) => "postprocess",
         }
     }
@@ -542,6 +736,9 @@ impl std::fmt::Display for BvpTaskError {
             Self::UnknownStrategy(strategy) => write!(f, "unknown BVP strategy `{strategy}`"),
             Self::UnknownBackend(method) => write!(f, "unknown BVP backend `{method}`"),
             Self::UnsupportedRoute(message) => write!(f, "unsupported BVP route: {message}"),
+            Self::UnsupportedOption { option, solver } => {
+                write!(f, "option `{option}` is not supported by {solver}")
+            }
             Self::UnsupportedContinuation(message) => {
                 write!(f, "unsupported BVP continuation: {message}")
             }
@@ -564,6 +761,7 @@ impl std::fmt::Display for BvpTaskError {
             }
             Self::Postprocess(error) => write!(f, "postprocessing error: {error}"),
             Self::Semantic(message) => write!(f, "{message}"),
+            Self::SolverResult(error) => write!(f, "solver result contract failed: {error}"),
             Self::Solver(message) => write!(f, "{message}"),
         }
     }
@@ -577,8 +775,54 @@ impl std::error::Error for BvpTaskError {
             Self::BvpSci(error) => Some(error),
             Self::BvpDamp(error) => Some(error),
             Self::Postprocess(error) => Some(error),
+            Self::SolverResult(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+/// Projects the already typed BVP_sci error into a stable task-shell category.
+/// The native error remains available through `source()` and its full Display
+/// text; this projection is only for compact tables and process policies.
+fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
+    match error {
+        BvpSciNewError::InvalidConfiguration(_) => "configuration",
+        BvpSciNewError::Callback { .. }
+        | BvpSciNewError::ShapeMismatch { .. }
+        | BvpSciNewError::NonFinite { .. }
+        | BvpSciNewError::AotCallback { .. } => "callback",
+        BvpSciNewError::NewtonFailure { .. } => "solver_exhaustion",
+        BvpSciNewError::SingularJacobian => "solver_singular",
+        BvpSciNewError::BoundaryToleranceNotMet { .. } => "solver_tolerance",
+        BvpSciNewError::MaxNodesExceeded { .. }
+        | BvpSciNewError::MeshRefinementLimit { .. } => "solver_exhaustion",
+        BvpSciNewError::LinearBackend { .. }
+        | BvpSciNewError::LinearFactorization { .. }
+        | BvpSciNewError::LinearSolve { .. } => "solver_linear",
+        BvpSciNewError::UnsupportedRoute(_) => "unsupported_route",
+        BvpSciNewError::SymbolicPreparation(_) => "symbolic_preparation",
+        BvpSciNewError::AotPreparation { kind, .. } => match kind {
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Compiler
+            | crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Build => "aot_compiler",
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Link => "aot_link",
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Timeout => "aot_timeout",
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::MissingArtifact
+            | crate::numerical::BVP_sci::new::BvpSciAotFailureKind::StaleArtifact => {
+                "aot_artifact"
+            }
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Publication => {
+                "aot_publication"
+            }
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Runtime => "aot_runtime",
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::SymbolicPreparation => {
+                "symbolic_preparation"
+            }
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Unknown => "aot_failure",
+        },
+        BvpSciNewError::AotHandoff { .. } => "aot_handoff",
+        BvpSciNewError::AotRuntime { .. } => "aot_runtime",
+        BvpSciNewError::ContinuationMismatch => "continuation",
+        BvpSciNewError::OutputOutOfDomain | BvpSciNewError::OutputUnavailable => "postprocess",
     }
 }
 
@@ -651,11 +895,7 @@ fn diagnostic_token(message: &str) -> String {
             .trim_matches('`')
             .to_string();
     }
-    message
-        .split('`')
-        .nth(1)
-        .unwrap_or("equations")
-        .to_string()
+    message.split('`').nth(1).unwrap_or("equations").to_string()
 }
 
 fn source_position(input: &str, token: &str) -> Option<(usize, usize)> {
@@ -764,9 +1004,13 @@ pub fn parse_bvp_problem_from_document(
 pub fn parse_bvp_solver_settings_from_document(
     document: &DocumentMap,
 ) -> Result<BvpSolverSettingsSpec, BvpTaskError> {
+    let solver = parse_bvp_solver_selection(document)?;
+    let solver_options = parse_bvp_solver_options(document)?;
+    validate_bvp_solver_options(&solver_options)?;
+    validate_bvp_option_compatibility(&solver, &solver_options)?;
     Ok(BvpSolverSettingsSpec {
-        solver: parse_bvp_solver_selection(document)?,
-        solver_options: parse_bvp_solver_options(document)?,
+        solver,
+        solver_options,
     })
 }
 
@@ -1016,7 +1260,9 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         }
         let result = solver
             .get_result()
-            .ok_or_else(|| BvpTaskError::Solver("BVP_Damp produced no result".to_string()))?;
+            .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
+                solver: "BVP_Damp",
+            }))?;
         continuation_telemetry.segments += 1;
         continuation_telemetry.fresh_preparations += 1;
         continuation_telemetry.peak_result_elements = continuation_telemetry
@@ -1034,6 +1280,7 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         result,
         continuation_segments: executed,
         continuation_telemetry,
+        runtime_telemetry: None,
     })
 }
 
@@ -1164,7 +1411,9 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
 
         let result = solver
             .get_result()
-            .ok_or_else(|| BvpTaskError::Solver("BVP_Damp produced no result".to_string()))?;
+            .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
+                solver: "BVP_Damp",
+            }))?;
         telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
@@ -1189,12 +1438,51 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
         result,
         continuation_segments: executed,
         continuation_telemetry: telemetry,
+        runtime_telemetry: None,
     })
 }
 
 fn validate_bvp_task_spec(spec: &BvpTaskSpec) -> Result<(), BvpTaskError> {
     validate_bvp_problem_spec(&spec.problem_spec())?;
     validate_bvp_solver_options(&spec.solver_options)?;
+    validate_bvp_option_compatibility(&spec.solver, &spec.solver_options)?;
+    if spec.solver.family == BvpSolverFamilySpec::Sci
+        && spec
+            .solver_options
+            .max_nodes
+            .is_some_and(|max_nodes| max_nodes < spec.mesh.n_steps)
+    {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "solver_options.max_nodes".to_string(),
+            message: "must be greater than or equal to the initial mesh node count".to_string(),
+        });
+    }
+    if let Some(endpoint) = spec.solver_options.singular_term_a {
+        if !endpoint.is_finite() || endpoint != spec.mesh.t0 {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.singular_term_a".to_string(),
+                message: "must equal mesh.t0, the left endpoint used by the BVP_sci singular-term formulation".to_string(),
+            });
+        }
+    }
+    if let Some(matrix) = &spec.solver_options.singular_term_matrix {
+        let expected = spec
+            .equations
+            .unknowns
+            .len()
+            .saturating_mul(spec.equations.unknowns.len());
+        if matrix.len() != expected {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.singular_term_matrix".to_string(),
+                message: format!(
+                    "expected {expected} row-major entries for an {}x{} matrix, got {}",
+                    spec.equations.unknowns.len(),
+                    spec.equations.unknowns.len(),
+                    matrix.len()
+                ),
+            });
+        }
+    }
 
     for (name, value) in &spec.equations.parameter_values {
         if !value.is_finite() {
@@ -1376,6 +1664,203 @@ fn validate_bvp_solver_options(options: &BvpSolverOptionsSpec) -> Result<(), Bvp
             message: "must be greater than zero".to_string(),
         });
     }
+    if let (Some(legacy), Some(native)) = (options.max_iterations, options.max_newton_iterations) {
+        if legacy != native {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.max_iterations/max_newton_iterations".to_string(),
+                message:
+                    "the compatibility alias and native BVP_sci limit must agree when both are set"
+                        .to_string(),
+            });
+        }
+    }
+    for (field, value) in [("boundary_tolerance", options.boundary_tolerance)] {
+        if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: format!("solver_options.{field}"),
+                message: "must be finite and greater than zero".to_string(),
+            });
+        }
+    }
+    for (field, value) in [
+        ("max_nodes", options.max_nodes),
+        ("max_newton_iterations", options.max_newton_iterations),
+        ("max_jacobian_refreshes", options.max_jacobian_refreshes),
+        ("max_mesh_refinements", options.max_mesh_refinements),
+        ("max_backtracking_steps", options.max_backtracking_steps),
+    ] {
+        if value == Some(0) {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: format!("solver_options.{field}"),
+                message: "must be greater than zero".to_string(),
+            });
+        }
+    }
+    if options.banded_lower == Some(0) || options.banded_upper == Some(0) {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "solver_options.banded_lower/banded_upper".to_string(),
+            message: "band widths must be greater than zero".to_string(),
+        });
+    }
+    if options.singular_term_a.is_some() != options.singular_term_matrix.is_some() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "solver_options.singular_term_a/singular_term_matrix".to_string(),
+            message: "both singular-term endpoint and matrix must be provided".to_string(),
+        });
+    }
+    if let Some(policy) = options.execution_policy {
+        let min_work = options.execution_min_work.unwrap_or(0);
+        if matches!(policy, BvpSciExecutionPolicy::Sequential)
+            && options.execution_min_work.is_some()
+        {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.execution_min_work".to_string(),
+                message: "is only valid for parallel or auto execution".to_string(),
+            });
+        }
+        let _ = min_work;
+    } else if options.execution_min_work.is_some() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "solver_options.execution_min_work".to_string(),
+            message: "requires an explicit execution_policy".to_string(),
+        });
+    }
+    if let Some(matrix) = &options.singular_term_matrix {
+        if matrix.iter().any(|value| !value.is_finite()) {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.singular_term_matrix".to_string(),
+                message: "all matrix entries must be finite".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_bvp_option_compatibility(
+    solver: &BvpSolverSelectionSpec,
+    options: &BvpSolverOptionsSpec,
+) -> Result<(), BvpTaskError> {
+    let unsupported: Vec<(&str, bool)> = match solver.family {
+        BvpSolverFamilySpec::Damp => vec![
+            ("boundary_tolerance", options.boundary_tolerance.is_some()),
+            ("max_nodes", options.max_nodes.is_some()),
+            (
+                "max_newton_iterations",
+                options.max_newton_iterations.is_some(),
+            ),
+            (
+                "max_jacobian_refreshes",
+                options.max_jacobian_refreshes.is_some(),
+            ),
+            (
+                "max_mesh_refinements",
+                options.max_mesh_refinements.is_some(),
+            ),
+            (
+                "max_backtracking_steps",
+                options.max_backtracking_steps.is_some(),
+            ),
+            ("banded_lower", options.banded_lower.is_some()),
+            ("banded_upper", options.banded_upper.is_some()),
+            (
+                "sparse_factorization",
+                options.sparse_factorization.is_some(),
+            ),
+            ("execution_policy", options.execution_policy.is_some()),
+            ("execution_min_work", options.execution_min_work.is_some()),
+            ("telemetry", options.telemetry.is_some()),
+            ("output_policy", options.output_policy.is_some()),
+            ("singular_term_a", options.singular_term_a.is_some()),
+            (
+                "singular_term_matrix",
+                options.singular_term_matrix.is_some(),
+            ),
+        ],
+        BvpSolverFamilySpec::Sci => vec![
+            ("linear_sys_method", options.linear_sys_method.is_some()),
+            ("loglevel", options.loglevel.is_some()),
+            (
+                "generated_backend",
+                options.generated_backend.preset.is_some(),
+            ),
+            (
+                "matrix_backend",
+                options.generated_backend.matrix_backend.is_some(),
+            ),
+            (
+                "backend_policy",
+                options.generated_backend.backend_policy.is_some(),
+            ),
+            (
+                "symbolic_backend",
+                options.generated_backend.symbolic_backend.is_some(),
+            ),
+            (
+                "aot_compile_preset",
+                options.generated_backend.aot_compile_preset.is_some(),
+            ),
+            (
+                "aot_execution_policy",
+                options.generated_backend.aot_execution_policy.is_some(),
+            ),
+            (
+                "banded_linear_solver",
+                options.generated_backend.banded_linear_solver.is_some(),
+            ),
+            (
+                "refinement_steps",
+                options.generated_backend.refinement_steps.is_some(),
+            ),
+        ],
+    };
+    if let Some((option, _)) = unsupported.into_iter().find(|(_, present)| *present) {
+        return Err(BvpTaskError::UnsupportedOption {
+            option: format!("solver_options.{option}"),
+            solver: match solver.family {
+                BvpSolverFamilySpec::Damp => "BVP_Damp".to_string(),
+                BvpSolverFamilySpec::Sci => "BVP_sci".to_string(),
+            },
+        });
+    }
+    if solver.family == BvpSolverFamilySpec::Sci {
+        if matches!(solver.execution, Some(BvpExecutionSpec::Aot))
+            && options.generated_backend.aot_output_dir.is_none()
+        {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.aot_output_dir".to_string(),
+                message: "is required for BVP_sci AOT execution".to_string(),
+            });
+        }
+        if !matches!(solver.execution, Some(BvpExecutionSpec::Aot)) {
+            let aot_settings_present = options.generated_backend.aot_codegen_backend.is_some()
+                || options.generated_backend.aot_c_compiler.is_some()
+                || options.generated_backend.aot_build_policy.is_some()
+                || options.generated_backend.aot_build_profile.is_some()
+                || options.generated_backend.aot_output_dir.is_some()
+                || options.generated_backend.aot_handoff_path.is_some();
+            if aot_settings_present {
+                return Err(BvpTaskError::UnsupportedOption {
+                    option: "solver_options.aot_* (task execution is not AOT)".to_string(),
+                    solver: "BVP_sci Lambdify route".to_string(),
+                });
+            }
+        }
+        if options.sparse_factorization.is_some() && solver.backend != BvpLinearBackendSpec::Sparse
+        {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.sparse_factorization".to_string(),
+                message: "is only applicable when method is Sparse".to_string(),
+            });
+        }
+        if (options.banded_lower.is_some() || options.banded_upper.is_some())
+            && solver.backend != BvpLinearBackendSpec::Banded
+        {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "solver_options.banded_lower/banded_upper".to_string(),
+                message: "band widths are only applicable when method is Banded".to_string(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1396,10 +1881,12 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     }
     let segments = continuation_rows(&spec)?;
     let mut executed = Vec::with_capacity(segments.len());
+    let mut runtime_telemetry = BvpTaskRuntimeTelemetry::for_spec(&spec);
     for (index, values) in segments.iter().enumerate() {
         let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_sci_solver_from_spec(&segment_spec)?;
         let solution = solver.solve().map_err(BvpTaskError::BvpSci)?;
+        runtime_telemetry.record(&solver.plan().telemetry_snapshot());
         let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
             let dataset = sci_solution_dataset(&solution, &segment_spec.equations.unknowns)?;
@@ -1424,6 +1911,7 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
         result,
         continuation_segments: executed,
         continuation_telemetry,
+        runtime_telemetry: Some(runtime_telemetry),
     })
 }
 
@@ -1508,11 +1996,14 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
         peak_result_elements: result.as_ref().map(DMatrix::len).unwrap_or(0),
         ..Default::default()
     };
+    let mut runtime_telemetry = BvpTaskRuntimeTelemetry::for_spec(&spec);
+    runtime_telemetry.record(&solver.plan().telemetry_snapshot());
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
         continuation_segments: executed,
         continuation_telemetry,
+        runtime_telemetry: Some(runtime_telemetry),
     })
 }
 
@@ -1692,6 +2183,31 @@ fn build_bvp_sci_solver_with_parameter_targets(
         BvpExecutionSpec::Lambdify => BvpSciExecution::Lambdify,
         BvpExecutionSpec::Aot => BvpSciExecution::Aot,
     };
+    let max_newton_iterations = spec
+        .solver_options
+        .max_newton_iterations
+        .or(spec.solver_options.max_iterations)
+        .unwrap_or(8);
+    let max_nodes = spec
+        .solver_options
+        .max_nodes
+        .unwrap_or_else(|| spec.mesh.n_steps.saturating_mul(16).max(128));
+    let max_mesh_refinements = spec.solver_options.max_mesh_refinements.unwrap_or(10);
+    let max_jacobian_refreshes = spec.solver_options.max_jacobian_refreshes.unwrap_or(4);
+    let max_backtracking_steps = spec.solver_options.max_backtracking_steps.unwrap_or(4);
+    let banded_lower = spec.solver_options.banded_lower.unwrap_or(1);
+    let banded_upper = spec.solver_options.banded_upper.unwrap_or(1);
+    let execution_min_work = spec.solver_options.execution_min_work.unwrap_or(0);
+    let execution_policy = match spec.solver_options.execution_policy {
+        Some(BvpSciExecutionPolicy::Sequential) => BvpSciExecutionPolicy::Sequential,
+        Some(BvpSciExecutionPolicy::Parallel { .. }) => BvpSciExecutionPolicy::Parallel {
+            min_work: execution_min_work,
+        },
+        Some(BvpSciExecutionPolicy::Auto { .. }) => BvpSciExecutionPolicy::Auto {
+            min_work: execution_min_work,
+        },
+        None => BvpSciExecutionPolicy::Sequential,
+    };
     let options = BvpSciOptions::default()
         .with_execution(execution)
         .with_assembly(
@@ -1703,14 +2219,30 @@ fn build_bvp_sci_solver_with_parameter_targets(
         .with_matrix_layout(match spec.solver.backend {
             BvpLinearBackendSpec::Dense => BvpSciMatrixLayout::Dense,
             BvpLinearBackendSpec::Sparse => BvpSciMatrixLayout::Sparse,
-            BvpLinearBackendSpec::Banded => BvpSciMatrixLayout::Banded { lower: 1, upper: 1 },
+            BvpLinearBackendSpec::Banded => BvpSciMatrixLayout::Banded {
+                lower: banded_lower,
+                upper: banded_upper,
+            },
         })
         .with_tolerance(spec.solver_options.tolerance.unwrap_or(1e-3))
-        .with_limits(
-            spec.mesh.n_steps.saturating_mul(16).max(128),
-            spec.solver_options.max_iterations.unwrap_or(10),
-            10,
-        );
+        .with_boundary_tolerance(
+            spec.solver_options
+                .boundary_tolerance
+                .unwrap_or(spec.solver_options.tolerance.unwrap_or(1e-3)),
+        )
+        .with_limits(max_nodes, max_newton_iterations, max_mesh_refinements)
+        .with_execution_policy(execution_policy)
+        .with_telemetry(
+            spec.solver_options
+                .telemetry
+                .unwrap_or(BvpSciTelemetryMode::Off),
+        )
+        .with_output_policy(
+            spec.solver_options
+                .output_policy
+                .unwrap_or(BvpSciOutputPolicy::MeshAndValues),
+        )
+        .with_backtracking_limit(max_backtracking_steps);
     let mut builder =
         BvpSciSolver::builder(spec.equations.rhs.clone(), spec.equations.unknowns.clone())
             .with_independent_variable(spec.equations.arg.clone())
@@ -1726,11 +2258,16 @@ fn build_bvp_sci_solver_with_parameter_targets(
             )
             .with_matrix_layout(options.matrix_layout)
             .with_tolerance(options.tolerance)
+            .with_boundary_tolerance(options.boundary_tolerance.unwrap_or(options.tolerance))
             .with_limits(
                 options.max_nodes,
                 options.max_newton_iterations,
                 options.max_mesh_refinements,
             )
+            .with_backtracking_limit(options.max_backtracking_steps)
+            .with_execution_policy(options.execution_policy)
+            .with_telemetry(options.telemetry)
+            .with_output_policy(options.output_policy)
             .with_parameter_names(parameter_names.clone())
             .with_parameters(initial_parameters);
     builder = match spec.solver.frontend.unwrap_or(BvpFrontendSpec::ExprLegacy) {
@@ -1744,6 +2281,18 @@ fn build_bvp_sci_solver_with_parameter_targets(
     } else {
         builder
     };
+    let mut builder = builder
+        .with_jacobian_refresh_limit(max_jacobian_refreshes)
+        .with_sparse_factorization(
+            spec.solver_options
+                .sparse_factorization
+                .unwrap_or(BvpSciSparseFactorization::StandardFaer),
+        );
+    if let Some(matrix) = &spec.solver_options.singular_term_matrix {
+        let singular =
+            BvpSciSingularTerm::new(dimension, matrix.clone()).map_err(BvpTaskError::BvpSci)?;
+        builder = builder.with_singular_term(singular);
+    }
     builder
         .with_boundary_callback(move |ya, yb, parameters, output| {
             if output.len() != boundary_dimension {
@@ -1802,8 +2351,11 @@ fn sci_solution_matrix(
     solution: &crate::numerical::BVP_sci::new::BvpSciSolution,
 ) -> Result<DMatrix<f64>, BvpTaskError> {
     if solution.x.is_empty() || solution.y.len() % solution.x.len() != 0 {
-        return Err(BvpTaskError::Solver(
-            "BVP_sci returned an invalid node-major solution".to_string(),
+        return Err(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::InvalidShape {
+                solver: "BVP_sci",
+                message: "invalid node-major solution".to_string(),
+            },
         ));
     }
     let dimension = solution.y.len() / solution.x.len();
@@ -1821,10 +2373,15 @@ fn sci_solution_dataset(
     let matrix = sci_solution_matrix(solution)?;
     let dimension = matrix.nrows();
     if variable_names.len() != dimension {
-        return Err(BvpTaskError::Solver(format!(
-            "BVP_sci returned {dimension} state components but the task declares {}",
-            variable_names.len()
-        )));
+        return Err(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::InvalidShape {
+                solver: "BVP_sci",
+                message: format!(
+                    "returned {dimension} state components but the task declares {}",
+                    variable_names.len()
+                ),
+            },
+        ));
     }
     let values = DMatrix::from_fn(solution.x.len(), dimension, |node, component| {
         matrix[(component, node)]
@@ -1918,24 +2475,64 @@ fn parse_bvp_solver_selection(
                 section: "task".to_string(),
                 field: "solver".to_string(),
                 message: format!("expected `BVP` or `BVP_sci`, got `{solver_name}`"),
-            })
+            });
         }
     };
+
+    if family == BvpSolverFamilySpec::Sci {
+        for field in ["strategy", "scheme"] {
+            if task_section.contains_key(field) {
+                return Err(BvpTaskError::UnsupportedOption {
+                    option: format!("task.{field}"),
+                    solver: "BVP_sci (uses its fixed SciPy-like collocation controller)"
+                        .to_string(),
+                });
+            }
+        }
+    }
 
     let strategy = BvpStrategySpec::from_str(
         &get_optional_string(task_section, "strategy", "task")?.unwrap_or_else(|| "Damped".into()),
     )?;
     let scheme = get_optional_string(task_section, "scheme", "task")?
         .unwrap_or_else(|| "forward".to_string());
-    let backend = BvpLinearBackendSpec::from_str(
-        &get_optional_string(task_section, "method", "task")?.unwrap_or_else(|| "Sparse".into()),
-    )?;
+    let method = get_optional_string(task_section, "method", "task")?;
+    let backend_alias = get_optional_string(task_section, "backend", "task")?;
+    if method.is_some() && backend_alias.is_some() {
+        return Err(BvpTaskError::InvalidField {
+            section: "task".to_string(),
+            field: "method/backend".to_string(),
+            message: "specify only one of `method` or its compatibility alias `backend`"
+                .to_string(),
+        });
+    }
+    let backend =
+        BvpLinearBackendSpec::from_str(method.or(backend_alias).as_deref().unwrap_or("Sparse"))?;
     let frontend = get_optional_string(task_section, "frontend", "task")?
         .map(|raw| BvpFrontendSpec::from_str(&raw))
         .transpose()?;
     let execution = get_optional_string(task_section, "execution", "task")?
         .map(|raw| BvpExecutionSpec::from_str(&raw))
         .transpose()?;
+
+    const ALLOWED_TASK_FIELDS: &[&str] = &[
+        "solver",
+        "strategy",
+        "scheme",
+        "method",
+        "backend",
+        "frontend",
+        "execution",
+    ];
+    if let Some(field) = task_section
+        .keys()
+        .find(|field| !ALLOWED_TASK_FIELDS.contains(&field.as_str()))
+    {
+        return Err(BvpTaskError::UnsupportedOption {
+            option: format!("task.{field}"),
+            solver: "BVP task documents".to_string(),
+        });
+    }
 
     Ok(BvpSolverSelectionSpec {
         task_kind: BvpTaskKindSpec::Bvp,
@@ -2061,13 +2658,169 @@ fn parse_bvp_solver_options(document: &DocumentMap) -> Result<BvpSolverOptionsSp
         None => return Ok(BvpSolverOptionsSpec::default()),
     };
 
+    const ALLOWED_OPTIONS: &[&str] = &[
+        "tolerance",
+        "boundary_tolerance",
+        "max_iterations",
+        "max_nodes",
+        "max_newton_iterations",
+        "max_jacobian_refreshes",
+        "max_mesh_refinements",
+        "max_backtracking_steps",
+        "banded_lower",
+        "banded_upper",
+        "sparse_factorization",
+        "execution_policy",
+        "execution_min_work",
+        "telemetry",
+        "output_policy",
+        "singular_term_a",
+        "singular_term_matrix",
+        "linear_sys_method",
+        "loglevel",
+        "generated_backend",
+        "matrix_backend",
+        "backend_policy",
+        "symbolic_backend",
+        "aot_codegen_backend",
+        "aot_c_compiler",
+        "aot_build_policy",
+        "aot_build_profile",
+        "aot_compile_preset",
+        "aot_execution_policy",
+        "aot_output_dir",
+        "aot_handoff_path",
+        "banded_linear_solver",
+        "refinement_steps",
+    ];
+    if let Some(key) = section
+        .keys()
+        .find(|key| !ALLOWED_OPTIONS.contains(&key.as_str()))
+    {
+        return Err(BvpTaskError::UnsupportedOption {
+            option: format!("solver_options.{key}"),
+            solver: "BVP task documents".to_string(),
+        });
+    }
+
     Ok(BvpSolverOptionsSpec {
         tolerance: get_optional_float(section, "tolerance", "solver_options")?,
+        boundary_tolerance: get_optional_float(section, "boundary_tolerance", "solver_options")?,
         max_iterations: get_optional_usize(section, "max_iterations", "solver_options")?,
+        max_nodes: get_optional_usize(section, "max_nodes", "solver_options")?,
+        max_newton_iterations: get_optional_usize(
+            section,
+            "max_newton_iterations",
+            "solver_options",
+        )?,
+        max_jacobian_refreshes: get_optional_usize(
+            section,
+            "max_jacobian_refreshes",
+            "solver_options",
+        )?,
+        max_mesh_refinements: get_optional_usize(
+            section,
+            "max_mesh_refinements",
+            "solver_options",
+        )?,
+        max_backtracking_steps: get_optional_usize(
+            section,
+            "max_backtracking_steps",
+            "solver_options",
+        )?,
+        banded_lower: get_optional_usize(section, "banded_lower", "solver_options")?,
+        banded_upper: get_optional_usize(section, "banded_upper", "solver_options")?,
+        sparse_factorization: get_optional_string(
+            section,
+            "sparse_factorization",
+            "solver_options",
+        )?
+        .map(|value| parse_sparse_factorization(&value))
+        .transpose()?,
+        execution_policy: get_optional_string(section, "execution_policy", "solver_options")?
+            .map(|value| parse_bvp_execution_policy(&value))
+            .transpose()?,
+        execution_min_work: get_optional_usize(section, "execution_min_work", "solver_options")?,
+        telemetry: get_optional_string(section, "telemetry", "solver_options")?
+            .map(|value| parse_bvp_telemetry(&value))
+            .transpose()?,
+        output_policy: get_optional_string(section, "output_policy", "solver_options")?
+            .map(|value| parse_bvp_sci_output_policy(&value))
+            .transpose()?,
+        singular_term_a: get_optional_float(section, "singular_term_a", "solver_options")?,
+        singular_term_matrix: get_optional_float_list(
+            section,
+            "singular_term_matrix",
+            "solver_options",
+        )?,
         linear_sys_method: get_optional_string(section, "linear_sys_method", "solver_options")?,
         loglevel: get_optional_string(section, "loglevel", "solver_options")?,
         generated_backend: parse_generated_backend_options(section)?,
     })
+}
+
+fn parse_sparse_factorization(raw: &str) -> Result<BvpSciSparseFactorization, BvpTaskError> {
+    match normalize_token(raw).as_str() {
+        "standardfaer" | "standard_faer" | "faer" => Ok(BvpSciSparseFactorization::StandardFaer),
+        "superlu" => Ok(BvpSciSparseFactorization::SuperLu),
+        "reusablefaer" | "reusablefaerexperimental" | "simplicial" => {
+            Err(BvpTaskError::UnsupportedOption {
+                option: "solver_options.sparse_factorization experimental policy".to_string(),
+                solver: "BVP_sci task documents (experimental Rust API only)".to_string(),
+            })
+        }
+        other => Err(BvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "sparse_factorization".to_string(),
+            message: format!(
+                "unknown sparse factorization `{other}`; use standard_faer or superlu"
+            ),
+        }),
+    }
+}
+
+fn parse_bvp_execution_policy(raw: &str) -> Result<BvpSciExecutionPolicy, BvpTaskError> {
+    let min_work = 0;
+    match normalize_token(raw).as_str() {
+        "sequential" | "seq" => Ok(BvpSciExecutionPolicy::Sequential),
+        "parallel" | "par" => Ok(BvpSciExecutionPolicy::Parallel { min_work }),
+        "auto" => Ok(BvpSciExecutionPolicy::Auto { min_work }),
+        other => Err(BvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "execution_policy".to_string(),
+            message: format!(
+                "unknown execution policy `{other}`; use sequential, parallel or auto"
+            ),
+        }),
+    }
+}
+
+fn parse_bvp_telemetry(raw: &str) -> Result<BvpSciTelemetryMode, BvpTaskError> {
+    match normalize_token(raw).as_str() {
+        "off" | "disabled" => Ok(BvpSciTelemetryMode::Off),
+        "counters" | "counter" => Ok(BvpSciTelemetryMode::Counters),
+        "timings" | "timing" | "detailed" => Ok(BvpSciTelemetryMode::Timings),
+        other => Err(BvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "telemetry".to_string(),
+            message: format!("unknown telemetry mode `{other}`; use off, counters or timings"),
+        }),
+    }
+}
+
+fn parse_bvp_sci_output_policy(raw: &str) -> Result<BvpSciOutputPolicy, BvpTaskError> {
+    match normalize_token(raw).as_str() {
+        "finalonly" | "final_only" | "final" => Ok(BvpSciOutputPolicy::FinalOnly),
+        "meshandvalues" | "mesh_and_values" | "mesh" | "values" => {
+            Ok(BvpSciOutputPolicy::MeshAndValues)
+        }
+        "denseoutput" | "dense_output" | "dense" => Ok(BvpSciOutputPolicy::DenseOutput),
+        other => Err(BvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "output_policy".to_string(),
+            message: format!("unknown BVP_sci output policy `{other}`"),
+        }),
+    }
 }
 
 fn parse_generated_backend_options(
@@ -2703,6 +3456,19 @@ fn get_required_float_list(
 ) -> Result<Vec<f64>, BvpTaskError> {
     let values = get_required_values(section, section_name, field)?;
     values_to_float_list(values, section_name, field)
+}
+
+fn get_optional_float_list(
+    section: &GenericSectionMap,
+    field: &str,
+    section_name: &str,
+) -> Result<Option<Vec<f64>>, BvpTaskError> {
+    match section.get(field) {
+        Some(Some(values)) if !values.is_empty() => {
+            values_to_float_list(values, section_name, field).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn values_to_float_list(

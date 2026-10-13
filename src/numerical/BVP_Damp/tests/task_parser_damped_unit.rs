@@ -7,8 +7,8 @@
 //! - Complex settings with adaptive grid and pseudonyms
 //! - Postprocessing configuration and execution
 
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::command_interpreter::task_parser::ParseErrorKind;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy,
 };
@@ -34,6 +34,37 @@ fn damped_adapter_keeps_typed_document_errors() {
         }
         other => panic!("expected typed document error, got {other:?}"),
     }
+}
+
+#[test]
+fn damped_legacy_parser_bridges_return_typed_failures() {
+    let mut solver = NRBVP::default();
+    let exact_error = solver
+        .try_parse_settings_from_str_with_exact_names("not_a_settings_section\nvalue: 1\n")
+        .expect_err("unknown sections should not be ignored");
+    assert_eq!(
+        exact_error,
+        BvpDampedTaskError::MissingSection("solver_settings")
+    );
+
+    let mut parser = DocumentParser::new("not_a_settings_section\nvalue: 1\n".to_string());
+    let alias_error = solver
+        .try_parse_settings(&mut parser)
+        .expect_err("pseudonym-aware parser should preserve document failures");
+    assert_eq!(
+        alias_error,
+        BvpDampedTaskError::MissingSection("solver_settings")
+    );
+}
+
+#[test]
+fn damped_postprocessing_bridge_reports_missing_parse_result_without_panicking() {
+    let mut solver = NRBVP::default();
+    let mut parser = DocumentParser::new(String::new());
+    let error = solver
+        .try_set_postprocessing_from_parser(&mut parser)
+        .expect_err("an unparsed document must be reported");
+    assert_eq!(error, BvpDampedTaskError::MissingSection("task document"));
 }
 
 use nalgebra::{DMatrix, DVector};

@@ -1,6 +1,4 @@
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
-use std::fs::File;
-use std::io::Write;
+use crate::command_interpreter::task_wizard::{self, Question};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,8 +9,9 @@ enum IvpTemplateMethod {
     Bdf,
     Radau5,
     BackwardEuler,
+    Dopri,
+    Ab4,
     Rk45,
-    Rk4,
 }
 
 impl IvpTemplateMethod {
@@ -23,8 +22,9 @@ impl IvpTemplateMethod {
             Self::Bdf => "BDF",
             Self::Radau5 => "Radau5",
             Self::BackwardEuler => "BackwardEuler",
+            Self::Dopri => "DOPRI",
+            Self::Ab4 => "AB4",
             Self::Rk45 => "RK45",
-            Self::Rk4 => "RK4",
         }
     }
 
@@ -43,6 +43,10 @@ impl IvpTemplateMethod {
 
     fn needs_bdf_execution_choice(self) -> bool {
         matches!(self, Self::LsodaAuto | Self::LsodeBdf)
+    }
+
+    fn has_native_controls(self) -> bool {
+        matches!(self, Self::Bdf | Self::Radau5 | Self::BackwardEuler)
     }
 }
 
@@ -161,6 +165,40 @@ enum IvpNativeExecution {
     BridgeSolve,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IvpExecutionPolicy {
+    Sequential,
+    Parallel,
+    Auto,
+}
+
+impl IvpExecutionPolicy {
+    fn task_value(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Parallel => "parallel",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IvpTelemetry {
+    Off,
+    Counters,
+    Timings,
+}
+
+impl IvpTelemetry {
+    fn task_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Counters => "counters",
+            Self::Timings => "timings",
+        }
+    }
+}
+
 impl IvpNativeExecution {
     fn task_value(self) -> &'static str {
         match self {
@@ -171,7 +209,7 @@ impl IvpNativeExecution {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct IvpTemplateConfig {
     method: IvpTemplateMethod,
     symbolic_assembly: IvpSymbolicAssembly,
@@ -181,6 +219,15 @@ struct IvpTemplateConfig {
     linear_structure: IvpLinearStructure,
     linear_solver_policy: IvpLinearSolverPolicy,
     native_execution: IvpNativeExecution,
+    execution_policy: IvpExecutionPolicy,
+    telemetry: IvpTelemetry,
+    tolerance: f64,
+    max_iterations: usize,
+    rtol: f64,
+    atol: f64,
+    max_step: Option<f64>,
+    first_step: Option<f64>,
+    step_size: Option<f64>,
 }
 
 impl Default for IvpTemplateConfig {
@@ -195,6 +242,15 @@ impl Default for IvpTemplateConfig {
             linear_structure,
             linear_solver_policy: linear_structure.default_policy(),
             native_execution: IvpNativeExecution::FaithfulBdfSolve,
+            execution_policy: IvpExecutionPolicy::Sequential,
+            telemetry: IvpTelemetry::Timings,
+            tolerance: 1e-6,
+            max_iterations: 100,
+            rtol: 1e-6,
+            atol: 1e-9,
+            max_step: Some(1e-3),
+            first_step: Some(1e-6),
+            step_size: Some(1e-3),
         }
     }
 }
@@ -216,10 +272,32 @@ fn build_ivp_task_template(config: &IvpTemplateConfig) -> String {
     template.push_str("y0: 1.0, 0.0, 0.0\n\n");
 
     template.push_str("solver_options\n");
-    template.push_str("rtol: 1e-6\n");
-    template.push_str("atol: 1e-9\n");
-    template.push_str("max_step: 1e-3\n");
-    template.push_str("first_step: Some(1e-6)\n");
+    match config.method {
+        IvpTemplateMethod::BackwardEuler => {
+            template.push_str(&format!("tolerance: {}\n", config.tolerance));
+            template.push_str(&format!("max_iterations: {}\n", config.max_iterations));
+            if let Some(step_size) = config.step_size {
+                template.push_str(&format!("step_size: {}\n", step_size));
+            }
+        }
+        IvpTemplateMethod::Bdf | IvpTemplateMethod::Radau5 => {
+            template.push_str(&format!("rtol: {}\n", config.rtol));
+            template.push_str(&format!("atol: {}\n", config.atol));
+            template.push_str(&format!("max_iterations: {}\n", config.max_iterations));
+            if let Some(max_step) = config.max_step {
+                template.push_str(&format!("max_step: {}\n", max_step));
+            }
+            if let Some(first_step) = config.first_step {
+                template.push_str(&format!("first_step: Some({})\n", first_step));
+            }
+        }
+        _ => {
+            template.push_str("rtol: 1e-6\n");
+            template.push_str("atol: 1e-9\n");
+            template.push_str("max_step: 1e-3\n");
+            template.push_str("first_step: Some(1e-6)\n");
+        }
+    }
 
     if config.method.is_lsode2() {
         if let Some(family) = config.method.lsode2_family_value() {
@@ -257,6 +335,56 @@ fn build_ivp_task_template(config: &IvpTemplateConfig) -> String {
                 config.native_execution.task_value()
             ));
         }
+    } else if config.method.has_native_controls() {
+        template.push_str(&format!(
+            "symbolic_frontend: {}\n",
+            config.symbolic_assembly.task_value()
+        ));
+        template.push_str(&format!(
+            "symbolic_execution: {}\n",
+            config.symbolic_execution.task_value()
+        ));
+        if matches!(config.symbolic_execution, IvpSymbolicExecution::Aot) {
+            template.push_str(&format!(
+                "aot_toolchain: {}\n",
+                config.aot_toolchain.task_value()
+            ));
+            template.push_str(&format!(
+                "aot_profile: {}\n",
+                config.aot_profile.task_value()
+            ));
+        }
+        template.push_str(&format!(
+            "matrix_layout: {}\n",
+            if config.method == IvpTemplateMethod::BackwardEuler {
+                "dense"
+            } else {
+                config.linear_structure.task_value()
+            }
+        ));
+        if config.method != IvpTemplateMethod::BackwardEuler {
+            template.push_str(&format!(
+                "banded_lower: {}\n",
+                if matches!(config.linear_structure, IvpLinearStructure::Banded) {
+                    1
+                } else {
+                    0
+                }
+            ));
+            template.push_str(&format!(
+                "banded_upper: {}\n",
+                if matches!(config.linear_structure, IvpLinearStructure::Banded) {
+                    1
+                } else {
+                    0
+                }
+            ));
+            template.push_str(&format!(
+                "execution_policy: {}\n",
+                config.execution_policy.task_value()
+            ));
+        }
+        template.push_str(&format!("telemetry: {}\n", config.telemetry.task_value()));
     }
 
     template.push_str("\npostprocessing\n");
@@ -271,30 +399,185 @@ fn build_ivp_task_template(config: &IvpTemplateConfig) -> String {
     template
 }
 
-pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) {
-    let theme = ColorfulTheme::default();
+pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) -> std::io::Result<()> {
+    let Some(answers) = task_wizard::run("--- IVP task document template wizard ---", |answers| {
+        let mut questions = vec![Question {
+            key: "method",
+            prompt: "Choose the IVP method",
+            options: &[
+                "LSODA-style automatic Adams/BDF switching (recommended for mixed IVPs)",
+                "LSODE fixed Adams family (non-stiff IVPs)",
+                "LSODE fixed BDF family (stiff IVPs)",
+                "Native BDF",
+                "Radau5",
+                "Backward Euler",
+                "DOPRI (Dormand-Prince, non-stiff)",
+                "AB4 (Adams-Bashforth 4, non-stiff)",
+                "RK45 (non-stiff)",
+            ],
+            default: 0,
+        }];
+        let method = answers.get("method").copied().unwrap_or(0);
+        if method >= 3 && method <= 5 {
+            questions.push(Question {
+                key: "tolerance_profile",
+                prompt: "Choose numerical tolerance",
+                options: &["standard (1e-6)", "strict (1e-8)", "relaxed (1e-4)"],
+                default: 0,
+            });
+            questions.push(Question {
+                key: "iteration_budget",
+                prompt: "Choose nonlinear/step iteration budget",
+                options: &["standard (100)", "extended (1000)", "large (10000)"],
+                default: 0,
+            });
+            questions.push(Question {
+                key: "step_profile",
+                prompt: if method == 5 {
+                    "Choose Backward Euler step size"
+                } else {
+                    "Choose adaptive step limits"
+                },
+                options: if method == 5 {
+                    &["1e-3 (standard)", "1e-2", "1e-1"]
+                } else {
+                    &["max=1e-3, first=1e-6", "max=1e-2, first=1e-5", "unbounded adaptive"]
+                },
+                default: 0,
+            });
+            questions.push(Question {
+                key: "assembly",
+                prompt: "Choose symbolic frontend",
+                options: &[
+                    "AtomView (native symbolic path)",
+                    "ExprLegacy (compatibility path)",
+                ],
+                default: 0,
+            });
+            questions.push(Question {
+                key: "execution",
+                prompt: "Choose symbolic execution",
+                options: &[
+                    "Lambdify (no external compiler)",
+                    "AOT (compiled generated callback)",
+                ],
+                default: 0,
+            });
+            if answers.get("execution") == Some(&1) {
+                questions.push(Question {
+                    key: "toolchain",
+                    prompt: "Choose AOT toolchain",
+                    options: &["c_tcc", "c_gcc", "zig", "rust"],
+                    default: 0,
+                });
+                questions.push(Question {
+                    key: "profile",
+                    prompt: "Choose AOT build profile",
+                    options: &["release", "debug"],
+                    default: 0,
+                });
+            }
+            if method != 5 {
+                questions.push(Question {
+                    key: "structure",
+                    prompt: "Choose matrix layout",
+                    options: &["banded", "sparse", "dense"],
+                    default: 0,
+                });
+                questions.push(Question {
+                    key: "execution_policy",
+                    prompt: "Choose symbolic callback execution policy",
+                    options: &["sequential", "parallel", "auto"],
+                    default: 0,
+                });
+            }
+            questions.push(Question {
+                key: "telemetry",
+                prompt: "Choose solver telemetry",
+                options: &["off", "counters", "timings (recommended for diagnostics)"],
+                default: 2,
+            });
+        }
+        if method <= 2 {
+            questions.push(Question {
+                key: "assembly",
+                prompt: "Choose LSODE2 symbolic assembly",
+                options: &[
+                    "AtomView (recommended for large symbolic systems)",
+                    "ExprLegacy (compatibility path)",
+                ],
+                default: 0,
+            });
+            questions.push(Question {
+                key: "execution",
+                prompt: "Choose LSODE2 symbolic execution",
+                options: &[
+                    "LambdifyExpr (fast startup, no external compiler)",
+                    "AOT (compiled generated callback)",
+                ],
+                default: 0,
+            });
+            if answers.get("execution") == Some(&1) {
+                questions.push(Question {
+                    key: "toolchain",
+                    prompt: "Choose AOT toolchain",
+                    options: &[
+                        "c_tcc (fast cold build, good default for experiments)",
+                        "c_gcc",
+                        "zig",
+                        "rust",
+                    ],
+                    default: 0,
+                });
+                questions.push(Question {
+                    key: "profile",
+                    prompt: "Choose AOT build profile",
+                    options: &["release", "debug"],
+                    default: 0,
+                });
+            }
+            questions.push(Question {
+                key: "structure",
+                prompt: "Choose linear system structure",
+                options: &["banded", "sparse", "dense"],
+                default: 0,
+            });
+            questions.push(Question {
+                key: "linear_policy",
+                prompt: "Choose linear solver policy",
+                options: &[
+                    "auto",
+                    "dense_lu",
+                    "faer_sparse_lu",
+                    "lapack_faithful_banded_lu",
+                ],
+                default: match answers.get("structure").copied().unwrap_or(0) {
+                    0 => 0,
+                    1 => 2,
+                    _ => 1,
+                },
+            });
+            if method == 0 || method == 2 {
+                questions.push(Question {
+                    key: "native_execution",
+                    prompt: "Choose BDF execution mode",
+                    options: &[
+                        "faithful_bdf_solve (recommended)",
+                        "probe_before_bridge",
+                        "bridge_solve",
+                    ],
+                    default: 0,
+                });
+            }
+        }
+        questions
+    }) else {
+        println!("IVP template wizard cancelled; no file was written.");
+        return Ok(());
+    };
 
-    println!("--- IVP task document template wizard ---");
-    println!(
-        "This wizard writes a parser-ready task document for src/main.rs. It only exposes fields currently supported by the IVP task parser.\n"
-    );
-
-    let method_items = [
-        "LSODA-style automatic Adams/BDF switching (recommended for mixed IVPs)",
-        "LSODE fixed Adams family (non-stiff IVPs)",
-        "LSODE fixed BDF family (stiff IVPs)",
-        "Native BDF",
-        "Radau5",
-        "Backward Euler",
-        "RK45",
-        "RK4",
-    ];
-    let method_idx = Select::with_theme(&theme)
-        .with_prompt("Choose the IVP method")
-        .items(&method_items)
-        .default(0)
-        .interact()
-        .unwrap();
+    let selected = |key| answers.get(key).copied().unwrap_or(0);
+    let method_idx = selected("method");
     let method = match method_idx {
         0 => IvpTemplateMethod::LsodaAuto,
         1 => IvpTemplateMethod::LsodeAdams,
@@ -302,8 +585,9 @@ pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) {
         3 => IvpTemplateMethod::Bdf,
         4 => IvpTemplateMethod::Radau5,
         5 => IvpTemplateMethod::BackwardEuler,
-        6 => IvpTemplateMethod::Rk45,
-        _ => IvpTemplateMethod::Rk4,
+        6 => IvpTemplateMethod::Dopri,
+        7 => IvpTemplateMethod::Ab4,
+        _ => IvpTemplateMethod::Rk45,
     };
 
     let mut config = IvpTemplateConfig {
@@ -311,111 +595,72 @@ pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) {
         ..IvpTemplateConfig::default()
     };
 
+    if method.has_native_controls() {
+        config.tolerance = match selected("tolerance_profile") {
+            1 => 1e-8,
+            2 => 1e-4,
+            _ => 1e-6,
+        };
+        config.max_iterations = match selected("iteration_budget") {
+            1 => 1_000,
+            2 => 10_000,
+            _ => 100,
+        };
+        if method == IvpTemplateMethod::BackwardEuler {
+            config.step_size = Some(match selected("step_profile") {
+                1 => 1e-2,
+                2 => 1e-1,
+                _ => 1e-3,
+            });
+        } else {
+            match selected("step_profile") {
+                1 => {
+                    config.max_step = Some(1e-2);
+                    config.first_step = Some(1e-5);
+                }
+                2 => {
+                    config.max_step = None;
+                    config.first_step = None;
+                }
+                _ => {}
+            }
+            config.rtol = config.tolerance;
+            config.atol = config.tolerance * 1e-3;
+        }
+    }
+
     if method.is_lsode2() {
-        println!("\nLSODE2 symbolic frontend");
-        let assembly_items = [
-            "AtomView (recommended for large symbolic systems)",
-            "ExprLegacy (compatibility path)",
-        ];
-        let assembly_idx = Select::with_theme(&theme)
-            .with_prompt("Choose symbolic assembly")
-            .items(&assembly_items)
-            .default(0)
-            .interact()
-            .unwrap();
-        config.symbolic_assembly = if assembly_idx == 0 {
+        config.symbolic_assembly = if selected("assembly") == 0 {
             IvpSymbolicAssembly::AtomView
         } else {
             IvpSymbolicAssembly::ExprLegacy
         };
-
-        let execution_items = [
-            "LambdifyExpr (fast startup, no external compiler)",
-            "AOT (compiled generated callback)",
-        ];
-        let execution_idx = Select::with_theme(&theme)
-            .with_prompt("Choose symbolic execution")
-            .items(&execution_items)
-            .default(0)
-            .interact()
-            .unwrap();
-        config.symbolic_execution = if execution_idx == 0 {
+        config.symbolic_execution = if selected("execution") == 0 {
             IvpSymbolicExecution::LambdifyExpr
         } else {
             IvpSymbolicExecution::Aot
         };
 
         if matches!(config.symbolic_execution, IvpSymbolicExecution::Aot) {
-            let toolchain_items = [
-                "c_tcc (fast cold build, good default for experiments)",
-                "c_gcc",
-                "zig",
-                "rust",
-            ];
-            let toolchain_idx = Select::with_theme(&theme)
-                .with_prompt("Choose AOT toolchain")
-                .items(&toolchain_items)
-                .default(0)
-                .interact()
-                .unwrap();
-            config.aot_toolchain = match toolchain_idx {
+            config.aot_toolchain = match selected("toolchain") {
                 0 => IvpAotToolchain::CTcc,
                 1 => IvpAotToolchain::CGcc,
                 2 => IvpAotToolchain::Zig,
                 _ => IvpAotToolchain::Rust,
             };
-
-            let profile_items = ["release", "debug"];
-            let profile_idx = Select::with_theme(&theme)
-                .with_prompt("Choose AOT build profile")
-                .items(&profile_items)
-                .default(0)
-                .interact()
-                .unwrap();
-            config.aot_profile = if profile_idx == 0 {
+            config.aot_profile = if selected("profile") == 0 {
                 IvpAotProfile::Release
             } else {
                 IvpAotProfile::Debug
             };
         }
 
-        println!("\nLSODE2 linear algebra");
-        println!(
-            "For `banded` task documents the dialogue does not ask for bandwidth. The parser accepts optional lsode2_banded_kl/ku for advanced fixed-width runs, but normal templates should let the LSODE2 route choose the configured banded path."
-        );
-        let structure_items = ["banded", "sparse", "dense"];
-        let structure_idx = Select::with_theme(&theme)
-            .with_prompt("Choose linear system structure")
-            .items(&structure_items)
-            .default(0)
-            .interact()
-            .unwrap();
-        config.linear_structure = match structure_idx {
+        config.linear_structure = match selected("structure") {
             0 => IvpLinearStructure::Banded,
             1 => IvpLinearStructure::Sparse,
             _ => IvpLinearStructure::Dense,
         };
-
-        let default_policy = config.linear_structure.default_policy();
-        let policy_items = [
-            "auto",
-            "dense_lu",
-            "faer_sparse_lu",
-            "lapack_faithful_banded_lu",
-        ];
-        let default_policy_idx = match default_policy {
-            IvpLinearSolverPolicy::Auto => 0,
-            IvpLinearSolverPolicy::DenseLu => 1,
-            IvpLinearSolverPolicy::FaerSparseLu => 2,
-            IvpLinearSolverPolicy::LapackFaithfulBandedLu => 3,
-        };
-        let policy_idx = Select::with_theme(&theme)
-            .with_prompt("Choose linear solver policy")
-            .items(&policy_items)
-            .default(default_policy_idx)
-            .interact()
-            .unwrap();
-        config.linear_solver_policy = match policy_idx {
+        config.linear_solver_policy = match selected("linear_policy") {
             0 => IvpLinearSolverPolicy::Auto,
             1 => IvpLinearSolverPolicy::DenseLu,
             2 => IvpLinearSolverPolicy::FaerSparseLu,
@@ -423,59 +668,97 @@ pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) {
         };
 
         if method.needs_bdf_execution_choice() {
-            let native_items = [
-                "faithful_bdf_solve (native faithful path, recommended)",
-                "probe_before_bridge",
-                "bridge_solve",
-            ];
-            let native_idx = Select::with_theme(&theme)
-                .with_prompt("Choose BDF execution mode")
-                .items(&native_items)
-                .default(0)
-                .interact()
-                .unwrap();
-            config.native_execution = match native_idx {
+            config.native_execution = match selected("native_execution") {
                 0 => IvpNativeExecution::FaithfulBdfSolve,
                 1 => IvpNativeExecution::ProbeBeforeBridge,
                 _ => IvpNativeExecution::BridgeSolve,
             };
         }
+    } else if method.has_native_controls() {
+        config.symbolic_assembly = if selected("assembly") == 0 {
+            IvpSymbolicAssembly::AtomView
+        } else {
+            IvpSymbolicAssembly::ExprLegacy
+        };
+        config.symbolic_execution = if selected("execution") == 0 {
+            IvpSymbolicExecution::LambdifyExpr
+        } else {
+            IvpSymbolicExecution::Aot
+        };
+        if matches!(config.symbolic_execution, IvpSymbolicExecution::Aot) {
+            config.aot_toolchain = match selected("toolchain") {
+                0 => IvpAotToolchain::CTcc,
+                1 => IvpAotToolchain::CGcc,
+                2 => IvpAotToolchain::Zig,
+                _ => IvpAotToolchain::Rust,
+            };
+            config.aot_profile = if selected("profile") == 0 {
+                IvpAotProfile::Release
+            } else {
+                IvpAotProfile::Debug
+            };
+        }
+        if method != IvpTemplateMethod::BackwardEuler {
+            config.linear_structure = match selected("structure") {
+                0 => IvpLinearStructure::Banded,
+                1 => IvpLinearStructure::Sparse,
+                _ => IvpLinearStructure::Dense,
+            };
+            config.execution_policy = match selected("execution_policy") {
+                1 => IvpExecutionPolicy::Parallel,
+                2 => IvpExecutionPolicy::Auto,
+                _ => IvpExecutionPolicy::Sequential,
+            };
+        } else {
+            config.linear_structure = IvpLinearStructure::Dense;
+        }
+        config.telemetry = match selected("telemetry") {
+            0 => IvpTelemetry::Off,
+            1 => IvpTelemetry::Counters,
+            _ => IvpTelemetry::Timings,
+        };
     }
 
     let template = build_ivp_task_template(&config);
     let final_path = output_path.unwrap_or_else(|| PathBuf::from("ivp_task_custom.txt"));
 
-    println!("\nConfiguration is ready.");
-    if Confirm::with_theme(&theme)
-        .with_prompt(format!(
-            "Write the IVP task template to {}?",
-            final_path.display()
-        ))
-        .default(true)
-        .interact()
-        .unwrap()
-    {
-        let mut file = File::create(&final_path).expect("failed to create IVP task file");
-        file.write_all(template.as_bytes())
-            .expect("failed to write IVP task file");
-        println!("IVP task template saved to {}", final_path.display());
+    match std::fs::write(&final_path, template) {
+        Ok(()) => println!("IVP task template saved to {}", final_path.display()),
+        Err(error) => return Err(error),
     }
+    Ok(())
+}
+
+/// Writes the deterministic default IVP task document without opening a
+/// terminal dialogue. Interactive customization belongs to `wizard`.
+pub fn write_ivp_task_template(path: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    let path = path.unwrap_or_else(|| PathBuf::from("ivp_task_template.txt"));
+    std::fs::write(&path, build_ivp_task_template(&IvpTemplateConfig::default()))?;
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::command_interpreter::task_parser_ivp::{
-        IvpMethodSpec, Lsode2TaskExecutionSpec, parse_ivp_task_from_str,
+        parse_ivp_task_from_str, IvpMethodSpec, Lsode2TaskExecutionSpec,
     };
+    use crate::command_interpreter::task_runner::{parse_task_spec_from_str, render_task_check};
     use crate::numerical::LSODE2::{
         Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerMode, Lsode2LinearSolverChoice,
         Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     };
 
+    fn assert_template_passes_cli_preflight(template: &str) {
+        let spec = parse_task_spec_from_str(template).expect("generated IVP should parse");
+        let report = render_task_check(&spec);
+        assert!(report.contains("preflight=valid; integration has not been run"));
+    }
+
     #[test]
     fn ivp_dialogue_lsoda_auto_lambdify_template_is_parser_ready() {
         let template = build_ivp_task_template(&IvpTemplateConfig::default());
+        assert_template_passes_cli_preflight(&template);
         let spec = parse_ivp_task_from_str(&template).expect("dialogue template should parse");
 
         assert_eq!(spec.solver.method, IvpMethodSpec::Lsoda);
@@ -504,6 +787,27 @@ mod tests {
     }
 
     #[test]
+    fn ivp_dialogue_offers_only_runnable_nonstiff_methods() {
+        for method in [
+            IvpTemplateMethod::Rk45,
+            IvpTemplateMethod::Dopri,
+            IvpTemplateMethod::Ab4,
+        ] {
+            let config = IvpTemplateConfig {
+                method,
+                ..IvpTemplateConfig::default()
+            };
+            let template = build_ivp_task_template(&config);
+            assert_template_passes_cli_preflight(&template);
+            assert!(
+                parse_ivp_task_from_str(&template).is_ok(),
+                "{} template must be executable by the task runner",
+                method.task_value()
+            );
+        }
+    }
+
+    #[test]
     fn ivp_dialogue_lsode2_aot_template_is_parser_ready() {
         let config = IvpTemplateConfig {
             symbolic_execution: IvpSymbolicExecution::Aot,
@@ -514,6 +818,7 @@ mod tests {
             ..IvpTemplateConfig::default()
         };
         let template = build_ivp_task_template(&config);
+        assert_template_passes_cli_preflight(&template);
         let spec = parse_ivp_task_from_str(&template).expect("AOT dialogue template should parse");
         let lsode2 = spec
             .solver_options
@@ -545,6 +850,7 @@ mod tests {
             ..IvpTemplateConfig::default()
         };
         let template = build_ivp_task_template(&config);
+        assert_template_passes_cli_preflight(&template);
         assert!(template.contains("method: LSODE"));
         assert!(template.contains("lsode2_method_family: adams"));
         assert!(!template.contains("lsode2_native_execution"));
@@ -568,6 +874,7 @@ mod tests {
             ..IvpTemplateConfig::default()
         };
         let template = build_ivp_task_template(&config);
+        assert_template_passes_cli_preflight(&template);
         assert!(template.contains("method: LSODE"));
         assert!(template.contains("lsode2_method_family: bdf"));
         assert!(template.contains("lsode2_native_execution: probe_before_bridge"));
@@ -590,8 +897,36 @@ mod tests {
             ..IvpTemplateConfig::default()
         };
         let template = build_ivp_task_template(&config);
+        assert_template_passes_cli_preflight(&template);
         assert!(!template.contains("lsode2_"));
         let spec = parse_ivp_task_from_str(&template).expect("Radau template should parse");
         assert_eq!(spec.solver.method, IvpMethodSpec::Radau5);
+    }
+
+    #[test]
+    fn ivp_native_templates_expose_solver_controls_and_remain_parser_ready() {
+        for method in [IvpTemplateMethod::Bdf, IvpTemplateMethod::Radau5] {
+            let config = IvpTemplateConfig {
+                method,
+                ..IvpTemplateConfig::default()
+            };
+            let template = build_ivp_task_template(&config);
+            assert!(template.contains("max_iterations: 100"));
+            assert!(template.contains("max_step: 0.001"));
+            assert_template_passes_cli_preflight(&template);
+            parse_ivp_task_from_str(&template)
+                .unwrap_or_else(|error| panic!("{} template must parse: {error}", method.task_value()));
+        }
+
+        let config = IvpTemplateConfig {
+            method: IvpTemplateMethod::BackwardEuler,
+            ..IvpTemplateConfig::default()
+        };
+        let template = build_ivp_task_template(&config);
+        assert!(template.contains("tolerance: 0.000001"));
+        assert!(template.contains("step_size: 0.001"));
+        assert!(!template.contains("max_step:"));
+        assert_template_passes_cli_preflight(&template);
+        parse_ivp_task_from_str(&template).expect("Backward Euler template must parse");
     }
 }

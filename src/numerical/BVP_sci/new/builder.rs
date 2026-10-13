@@ -192,6 +192,20 @@ impl BvpSciSolverBuilder {
         self
     }
 
+    /// Set the modified-Newton Jacobian refresh budget independently from the
+    /// Newton and adaptive-mesh iteration limits.
+    pub fn with_jacobian_refresh_limit(mut self, max_refreshes: usize) -> Self {
+        self.options.max_jacobian_refreshes = max_refreshes;
+        self
+    }
+
+    /// Set the maximum number of line-search trial evaluations per Newton
+    /// correction.
+    pub fn with_backtracking_limit(mut self, max_trials: usize) -> Self {
+        self.options.max_backtracking_steps = max_trials;
+        self
+    }
+
     /// Set the callback execution policy for warm residual/Jacobian entries.
     pub fn with_execution_policy(mut self, policy: BvpSciExecutionPolicy) -> Self {
         self.options.execution_policy = policy;

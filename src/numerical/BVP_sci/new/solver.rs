@@ -78,6 +78,17 @@ impl BvpSciSolver {
         super::builder::BvpSciSolverBuilder::new(equations, state_names)
     }
 
+    /// Read the validated controller, layout, execution and output policies
+    /// selected for this prepared solver.
+    pub fn options(&self) -> &BvpSciOptions {
+        &self.options
+    }
+
+    /// Return the sparse factorization implementation selected at build time.
+    pub fn sparse_factorization(&self) -> BvpSciSparseFactorization {
+        self.sparse_factorization
+    }
+
     /// Create a solver from a prepared ExprLegacy or AtomView plan.
     pub fn new<B>(
         plan: BvpSciLambdifyPlan,

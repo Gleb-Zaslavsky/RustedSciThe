@@ -12,7 +12,6 @@ use csv::Writer;
 use na::{DMatrix, DVector};
 use std::env;
 use std::path::Path;
-use std::time::Instant;
 
 static COMPLEX: [&str; 1] = ["BDF"];
 #[cfg(test)]
@@ -291,7 +290,6 @@ impl ODEsolver {
     }
 
     pub fn main_loop(&mut self) {
-        let start = Instant::now();
         let mut integr_status: Option<i8> = None;
         let mut y: Vec<DVector<f64>> = Vec::new();
         let mut t: Vec<f64> = Vec::new();
@@ -363,9 +361,6 @@ impl ODEsolver {
         }
         let y_res: DMatrix<f64> = DMatrix::from_vec(cols, rows, flat_vec).transpose();
         let t_res = DVector::from_vec(t);
-        let duration = start.elapsed();
-        println!("Program took {} milliseconds to run", duration.as_millis());
-
         self.t_result = t_res;
         self.y_result = y_res;
     }

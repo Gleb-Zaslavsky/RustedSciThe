@@ -1,4 +1,21 @@
 //! Matched-workload counter semantics and numerical parity against vendored SciPy.
+//!
+//! PowerShell setup: point `IVP_SCIPY_PYTHON` at the pinned virtual environment
+//! and verify that this exact interpreter can import both dependencies before
+//! running any ignored cross-language story:
+//!
+//! ```powershell
+//! $env:IVP_SCIPY_PYTHON = (Resolve-Path .\.venv-gavin-win\Scripts\python.exe).Path
+//! & $env:IVP_SCIPY_PYTHON -c "import sys, numpy, scipy; print(sys.executable); print('NumPy', numpy.__version__); print('SciPy', scipy.__version__)"
+//! ```
+//!
+//! Run correctness/parity stories in debug; run the timing benchmark in release:
+//!
+//! ```powershell
+//! cargo test --lib --no-default-features numerical::Radau::tests::scipy_parity::radau_rust_vs_scipy_matched_workload_and_counter_semantics_story -- --ignored --nocapture --test-threads=1
+//! cargo test --lib --no-default-features numerical::Radau::tests::scipy_parity::radau_scipy_extended_direction_initial_step_and_failure_story -- --ignored --nocapture --test-threads=1
+//! cargo test --release --lib --no-default-features numerical::Radau::tests::scipy_parity::radau_scipy_release_core_timing_benchmark_story -- --ignored --nocapture --test-threads=1
+//! ```
 
 use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;

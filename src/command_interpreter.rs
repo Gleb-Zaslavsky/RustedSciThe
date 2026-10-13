@@ -9,3 +9,4 @@ pub mod task_parser_ivp;
 ///
 mod task_parser_tests;
 pub mod task_runner;
+pub mod task_wizard;

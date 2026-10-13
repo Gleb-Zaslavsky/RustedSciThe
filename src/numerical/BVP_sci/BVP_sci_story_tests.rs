@@ -701,6 +701,12 @@ mod tests {
         n_steps: usize,
         repetitions: usize,
     ) -> Vec<RaceSample> {
+        // The generated-backend registry is process-wide. Keep AOT lifecycle
+        // stories away from concurrent tests that unregister linked entries.
+        let _registry_guard = variants
+            .iter()
+            .any(|variant| variant.source == "AOT")
+            .then(crate::numerical::BVP_sci::generated_backend_registry_test_guard);
         let mut samples = Vec::with_capacity(variants.len() * repetitions);
         for repetition in 0..repetitions {
             println!(
@@ -2548,12 +2554,25 @@ mod tests {
             .iter()
             .filter(|sample| sample.row.source == "AOT")
             .collect::<Vec<_>>();
+        let build_if_missing_samples = aot_samples
+            .iter()
+            .filter(|sample| sample.row.bootstrap_hint == "build_if_missing_or_reuse")
+            .collect::<Vec<_>>();
         assert!(
-            aot_samples.iter().any(|sample| stats_diagnostic_string(
-                &sample.statistics,
-                "generated_backend_action"
-            ) == "built_and_linked"),
-            "BuildIfMissing lifecycle story must include at least one actual build/link event"
+            !build_if_missing_samples.is_empty()
+                && build_if_missing_samples.iter().all(|sample| {
+                    stats_diagnostic_string(&sample.statistics, "generated_backend_policy")
+                        == "BuildIfMissing"
+                        && matches!(
+                            stats_diagnostic_string(
+                                &sample.statistics,
+                                "generated_backend_action",
+                            )
+                            .as_str(),
+                            "built_and_linked" | "reused_linked"
+                        )
+                }),
+            "BuildIfMissing rows must report either a build or a valid linked-runtime reuse"
         );
         let strict_samples = aot_samples
             .iter()

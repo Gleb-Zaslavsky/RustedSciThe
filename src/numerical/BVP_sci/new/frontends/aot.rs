@@ -33,6 +33,7 @@ use nalgebra::DVector;
 use super::super::config::{BvpSciAssembly, BvpSciExecutionPolicy, BvpSciMatrixLayout};
 use super::super::error::{BvpSciAotFailureKind, BvpSciNewError, BvpSciStage};
 use super::super::telemetry::{BvpSciTelemetry, BvpSciTelemetryMode};
+use super::parameter_jacobian::BvpSciParameterJacobianPlan;
 
 /// Prepared generated callback route selected once before numerical solving.
 #[derive(Clone)]
@@ -46,6 +47,7 @@ pub enum BvpSciAotPlan {
         execution_policy: IvpLambdifyExecutionPolicy,
         telemetry: BvpSciTelemetry,
         updated_resolver: Option<AotResolver>,
+        parameter_jacobian: BvpSciParameterJacobianPlan,
     },
     /// Sparse explicit-value or compact-Banded callback route.
     Structured {
@@ -60,6 +62,7 @@ pub enum BvpSciAotPlan {
         telemetry: BvpSciTelemetry,
         shared_telemetry: IvpTelemetry,
         updated_resolver: Option<AotResolver>,
+        parameter_jacobian: BvpSciParameterJacobianPlan,
     },
 }
 
@@ -127,6 +130,14 @@ impl BvpSciAotPlan {
             BvpSciTelemetryMode::Timings => IvpTelemetry::detailed(),
         };
         let execution_policy = to_ivp_policy(execution_policy);
+        let parameter_jacobian = BvpSciParameterJacobianPlan::prepare(
+            assembly,
+            &equations,
+            &state_names,
+            &parameter_names,
+            &independent_name,
+            telemetry.clone(),
+        )?;
         let options = SymbolicIvpProblemOptions::new()
             .with_symbolic_assembly_backend(symbolic_backend)
             .with_equation_parameters(parameter_names.clone())
@@ -172,6 +183,7 @@ impl BvpSciAotPlan {
                     execution_policy,
                     telemetry,
                     updated_resolver,
+                    parameter_jacobian,
                 })
             }
             BvpSciMatrixLayout::Sparse => {
@@ -192,6 +204,7 @@ impl BvpSciAotPlan {
                     execution_policy,
                     telemetry,
                     None,
+                    parameter_jacobian,
                 )
             }
             BvpSciMatrixLayout::Banded { lower, upper } => {
@@ -215,6 +228,7 @@ impl BvpSciAotPlan {
                     execution_policy,
                     telemetry,
                     Some(slot_map),
+                    parameter_jacobian,
                 )
             }
         }?;
@@ -235,6 +249,7 @@ impl BvpSciAotPlan {
         execution_policy: IvpLambdifyExecutionPolicy,
         telemetry: BvpSciTelemetry,
         band_slots: Option<AtomAotBandedSlotMap>,
+        parameter_jacobian: BvpSciParameterJacobianPlan,
     ) -> Result<Self, BvpSciNewError> {
         let validation_telemetry = result.telemetry.clone();
         let validation_started = validation_telemetry
@@ -266,6 +281,7 @@ impl BvpSciAotPlan {
             telemetry,
             shared_telemetry: result.telemetry,
             updated_resolver: result.updated_resolver,
+            parameter_jacobian,
         })
     }
 
@@ -317,6 +333,38 @@ impl BvpSciAotPlan {
         match self {
             Self::Dense { dimension, .. } => dimension.saturating_mul(*dimension),
             Self::Structured { pattern, .. } => pattern.len(),
+        }
+    }
+
+    pub fn parameter_jacobian_nnz(&self) -> usize {
+        match self {
+            Self::Dense {
+                parameter_jacobian, ..
+            }
+            | Self::Structured {
+                parameter_jacobian, ..
+            } => parameter_jacobian.nnz(),
+        }
+    }
+
+    pub fn evaluate_parameter_jacobian(
+        &self,
+        x: f64,
+        state: &[f64],
+        parameters: &[f64],
+        arguments: &mut [f64],
+        output: &mut [f64],
+    ) -> Result<(), BvpSciNewError> {
+        match self {
+            Self::Dense {
+                parameter_jacobian, ..
+            }
+            | Self::Structured {
+                parameter_jacobian, ..
+            } => {
+                self.bind_args(x, state, parameters, arguments)?;
+                parameter_jacobian.evaluate(arguments, output)
+            }
         }
     }
 

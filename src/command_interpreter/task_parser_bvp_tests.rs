@@ -15,6 +15,36 @@ fn bvp_adapter_keeps_typed_document_errors() {
 }
 
 #[test]
+fn bvp_sci_task_categories_preserve_runtime_failure_taxonomy() {
+    assert_eq!(
+        bvp_sci_error_category(&BvpSciNewError::MaxNodesExceeded { max_nodes: 16 }),
+        "solver_exhaustion"
+    );
+    assert_eq!(
+        bvp_sci_error_category(&BvpSciNewError::LinearSolve {
+            message: "singular".to_string()
+        }),
+        "solver_linear"
+    );
+    assert_eq!(
+        bvp_sci_error_category(&BvpSciNewError::AotPreparation {
+            stage: crate::numerical::BVP_sci::new::BvpSciStage::AotBuild,
+            kind: crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Compiler,
+            message: "compiler failed".to_string(),
+        }),
+        "aot_compiler"
+    );
+    assert_eq!(
+        bvp_sci_error_category(&BvpSciNewError::AotPreparation {
+            stage: crate::numerical::BVP_sci::new::BvpSciStage::AotBuild,
+            kind: crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Link,
+            message: "link failed".to_string(),
+        }),
+        "aot_link"
+    );
+}
+
+#[test]
 fn bvp_document_semantic_errors_keep_source_location() {
     let input = r#"
 task
@@ -37,8 +67,8 @@ n_steps: 4
 initial_guess
 y: 0.0
 "#;
-    let error = parse_bvp_task_from_str(input)
-        .expect_err("an undeclared boundary state must be rejected");
+    let error =
+        parse_bvp_task_from_str(input).expect_err("an undeclared boundary state must be rejected");
     match error {
         BvpTaskError::SymbolDiagnostic {
             message,
@@ -248,10 +278,11 @@ max_iterations: 20
     let aot_input = input.replace("execution: Lambdify", "execution: AOT");
     let error = run_bvp_task_from_str(&aot_input).expect_err("AOT without output dir must fail");
     match error {
-        BvpTaskError::BvpSci(error) => {
-            assert!(error.to_string().contains("output directory"));
+        BvpTaskError::InvalidConfiguration { field, message } => {
+            assert_eq!(field, "solver_options.aot_output_dir");
+            assert!(message.contains("required"));
         }
-        other => panic!("expected typed BVP AOT preparation error, got {other:?}"),
+        other => panic!("expected early typed BVP AOT configuration error, got {other:?}"),
     }
 
     let invalid_frontend = input.replace("frontend: ExprLegacy", "frontend: Lambdify");
@@ -263,6 +294,167 @@ max_iterations: 20
         }
         other => panic!("expected typed frontend error, got {other:?}"),
     }
+}
+
+#[test]
+fn bvp_sci_parser_maps_native_controller_and_backend_options() {
+    let input = r#"
+task
+solver: BVP_sci
+method: Banded
+frontend: AtomViewNative
+execution: Lambdify
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 8
+
+initial_guess
+y: 0.0
+
+solver_options
+tolerance: 1e-5
+boundary_tolerance: 2e-5
+max_nodes: 256
+max_newton_iterations: 7
+max_jacobian_refreshes: 3
+max_mesh_refinements: 6
+max_backtracking_steps: 2
+banded_lower: 2
+banded_upper: 3
+execution_policy: auto
+execution_min_work: 64
+telemetry: counters
+output_policy: final_only
+singular_term_a: 0.0
+singular_term_matrix: [0.25]
+"#;
+
+    let spec = parse_bvp_task_from_str(input).expect("all native BVP_sci options should parse");
+    let solver = build_bvp_sci_solver_from_spec(&spec)
+        .expect("parsed options should reach the native BVP_sci builder");
+    let applied = solver.options();
+    assert_eq!(applied.tolerance, 1e-5);
+    assert_eq!(applied.boundary_tolerance, Some(2e-5));
+    assert_eq!(applied.max_nodes, 256);
+    assert_eq!(applied.max_newton_iterations, 7);
+    assert_eq!(applied.max_jacobian_refreshes, 3);
+    assert_eq!(applied.max_mesh_refinements, 6);
+    assert_eq!(applied.max_backtracking_steps, 2);
+    assert_eq!(
+        applied.matrix_layout,
+        BvpSciMatrixLayout::Banded { lower: 2, upper: 3 }
+    );
+    assert_eq!(
+        applied.execution_policy,
+        BvpSciExecutionPolicy::Auto { min_work: 64 }
+    );
+    assert_eq!(applied.telemetry, BvpSciTelemetryMode::Counters);
+    assert_eq!(applied.output_policy, BvpSciOutputPolicy::FinalOnly);
+    assert!(applied.singular_term.is_some());
+    assert_eq!(
+        solver.sparse_factorization(),
+        BvpSciSparseFactorization::StandardFaer
+    );
+
+    let options = &spec.solver_options;
+    assert_eq!(options.boundary_tolerance, Some(2e-5));
+    assert_eq!(options.max_nodes, Some(256));
+    assert_eq!(options.max_newton_iterations, Some(7));
+    assert_eq!(options.max_jacobian_refreshes, Some(3));
+    assert_eq!(options.max_mesh_refinements, Some(6));
+    assert_eq!(options.max_backtracking_steps, Some(2));
+    assert_eq!(options.banded_lower, Some(2));
+    assert_eq!(options.banded_upper, Some(3));
+    assert_eq!(options.execution_min_work, Some(64));
+    assert_eq!(options.telemetry, Some(BvpSciTelemetryMode::Counters));
+    assert_eq!(options.output_policy, Some(BvpSciOutputPolicy::FinalOnly));
+    assert_eq!(options.singular_term_a, Some(0.0));
+    assert_eq!(options.singular_term_matrix.as_deref(), Some(&[0.25][..]));
+}
+
+#[test]
+fn bvp_task_parser_rejects_options_for_the_wrong_solver_family_or_layout() {
+    let base = r#"
+task
+solver: BVP
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 4
+
+initial_guess
+y: 0.0
+
+solver_options
+max_nodes: 64
+"#;
+    assert!(matches!(
+        parse_bvp_task_from_str(base),
+        Err(BvpTaskError::UnsupportedOption { option, .. }) if option == "solver_options.max_nodes"
+    ));
+
+    let sparse_on_dense = base
+        .replace("solver: BVP", "solver: BVP_sci")
+        .replace("max_nodes: 64", "sparse_factorization: superlu");
+    assert!(matches!(
+        parse_bvp_task_from_str(&sparse_on_dense),
+        Err(BvpTaskError::InvalidConfiguration { field, .. }) if field == "solver_options.sparse_factorization"
+    ));
+
+    let ignored_key = base.replace("max_nodes: 64", "mystery_limit: 64");
+    assert!(matches!(
+        parse_bvp_task_from_str(&ignored_key),
+        Err(BvpTaskError::UnsupportedOption { option, .. }) if option == "solver_options.mystery_limit"
+    ));
+}
+
+#[test]
+fn bvp_sci_rejects_bvp_damp_strategy_fields_instead_of_ignoring_them() {
+    let input = r#"
+task
+solver: BVP_sci
+strategy: Damped
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 4
+
+initial_guess
+y: 0.0
+"#;
+    assert!(matches!(
+        parse_bvp_task_from_str(input),
+        Err(BvpTaskError::UnsupportedOption { option, .. }) if option == "task.strategy"
+    ));
 }
 
 #[test]
@@ -393,10 +585,11 @@ mode: warm
 
     let run = run_bvp_task_from_str(input).expect("warm BVP_sci continuation should execute");
     assert_eq!(run.continuation_segments.len(), 2);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -433,10 +626,11 @@ mode: fresh
 
     let run = run_bvp_task_from_str(input).expect("BVP_Damp continuation should execute");
     assert_eq!(run.continuation_segments.len(), 2);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -475,10 +669,11 @@ mode: warm
     assert_eq!(run.continuation_segments.len(), 2);
     assert_eq!(run.continuation_telemetry.fresh_preparations, 1);
     assert_eq!(run.continuation_telemetry.prepared_reuses, 1);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -533,10 +728,11 @@ restart_each: false
         .expect("long continuation should publish a result");
     assert!(result.iter().all(|value| value.is_finite()));
     assert_eq!(telemetry.peak_result_elements, result.len());
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.len() == telemetry.peak_result_elements));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.len() == telemetry.peak_result_elements)
+    );
 }
 
 #[test]

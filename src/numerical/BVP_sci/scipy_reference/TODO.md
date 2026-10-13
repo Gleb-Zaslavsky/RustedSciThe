@@ -576,14 +576,15 @@ correctness/parity status separate from speed conclusions.
   matched frontend, layout, dimension and mesh. Existing small-system slices
   only establish dispatch/overhead behavior; callback speedup and chunk
   counters do not establish full-solve speedup.
-- [ ] Keep the AOT parameter-derivative caveat visible in reports: AOT currently
-  has no generated symbolic `df/dp` callback and uses finite differences,
-  whereas Lambdify ExprLegacy/AtomViewNative provide the prepared symbolic
-  parameter Jacobian. Report FD probe counts/time separately and do not call
-  AOT-vs-Lambdify rows strict frontend parity until this source-of-work
-  difference is either removed or explicitly controlled.
-- [ ] Evaluate an AOT-generated analytic `df/dp` callback using the existing
-  symbolic differentiation/codegen lifecycle. Preserve the common FD fallback
-  for unsupported routes, and gate the change with derivative-value parity,
-  parameterized full-solve parity, telemetry, and AOT lifecycle/provenance
-  tests before measuring speed.
+- [x] Remove the RHS parameter-Jacobian FD mismatch from AOT. AOT keeps its
+  generated residual and `df/dy` hot callbacks; nonzero `df/dp` entries are
+  symbolically differentiated and prepared once through a compact Lambdify
+  evaluator using the selected ExprLegacy or AtomView representation. The
+  evaluator shares the AOT `[x, parameters..., state...]` argument buffer and
+  introduces no callback-time allocation. Targeted debug derivative and AOT
+  callback contract gates pass with exact `df/dp` values and zero FD probes.
+- [ ] Collect release evidence for the hybrid path: preparation cost and full
+  parameterized solve/continuation on matched ExprLegacy/AtomView and Dense,
+  Sparse, Banded routes. Compare one-time derivative preparation against the
+  removed parameter FD probes rather than assuming the hybrid preparation is
+  free.

@@ -4037,6 +4037,9 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
         residual_ms: String,
         jacobian_ms: String,
         jacobian_nnz: usize,
+        parameter_jacobian_nnz: usize,
+        parameter_jacobian_calls: u64,
+        fd_probes: u64,
         runtime_ready: u64,
         build_attempts: u64,
         link_attempts: u64,
@@ -4118,6 +4121,15 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
                 &mut scratch,
             )
             .expect("AOT Jacobian callback should evaluate");
+            let mut parameter_jacobian = vec![0.0; 2];
+            plan.evaluate_parameter_jacobian(
+                0.25,
+                &[1.0, 2.0],
+                &[3.0],
+                &mut arguments,
+                &mut parameter_jacobian,
+            )
+            .expect("AOT Lambdify parameter Jacobian should evaluate");
             let callback_ms = callback_started.elapsed().as_secs_f64() * 1e3;
             let expected_rhs = [3.25, -0.25];
             let expected_jacobian = [3.0, 0.0, 1.0, -1.0];
@@ -4136,6 +4148,7 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
                 max_jacobian_diff < 1e-12,
                 "AOT Jacobian drift={max_jacobian_diff:e}"
             );
+            assert_eq!(parameter_jacobian, [1.0, 0.25]);
 
             let telemetry_snapshot = plan.telemetry_snapshot();
             telemetry_snapshot
@@ -4148,6 +4161,10 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
             assert!(!aot.aot_artifact_keys.is_empty());
             assert!(telemetry_snapshot.residual_evaluation_ms.is_some());
             assert!(telemetry_snapshot.jacobian_evaluation_ms.is_some());
+            assert!(plan.has_parameter_jacobian());
+            assert_eq!(plan.parameter_jacobian_nnz(), 2);
+            assert_eq!(telemetry_snapshot.parameter_jacobian_calls, 1);
+            assert_eq!(telemetry_snapshot.finite_difference_probes, 0);
             rows.push(AotRow {
                 frontend: frontend_name.into(),
                 layout: layout_name.into(),
@@ -4161,6 +4178,9 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
                 residual_ms: timing(telemetry_snapshot.residual_evaluation_ms),
                 jacobian_ms: timing(telemetry_snapshot.jacobian_evaluation_ms),
                 jacobian_nnz: plan.jacobian_nnz(),
+                parameter_jacobian_nnz: plan.parameter_jacobian_nnz(),
+                parameter_jacobian_calls: telemetry_snapshot.parameter_jacobian_calls,
+                fd_probes: telemetry_snapshot.finite_difference_probes,
                 runtime_ready: aot.aot_runtime_ready,
                 build_attempts: aot.aot_build_attempts,
                 link_attempts: aot.aot_link_attempts,
@@ -4172,7 +4192,7 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
         }
     }
     crate::Utils::test_reporting::capture_test_block(format!(
-        "# BVP_sci AOT frontend/backend contract matrix\n\n- lifecycle: BuildIfMissing + C/{compiler}\n- callback ABI: [x, parameters..., state...]\n- `residual_ms` and `jacobian_ms` are separate callback telemetry scopes\n- AOT telemetry is a separate non-additive IVP snapshot\n\n{}",
+        "# BVP_sci AOT frontend/backend contract matrix\n\n- lifecycle: BuildIfMissing + C/{compiler}\n- callback ABI: [x, parameters..., state...]\n- hot residual and `df/dy` use AOT; the sparse `df/dp` block is symbolically differentiated and Lambdified once with the same ExprLegacy/AtomView assembly\n- `residual_ms` and `jacobian_ms` are separate callback telemetry scopes\n- AOT telemetry is a separate non-additive IVP snapshot\n\n{}",
         Table::new(rows)
     ));
 }
@@ -4373,6 +4393,8 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
         factorization_ms: String,
         residual_calls: u64,
         jacobian_calls: u64,
+        parameter_jacobian_calls: u64,
+        finite_difference_probes: u64,
         aot_cache_hits: String,
         aot_cache_misses: String,
         build_attempts: String,
@@ -4552,6 +4574,13 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
                     snapshot
                         .validate_contract()
                         .expect("full-solve telemetry must satisfy its contract");
+                    if is_aot {
+                        assert!(solver.plan().has_parameter_jacobian());
+                        assert!(
+                            snapshot.parameter_jacobian_calls > 0,
+                            "AOT solve must use its prepared symbolic df/dp evaluator"
+                        );
+                    }
                     let aot_provenance = snapshot.aot.as_ref().map(|aot| {
                         (
                             aot.aot_resolution_hits.to_string(),
@@ -4604,6 +4633,8 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
                         factorization_ms: format!("{}", timing(snapshot.factorization_ms)),
                         residual_calls: snapshot.residual_evaluations,
                         jacobian_calls: snapshot.jacobian_evaluations,
+                        parameter_jacobian_calls: snapshot.parameter_jacobian_calls,
+                        finite_difference_probes: snapshot.finite_difference_probes,
                         aot_cache_hits: aot_provenance
                             .as_ref()
                             .map(|value| value.0.clone())

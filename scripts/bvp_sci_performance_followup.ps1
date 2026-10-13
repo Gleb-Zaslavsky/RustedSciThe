@@ -68,22 +68,23 @@ function Invoke-LoggedCargo {
     Write-Host "$Name exit=$code log=$logPath"
 }
 
-# This route uses analytical Rust callbacks and the same official BVP as the
-# SciPy reference; it fails if SuperLU silently falls back to StandardFaer.
+# This route uses exact symbolic ExprLegacy derivatives with the same official
+# BVP as the SciPy reference; it fails if SuperLU silently falls back to Faer.
 Invoke-LoggedCargo "python_vs_rust_superlu" @(
-    "bench", "--release", "--no-default-features", "--features", "superlu",
+    "bench", "--no-default-features", "--features", "superlu",
     "--bench", "bvp_sci_scipy_parity", "--", "--noplot"
 )
 
-# Fresh artifact roots are created internally per AOT row. Cache miss/build/link
-# provenance is validated by the benchmark before it reports success.
+# Fresh artifact roots are created internally per AOT row. Successful build,
+# link, publication and runtime-ready lifecycle counters validate cold work;
+# resolver cache-hit/miss counters are retained as diagnostics only.
 $env:BVP_SCI_AOT_BENCH_PHASE = "cold-amortization"
 $env:BVP_SCI_AOT_BENCH_REPORT = "aot_cold_callback_amortization"
 $env:BVP_SCI_AOT_BENCH_DIMENSIONS = $Dimensions
 $env:BVP_SCI_AOT_BENCH_FRONTENDS = "lambdify-expr-legacy,lambdify-atom-native,aot-expr-legacy,aot-atom-native"
 $env:BVP_SCI_AOT_BENCH_LAYOUTS = "sparse"
 Invoke-LoggedCargo "aot_cold_callback_amortization" @(
-    "bench", "--release", "--no-default-features", "--bench", "bvp_sci_aot", "--", "--noplot"
+    "bench", "--no-default-features", "--bench", "bvp_sci_aot", "--", "--noplot"
 )
 
 # The worker count is process-global. Use one Cargo process per count and keep
@@ -100,7 +101,7 @@ foreach ($workerText in ($WorkerCounts -split ',')) {
     $env:BVP_SCI_AOT_POLICY_FULL_SOLVE_WORKER_COUNT = $worker
     $env:BVP_SCI_AOT_BENCH_REPORT = "aot_coupled_chain_full_solve_workers_$worker"
     Invoke-LoggedCargo "aot_full_solve_workers_$worker" @(
-        "bench", "--release", "--no-default-features", "--bench", "bvp_sci_aot", "--", "--noplot"
+        "bench", "--no-default-features", "--bench", "bvp_sci_aot", "--", "--noplot"
     )
 }
 

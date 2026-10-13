@@ -32,8 +32,10 @@
 //! - `apply_bvp_damped_solver_settings()` - Apply typed settings to the solver
 //! - `apply_bvp_damped_postprocessing()` - Apply typed postprocessing actions
 //! - `apply_bvp_damped_task_spec()` - Apply both solver settings and postprocessing
+//! - `try_apply_bvp_damped_task_spec()` - Fallible full-spec application
 //! - `set_params_from_hashmap(result)` - Map parsed DocumentMap to solver parameters
 //! - `set_postpocessing_from_hashmap(parser)` - Configure and execute postprocessing options
+//! - `try_set_params_from_document()` / `try_set_postprocessing_from_parser()` - Typed bridges
 //!
 //! ### String-based Parsing
 //! - `parse_settings_from_str_with_exact_names(input)` - Legacy solver-settings-only parse with exact key names
@@ -124,8 +126,10 @@
 //! ### 6. Error Handling Strategy
 //! Typed parsing uses fallible helpers and returns structured errors for missing
 //! sections, missing fields, invalid values, and unsupported backend names. The
-//! legacy compatibility wrappers still exist, but the typed path does not rely on
-//! user-input panics.
+//! `try_*` adapters preserve those errors. Legacy compatibility wrappers remain
+//! and panic only when their historical infallible contract receives invalid
+//! input. The mathematical BVP itself remains solver-owned input; this settings
+//! parser does not duplicate equation/boundary construction.
 //!
 //! ### 7. Mesh Initialization
 //! `before_solve_preprocessing()` creates uniform mesh from t0, t_end, and n_steps,
@@ -153,9 +157,7 @@
 //! solver.set_postpocessing_from_hashmap(&mut parser);
 //! ```
 
-use crate::command_interpreter::task_parser::{
-    DocumentMap, DocumentParser, ParseError, Value,
-};
+use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
 };
@@ -1099,11 +1101,12 @@ pub fn parse_bvp_damped_task_from_str(
     parser
         .parse_document_typed()
         .map_err(BvpDampedTaskError::Document)?;
-    parser.try_keys_to_lower_case_typed(Some(vec![
-        "bounds".to_string(),
-        "rel_tolerance".to_string(),
-    ]))
-    .map_err(BvpDampedTaskError::Document)?;
+    parser
+        .try_keys_to_lower_case_typed(Some(vec![
+            "bounds".to_string(),
+            "rel_tolerance".to_string(),
+        ]))
+        .map_err(BvpDampedTaskError::Document)?;
     let result = parser
         .get_result()
         .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
@@ -1213,39 +1216,79 @@ impl NRBVP {
         parse_bvp_damped_task_from_str(input)
     }
 
+    /// Fallible replacement for the legacy map-mutating setter.
+    pub fn try_set_params_from_document(
+        &mut self,
+        document: &DocumentMap,
+    ) -> Result<(), BvpDampedTaskError> {
+        let spec = parse_bvp_damped_solver_settings_from_document(document)?;
+        self.try_apply_bvp_damped_solver_settings(&spec)
+    }
+
     pub fn set_params_from_hashmap(&mut self, result: DocumentMap) {
-        let spec = parse_bvp_damped_solver_settings_from_document(&result)
-            .expect("Failed to parse BVP Damp solver settings");
-        self.apply_bvp_damped_solver_settings(&spec);
+        self.try_set_params_from_document(&result)
+            .expect("legacy BVP Damp settings document must be valid");
+    }
+
+    /// Parse and apply postprocessing without panicking on a missing parser result.
+    pub fn try_set_postprocessing_from_parser(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(), BvpDampedTaskError> {
+        let document = parser
+            .get_result()
+            .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+        let spec = parse_bvp_damped_postprocessing_from_document(document)?;
+        self.apply_bvp_damped_postprocessing(&spec);
+        Ok(())
     }
 
     pub fn set_postpocessing_from_hashmap(&mut self, parser: &mut DocumentParser) {
-        let result: DocumentMap = parser.get_result().unwrap().clone();
-        let spec = parse_bvp_damped_postprocessing_from_document(&result)
-            .expect("Failed to parse BVP Damp postprocessing");
-        self.apply_bvp_damped_postprocessing(&spec);
+        self.try_set_postprocessing_from_parser(parser)
+            .expect("legacy BVP Damp postprocessing document must be valid");
     }
 
     /// Apply the typed full task contract to the solver state.
     pub fn apply_bvp_damped_task_spec(&mut self, spec: &BvpDampedTaskSpec) {
-        self.apply_bvp_damped_solver_settings(&spec.solver_settings);
+        self.try_apply_bvp_damped_task_spec(spec)
+            .expect("legacy BVP Damp task spec must be applicable");
+    }
+
+    /// Fallible full-task application for callers that need typed setup errors.
+    pub fn try_apply_bvp_damped_task_spec(
+        &mut self,
+        spec: &BvpDampedTaskSpec,
+    ) -> Result<(), BvpDampedTaskError> {
+        self.try_apply_bvp_damped_solver_settings(&spec.solver_settings)?;
         self.apply_bvp_damped_postprocessing(&spec.postprocessing);
+        Ok(())
     }
 
     pub fn parse_settings_from_str_with_exact_names(&mut self, input: &str) {
-        let mut parser = DocumentParser::new(input.to_owned());
+        self.try_parse_settings_from_str_with_exact_names(input)
+            .expect("legacy BVP Damp settings text must be valid");
+    }
 
-        let _ = parser.parse_document();
+    /// Fallible exact-name parser for solver settings text.
+    pub fn try_parse_settings_from_str_with_exact_names(
+        &mut self,
+        input: &str,
+    ) -> Result<(), BvpDampedTaskError> {
+        let mut parser = DocumentParser::new(input.to_owned());
+        parser
+            .parse_document_typed()
+            .map_err(BvpDampedTaskError::Document)?;
         // keys inside bounds header of rel_tolerance don't need to be converted to lowecase
         // because they contain problem variables names which are arbituary
         parser.keys_to_lower_case(Some(vec![
             "bounds".to_string(),
             "rel_tolerance".to_string(),
         ]));
-        let result: DocumentMap = parser.get_result().expect("Failed to get result").clone();
-        let spec = parse_bvp_damped_solver_settings_from_document(&result)
-            .expect("Failed to parse BVP Damp solver settings");
-        self.apply_bvp_damped_solver_settings(&spec);
+        let result = parser
+            .get_result()
+            .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+        let spec = parse_bvp_damped_solver_settings_from_document(result)?;
+        self.try_apply_bvp_damped_solver_settings(&spec)
     }
 
     pub fn parse_file(&mut self, path: Option<PathBuf>) -> Result<DocumentParser, String> {
@@ -1268,8 +1311,8 @@ impl NRBVP {
                 message: e,
             })?;
         parser
-            .parse_document()
-            .map_err(BvpDampedTaskError::Parser)?;
+            .parse_document_typed()
+            .map_err(BvpDampedTaskError::Document)?;
         parser.keys_to_lower_case(Some(vec![
             "bounds".to_string(),
             "rel_tolerance".to_string(),
@@ -1284,22 +1327,40 @@ impl NRBVP {
         &mut self,
         parser: &mut DocumentParser,
     ) -> Result<(), String> {
-        let _ = parser.parse_document();
+        self.try_parse_settings_with_exact_names(parser)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Typed exact-name compatibility path for callers that already own a parser.
+    pub fn try_parse_settings_with_exact_names(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(), BvpDampedTaskError> {
+        parser
+            .parse_document_typed()
+            .map_err(BvpDampedTaskError::Document)?;
         parser.keys_to_lower_case(Some(vec![
             "bounds".to_string(),
             "rel_tolerance".to_string(),
         ]));
-        let result: DocumentMap = parser
+        let result = parser
             .get_result()
-            .ok_or("No result after parsing")?
-            .clone();
-        let spec =
-            parse_bvp_damped_solver_settings_from_document(&result).map_err(|e| e.to_string())?;
-        self.apply_bvp_damped_solver_settings(&spec);
-        Ok(())
+            .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+        let spec = parse_bvp_damped_solver_settings_from_document(result)?;
+        self.try_apply_bvp_damped_solver_settings(&spec)
     }
+
     /// Parses the settings from a string and covers some common typos
     pub fn parse_settings(&mut self, parser: &mut DocumentParser) -> Result<(), String> {
+        self.try_parse_settings(parser)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Typed parser for legacy pseudonym-aware BVP Damp settings documents.
+    pub fn try_parse_settings(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(), BvpDampedTaskError> {
         let headers_pseudonims: HashMap<String, Vec<String>> = HashMap::from([
             (
                 "solver_settings".to_string(),
@@ -1365,15 +1426,14 @@ impl NRBVP {
         ]);
 
         parser.with_pseudonims(Some(headers_pseudonims), Some(field_name_pseudonims));
-        let _ = parser.parse_document();
-        let result: DocumentMap = parser
+        parser
+            .parse_document_typed()
+            .map_err(BvpDampedTaskError::Document)?;
+        let result = parser
             .get_result()
-            .ok_or("No result after parsing")?
-            .clone();
-        let spec =
-            parse_bvp_damped_solver_settings_from_document(&result).map_err(|e| e.to_string())?;
-        self.apply_bvp_damped_solver_settings(&spec);
-        Ok(())
+            .ok_or(BvpDampedTaskError::MissingSection("task document"))?;
+        let spec = parse_bvp_damped_solver_settings_from_document(result)?;
+        self.try_apply_bvp_damped_solver_settings(&spec)
     }
 }
 

@@ -1562,14 +1562,9 @@ mod tests_phase1 {
     use crate::symbolic::symbolic_engine::Expr;
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
 
     fn generated_backend_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GENERATED_BACKEND_REGISTRY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        GENERATED_BACKEND_REGISTRY_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("generated backend registry test lock should not be poisoned")
+        crate::numerical::BVP_sci::generated_backend_registry_test_guard()
     }
     use std::process::Command;
 

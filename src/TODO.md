@@ -417,34 +417,24 @@ terminal, BVP и task parser вызывают эти функции напрям
 пользовательский формат документов является публичной поверхностью и требует
 регрессионной дисциплины.
 
-- [ ] CLI/task-shell UX contract audit. Current `src/main.rs` is usable and
-  already supports `<task-file>`, `--check`, `convert`, `convert_check`,
-  `--template ivp|bvp` and `--showcase`, while `ivp_dialogue.rs` /
-  `bvp_dialogue.rs` generate parser-ready templates for many current routes.
-  Remaining risk: command discovery, help text, generated templates,
-  `examples/task_docs/*`, task parser grammar and `TASK_DOCS_GUIDE_*` can drift
-  independently. First hardening step should be contract tests around:
-  help/showcase output mentions all supported top-level commands; every
-  generated template parses and passes `render_task_check`; representative CLI
-  subprocess tests cover `--check`, `convert_check`, and template creation into
-  a temp dir. Prefer this before changing UX architecture.
-- [ ] Split BVP/IVP task parsing into typed problem/settings layers and keep the
-  solver builder out of the raw document parser. The next refactor pass should
-  mirror the working `command_interpreter` shape across the legacy BVP Damp
-  parser: `parse_*_from_document` should produce `*_Spec` values, solver
-  settings must be parsed separately from equations/boundary data, and the old
-  mutating helpers (`set_params_from_hashmap`, `set_postpocessing_from_hashmap`)
-  should become thin compatibility bridges only. Unknown solver names,
-  malformed sections, and grid-refinement dispatch failures should return typed
-  errors instead of `panic!`, while end-to-end docs and split-mode docs remain
-  both supported.
-- [ ] Evaluate migrating manual argument parsing in `main.rs` to `clap` once the
-  command surface is stable. Recommended direction: `clap` subcommands
-  (`run`, `check`, `convert`, `convert-check`, `template`, `showcase`) with
-  backward-compatible aliases for existing invocations. This would improve
-  discoverability, shell completion and error messages without changing task
-  document semantics.
-- [ ] Keep `dialoguer` as the default template wizard for now. `ratatui` should
+- [x] CLI/task-shell UX contract audit. The `clap` subcommands and compatibility
+  aliases are covered by stable process contracts: help/showcase enumerate the
+  public commands, `convert_check` dispatches, the BVP_sci executable template
+  is created and passes `check`, and generated IVP/BVP wizard variants parse
+  and pass `render_task_check`. See the focused tests under
+  `src/command_interpreter/*dialogue.rs` and
+  `src/command_interpreter/task_shell_cli_contract.rs`.
+- [x] Split task parsing into typed problem/settings layers and keep solver
+  construction out of raw document parsing. IVP and BVP document parsers expose
+  separate problem/settings specs; BVP_Damp intentionally parses only its
+  solver settings and postprocessing because its physical equations remain
+  solver-owned API input. Legacy mutating helpers remain as compatibility
+  bridges, with new typed `try_*` counterparts; parser syntax failures and
+  unknown grid-refinement methods are typed rather than silently ignored.
+- [x] Migrate executable argument parsing to `clap` subcommands (`run`, `check`,
+  `convert`, `convert-check`, `template`, `check-ffi-dependencies`, `showcase`)
+  while retaining compatibility aliases for older invocations.
+- [x] Keep `dialoguer` as the default template wizard for now. `ratatui` should
   be considered only if we deliberately want a full-screen task-document editor
   with preview/check panels. For the current needs, Ratatui would add significant
   UI state/testing complexity without solving the parser/help drift problem.

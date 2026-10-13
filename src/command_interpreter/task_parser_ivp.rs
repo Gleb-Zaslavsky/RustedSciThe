@@ -15,27 +15,40 @@
 //! the parser stage only validates and normalizes user input, while solver
 //! execution and postprocessing remain explicit follow-up steps.
 
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_common::{
-    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode,
-    ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
+    ContinuationMode, ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
+    parse_continuation_spec, parse_symbolic_equation_system,
 };
-use crate::numerical::ODE_api2::{
-    NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
+use crate::numerical::BDF::BDF_api::{
+    BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver as BdfOdeSolver,
 };
-use crate::numerical::Radau::{RadauConfig, RadauError, RadauProblem, RadauSolution, RadauSolver};
-use crate::numerical::BDF::BDF_api::{BdfSolveError, BdfSolverOptions, ODEsolver as BdfOdeSolver};
-use crate::numerical::BE::{BeError, BeSolverOptions, BE};
+use crate::numerical::BE::{BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode};
 use crate::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend,
     Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
     Lsode2NativeExecutionConfig, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
-    Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
+    FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend, Lsode2StopComparator,
+    Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
     Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::LSODE2::{Lsode2Error, Lsode2Solver};
+use crate::numerical::ODE_api2::{
+    NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
+};
+use crate::numerical::Radau::{
+    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy,
+    RadauFrontend, RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver,
+    RadauTelemetryMode,
+};
 use crate::symbolic::symbolic_engine::Expr;
-use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
+use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
+use crate::symbolic::symbolic_ivp_generated::{
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+};
+use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fs;
@@ -94,8 +107,9 @@ impl IvpMethodSpec {
     fn from_str(raw: &str) -> Result<Self, IvpTaskError> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "rk45" => Ok(Self::NonStiff("RK45".to_string())),
-            "rk4" => Ok(Self::NonStiff("RK4".to_string())),
-            "euler" => Ok(Self::NonStiff("euler".to_string())),
+            "dopri" | "dormand-prince" | "dormandprince" | "dormand_prince" => {
+                Ok(Self::NonStiff("DOPRI".to_string()))
+            }
             "ab4" => Ok(Self::NonStiff("AB4".to_string())),
             "radau5" | "radau-5" | "radau_iia_5" => Ok(Self::Radau5),
             "bdf" => Ok(Self::Bdf),
@@ -151,7 +165,22 @@ pub struct IvpSolverOptionsSpec {
     pub vectorized: Option<bool>,
     pub parallel: Option<bool>,
     pub neighborhood_check: Option<f64>,
+    /// Shared stiff-solver symbolic route. LSODE2 keeps its historical
+    /// prefixed fields because its controller/layout policy is more detailed.
+    pub symbolic_assembly: Option<Lsode2SymbolicAssemblyBackend>,
+    pub symbolic_execution: Option<Lsode2TaskExecutionSpec>,
+    pub matrix_layout: Option<Lsode2LinearSystemStructure>,
+    pub execution_policy: Option<IvpLambdifyExecutionPolicy>,
+    pub telemetry: Option<IvpTelemetryModeSpec>,
     pub lsode2: Option<Lsode2TaskOptionsSpec>,
+}
+
+/// Telemetry spelling shared by the task-document adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IvpTelemetryModeSpec {
+    Off,
+    Counters,
+    Timings,
 }
 
 /// LSODE2-specific options parsed from `solver_options`.
@@ -1109,7 +1138,15 @@ fn validate_solver_options(
 ) -> Result<(), IvpTaskError> {
     let method_name = ivp_method_name(method);
     let unsupported = match method {
-        IvpMethodSpec::NonStiff(_) => None,
+        IvpMethodSpec::NonStiff(_) => [
+            (options.symbolic_assembly.is_some(), "symbolic_frontend"),
+            (options.symbolic_execution.is_some(), "symbolic_execution"),
+            (options.matrix_layout.is_some(), "matrix_layout"),
+            (options.execution_policy.is_some(), "execution_policy"),
+            (options.telemetry.is_some(), "telemetry"),
+        ]
+        .into_iter()
+        .find_map(|(present, name)| present.then_some(name)),
         IvpMethodSpec::Bdf => [
             (options.step_size.is_some(), "step_size"),
             (options.tolerance.is_some(), "tolerance"),
@@ -1125,6 +1162,22 @@ fn validate_solver_options(
             (options.first_step.is_some(), "first_step"),
             (options.vectorized.is_some(), "vectorized"),
             (options.parallel.is_some(), "parallel"),
+            (
+                matches!(
+                    options.matrix_layout,
+                    Some(Lsode2LinearSystemStructure::Sparse { .. })
+                        | Some(Lsode2LinearSystemStructure::Banded { .. })
+                ),
+                "matrix_layout",
+            ),
+            (
+                matches!(
+                    options.execution_policy,
+                    Some(IvpLambdifyExecutionPolicy::Parallel { .. })
+                        | Some(IvpLambdifyExecutionPolicy::Auto { .. })
+                ),
+                "execution_policy",
+            ),
         ]
         .into_iter()
         .find_map(|(present, name)| present.then_some(name)),
@@ -1443,7 +1496,7 @@ fn parse_ivp_schema_version(document: &DocumentMap) -> Result<u32, IvpTaskError>
             return Err(IvpTaskError::InvalidConfiguration {
                 field: "task.schema_version".to_string(),
                 message: "expected a non-negative integer".to_string(),
-            })
+            });
         }
     };
     if version != 1 {
@@ -1538,11 +1591,51 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
             if let Some(max_steps) = spec.solver_options.max_iterations {
                 options.max_steps = max_steps;
             }
-            let solver = BdfOdeSolver::new_with_options(options);
+            if let Some(assembly) = spec.solver_options.symbolic_assembly {
+                options = options.with_symbolic_assembly_backend(match assembly {
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                        IvpSymbolicAssemblyBackend::ExprLegacy
+                    }
+                    Lsode2SymbolicAssemblyBackend::AtomView => IvpSymbolicAssemblyBackend::AtomView,
+                });
+            }
+            if let Some(execution) = spec.solver_options.symbolic_execution.as_ref() {
+                if let Some(config) = generated_backend_config_for_task(execution) {
+                    options = options.with_generated_backend_config(config);
+                }
+            }
+            if let Some(policy) = spec.solver_options.execution_policy {
+                options = options.with_lambdify_execution_policy(policy);
+            }
+            if let Some(telemetry) = spec.solver_options.telemetry {
+                options = options.with_telemetry_mode(match telemetry {
+                    IvpTelemetryModeSpec::Off => BdfTelemetryMode::Off,
+                    IvpTelemetryModeSpec::Counters => BdfTelemetryMode::Counters,
+                    IvpTelemetryModeSpec::Timings => BdfTelemetryMode::Timings,
+                });
+            }
+            let matrix_layout = spec
+                .solver_options
+                .matrix_layout
+                .unwrap_or(Lsode2LinearSystemStructure::Dense);
+            let mut solver = BdfOdeSolver::new_with_options(options);
+            match matrix_layout {
+                Lsode2LinearSystemStructure::Dense => {}
+                Lsode2LinearSystemStructure::Sparse => {
+                    solver.set_bdf_linear_backend_factory(|| {
+                        Box::new(FaerSparseBdfLinearBackend::default())
+                    });
+                }
+                Lsode2LinearSystemStructure::Banded { .. } => {
+                    solver.set_bdf_linear_backend_factory(|| {
+                        Box::new(FaithfulBandedBdfLinearBackend::default())
+                    });
+                }
+            }
             Ok(IvpTaskSolver::Bdf(solver))
         }
         IvpMethodSpec::BackwardEuler => {
-            let options = BeSolverOptions::new(
+            let mut options = BeSolverOptions::new(
                 spec.equations.symbolic_rhs.clone(),
                 spec.equations.unknowns.clone(),
                 spec.equations.arg.clone(),
@@ -1553,6 +1646,24 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 spec.initial_conditions.t_end,
                 y0,
             );
+            if let Some(assembly) = spec.solver_options.symbolic_assembly {
+                options = options.with_symbolic_assembly_backend(match assembly {
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => BeSymbolicAssemblyBackend::ExprLegacy,
+                    Lsode2SymbolicAssemblyBackend::AtomView => BeSymbolicAssemblyBackend::AtomViewNative,
+                });
+            }
+            if let Some(execution) = spec.solver_options.symbolic_execution.as_ref() {
+                if let Some(config) = generated_backend_config_for_task(execution) {
+                    options = options.with_generated_backend_config(config);
+                }
+            }
+            if let Some(telemetry) = spec.solver_options.telemetry {
+                options = options.with_telemetry_mode(match telemetry {
+                    IvpTelemetryModeSpec::Off => BeTelemetryMode::Off,
+                    IvpTelemetryModeSpec::Counters => BeTelemetryMode::Counters,
+                    IvpTelemetryModeSpec::Timings => BeTelemetryMode::Timings,
+                });
+            }
             let solver = BE::try_new_with_options(options).map_err(|error| {
                 IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))
             })?;
@@ -1589,6 +1700,53 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 max_newton_iterations: spec.solver_options.max_iterations.unwrap_or(6),
                 ..RadauConfig::default()
             };
+            if let Some(assembly) = spec.solver_options.symbolic_assembly {
+                config.frontend = match assembly {
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => RadauFrontend::ExprLegacy,
+                    Lsode2SymbolicAssemblyBackend::AtomView => RadauFrontend::AtomViewNative,
+                };
+            }
+            if let Some(execution) = spec.solver_options.symbolic_execution.as_ref() {
+                match execution {
+                    Lsode2TaskExecutionSpec::LambdifyExpr => {
+                        config.execution = RadauExecution::Lambdify;
+                    }
+                    Lsode2TaskExecutionSpec::Aot { .. } => {
+                        config.execution = RadauExecution::Aot;
+                        config.aot = Some(RadauAotConfig {
+                            generated: generated_backend_config_for_task(execution)
+                                .expect("AOT task execution must yield a generated config"),
+                        });
+                    }
+                }
+            }
+            if let Some(layout) = spec.solver_options.matrix_layout {
+                config.matrix_layout = match layout {
+                    Lsode2LinearSystemStructure::Dense => RadauMatrixLayout::Dense,
+                    Lsode2LinearSystemStructure::Sparse => RadauMatrixLayout::Sparse,
+                    Lsode2LinearSystemStructure::Banded { kl, ku } => {
+                        RadauMatrixLayout::Banded { lower: kl, upper: ku }
+                    }
+                };
+            }
+            if let Some(policy) = spec.solver_options.execution_policy {
+                config.execution_policy = match policy {
+                    IvpLambdifyExecutionPolicy::Sequential => RadauExecutionPolicy::Sequential,
+                    IvpLambdifyExecutionPolicy::Parallel { min_work } => {
+                        RadauExecutionPolicy::Parallel { min_work }
+                    }
+                    IvpLambdifyExecutionPolicy::Auto { min_work } => {
+                        RadauExecutionPolicy::Auto { min_work }
+                    }
+                };
+            }
+            if let Some(telemetry) = spec.solver_options.telemetry {
+                config.telemetry = match telemetry {
+                    IvpTelemetryModeSpec::Off => RadauTelemetryMode::Off,
+                    IvpTelemetryModeSpec::Counters => RadauTelemetryMode::Counters,
+                    IvpTelemetryModeSpec::Timings => RadauTelemetryMode::Timings,
+                };
+            }
             if let Some(max_steps) = spec.solver_options.max_iterations {
                 config.max_steps = max_steps;
             }
@@ -1626,6 +1784,39 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
             Ok(IvpTaskSolver::Lsode2(solver))
         }
     }
+}
+
+/// Translate the common task-document AOT policy into the shared generated-IVP
+/// configuration. The numerical adapters own the actual preparation; this
+/// helper only normalizes toolchain and lifecycle policy once at the parser
+/// boundary.
+fn generated_backend_config_for_task(
+    execution: &Lsode2TaskExecutionSpec,
+) -> Option<SymbolicIvpGeneratedBackendConfig> {
+    let Lsode2TaskExecutionSpec::Aot {
+        toolchain,
+        profile,
+        output_parent_dir,
+    } = execution
+    else {
+        return None;
+    };
+    let build_profile = match profile {
+        Lsode2AotProfile::Debug => AotBuildProfile::Debug,
+        Lsode2AotProfile::Release => AotBuildProfile::Release,
+    };
+    let mut config = SymbolicIvpGeneratedBackendConfig::new()
+        .with_build_policy(SymbolicIvpAotBuildPolicy::BuildIfMissing {
+            profile: build_profile,
+        })
+        .with_output_parent_dir(output_parent_dir.clone());
+    config = match toolchain {
+        Lsode2AotToolchain::CTcc => config.with_c_tcc(),
+        Lsode2AotToolchain::CGcc => config.with_c_gcc(),
+        Lsode2AotToolchain::Zig => config.with_zig(),
+        Lsode2AotToolchain::Rust => config.with_rust(),
+    };
+    Some(config)
 }
 
 fn build_lsode2_problem_config_from_spec(
@@ -2227,8 +2418,161 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         vectorized: get_optional_bool(section, "vectorized")?,
         parallel: get_optional_bool(section, "parallel")?,
         neighborhood_check: get_optional_float(section, "neighborhood_check")?,
+        symbolic_assembly: parse_common_symbolic_assembly(section)?,
+        symbolic_execution: parse_common_symbolic_execution(section)?,
+        matrix_layout: parse_common_matrix_layout(section)?,
+        execution_policy: parse_common_execution_policy(section)?,
+        telemetry: parse_common_telemetry(section)?,
         lsode2,
     })
+}
+
+fn parse_common_symbolic_assembly(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2SymbolicAssemblyBackend>, IvpTaskError> {
+    let raw = get_optional_string(section, "symbolic_frontend", "solver_options")?
+        .or(get_optional_string(section, "symbolic_assembly", "solver_options")?);
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "exprlegacy" | "expr_legacy" | "expr" => {
+            Ok(Some(Lsode2SymbolicAssemblyBackend::ExprLegacy))
+        }
+        "atomview" | "atom_view" | "atom_native" | "atomviewnative" => {
+            Ok(Some(Lsode2SymbolicAssemblyBackend::AtomView))
+        }
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "symbolic_frontend".to_string(),
+            message: format!(
+                "unknown symbolic frontend `{other}` (use ExprLegacy or AtomView)"
+            ),
+        }),
+    }
+}
+
+fn parse_common_symbolic_execution(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2TaskExecutionSpec>, IvpTaskError> {
+    let raw = get_optional_string(section, "symbolic_execution", "solver_options")?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if matches!(
+        raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str(),
+        "lambdify" | "lambdify_expr" | "lambdifyexpr"
+    ) {
+        return Ok(Some(Lsode2TaskExecutionSpec::LambdifyExpr));
+    }
+    if !raw.trim().eq_ignore_ascii_case("aot") {
+        return Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "symbolic_execution".to_string(),
+            message: format!("unknown symbolic execution `{raw}` (use Lambdify or AOT)"),
+        });
+    }
+    let toolchain_raw = get_optional_string(section, "aot_toolchain", "solver_options")?
+        .unwrap_or_else(|| "c_gcc".to_string());
+    let profile_raw = get_optional_string(section, "aot_profile", "solver_options")?
+        .unwrap_or_else(|| "release".to_string());
+    let output_parent_dir =
+        get_optional_string(section, "aot_output_dir", "solver_options")?.map(PathBuf::from);
+    let toolchain = match toolchain_raw.trim().to_ascii_lowercase().as_str() {
+        "c_tcc" | "ctcc" => Lsode2AotToolchain::CTcc,
+        "c_gcc" | "cgcc" | "gcc" => Lsode2AotToolchain::CGcc,
+        "zig" => Lsode2AotToolchain::Zig,
+        "rust" => Lsode2AotToolchain::Rust,
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "aot_toolchain".to_string(),
+                message: format!("unknown AOT toolchain `{other}`"),
+            })
+        }
+    };
+    let profile = match profile_raw.trim().to_ascii_lowercase().as_str() {
+        "debug" => Lsode2AotProfile::Debug,
+        "release" => Lsode2AotProfile::Release,
+        other => {
+            return Err(IvpTaskError::InvalidField {
+                section: "solver_options".to_string(),
+                field: "aot_profile".to_string(),
+                message: format!("unknown AOT profile `{other}`"),
+            })
+        }
+    };
+    Ok(Some(Lsode2TaskExecutionSpec::Aot {
+        toolchain,
+        profile,
+        output_parent_dir,
+    }))
+}
+
+fn parse_common_matrix_layout(
+    section: &GenericSectionMap,
+) -> Result<Option<Lsode2LinearSystemStructure>, IvpTaskError> {
+    let raw = get_optional_string(section, "matrix_layout", "solver_options")?
+        .or(get_optional_string(section, "linear_structure", "solver_options")?);
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dense" => Ok(Some(Lsode2LinearSystemStructure::Dense)),
+        "sparse" => Ok(Some(Lsode2LinearSystemStructure::Sparse)),
+        "banded" => Ok(Some(Lsode2LinearSystemStructure::Banded {
+            kl: get_optional_usize(section, "banded_lower")?
+                .or(get_optional_usize(section, "banded_kl")?)
+                .unwrap_or(1),
+            ku: get_optional_usize(section, "banded_upper")?
+                .or(get_optional_usize(section, "banded_ku")?)
+                .unwrap_or(1),
+        })),
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "matrix_layout".to_string(),
+            message: format!("unknown matrix layout `{other}` (use dense, sparse or banded)"),
+        }),
+    }
+}
+
+fn parse_common_execution_policy(
+    section: &GenericSectionMap,
+) -> Result<Option<IvpLambdifyExecutionPolicy>, IvpTaskError> {
+    let raw = get_optional_string(section, "execution_policy", "solver_options")?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let min_work = get_optional_usize(section, "parallel_min_work")?.unwrap_or(32);
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sequential" | "seq" => Ok(Some(IvpLambdifyExecutionPolicy::Sequential)),
+        "parallel" => Ok(Some(IvpLambdifyExecutionPolicy::Parallel { min_work })),
+        "auto" => Ok(Some(IvpLambdifyExecutionPolicy::Auto { min_work })),
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "execution_policy".to_string(),
+            message: format!("unknown execution policy `{other}` (use sequential, parallel or auto)"),
+        }),
+    }
+}
+
+fn parse_common_telemetry(
+    section: &GenericSectionMap,
+) -> Result<Option<IvpTelemetryModeSpec>, IvpTaskError> {
+    let raw = get_optional_string(section, "telemetry", "solver_options")?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" => Ok(Some(IvpTelemetryModeSpec::Off)),
+        "counters" | "counter" => Ok(Some(IvpTelemetryModeSpec::Counters)),
+        "timings" | "timing" | "full" => Ok(Some(IvpTelemetryModeSpec::Timings)),
+        other => Err(IvpTaskError::InvalidField {
+            section: "solver_options".to_string(),
+            field: "telemetry".to_string(),
+            message: format!("unknown telemetry mode `{other}` (use off, counters or timings)"),
+        }),
+    }
 }
 
 fn parse_lsode2_options(

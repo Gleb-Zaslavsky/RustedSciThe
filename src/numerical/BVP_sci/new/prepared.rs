@@ -190,9 +190,10 @@ impl BvpSciLambdifyPlan {
             Self::Numerical(plan) if plan.has_rhs_parameter_jacobian() => {
                 plan.dimension().saturating_mul(plan.parameter_dimension())
             }
-            Self::Numerical(_) | Self::Aot(_) => 0,
+            Self::Numerical(_) => 0,
             Self::ExprLegacy(plan) => plan.parameter_jacobian_nnz(),
             Self::AtomViewNative(plan) => plan.parameter_jacobian_nnz(),
+            Self::Aot(plan) => plan.parameter_jacobian_nnz(),
         }
     }
 
@@ -351,7 +352,8 @@ impl BvpSciLambdifyPlan {
     }
 
     /// Evaluate the prepared analytical `df/dp` block when this frontend has
-    /// one. Numerical and AOT plans retain the common finite-difference path.
+    /// one. Numerical plans without an explicit callback retain the common
+    /// finite-difference path. AOT uses a compact Lambdify derivative plan.
     pub fn evaluate_parameter_jacobian(
         &self,
         x: f64,
@@ -372,7 +374,10 @@ impl BvpSciLambdifyPlan {
                 plan.evaluate_parameter_jacobian(x, state, parameters, arguments, output)?;
                 Ok(true)
             }
-            _ => Ok(false),
+            Self::Aot(plan) => {
+                plan.evaluate_parameter_jacobian(x, state, parameters, arguments, output)?;
+                Ok(true)
+            }
         }
     }
 
@@ -380,7 +385,7 @@ impl BvpSciLambdifyPlan {
         match self {
             Self::Numerical(plan) => plan.has_rhs_parameter_jacobian(),
             Self::ExprLegacy(_) | Self::AtomViewNative(_) => true,
-            Self::Aot(_) => false,
+            Self::Aot(_) => true,
         }
     }
 

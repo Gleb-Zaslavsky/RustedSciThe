@@ -9,6 +9,18 @@
 //! coupling to its internal modules while preserving a migration path for old
 //! examples and downstream code that still needs the historical baseline.
 
+/// Serializes tests that mutate the process-wide linked generated-backend
+/// registry, preventing AOT lifecycle stories from racing with test cleanup.
+#[cfg(test)]
+pub(crate) fn generated_backend_registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("generated backend registry test lock should not be poisoned")
+}
+
 /// Second-generation BVP architecture and the public solver facade.
 pub mod new;
 

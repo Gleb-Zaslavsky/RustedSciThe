@@ -2337,10 +2337,22 @@ Jacobian. A direct compact story checks the exact row-major block
 `[[y0, 1], [0, y0^2]]`: both frontends report three structural entries, one
 parameter-Jacobian callback, zero runtime finite-difference probes, and zero
 value error. The full parameterized frontend/layout continuation matrix and
-the Numerical finite-difference fallback test also pass in debug. Remaining
-finite-difference probes in the full-solve contract table are boundary
-Jacobian probes, not RHS `df/dp`; AOT keeps the existing fallback for now.
-No release performance evidence has been collected for this change yet.
+the Numerical finite-difference fallback test also pass in debug. AOT now
+keeps generated residual and `df/dy` callbacks while preparing only the
+nonzero `df/dp` block through the selected ExprLegacy or AtomView Lambdify
+route. The compact AOT contract story passes for both frontends and all three
+layouts, with exact derivative parity and zero FD probes. The direct
+parameter-only debug gate also passes for both symbolic routes. Remaining
+finite-difference probes in full solves are boundary Jacobian probes, not RHS
+`df/dp`. Release preparation-cost and full-solve performance evidence remains
+outstanding.
+
+Debug verification: the direct parameter-only test passed for both symbolic
+routes; the ignored AOT callback contract matrix passed all six
+frontend/layout combinations; and a reduced AOT/Lambdify full-solve plus
+continuation matrix (`dimension=2`, `nodes=3`) passed all 12 rows. In that
+matrix AOT rows assert that the prepared parameter evaluator is present and
+called. This is correctness evidence only, not a performance baseline.
 
 ### 2026-10-13 Release Failure Triage
 
@@ -2467,24 +2479,30 @@ native-library distribution, or actual retained/peak factor-memory accounting;
 those remain platform and deployment follow-ups rather than failures of this
 release run.
 
-## 2026-10-13 Performance Questions Still Open
+## 2026-10-13 Focused Performance Follow-Up
 
-Do not mark performance break-even as solved from the current matrix:
+Capture: `test_reports/BVP_sci_performance_followup/20261013T102759Z/`. All five
+configured steps passed; compact reports and technical logs are stored in
+separate directories. The focused runner covered the official SciPy/SuperLU
+case, cold AOT callback amortization, and AOT Sparse full-solve policies at
+`n=32/64`, `nodes=128/256`, and worker counts `1/4/12`.
+Primary tables: `reports/BVP_sci_SciPy_Parity_Bench/release/python_vs_rust_numerical_core.md`, `reports/BVP_sci_AOT_Bench/release/aot_cold_callback_amortization.md`, and the three `aot_coupled_chain_full_solve_workers_<N>.md` reports.
 
-- The official large Rust/SciPy full solve previously used StandardFaer.
-  Same-matrix evidence found SuperLU factorization comparable to or faster than
-  SciPy, but Rust CSC assembly remained more expensive. A repeated full
-  Rust-SuperLU versus SciPy run is required to see whether this changes the
-  end-to-end result.
-- AOT continuation rows after the initial compile often use cache hits. They
-  establish warm reuse, not universal cold-compile amortization. The new
-  `cold-amortization` dashboard phase isolates artifacts and reports
-  preparation plus a warm callback series; this is still not full BVP solve
-  break-even evidence.
-- Existing worker-count rows are mostly small-workload dispatch evidence.
-  Large matched full-solve comparisons are still required before claiming a
-  Parallel/Auto break-even point.
-- AOT currently finite-differences `df/dp`, whereas Lambdify has a prepared
-  symbolic parameter Jacobian. This changes callback work and must remain an
-  explicit caveat in AOT/Lambdify comparisons until an analytic AOT path is
-  implemented or the comparison controls for that difference.
+| Axis | Release evidence | Interpretation |
+| --- | --- | --- |
+| SciPy vs Rust/SuperLU | Official 60-state/two-parameter solve, 5 repeats: Python `13.373 ms`; Rust numerical core `14.315 ms`; construction + core `14.501 ms`; same status/17-node mesh and `9.239e-13` max state difference | Near performance parity, Rust about 7% slower in this capture. This is not an apples-to-apples callback implementation comparison: Python receives prepared callbacks, Rust uses ExprLegacy with exact symbolic derivatives; Rust symbolic preparation (`0.380 ms`) is reported separately. |
+| SuperLU stages | Instrumented factorization: SciPy `6.196 ms`, Rust `6.606 ms`; linear-system assembly: SciPy `1.227 ms` over 3 calls, Rust `2.550 ms` over 4 calls; linear solves: SciPy `0.438 ms`, Rust `0.219 ms` over 12 calls each | Factorization is no longer the obvious dominant gap. Rust CSC/triplet assembly is a promising investigation, but the assembly call counts/scopes differ, so this is an aggregate attribution signal, not a per-call apples-to-apples comparison. Linear solves are matched by count and faster in this capture. Instrumented scopes are not additive wall-clock. |
+| Cold AOT | Sparse `n=32/64`, ExprLegacy/AtomNative; cold preparation `19.9-29.8 ms`. Cold + 16 callback pairs is `+1,816%` to `+20,394%` vs matched Lambdify; projected callback-only crossover is `10,470-236,665` pairs, with one ExprLegacy slice not reaching crossover. | Cold compilation does not amortize over 16 callback pairs. Warm callback series can be faster, especially AtomNative, but this dashboard times residual/`df/dy`, not solver-level `df/dp`; it does not establish full parameter-continuation break-even. Coldness is proven by unique artifact namespaces and build/link/publication/runtime-ready counters, not resolver hit/miss counters. |
+| AOT full-solve policies | Across both frontends and all tested sizes/workers, forced Parallel regressed by `8-65%`. Auto was usually close to Sequential, with measured deviations from about `-10%` to `+14%`. | Keep Sequential as the safe policy. Auto has no portable break-even yet; worker dispatch correctness is not evidence of a speedup. |
+
+### Follow-Up Plan
+
+- [ ] Profile Rust SuperLU triplet materialization, CSC assembly and ABI conversion separately on the official matrix; preserve the current SuperLU-vs-SciPy full-solve gate and repeat/interleave measurements before changing backend defaults.
+- [ ] Measure AOT amortization with actual prepared BVP solves and parameter continuation, including the `df/dp` evaluator and total cold preparation, on nonlinear/stiff workloads and longer series. Do not infer a full-solve crossover from callback-only projections.
+- [ ] Extend the AOT Sequential/Parallel/Auto matrix to additional representative nonlinear/stiff workloads. Keep Parallel opt-in; assess Auto only from matched full-solve wall time plus dispatch/chunk telemetry.
+- [ ] Retain repeated statistical baselines before making threshold or universal performance claims. This five-repeat capture is useful release evidence, not a cross-machine guarantee.
+
+AOT now uses a compact Lambdify evaluator for symbolic `df/dp` while keeping
+generated residual and state-Jacobian callbacks. Future comparisons must account
+for the extra one-time derivative preparation and measure its solver-level work
+separately from the callback-only `df/dy` dashboard.
