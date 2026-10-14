@@ -1,0 +1,26 @@
+[package]
+name = "rustedscithe-python"
+version = "0.1.1"
+edition = "2024"
+publish = false
+description = "PyO3 bindings for the RustedSciThe symbolic and numerical APIs"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/Gleb-Zaslavsky/RustedSciThe"
+
+[lib]
+name = "rustedscithe"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["extension-module", "abi3"]
+extension-module = ["pyo3/extension-module"]
+abi3 = ["pyo3/abi3-py310"]
+# Opt-in only: forwards the core crate's runtime-loaded SuperLU bridge support.
+superlu = ["rustedscithe-core/superlu"]
+
+[dependencies]
+pyo3 = { version = "0.27" }
+numpy = "0.27"
+nalgebra = "0.35"
+rustedscithe-core = { package = "RustedSciThe", path = "../..", default-features = false }

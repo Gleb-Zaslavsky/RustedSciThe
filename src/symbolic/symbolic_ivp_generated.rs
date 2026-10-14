@@ -516,6 +516,72 @@ impl SymbolicIvpGeneratedBackendConfig {
     }
 }
 
+fn handoff_lifecycle_error(
+    stage: crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage,
+    kind: crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind,
+    artifact_key: impl Into<String>,
+    detail: impl Into<String>,
+) -> SymbolicIvpGeneratedError {
+    SymbolicIvpGeneratedError::AotLifecycle(
+        crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleError::new(
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureDiagnostics::new(
+                stage,
+                kind,
+                artifact_key,
+                detail,
+            ),
+        ),
+    )
+}
+
+/// Loads the durable registry only when the caller did not provide an
+/// in-process resolver. A missing file is normal for BuildIfMissing; malformed
+/// content and other IO failures are surfaced as typed handoff diagnostics.
+fn load_handoff_resolver(
+    mut config: SymbolicIvpGeneratedBackendConfig,
+) -> Result<SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError> {
+    if config.resolver.is_some() {
+        return Ok(config);
+    }
+    let Some(path) = config.handoff_path.as_ref() else {
+        return Ok(config);
+    };
+    match AotResolver::read_handoff(path) {
+        Ok(resolver) => {
+            config.resolver = Some(resolver);
+            Ok(config)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config),
+        Err(error) => Err(handoff_lifecycle_error(
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Planned,
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Manifest,
+            path.display().to_string(),
+            format!("failed to read AOT registry handoff '{}': {error}", path.display()),
+        )),
+    }
+}
+
+/// Publishes a resolver snapshot for a later process. The registry contains
+/// only owned manifest/path metadata; the consumer reopens the compiled
+/// library and creates a process-local callback owner during RequirePrebuilt.
+fn write_handoff_if_requested(
+    resolver: &AotResolver,
+    config: &SymbolicIvpGeneratedBackendConfig,
+    artifact_key: &str,
+) -> Result<(), SymbolicIvpGeneratedError> {
+    let Some(path) = config.handoff_path.as_ref() else {
+        return Ok(());
+    };
+    resolver.write_handoff(path).map_err(|error| {
+        handoff_lifecycle_error(
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Published,
+            crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Io,
+            artifact_key,
+            format!("failed to publish AOT registry handoff '{}': {error}", path.display()),
+        )
+    })
+}
+
 /// Errors surfaced by the high-level IVP generated-backend layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolicIvpGeneratedError {
@@ -2149,6 +2215,7 @@ fn perform_requested_build(
             return Err(error);
         }
     };
+    write_handoff_if_requested(&resolver, config, problem_key.as_str())?;
     // The publication call below performs the first dynamic load for a cold
     // producer.  Count it here so a producer reports one link attempt, while
     // a later in-process cache hit does not fabricate another attempt.
@@ -2298,6 +2365,7 @@ fn perform_requested_residual_build(
     let resolver = measure_cold_stage(&problem.telemetry, IvpColdStage::AotLink, || {
         register_ivp_build_result_in_registry(resolver_snapshot, prepared.manifest(), &build)
     })?;
+    write_handoff_if_requested(&resolver, config, problem_key.as_str())?;
     measure_cold_stage(&problem.telemetry, IvpColdStage::AotPublication, || {
         register_ivp_residual_runtime_backend(
             "residual-only",
@@ -2432,6 +2500,7 @@ fn perform_requested_sparse_build(
             return Err(error);
         }
     };
+    write_handoff_if_requested(&resolver, config, problem_key.as_str())?;
     let published = measure_cold_stage(telemetry, IvpColdStage::AotPublication, || {
         register_ivp_sparse_runtime_backend(
             "sparse",
@@ -2559,6 +2628,7 @@ fn perform_requested_expr_banded_build(
     let resolver = measure_cold_stage(&baseline_problem.telemetry, IvpColdStage::AotLink, || {
         register_ivp_build_result_in_registry(resolver_snapshot, manifest, &build)
     })?;
+    write_handoff_if_requested(&resolver, config, &problem_key)?;
     let publication = measure_cold_stage(
         &baseline_problem.telemetry,
         IvpColdStage::AotPublication,
@@ -2771,6 +2841,7 @@ fn perform_requested_native_sparse_build(
             return Err(error);
         }
     };
+    write_handoff_if_requested(&resolver, config, problem_key.as_str())?;
     // The link scope ends when the artifact has been registered in the
     // resolver. Runtime callback publication is a separate lifecycle stage;
     // keeping it outside AotLink makes structured AtomView comparable with
@@ -3134,6 +3205,7 @@ pub fn prepare_generated_symbolic_ivp_sparse_backend(
     options: SymbolicIvpProblemOptions,
     config: SymbolicIvpGeneratedBackendConfig,
 ) -> Result<PreparedGeneratedSymbolicIvpSparseBackend, SymbolicIvpGeneratedError> {
+    let config = load_handoff_resolver(config)?;
     let use_atom_native_aot = options.symbolic_assembly_backend
         == crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView;
     if use_atom_native_aot {
@@ -3628,6 +3700,7 @@ pub fn prepare_generated_symbolic_ivp_problem(
     options: SymbolicIvpProblemOptions,
     config: SymbolicIvpGeneratedBackendConfig,
 ) -> Result<PreparedGeneratedSymbolicIvpProblem, SymbolicIvpGeneratedError> {
+    let config = load_handoff_resolver(config)?;
     let baseline_problem = prepare_symbolic_ivp_problem(equations, variables, time_arg, options)?;
     let aot_source = &baseline_problem;
     let dense_preparation = dense_problem_preparation(aot_source, config.aot_options)?;
@@ -3839,6 +3912,7 @@ fn prepare_generated_symbolic_ivp_residual_problem_with_layout(
     config: SymbolicIvpGeneratedBackendConfig,
     native_banded_layout: Option<(usize, usize)>,
 ) -> Result<PreparedGeneratedSymbolicIvpResidualProblem, SymbolicIvpGeneratedError> {
+    let config = load_handoff_resolver(config)?;
     let is_atom_view = options.symbolic_assembly_backend
         == crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend::AtomView;
     let baseline_problem =

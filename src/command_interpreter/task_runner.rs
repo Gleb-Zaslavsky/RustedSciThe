@@ -7,11 +7,11 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
+    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, parse_ivp_task_from_str,
-    run_ivp_task,
+    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
+    IvpTaskSpec, IvpTelemetryModeSpec, Lsode2TaskExecutionSpec,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -107,19 +107,9 @@ impl TaskRunnerError {
         let category = self.category();
         match category {
             "io" | "postprocess" => 5,
-            "solver"
-            | "solver_result"
-            | "solver_exhaustion"
-            | "solver_singular"
-            | "solver_tolerance"
-            | "solver_linear"
-            | "callback"
-            | "aot_compiler"
-            | "aot_link"
-            | "aot_timeout"
-            | "aot_artifact"
-            | "aot_publication"
-            | "aot_runtime"
+            "solver" | "solver_result" | "solver_exhaustion" | "solver_singular"
+            | "solver_tolerance" | "solver_linear" | "callback" | "aot_compiler" | "aot_link"
+            | "aot_timeout" | "aot_artifact" | "aot_publication" | "aot_runtime"
             | "aot_handoff" => 6,
             _ => 3,
         }
@@ -372,7 +362,9 @@ pub fn anchor_task_paths(spec: &mut ParsedTaskSpec, task_path: impl AsRef<Path>)
             .map(|directory| directory.join(task_path))
             .unwrap_or_else(|_| task_path.to_path_buf())
     };
-    let base = absolute_task_path.parent().unwrap_or_else(|| Path::new("."));
+    let base = absolute_task_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
     match spec {
         ParsedTaskSpec::Ivp(spec) => {
             anchor_enabled_default(
@@ -772,16 +764,57 @@ fn render_ivp_check(spec: &IvpTaskSpec) -> String {
         || options.telemetry.is_some()
     {
         out.push_str(&format!(
-            "native_options: symbolic_frontend={:?}, symbolic_execution={:?}, matrix_layout={:?}, execution_policy={:?}, telemetry={:?}\n",
-            options.symbolic_assembly,
-            options.symbolic_execution,
-            options.matrix_layout,
-            options.execution_policy,
-            options.telemetry,
+            "native_options: symbolic_frontend={}, symbolic_execution={}, matrix_layout={}, execution_policy={}, telemetry={}\n",
+            options
+                .symbolic_assembly
+                .map(|value| value.label())
+                .unwrap_or("default"),
+            options
+                .symbolic_execution
+                .as_ref()
+                .map(Lsode2TaskExecutionSpec::label)
+                .unwrap_or_else(|| "default".to_string()),
+            options
+                .matrix_layout
+                .map(|value| value.label())
+                .unwrap_or("default"),
+            options
+                .execution_policy
+                .map(|value| value.label())
+                .unwrap_or("default"),
+            ivp_telemetry_label(options.telemetry),
         ));
     }
     if let Some(lsode2) = &options.lsode2 {
-        out.push_str(&format!("lsode2_options={lsode2:?}\n"));
+        let controller = lsode2
+            .controller
+            .map(|value| value.mode.label())
+            .unwrap_or("bdf_only");
+        let symbolic_assembly = lsode2
+            .symbolic_assembly
+            .map(|value| value.label())
+            .unwrap_or("default");
+        let symbolic_execution = lsode2
+            .symbolic_execution
+            .as_ref()
+            .map(Lsode2TaskExecutionSpec::label)
+            .unwrap_or_else(|| "default".to_string());
+        let linear_structure = lsode2
+            .linear_system_structure
+            .map(|value| value.label())
+            .unwrap_or("default");
+        let linear_policy = lsode2
+            .linear_solver_policy
+            .map(|value| value.label())
+            .unwrap_or_else(|| "default".to_string());
+        let native_execution = lsode2
+            .native_execution
+            .map(|value| value.label())
+            .unwrap_or_else(|| "default".to_string());
+        out.push_str(&format!(
+            "lsode2_options: controller={controller}, symbolic_assembly={symbolic_assembly}, symbolic_execution={symbolic_execution}, linear_structure={linear_structure}, linear_policy={linear_policy}, native_execution={native_execution}, stop_conditions={}\n",
+            lsode2.stop_conditions.len(),
+        ));
     }
     if let Some(continuation) = &spec.continuation {
         out.push_str(&format!(
@@ -815,7 +848,18 @@ fn render_ivp_check(spec: &IvpTaskSpec) -> String {
     out
 }
 
-fn render_ivp_output_targets(output: &crate::command_interpreter::task_parser_ivp::PostprocessingSpec) -> String {
+fn ivp_telemetry_label(mode: Option<IvpTelemetryModeSpec>) -> &'static str {
+    match mode {
+        Some(IvpTelemetryModeSpec::Off) => "off",
+        Some(IvpTelemetryModeSpec::Counters) => "counters",
+        Some(IvpTelemetryModeSpec::Timings) => "timings",
+        None => "default",
+    }
+}
+
+fn render_ivp_output_targets(
+    output: &crate::command_interpreter::task_parser_ivp::PostprocessingSpec,
+) -> String {
     let mut targets = Vec::new();
     if output.save_csv {
         targets.push(format!(
@@ -1124,6 +1168,70 @@ max_step: 1e-2
         assert!(preview.contains("method=LSODE2"));
         assert!(preview.contains("y |"));
         assert!(preview.contains("2"));
+    }
+
+    #[test]
+    fn render_task_check_exposes_normalized_lsode2_route_without_debug_dump() {
+        let ivp_doc = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+unknowns: y
+rhs: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+symbolic_frontend: AtomView
+symbolic_execution: Lambdify
+matrix_layout: sparse
+execution_policy: auto
+telemetry: timings
+"#;
+        let spec = parse_task_spec_from_str(ivp_doc).expect("IVP document should parse");
+        let check = render_task_check(&spec);
+
+        assert!(check.contains("lsode2_options: controller=bdf_only"));
+        assert!(check.contains("symbolic_assembly=atom_view"));
+        assert!(check.contains("symbolic_execution=lambdify"));
+        assert!(check.contains("linear_structure=sparse"));
+        assert!(check.contains("linear_policy=default"));
+        assert!(check.contains("native_execution=default"));
+        assert!(check.contains(
+            "native_options: symbolic_frontend=atom_view, symbolic_execution=lambdify, matrix_layout=sparse, execution_policy=auto, telemetry=timings"
+        ));
+        assert!(!check.contains("Lsode2TaskOptionsSpec {"));
+    }
+
+    #[test]
+    fn render_task_check_uses_one_native_options_contract_for_stiff_ivp_routes() {
+        for method in ["BDF", "Radau5", "BackwardEuler"] {
+            let ivp_doc = format!(
+                "task\nsolver: IVP\nmethod: {method}\n\n\
+                 equations\narg: t\nunknowns: y\nrhs: -y\n\n\
+                 initial_conditions\nt0: 0.0\nt_end: 0.1\ny0: 1.0\n\n\
+                 solver_options\n\
+                 symbolic_frontend: ExprLegacy\n\
+                 symbolic_execution: Lambdify\n\
+                 matrix_layout: dense\n\
+                 execution_policy: sequential\n\
+                 telemetry: counters\n"
+            );
+            let spec = parse_task_spec_from_str(&ivp_doc)
+                .unwrap_or_else(|error| panic!("{method} document should parse: {error}"));
+            let check = render_task_check(&spec);
+            assert!(check.contains(
+                "native_options: symbolic_frontend=expr_legacy, symbolic_execution=lambdify, matrix_layout=dense, execution_policy=sequential, telemetry=counters"
+            ));
+            assert!(!check.contains("Some(ExprLegacy)"));
+            assert!(!check.contains("Some(Lambdify"));
+        }
     }
 
     #[test]

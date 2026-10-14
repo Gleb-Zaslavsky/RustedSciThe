@@ -1004,9 +1004,7 @@ pub fn compile_native_sparse_aot_jacobian_callback_with_telemetry(
             generated_backend,
         ),
     }
-    .map_err(|err| IvpBackendError::GeneratedBackendFailure {
-        message: err.to_string(),
-    })?;
+    .map_err(IvpBackendError::from_generated_error)?;
 
     if let Some(handoff_path) = handoff_path.as_ref() {
         let resolver = prepared.updated_resolver.as_ref().ok_or_else(|| {

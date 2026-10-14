@@ -7,7 +7,7 @@ use super::error::{RadauConfigError, RadauError, RadauStage, RadauUnsupportedRou
 use super::{
     aot::{AotPlan, AotWorkspace},
     atom_native::{AtomNativePlan, AtomNativeWorkspace},
-    config::{RadauAssembly, RadauMatrixLayout},
+    config::{RadauAssembly, RadauJacobianSource, RadauMatrixLayout},
     lambdify::{LambdifyPlan, LambdifyWorkspace},
     telemetry::{RadauFrontendStage, RadauTelemetry, RadauTelemetryMode},
 };
@@ -51,6 +51,11 @@ pub(crate) struct SymbolicCallbackSession<'a> {
     generation: u64,
     telemetry: RadauTelemetry,
     execution_policy: IvpLambdifyExecutionPolicy,
+    jacobian_source: RadauJacobianSource,
+    finite_difference_atol: f64,
+    finite_difference_state: Vec<f64>,
+    finite_difference_base: Vec<f64>,
+    finite_difference_perturbed: Vec<f64>,
 }
 
 impl PreparedSymbolicCallbacks {
@@ -193,6 +198,11 @@ impl PreparedSymbolicCallbacks {
             generation: 1,
             telemetry: RadauTelemetry::new(mode),
             execution_policy: self.execution_policy(),
+            jacobian_source: RadauJacobianSource::Analytic,
+            finite_difference_atol: 1e-6,
+            finite_difference_state: Vec::new(),
+            finite_difference_base: Vec::new(),
+            finite_difference_perturbed: Vec::new(),
         }
     }
 
@@ -367,6 +377,16 @@ impl<'a> SymbolicCallbackSession<'a> {
         &mut self.telemetry
     }
 
+    /// Select the Jacobian source for this solve session.
+    ///
+    /// Symbolic plans normally provide an analytic Jacobian. The public
+    /// adapter can select finite differences when no symbolic Jacobian was
+    /// supplied without changing the immutable prepared frontend.
+    pub(crate) fn set_jacobian_policy(&mut self, source: RadauJacobianSource, atol: f64) {
+        self.jacobian_source = source;
+        self.finite_difference_atol = atol;
+    }
+
     /// Borrow the current parameter values.
     pub(crate) fn parameters(&self) -> &[f64] {
         &self.parameters
@@ -437,6 +457,9 @@ impl<'a> SymbolicCallbackSession<'a> {
         state: &[f64],
         output: &mut [f64],
     ) -> Result<(), RadauError> {
+        if self.jacobian_source == RadauJacobianSource::FiniteDifference {
+            return self.evaluate_finite_difference_jacobian(t, state, output);
+        }
         // Structured Jacobian callbacks are still one logical solver-level
         // Jacobian request even when their evaluator writes a projected
         // Sparse/Banded layout directly.
@@ -453,6 +476,69 @@ impl<'a> SymbolicCallbackSession<'a> {
         )
     }
 
+    /// Evaluate a dense Jacobian with reusable forward-difference buffers.
+    ///
+    /// This is deliberately implemented at the session boundary: the same
+    /// prepared symbolic residual callback is used for the base and perturbed
+    /// states, while the probe vectors remain allocated across Newton steps.
+    fn evaluate_finite_difference_jacobian(
+        &mut self,
+        t: f64,
+        state: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), RadauError> {
+        let dimension = state.len();
+        let expected = dimension
+            .checked_mul(dimension)
+            .ok_or(RadauError::WorkspaceSizeOverflow { dimension })?;
+        if output.len() != expected {
+            return Err(RadauError::ShapeMismatch {
+                stage: RadauStage::Jacobian,
+                expected,
+                actual: output.len(),
+            });
+        }
+
+        // Move the buffers out temporarily so the residual call can borrow
+        // the session mutably without overlapping a borrow of one buffer.
+        let mut probe_state = std::mem::take(&mut self.finite_difference_state);
+        let mut base = std::mem::take(&mut self.finite_difference_base);
+        let mut perturbed = std::mem::take(&mut self.finite_difference_perturbed);
+        probe_state.resize(dimension, 0.0);
+        probe_state.copy_from_slice(state);
+        base.resize(dimension, 0.0);
+        perturbed.resize(dimension, 0.0);
+
+        let result = (|| {
+            self.telemetry.count_stage(RadauStage::Jacobian);
+            self.telemetry
+                .record_policy_dispatch(self.execution_policy, expected, expected);
+            self.evaluate_residual(t, state, &mut base)?;
+            self.telemetry.record_finite_difference_probe();
+            let eps = f64::EPSILON.sqrt();
+            for column in 0..dimension {
+                let scale = state[column].abs().max(self.finite_difference_atol).max(1.0);
+                let mut h = eps * scale;
+                if h == 0.0 || !h.is_finite() {
+                    h = eps;
+                }
+                probe_state[column] = state[column] + h;
+                self.evaluate_residual(t, &probe_state, &mut perturbed)?;
+                self.telemetry.record_finite_difference_probe();
+                probe_state[column] = state[column];
+                for row in 0..dimension {
+                    output[row * dimension + column] = (perturbed[row] - base[row]) / h;
+                }
+            }
+            validate_callback_output(RadauStage::Jacobian, expected, output)
+        })();
+
+        self.finite_difference_state = probe_state;
+        self.finite_difference_base = base;
+        self.finite_difference_perturbed = perturbed;
+        result
+    }
+
     pub(crate) fn evaluate_jacobian_layout(
         &mut self,
         t: f64,
@@ -460,6 +546,12 @@ impl<'a> SymbolicCallbackSession<'a> {
         layout: RadauMatrixLayout,
         output: &mut [f64],
     ) -> Result<(), RadauError> {
+        if self.jacobian_source == RadauJacobianSource::FiniteDifference {
+            if layout != RadauMatrixLayout::Dense {
+                return Err(RadauUnsupportedRoute::StructuredJacobianCallbackRequired.into());
+            }
+            return self.evaluate_finite_difference_jacobian(t, state, output);
+        }
         self.telemetry.count_stage(RadauStage::Jacobian);
         self.telemetry
             .record_policy_dispatch(self.execution_policy, output.len(), output.len());

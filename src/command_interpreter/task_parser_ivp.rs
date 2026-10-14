@@ -15,40 +15,40 @@
 //! the parser stage only validates and normalizes user input, while solver
 //! execution and postprocessing remain explicit follow-up steps.
 
-use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_common::{
-    ContinuationMode, ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
-    parse_continuation_spec, parse_symbolic_equation_system,
+    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode,
+    ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
 };
-use crate::numerical::BDF::BDF_api::{
-    BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver as BdfOdeSolver,
-};
-use crate::numerical::BE::{BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode};
-use crate::numerical::LSODE2::{
-    Lsode2AotProfile, Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend,
-    Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure,
-    Lsode2NativeExecutionConfig, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
-    FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend, Lsode2StopComparator,
-    Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
-    Lsode2SymbolicExecutionMode,
-};
-use crate::numerical::LSODE2::{Lsode2Error, Lsode2Solver};
 use crate::numerical::ODE_api2::{
     NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
 };
 use crate::numerical::Radau::{
-    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy,
-    RadauFrontend, RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver,
-    RadauTelemetryMode,
+    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
+    RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver, RadauTelemetryMode,
 };
-use crate::symbolic::symbolic_engine::Expr;
+use crate::numerical::BDF::BDF_api::{
+    BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver as BdfOdeSolver,
+};
+use crate::numerical::BE::{
+    BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode, BE,
+};
+use crate::numerical::LSODE2::{
+    FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend, IvpTelemetry, Lsode2AotProfile,
+    Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
+    Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2NativeExecutionConfig,
+    Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2StopComparator, Lsode2StopCondition,
+    Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+};
+use crate::numerical::LSODE2::{Lsode2Error, Lsode2Solver};
+use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
-use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fs;
@@ -207,6 +207,32 @@ pub enum Lsode2TaskExecutionSpec {
         profile: Lsode2AotProfile,
         output_parent_dir: Option<PathBuf>,
     },
+}
+
+impl Lsode2TaskExecutionSpec {
+    /// Stable task/CLI label; compiler details remain explicit for AOT.
+    pub fn label(&self) -> String {
+        match self {
+            Self::LambdifyExpr => "lambdify".to_string(),
+            Self::Aot {
+                toolchain,
+                profile,
+                output_parent_dir,
+            } => match output_parent_dir {
+                Some(path) => format!(
+                    "aot(toolchain={},profile={},output={})",
+                    toolchain.label(),
+                    profile.label(),
+                    path.display()
+                ),
+                None => format!(
+                    "aot(toolchain={},profile={})",
+                    toolchain.label(),
+                    profile.label()
+                ),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1648,8 +1674,12 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
             );
             if let Some(assembly) = spec.solver_options.symbolic_assembly {
                 options = options.with_symbolic_assembly_backend(match assembly {
-                    Lsode2SymbolicAssemblyBackend::ExprLegacy => BeSymbolicAssemblyBackend::ExprLegacy,
-                    Lsode2SymbolicAssemblyBackend::AtomView => BeSymbolicAssemblyBackend::AtomViewNative,
+                    Lsode2SymbolicAssemblyBackend::ExprLegacy => {
+                        BeSymbolicAssemblyBackend::ExprLegacy
+                    }
+                    Lsode2SymbolicAssemblyBackend::AtomView => {
+                        BeSymbolicAssemblyBackend::AtomViewNative
+                    }
                 });
             }
             if let Some(execution) = spec.solver_options.symbolic_execution.as_ref() {
@@ -1724,9 +1754,10 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 config.matrix_layout = match layout {
                     Lsode2LinearSystemStructure::Dense => RadauMatrixLayout::Dense,
                     Lsode2LinearSystemStructure::Sparse => RadauMatrixLayout::Sparse,
-                    Lsode2LinearSystemStructure::Banded { kl, ku } => {
-                        RadauMatrixLayout::Banded { lower: kl, upper: ku }
-                    }
+                    Lsode2LinearSystemStructure::Banded { kl, ku } => RadauMatrixLayout::Banded {
+                        lower: kl,
+                        upper: ku,
+                    },
                 };
             }
             if let Some(policy) = spec.solver_options.execution_policy {
@@ -1874,10 +1905,12 @@ fn build_lsode2_problem_config_from_spec(
         }
         let symbolic_assembly = options
             .symbolic_assembly
+            .or(spec.solver_options.symbolic_assembly)
             .unwrap_or(Lsode2SymbolicAssemblyBackend::ExprLegacy);
         let symbolic_execution = options
             .symbolic_execution
             .clone()
+            .or_else(|| spec.solver_options.symbolic_execution.clone())
             .unwrap_or(Lsode2TaskExecutionSpec::LambdifyExpr);
 
         match symbolic_execution {
@@ -1906,7 +1939,10 @@ fn build_lsode2_problem_config_from_spec(
             }
         }
 
-        if let Some(structure) = options.linear_system_structure {
+        if let Some(structure) = options
+            .linear_system_structure
+            .or(spec.solver_options.matrix_layout)
+        {
             config = config.with_linear_system_structure(structure);
         }
         if let Some(policy) = options.linear_solver_policy {
@@ -1930,6 +1966,20 @@ fn build_lsode2_problem_config_from_spec(
                 ),
             };
         }
+    }
+
+    // Common task controls apply to LSODE2 too. This keeps task documents
+    // portable between BDF, Radau, Backward Euler, and LSODE2 without forcing
+    // users to learn a second spelling for the same telemetry/policy fields.
+    if let Some(policy) = spec.solver_options.execution_policy {
+        config = config.with_lambdify_execution_policy(policy);
+    }
+    if let Some(telemetry) = spec.solver_options.telemetry {
+        config = config.with_telemetry(match telemetry {
+            IvpTelemetryModeSpec::Off => IvpTelemetry::disabled(),
+            IvpTelemetryModeSpec::Counters => IvpTelemetry::counters(),
+            IvpTelemetryModeSpec::Timings => IvpTelemetry::detailed(),
+        });
     }
 
     // Keep parser route symbolic-only to avoid hybrid "document + closures" mode.
@@ -2406,7 +2456,34 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         Some(section) => section,
         None => return Ok(IvpSolverOptionsSpec::default()),
     };
-    let lsode2 = parse_lsode2_options(section)?;
+    let common_symbolic_assembly = parse_common_symbolic_assembly(section)?;
+    let common_symbolic_execution = parse_common_symbolic_execution(section)?;
+    let common_matrix_layout = parse_common_matrix_layout(section)?;
+    let common_execution_policy = parse_common_execution_policy(section)?;
+    let common_telemetry = parse_common_telemetry(section)?;
+    let mut lsode2 = parse_lsode2_options(section)?;
+
+    // Normalize common and LSODE2-prefixed spellings before dispatch. The
+    // prefixed spelling remains authoritative, while common fields keep the
+    // task language consistent across stiff IVP solvers.
+    if let Some(options) = lsode2.as_mut() {
+        options.symbolic_assembly = options.symbolic_assembly.or(common_symbolic_assembly);
+        options.symbolic_execution = options
+            .symbolic_execution
+            .clone()
+            .or_else(|| common_symbolic_execution.clone());
+        options.linear_system_structure = options.linear_system_structure.or(common_matrix_layout);
+    } else if common_symbolic_assembly.is_some()
+        || common_symbolic_execution.is_some()
+        || common_matrix_layout.is_some()
+    {
+        lsode2 = Some(Lsode2TaskOptionsSpec {
+            symbolic_assembly: common_symbolic_assembly,
+            symbolic_execution: common_symbolic_execution.clone(),
+            linear_system_structure: common_matrix_layout,
+            ..Lsode2TaskOptionsSpec::default()
+        });
+    }
     Ok(IvpSolverOptionsSpec {
         step_size: get_optional_float(section, "step_size")?,
         tolerance: get_optional_float(section, "tolerance")?,
@@ -2418,11 +2495,11 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         vectorized: get_optional_bool(section, "vectorized")?,
         parallel: get_optional_bool(section, "parallel")?,
         neighborhood_check: get_optional_float(section, "neighborhood_check")?,
-        symbolic_assembly: parse_common_symbolic_assembly(section)?,
-        symbolic_execution: parse_common_symbolic_execution(section)?,
-        matrix_layout: parse_common_matrix_layout(section)?,
-        execution_policy: parse_common_execution_policy(section)?,
-        telemetry: parse_common_telemetry(section)?,
+        symbolic_assembly: common_symbolic_assembly,
+        symbolic_execution: common_symbolic_execution,
+        matrix_layout: common_matrix_layout,
+        execution_policy: common_execution_policy,
+        telemetry: common_telemetry,
         lsode2,
     })
 }
@@ -2430,12 +2507,18 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
 fn parse_common_symbolic_assembly(
     section: &GenericSectionMap,
 ) -> Result<Option<Lsode2SymbolicAssemblyBackend>, IvpTaskError> {
-    let raw = get_optional_string(section, "symbolic_frontend", "solver_options")?
-        .or(get_optional_string(section, "symbolic_assembly", "solver_options")?);
+    let raw = get_optional_string(section, "symbolic_frontend", "solver_options")?.or(
+        get_optional_string(section, "symbolic_assembly", "solver_options")?,
+    );
     let Some(raw) = raw else {
         return Ok(None);
     };
-    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
         "exprlegacy" | "expr_legacy" | "expr" => {
             Ok(Some(Lsode2SymbolicAssemblyBackend::ExprLegacy))
         }
@@ -2445,9 +2528,7 @@ fn parse_common_symbolic_assembly(
         other => Err(IvpTaskError::InvalidField {
             section: "solver_options".to_string(),
             field: "symbolic_frontend".to_string(),
-            message: format!(
-                "unknown symbolic frontend `{other}` (use ExprLegacy or AtomView)"
-            ),
+            message: format!("unknown symbolic frontend `{other}` (use ExprLegacy or AtomView)"),
         }),
     }
 }
@@ -2460,7 +2541,10 @@ fn parse_common_symbolic_execution(
         return Ok(None);
     };
     if matches!(
-        raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str(),
+        raw.trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str(),
         "lambdify" | "lambdify_expr" | "lambdifyexpr"
     ) {
         return Ok(Some(Lsode2TaskExecutionSpec::LambdifyExpr));
@@ -2488,7 +2572,7 @@ fn parse_common_symbolic_execution(
                 section: "solver_options".to_string(),
                 field: "aot_toolchain".to_string(),
                 message: format!("unknown AOT toolchain `{other}`"),
-            })
+            });
         }
     };
     let profile = match profile_raw.trim().to_ascii_lowercase().as_str() {
@@ -2499,7 +2583,7 @@ fn parse_common_symbolic_execution(
                 section: "solver_options".to_string(),
                 field: "aot_profile".to_string(),
                 message: format!("unknown AOT profile `{other}`"),
-            })
+            });
         }
     };
     Ok(Some(Lsode2TaskExecutionSpec::Aot {
@@ -2512,8 +2596,9 @@ fn parse_common_symbolic_execution(
 fn parse_common_matrix_layout(
     section: &GenericSectionMap,
 ) -> Result<Option<Lsode2LinearSystemStructure>, IvpTaskError> {
-    let raw = get_optional_string(section, "matrix_layout", "solver_options")?
-        .or(get_optional_string(section, "linear_structure", "solver_options")?);
+    let raw = get_optional_string(section, "matrix_layout", "solver_options")?.or(
+        get_optional_string(section, "linear_structure", "solver_options")?,
+    );
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -2551,7 +2636,9 @@ fn parse_common_execution_policy(
         other => Err(IvpTaskError::InvalidField {
             section: "solver_options".to_string(),
             field: "execution_policy".to_string(),
-            message: format!("unknown execution policy `{other}` (use sequential, parallel or auto)"),
+            message: format!(
+                "unknown execution policy `{other}` (use sequential, parallel or auto)"
+            ),
         }),
     }
 }

@@ -10,7 +10,10 @@ use crate::numerical::Nonlinear_systems::least_squares::{
     PreparedSymbolicLeastSquaresProblem,
 };
 use crate::numerical::Nonlinear_systems::solver::NonlinearSolver;
-use crate::numerical::Nonlinear_systems::symbolic::SymbolicProblemOptions;
+use crate::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, PreparationTelemetryMode, SymbolicLambdifyFrontend,
+    SymbolicProblemOptions,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use log::{log, Level};
 use nalgebra::DVector;
@@ -55,6 +58,10 @@ pub struct SymbolicLeastSquaresSolver {
     /// Prepared shared symbolic frontend used by all solves.
     prepared: Option<PreparedSymbolicLeastSquaresProblem>,
     telemetry_mode: LeastSquaresTelemetryMode,
+    /// Symbolic frontend used by the shared Lambdify preparation.
+    lambdify_frontend: SymbolicLambdifyFrontend,
+    /// Callback execution policy used by the prepared symbolic backend.
+    lambdify_execution_policy: LambdifyExecutionPolicy,
 }
 
 impl SymbolicLeastSquaresSolver {
@@ -77,6 +84,8 @@ impl SymbolicLeastSquaresSolver {
             positive_variables: Vec::new(),
             prepared: None,
             telemetry_mode: LeastSquaresTelemetryMode::Off,
+            lambdify_frontend: SymbolicLambdifyFrontend::ExprLegacy,
+            lambdify_execution_policy: LambdifyExecutionPolicy::Sequential,
         }
     }
 
@@ -179,6 +188,24 @@ impl SymbolicLeastSquaresSolver {
     /// Enables optional LM telemetry for solves through this symbolic wrapper.
     pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
         self.telemetry_mode = mode;
+        self
+    }
+
+    /// Selects the symbolic representation used by the shared Lambdify path.
+    ///
+    /// `ExprLegacy` remains the default for compatibility. `AtomViewNative`
+    /// stays an independent route and is never reached by converting the
+    /// prepared Atom graph back into the legacy expression tree.
+    pub fn with_lambdify_frontend(mut self, frontend: SymbolicLambdifyFrontend) -> Self {
+        self.prepared = None;
+        self.lambdify_frontend = frontend;
+        self
+    }
+
+    /// Selects sequential or thresholded parallel callback evaluation.
+    pub fn with_lambdify_execution_policy(mut self, policy: LambdifyExecutionPolicy) -> Self {
+        self.prepared = None;
+        self.lambdify_execution_policy = policy;
         self
     }
 
@@ -293,7 +320,14 @@ impl SymbolicLeastSquaresSolver {
     ) -> Result<(), crate::numerical::Nonlinear_systems::error::SolveError> {
         let mut options = SymbolicProblemOptions::new()
             .with_variables(self.values.clone())
-            .with_lambdify_backend();
+            .with_lambdify_backend()
+            .with_lambdify_frontend(self.lambdify_frontend)
+            .with_lambdify_execution_policy(self.lambdify_execution_policy)
+            .with_preparation_telemetry(if self.telemetry_mode == LeastSquaresTelemetryMode::Detailed {
+                PreparationTelemetryMode::Collect
+            } else {
+                PreparationTelemetryMode::Disabled
+            });
         if let Some(parameters) = &self.parameters {
             options = options.with_equation_parameters(parameters.clone());
         }

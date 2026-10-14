@@ -102,6 +102,21 @@ pub enum IvpBackendError {
     InvalidArgumentSchema { message: String },
     /// High-level generated-backend orchestration failed.
     GeneratedBackendFailure { message: String },
+    /// The requested AOT artifact does not exist in the selected cache.
+    AotArtifactMissing { message: String },
+    /// The cache contains a prepared state, but no compiled artifact is ready.
+    AotArtifactNotBuilt { message: String },
+    /// The artifact was found, but its runtime library could not be loaded.
+    AotRuntimeUnavailable { message: String },
+    /// A typed AOT lifecycle failure with its stage and stable failure class.
+    AotLifecycleFailure {
+        stage: crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage,
+        kind: crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind,
+        artifact_key: String,
+        message: String,
+    },
+    /// AOT was requested without an output directory for materialization.
+    AotBuildOutputDirMissing,
     /// Native AtomView preparation failed before a callback was published.
     AtomPreparationFailure { stage: String, message: String },
     /// Native symbolic differentiation failed at a specific Jacobian entry.
@@ -173,6 +188,22 @@ impl fmt::Display for IvpBackendError {
             }
             Self::InvalidArgumentSchema { message } => write!(f, "{message}"),
             Self::GeneratedBackendFailure { message } => write!(f, "{message}"),
+            Self::AotArtifactMissing { message } => write!(f, "{message}"),
+            Self::AotArtifactNotBuilt { message } => write!(f, "{message}"),
+            Self::AotRuntimeUnavailable { message } => write!(f, "{message}"),
+            Self::AotLifecycleFailure {
+                stage,
+                kind,
+                artifact_key,
+                message,
+            } => write!(
+                f,
+                "AOT lifecycle failure (stage={stage:?}, kind={kind:?}, artifact={artifact_key}): {message}"
+            ),
+            Self::AotBuildOutputDirMissing => write!(
+                f,
+                "symbolic IVP generated backend build requested without output directory"
+            ),
             Self::AtomPreparationFailure { stage, message } => {
                 write!(f, "AtomView preparation failed during {stage}: {message}")
             }
@@ -230,6 +261,49 @@ impl fmt::Display for IvpBackendError {
                 f,
                 "invalid native banded storage for {rows}x{cols} Jacobian: lower={lower}, upper={upper}"
             ),
+        }
+    }
+}
+
+impl IvpBackendError {
+    /// Preserve the generated-backend lifecycle classification at the solver
+    /// boundary instead of collapsing it into a display string.
+    pub fn from_generated_error(
+        error: crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedError,
+    ) -> Self {
+        use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedError;
+
+        match error {
+            SymbolicIvpGeneratedError::IvpBackend(error) => error,
+            SymbolicIvpGeneratedError::CompiledAotArtifactMissing(message) => {
+                Self::AotArtifactMissing { message }
+            }
+            SymbolicIvpGeneratedError::CompiledAotArtifactNotBuilt(message) => {
+                Self::AotArtifactNotBuilt { message }
+            }
+            SymbolicIvpGeneratedError::CompiledAotRuntimeUnavailable(message) => {
+                Self::AotRuntimeUnavailable { message }
+            }
+            SymbolicIvpGeneratedError::AotLifecycle(error) => {
+                let diagnostics = error.diagnostics;
+                Self::AotLifecycleFailure {
+                    stage: diagnostics.stage,
+                    kind: diagnostics.kind,
+                    artifact_key: diagnostics.artifact_key,
+                    message: diagnostics.detail,
+                }
+            }
+            SymbolicIvpGeneratedError::AotBuildOutputDirMissing => {
+                Self::AotBuildOutputDirMissing
+            }
+            SymbolicIvpGeneratedError::AotBuildFailed(message) => {
+                Self::AotLifecycleFailure {
+                    stage: crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Build,
+                    kind: crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Compiler,
+                    artifact_key: "unknown".to_owned(),
+                    message,
+                }
+            }
         }
     }
 }

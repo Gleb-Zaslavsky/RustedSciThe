@@ -6,6 +6,7 @@
 //! warm callbacks, parameter continuation and callback policy dispatch.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,6 +18,8 @@ use RustedSciThe::numerical::BVP_sci::new::{
 use RustedSciThe::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use tabled::{Table, Tabled};
+
+static COLD_NAMESPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn validate_markdown_table(table: &str) {
     let mut expected_delimiters = None;
@@ -278,9 +281,10 @@ fn run_row(frontend: Frontend, layout: Layout, dimension: usize, policy_name: &s
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_nanos());
+            let sequence = COLD_NAMESPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             artifact_root = artifact_root
                 .join("cold-amortization")
-                .join(format!("{}-{nonce}", std::process::id()));
+                .join(format!("{}-{nonce}-{sequence}", std::process::id()));
         }
         let mut config = RustedSciThe::numerical::BVP_sci::new::SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
             artifact_root
@@ -1048,8 +1052,8 @@ fn cold_amortization(rows: &[Row], row: &Row) -> (String, String) {
     }) else {
         return ("missing-lambdify-row".into(), "missing-lambdify-row".into());
     };
-    if row.status != "ok" || row.aot_cache_misses == 0 || row.aot_cache_hits != 0 {
-        return ("cache-not-cold".into(), "cache-not-cold".into());
+    if !has_cold_build_provenance(row) {
+        return ("cold-build-unproven".into(), "cold-build-unproven".into());
     }
     let (Ok(aot_prepare), Ok(aot_series), Ok(lambda_prepare), Ok(lambda_series)) = (
         row.preparation_ms.parse::<f64>(),
@@ -1075,6 +1079,16 @@ fn cold_amortization(rows: &[Row], row: &Row) -> (String, String) {
         count.to_string()
     };
     (format!("{delta:+.1}% (cold+16)"), break_even)
+}
+
+fn has_cold_build_provenance(row: &Row) -> bool {
+    row.status == "ok"
+        && row.build_attempts > 0
+        && row.build_successes > 0
+        && row.link_attempts > 0
+        && row.link_successes > 0
+        && row.publication_calls > 0
+        && row.runtime_ready > 0
 }
 
 fn main() {
@@ -1154,16 +1168,15 @@ fn main() {
         if phase == "cold-amortization" {
             if row.frontend.starts_with("aot-")
                 && row.status == "ok"
-                && (row.aot_cache_misses == 0
-                    || row.aot_cache_hits != 0
-                    || row.build_attempts == 0
+                && (row.build_attempts == 0
                     || row.build_successes == 0
                     || row.link_attempts == 0
                     || row.link_successes == 0
-                    || row.publication_calls == 0)
+                    || row.publication_calls == 0
+                    || row.runtime_ready == 0)
             {
                 let reason = format!(
-                    "{} / {} / n={}: expected cold miss, successful build/link/publication, got hits={}, misses={}, build_attempts={}, build_successes={}, link_attempts={}, link_successes={}, publication_calls={}",
+                    "{} / {} / n={}: unique cold namespace did not produce a ready published build; resolver hits/misses are informational (hits={}, misses={}), lifecycle: build={}/{}, link={}/{}, publication={}, runtime_ready={}",
                     row.frontend,
                     row.layout,
                     row.dimension,
@@ -1173,7 +1186,8 @@ fn main() {
                     row.build_successes,
                     row.link_attempts,
                     row.link_successes,
-                    row.publication_calls
+                    row.publication_calls,
+                    row.runtime_ready
                 );
                 lifecycle_failures.push(reason.clone());
                 row.status = format!("error: {reason}");
@@ -1205,11 +1219,11 @@ fn main() {
         format!("\n\n## Failed Rows\n\n- {}\n", failures.join("\n- "))
     };
     let mut body = format!(
-        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-pair residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT currently uses finite differences for parameter derivatives (`df/dp`); Lambdify ExprLegacy/AtomViewNative have prepared symbolic `df/dp`. Callback timings across these routes therefore include different work and are not strict apples-to-apples evidence\n- in `cold-amortization`, every AOT row gets a unique artifact namespace; require nonzero cache misses and zero hits. `cold_total_16_vs_lambdify` compares preparation plus one 16-pair callback series, while `cold_break_even_callback_pairs` projects the callback-only crossover count; neither is a full-solve break-even claim\n- this callback-only phase is not full BVP solve break-even evidence; use `policy-full-solve` with large matched dimensions/nodes for execution-policy break-even\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
+        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-pair residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT uses generated residual/`df/dy` evaluators and a prepared symbolic Lambdify plan for `df/dp`; this hybrid route must be interpreted separately from the older finite-difference fallback evidence\n- in `cold-amortization`, every AOT row receives a unique artifact namespace. Cold build is gated by successful build, link, publication and runtime-ready lifecycle counters; resolver cache hit/miss counters are reported as diagnostics, not as coldness proof\n- `cold_total_16_vs_lambdify` compares preparation plus one 16-pair callback series, while `cold_break_even_callback_pairs` projects the callback-only crossover count; neither is a full-solve break-even claim\n- this callback-only phase is not full BVP solve break-even evidence; use `policy-full-solve` with large matched dimensions/nodes for execution-policy break-even\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
         table
     );
     body.push_str(
-        "\n\nThe callback-only dashboard times `df/dy` evaluation, not `df/dp`; it therefore does not measure the AOT finite-difference parameter-Jacobian overhead. The `df/dp` distinction is relevant to full parameterized BVP solves and must be read from solver-level telemetry/evidence.\n",
+        "\n\nThe callback-only dashboard times the residual and state Jacobian evaluators (`df/dy`), not the parameter Jacobian (`df/dp`) path. The latter is prepared symbolically and evaluated by the BVP solver during parameterized solves; assess its cost using solver-level telemetry rather than this callback-only table.\n",
     );
     body.push_str(&failure_note);
     let report_name =

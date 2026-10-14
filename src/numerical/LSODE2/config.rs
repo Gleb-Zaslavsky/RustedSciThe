@@ -1,9 +1,9 @@
 use super::algorithm::Lsode2ControllerConfig;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_runtime_api::{
-    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
     recommended_dense_jacobian_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
@@ -140,13 +140,21 @@ impl Lsode2NumericProblemOptions {
 
 /// Time-integration family selected by the LSODE2 facade.
 ///
-/// The first implementation milestone routes this to the crate's tested BDF
-/// engine.  Keeping the method enum explicit makes room for future LSODE-like
-/// Adams/BDF switching without overloading stringly-typed options.
+/// Controller family requested by the LSODE2 facade.
+///
+/// The numerical implementation keeps the controller policy separate from
+/// this value: `Bdf` and `Adams` select fixed families, while `Auto` selects
+/// the existing LSODA-style automatic Adams/BDF policy. Keeping the request
+/// explicit makes summaries and adapters truthful without introducing another
+/// stringly-typed option into the numerical core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lsode2Method {
-    /// Variable-order BDF method, currently backed by `numerical::BDF`.
+    /// Fixed variable-order BDF family.
     Bdf,
+    /// Fixed variable-order Adams family.
+    Adams,
+    /// Automatic Adams/BDF controller.
+    Auto,
 }
 
 impl Default for Lsode2Method {
@@ -159,6 +167,8 @@ impl Lsode2Method {
     pub fn label(self) -> &'static str {
         match self {
             Self::Bdf => "bdf",
+            Self::Adams => "adams",
+            Self::Auto => "auto",
         }
     }
 }
@@ -388,6 +398,16 @@ pub enum Lsode2LinearSolverPolicy {
     Force(Lsode2LinearSolverChoice),
 }
 
+impl Lsode2LinearSolverPolicy {
+    /// Stable human-readable label for CLI reports and provenance.
+    pub fn label(self) -> String {
+        match self {
+            Self::Auto => "auto".to_string(),
+            Self::Force(choice) => format!("force:{}", choice.label()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lsode2StopComparator {
     GreaterEqual,
@@ -471,6 +491,25 @@ pub enum Lsode2NativeExecutionConfig {
         max_step_attempts: usize,
         max_accepted_steps: usize,
     },
+}
+
+impl Lsode2NativeExecutionConfig {
+    /// Stable human-readable label for task previews and diagnostics.
+    pub fn label(self) -> String {
+        match self {
+            Self::BridgeSolve | Self::Disabled => "bridge_solve".to_string(),
+            Self::ProbeBeforeBridge {
+                max_step_attempts,
+                max_accepted_steps,
+            } => format!(
+                "probe_before_bridge(steps={max_step_attempts},accepted={max_accepted_steps})"
+            ),
+            Self::NativeSolve {
+                max_step_attempts,
+                max_accepted_steps,
+            } => format!("native_solve(steps={max_step_attempts},accepted={max_accepted_steps})"),
+        }
+    }
 }
 
 impl Default for Lsode2NativeExecutionConfig {
@@ -1027,11 +1066,9 @@ impl Lsode2ProblemConfig {
 
     /// Declares intent to use the non-stiff Adams family only.
     ///
-    /// Bridge execution currently remains BDF-only and rejects this mode.
-    /// Native execution modes (`probe_before_bridge` and `native_solve`) are
-    /// allowed to run Adams-like stepping so
-    /// we can mirror LSODE control-plane behavior while the native path is
-    /// being hardened.
+    /// Bridge execution remains BDF-only and rejects this mode. Native
+    /// execution modes (`probe_before_bridge` and `native_solve`) execute the
+    /// tested Adams-like stepping engine.
     pub fn with_adams_only_controller(self) -> Self {
         self.with_controller(Lsode2ControllerConfig::adams_only())
     }
@@ -1046,8 +1083,8 @@ impl Lsode2ProblemConfig {
     /// (Adams or BDF). Automatic stiffness/method switching is an `LSODA`-style
     /// behavior and is therefore exposed here as an explicit opt-in extension.
     ///
-    /// The current milestone still executes through the tested BDF engine and
-    /// reports that fallback explicitly in [`crate::numerical::LSODE2::Lsode2SolveSummary`].
+    /// Native execution performs the controller's Adams/BDF decision and
+    /// reports any bridge fallback explicitly in the solve summary.
     pub fn with_automatic_adams_bdf_controller(self) -> Self {
         self.with_controller(Lsode2ControllerConfig::automatic_adams_bdf())
     }
@@ -1494,6 +1531,20 @@ impl Lsode2ProblemConfig {
             residual: Arc::new(residual),
             jacobian: Arc::new(jacobian),
         });
+        self.residual_jacobian_source = Lsode2ResidualJacobianSource::Analytical;
+        self.sync_legacy_backend_from_policy();
+        self
+    }
+
+    /// Installs an already-owned analytical callback bundle.
+    ///
+    /// This is the non-generic counterpart to [`Self::with_analytical_callbacks`]
+    /// for adapters that must build callbacks behind an FFI or scripting
+    /// boundary before handing ownership to LSODE2. It avoids wrapping an
+    /// existing `Arc<dyn Fn...>` in another closure and preserves the same
+    /// analytical source policy.
+    pub fn with_analytical_callback_bundle(mut self, callbacks: Lsode2AnalyticalCallbacks) -> Self {
+        self.analytical_callbacks = Some(callbacks);
         self.residual_jacobian_source = Lsode2ResidualJacobianSource::Analytical;
         self.sync_legacy_backend_from_policy();
         self

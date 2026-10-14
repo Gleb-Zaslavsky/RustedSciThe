@@ -488,6 +488,38 @@ Then run `target/release/RustedSciThe run model.txt` (or
 `target\release\RustedSciThe.exe run model.txt` on Windows). The task runner
 solves the model and writes the Markdown report and Plotters image requested
 in `postprocessing`; omit or change those options to select different outputs.
+When installing or copying the binary outside the source tree, the same
+commands use the installed path, for example `RustedSciThe.exe check model.txt`
+and `RustedSciThe.exe run model.txt`. Use `RustedSciThe.exe wizard` only from
+an interactive console; scripts should use explicit `template` or task files.
+If requested output files already exist, `run` refuses to replace them until
+`--force` is supplied.
+
+For scripts that execute one document at a time, `run --format json` emits one
+compact lifecycle record on stdout instead of the human preview and summary:
+
+```sh
+target/release/RustedSciThe run model.txt --format json
+```
+
+For a reproducible night run, pass several documents to `batch`. The runner
+continues after an individual failure, prints a compact table, and can write a
+machine-readable JSON summary without mixing compiler or solver trace output
+into that report:
+
+```sh
+target/release/RustedSciThe batch tasks/a.txt tasks/b.txt \
+  --format json --report reports/night-summary.json
+```
+
+Use `--force` only when intentionally replacing an existing report. Relative
+artifact paths inside a task document are resolved beside that document, so
+the result does not depend on the directory from which the executable was
+launched. Exit code `0` means success (or a clean interactive cancellation),
+`3` is a parse/configuration failure, `4` is a batch with at least one failed
+task, `5` is an input/output or postprocessing failure, and `6` is solver
+execution failure. Run `RustedSciThe --help` for the complete command list;
+`RustedSciThe showcase` prints the same list with source-checkout examples.
 
 ## Contributing
 

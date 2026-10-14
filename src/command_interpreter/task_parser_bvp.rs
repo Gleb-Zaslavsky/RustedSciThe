@@ -479,6 +479,8 @@ impl BvpTaskSpec {
 pub struct BvpTaskRunResult {
     pub specification: BvpTaskSpec,
     pub result: Option<DMatrix<f64>>,
+    /// Final adaptive or fixed mesh corresponding to `result`.
+    pub mesh: Option<Vec<f64>>,
     /// One final matrix per executed continuation segment. The last entry is
     /// also exposed through `result` for compatibility with existing callers.
     pub continuation_segments: Vec<BvpTaskSegmentResult>,
@@ -492,7 +494,7 @@ pub struct BvpTaskRunResult {
 
 /// Runtime facts retained for task-shell summaries without storing the full
 /// potentially large solver trace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BvpTaskRuntimeTelemetry {
     pub mode: BvpSciTelemetryMode,
     pub requested_sparse_factorization: Option<BvpSciSparseFactorization>,
@@ -502,6 +504,26 @@ pub struct BvpTaskRuntimeTelemetry {
     pub superlu_factorizations: Option<u64>,
     pub linear_factorizations: Option<u64>,
     pub linear_solves: Option<u64>,
+    pub timings: Option<BvpTaskRuntimeTimings>,
+}
+
+/// Selected inclusive/exclusive stage timings retained for Python and CLI
+/// reports. `None` means the native solver did not measure that stage.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BvpTaskRuntimeTimings {
+    pub preparation_ms: Option<f64>,
+    pub rhs_callback_ms: Option<f64>,
+    pub jacobian_callback_ms: Option<f64>,
+    pub residual_evaluation_ms: Option<f64>,
+    pub jacobian_evaluation_ms: Option<f64>,
+    pub linear_assembly_ms: Option<f64>,
+    pub factorization_ms: Option<f64>,
+    pub linear_solve_ms: Option<f64>,
+    pub newton_ms: Option<f64>,
+    pub mesh_refinement_ms: Option<f64>,
+    pub full_solve_ms: Option<f64>,
+    pub full_solve_total_ms: Option<f64>,
+    pub sparse_csc_assembly_ms: Option<f64>,
 }
 
 /// Effective sparse route as observed by solver telemetry.
@@ -544,6 +566,7 @@ impl BvpTaskRuntimeTelemetry {
             superlu_factorizations: counters_enabled.then_some(0),
             linear_factorizations: counters_enabled.then_some(0),
             linear_solves: counters_enabled.then_some(0),
+            timings: None,
         }
     }
 
@@ -563,6 +586,21 @@ impl BvpTaskRuntimeTelemetry {
         if let Some(total) = &mut self.linear_solves {
             *total += snapshot.linear_solves;
         }
+        self.timings = Some(BvpTaskRuntimeTimings {
+            preparation_ms: snapshot.preparation_ms,
+            rhs_callback_ms: snapshot.rhs_callback_ms,
+            jacobian_callback_ms: snapshot.jacobian_callback_ms,
+            residual_evaluation_ms: snapshot.residual_evaluation_ms,
+            jacobian_evaluation_ms: snapshot.jacobian_evaluation_ms,
+            linear_assembly_ms: snapshot.linear_assembly_ms,
+            factorization_ms: snapshot.factorization_ms,
+            linear_solve_ms: snapshot.linear_solve_ms,
+            newton_ms: snapshot.newton_ms,
+            mesh_refinement_ms: snapshot.mesh_refinement_ms,
+            full_solve_ms: snapshot.full_solve_ms,
+            full_solve_total_ms: snapshot.full_solve_total_ms,
+            sparse_csc_assembly_ms: snapshot.sparse_csc_assembly_ms,
+        });
 
         self.sparse_backend_outcome = match self.requested_sparse_factorization {
             None => BvpTaskSparseBackendOutcome::NotApplicable,
@@ -598,6 +636,9 @@ pub struct BvpTaskContinuationTelemetry {
 pub struct BvpTaskSegmentResult {
     pub index: usize,
     pub parameters: Vec<f64>,
+    /// Mesh corresponding to this segment's state matrix.  BVP_sci may refine
+    /// this independently for every fresh or restarted segment.
+    pub mesh: Vec<f64>,
     pub result: DMatrix<f64>,
 }
 
@@ -1263,6 +1304,7 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
             .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
                 solver: "BVP_Damp",
             }))?;
+        let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
         continuation_telemetry.segments += 1;
         continuation_telemetry.fresh_preparations += 1;
         continuation_telemetry.peak_result_elements = continuation_telemetry
@@ -1271,13 +1313,16 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         executed.push(BvpTaskSegmentResult {
             index,
             parameters: values.clone(),
+            mesh,
             result,
         });
     }
     let result = executed.last().map(|segment| segment.result.clone());
+    let mesh = executed.last().map(|segment| segment.mesh.clone());
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
+        mesh,
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: None,
@@ -1414,6 +1459,7 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
             .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
                 solver: "BVP_Damp",
             }))?;
+        let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
         telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
@@ -1428,14 +1474,17 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
         executed.push(BvpTaskSegmentResult {
             index,
             parameters: row.clone(),
+            mesh,
             result,
         });
     }
 
     let result = executed.last().map(|segment| segment.result.clone());
+    let mesh = executed.last().map(|segment| segment.mesh.clone());
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
+        mesh,
         continuation_segments: executed,
         continuation_telemetry: telemetry,
         runtime_telemetry: None,
@@ -1893,13 +1942,16 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
             plan.execute(&dataset).map_err(BvpTaskError::Postprocess)?;
         }
         let result = sci_solution_matrix(&solution)?;
+        let mesh = solution.x.clone();
         executed.push(BvpTaskSegmentResult {
             index,
             parameters: values.clone(),
+            mesh,
             result,
         });
     }
     let result = executed.last().map(|segment| segment.result.clone());
+    let mesh = executed.last().map(|segment| segment.mesh.clone());
     let continuation_telemetry = BvpTaskContinuationTelemetry {
         segments: executed.len(),
         fresh_preparations: executed.len(),
@@ -1909,6 +1961,7 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
+        mesh,
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
@@ -1981,14 +2034,17 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
             let dataset = sci_solution_dataset(&solution, &spec.equations.unknowns)?;
             plan.execute(&dataset).map_err(BvpTaskError::Postprocess)?;
         }
+        let mesh = solution.x.clone();
         executed.push(BvpTaskSegmentResult {
             index,
             parameters: values.clone(),
+            mesh,
             result: sci_solution_matrix(&solution)?,
         });
     }
 
     let result = executed.last().map(|segment| segment.result.clone());
+    let mesh = executed.last().map(|segment| segment.mesh.clone());
     let continuation_telemetry = BvpTaskContinuationTelemetry {
         segments: executed.len(),
         fresh_preparations: 1,
@@ -2001,6 +2057,7 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
     Ok(BvpTaskRunResult {
         specification: spec,
         result,
+        mesh,
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
@@ -2040,6 +2097,13 @@ fn bvp_parameter_values(
         values[index] = value;
     }
     Ok(values)
+}
+
+fn uniform_bvp_mesh(t0: f64, t_end: f64, n_steps: usize) -> Vec<f64> {
+    let count = n_steps.max(2);
+    (0..count)
+        .map(|index| t0 + (t_end - t0) * index as f64 / (count - 1) as f64)
+        .collect()
 }
 
 /// Convert BVP_Damp's node-major full result (`nodes x states`) into the

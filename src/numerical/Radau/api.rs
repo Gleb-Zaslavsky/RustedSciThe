@@ -914,6 +914,7 @@ impl RadauSolver {
             });
         }
         let mut session = self.callbacks.session_with_telemetry(self.config.telemetry);
+        session.set_jacobian_policy(self.config.jacobian_source, self.config.atol);
         session
             .rebind_parameters(parameters)
             .map_err(RadauError::from)?;

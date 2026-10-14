@@ -1013,9 +1013,9 @@ impl Lsode2Solver {
     /// Returns the current controller method-family decision for current
     /// runtime telemetry.
     ///
-    /// The current executable engine is BDF. This method makes any temporary
-    /// fallback from the future Adams/BDF policy visible without forcing users
-    /// to inspect the full solve summary.
+    /// This method makes the active Adams/BDF decision and any temporary
+    /// fallback visible without forcing users to inspect the full solve
+    /// summary.
     pub fn algorithm_switch_decision(&self) -> Lsode2SwitchDecision {
         self.algorithm
             .switch_decision(self.algorithm_switch_telemetry_from_runtime())

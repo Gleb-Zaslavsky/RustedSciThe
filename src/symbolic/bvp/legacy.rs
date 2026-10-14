@@ -5105,7 +5105,9 @@ impl Jacobian {
 
         let mut table = Builder::from(timer_hash.clone()).build();
         table.with(Style::modern_rounded());
-        println!("{}", table.to_string());
+        // This is diagnostic output, not part of the solver result.  Route it
+        // through the logger so library users are not forced to parse stdout.
+        info!("BVP symbolic generation timing:\n{}", table);
         info!(
             "\n \n ____________END OF GENERATE BVP ________________________________________________________________"
         );
@@ -5351,8 +5353,8 @@ impl Jacobian {
         self.variable_string = variable_string.clone();
         self.vector_of_variables =
             Expr::parse_vector_expression(variable_string.iter().map(|s| s.as_str()).collect());
-        println!(" {:?}", self.vector_of_functions);
-        println!(" {:?}", self.vector_of_variables);
+        debug!("BVP symbolic functions initialized: {:?}", self.vector_of_functions);
+        debug!("BVP symbolic variables initialized: {:?}", self.vector_of_variables);
     }
 
     /// Sets symbolic parameter names used during residual/Jacobian evaluation.
@@ -7856,7 +7858,7 @@ impl Jacobian {
             bc_handling.elapsed().as_millis() as f64,
         );
         // DISCRETAZING EQUATIONS
-        println!("creating discretization equations");
+        debug!("creating BVP discretization equations");
         let discretization_start = Instant::now();
 
         // Optimized discretization with variable tracking
@@ -8000,7 +8002,7 @@ impl Jacobian {
 
         let mut table = Builder::from(timer_hash.clone()).build();
         table.with(Style::modern_rounded());
-        println!("{}", table.to_string());
+        info!("BVP legacy discretization timing:\n{}", table);
     }
 
     /// Automatically detects the bandwidth of the sparse Jacobian matrix using parallel computation.

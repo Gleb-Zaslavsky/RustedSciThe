@@ -1,0 +1,94 @@
+# Руководство по Python-интерфейсу RustedSciThe
+
+Python-пакет является тонкой обёрткой над Rust-ядром. Численные алгоритмы и
+символьные операции не переписаны на Python: `Expr` разбирается,
+дифференцируется и упрощается в Rust, а solver владеет подготовкой,
+коллбэками, workspace и телеметрией.
+
+## Установка под Windows
+
+```powershell
+py -3.12 -m venv .venv-rustedscithe
+.\.venv-rustedscithe\Scripts\python.exe -m pip install -U pip numpy maturin
+& .\.venv-rustedscithe\Scripts\maturin.exe develop --manifest-path bindings/python/Cargo.toml
+```
+
+Пакет ориентирован на `abi3-py310` и NumPy 2.x. Расширение называется
+`rustedscithe._native`, но пользовательский код должен импортировать обычный
+`rustedscithe`.
+
+## Независимые измерения маршрута
+
+| Измерение | Значения | Смысл |
+| --- | --- | --- |
+| символьный frontend | `expr_legacy`, `atom_native` | подготовка и дифференцирование выражений |
+| execution | `lambdify`, `aot` | closure в процессе или скомпилированный артефакт |
+| layout | `dense`, `sparse`, `banded` | хранение и решение линейной системы |
+| политика коллбэков | `sequential`, `parallel`, `auto` | планирование вычислений там, где это поддержано |
+
+Проверяйте `capabilities("solver")`. Неподдержанный набор настроек даёт
+`UnsupportedOptionError`, а не молча переключается на другой backend.
+
+## IVP и continuation
+
+`solve_ivp(...)` удобен для одиночного решения, а `create_ivp(...)` нужен для
+явной подготовки, continuation и restart. Для серии параметров подготовьте
+модель один раз:
+
+```python
+import numpy as np
+from rustedscithe import BdfSolver, Expr
+
+y = Expr.variable("y")
+a = Expr.variable("a")
+solver = BdfSolver(
+    [-a * y], ["y"], "t", np.array([1.0]), 0.0, 0.5, 0.1,
+    parameters=["a"], parameter_values=np.array([1.0]),
+)
+solver.prepare()
+first = solver.solve()
+second = solver.continue_with_parameters(np.array([2.0]), 1.0)
+```
+
+Continuation использует подготовленный символьный маршрут, но не начинает
+новое решение с исходного `y0`. Для нового состояния и интервала используйте
+`restart(...)`. Холодная AOT-компиляция может окупиться только на длинной
+серии, поэтому сравнивайте отдельно preparation, callback и full solve.
+
+## BVP
+
+`solve_bvp("bvp_sci", ...)` и `solve_bvp("bvp_damp", ...)` имеют общий
+внешний lifecycle, но намеренно разные граничные данные:
+
+- BVP_sci принимает список символьных граничных невязок;
+- BVP_Damp принимает mapping состояния к граничным условиям и требует bounds.
+
+Нельзя сравнивать layout на разных уравнениях: Dense естественен для малых
+плотных задач, а Sparse/Banded могут выигрывать на структурированных
+диффузионных или collocation-системах. SuperLU в BVP_sci является opt-in;
+доступность и fallback отражаются в телеметрии.
+
+## NumPy и владение данными
+
+Результаты имеют owned-методы `times_array()`, `states_array()`,
+`mesh_array()` и `values_array()`. IVP states имеют форму `(time, state)`,
+BVP_sci values — `(mesh, state)`, а BVP_Damp сохраняет native-ориентацию
+`(state, mesh)`. Старые list-методы оставлены. Zero-copy views намеренно не
+обещаются: подготовленные solvers переиспользуют изменяемые workspace.
+
+Facade принимает NumPy-векторы и преобразует их перед входом в Rust.
+
+## Ошибки, телеметрия и task parser
+
+Используйте typed exceptions: `InvalidConfigurationError`,
+`UnsupportedOptionError`, `PreparationError`, AOT-ошибки,
+`CallbackError`, `SolverError` и `ExhaustionError`. Native-ошибки имеют поля
+`stage`, `solver`, `route`; текст сообщения не следует разбирать программно.
+
+`TaskDocument.parse(...)`, `task(...)` и `run_task_batch(...)` используют
+общий Rust task parser. Batch продолжает выполнение после ошибки и может
+вывести компактную таблицу через `render_table(...)`.
+
+Примеры в `bindings/python/examples/` показывают Radau, BDF continuation,
+BVP_sci, nonlinear/fitting и batch-задачи. Они используют уже проверенную
+семантику основных Rust-гайдов, а не придумывают отдельные Python-алгоритмы.

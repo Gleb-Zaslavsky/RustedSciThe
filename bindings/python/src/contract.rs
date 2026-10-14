@@ -1,0 +1,718 @@
+use std::collections::HashMap;
+use std::fmt;
+
+use pyo3::prelude::*;
+
+use crate::errors::{InvalidConfigurationError, UnsupportedOptionError};
+
+/// Symbolic preparation route understood by the native solver APIs.
+#[pyclass(name = "SymbolicFrontend", module = "rustedscithe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolicFrontend {
+    ExprLegacy,
+    AtomNative,
+}
+
+impl fmt::Display for SymbolicFrontend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ExprLegacy => "ExprLegacy",
+            Self::AtomNative => "AtomNative",
+        })
+    }
+}
+
+#[pymethods]
+impl SymbolicFrontend {
+    fn __str__(&self) -> &'static str {
+        match self {
+            Self::ExprLegacy => "ExprLegacy",
+            Self::AtomNative => "AtomNative",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SymbolicFrontend.{}", self)
+    }
+}
+
+/// Runtime route used after symbolic preparation.
+#[pyclass(name = "ExecutionRoute", module = "rustedscithe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionRoute {
+    Lambdify,
+    AOT,
+}
+
+impl fmt::Display for ExecutionRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Lambdify => "Lambdify",
+            Self::AOT => "AOT",
+        })
+    }
+}
+
+#[pymethods]
+impl ExecutionRoute {
+    fn __str__(&self) -> &'static str {
+        match self {
+            Self::Lambdify => "Lambdify",
+            Self::AOT => "AOT",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ExecutionRoute.{}", self)
+    }
+}
+
+/// Linear algebra storage selected by a solver.
+#[pyclass(name = "MatrixLayout", module = "rustedscithe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatrixLayout {
+    Dense,
+    Sparse,
+    Banded,
+}
+
+impl fmt::Display for MatrixLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Dense => "Dense",
+            Self::Sparse => "Sparse",
+            Self::Banded => "Banded",
+        })
+    }
+}
+
+#[pymethods]
+impl MatrixLayout {
+    fn __str__(&self) -> &'static str {
+        match self {
+            Self::Dense => "Dense",
+            Self::Sparse => "Sparse",
+            Self::Banded => "Banded",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MatrixLayout.{}", self)
+    }
+}
+
+/// Callback evaluation policy for a solver.
+#[pyclass(name = "ExecutionPolicy", module = "rustedscithe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionPolicy {
+    Sequential,
+    Parallel,
+    Auto,
+}
+
+impl fmt::Display for ExecutionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Sequential => "Sequential",
+            Self::Parallel => "Parallel",
+            Self::Auto => "Auto",
+        })
+    }
+}
+
+#[pymethods]
+impl ExecutionPolicy {
+    fn __str__(&self) -> &'static str {
+        match self {
+            Self::Sequential => "Sequential",
+            Self::Parallel => "Parallel",
+            Self::Auto => "Auto",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ExecutionPolicy.{}", self)
+    }
+}
+
+/// Amount of runtime telemetry collected by a solver.
+#[pyclass(name = "TelemetryMode", module = "rustedscithe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TelemetryMode {
+    Off,
+    Counters,
+    Timings,
+}
+
+impl fmt::Display for TelemetryMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Off => "Off",
+            Self::Counters => "Counters",
+            Self::Timings => "Timings",
+        })
+    }
+}
+
+#[pymethods]
+impl TelemetryMode {
+    fn __str__(&self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Counters => "Counters",
+            Self::Timings => "Timings",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("TelemetryMode.{}", self)
+    }
+}
+
+fn normalize(value: Option<&str>, default: &str, field: &str) -> PyResult<String> {
+    let value = value.unwrap_or(default).trim();
+    if value.is_empty() {
+        return Err(InvalidConfigurationError::new_err(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(value.to_ascii_lowercase().replace(['-', ' '], "_"))
+}
+
+fn choose(value: Option<&str>, default: &str, field: &str, allowed: &[&str]) -> PyResult<String> {
+    let normalized = normalize(value, default, field)?;
+    if allowed.iter().any(|item| *item == normalized) {
+        Ok(normalized)
+    } else {
+        Err(UnsupportedOptionError::new_err(format!(
+            "unsupported {field} '{normalized}'; expected one of {}",
+            allowed.join(", ")
+        )))
+    }
+}
+
+fn choose_frontend(value: Option<&str>) -> PyResult<String> {
+    match choose(
+        value,
+        "expr_legacy",
+        "frontend",
+        &["expr_legacy", "expr", "atom_native", "atom_view"],
+    )?
+    .as_str()
+    {
+        "expr_legacy" | "expr" => Ok("expr_legacy".to_owned()),
+        "atom_native" | "atom_view" => Ok("atom_native".to_owned()),
+        _ => unreachable!("choose_frontend only accepts the four listed aliases"),
+    }
+}
+
+/// Common solver configuration values shared by the native APIs.
+///
+/// This object only validates and stores the common vocabulary. A concrete
+/// solver wrapper remains responsible for applying solver-specific options.
+#[pyclass(name = "SolverOptions", module = "rustedscithe")]
+#[derive(Clone, Debug)]
+pub struct SolverOptions {
+    frontend: String,
+    execution: String,
+    matrix_layout: String,
+    execution_policy: String,
+    telemetry: String,
+    aot_policy: String,
+    aot_toolchain: String,
+    aot_profile: String,
+    aot_output_dir: Option<String>,
+    aot_handoff_path: Option<String>,
+    band_lower: Option<usize>,
+    band_upper: Option<usize>,
+    sparse_factorization: String,
+}
+
+#[pymethods]
+impl SolverOptions {
+    #[new]
+    #[pyo3(signature = (*, frontend=None, execution=None, matrix_layout=None, execution_policy=None, telemetry=None, aot_policy=None, aot_toolchain=None, aot_profile=None, aot_output_dir=None))]
+    pub fn new(
+        frontend: Option<&str>,
+        execution: Option<&str>,
+        matrix_layout: Option<&str>,
+        execution_policy: Option<&str>,
+        telemetry: Option<&str>,
+        aot_policy: Option<&str>,
+        aot_toolchain: Option<&str>,
+        aot_profile: Option<&str>,
+        aot_output_dir: Option<&str>,
+    ) -> PyResult<Self> {
+        let aot_output_dir = match aot_output_dir {
+            Some(value) if value.trim().is_empty() => {
+                return Err(InvalidConfigurationError::new_err(
+                    "aot_output_dir must not be empty",
+                ));
+            }
+            Some(value) => Some(value.trim().to_owned()),
+            None => None,
+        };
+        Ok(Self {
+            frontend: choose_frontend(frontend)?,
+            execution: choose(execution, "lambdify", "execution", &["lambdify", "aot"])?,
+            matrix_layout: choose(
+                matrix_layout,
+                "dense",
+                "matrix_layout",
+                &["dense", "sparse", "banded"],
+            )?,
+            execution_policy: choose(
+                execution_policy,
+                "sequential",
+                "execution_policy",
+                &["sequential", "parallel", "auto"],
+            )?,
+            telemetry: choose(
+                telemetry,
+                "timings",
+                "telemetry",
+                &["off", "counters", "timings"],
+            )?,
+            aot_policy: choose(
+                aot_policy,
+                "build_if_missing",
+                "aot_policy",
+                &["require_prebuilt", "build_if_missing", "rebuild_always"],
+            )?,
+            aot_toolchain: choose(
+                aot_toolchain,
+                "gcc",
+                "aot_toolchain",
+                &["gcc", "tcc", "zig", "rust"],
+            )?,
+            aot_profile: choose(aot_profile, "release", "aot_profile", &["debug", "release"])?,
+            aot_output_dir,
+            aot_handoff_path: None,
+            band_lower: None,
+            band_upper: None,
+            sparse_factorization: "standard_faer".to_owned(),
+        })
+    }
+
+    #[getter]
+    pub(crate) fn frontend(&self) -> &str {
+        &self.frontend
+    }
+
+    #[getter]
+    pub(crate) fn execution(&self) -> &str {
+        &self.execution
+    }
+
+    #[getter]
+    pub(crate) fn matrix_layout(&self) -> &str {
+        &self.matrix_layout
+    }
+
+    #[getter]
+    pub(crate) fn execution_policy(&self) -> &str {
+        &self.execution_policy
+    }
+
+    #[getter]
+    pub(crate) fn telemetry(&self) -> &str {
+        &self.telemetry
+    }
+
+    #[getter]
+    pub(crate) fn aot_policy(&self) -> &str {
+        &self.aot_policy
+    }
+
+    #[getter]
+    pub(crate) fn aot_toolchain(&self) -> &str {
+        &self.aot_toolchain
+    }
+
+    #[getter]
+    pub(crate) fn aot_profile(&self) -> &str {
+        &self.aot_profile
+    }
+
+    #[getter]
+    pub(crate) fn aot_output_dir(&self) -> Option<&str> {
+        self.aot_output_dir.as_deref()
+    }
+
+    /// Configure the durable registry file shared by an AOT producer and
+    /// consumer. It is opt-in so existing constructor call sites remain
+    /// source-compatible.
+    pub fn set_aot_handoff_path(&mut self, path: Option<&str>) -> PyResult<()> {
+        self.aot_handoff_path = match path {
+            Some(value) if value.trim().is_empty() => {
+                return Err(InvalidConfigurationError::new_err(
+                    "aot_handoff_path must not be empty",
+                ));
+            }
+            Some(value) => Some(value.trim().to_owned()),
+            None => None,
+        };
+        Ok(())
+    }
+
+    #[getter]
+    pub(crate) fn aot_handoff_path(&self) -> Option<&str> {
+        self.aot_handoff_path.as_deref()
+    }
+
+    /// Set the lower and upper half-bandwidth used by a Banded route.
+    ///
+    /// The values are intentionally separate from `matrix_layout`: callers
+    /// may build one option object first and select the concrete layout later.
+    pub fn set_banded_width(&mut self, lower: usize, upper: usize) {
+        self.band_lower = Some(lower);
+        self.band_upper = Some(upper);
+    }
+
+    /// Select a solver-specific sparse factorization policy.
+    ///
+    /// The common option object stores the spelling without forcing every
+    /// solver to support every sparse implementation. BVP_sci currently
+    /// accepts `standard_faer`, the reusable-faer experiments and `superlu`.
+    pub fn set_sparse_factorization(&mut self, value: &str) -> PyResult<()> {
+        self.sparse_factorization = choose(
+            Some(value),
+            "standard_faer",
+            "sparse_factorization",
+            &[
+                "standard_faer",
+                "reusable_faer_experimental",
+                "reusable_faer_simplicial_experimental",
+                "superlu",
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn sparse_factorization(&self) -> &str {
+        &self.sparse_factorization
+    }
+
+    pub(crate) fn band_lower(&self) -> Option<usize> {
+        self.band_lower
+    }
+
+    pub(crate) fn band_upper(&self) -> Option<usize> {
+        self.band_upper
+    }
+
+    /// Validate common options against a concrete solver capability set.
+    pub fn validate_for(&self, solver: &str) -> PyResult<()> {
+        self.validate_aot_options()?;
+        let capabilities = capabilities_for(solver)?;
+        if !capabilities.frontends.iter().any(|v| v == &self.frontend)
+            || !capabilities.executions.iter().any(|v| v == &self.execution)
+            || !capabilities
+                .layouts
+                .iter()
+                .any(|v| v == &self.matrix_layout)
+            || !capabilities
+                .policies
+                .iter()
+                .any(|v| v == &self.execution_policy)
+        {
+            return Err(UnsupportedOptionError::new_err(format!(
+                "options are not supported by solver '{solver}'"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reject AOT-only knobs when the selected execution route is Lambdify.
+    ///
+    /// Keeping this check in the common contract prevents a setting from
+    /// being silently accepted by one wrapper and ignored by another.
+    pub(crate) fn validate_aot_options(&self) -> PyResult<()> {
+        if self.execution == "lambdify"
+            && (self.aot_policy != "build_if_missing"
+                || self.aot_toolchain != "gcc"
+                || self.aot_profile != "release"
+                || self.aot_output_dir.is_some()
+                || self.aot_handoff_path.is_some())
+        {
+            return Err(UnsupportedOptionError::new_err(
+                "aot_policy, aot_toolchain, aot_profile, aot_output_dir and aot_handoff_path require execution='aot'",
+            ));
+        }
+        Ok(())
+    }
+
+    fn as_dict(&self) -> HashMap<String, String> {
+        let mut values = HashMap::from([
+            ("frontend".to_owned(), self.frontend.clone()),
+            ("execution".to_owned(), self.execution.clone()),
+            ("matrix_layout".to_owned(), self.matrix_layout.clone()),
+            ("execution_policy".to_owned(), self.execution_policy.clone()),
+            ("telemetry".to_owned(), self.telemetry.clone()),
+            ("aot_policy".to_owned(), self.aot_policy.clone()),
+            ("aot_toolchain".to_owned(), self.aot_toolchain.clone()),
+            ("aot_profile".to_owned(), self.aot_profile.clone()),
+        ]);
+        if let Some(output_dir) = &self.aot_output_dir {
+            values.insert("aot_output_dir".to_owned(), output_dir.clone());
+        }
+        if let Some(handoff_path) = &self.aot_handoff_path {
+            values.insert("aot_handoff_path".to_owned(), handoff_path.clone());
+        }
+        if let Some(lower) = self.band_lower {
+            values.insert("band_lower".to_owned(), lower.to_string());
+        }
+        if let Some(upper) = self.band_upper {
+            values.insert("band_upper".to_owned(), upper.to_string());
+        }
+        values
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SolverOptions(frontend='{}', execution='{}', matrix_layout='{}', execution_policy='{}', telemetry='{}', aot_policy='{}', aot_toolchain='{}', aot_profile='{}', aot_output_dir={:?}, aot_handoff_path={:?}, band_lower={:?}, band_upper={:?})",
+            self.frontend,
+            self.execution,
+            self.matrix_layout,
+            self.execution_policy,
+            self.telemetry,
+            self.aot_policy,
+            self.aot_toolchain,
+            self.aot_profile,
+            self.aot_output_dir,
+            self.aot_handoff_path,
+            self.band_lower,
+            self.band_upper,
+        )
+    }
+}
+
+/// Capabilities advertised by a concrete solver family.
+#[pyclass(name = "SolverCapabilities", module = "rustedscithe")]
+#[derive(Clone, Debug)]
+pub struct SolverCapabilities {
+    solver: String,
+    frontends: Vec<String>,
+    executions: Vec<String>,
+    methods: Vec<String>,
+    layouts: Vec<String>,
+    policies: Vec<String>,
+    supports_continuation: bool,
+    supports_analytical_callbacks: bool,
+    analytical_callback_layouts: Vec<String>,
+}
+
+#[pymethods]
+impl SolverCapabilities {
+    #[getter]
+    pub(crate) fn solver(&self) -> &str {
+        &self.solver
+    }
+
+    #[getter]
+    pub(crate) fn frontends(&self) -> Vec<String> {
+        self.frontends.clone()
+    }
+
+    #[getter]
+    pub(crate) fn executions(&self) -> Vec<String> {
+        self.executions.clone()
+    }
+
+    /// Solver-specific method/controller values accepted by the Python API.
+    /// An empty list means that the solver has no selectable method in this
+    /// contract and uses its single native algorithm.
+    #[getter]
+    pub(crate) fn methods(&self) -> Vec<String> {
+        self.methods.clone()
+    }
+
+    #[getter]
+    pub(crate) fn layouts(&self) -> Vec<String> {
+        self.layouts.clone()
+    }
+
+    #[getter]
+    pub(crate) fn policies(&self) -> Vec<String> {
+        self.policies.clone()
+    }
+
+    #[getter]
+    pub(crate) fn supports_continuation(&self) -> bool {
+        self.supports_continuation
+    }
+
+    #[getter]
+    pub(crate) fn supports_analytical_callbacks(&self) -> bool {
+        self.supports_analytical_callbacks
+    }
+
+    /// Matrix layouts for which Python-owned analytical callbacks are valid.
+    ///
+    /// This is intentionally separate from the boolean capability because
+    /// different matrix layouts may expose different callback contracts.
+    #[getter]
+    pub(crate) fn analytical_callback_layouts(&self) -> Vec<String> {
+        self.analytical_callback_layouts.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SolverCapabilities(solver='{}')", self.solver)
+    }
+}
+
+fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
+    let solver = solver.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let common_frontends = vec!["expr_legacy".to_owned(), "atom_native".to_owned()];
+    match solver.as_str() {
+        "radau" | "radau5" => Ok(SolverCapabilities {
+            solver: "radau5".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            methods: vec!["radau5".to_owned()],
+            layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            // The separate RadauCallbackSolver exposes the native Dense
+            // callback contract; symbolic RadauSolver remains expression-only.
+            supports_analytical_callbacks: true,
+            analytical_callback_layouts: vec!["dense".to_owned()],
+        }),
+        "bdf" => Ok(SolverCapabilities {
+            solver,
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            methods: vec!["bdf".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            // BdfCallbackSolver exposes the native Dense callback contract;
+            // symbolic BdfSolver remains the expression-oriented entry point.
+            supports_analytical_callbacks: true,
+            analytical_callback_layouts: vec!["dense".to_owned()],
+        }),
+        "backward_euler" | "be" => Ok(SolverCapabilities {
+            solver: "backward_euler".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            methods: vec!["backward_euler".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "lsode2" => Ok(SolverCapabilities {
+            solver: "lsode2".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            methods: vec![
+                "bdf".to_owned(),
+                "adams".to_owned(),
+                "auto".to_owned(),
+                "lsoda".to_owned(),
+            ],
+            layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            // Python callbacks are available on all native LSODE2 layouts.
+            supports_analytical_callbacks: true,
+            analytical_callback_layouts: vec![
+                "dense".to_owned(),
+                "sparse".to_owned(),
+                "banded".to_owned(),
+            ],
+        }),
+        "bvp" | "bvp_damp" | "bvp_damped" => Ok(SolverCapabilities {
+            solver: "bvp_damp".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            // The direct Python class owns the Damped solver only. Frozen is
+            // still available through native/task routes but is deliberately
+            // not advertised as a complete direct Python API.
+            methods: vec!["damped".to_owned()],
+            layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "bvp_sci" | "bvpsci" | "bvp_scipy" => Ok(SolverCapabilities {
+            solver: "bvp_sci".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            methods: vec!["scipy_like".to_owned()],
+            layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "nonlinear" | "nonlinear_system" | "nonlinear_systems" => Ok(SolverCapabilities {
+            solver: "nonlinear_system".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec![
+                "newton".to_owned(),
+                "damped_newton".to_owned(),
+                "damped_newton_advanced".to_owned(),
+                "levenberg_marquardt".to_owned(),
+                "backtracking_levenberg_marquardt".to_owned(),
+                "levenberg_marquardt_minpack".to_owned(),
+                "nielsen_levenberg_marquardt".to_owned(),
+                "nielsen_levenberg_marquardt_advanced".to_owned(),
+                "trust_region".to_owned(),
+                "powell_dogleg".to_owned(),
+                "trust_region_lm".to_owned(),
+            ],
+            layouts: vec!["dense".to_owned()],
+            policies: vec![
+                "sequential".to_owned(),
+                "parallel".to_owned(),
+                "auto".to_owned(),
+            ],
+            supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "fitting" | "least_squares" => Ok(SolverCapabilities {
+            solver: "fitting".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["levenberg_marquardt".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        _ => Err(InvalidConfigurationError::new_err(format!(
+            "unknown solver '{solver}'; capabilities are currently defined for radau5, bdf, backward_euler, lsode2, bvp_damp, bvp_sci, nonlinear_system and fitting"
+        ))),
+    }
+}
+
+#[pyfunction]
+pub fn capabilities(solver: &str) -> PyResult<SolverCapabilities> {
+    capabilities_for(solver)
+}

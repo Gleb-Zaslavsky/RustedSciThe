@@ -333,9 +333,11 @@ fn cli_uses_the_same_task_through_check_run_and_batch() {
     let batch = run_cli(&["batch", &task_arg, "--report", &report_arg]);
     assert_eq!(batch.status.code(), Some(0));
     assert!(report.is_file());
-    assert!(fs::read_to_string(report)
-        .expect("same-task batch report should be readable")
-        .contains("passed"));
+    assert!(
+        fs::read_to_string(report)
+            .expect("same-task batch report should be readable")
+            .contains("passed")
+    );
 }
 
 #[test]
@@ -357,7 +359,11 @@ fn cli_ffi_preflight_reports_superlu_feature_and_bridge_independently() {
 fn cli_ffi_preflight_reports_requirements_for_selected_task() {
     let task_doc = "task\nsolver: BVP_sci\nfrontend: ExprLegacy\nexecution: Lambdify\nmethod: Sparse\n\nequations\narg: x\nunknowns: y\nrhs: -y\n\nboundary_conditions\ny_left: 1.0\n\nmesh\nt0: 0.0\nt_end: 1.0\nn_steps: 8\n\ninitial_guess\ny: 0.5\n\nsolver_options\nsparse_factorization: superlu\n";
     let (_dir, task) = write_temp_task(task_doc);
-    let output = run_cli(&["check-ffi-dependencies", "--task", task.to_string_lossy().as_ref()]);
+    let output = run_cli(&[
+        "check-ffi-dependencies",
+        "--task",
+        task.to_string_lossy().as_ref(),
+    ]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);

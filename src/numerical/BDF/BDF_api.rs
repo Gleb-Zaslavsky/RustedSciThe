@@ -1499,8 +1499,11 @@ impl ODEsolver {
         }
         options = options.with_symbolic_assembly_backend(self.symbolic_assembly_backend);
         options = options.with_lambdify_execution_policy(self.lambdify_execution_policy);
-        let backend_telemetry =
-            (self.telemetry_mode == BdfTelemetryMode::Timings).then(IvpTelemetry::detailed);
+        let backend_telemetry = match self.telemetry_mode {
+            BdfTelemetryMode::Off => None,
+            BdfTelemetryMode::Counters => Some(IvpTelemetry::counters()),
+            BdfTelemetryMode::Timings => Some(IvpTelemetry::detailed()),
+        };
         if let Some(telemetry) = &backend_telemetry {
             options = options.with_telemetry(telemetry.clone());
         }

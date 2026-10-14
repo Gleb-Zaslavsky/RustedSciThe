@@ -1607,12 +1607,7 @@ fn initial_native_step_size(
 fn map_generated_backend_error(
     err: crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedError,
 ) -> IvpBackendError {
-    match err {
-        crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedError::IvpBackend(err) => err,
-        other => IvpBackendError::GeneratedBackendFailure {
-            message: other.to_string(),
-        },
-    }
+    IvpBackendError::from_generated_error(err)
 }
 
 fn map_runtime_state_error(err: super::state::Lsode2RuntimeStateError) -> IvpBackendError {

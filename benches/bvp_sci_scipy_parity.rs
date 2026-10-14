@@ -26,7 +26,7 @@ use tabled::{Table, Tabled};
 enum RustRoute {
     ExactNumerical,
     #[cfg(feature = "superlu")]
-    ExactNumericalSuperLu,
+    ExprLegacySuperLu,
     ExprLegacy,
 }
 
@@ -34,17 +34,31 @@ impl RustRoute {
     fn is_exact_numerical(self) -> bool {
         match self {
             Self::ExactNumerical => true,
-            #[cfg(feature = "superlu")]
-            Self::ExactNumericalSuperLu => true,
             Self::ExprLegacy => false,
+            #[cfg(feature = "superlu")]
+            Self::ExprLegacySuperLu => false,
         }
+    }
+
+    fn uses_symbolic_frontend(self) -> bool {
+        match self {
+            Self::ExprLegacy => true,
+            Self::ExactNumerical => false,
+            #[cfg(feature = "superlu")]
+            Self::ExprLegacySuperLu => true,
+        }
+    }
+
+    #[cfg(feature = "superlu")]
+    fn uses_superlu(self) -> bool {
+        matches!(self, Self::ExprLegacySuperLu)
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::ExactNumerical => "Numerical/exact-Jacobian",
             #[cfg(feature = "superlu")]
-            Self::ExactNumericalSuperLu => "Numerical/exact-Jacobian + Sparse/SuperLU",
+            Self::ExprLegacySuperLu => "ExprLegacy/exact-symbolic + Sparse/SuperLU",
             Self::ExprLegacy => "ExprLegacy/Lambdify",
         }
     }
@@ -65,7 +79,7 @@ const CASES: &[(&str, BvpSciMatrixLayout, RustRoute)] = &[
     (
         "big-parameterized-analytic",
         BvpSciMatrixLayout::Sparse,
-        RustRoute::ExactNumericalSuperLu,
+        RustRoute::ExprLegacySuperLu,
     ),
     (
         "big-parameterized-analytic",
@@ -466,7 +480,7 @@ fn route_layout_name(route: RustRoute, layout: BvpSciMatrixLayout) -> &'static s
     #[cfg(not(feature = "superlu"))]
     let _ = route;
     #[cfg(feature = "superlu")]
-    if route == RustRoute::ExactNumericalSuperLu {
+    if route.uses_superlu() {
         return "Sparse/SuperLU";
     }
     layout_name(layout)
@@ -689,7 +703,7 @@ fn run_route_diagnostic(
     ),
     String,
 > {
-    let (problem, _) = prepare_problem(case, route == RustRoute::ExprLegacy)?;
+    let (problem, _) = prepare_problem(case, route.uses_symbolic_frontend())?;
     let telemetry = BvpSciTelemetry::timings();
     if matches!(route, RustRoute::ExactNumerical) && layout == BvpSciMatrixLayout::Dense {
         telemetry.enable_linear_system_capture(1000);
@@ -697,7 +711,20 @@ fn run_route_diagnostic(
     let plan = match route {
         RustRoute::ExactNumerical => make_numerical_plan(case, telemetry.clone())?,
         #[cfg(feature = "superlu")]
-        RustRoute::ExactNumericalSuperLu => make_numerical_plan(case, telemetry.clone())?,
+        RustRoute::ExprLegacySuperLu => {
+            let (equations, state_names, parameter_names, _) = symbolic_expressions(case)?;
+            BvpSciLambdifyPlan::prepare(
+                BvpSciAssembly::ExprLegacy,
+                &equations,
+                &state_names,
+                &parameter_names,
+                "x",
+                telemetry.clone(),
+            )
+            .map_err(|error| {
+                format!("Rust SuperLU symbolic diagnostic preparation failed: {error}")
+            })?
+        }
         RustRoute::ExprLegacy => {
             let (equations, state_names, parameter_names, _) = symbolic_expressions(case)?;
             BvpSciLambdifyPlan::prepare(
@@ -724,7 +751,7 @@ fn run_route_diagnostic(
     options.output_policy = BvpSciOutputPolicy::MeshAndValues;
     let boundary = boundary(case, problem.dimension, telemetry.clone());
     #[cfg(feature = "superlu")]
-    let solver_result = if route == RustRoute::ExactNumericalSuperLu {
+    let solver_result = if route.uses_superlu() {
         BvpSciSolver::new_with_sparse_factorization(
             plan,
             boundary,
@@ -765,7 +792,7 @@ fn run_route_diagnostic(
         ));
     }
     #[cfg(feature = "superlu")]
-    if route == RustRoute::ExactNumericalSuperLu {
+    if route.uses_superlu() {
         let snapshot = solver.plan().telemetry_snapshot();
         if snapshot.superlu_fallbacks != 0 || snapshot.superlu.native_factorization_calls == 0 {
             return Err(format!(
@@ -1735,7 +1762,7 @@ fn benchmark_rust(
         let construction_started = Instant::now();
         let boundary = boundary(case, problem.dimension, plan.telemetry().clone());
         #[cfg(feature = "superlu")]
-        let solver_result = if route == RustRoute::ExactNumericalSuperLu {
+        let solver_result = if route.uses_superlu() {
             BvpSciSolver::new_with_sparse_factorization(
                 plan.clone(),
                 boundary,
@@ -1813,7 +1840,7 @@ fn benchmark_case(
     repeats: usize,
 ) -> Result<CaseResult, String> {
     let python = benchmark_python(case, warmups, repeats)?;
-    let (problem, prepare_ms) = prepare_problem(case, route == RustRoute::ExprLegacy)?;
+    let (problem, prepare_ms) = prepare_problem(case, route.uses_symbolic_frontend())?;
     let exact_plan;
     let plan = match route {
         RustRoute::ExactNumerical => {
@@ -1821,10 +1848,10 @@ fn benchmark_case(
             &exact_plan
         }
         #[cfg(feature = "superlu")]
-        RustRoute::ExactNumericalSuperLu => {
-            exact_plan = make_numerical_plan(case, BvpSciTelemetry::disabled())?;
-            &exact_plan
-        }
+        RustRoute::ExprLegacySuperLu => problem
+            .expr_plan
+            .as_ref()
+            .expect("SuperLU route prepares its symbolic plan"),
         RustRoute::ExprLegacy => problem
             .expr_plan
             .as_ref()
@@ -1853,7 +1880,7 @@ fn benchmark_case(
             scipy: format!("{} / NumPy {}", python.scipy_version, python.numpy_version),
             python_wall_median_ms: fmt_ms(python.median_ms),
             python_range_ms: format!("{:.3}..{:.3}", python.min_ms, python.max_ms),
-            rust_expr_prepare_ms: if route == RustRoute::ExprLegacy {
+            rust_expr_prepare_ms: if route.uses_symbolic_frontend() {
                 fmt_ms(prepare_ms)
             } else {
                 "n/a".into()
@@ -1918,7 +1945,7 @@ fn main() {
             for (layout, route) in [
                 (BvpSciMatrixLayout::Dense, RustRoute::ExactNumerical),
                 #[cfg(feature = "superlu")]
-                (BvpSciMatrixLayout::Sparse, RustRoute::ExactNumericalSuperLu),
+                (BvpSciMatrixLayout::Sparse, RustRoute::ExprLegacySuperLu),
                 (BvpSciMatrixLayout::Sparse, RustRoute::ExprLegacy),
                 (
                     BvpSciMatrixLayout::Banded {
@@ -1932,7 +1959,7 @@ fn main() {
                     Ok((rust, status, nodes, capture)) => {
                         backend_mesh_rows.extend(build_backend_mesh_rows(route, layout, &rust));
                         #[cfg(feature = "superlu")]
-                        if route == RustRoute::ExactNumericalSuperLu {
+                        if route.uses_superlu() {
                             superlu_stage_rows.push(superlu_stage_row(&rust));
                         }
                         if capture.is_some() {
@@ -2085,19 +2112,19 @@ fn main() {
     let report = format!(
         "# BVP_sci Python versus Rust numerical-core benchmark\n\n\
          - pinned reference: official SciPy 1.18.1 / NumPy 2.5.4; uninstrumented Python reference source\n\
-         - exact Numerical rows use analytical state, parameter and boundary Jacobians in both implementations; ExprLegacy rows retain symbolic state Jacobians and the frontend parameter-FD path\n\
-         - only exact Numerical rows are apples-to-apples against Python; ExprLegacy rows are a separate Rust frontend/lifecycle comparison and their Python ratio is contextual, not an equivalent-derivative speed claim\n\
+         - the Dense Numerical row uses analytical state, parameter and boundary Jacobians in both implementations; ExprLegacy uses exact symbolic state and parameter derivatives with analytic boundary callbacks\n\
+         - Dense Numerical is the strict callback-route comparison against Python. ExprLegacy/SuperLU is a separate symbolic frontend route with mathematically exact derivatives; its Rust numerical-core timing is useful context, not an apples-to-apples callback-implementation claim\n\
          - Python timer covers each `solve_bvp` call; callback/problem construction and process startup are excluded\n\
          - Rust `numerical_core` covers `BvpSciSolver::solve`; solver construction and one-time ExprLegacy preparation are separate\n\
          - `construct + core` is the closer lifecycle comparison; neither Rust column includes ExprLegacy preparation\n\
-         - Rust is measured through exact Numerical and ExprLegacy routes; with Cargo feature `superlu`, the official 60-state exact-Numerical Sparse/SuperLU full solve is added and fallback is rejected. ExprLegacy diagnostics additionally cover Dense/nalgebra, Sparse/faer and bordered-Banded; SciPy uses CSC/SuperLU\n\
+         - Rust is measured through Dense Numerical and ExprLegacy routes; with Cargo feature `superlu`, the official 60-state ExprLegacy/exact-symbolic Sparse/SuperLU full solve is added and fallback is rejected. ExprLegacy diagnostics also cover Sparse/faer and bordered-Banded; SciPy uses CSC/SuperLU\n\
          - warmups: {warmups}; measured repeats: {repeats}; cells are medians unless the column says range\n\
          - every Rust route/layout must match SciPy's successful status/node count and match the first exact Rust final state within 1e-6\n\
          - full SciPy value/derivative/defect and counter semantics are gated by the dedicated debug parity stories\n\n\
          ## Uninstrumented Release Timing\n\n\
          {}\n\n\
          ## Instrumented Stage Diagnostics\n\n\
-         This separate single-solve diagnostic uses opt-in Python/Rust telemetry; its timings include instrumentation overhead and must not be compared to the release timing table. It reports the exact-Jacobian Dense route and ExprLegacy Sparse/Banded routes. Only Dense Numerical is strict counter parity; the symbolic routes are stage attribution because their callback and derivative construction differs. Parent/child times are inclusive and non-additive; dedicated callback timings are attribution views and overlap aggregate evaluation scopes. RHS/Jacobian work units count evaluated state points so Python vectorized calls can be compared with Rust point callbacks. Callback work differences are reported, not treated as parity failures, because each implementation may evaluate or cache callback values at different points in the algorithm. `calls` intentionally exposes dispatch granularity.\n\n\
+         This separate single-solve diagnostic uses opt-in Python/Rust telemetry; its timings include instrumentation overhead and must not be compared to the release timing table. It reports the exact-Jacobian Dense Numerical route, ExprLegacy/SuperLU, and ExprLegacy Sparse/Banded routes. Only Dense Numerical is strict callback/counter parity; symbolic routes provide stage attribution because callback construction and dispatch differ. Parent/child times are inclusive and non-additive; dedicated callback timings are attribution views and overlap aggregate evaluation scopes. RHS/Jacobian work units count evaluated state points so Python vectorized calls can be compared with Rust point callbacks. Callback work differences are reported, not treated as parity failures, because each implementation may evaluate or cache callback values at different points in the algorithm. `calls` intentionally exposes dispatch granularity.\n\n\
          {}\n\n\
          ## Per-Mesh-Pass Work and Timing\n\n\
          Rows are indexed by outer solve pass and report the mesh/system dimension seen by that pass, so the first work-count divergence is visible instead of being hidden by equal totals. Stage timings are matched by operation where semantics permit; pass elapsed scopes are diagnostic only (SciPy starts at `prepare_sys`, Rust at the current-mesh solve boundary), so do not compare those two columns as equivalent wall-clock scopes. All timings are inclusive attribution and non-additive.\n\n\
@@ -2122,7 +2149,7 @@ fn main() {
     );
     #[cfg(feature = "superlu")]
     let report = format!(
-        "{report}\n\n## Sparse/SuperLU Full-Solve Stage Attribution\n\nThis is one instrumented solve, separate from the repeated uninstrumented timing table. It records the Rust CSC assembly, ABI conversion, FFI and native factorization/solve scopes, and fallback count. The SciPy per-mesh stage table above provides corresponding total assembly/factor/solve scopes; the boundary between Rust bridge/assembly and SciPy's CSC construction is not identical.\n\n{}\n\nWith Cargo feature `superlu`, the official 60-state analytical-callback Sparse/SuperLU full-solve route is included. The preflight rejects fallback and gates SciPy status, mesh and common Newton/factor/solve counters. This does not change older StandardFaer measurements or establish a universal performance win.\n",
+        "{report}\n\n## Sparse/SuperLU Full-Solve Stage Attribution\n\nThis is one instrumented solve, separate from the repeated uninstrumented timing table. It records the Rust CSC assembly, ABI conversion, FFI and native factorization/solve scopes, and fallback count. The SciPy per-mesh stage table above provides corresponding total assembly/factor/solve scopes; the boundary between Rust bridge/assembly and SciPy's CSC construction is not identical.\n\n{}\n\nWith Cargo feature `superlu`, the official 60-state ExprLegacy route uses exact symbolic state and parameter derivatives with the Sparse/SuperLU backend. The preflight rejects fallback and gates SciPy status, mesh and common Newton/factor/solve counters. The symbolic Rust callback route is not claimed to match Python callback implementation, and the result does not establish a universal performance win.\n",
         Table::new(&superlu_stage_rows)
     );
     let name = std::env::var("BVP_SCI_SCIPY_BENCH_REPORT")

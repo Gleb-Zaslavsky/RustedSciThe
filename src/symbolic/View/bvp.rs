@@ -40,6 +40,7 @@ use super::{
 };
 use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
+use log::info;
 use rayon::prelude::*;
 use tabled::{builder::Builder, settings::Style};
 
@@ -808,7 +809,9 @@ fn try_assemble_atom_bvp_problem(
             total: total_elapsed,
         },
     };
-    println!("{}", system.render_timer_table());
+    // Keep library calls quiet by default.  Applications that install a
+    // logger can opt into this compact preparation table at info level.
+    info!("Atom/View BVP discretization timing:\n{}", system.render_timer_table());
     Ok(system)
 }
 

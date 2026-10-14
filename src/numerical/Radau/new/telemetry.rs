@@ -412,6 +412,13 @@ impl RadauTelemetry {
         }
     }
 
+    /// Count a residual probe performed by finite-difference Jacobian code.
+    pub(crate) fn record_finite_difference_probe(&mut self) {
+        if self.mode != RadauTelemetryMode::Off {
+            self.counters.finite_difference_probes += 1;
+        }
+    }
+
     /// Count one linear backend operation by its detailed stage.
     pub(crate) fn count_linear(&mut self, stage: RadauLinearStage) {
         if self.mode == RadauTelemetryMode::Off {

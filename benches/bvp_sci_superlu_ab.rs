@@ -6,14 +6,14 @@
 
 use std::time::{Duration, Instant};
 
-use tabled::{Table, Tabled};
+use RustedSciThe::Utils::test_reporting::write_test_report;
 use RustedSciThe::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciBoundaryCallbacks, BvpSciExecution, BvpSciLambdifyPlan,
     BvpSciMatrixLayout, BvpSciOptions, BvpSciSolver, BvpSciSparseFactorization, BvpSciStatus,
     BvpSciTelemetry, BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::Utils::test_reporting::write_test_report;
+use tabled::{Table, Tabled};
 
 #[derive(Clone, Copy)]
 enum Route {

@@ -1,8 +1,9 @@
 use super::*;
 use crate::command_interpreter::task_parser::ParseErrorKind;
 use crate::command_interpreter::task_runner::{
-    ParsedTaskSpec, TaskRunnerError, parse_task_spec_from_file,
+    parse_task_spec_from_file, ParsedTaskSpec, TaskRunnerError,
 };
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetryMode};
 use std::fs;
 use tempfile::tempdir;
 
@@ -111,11 +112,10 @@ t_end_values: 1.0, 1.1, 1.2, 1.3
     );
     let run = run_ivp_continuation(spec).expect("fresh grid continuation should execute");
     assert_eq!(run.segments.len(), 4);
-    assert!(
-        run.segments
-            .iter()
-            .all(|segment| segment.status_code.is_some())
-    );
+    assert!(run
+        .segments
+        .iter()
+        .all(|segment| segment.status_code.is_some()));
 }
 
 #[test]
@@ -258,11 +258,9 @@ fn ivp_adapter_preserves_native_error_category_and_source() {
         },
     ));
 
-    assert!(
-        error
-            .to_string()
-            .contains("generated/AOT backend selection")
-    );
+    assert!(error
+        .to_string()
+        .contains("generated/AOT backend selection"));
     assert!(std::error::Error::source(&error).is_some());
     assert!(matches!(
         error,
@@ -880,24 +878,18 @@ restart_each: false
     assert_eq!(continuation.fresh_preparations, 1);
     assert_eq!(continuation.prepared_reuses, 2);
     assert_eq!(continuation.parameter, "rate");
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status.as_deref() == Some("finished"))
-    );
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Grid { .. })))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status.as_deref() == Some("finished")));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Grid { .. }))));
 }
 
 #[test]
@@ -942,12 +934,10 @@ restart_each: false
         .expect("continuation result should be present");
     assert_eq!(first_series.segments.len(), 64);
     assert_eq!(first_series.segments.capacity(), 64);
-    assert!(
-        first_series
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
+    assert!(first_series
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
 
     let second = run_ivp_task_from_str(&input).expect("repeat long series should solve");
     let second_series = second
@@ -1034,12 +1024,10 @@ t_end_values: 0.02, 0.02
         .continuation
         .expect("BE restart should return continuation segments");
     assert_eq!(continuation.segments.len(), 2);
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
 
     let lsode = input
         .replace("BackwardEuler", "LSODE2")
@@ -1051,12 +1039,10 @@ t_end_values: 0.02, 0.02
         .continuation
         .expect("LSODE2 restart should return continuation segments");
     assert_eq!(continuation.segments.len(), 2);
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
 }
 
 #[test]
@@ -1094,12 +1080,10 @@ restart_each: false
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
 }
 
 #[test]
@@ -1137,18 +1121,14 @@ restart_each: false
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Radau(_))))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Radau(_)))));
 }
 
 #[test]
@@ -1184,12 +1164,10 @@ restart_each: true
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(
-        continuation
-            .segments
-            .iter()
-            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
-    );
+    assert!(continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
 }
 
 #[test]
@@ -1914,7 +1892,10 @@ solver_options
     let bdf_solver = build_ivp_solver_from_spec(&bdf).expect("BDF route should build");
     match bdf_solver {
         IvpTaskSolver::Bdf(solver) => {
-            assert_eq!(solver.symbolic_assembly_backend(), IvpSymbolicAssemblyBackend::AtomView);
+            assert_eq!(
+                solver.symbolic_assembly_backend(),
+                IvpSymbolicAssemblyBackend::AtomView
+            );
             assert_eq!(solver.telemetry_mode(), BdfTelemetryMode::Timings);
         }
         _ => panic!("expected BDF solver"),
@@ -1929,7 +1910,10 @@ solver_options
     match radau_solver {
         IvpTaskSolver::Radau { solver, .. } => {
             let config = solver.config();
-            assert_eq!(config.frontend, crate::numerical::Radau::RadauFrontend::ExprLegacy);
+            assert_eq!(
+                config.frontend,
+                crate::numerical::Radau::RadauFrontend::ExprLegacy
+            );
             assert_eq!(
                 config.matrix_layout,
                 crate::numerical::Radau::RadauMatrixLayout::Banded { lower: 1, upper: 2 }
@@ -1938,7 +1922,10 @@ solver_options
                 config.execution_policy,
                 crate::numerical::Radau::RadauExecutionPolicy::Parallel { min_work: 4 }
             );
-            assert_eq!(config.telemetry, crate::numerical::Radau::RadauTelemetryMode::Counters);
+            assert_eq!(
+                config.telemetry,
+                crate::numerical::Radau::RadauTelemetryMode::Counters
+            );
         }
         _ => panic!("expected Radau solver"),
     }
@@ -1955,9 +1942,66 @@ solver_options
                 solver.symbolic_assembly_backend(),
                 crate::numerical::BE::BeSymbolicAssemblyBackend::AtomViewNative
             );
-            assert_eq!(solver.telemetry_mode(), crate::numerical::BE::BeTelemetryMode::Off);
+            assert_eq!(
+                solver.telemetry_mode(),
+                crate::numerical::BE::BeTelemetryMode::Off
+            );
         }
         _ => panic!("expected Backward Euler solver"),
+    }
+}
+
+#[test]
+fn ivp_lsode2_consumes_common_frontend_layout_policy_and_telemetry_fields() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+equations
+arg: t
+unknowns: y
+rhs: -y
+
+initial_conditions
+t0: 0.0
+t_end: 0.1
+y0: 1.0
+
+solver_options
+symbolic_frontend: AtomView
+symbolic_execution: Lambdify
+matrix_layout: sparse
+execution_policy: auto
+telemetry: timings
+"#;
+
+    let spec = parse_ivp_task_from_str(input).expect("common LSODE2 options should parse");
+    let solver = build_ivp_solver_from_spec(&spec).expect("LSODE2 route should build");
+    match solver {
+        IvpTaskSolver::Lsode2(solver) => {
+            assert_eq!(
+                solver.config().linear_system_structure,
+                Lsode2LinearSystemStructure::Sparse
+            );
+            assert_eq!(
+                solver.config().backend.jacobian_backend,
+                Lsode2JacobianBackend::SymbolicGenerated
+            );
+            assert_eq!(
+                solver.config().lambdify_execution_policy,
+                IvpLambdifyExecutionPolicy::Auto { min_work: 32 }
+            );
+            assert_eq!(solver.config().telemetry.mode(), IvpTelemetryMode::Detailed);
+            assert!(matches!(
+                solver.config().residual_jacobian_source,
+                Lsode2ResidualJacobianSource::Symbolic {
+                    assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+                    execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+                }
+            ));
+        }
+        _ => panic!("expected LSODE2 solver"),
     }
 }
 
