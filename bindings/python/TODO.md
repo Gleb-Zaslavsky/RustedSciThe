@@ -933,9 +933,10 @@ a blocker for stabilizing the published Windows package.
   three failures exposed the stale facade lookup `_native.Lsode2PythonSolver`;
   the published extension exports `Lsode2Solver`. The source fix is present in
   the working tree, not in immutable `0.1.1`.
-- [ ] After publishing a corrected version, rerun the complete suite against
-  that exact production wheel and require zero failures. Do not treat the
-  `0.1.1` run above as a passing release gate.
+- [ ] Run the complete Python contract suite against the exact production
+  `0.1.2` wheel and require zero failures. The production artifact hashes and
+  clean-install import smoke test passed; the earlier `0.1.1` failures do not
+  count as a `0.1.2` full-suite result.
 - [ ] Cover representative single solves, prepared reuse, restart with new
   initial data, parameter continuation, long-series behavior and typed failure
   paths. Check that optional AOT/compiler cases are either exercised or
@@ -1090,13 +1091,201 @@ a blocker for stabilizing the published Windows package.
    boundaries now set exact stage/solver/route metadata and regression tests
    cover stale native-map context. Rust doc comments describe ownership and
    layout at Rust/NumPy conversions.
-3. [x] Build and validate the `0.1.2` Windows candidate from sdist. The clean
-   CPython 3.14 / NumPy 2.5.4 install passed `99 passed, 2 skipped`; sdist and
-   wheel passed `twine check`. Artifact SHA-256 hashes are in
-   `PUBLICATION_GUIDE.md`. This is local evidence, not yet a PyPI release.
-4. [ ] Upload the exact candidate files to TestPyPI, clean-install
-   `rustedscithe==0.1.2`, then run the same full contract suite outside the
-   checkout. If clean, publish those exact hashes to production PyPI and test
-   the production installation.
+3. [x] Build and validate the `0.1.2` Windows release from sdist using the
+   Maturin `release` profile. Both artifacts passed `twine check`; the exact
+   wheel passed clean-venv installation and smoke testing. Published TestPyPI
+   and production PyPI hashes match the recorded artifacts.
+4. [ ] Run the complete Python contract suite against the exact production
+   `0.1.2` wheel outside the checkout. The production clean-install and native
+   import smoke test passed; the full suite remains unverified for this exact
+   release wheel.
 5. Return to the remaining items in this entire **Post-publication audit and
    next work** section; the release steps above do not close the broader audit.
+
+## 15. Symbolic mathematics and trajectory animation expansion
+
+Source review and implementation progress recorded on 2026-10-15. Keep the
+Python layer thin, reuse native algorithms, and preserve the existing solver
+APIs and guides. Implementation validation uses debug builds; publication and
+release timing checks belong at the end.
+
+### 15.1 Existing coverage and concrete gaps
+
+- [x] Inspect `src/expr.rs`, `src/system.rs`, `src/lambdify.rs`, Python stubs,
+  and expression contract tests. Parsing, arithmetic between Expr values,
+  differentiation, scalar/expression substitution, recursive `where`, variable
+  discovery, scalar evaluation, simplification, `str`/`repr`, symbolic systems,
+  Jacobians and reusable Lambdify evaluation already exist. Retain these APIs
+  and extend their tests instead of introducing duplicate implementations.
+- [x] Identify missing scalar conveniences: cotangent/`ctg`, `log10`, symbol
+  batches/indexed symbols, renaming, dependency queries, `pretty_print`, higher
+  derivatives, Taylor expansion and integration. Python numeric operands and
+  reflected arithmetic are also missing from the current Expr-only operators.
+- [x] Confirm that standalone scalar/system Lambdify currently calls the
+  ExprLegacy compiler. Solver-level AtomNative selection does not automatically
+  provide an AtomNative standalone symbolic callable.
+- [x] Inspect native animation and both LSODE2 Lorenz animation examples.
+  `create_2d_animation` and `create_3d_animation` own a blocking Bevy application
+  and accept `(dimension, samples)` matrices plus time vectors. No Python
+  animation adapter is present. Bevy is currently an unconditional core
+  dependency; `default-features = false` does not disable it.
+- [x] Identify reusable educational material in `examples/symbolic/`, the
+  Russian symbolic guides, the task-alias examples and the LSODE2 Lorenz
+  examples. Dedicated Python symbolic guides/examples are still missing.
+
+### 15.2 Scalar expressions and symbolic preparation
+
+- [x] Add missing scalar functions with consistent Python names (`log10`,
+  `cot`). `cot` is represented as `cos(x)/sin(x)` because the core's legacy
+  `ctg` node currently evaluates inconsistently in scalar Lambdify; do not
+  expose that incorrect node as the Python cotangent implementation.
+- [x] Support finite Python scalar operands and reflected operators, including
+  `2*x`, `x+1`, `1/x` and `x**2`. Booleans are rejected explicitly, non-finite
+  numbers raise `InvalidExpressionError`, and unrelated types raise `TypeError`.
+- [x] Add symbol-batch/indexed construction, single-variable renaming and
+  `contains_variable`. `variables()` returns sorted unique free symbols and is
+  the default `evaluate`/Lambdify order; explicit callable order remains under
+  caller control.
+- [x] Expose native `pretty_print()` as a returned string, preserving existing
+  `str`/`repr`. Pretty output is for display, not expression serialization.
+- [x] Document recursive substitution: definitions recursively resolve as a
+  dependency graph; cycles and duplicate names fail; unmapped symbols stay
+  free; unused definitions are harmless. Existing method semantics are
+  unchanged.
+- [x] Resolve one replacement dependency graph per `SymbolicSystem` and reuse
+  the resolved expressions across residual rows.
+- [x] Add higher derivatives, gradient and a non-printing Taylor polynomial
+  builder. Taylor keeps other symbols free and rejects orders above 32; the
+  legacy stdout-printing Taylor helper is not used.
+- [x] Document the existing simplifier honestly as an algebraic rewrite that
+  does not preserve domain/singularity information. The regression contract
+  explicitly captures `x/x -> 1` while the unsimplified form is undefined at
+  `x=0`; structural equality, assumed-domain equivalence and numerical probes
+  remain distinct concepts. No core simplifier algorithm was changed.
+- [x] Add standalone ExprLegacy/AtomNative callable selection using the public
+  lossless `expr_to_atom` conversion. AtomNative converts once at preparation
+  and evaluates from the packed Atom path thereafter. AOT remains separate.
+- [x] Add NumPy batch evaluation with `(samples, variables)` input and
+  `(samples,)` output. The closure is compiled once and the sample loop runs in
+  Rust, with no Python callback per sample.
+- [x] Add opt-in preparation timing and callback count/time snapshots for scalar
+  and vector callables. Diagnostics default off; callback timing excludes
+  Python/NumPy input conversion, and preparation is represented as `None`
+  rather than a misleading zero when disabled.
+
+### 15.3 Integration and symbolic arrays
+
+- [x] Expose native indefinite integration with a typed
+  `UnsupportedSymbolicOperationError`. State that the current integrator
+  supports selected elementary forms and returns a primitive without an
+  integration constant. Definite integration and quadrature remain separate
+  pending domain and input validation.
+- [ ] Validate returned primitives by differentiating them on supported
+  domains, supplemented by numerical probes and known exact examples.
+  Inspect negative-domain logarithms explicitly: native `integrate(1/x)`
+  returns `ln(x)`, not a general real-domain `ln(abs(x))` representation.
+- [ ] Define definite-integration semantics for remaining free parameters,
+  reversed bounds, singularities and non-finite values. Native endpoint
+  subtraction alone does not establish convergence across a singularity.
+- [ ] Keep numerical quadrature explicit and separate from symbolic
+  integration. Validate Simpson's positive even subdivision count, Gaussian
+  degree, interval and weight/alpha conventions before calling native code;
+  current low-level paths contain `panic!`/`unwrap` for invalid inputs.
+- [x] Expose safe native ExprVector/ExprMatrix construction, shape/indexing,
+  transpose, vector dot, matrix-vector product, elementwise differentiation/
+  substitution/simplification and evaluation. Reuse `Expr` handles and sorted
+  free-variable order; return owned NumPy arrays with exact shapes.
+- [x] Establish immutable Python value semantics and owned NumPy numerical
+  results; reject ragged matrices, invalid indexes, mismatched dimensions and
+  non-finite values before native assertions.
+- [x] Limit determinant to verified native capabilities: square matrices of
+  sizes 1 through 3. Larger/invalid matrices raise a typed configuration error
+  instead of reaching the core panic path.
+- [ ] Add symbolic matrix-matrix and elementwise matrix products only after
+  choosing/documenting their distinct semantics; expose more advanced block,
+  inverse and Kronecker operations only with verified native guarantees.
+
+### 15.4 Native 2D/3D trajectory animation
+
+- [x] Add a small Python animation API accepting NumPy-compatible
+  `times (N,)` and `points (N,2)` / `(N,3)`, axis labels and speed. Normalize
+  layout once for the native `(dimension,N)` helper. Specify any alternative
+  layout explicitly; do not guess from ambiguous square shapes. The facade
+  coerces ArrayLike inputs to owned float64 arrays; shape remains unambiguous.
+- [x] Add a thin convenience adapter from detached solver output with selected
+  state columns. Keep solving and playback separate so viewing a trajectory
+  cannot modify/restart a solver or recalculate its callbacks.
+- [x] Validate shape, sample count, finiteness, speed and time ordering before
+  opening a window. One-point trajectories are supported; multi-point time
+  must be strictly monotone in either direction. Coordinates must remain finite
+  after f64-to-f32 conversion. Native entry points return typed validation
+  errors and the Python facade maps them to `ValueError`.
+- [x] Make playback follow adjacent physical time intervals, preserve elapsed
+  time across render frames, scale intervals by playback speed and loop using
+  the final observed interval. The marker is display-FPS sampled and may skip
+  tightly spaced samples; display intervals below one microsecond are clamped.
+- [x] Fix pre-validation indexing, mismatched sample continuation, the 3D Y
+  extent typo, and unused 2D camera centering/scale. Cache trajectory bounds
+  once instead of scanning the full trajectory every rendered frame. Rendering
+  remains f32 and is explicitly not a precision-preserving export path.
+- [x] Establish the initial lifecycle contract: a synchronous Bevy event loop,
+  GIL released while blocked, Esc and window-close exit, plus typed input errors
+  mapped to Python `ValueError`. Playback is intended for the process main
+  thread. No numerical work or callback reevaluation is performed by the view.
+- [ ] Decide wheel delivery after measuring dependency/size/runtime impact.
+  Consider a binding feature and an explicit unsupported-capability diagnostic
+  when absent. A pip extra cannot enable a Cargo feature in an existing wheel.
+  Ordinary symbolic/numerical import must not initialize a graphics window.
+- [ ] Treat interactive desktop playback as the initial scope. GIF/video export,
+  notebook HTML and multiple simultaneous trajectories need separate contracts
+  and must not be claimed as existing Utils capabilities.
+
+### 15.5 Examples, guides and verification
+
+- [x] Add `guides/SYMBOLIC_MATH_GUIDE_EN.md` and `_RU.md`, with native Python
+  syntax, function inventory, substitutions, argument order, pretty printing,
+  derivatives/Jacobians, simplification, Taylor expansion, integration domains,
+  symbolic arrays, prepared callables, performance guidance and typed errors.
+  Link them from README and the example index; preserve existing solver guides.
+- [x] Add commented Python examples for scalar symbolic calculus and symbolic
+  arrays: multivariable derivatives, recursive aliases, AtomNative batch
+  evaluation, an elementary primitive, typed unsupported integration, vector
+  and matrix operations, owned NumPy output and shape rejection. Both scripts
+  were executed in the Windows venv; terminal output uses ASCII-safe formatting.
+- [x] Add LSODE2 Lorenz 2D and 3D animation example-guides using the existing
+  Rust tasks and Python Lorenz example. Explain axis projection, adaptive time
+  samples, speed and camera controls. Add a selected-body three-body example
+  only within the supported trajectory-display contract. Both examples default
+  to compute-only operation and open a window only with explicit CLI flags.
+- [x] Add paired RU/EN animation instructions, explicit interactive invocation
+  and computation-only examples so automated checks do not open windows.
+- [x] Add Python/native parity checks and typed-failure tests for the newly
+  exposed integration and array operations, including unsupported integrals,
+  ragged matrices, bad indexes, incompatible dimensions, determinant limits and
+  empty NumPy shapes. Existing scalar contract tests cover substitution cycles,
+  duplicate names, precedence and repeated callable reuse, and a dedicated
+  test records domain-sensitive simplification semantics.
+- [x] Add headless animation-input tests. Keep opt-in desktop checks for
+  open/close and repeated invocation separate from unattended suites.
+- [x] Update Python/Rust docstrings, boundary comments, `.pyi` declarations and
+  exports alongside the animation API. Solver capability metadata is unchanged
+  because animation is independent of solver routes.
+- [ ] Verify renderer startup, close/reopen support, renderer failure handling
+  and invocation from a non-main Python thread in an opt-in desktop session.
+  Bevy/runtime panics need platform evidence before stronger guarantees.
+- [ ] Validate the final installed wheel, dependency closure and example corpus;
+  record full-suite results separately from an import smoke test. Keep existing
+  production-wheel validation debt visible while extending these capabilities.
+
+Remaining implementation order: opt-in desktop lifecycle and wheel-delivery
+decision; definite/numerical integration policy and additional symbolic array
+products; installed-wheel validation. The 2026-10-15
+debug validation for scalar expressions, AtomNative/ExprLegacy callables,
+NumPy batch evaluation and opt-in diagnostics passed `93` contract tests with
+`2` skips; adding symbolic integration, vector/matrix bindings and bilingual
+symbolic guides raised the suite to `96` passed with `2` skipped before
+animation. The updated suite passes `98` tests with `2` skips; core animation
+validation passed 3 targeted Rust tests. Lorenz and three-body examples ran in
+compute-only mode and mypy passed. No interactive window was opened, and this
+editable-extension evidence does not replace the outstanding full
+production-wheel suite.

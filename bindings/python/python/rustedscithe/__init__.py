@@ -8,6 +8,10 @@ Python-native convenience layer to live beside the extension in wheels.
 from . import _native
 from ._native import *  # noqa: F401,F403 - stable extension surface
 from .facade import (
+    animate_solution_2d,
+    animate_solution_3d,
+    animate_trajectory_2d,
+    animate_trajectory_3d,
     capabilities,
     create_bvp,
     create_ivp,
@@ -27,7 +31,9 @@ from .facade import (
 __all__ = [
     name for name in dir(_native) if not name.startswith("_")
 ] + [
-    "capabilities", "create_bvp", "create_fit", "create_ivp",
+    "animate_solution_2d", "animate_solution_3d",
+    "animate_trajectory_2d", "animate_trajectory_3d", "capabilities",
+    "create_bvp", "create_fit", "create_ivp",
     "create_nonlinear", "fit", "render_table", "run_task_batch",
     "run_task_batch_report", "solve_bvp",
     "solve_ivp", "solve_nonlinear", "task", "write_table",

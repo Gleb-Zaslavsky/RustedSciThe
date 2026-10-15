@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::contract::SymbolicFrontend;
 use crate::errors::InvalidExpressionError;
 use crate::expr::PyExpr;
 use crate::lambdify::LambdifiedExpr;
@@ -145,11 +146,15 @@ impl SymbolicSystem {
     /// constants disappear from the numerical input schema, while variables
     /// introduced by an alias are added in first-use order.
     pub fn substitute_many(&self, replacements: Vec<(String, PyExpr)>) -> PyResult<Self> {
+        // Resolve the dependency graph once, not once per residual row. This
+        // keeps preparation proportional to the shared substitution set plus
+        // the actual expression transformations.
+        let resolved = PyExpr::resolve_substitutions(replacements)?;
         let expressions = self
             .expressions
             .iter()
-            .map(|expression| PyExpr::apply_substitutions(&expression.inner, replacements.clone()))
-            .collect::<PyResult<Vec<_>>>()?;
+            .map(|expression| PyExpr::apply_resolved_substitutions(&expression.inner, &resolved))
+            .collect();
         Self::build(expressions, None)
     }
 
@@ -164,12 +169,26 @@ impl SymbolicSystem {
         self.substitute_many(entries)
     }
 
-    /// Compile all residuals once into reusable native scalar callables.
-    pub fn lambdify(&self) -> PyResult<LambdifiedSystem> {
+    /// Compile residuals and their Jacobian once using the selected frontend.
+    /// Diagnostics default to off so repeated native callbacks are not timed.
+    #[pyo3(signature=(frontend=None, diagnostics=false))]
+    pub fn lambdify(
+        &self,
+        frontend: Option<SymbolicFrontend>,
+        diagnostics: bool,
+    ) -> PyResult<LambdifiedSystem> {
+        let frontend = frontend.unwrap_or(SymbolicFrontend::ExprLegacy);
         let compiled = self
             .expressions
             .iter()
-            .map(|expression| LambdifiedExpr::compile(expression, Some(self.variables.clone())))
+            .map(|expression| {
+                LambdifiedExpr::compile_with_options(
+                    expression,
+                    Some(self.variables.clone()),
+                    frontend,
+                    diagnostics,
+                )
+            })
             .collect::<PyResult<Vec<_>>>()?;
         let jacobian = self
             .jacobian()
@@ -177,7 +196,12 @@ impl SymbolicSystem {
             .map(|row| {
                 row.into_iter()
                     .map(|expression| {
-                        LambdifiedExpr::compile(&expression, Some(self.variables.clone()))
+                        LambdifiedExpr::compile_with_options(
+                            &expression,
+                            Some(self.variables.clone()),
+                            frontend,
+                            diagnostics,
+                        )
                     })
                     .collect::<PyResult<Vec<_>>>()
             })
@@ -186,6 +210,8 @@ impl SymbolicSystem {
             variables: self.variables.clone(),
             residuals: compiled,
             jacobian,
+            frontend,
+            diagnostics_enabled: diagnostics,
         })
     }
 
@@ -204,6 +230,8 @@ pub struct LambdifiedSystem {
     variables: Vec<String>,
     residuals: Vec<LambdifiedExpr>,
     jacobian: Vec<Vec<LambdifiedExpr>>,
+    frontend: SymbolicFrontend,
+    diagnostics_enabled: bool,
 }
 
 #[pymethods]
@@ -233,6 +261,49 @@ impl LambdifiedSystem {
     /// Return the input order expected by `evaluate`.
     pub fn variables(&self) -> Vec<String> {
         self.variables.clone()
+    }
+
+    /// Return the selected symbolic frontend for this prepared system.
+    #[getter]
+    pub fn frontend(&self) -> &'static str {
+        match self.frontend {
+            SymbolicFrontend::ExprLegacy => "expr_legacy",
+            SymbolicFrontend::AtomNative => "atom_native",
+        }
+    }
+
+    /// Return whether preparation and callback timing/counters were enabled.
+    #[getter]
+    pub fn diagnostics_enabled(&self) -> bool {
+        self.diagnostics_enabled
+    }
+
+    /// Aggregate callback counts and native callback time across residuals/Jacobian.
+    pub fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = PyDict::new(py);
+        let (evaluations, callback_ns) = self
+            .residuals
+            .iter()
+            .chain(self.jacobian.iter().flatten())
+            .map(LambdifiedExpr::diagnostic_counts)
+            .fold((0_u64, 0_u64), |(count, time), (next_count, next_time)| {
+                (count + next_count, time.saturating_add(next_time))
+            });
+        report.set_item("enabled", self.diagnostics_enabled)?;
+        report.set_item("evaluations", evaluations)?;
+        report.set_item("callback_time_ms", callback_ns as f64 / 1_000_000.0)?;
+        Ok(report)
+    }
+
+    /// Sum cold preparation time over all residual and Jacobian callables.
+    #[getter]
+    pub fn preparation_ms(&self) -> Option<f64> {
+        self.residuals
+            .iter()
+            .chain(self.jacobian.iter().flatten())
+            .try_fold(0.0, |total, expression| {
+                expression.preparation_time_ms().map(|value| total + value)
+            })
     }
 
     fn __repr__(&self) -> String {

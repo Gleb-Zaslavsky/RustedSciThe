@@ -2,6 +2,10 @@
 
 from ._native import *
 from .facade import (
+    animate_solution_2d as animate_solution_2d,
+    animate_solution_3d as animate_solution_3d,
+    animate_trajectory_2d as animate_trajectory_2d,
+    animate_trajectory_3d as animate_trajectory_3d,
     capabilities as capabilities,
     create_bvp as create_bvp,
     create_fit as create_fit,
@@ -19,7 +23,7 @@ from .facade import (
 )
 
 __all__ = [
-    "Expr", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
+    "Expr", "ExprVector", "ExprMatrix", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpDampSolver", "BvpDampSolution", "RadauSolver",
     "RadauCallbackSolver", "RadauSolution", "LambdifiedExpr", "Lsode2Solver",
@@ -28,12 +32,15 @@ __all__ = [
     "GavinFittingSolution", "VarProSolver", "VarProSolution", "SymbolicFrontend",
     "ExecutionRoute", "MatrixLayout", "ExecutionPolicy", "TelemetryMode",
     "SolverOptions", "SolverCapabilities", "TaskDocument", "IvpTaskResult",
-    "BvpTaskResult", "parse_expr", "symbol", "constant", "capabilities",
+    "BvpTaskResult", "parse_expr", "symbol", "symbols", "indexed_symbols", "constant", "capabilities",
     "RustedSciTheError", "InvalidExpressionError", "UnsupportedOptionError",
+    "UnsupportedSymbolicOperationError",
     "InvalidConfigurationError", "SolverError", "PreparationError",
     "AotArtifactError", "AotCompilerError", "AotLinkError", "AotTimeoutError",
     "AotLifecycleError", "CallbackError", "TaskDocumentError", "BvpError",
     "TelemetryError", "ExhaustionError", "PanicError", "PoisonedSolverError",
+    "animate_solution_2d", "animate_solution_3d",
+    "animate_trajectory_2d", "animate_trajectory_3d",
     "create_bvp", "create_fit", "create_ivp", "create_nonlinear", "fit",
     "render_table", "run_task_batch", "run_task_batch_report", "solve_bvp",
     "solve_ivp", "solve_nonlinear", "task", "write_table",

@@ -41,17 +41,19 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use nalgebra::{DMatrix, DVector};
 
+use super::animation::{
+    AnimationInputError, advance_animation_clock, validate_trajectory,
+};
+
 /// Component that holds animated 2D trajectory data and current animation state
 #[derive(Component)]
 struct AnimatedLine2D {
     /// 2D points matrix (2 rows x N columns, each column is a point)
     points: DMatrix<f32>,
-    /// Time values for each point (length N)
-    _times: DVector<f32>,
     /// Current point index being animated (0..N-1)
     current_index: usize,
-    /// Timer controlling animation speed between points
-    timer: Timer,
+    /// Sub-frame time already spent in the current sample interval.
+    elapsed_in_interval: f64,
 }
 
 /// Component for 2D camera control with pan and zoom
@@ -72,12 +74,13 @@ struct LegendMarker;
 struct LineData2D {
     /// 2D trajectory points
     points: DMatrix<f32>,
-    /// Time values for animation timing
-    times: DVector<f32>,
+    /// Seconds between successive displayed samples, including the loop edge.
+    frame_intervals: Vec<f32>,
+    /// Cached trajectory bounds; recomputing these per frame is O(N) overhead.
+    min: Vec2,
+    max: Vec2,
     /// Custom names for X, Y axes
     axis_names: (String, String),
-    /// Animation speed multiplier (higher = faster)
-    speed_multiplier: f32,
 }
 
 /// Creates and runs an interactive 2D trajectory animation
@@ -104,21 +107,63 @@ pub fn create_2d_animation(
     axes_names: Option<(String, String)>,
     speed: Option<f32>,
 ) {
+    if let Err(error) = try_create_2d_animation(points, times, axes_names, speed) {
+        eprintln!("Cannot start 2D trajectory animation: {error}");
+    }
+}
+
+/// Validate and run an interactive 2D trajectory animation.
+///
+/// Timestamps may be strictly increasing or strictly decreasing. Playback
+/// visits every sample and uses adjacent timestamp gaps scaled by `speed`.
+/// The Bevy event loop blocks until the window closes; renderer initialization
+/// failures remain Bevy/runtime errors and are not converted by this function.
+pub fn try_create_2d_animation(
+    points: DMatrix<f64>,
+    times: DVector<f64>,
+    axes_names: Option<(String, String)>,
+    speed: Option<f32>,
+) -> Result<(), AnimationInputError> {
+    let speed = speed.unwrap_or(1.0);
+    let frame_intervals = validate_trajectory::<2>(&points, &times, speed)?;
+    let points = points.cast::<f32>();
+    let min = Vec2::new(
+        (0..points.ncols())
+            .map(|column| points[(0, column)])
+            .fold(f32::INFINITY, f32::min),
+        (0..points.ncols())
+            .map(|column| points[(1, column)])
+            .fold(f32::INFINITY, f32::min),
+    );
+    let max = Vec2::new(
+        (0..points.ncols())
+            .map(|column| points[(0, column)])
+            .fold(f32::NEG_INFINITY, f32::max),
+        (0..points.ncols())
+            .map(|column| points[(1, column)])
+            .fold(f32::NEG_INFINITY, f32::max),
+    );
+
     // Create Bevy app with default plugins (windowing, rendering, input, etc.)
     App::new()
         .add_plugins(DefaultPlugins)
         // Setup scene once at startup
         .add_systems(Startup, setup_2d_scene)
         // Run animation and camera control every frame
-        .add_systems(Update, (animate_2d_line, camera_2d_controller))
+        .add_systems(
+            Update,
+            (animate_2d_line, camera_2d_controller, exit_animation_on_escape),
+        )
         // Store trajectory data as a global resource
         .insert_resource(LineData2D {
-            points: points.cast::<f32>(), // Convert f64 to f32 for Bevy compatibility
-            times: times.cast::<f32>(),
+            points,
+            frame_intervals,
+            min,
+            max,
             axis_names: axes_names.unwrap_or_else(|| ("x".to_string(), "y".to_string())),
-            speed_multiplier: speed.unwrap_or(1.0),
         })
         .run(); // Blocks until window is closed
+    Ok(())
 }
 
 /// Bevy startup system that initializes the 2D scene
@@ -127,28 +172,14 @@ fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>) {
     // Set light gray background color
     commands.insert_resource(ClearColor(Color::srgb(0.95, 0.95, 0.98)));
 
-    // Calculate bounding box of trajectory data for optimal camera positioning
+    // The public entry point validates shape and finiteness before Bevy starts.
     let p = &line_data.points;
-    let mut min_vals = [f32::INFINITY; 2];
-    let mut max_vals = [f32::NEG_INFINITY; 2];
-
-    // Find min/max values in each dimension
-    for col in 0..p.ncols() {
-        for row in 0..2 {
-            let val = p[(row, col)];
-            min_vals[row] = min_vals[row].min(val);
-            max_vals[row] = max_vals[row].max(val);
-        }
-    }
-
-    // Calculate center point and size for camera setup
-    let _center = Vec2::new(
-        (min_vals[0] + max_vals[0]) / 2.0,
-        (min_vals[1] + max_vals[1]) / 2.0,
-    );
-    let size = ((max_vals[0] - min_vals[0]).powi(2) + (max_vals[1] - min_vals[1]).powi(2)).sqrt();
-    let _initial_zoom = if size > 0.0 {
-        (2.0 / size).clamp(0.01, 100.0)
+    // Fit the initial camera to the cached bounds instead of starting at origin.
+    let center = line_data.min * 0.5 + line_data.max * 0.5;
+    let extent = line_data.max - line_data.min;
+    let size = extent.x.max(extent.y);
+    let initial_scale = if size > 0.0 {
+        (2.0 / size).clamp(0.1, 10.0)
     } else {
         1.0
     };
@@ -156,49 +187,20 @@ fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>) {
     // Spawn 2D camera with pan/zoom controller
     commands.spawn((
         Camera2d,
-        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        Transform::from_translation(Vec3::new(center.x, center.y, 0.0))
+            .with_scale(Vec3::splat(initial_scale)),
         // Attach the controller so the camera_query in the system finds it
         Camera2DController {
-            offset: Vec2::ZERO,
-            zoom: 1.0,
+            offset: center,
+            zoom: 1.0 / initial_scale,
         },
     ));
-
-    // Validate input data format
-    let t = &line_data.times;
-    if p.nrows() != 2 {
-        error!("Points must have 2 rows (x,y). got nrows = {}", p.nrows());
-        return;
-    }
-    if p.ncols() == 0 || t.len() == 0 {
-        warn!("No points/times provided.");
-        return;
-    }
-    if p.ncols() != t.len() {
-        warn!(
-            "Number of points (columns) != number of times. points.cols={} times.len={}",
-            p.ncols(),
-            t.len()
-        );
-        // Continue with available data
-    }
-
-    // Calculate initial animation timing
-    let _npoints = p.ncols();
-    let initial_dt = if t.len() >= 2 {
-        // Use time difference between first two points, scaled by speed
-        ((t[1] - t[0]).abs().max(1e-6)) / line_data.speed_multiplier
-    } else {
-        // Fallback to 100ms per frame, scaled by speed
-        0.1_f32 / line_data.speed_multiplier
-    };
 
     // Spawn the animated trajectory entity
     commands.spawn((AnimatedLine2D {
         points: p.clone(),
-        _times: t.clone(),
         current_index: 0, // Start at first point
-        timer: Timer::from_seconds(initial_dt, TimerMode::Once), // One-shot timer
+        elapsed_in_interval: 0.0,
     },));
 
     // Print axis information to console for reference
@@ -263,39 +265,18 @@ fn animate_2d_line(
             continue; // Skip empty trajectories
         }
 
-        // Update animation timer with frame delta time
-        line.timer.tick(time.delta());
-
-        // Check if it's time to advance to next point
-        if line.timer.just_finished() {
-            // Calculate point skip based on speed (higher speed = skip more points)
-            let skip = (line_data.speed_multiplier as usize).max(1);
-
-            // Advance to next point with wraparound
-            line.current_index = (line.current_index + skip) % npoints;
-
-            // Reset timer for next animation step (fixed 50ms base duration)
-            let base_duration = 0.05;
-            line.timer = Timer::from_seconds(base_duration, TimerMode::Once);
-            line.timer.reset();
-        }
-
-        // Calculate axis length for proper scaling
-        let mut min_vals = [f32::INFINITY; 2];
-        let mut max_vals = [f32::NEG_INFINITY; 2];
-
-        // Find min/max in each dimension across all points
-        for col in 0..npoints {
-            for row in 0..2 {
-                let val = line.points[(row, col)];
-                min_vals[row] = min_vals[row].min(val);
-                max_vals[row] = max_vals[row].max(val);
-            }
-        }
+        // Carry elapsed wall time across sample boundaries instead of losing
+        // timer overshoot when adaptive steps are shorter than one render frame.
+        (line.current_index, line.elapsed_in_interval) = advance_animation_clock(
+            line.current_index,
+            line.elapsed_in_interval,
+            time.delta().as_secs_f64(),
+            &line_data.frame_intervals,
+        );
 
         // Calculate axis extent based on data bounds with padding
-        let x_extent = (max_vals[0] - min_vals[0]).max(1.0) * 0.6;
-        let y_extent = (max_vals[1] - min_vals[1]).max(1.0) * 0.6;
+        let x_extent = (line_data.max.x - line_data.min.x).max(1.0) * 0.6;
+        let y_extent = (line_data.max.y - line_data.min.y).max(1.0) * 0.6;
 
         // Draw coordinate axes extending in both directions
         gizmos.line_2d(
@@ -394,6 +375,16 @@ fn camera_2d_controller(
 
     if !mouse_input.pressed(MouseButton::Left) {
         mouse_motion.clear();
+    }
+}
+
+/// Close the interactive application with a successful exit when Esc is hit.
+fn exit_animation_on_escape(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut app_exit: MessageWriter<AppExit>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        app_exit.write(AppExit::Success);
     }
 }
 

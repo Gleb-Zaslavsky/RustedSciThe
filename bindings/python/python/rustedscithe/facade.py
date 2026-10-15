@@ -6,7 +6,8 @@ from pathlib import Path
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from numpy.typing import ArrayLike
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from . import _native
 
@@ -17,6 +18,84 @@ TaskDocument = _native.TaskDocument
 BvpSciSolver = _native.BvpSciSolver
 BvpDampSolver = _native.BvpDampSolver
 Lsode2Solver = _native.Lsode2Solver
+
+
+def animate_trajectory_2d(
+    points: ArrayLike,
+    times: ArrayLike,
+    axis_names: tuple[str, str] | None = None,
+    speed: float = 1.0,
+) -> None:
+    """Display a sample-major ``(N, 2)`` trajectory in a blocking Bevy window."""
+
+    _native.animate_trajectory_2d(
+        np.asarray(points, dtype=np.float64),
+        np.asarray(times, dtype=np.float64),
+        axis_names,
+        speed,
+    )
+
+
+def animate_trajectory_3d(
+    points: ArrayLike,
+    times: ArrayLike,
+    axis_names: tuple[str, str, str] | None = None,
+    speed: float = 1.0,
+) -> None:
+    """Display a sample-major ``(N, 3)`` trajectory in a blocking Bevy window."""
+
+    _native.animate_trajectory_3d(
+        np.asarray(points, dtype=np.float64),
+        np.asarray(times, dtype=np.float64),
+        axis_names,
+        speed,
+    )
+
+
+def _solution_trajectory(
+    solution: Any, columns: tuple[int, ...]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Detach selected state columns without invoking solver work again."""
+
+    states_method = getattr(solution, "states_array", None)
+    times_method = getattr(solution, "times_array", None)
+    if not callable(states_method) or not callable(times_method):
+        raise TypeError("solution must provide states_array() and times_array()")
+    states = np.asarray(states_method(), dtype=np.float64)
+    times = np.asarray(times_method(), dtype=np.float64)
+    if states.ndim != 2:
+        raise ValueError("solution states must have shape (samples, state_dimension)")
+    if len(columns) not in (2, 3):
+        raise ValueError("select exactly two or three state columns")
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in columns):
+        raise TypeError("state column indexes must be integers")
+    if any(index < 0 or index >= states.shape[1] for index in columns):
+        raise ValueError("selected state column is outside the solution dimension")
+    return states[:, columns], times
+
+
+def animate_solution_2d(
+    solution: Any,
+    columns: tuple[int, int],
+    axis_names: tuple[str, str] | None = None,
+    speed: float = 1.0,
+) -> None:
+    """Animate two selected state components from a detached IVP solution."""
+
+    points, times = _solution_trajectory(solution, columns)
+    animate_trajectory_2d(points, times, axis_names, speed)
+
+
+def animate_solution_3d(
+    solution: Any,
+    columns: tuple[int, int, int],
+    axis_names: tuple[str, str, str] | None = None,
+    speed: float = 1.0,
+) -> None:
+    """Animate three selected state components from a detached IVP solution."""
+
+    points, times = _solution_trajectory(solution, columns)
+    animate_trajectory_3d(points, times, axis_names, speed)
 
 
 def _owned_sequence(value: Any) -> Any:

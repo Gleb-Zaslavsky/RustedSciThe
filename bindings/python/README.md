@@ -132,6 +132,8 @@ recommended workflows.
 | Family | English | Русский |
 | --- | --- | --- |
 | Python API overview | [Python solvers](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/PYTHON_SOLVERS_GUIDE_EN.md) | [Обзор Python API](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/PYTHON_SOLVERS_GUIDE_RU.md) |
+| Symbolic mathematics | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SYMBOLIC_MATH_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SYMBOLIC_MATH_GUIDE_RU.md) |
+| Trajectory animation | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
 | Radau | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/RADAU_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/RADAU_GUIDE_RU.md) |
 | BDF | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BDF_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BDF_GUIDE_RU.md) |
 | Backward Euler | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BACKWARD_EULER_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BACKWARD_EULER_GUIDE_RU.md) |
@@ -140,9 +142,9 @@ recommended workflows.
 | BVP_Damp | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_RU.md) |
 | Nonlinear systems and fitting | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_RU.md) |
 
-Runnable, commented Python examples include Robertson kinetics, Lorenz and
-three-body systems, frontend/layout comparisons, continuation, AOT and task
-documents. See the [Python example index](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/examples/README.md);
+Runnable, commented Python examples include native symbolic calculus and
+arrays, Robertson kinetics, Lorenz and three-body systems, frontend/layout
+comparisons, continuation, AOT and task documents. See the [Python example index](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/examples/README.md);
 the repository's Rust examples are collected separately in the root
 [examples directory](https://github.com/Gleb-Zaslavsky/RustedSciThe/tree/master/examples/).
 

@@ -26,6 +26,7 @@ pub(crate) fn annotate(error: PyErr, stage: &str, solver: &str, route: &str) -> 
             Some("InvalidExpressionError") => "expression",
             Some("UnsupportedOptionError") => "unsupported_option",
             Some("InvalidConfigurationError") => "configuration",
+            Some("UnsupportedSymbolicOperationError") => "unsupported_symbolic_operation",
             Some("PreparationError") => "preparation",
             Some("AotArtifactError") => "aot_artifact",
             Some("AotCompilerError") => "aot_compiler",
@@ -270,6 +271,15 @@ create_exception!(
     InvalidExpressionError,
     RustedSciTheError,
     "The symbolic expression is invalid."
+);
+
+// Raised when a requested symbolic transformation is valid as an operation
+// but is outside the native engine's supported subset.
+create_exception!(
+    rustedscithe,
+    UnsupportedSymbolicOperationError,
+    RustedSciTheError,
+    "The symbolic operation is not supported for this expression."
 );
 
 // Raised when a solver option is unknown or unsupported by a solver.

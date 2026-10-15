@@ -1,12 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyDict};
 
 use rustedscithe_core::symbolic::symbolic_engine::Expr;
 
-use crate::errors::InvalidExpressionError;
+use crate::errors::{InvalidExpressionError, UnsupportedSymbolicOperationError, annotate};
 use crate::lambdify::LambdifiedExpr;
+
+const MAX_TAYLOR_ORDER: usize = 32;
 
 /// Python-owned immutable handle to RustedSciThe's symbolic expression tree.
 ///
@@ -42,6 +45,22 @@ impl PyExpr {
         Ok(())
     }
 
+    fn operand(value: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        if let Ok(expression) = value.extract::<PyRef<'_, PyExpr>>() {
+            return Ok(expression.inner.clone());
+        }
+        if value.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(
+                "boolean values are not valid symbolic scalar operands",
+            ));
+        }
+        let scalar = value.extract::<f64>().map_err(|_| {
+            PyTypeError::new_err("symbolic operands must be Expr instances or finite numbers")
+        })?;
+        Self::checked_finite(scalar, "symbolic scalar operands")?;
+        Ok(Expr::Const(scalar))
+    }
+
     pub(crate) fn resolve_substitutions(
         replacements: Vec<(String, PyExpr)>,
     ) -> PyResult<HashMap<String, Expr>> {
@@ -73,6 +92,17 @@ impl PyExpr {
             expanded = expanded.substitute_variable(&name, &replacement);
         }
         Ok(Self::from_inner(expanded))
+    }
+
+    pub(crate) fn apply_resolved_substitutions(
+        expression: &Expr,
+        replacements: &HashMap<String, Expr>,
+    ) -> Self {
+        let mut expanded = expression.clone();
+        for (name, replacement) in replacements {
+            expanded = expanded.substitute_variable(name, replacement);
+        }
+        Self::from_inner(expanded)
     }
 }
 
@@ -119,6 +149,47 @@ impl PyExpr {
         Ok(Self::from_inner(Expr::Var(name.to_owned())))
     }
 
+    /// Construct multiple variables in the supplied order.
+    ///
+    /// Names must be non-empty and unique. Unlike `variables()`, this helper
+    /// preserves caller order because it returns a sequence of independent
+    /// symbols rather than discovering free variables in an expression.
+    #[staticmethod]
+    pub fn symbols(names: Vec<String>) -> PyResult<Vec<Self>> {
+        if names.is_empty() {
+            return Err(InvalidExpressionError::new_err(
+                "symbol batch must contain at least one name",
+            ));
+        }
+        let mut seen = HashSet::with_capacity(names.len());
+        names
+            .into_iter()
+            .map(|name| {
+                Self::checked_name(&name, "symbol name")?;
+                if !seen.insert(name.clone()) {
+                    return Err(InvalidExpressionError::new_err(format!(
+                        "symbol name '{name}' was declared more than once"
+                    )));
+                }
+                Ok(Self::from_inner(Expr::Var(name)))
+            })
+            .collect()
+    }
+
+    /// Construct `count` variables named `prefix0`, `prefix1`, ... .
+    #[staticmethod]
+    pub fn indexed(prefix: &str, count: usize) -> PyResult<Vec<Self>> {
+        Self::checked_name(prefix, "indexed symbol prefix")?;
+        if count == 0 {
+            return Err(InvalidExpressionError::new_err(
+                "indexed symbol count must be positive",
+            ));
+        }
+        (0..count)
+            .map(|index| Self::variable(&format!("{prefix}{index}")))
+            .collect()
+    }
+
     /// Create a finite symbolic constant.
     #[staticmethod]
     pub fn constant(value: f64) -> PyResult<Self> {
@@ -140,6 +211,53 @@ impl PyExpr {
         Ok(Self::from_inner(self.inner.diff(variable)))
     }
 
+    /// Return the `order`-th symbolic derivative, simplifying after each pass.
+    pub fn diff_n(&self, variable: &str, order: usize) -> PyResult<Self> {
+        Self::checked_name(variable, "differentiation variable")?;
+        Ok(Self::from_inner(
+            self.inner.n_th_derivative1D(variable, order),
+        ))
+    }
+
+    /// Return partial derivatives in the expression's sorted free-variable order.
+    pub fn gradient(&self) -> Vec<Self> {
+        self.variables()
+            .iter()
+            .map(|variable| Self::from_inner(self.inner.diff(variable)))
+            .collect()
+    }
+
+    /// Build a formal Taylor polynomial through `order` around `center`.
+    ///
+    /// Other free variables remain symbolic. This constructs a formal
+    /// polynomial; it does not assert convergence or a radius of convergence.
+    /// A conservative order limit keeps accidental high-order requests from
+    /// causing unbounded tree growth.
+    pub fn taylor_series(&self, variable: &str, center: f64, order: usize) -> PyResult<Self> {
+        Self::checked_name(variable, "Taylor variable")?;
+        Self::checked_finite(center, "Taylor expansion point")?;
+        if order > MAX_TAYLOR_ORDER {
+            return Err(InvalidExpressionError::new_err(format!(
+                "Taylor order must not exceed {MAX_TAYLOR_ORDER}"
+            )));
+        }
+
+        let delta = Expr::Var(variable.to_owned()) - Expr::Const(center);
+        let mut derivative = self.inner.clone();
+        let mut factorial = 1.0;
+        let mut polynomial = Expr::Const(0.0);
+        for degree in 0..=order {
+            if degree > 0 {
+                derivative = derivative.diff(variable).simplify();
+                factorial *= degree as f64;
+            }
+            let coefficient = derivative.set_variable(variable, center) / Expr::Const(factorial);
+            let term = coefficient * delta.clone().pow(Expr::Const(degree as f64));
+            polynomial = polynomial + term;
+        }
+        Ok(Self::from_inner(polynomial.simplify()))
+    }
+
     /// Substitute a finite scalar for one variable.
     pub fn substitute(&self, variable: &str, value: f64) -> PyResult<Self> {
         Self::checked_name(variable, "substitution variable")?;
@@ -155,11 +273,28 @@ impl PyExpr {
         ))
     }
 
+    /// Rename one variable throughout a new copy of the expression.
+    pub fn rename_variable(&self, old_name: &str, new_name: &str) -> PyResult<Self> {
+        Self::checked_name(old_name, "old variable name")?;
+        Self::checked_name(new_name, "new variable name")?;
+        Ok(Self::from_inner(
+            self.inner.rename_variable(old_name, new_name),
+        ))
+    }
+
+    /// Check whether the expression contains a named free variable.
+    pub fn contains_variable(&self, name: &str) -> PyResult<bool> {
+        Self::checked_name(name, "variable name")?;
+        Ok(self.inner.contains_variable(name))
+    }
+
     /// Recursively expand a set of named symbolic substitutions.
     ///
     /// The mapping is resolved as a dependency graph, so definitions may refer
     /// to definitions declared later in the Python dictionary. Cycles and
     /// duplicate names are rejected before the target expression is changed.
+    /// Names absent from the mapping remain free variables; extra mapping
+    /// entries that are not referenced by the expression are harmless.
     pub fn substitute_many(&self, replacements: Vec<(String, PyExpr)>) -> PyResult<Self> {
         Self::apply_substitutions(&self.inner, replacements)
     }
@@ -168,7 +303,8 @@ impl PyExpr {
     ///
     /// This is an ergonomic alias for `substitute_many`: the operation is
     /// simultaneous after recursive expansion, not dependent on dictionary
-    /// iteration order.
+    /// iteration order. Unmapped symbols remain free, and unused definitions
+    /// do not alter the expression.
     pub fn where_substitute(&self, replacements: &Bound<'_, PyDict>) -> PyResult<Self> {
         let entries = replacements
             .iter()
@@ -181,14 +317,28 @@ impl PyExpr {
 
     /// Compile this expression once into a reusable native scalar callable.
     ///
-    /// If `variables` is omitted, the native expression variable order is
-    /// used. Supplying an explicit order is recommended for solver adapters.
-    #[pyo3(signature=(variables=None))]
-    pub fn lambdify(&self, variables: Option<Vec<String>>) -> PyResult<LambdifiedExpr> {
-        LambdifiedExpr::compile(self, variables)
+    /// If `variables` is omitted, sorted free-variable order is used. Choose
+    /// `SymbolicFrontend.AtomNative` to convert once and then evaluate directly
+    /// from the packed Atom route. Diagnostics are disabled by default.
+    #[pyo3(signature=(variables=None, frontend=None, diagnostics=false))]
+    pub fn lambdify(
+        &self,
+        variables: Option<Vec<String>>,
+        frontend: Option<crate::contract::SymbolicFrontend>,
+        diagnostics: bool,
+    ) -> PyResult<LambdifiedExpr> {
+        LambdifiedExpr::compile_with_options(
+            self,
+            variables,
+            frontend.unwrap_or(crate::contract::SymbolicFrontend::ExprLegacy),
+            diagnostics,
+        )
     }
 
-    /// Return variable names in the order used by `evaluate`.
+    /// Return sorted, unique free-variable names.
+    ///
+    /// `evaluate()` and default `lambdify()` use this exact order; an explicit
+    /// Lambdify argument list may choose a different order.
     pub fn variables(&self) -> Vec<String> {
         self.inner.extract_variables().1
     }
@@ -220,9 +370,40 @@ impl PyExpr {
         }
     }
 
-    /// Apply RustedSciThe's symbolic simplification pass.
+    /// Apply RustedSciThe's algebraic simplification pass.
+    ///
+    /// This pass is not domain-preserving: for example, `x / x` may simplify
+    /// to `1`, even though the original expression is undefined at `x = 0`.
+    /// Preserve the unsimplified expression or enforce its domain separately
+    /// when singular points are relevant to the model.
     pub fn simplify(&self) -> Self {
         Self::from_inner(self.inner.simplify())
+    }
+
+    /// Return an indefinite primitive with respect to `variable`.
+    ///
+    /// The native integrator supports a subset of elementary expressions and
+    /// reports unsupported forms as `UnsupportedSymbolicOperationError`.
+    /// The returned primitive has no integration constant. In particular, the
+    /// native rule for `1/x` is `ln(x)`; callers integrating across negative
+    /// values or zero must account for the real-domain branch themselves.
+    pub fn integrate(&self, variable: &str) -> PyResult<Self> {
+        Self::checked_name(variable, "integration variable")?;
+        self.inner
+            .integrate(variable)
+            .map(Self::from_inner)
+            .map_err(|message| {
+                let error = annotate(
+                    UnsupportedSymbolicOperationError::new_err(message),
+                    "symbolic_integration",
+                    "Expr.integrate",
+                    "native_symbolic",
+                );
+                Python::attach(|py| {
+                    let _ = error.value(py).setattr("operation", "integrate");
+                });
+                error
+            })
     }
 
     /// Build `exp(self)`.
@@ -233,6 +414,11 @@ impl PyExpr {
     /// Build `ln(self)`.
     pub fn ln(&self) -> Self {
         Self::from_inner(self.inner.clone().ln())
+    }
+
+    /// Build `log10(self)` using the core's natural-log identity.
+    pub fn log10(&self) -> Self {
+        Self::from_inner(self.inner.clone().log10())
     }
 
     /// Build `sin(self)`.
@@ -248,6 +434,17 @@ impl PyExpr {
     /// Build `tan(self)` using RustedSciThe's `tg` representation.
     pub fn tan(&self) -> Self {
         Self::from_inner(Expr::tg(Box::new(self.inner.clone())))
+    }
+
+    /// Build cotangent as `cos(self) / sin(self)`.
+    ///
+    /// The core's legacy `ctg` node currently has inconsistent scalar
+    /// evaluation semantics, so this binding uses the equivalent elementary
+    /// expression rather than exposing a numerically incorrect node.
+    pub fn cot(&self) -> Self {
+        Self::from_inner(
+            Expr::cos(Box::new(self.inner.clone())) / Expr::sin(Box::new(self.inner.clone())),
+        )
     }
 
     /// Build the inverse sine of `self`.
@@ -303,27 +500,58 @@ impl PyExpr {
         format!("Expr({:?})", self.inner.to_string())
     }
 
-    fn __add__(&self, rhs: &PyExpr) -> Self {
-        Self::from_inner(self.inner.clone() + rhs.inner.clone())
+    /// Render a two-dimensional mathematical presentation for display only.
+    /// The result is not a parser or serialization format.
+    pub fn pretty_print(&self) -> String {
+        self.inner.pretty_print()
     }
 
-    fn __sub__(&self, rhs: &PyExpr) -> Self {
-        Self::from_inner(self.inner.clone() - rhs.inner.clone())
+    fn __add__(&self, rhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(self.inner.clone() + Self::operand(rhs)?))
     }
 
-    fn __mul__(&self, rhs: &PyExpr) -> Self {
-        Self::from_inner(self.inner.clone() * rhs.inner.clone())
+    fn __radd__(&self, lhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(Self::operand(lhs)? + self.inner.clone()))
     }
 
-    fn __truediv__(&self, rhs: &PyExpr) -> PyResult<Self> {
-        if matches!(&rhs.inner, Expr::Const(value) if *value == 0.0) {
+    fn __sub__(&self, rhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(self.inner.clone() - Self::operand(rhs)?))
+    }
+
+    fn __rsub__(&self, lhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(Self::operand(lhs)? - self.inner.clone()))
+    }
+
+    fn __mul__(&self, rhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(self.inner.clone() * Self::operand(rhs)?))
+    }
+
+    fn __rmul__(&self, lhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self::from_inner(Self::operand(lhs)? * self.inner.clone()))
+    }
+
+    fn __truediv__(&self, rhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let rhs = Self::operand(rhs)?;
+        if matches!(&rhs, Expr::Const(value) if *value == 0.0) {
             return Err(InvalidExpressionError::new_err("division by zero"));
         }
-        Ok(Self::from_inner(self.inner.clone() / rhs.inner.clone()))
+        Ok(Self::from_inner(self.inner.clone() / rhs))
     }
 
-    fn __pow__(&self, rhs: &PyExpr, _modulo: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        Ok(self.pow(rhs))
+    fn __rtruediv__(&self, lhs: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let lhs = Self::operand(lhs)?;
+        if matches!(&self.inner, Expr::Const(value) if *value == 0.0) {
+            return Err(InvalidExpressionError::new_err("division by zero"));
+        }
+        Ok(Self::from_inner(lhs / self.inner.clone()))
+    }
+
+    fn __pow__(
+        &self,
+        rhs: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Ok(self.pow(&Self::from_inner(Self::operand(rhs)?)))
     }
 
     fn __neg__(&self) -> Self {
@@ -346,4 +574,16 @@ pub fn symbol(name: &str) -> PyResult<PyExpr> {
 #[pyfunction]
 pub fn constant(value: f64) -> PyResult<PyExpr> {
     PyExpr::constant(value)
+}
+
+/// Construct a caller-ordered batch of symbolic variables.
+#[pyfunction]
+pub fn symbols(names: Vec<String>) -> PyResult<Vec<PyExpr>> {
+    PyExpr::symbols(names)
+}
+
+/// Construct an indexed variable batch named `prefix0` through `prefixN-1`.
+#[pyfunction]
+pub fn indexed_symbols(prefix: &str, count: usize) -> PyResult<Vec<PyExpr>> {
+    PyExpr::indexed(prefix, count)
 }

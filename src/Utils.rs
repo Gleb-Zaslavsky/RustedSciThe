@@ -14,5 +14,6 @@ pub mod test_reporting;
 
 pub mod animation_2d;
 pub mod animation_3d;
+pub mod animation;
 
 pub mod bevy_2d;

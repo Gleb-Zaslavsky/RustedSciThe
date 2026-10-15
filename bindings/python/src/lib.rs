@@ -4,6 +4,7 @@
 //! and thin vertical slices for the first numerical solvers. Concrete wrappers
 //! can be added without changing expression semantics or option spelling.
 
+mod animation;
 mod aot;
 mod bdf;
 mod be;
@@ -20,6 +21,7 @@ mod numpy_support;
 #[cfg(test)]
 mod parity;
 mod radau;
+mod symbolic_arrays;
 mod system;
 mod task;
 mod telemetry;
@@ -40,14 +42,15 @@ use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError, BvpError,
     CallbackError, ExhaustionError, InvalidConfigurationError, InvalidExpressionError, PanicError,
     PoisonedSolverError, PreparationError, RustedSciTheError, SolverError, TaskDocumentError,
-    TelemetryError, UnsupportedOptionError,
+    TelemetryError, UnsupportedOptionError, UnsupportedSymbolicOperationError,
 };
-use crate::expr::{PyExpr, constant, parse_expr, symbol};
+use crate::expr::{PyExpr, constant, indexed_symbols, parse_expr, symbol, symbols};
 use crate::gavin::{GavinFittingSolution, GavinFittingSolver};
 use crate::lambdify::LambdifiedExpr;
 use crate::lsode2::{Lsode2PythonSolver, Lsode2Solution};
 use crate::nonlinear::{FittingSolution, FittingSolver, NonlinearSolution, NonlinearSolver};
 use crate::radau::{RadauCallbackSolver, RadauSolution, RadauSolver};
+use crate::symbolic_arrays::{PyExprMatrix, PyExprVector};
 use crate::system::{LambdifiedSystem, SymbolicSystem};
 use crate::task::{BvpTaskResult, IvpTaskResult, TaskDocument};
 use crate::varpro::{VarProSolution, VarProSolver};
@@ -60,6 +63,8 @@ use crate::varpro::{VarProSolution, VarProSolver};
 #[pymodule]
 fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyExpr>()?;
+    module.add_class::<PyExprVector>()?;
+    module.add_class::<PyExprMatrix>()?;
     module.add_class::<BdfSolver>()?;
     module.add_class::<BdfCallbackSolver>()?;
     module.add_class::<BdfSolution>()?;
@@ -100,13 +105,27 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     module.add_function(wrap_pyfunction!(parse_expr, module)?)?;
     module.add_function(wrap_pyfunction!(symbol, module)?)?;
+    module.add_function(wrap_pyfunction!(symbols, module)?)?;
+    module.add_function(wrap_pyfunction!(indexed_symbols, module)?)?;
     module.add_function(wrap_pyfunction!(constant, module)?)?;
     module.add_function(wrap_pyfunction!(capabilities, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        crate::animation::animate_trajectory_2d,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        crate::animation::animate_trajectory_3d,
+        module
+    )?)?;
 
     module.add("RustedSciTheError", RustedSciTheError::type_object(py))?;
     module.add(
         "InvalidExpressionError",
         InvalidExpressionError::type_object(py),
+    )?;
+    module.add(
+        "UnsupportedSymbolicOperationError",
+        UnsupportedSymbolicOperationError::type_object(py),
     )?;
     module.add(
         "UnsupportedOptionError",

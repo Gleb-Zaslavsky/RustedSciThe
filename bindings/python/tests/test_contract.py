@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 
+import numpy as np
 import pytest
 
 from rustedscithe import (
@@ -28,6 +29,8 @@ from rustedscithe import (
     CallbackError,
     ExhaustionError,
     Expr,
+    ExprMatrix,
+    ExprVector,
     FittingSolution,
     InvalidConfigurationError,
     InvalidExpressionError,
@@ -48,6 +51,8 @@ from rustedscithe import (
     SolverError,
     SolverOptions,
     SymbolicSystem,
+    SymbolicFrontend,
+    UnsupportedSymbolicOperationError,
     TaskDocument,
     TaskDocumentError,
     TelemetryError,
@@ -55,7 +60,61 @@ from rustedscithe import (
     VarProSolver,
     VarProSolution,
     capabilities,
+    animate_solution_2d,
+    animate_solution_3d,
+    animate_trajectory_2d,
+    animate_trajectory_3d,
+    indexed_symbols,
+    symbols,
 )
+
+
+def test_animation_api_rejects_invalid_inputs_before_opening_a_window():
+    valid_2d = np.asarray([[0.0, 0.0], [1.0, 2.0]], dtype=np.float64)
+    valid_3d = np.asarray([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]], dtype=np.float64)
+    times = np.asarray([0.0, 1.0], dtype=np.float64)
+
+    with pytest.raises(ValueError, match=r"shape \(samples, 2\)"):
+        animate_trajectory_2d(valid_3d, times)
+    with pytest.raises(ValueError, match=r"shape \(samples, 3\)"):
+        animate_trajectory_3d(valid_2d, times)
+    with pytest.raises(ValueError, match="timestamps"):
+        animate_trajectory_2d(valid_2d, np.asarray([0.0, 0.0]))
+    with pytest.raises(ValueError, match="speed"):
+        animate_trajectory_2d(valid_2d, times, speed=0.0)
+    with pytest.raises(ValueError, match="coordinate"):
+        animate_trajectory_3d(
+            np.asarray([[0.0, 0.0, np.inf], [1.0, 2.0, 3.0]]), times
+        )
+    with pytest.raises(ValueError, match="too large for playback"):
+        animate_trajectory_2d(valid_2d, np.asarray([0.0, 2.0e9]))
+    with pytest.raises(ValueError, match="coordinate range"):
+        animate_trajectory_2d(
+            np.asarray(
+                [
+                    [np.finfo(np.float32).max, 0.0],
+                    [-np.finfo(np.float32).max, 0.0],
+                ]
+            ),
+            times,
+        )
+
+
+def test_solution_animation_adapter_only_reads_selected_solution_columns():
+    class DetachedSolution:
+        def states_array(self):
+            return np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+        def times_array(self):
+            return np.asarray([0.0, 1.0])
+
+    solution = DetachedSolution()
+    with pytest.raises(ValueError, match="speed"):
+        animate_solution_2d(solution, (0, 2), ("x", "z"), speed=0.0)
+    with pytest.raises(ValueError, match="speed"):
+        animate_solution_3d(solution, (0, 1, 2), speed=0.0)
+    with pytest.raises(ValueError, match="outside the solution dimension"):
+        animate_solution_2d(solution, (0, 3), speed=0.0)
 
 
 def test_task_document_parse_preview_check_and_file_roundtrip(tmp_path):
@@ -706,6 +765,134 @@ def test_exposed_symbolic_operations_are_native_and_composable():
     assert Expr.parse("(x + 0) * 1").simplify().evaluate([3.0]) == pytest.approx(3.0)
 
 
+def test_scalar_expression_numeric_operators_and_reflected_forms():
+    x = Expr.variable("x")
+    expression = 2 * x + 1 / x - (x - 3) ** 2
+
+    assert expression.evaluate([2.0]) == pytest.approx(3.5)
+    assert (x + 1).evaluate([2.0]) == pytest.approx(3.0)
+    assert (1 - x).evaluate([2.0]) == pytest.approx(-1.0)
+    assert (x * 0.5).evaluate([2.0]) == pytest.approx(1.0)
+    with pytest.raises(InvalidExpressionError, match="finite"):
+        _ = x + float("inf")
+    with pytest.raises(TypeError, match="boolean"):
+        _ = x + True
+
+
+def test_symbol_batches_renaming_pretty_print_and_scalar_derivatives():
+    x, y = Expr.symbols(["x", "y"])
+    x0, x1, x2 = Expr.indexed("x", 3)
+    assert [str(item) for item in symbols(["a", "b"])] == ["a", "b"]
+    assert [str(item) for item in indexed_symbols("u", 2)] == ["u0", "u1"]
+    expression = x**2 + y * x0 + x1 - x2
+
+    assert [item.variables() for item in (x, y, x0, x1, x2)] == [
+        ["x"], ["y"], ["x0"], ["x1"], ["x2"]
+    ]
+    assert expression.variables() == ["x", "x0", "x1", "x2", "y"]
+    assert expression.contains_variable("x")
+    assert not expression.contains_variable("missing")
+    renamed = expression.rename_variable("x", "z")
+    assert renamed.variables() == ["x0", "x1", "x2", "y", "z"]
+    assert expression.variables() == ["x", "x0", "x1", "x2", "y"]
+    assert "z" in renamed.pretty_print()
+
+    polynomial = Expr.parse("x^3 + y*x")
+    assert polynomial.diff_n("x", 2).evaluate([2.0]) == pytest.approx(12.0)
+    gradient = polynomial.gradient()
+    assert gradient[0].evaluate([2.0, 4.0]) == pytest.approx(16.0)
+    assert gradient[1].evaluate([2.0]) == pytest.approx(2.0)
+    taylor = Expr.parse("x^2 + y").taylor_series("x", 1.0, 2)
+    assert taylor.evaluate([1.25, 3.0]) == pytest.approx(4.5625)
+    assert Expr.variable("x").log10().evaluate([10.0]) == pytest.approx(1.0)
+    assert Expr.variable("x").cot().evaluate([1.0]) == pytest.approx(1.0 / np.tan(1.0))
+
+    with pytest.raises(InvalidExpressionError, match="more than once"):
+        Expr.symbols(["x", "x"])
+    with pytest.raises(InvalidExpressionError, match="must not exceed"):
+        polynomial.taylor_series("x", 0.0, 33)
+
+
+def test_symbolic_indefinite_integration_and_typed_unsupported_form():
+    x = Expr.variable("x")
+    primitive = (x**3 + 2 * x).integrate("x")
+    assert primitive.diff("x").simplify().evaluate([1.75]) == pytest.approx(
+        (x**3 + 2 * x).evaluate([1.75])
+    )
+    assert Expr.parse("1/x").integrate("x").variables() == ["x"]
+
+    with pytest.raises(UnsupportedSymbolicOperationError) as error:
+        Expr.parse("exp(x^2)").integrate("x")
+    assert error.value.stage == "symbolic_integration"
+    assert error.value.category == "unsupported_symbolic_operation"
+    assert error.value.operation == "integrate"
+
+
+def test_symbolic_simplification_contract_does_not_preserve_domain_singularities():
+    x = Expr.variable("x")
+    original = x / x
+    simplified = original.simplify()
+
+    # Keep this behavior explicit: simplification does not carry domain assumptions.
+    assert str(simplified) == "1"
+    assert simplified.evaluate([]) == pytest.approx(1.0)
+    with pytest.raises(InvalidExpressionError, match="non-finite"):
+        original.evaluate([0.0])
+
+
+def test_symbolic_vectors_and_matrices_validate_shapes_and_return_owned_numpy():
+    x, y = Expr.symbols(["x", "y"])
+    vector = ExprVector([x + y, x * y])
+    assert len(vector) == 2
+    assert vector.variables() == ["x", "y"]
+    np.testing.assert_allclose(vector.evaluate([2.0, 3.0]), [5.0, 6.0])
+    assert vector.dot(ExprVector([x, y])).evaluate([2.0, 3.0]) == pytest.approx(28.0)
+    assert vector.diff("x").evaluate([3.0]).tolist() == pytest.approx([1.0, 3.0])
+    with pytest.raises(IndexError):
+        _ = vector[2]
+    with pytest.raises(InvalidConfigurationError, match="lengths differ"):
+        vector.dot(ExprVector([x]))
+
+    matrix = ExprMatrix([[x, y], [x * y, x**2]])
+    assert matrix.shape() == (2, 2)
+    assert matrix.variables() == ["x", "y"]
+    np.testing.assert_allclose(matrix.evaluate([2.0, 3.0]), [[2.0, 3.0], [6.0, 4.0]])
+    np.testing.assert_allclose(
+        matrix.transpose().evaluate([2.0, 3.0]), [[2.0, 6.0], [3.0, 4.0]]
+    )
+    np.testing.assert_allclose(
+        matrix.substitute_expr("y", x).evaluate([2.0]), [[2.0, 2.0], [4.0, 4.0]]
+    )
+    np.testing.assert_allclose(
+        matrix.matvec(ExprVector([x, y])).evaluate([2.0, 3.0]), [13.0, 24.0]
+    )
+    assert matrix.trace().evaluate([2.0]) == pytest.approx(6.0)
+    assert matrix.determinant().evaluate([2.0, 3.0]) == pytest.approx(-10.0)
+    with pytest.raises(IndexError):
+        matrix.get(2, 0)
+    with pytest.raises(InvalidConfigurationError, match="same length"):
+        ExprMatrix([[x], [x, y]])
+    with pytest.raises(InvalidConfigurationError, match="size 1 through 3"):
+        ExprMatrix.identity(4).determinant()
+    assert ExprMatrix.zeros(0, 3).evaluate([]).shape == (0, 3)
+    assert ExprMatrix.zeros(2, 0).evaluate([]).shape == (2, 0)
+
+
+def test_lambdified_expression_evaluates_numpy_batches_with_explicit_axes():
+    x, y = Expr.symbols(["x", "y"])
+    compiled = (x + 2 * y).lambdify(["y", "x"], diagnostics=True)
+    samples = np.array([[3.0, 2.0], [5.0, 4.0]])
+
+    assert compiled.evaluate_batch(samples) == pytest.approx(np.array([8.0, 14.0]))
+    strided_samples = np.array([[3.0, -1.0, 2.0], [5.0, -1.0, 4.0]])[:, ::2]
+    assert compiled.evaluate_batch(strided_samples) == pytest.approx(np.array([8.0, 14.0]))
+    assert compiled.preparation_ms >= 0.0
+    assert compiled.diagnostics_enabled
+    assert compiled.diagnostics()["evaluations"] == 4
+    with pytest.raises(InvalidExpressionError, match="columns"):
+        compiled.evaluate_batch(np.ones((2, 1)))
+
+
 def test_where_substitution_resolves_nested_aliases_independent_of_mapping_order():
     x = Expr.variable("x")
     y = Expr.variable("y")
@@ -723,6 +910,14 @@ def test_where_substitution_resolves_nested_aliases_independent_of_mapping_order
     )
     assert expanded_system.variables() == ["x", "y"]
     assert expanded_system.evaluate([3.0, 4.0]) == pytest.approx([10.0, 6.0])
+
+    # The same dependency graph is applied to every residual in one prepared pass.
+    many_rows = SymbolicSystem([scaled + y, scaled * x, scaled - rate])
+    rebound = many_rows.substitute_many(
+        [("scaled", rate * x), ("rate", Expr.constant(2.0))]
+    )
+    assert rebound.variables() == ["x", "y"]
+    assert rebound.evaluate([3.0, 4.0]) == pytest.approx([10.0, 18.0, 4.0])
 
 
 def test_where_substitution_rejects_cycles_and_duplicate_list_names():
@@ -744,11 +939,42 @@ def test_lambdify_compiles_once_and_keeps_explicit_input_order():
     assert compiled.variables() == ["y", "x"]
     assert compiled.evaluate([3.0, 2.0]) == pytest.approx(5.0)
     assert "x" in compiled.expression
+    assert compiled.preparation_ms is None
+    assert not compiled.diagnostics_enabled
+    assert compiled.diagnostics()["evaluations"] == 0
 
     with pytest.raises(InvalidExpressionError):
         (x + y).lambdify(["x"])
     with pytest.raises(InvalidExpressionError):
         (x + y).lambdify(["x", "x", "y"])
+
+
+def test_expr_legacy_and_atom_native_standalone_callables_match_with_diagnostics():
+    x, y = Expr.symbols(["x", "y"])
+    expression = x.sin() * y + x**2
+    legacy = expression.lambdify(["y", "x"], frontend=SymbolicFrontend.ExprLegacy)
+    atom = expression.lambdify(
+        ["y", "x"], frontend=SymbolicFrontend.AtomNative, diagnostics=True
+    )
+
+    point = [0.25, 1.5]
+    assert atom.frontend == "atom_native"
+    assert legacy.frontend == "expr_legacy"
+    assert atom.evaluate(point) == pytest.approx(legacy.evaluate(point))
+    assert atom.preparation_ms is not None and atom.preparation_ms >= 0.0
+    assert atom.diagnostics_enabled
+    assert atom.diagnostics()["evaluations"] == 1
+    assert atom.diagnostics()["callback_time_ms"] >= 0.0
+
+    system = SymbolicSystem([expression, expression.diff("x")], ["x", "y"])
+    prepared = system.lambdify(frontend=SymbolicFrontend.AtomNative, diagnostics=True)
+    residual = prepared.evaluate([0.25, 1.5])
+    jacobian = prepared.evaluate_jacobian([0.25, 1.5])
+    assert prepared.frontend == "atom_native"
+    assert prepared.diagnostics_enabled
+    assert prepared.preparation_ms is not None and prepared.preparation_ms >= 0.0
+    assert len(residual) == 2 and len(jacobian) == 2
+    assert prepared.diagnostics()["evaluations"] == 6
 
 
 def test_symbolic_system_exposes_residual_jacobian_and_reusable_vector_callable():
