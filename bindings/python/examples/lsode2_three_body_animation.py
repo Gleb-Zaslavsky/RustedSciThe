@@ -1,7 +1,7 @@
-"""Solve the planar three-body example and optionally animate one body.
+"""Solve the planar three-body example and animate one body's XY path.
 
-The default is a non-interactive numerical run. Add ``--animate`` to display
-one selected body's XY path; this makes the script safe for batch checks.
+The interactive animation is shown by default. Pass ``--no-animate`` for a
+headless numerical run suitable for batch checks.
 """
 
 import argparse
@@ -13,9 +13,17 @@ from rustedscithe import Expr, SolverOptions, animate_solution_2d, solve_ivp
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--animate", action="store_true")
-    parser.add_argument("--body", type=int, choices=(0, 1, 2), default=0)
-    parser.add_argument("--speed", type=float, default=1.0)
+    animation = parser.add_mutually_exclusive_group()
+    animation.add_argument("--animate", dest="animate", action="store_true")
+    animation.add_argument("--no-animate", dest="animate", action="store_false")
+    parser.set_defaults(animate=True)
+    parser.add_argument("--body", type=int, choices=(0, 1, 2), default=1)
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=0.01,
+        help="playback rate multiplier; the short default interval is slowed down",
+    )
     args = parser.parse_args()
 
     names = [
@@ -69,6 +77,7 @@ def main() -> None:
     print("samples:", len(times))
     print(f"body {args.body} final XY:", states[-1, [x_column, y_column]])
     if args.animate:
+        print("Opening 2D animation; close the window or press Esc to finish.")
         animate_solution_2d(
             solution,
             (x_column, y_column),

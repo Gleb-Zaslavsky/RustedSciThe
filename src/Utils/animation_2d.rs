@@ -41,9 +41,8 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use nalgebra::{DMatrix, DVector};
 
-use super::animation::{
-    AnimationInputError, advance_animation_clock, validate_trajectory,
-};
+use super::animation::normalize_for_display;
+use super::animation::{AnimationInputError, advance_animation_clock, validate_trajectory};
 
 /// Component that holds animated 2D trajectory data and current animation state
 #[derive(Component)]
@@ -81,6 +80,9 @@ struct LineData2D {
     max: Vec2,
     /// Custom names for X, Y axes
     axis_names: (String, String),
+    /// Transform metadata used to display physical coordinates in the HUD.
+    coordinate_origin: [f64; 2],
+    units_per_display_unit: f64,
 }
 
 /// Creates and runs an interactive 2D trajectory animation
@@ -126,7 +128,8 @@ pub fn try_create_2d_animation(
 ) -> Result<(), AnimationInputError> {
     let speed = speed.unwrap_or(1.0);
     let frame_intervals = validate_trajectory::<2>(&points, &times, speed)?;
-    let points = points.cast::<f32>();
+    let display = normalize_for_display::<2>(&points);
+    let points = display.points;
     let min = Vec2::new(
         (0..points.ncols())
             .map(|column| points[(0, column)])
@@ -152,7 +155,11 @@ pub fn try_create_2d_animation(
         // Run animation and camera control every frame
         .add_systems(
             Update,
-            (animate_2d_line, camera_2d_controller, exit_animation_on_escape),
+            (
+                animate_2d_line,
+                camera_2d_controller,
+                exit_animation_on_escape,
+            ),
         )
         // Store trajectory data as a global resource
         .insert_resource(LineData2D {
@@ -161,6 +168,8 @@ pub fn try_create_2d_animation(
             min,
             max,
             axis_names: axes_names.unwrap_or_else(|| ("x".to_string(), "y".to_string())),
+            coordinate_origin: display.origin,
+            units_per_display_unit: display.units_per_display_unit,
         })
         .run(); // Blocks until window is closed
     Ok(())
@@ -168,7 +177,7 @@ pub fn try_create_2d_animation(
 
 /// Bevy startup system that initializes the 2D scene
 /// Sets up camera, animated trajectory, and UI elements
-fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>) {
+fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>, windows: Query<&Window>) {
     // Set light gray background color
     commands.insert_resource(ClearColor(Color::srgb(0.95, 0.95, 0.98)));
 
@@ -178,8 +187,11 @@ fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>) {
     let center = line_data.min * 0.5 + line_data.max * 0.5;
     let extent = line_data.max - line_data.min;
     let size = extent.x.max(extent.y);
-    let initial_scale = if size > 0.0 {
-        (2.0 / size).clamp(0.1, 10.0)
+    let viewport_height = windows.iter().next().map(Window::height).unwrap_or(720.0);
+    // Keep the trajectory at about 70% of the viewport height. The points are
+    // already normalized into a small, centered display-space range.
+    let initial_camera_scale = if size > 0.0 {
+        (size / (viewport_height * 0.7)).clamp(1.0e-6, 1.0e6)
     } else {
         1.0
     };
@@ -188,11 +200,11 @@ fn setup_2d_scene(mut commands: Commands, line_data: Res<LineData2D>) {
     commands.spawn((
         Camera2d,
         Transform::from_translation(Vec3::new(center.x, center.y, 0.0))
-            .with_scale(Vec3::splat(initial_scale)),
+            .with_scale(Vec3::splat(initial_camera_scale)),
         // Attach the controller so the camera_query in the system finds it
         Camera2DController {
             offset: center,
-            zoom: 1.0 / initial_scale,
+            zoom: 1.0 / initial_camera_scale,
         },
     ));
 
@@ -275,40 +287,48 @@ fn animate_2d_line(
         );
 
         // Calculate axis extent based on data bounds with padding
-        let x_extent = (line_data.max.x - line_data.min.x).max(1.0) * 0.6;
-        let y_extent = (line_data.max.y - line_data.min.y).max(1.0) * 0.6;
+        let center = line_data.min * 0.5 + line_data.max * 0.5;
+        let data_extent = line_data.max - line_data.min;
+        let overall_extent = data_extent.x.max(data_extent.y);
+        let fallback_extent = if overall_extent > 0.0 {
+            overall_extent * 0.1
+        } else {
+            1.0
+        };
+        let x_extent = data_extent.x.max(fallback_extent).max(1.0e-6) * 0.6;
+        let y_extent = data_extent.y.max(fallback_extent).max(1.0e-6) * 0.6;
 
         // Draw coordinate axes extending in both directions
         gizmos.line_2d(
-            Vec2::new(-x_extent, 0.0),
-            Vec2::new(x_extent, 0.0),
+            Vec2::new(center.x - x_extent, center.y),
+            Vec2::new(center.x + x_extent, center.y),
             Color::srgb(1.0, 0.0, 0.0),
         ); // X-axis
         gizmos.line_2d(
-            Vec2::new(0.0, -y_extent),
-            Vec2::new(0.0, y_extent),
+            Vec2::new(center.x, center.y - y_extent),
+            Vec2::new(center.x, center.y + y_extent),
             Color::srgb(0.0, 1.0, 0.0),
         ); // Y-axis
 
         // Draw small circles at axis endpoints
         let circle_radius = (x_extent + y_extent) * 0.01;
         gizmos.circle_2d(
-            Vec2::new(x_extent, 0.0),
+            Vec2::new(center.x + x_extent, center.y),
             circle_radius,
             Color::srgb(1.0, 0.0, 0.0),
         );
         gizmos.circle_2d(
-            Vec2::new(-x_extent, 0.0),
+            Vec2::new(center.x - x_extent, center.y),
             circle_radius,
             Color::srgb(1.0, 0.0, 0.0),
         );
         gizmos.circle_2d(
-            Vec2::new(0.0, y_extent),
+            Vec2::new(center.x, center.y + y_extent),
             circle_radius,
             Color::srgb(0.0, 1.0, 0.0),
         );
         gizmos.circle_2d(
-            Vec2::new(0.0, -y_extent),
+            Vec2::new(center.x, center.y - y_extent),
             circle_radius,
             Color::srgb(0.0, 1.0, 0.0),
         );
@@ -335,9 +355,13 @@ fn animate_2d_line(
 
         // Update UI text with current position values
         for mut text in text_query.iter_mut() {
+            let physical_x = f64::from(current_point.x) * line_data.units_per_display_unit
+                + line_data.coordinate_origin[0];
+            let physical_y = f64::from(current_point.y) * line_data.units_per_display_unit
+                + line_data.coordinate_origin[1];
             **text = format!(
                 "Position: {}:{:.2}, {}:{:.2}",
-                line_data.axis_names.0, current_point.x, line_data.axis_names.1, current_point.y
+                line_data.axis_names.0, physical_x, line_data.axis_names.1, physical_y
             );
         }
     }
@@ -364,7 +388,7 @@ fn camera_2d_controller(
         // Handle zoom with scroll wheel
         for scroll in scroll_events.read() {
             controller.zoom *= 1.0 + scroll.y * 0.1;
-            controller.zoom = controller.zoom.clamp(0.1, 10.0);
+            controller.zoom = controller.zoom.clamp(1.0e-6, 1.0e6);
         }
 
         // Apply camera translation and zoom (reciprocal for correct zoom direction)

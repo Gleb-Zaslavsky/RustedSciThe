@@ -7,6 +7,55 @@ use std::fmt;
 
 use nalgebra::{DMatrix, DVector};
 
+/// Display-space coordinates plus the transform back to the solver's units.
+///
+/// The animation renderer uses `f32` geometry and perspective/orthographic
+/// cameras. Mapping the largest coordinate range to four display units keeps
+/// tiny and heavily offset trajectories visible without changing solver data.
+pub(crate) struct DisplayTrajectory<const D: usize> {
+    pub(crate) points: DMatrix<f32>,
+    pub(crate) origin: [f64; D],
+    pub(crate) units_per_display_unit: f64,
+}
+
+/// Center and uniformly scale a validated trajectory into a renderer-friendly
+/// range while retaining enough metadata to report original coordinates.
+pub(crate) fn normalize_for_display<const D: usize>(points: &DMatrix<f64>) -> DisplayTrajectory<D> {
+    let mut origin = [0.0; D];
+    let mut min = [f64::INFINITY; D];
+    let mut max = [f64::NEG_INFINITY; D];
+    for column in 0..points.ncols() {
+        for row in 0..D {
+            let value = points[(row, column)];
+            min[row] = min[row].min(value);
+            max[row] = max[row].max(value);
+        }
+    }
+
+    let mut range = 0.0_f64;
+    for axis in 0..D {
+        origin[axis] = min[axis] * 0.5 + max[axis] * 0.5;
+        range = range.max(max[axis] - min[axis]);
+    }
+
+    let units_per_display_unit = if range > 0.0 { range / 4.0 } else { 1.0 };
+    let mut display_points = DMatrix::zeros(D, points.ncols());
+    if range > 0.0 {
+        for column in 0..points.ncols() {
+            for row in 0..D {
+                display_points[(row, column)] =
+                    (((points[(row, column)] - origin[row]) / range) * 4.0) as f32;
+            }
+        }
+    }
+
+    DisplayTrajectory {
+        points: display_points,
+        origin,
+        units_per_display_unit,
+    }
+}
+
 /// Invalid trajectory data or playback configuration for an animation helper.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnimationInputError {
@@ -34,13 +83,15 @@ impl fmt::Display for AnimationInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDimension { expected, actual } => {
-                write!(f, "trajectory must have {expected} coordinate rows, got {actual}")
+                write!(
+                    f,
+                    "trajectory must have {expected} coordinate rows, got {actual}"
+                )
             }
             Self::EmptyTrajectory => write!(f, "trajectory must contain at least one point"),
-            Self::SampleCountMismatch { points, times } => write!(
-                f,
-                "trajectory has {points} points but {times} timestamps"
-            ),
+            Self::SampleCountMismatch { points, times } => {
+                write!(f, "trajectory has {points} points but {times} timestamps")
+            }
             Self::InvalidCoordinate { row, column } => write!(
                 f,
                 "coordinate at row {row}, sample {column} is non-finite or outside f32 range"
@@ -106,13 +157,11 @@ pub fn validate_trajectory<const D: usize>(
         }
     }
     for row in 0..D {
-        let (min, max) = (0..points.ncols()).fold(
-            (f64::INFINITY, f64::NEG_INFINITY),
-            |(min, max), column| {
+        let (min, max) =
+            (0..points.ncols()).fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), column| {
                 let value = points[(row, column)];
                 (min.min(value), max.max(value))
-            },
-        );
+            });
         if !((max - min) as f32).is_finite() {
             return Err(AnimationInputError::InvalidCoordinateRange { axis: row });
         }
@@ -196,10 +245,16 @@ mod tests {
     fn validates_forward_backward_and_single_sample_timing() {
         let points = DMatrix::from_row_slice(2, 3, &[0.0, 1.0, 2.0, 0.0, 1.0, 0.0]);
         let forward = DVector::from_vec(vec![0.0, 0.25, 1.0]);
-        assert_eq!(validate_trajectory::<2>(&points, &forward, 2.0).unwrap(), vec![0.125, 0.375, 0.375]);
+        assert_eq!(
+            validate_trajectory::<2>(&points, &forward, 2.0).unwrap(),
+            vec![0.125, 0.375, 0.375]
+        );
 
         let backward = DVector::from_vec(vec![1.0, 0.25, 0.0]);
-        assert_eq!(validate_trajectory::<2>(&points, &backward, 1.0).unwrap(), vec![0.75, 0.25, 0.25]);
+        assert_eq!(
+            validate_trajectory::<2>(&points, &backward, 1.0).unwrap(),
+            vec![0.75, 0.25, 0.25]
+        );
 
         let one_point = DMatrix::from_row_slice(2, 1, &[1.0, 2.0]);
         assert_eq!(
@@ -211,9 +266,35 @@ mod tests {
     #[test]
     fn playback_clock_preserves_overshoot_and_wraps_irregular_samples() {
         let intervals = [0.125, 0.25, 0.125];
-        assert_eq!(advance_animation_clock(0, 0.0, 0.1875, &intervals), (1, 0.0625));
+        assert_eq!(
+            advance_animation_clock(0, 0.0, 0.1875, &intervals),
+            (1, 0.0625)
+        );
         assert_eq!(advance_animation_clock(2, 0.0, 0.25, &intervals), (1, 0.0));
-        assert_eq!(advance_animation_clock(0, 0.0, 0.6875, &intervals), (1, 0.0625));
+        assert_eq!(
+            advance_animation_clock(0, 0.0, 0.6875, &intervals),
+            (1, 0.0625)
+        );
+    }
+
+    #[test]
+    fn display_normalization_fits_tiny_offset_trajectory_and_retains_units() {
+        let points = DMatrix::from_row_slice(
+            2,
+            3,
+            &[1.0e6, 1.0e6 + 0.002, 1.0e6 + 0.004, -3.0, -2.998, -2.996],
+        );
+        let display = normalize_for_display::<2>(&points);
+
+        assert!((display.points[(0, 0)] + 2.0).abs() < 1.0e-5);
+        assert!((display.points[(0, 2)] - 2.0).abs() < 1.0e-5);
+        assert!((display.points[(1, 0)] + 2.0).abs() < 1.0e-5);
+        assert!((display.points[(1, 2)] - 2.0).abs() < 1.0e-5);
+        for axis in 0..2 {
+            let restored = f64::from(display.points[(axis, 1)]) * display.units_per_display_unit
+                + display.origin[axis];
+            assert!((restored - points[(axis, 1)]).abs() < 1.0e-9);
+        }
     }
 
     #[test]
@@ -241,19 +322,11 @@ mod tests {
             Err(AnimationInputError::InvalidCoordinate { .. })
         ));
         assert!(matches!(
-            validate_trajectory::<2>(
-                &points,
-                &DVector::from_vec(vec![0.0, 0.0]),
-                1.0
-            ),
+            validate_trajectory::<2>(&points, &DVector::from_vec(vec![0.0, 0.0]), 1.0),
             Err(AnimationInputError::NonMonotoneTime { .. })
         ));
         assert!(matches!(
-            validate_trajectory::<2>(
-                &points,
-                &DVector::from_vec(vec![0.0, 2.0e9]),
-                1.0
-            ),
+            validate_trajectory::<2>(&points, &DVector::from_vec(vec![0.0, 2.0e9]), 1.0),
             Err(AnimationInputError::UnrepresentableTimeInterval { .. })
         ));
         assert!(matches!(

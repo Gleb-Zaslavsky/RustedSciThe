@@ -1,7 +1,7 @@
-"""Solve Lorenz with LSODE2 and optionally animate a 2D/3D projection.
+"""Solve Lorenz with LSODE2 and show its 3D trajectory by default.
 
-Run ``python examples/lsode2_lorenz_animation.py`` for compute-only mode.
-Add ``--animate 2d`` or ``--animate 3d`` to open the interactive Bevy window.
+Use ``--animate 2d`` / ``--animate 3d`` for one view, ``both`` for sequential
+views, or ``--no-animate`` for a headless numerical run.
 """
 
 import argparse
@@ -19,7 +19,9 @@ from rustedscithe import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--animate", choices=("2d", "3d"), default=None)
+    animation = parser.add_mutually_exclusive_group()
+    animation.add_argument("--animate", choices=("2d", "3d", "both"), default="3d")
+    animation.add_argument("--no-animate", dest="animate", action="store_const", const=None)
     parser.add_argument("--speed", type=float, default=1.0, help="playback rate multiplier")
     args = parser.parse_args()
 
@@ -55,10 +57,12 @@ def main() -> None:
     print("controller/family:", solution.controller_mode, solution.executed_family)
     print("final state:", states[-1])
 
-    if args.animate == "2d":
+    if args.animate in ("2d", "both"):
         # The (x,z) projection exposes the familiar two-lobe Lorenz attractor.
+        print("Opening 2D animation; close the window or press Esc to finish.")
         animate_solution_2d(solution, (0, 2), ("x", "z"), args.speed)
-    elif args.animate == "3d":
+    if args.animate in ("3d", "both"):
+        print("Opening 3D animation; close the window or press Esc to finish.")
         animate_solution_3d(solution, (0, 1, 2), ("x", "y", "z"), args.speed)
 
 

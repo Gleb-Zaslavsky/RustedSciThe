@@ -1228,10 +1228,12 @@ release timing checks belong at the end.
   extent typo, and unused 2D camera centering/scale. Cache trajectory bounds
   once instead of scanning the full trajectory every rendered frame. Rendering
   remains f32 and is explicitly not a precision-preserving export path.
-- [x] Establish the initial lifecycle contract: a synchronous Bevy event loop,
-  GIL released while blocked, Esc and window-close exit, plus typed input errors
-  mapped to Python `ValueError`. Playback is intended for the process main
-  thread. No numerical work or callback reevaluation is performed by the view.
+- [x] Establish the lifecycle contract: each synchronous Bevy event loop runs
+  in an isolated Python child process because winit cannot recreate an event
+  loop in one process. Esc/window-close exits the child; the parent waits and
+  maps typed input failures back to Python. Enforce caller main-thread
+  invocation before process startup. No numerical work or callback
+  reevaluation is performed by the view.
 - [ ] Decide wheel delivery after measuring dependency/size/runtime impact.
   Consider a binding feature and an explicit unsupported-capability diagnostic
   when absent. A pip extra cannot enable a Cargo feature in an existing wheel.
@@ -1270,9 +1272,14 @@ release timing checks belong at the end.
 - [x] Update Python/Rust docstrings, boundary comments, `.pyi` declarations and
   exports alongside the animation API. Solver capability metadata is unchanged
   because animation is independent of solver routes.
-- [ ] Verify renderer startup, close/reopen support, renderer failure handling
-  and invocation from a non-main Python thread in an opt-in desktop session.
-  Bevy/runtime panics need platform evidence before stronger guarantees.
+- [x] Reject invocation from a non-main Python thread before opening a window;
+  this is covered without requiring a desktop renderer.
+- [x] On Windows, verify real renderer startup and close for both 2D and 3D,
+  including sequential calls from one parent Python process. Each view runs in
+  its own child, avoiding winit's unrecreatable per-process event loop.
+- [ ] Verify renderer-initialization failure mapping and installed-wheel child
+  module discovery; debug editable-package coverage does not prove wheel
+  dependency closure.
 - [ ] Validate the final installed wheel, dependency closure and example corpus;
   record full-suite results separately from an import smoke test. Keep existing
   production-wheel validation debt visible while extending these capabilities.
@@ -1284,8 +1291,9 @@ debug validation for scalar expressions, AtomNative/ExprLegacy callables,
 NumPy batch evaluation and opt-in diagnostics passed `93` contract tests with
 `2` skips; adding symbolic integration, vector/matrix bindings and bilingual
 symbolic guides raised the suite to `96` passed with `2` skipped before
-animation. The updated suite passes `98` tests with `2` skips; core animation
+animation. The updated suite passes `111` tests with `2` skips; core animation
 validation passed 3 targeted Rust tests. Lorenz and three-body examples ran in
-compute-only mode and mypy passed. No interactive window was opened, and this
-editable-extension evidence does not replace the outstanding full
-production-wheel suite.
+compute-only mode and mypy passed. A Windows desktop smoke opened and closed 2D
+then 3D views sequentially through the public facade, proving same-session
+reopen via process isolation. This editable-extension evidence does not replace
+the outstanding full production-wheel suite.

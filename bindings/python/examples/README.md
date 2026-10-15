@@ -38,8 +38,8 @@ native solver's route and numerical policies.
 | [`nonlinear_and_fitting.py`](nonlinear_and_fitting.py) | Nonlinear root solve and least-squares fitting | [EN](../guides/NONLINEAR_FITTING_GUIDE_EN.md) / [RU](../guides/NONLINEAR_FITTING_GUIDE_RU.md) |
 | [`symbolic_calculus.py`](symbolic_calculus.py) | Differentiation, recursive substitutions, integration, AtomNative preparation and NumPy batches | [EN](../guides/SYMBOLIC_MATH_GUIDE_EN.md) / [RU](../guides/SYMBOLIC_MATH_GUIDE_RU.md) |
 | [`symbolic_arrays.py`](symbolic_arrays.py) | Symbolic vector/matrix algebra and owned NumPy outputs | [EN](../guides/SYMBOLIC_MATH_GUIDE_EN.md) / [RU](../guides/SYMBOLIC_MATH_GUIDE_RU.md) |
-| [`lsode2_lorenz_animation.py`](lsode2_lorenz_animation.py) | Lorenz solve with compute-only, 2D projection and 3D playback modes | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
-| [`lsode2_three_body_animation.py`](lsode2_three_body_animation.py) | Three-body solve and optional selected-body XY animation | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
+| [`lsode2_lorenz_animation.py`](lsode2_lorenz_animation.py) | Lorenz solve and default 3D animation; optional 2D/both or `--no-animate` | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
+| [`lsode2_three_body_animation.py`](lsode2_three_body_animation.py) | Three-body solve and default selected-body XY animation (use `--no-animate` for headless mode) | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
 | [`task_batch.py`](task_batch.py) | Failure-tolerant task batch and compact status table | [Overview EN](../guides/PYTHON_SOLVERS_GUIDE_EN.md#text-tasks-and-examples) / [Overview RU](../guides/PYTHON_SOLVERS_GUIDE_RU.md) |
 
 The examples are intentionally small and deterministic. They demonstrate

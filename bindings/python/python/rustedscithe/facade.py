@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import tempfile
+import threading
 from pathlib import Path
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -19,6 +24,85 @@ BvpSciSolver = _native.BvpSciSolver
 BvpDampSolver = _native.BvpDampSolver
 Lsode2Solver = _native.Lsode2Solver
 
+_ANIMATION_ERROR_PREFIX = "RUSTEDSCITHE_ANIMATION_ERROR:"
+
+
+def _require_animation_main_thread() -> None:
+    """Keep desktop event-loop startup on the caller's Python main thread."""
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("trajectory animation must be started from Python's main thread")
+
+
+def _run_animation_process(
+    dimension: int,
+    points: NDArray[np.float64],
+    times: NDArray[np.float64],
+    axis_names: tuple[str, ...] | None,
+    speed: float,
+) -> None:
+    """Run one Bevy event loop in an isolated process.
+
+    Winit permits one event loop per process. A short-lived child keeps that
+    restriction from leaking into the public API: callers can close one view
+    and open another later in the same Python process.
+    """
+
+    _require_animation_main_thread()
+    with tempfile.TemporaryDirectory(prefix="rustedscithe-animation-") as temporary:
+        input_path = Path(temporary) / "trajectory.npz"
+        np.savez(input_path, points=points, times=times)
+        arguments = [
+            sys.executable,
+            "-m",
+            "rustedscithe._animation_worker",
+            "--input",
+            str(input_path),
+            "--dimension",
+            str(dimension),
+            "--axis-names",
+            json.dumps(axis_names),
+            "--speed",
+            repr(float(speed)),
+        ]
+        completed = subprocess.run(
+            arguments,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    if completed.returncode == 0:
+        if completed.stdout:
+            sys.stdout.write(completed.stdout)
+            sys.stdout.flush()
+        if completed.stderr:
+            sys.stderr.write(completed.stderr)
+            sys.stderr.flush()
+        return
+
+    for line in reversed(completed.stderr.splitlines()):
+        if line.startswith(_ANIMATION_ERROR_PREFIX):
+            try:
+                error = json.loads(line[len(_ANIMATION_ERROR_PREFIX) :])
+            except json.JSONDecodeError:
+                break
+            message = str(error.get("message", "animation worker failed"))
+            error_type = error.get("type")
+            if error_type == "ValueError":
+                raise ValueError(message)
+            if error_type == "TypeError":
+                raise TypeError(message)
+            raise RuntimeError(message)
+
+    detail = completed.stderr.strip() or completed.stdout.strip()
+    message = f"animation worker exited with status {completed.returncode}"
+    if detail:
+        message = f"{message}: {detail}"
+    raise RuntimeError(message)
+
 
 def animate_trajectory_2d(
     points: ArrayLike,
@@ -26,14 +110,19 @@ def animate_trajectory_2d(
     axis_names: tuple[str, str] | None = None,
     speed: float = 1.0,
 ) -> None:
-    """Display a sample-major ``(N, 2)`` trajectory in a blocking Bevy window."""
+    """Display a sample-major ``(N, 2)`` trajectory in a blocking Bevy window.
 
-    _native.animate_trajectory_2d(
-        np.asarray(points, dtype=np.float64),
-        np.asarray(times, dtype=np.float64),
-        axis_names,
-        speed,
-    )
+    Each display runs in an isolated child process because winit allows one
+    event loop per process. Call from Python's main thread.
+    """
+
+    points_array = np.asarray(points, dtype=np.float64)
+    times_array = np.asarray(times, dtype=np.float64)
+    if points_array.ndim != 2 or points_array.shape[1] != 2:
+        raise ValueError(f"points must have shape (samples, 2), got {points_array.shape}")
+    if times_array.ndim != 1:
+        raise ValueError(f"times must have shape (samples,), got {times_array.shape}")
+    _run_animation_process(2, points_array, times_array, axis_names, speed)
 
 
 def animate_trajectory_3d(
@@ -42,14 +131,19 @@ def animate_trajectory_3d(
     axis_names: tuple[str, str, str] | None = None,
     speed: float = 1.0,
 ) -> None:
-    """Display a sample-major ``(N, 3)`` trajectory in a blocking Bevy window."""
+    """Display a sample-major ``(N, 3)`` trajectory in a blocking Bevy window.
 
-    _native.animate_trajectory_3d(
-        np.asarray(points, dtype=np.float64),
-        np.asarray(times, dtype=np.float64),
-        axis_names,
-        speed,
-    )
+    Each display runs in an isolated child process because winit allows one
+    event loop per process. Call from Python's main thread.
+    """
+
+    points_array = np.asarray(points, dtype=np.float64)
+    times_array = np.asarray(times, dtype=np.float64)
+    if points_array.ndim != 2 or points_array.shape[1] != 3:
+        raise ValueError(f"points must have shape (samples, 3), got {points_array.shape}")
+    if times_array.ndim != 1:
+        raise ValueError(f"times must have shape (samples,), got {times_array.shape}")
+    _run_animation_process(3, points_array, times_array, axis_names, speed)
 
 
 def _solution_trajectory(

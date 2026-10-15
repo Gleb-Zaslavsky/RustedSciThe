@@ -6,10 +6,24 @@
 
 use nalgebra::{DMatrix, DVector};
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use rustedscithe_core::Utils::{animation_2d, animation_3d};
+
+/// Bevy's desktop event loop must be created on the process main thread.
+/// Releasing the GIL below does not move execution to another OS thread.
+fn require_main_thread(py: Python<'_>) -> PyResult<()> {
+    let threading = PyModule::import(py, "threading")?;
+    let current = threading.call_method0("current_thread")?;
+    let main = threading.call_method0("main_thread")?;
+    if !current.is(&main) {
+        return Err(PyRuntimeError::new_err(
+            "trajectory animation must be started from Python's main thread",
+        ));
+    }
+    Ok(())
+}
 
 fn trajectory<const D: usize>(
     points: PyReadonlyArray2<'_, f64>,
@@ -54,6 +68,7 @@ pub fn animate_trajectory_2d(
     axis_names: Option<(String, String)>,
     speed: f32,
 ) -> PyResult<()> {
+    require_main_thread(py)?;
     let (points, times) = trajectory::<2>(points, times)?;
     py.detach(move || animation_2d::try_create_2d_animation(points, times, axis_names, Some(speed)))
         .map_err(|error| PyValueError::new_err(error.to_string()))
@@ -74,6 +89,7 @@ pub fn animate_trajectory_3d(
     axis_names: Option<(String, String, String)>,
     speed: f32,
 ) -> PyResult<()> {
+    require_main_thread(py)?;
     let (points, times) = trajectory::<3>(points, times)?;
     py.detach(move || animation_3d::try_create_3d_animation(points, times, axis_names, Some(speed)))
         .map_err(|error| PyValueError::new_err(error.to_string()))

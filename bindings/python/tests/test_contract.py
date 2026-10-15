@@ -10,9 +10,11 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
+import rustedscithe.facade as python_facade
 
 from rustedscithe import (
     AotArtifactError,
@@ -98,6 +100,54 @@ def test_animation_api_rejects_invalid_inputs_before_opening_a_window():
             ),
             times,
         )
+
+
+def test_animation_api_rejects_worker_thread_before_opening_a_window():
+    points = np.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=np.float64)
+    times = np.asarray([0.0, 1.0], dtype=np.float64)
+
+    # Bevy's desktop event loop is main-thread-bound on supported platforms.
+    # This contract test must fail before any renderer/window is initialized.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(animate_trajectory_2d, points, times)
+        with pytest.raises(RuntimeError, match="Python's main thread"):
+            future.result()
+
+
+def test_animation_facade_runs_one_isolated_child_and_preserves_array_layout(
+    monkeypatch, capsys
+):
+    def fake_run(arguments, **kwargs):
+        assert arguments[1:3] == ["-m", "rustedscithe._animation_worker"]
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "check": False,
+        }
+        input_path = Path(arguments[arguments.index("--input") + 1])
+        with np.load(input_path, allow_pickle=False) as trajectory:
+            np.testing.assert_array_equal(
+                trajectory["points"], np.asarray([[1.0, 2.0], [3.0, 4.0]])
+            )
+            np.testing.assert_array_equal(trajectory["times"], [0.0, 0.5])
+        return subprocess.CompletedProcess(arguments, 0, "animation closed\n", "")
+
+    monkeypatch.setattr(python_facade.subprocess, "run", fake_run)
+    animate_trajectory_2d([[1.0, 2.0], [3.0, 4.0]], [0.0, 0.5])
+    assert capsys.readouterr().out == "animation closed\n"
+
+
+def test_animation_facade_restores_typed_child_input_errors(monkeypatch):
+    def fake_run(arguments, **kwargs):
+        error = {"type": "ValueError", "message": "invalid animation speed"}
+        stderr = "RUSTEDSCITHE_ANIMATION_ERROR:" + json.dumps(error)
+        return subprocess.CompletedProcess(arguments, 2, "", stderr)
+
+    monkeypatch.setattr(python_facade.subprocess, "run", fake_run)
+    with pytest.raises(ValueError, match="invalid animation speed"):
+        animate_trajectory_2d([[0.0, 0.0]], [0.0])
 
 
 def test_solution_animation_adapter_only_reads_selected_solution_columns():

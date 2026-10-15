@@ -36,22 +36,32 @@ Each coordinate range must also remain representable as finite `f32` geometry.
 
 ## Animate a solver result
 
-`examples/lsode2_lorenz_animation.py` solves the Lorenz system and defaults to
-compute-only mode:
+`examples/lsode2_lorenz_animation.py` solves the Lorenz system and opens the 3D
+trajectory by default. Select another view or use `--no-animate` for a
+headless numerical run:
 
 ```console
-python examples/lsode2_lorenz_animation.py
+python examples/lsode2_lorenz_animation.py --no-animate
 python examples/lsode2_lorenz_animation.py --animate 2d
 python examples/lsode2_lorenz_animation.py --animate 3d --speed 1.5
+python examples/lsode2_lorenz_animation.py --animate both
 ```
 
-The 2D view is the `(x,z)` projection; the 3D view uses `(x,y,z)`. The
-three-body example similarly animates one selected body's planar path:
+The no-argument command opens the 3D `(x,y,z)` view; the 2D view uses the
+`(x,z)` projection. The
+`both` mode closes the 2D child window and then opens 3D in a new child process,
+without solving the model a second time. The
+three-body animation example opens its selected body's planar path by default.
+Use `--no-animate` for a headless numerical run:
 
 ```console
-python examples/lsode2_three_body_animation.py
+python examples/lsode2_three_body_animation.py --no-animate
 python examples/lsode2_three_body_animation.py --animate --body 1
 ```
+
+Animation coordinates are uniformly normalized for display so small or
+offset trajectories fit the viewport; the position HUD still reports the
+original solver coordinates.
 
 For an existing IVP result, `animate_solution_2d(solution, columns=(0, 2), ...)`
 and `animate_solution_3d(solution, columns=(0, 1, 2), ...)` read the detached
@@ -61,10 +71,11 @@ re-evaluate callbacks.
 ## Runtime behavior
 
 Opening a Bevy window is synchronous and blocks until the window closes; press
-Esc or use the window close control to exit. The
-binding releases the Python GIL while the event loop runs, but callers should
-invoke desktop playback from the process's main thread. Window creation
-requires a working desktop renderer and is intentionally not part of ordinary
-headless tests. Importing `rustedscithe` or solving an IVP does not open a
-window. Renderer availability and repeated close/reopen behavior remain
-platform-specific and should be checked on the target desktop.
+Esc or use the window close control to exit. Each call runs one native event
+loop in a short-lived Python child process. This isolates winit's one-event-loop-
+per-process restriction, so a caller may close a 2D view and later open a 3D
+view in the same Python session. The parent waits for the child and relays typed
+input/runtime failures. Call playback from Python's main thread; a worker-thread
+call raises `RuntimeError` before a process is started. Window creation requires
+a working desktop renderer and is intentionally not part of ordinary headless
+tests. Importing `rustedscithe` or solving an IVP does not open a window.

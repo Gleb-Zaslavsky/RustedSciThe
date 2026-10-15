@@ -41,9 +41,8 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use nalgebra::{DMatrix, DVector};
 
-use super::animation::{
-    AnimationInputError, advance_animation_clock, validate_trajectory,
-};
+use super::animation::normalize_for_display;
+use super::animation::{AnimationInputError, advance_animation_clock, validate_trajectory};
 
 /// Component that holds animated trajectory data and current animation state
 #[derive(Component)]
@@ -85,6 +84,9 @@ struct LineData {
     max: Vec3,
     /// Custom names for X, Y, Z axes
     axis_names: (String, String, String),
+    /// Transform metadata used to display physical coordinates in the HUD.
+    coordinate_origin: [f64; 3],
+    units_per_display_unit: f64,
 }
 
 /// Creates and runs an interactive 3D trajectory animation
@@ -130,7 +132,8 @@ pub fn try_create_3d_animation(
 ) -> Result<(), AnimationInputError> {
     let speed = speed.unwrap_or(1.0);
     let frame_intervals = validate_trajectory::<3>(&points, &times, speed)?;
-    let points = points.cast::<f32>();
+    let display = normalize_for_display::<3>(&points);
+    let points = display.points;
     let min = Vec3::new(
         (0..points.ncols())
             .map(|column| points[(0, column)])
@@ -172,6 +175,8 @@ pub fn try_create_3d_animation(
             max,
             axis_names: axes_names
                 .unwrap_or_else(|| ("x".to_string(), "y".to_string(), "z".to_string())),
+            coordinate_origin: display.origin,
+            units_per_display_unit: display.units_per_display_unit,
         })
         .run(); // Blocks until window is closed
     Ok(())
@@ -191,8 +196,11 @@ fn setup_scene(mut commands: Commands, line_data: Res<LineData>) {
     let extent = line_data.max - line_data.min;
     let size = extent.x.max(extent.y).max(extent.z);
 
-    // Position camera at 2x the data size for good initial view
-    let camera_distance = size.max(1.0);
+    // Perspective projection needs extra room for diagonal views of the full
+    // three-dimensional bounds, especially for attractor-shaped trajectories.
+    // Keep tiny trajectories close enough to see; use a safe fallback only
+    // when every point is identical.
+    let camera_distance = if size > 0.0 { size * 4.0 } else { 2.0 };
 
     // Spawn 3D camera with orbital controller
     commands.spawn((
@@ -315,17 +323,22 @@ fn animate_line(
             line_data.max.z - line_data.min.z,
         ];
         let max_range = ranges.iter().fold(0.0f32, |a, &b| a.max(b));
-        let axis_length = max_range.max(1.0) * 1.2;
+        let axis_length = if max_range > 0.0 {
+            max_range * 1.2
+        } else {
+            1.2
+        };
+        let axis_origin = line_data.min * 0.5 + line_data.max * 0.5;
 
-        // Draw coordinate axes from origin
-        let x_end = Vec3::X * axis_length; // Red X-axis
-        let y_end = Vec3::Y * axis_length; // Green Y-axis
-        let z_end = Vec3::Z * axis_length; // Blue Z-axis
+        // Center axes on the data bounds so offset trajectories remain visible.
+        let x_end = axis_origin + Vec3::X * axis_length; // Red X-axis
+        let y_end = axis_origin + Vec3::Y * axis_length; // Green Y-axis
+        let z_end = axis_origin + Vec3::Z * axis_length; // Blue Z-axis
 
         // Draw axis lines with standard colors
-        gizmos.line(Vec3::ZERO, x_end, Color::srgb(1.0, 0.0, 0.0)); // Red X
-        gizmos.line(Vec3::ZERO, y_end, Color::srgb(0.0, 1.0, 0.0)); // Green Y
-        gizmos.line(Vec3::ZERO, z_end, Color::srgb(0.0, 0.0, 1.0)); // Blue Z
+        gizmos.line(axis_origin, x_end, Color::srgb(1.0, 0.0, 0.0)); // Red X
+        gizmos.line(axis_origin, y_end, Color::srgb(0.0, 1.0, 0.0)); // Green Y
+        gizmos.line(axis_origin, z_end, Color::srgb(0.0, 0.0, 1.0)); // Blue Z
 
         // Draw small spheres at axis endpoints for clear identification
         let sphere_radius = axis_length * 0.02;
@@ -360,18 +373,28 @@ fn animate_line(
             line.points[(2, cur_idx)],
         );
         // Small blue sphere to mark current position
-        gizmos.sphere(current_point, 0.05, Color::srgb(0.0, 0.0, 1.0));
+        gizmos.sphere(
+            current_point,
+            (axis_length * 0.01).max(1.0e-6),
+            Color::srgb(0.0, 0.0, 1.0),
+        );
 
         // Update UI text with current position values
         for mut text in text_query.iter_mut() {
+            let physical_x = f64::from(current_point.x) * line_data.units_per_display_unit
+                + line_data.coordinate_origin[0];
+            let physical_y = f64::from(current_point.y) * line_data.units_per_display_unit
+                + line_data.coordinate_origin[1];
+            let physical_z = f64::from(current_point.z) * line_data.units_per_display_unit
+                + line_data.coordinate_origin[2];
             **text = format!(
                 "Position: {}:{:.2}, {}:{:.2}, {}:{:.2}",
                 line_data.axis_names.0,
-                current_point.x,
+                physical_x,
                 line_data.axis_names.1,
-                current_point.y,
+                physical_y,
                 line_data.axis_names.2,
-                current_point.z
+                physical_z
             );
         }
     }
@@ -403,7 +426,7 @@ fn camera_controller(
             // Multiply distance by scroll factor (scroll up = zoom in)
             controller.distance *= 1.0 - scroll.y * 0.1;
             // Prevent camera from getting too close or too far
-            controller.distance = controller.distance.clamp(0.1, 1000.0);
+            controller.distance = controller.distance.clamp(1.0e-6, 1.0e9);
         }
 
         // Calculate new camera position using spherical coordinates
