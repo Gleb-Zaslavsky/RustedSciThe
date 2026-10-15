@@ -6,6 +6,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-NativeTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    & $Executable @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode"
+    }
+}
+
+function Invoke-NativeToolOutput {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $result = & $Executable @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode"
+    }
+    return $result
+}
+
 $bindingRoot = (Resolve-Path (Join-Path $PSScriptRoot ".."))
 $repoRoot = (Resolve-Path (Join-Path $bindingRoot "..\.."))
 $python = if ($env:PYTHON) { $env:PYTHON } else {
@@ -17,7 +46,8 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path $bindingRoot ("target\publication-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $runId = (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $OutputDirectory = Join-Path $bindingRoot ("target\publication-" + $runId)
 }
 
 $packageVersion = ((Get-Content (Join-Path $bindingRoot "pyproject.toml") |
@@ -26,29 +56,43 @@ if (-not $packageVersion) {
     throw "Cannot determine the Python package version from pyproject.toml"
 }
 
-$output = (New-Item -ItemType Directory -Force -Path $OutputDirectory).FullName
-$rawDirectory = (New-Item -ItemType Directory -Force -Path (Join-Path $output "raw-sdist")).FullName
-$stageDirectory = (New-Item -ItemType Directory -Force -Path (Join-Path $output "sdist-stage")).FullName
+if (Test-Path -LiteralPath $OutputDirectory) {
+    $existing = Get-ChildItem -LiteralPath $OutputDirectory -Force
+    if ($existing.Count -gt 0) {
+        throw "Output directory must be empty to prevent stale artifacts: $OutputDirectory"
+    }
+    $output = (Resolve-Path -LiteralPath $OutputDirectory).Path
+} else {
+    $output = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
+}
+$rawDirectory = (New-Item -ItemType Directory -Path (Join-Path $output "raw-sdist")).FullName
+$stageDirectory = (New-Item -ItemType Directory -Path (Join-Path $output "sdist-stage")).FullName
 
 Push-Location $repoRoot
 try {
-    & $python -m maturin sdist `
-        --manifest-path (Join-Path $bindingRoot "Cargo.toml") `
-        --out $rawDirectory
+    Invoke-NativeTool -Executable $python -Label "maturin sdist" -Arguments @(
+        "-m", "maturin", "sdist",
+        "--manifest-path", (Join-Path $bindingRoot "Cargo.toml"),
+        "--out", $rawDirectory
+    )
 } finally {
     Pop-Location
 }
 
-$rawSdist = Get-ChildItem -LiteralPath $rawDirectory -Filter "*.tar.gz" | Select-Object -First 1
-if (-not $rawSdist) {
-    throw "maturin did not produce an sdist in $rawDirectory"
+$rawSdists = @(Get-ChildItem -LiteralPath $rawDirectory -Filter "rustedscithe-$packageVersion.tar.gz" -File)
+if ($rawSdists.Count -ne 1) {
+    throw "Expected exactly one rustedscithe-$packageVersion.tar.gz from maturin; found $($rawSdists.Count)"
 }
+$rawSdist = $rawSdists[0]
 
-& tar -xzf $rawSdist.FullName -C $stageDirectory
-$archiveRoot = Get-ChildItem -LiteralPath $stageDirectory -Directory | Select-Object -First 1
-if (-not $archiveRoot) {
-    throw "Cannot locate the extracted sdist root"
+Invoke-NativeTool -Executable "tar" -Label "sdist extraction" -Arguments @(
+    "-xzf", $rawSdist.FullName, "-C", $stageDirectory
+)
+$archiveRoots = @(Get-ChildItem -LiteralPath $stageDirectory -Directory)
+if ($archiveRoots.Count -ne 1) {
+    throw "Expected exactly one extracted sdist root; found $($archiveRoots.Count)"
 }
+$archiveRoot = $archiveRoots[0]
 
 $pythonReadme = Join-Path $archiveRoot.FullName "bindings\python\README.md"
 $archiveReadme = Join-Path $archiveRoot.FullName "README.md"
@@ -63,30 +107,48 @@ Copy-Item -LiteralPath $pythonReadme -Destination $archiveReadme -Force
 $fixedSdist = Join-Path $output $rawSdist.Name
 Push-Location $stageDirectory
 try {
-    & tar -czf $fixedSdist $archiveRoot.Name
+    Invoke-NativeTool -Executable "tar" -Label "fixed sdist archive" -Arguments @(
+        "-czf", $fixedSdist, $archiveRoot.Name
+    )
 } finally {
     Pop-Location
 }
 
-& $python -m twine check $fixedSdist
+Invoke-NativeTool -Executable $python -Label "twine check sdist" -Arguments @(
+    "-m", "twine", "check", $fixedSdist
+)
+$sdistReadme = (Invoke-NativeToolOutput -Executable "tar" -Label "sdist README verification" -Arguments @(
+    "-xOf", $fixedSdist, "$($archiveRoot.Name)/README.md"
+)) -join "`n"
+if ($sdistReadme -notmatch "# RustedSciThe for Python") {
+    throw "The fixed sdist root README does not contain the Python package description"
+}
 
 if (-not $SkipWheel) {
-    $wheelDirectory = (New-Item -ItemType Directory -Force -Path (Join-Path $output "wheels-from-sdist")).FullName
-    & $python -m pip wheel $fixedSdist --no-deps --no-cache-dir --wheel-dir $wheelDirectory
-    $wheel = Get-ChildItem -LiteralPath $wheelDirectory -Filter "*.whl" | Select-Object -First 1
-    if (-not $wheel) {
-        throw "pip did not produce a wheel from the fixed sdist"
+    $wheelDirectory = (New-Item -ItemType Directory -Path (Join-Path $output "wheels-from-sdist")).FullName
+    Invoke-NativeTool -Executable $python -Label "pip wheel from sdist" -Arguments @(
+        "-m", "pip", "wheel", $fixedSdist, "--no-deps", "--no-cache-dir",
+        "--wheel-dir", $wheelDirectory
+    )
+    $wheels = @(Get-ChildItem -LiteralPath $wheelDirectory -Filter "rustedscithe-$packageVersion-*.whl" -File)
+    if ($wheels.Count -ne 1) {
+        throw "Expected exactly one rustedscithe $packageVersion wheel from the sdist; found $($wheels.Count)"
     }
+    $wheel = $wheels[0]
 
     $metadataPath = "rustedscithe-$packageVersion.dist-info/METADATA"
-    $metadata = (& tar -xOf $wheel.FullName $metadataPath) -join "`n"
-    if ($metadata -notmatch "# RustedSciThe Python Package") {
+    $metadata = (Invoke-NativeToolOutput -Executable "tar" -Label "wheel metadata verification" -Arguments @(
+        "-xOf", $wheel.FullName, $metadataPath
+    )) -join "`n"
+    if ($metadata -notmatch "# RustedSciThe for Python") {
         throw "The wheel metadata does not contain the Python README"
     }
     if ($metadata -match "# RustedSciThe\r?\nRustedSciThe is a Rust framework") {
         throw "The wheel metadata still contains the core README"
     }
-    & $python -m twine check $wheel.FullName
+    Invoke-NativeTool -Executable $python -Label "twine check wheel" -Arguments @(
+        "-m", "twine", "check", $wheel.FullName
+    )
     Write-Host "wheel=$($wheel.FullName)"
 }
 

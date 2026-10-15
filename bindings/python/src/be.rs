@@ -19,7 +19,8 @@ use rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError;
 use crate::aot::{generated_config, map_backend_error, provenance_fields};
 use crate::contract::SolverOptions;
 use crate::errors::{
-    ExhaustionError, InvalidConfigurationError, SolverError, UnsupportedOptionError, annotate,
+    ExhaustionError, InvalidConfigurationError, SolverError, SolverPanicState,
+    UnsupportedOptionError, catch_panic,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -138,6 +139,10 @@ fn validate_expression_symbols(
 
 /// Detached Backward Euler trajectory and the telemetry snapshot collected
 /// while producing it.
+///
+/// Trajectory data is copied out of the mutable solver. Use the list accessors
+/// for ordinary Python code or the `*_array()` accessors for owned NumPy
+/// arrays. Telemetry methods expose counters and stage timings for this result.
 #[pyclass(name = "BackwardEulerSolution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct BackwardEulerSolution {
@@ -251,19 +256,23 @@ impl BackwardEulerSolution {
     }
 
     #[getter]
+    /// Native integration status for the returned trajectory.
     pub fn status(&self) -> &str {
         &self.status
     }
 
     #[getter]
+    /// Telemetry collection level used for this solve.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }
 
+    /// Return discrete solver counters; the map is empty when collection is off.
     pub fn telemetry_counters(&self) -> std::collections::HashMap<String, u64> {
         self.counters.clone()
     }
 
+    /// Return measured stage durations in milliseconds, if timing telemetry was enabled.
     pub fn telemetry_timings_ms(&self) -> std::collections::HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -331,7 +340,13 @@ impl BackwardEulerSolution {
     }
 }
 
-/// Backward Euler symbolic solver for the initial Dense/Lambdify route.
+/// Symbolic Backward Euler solver.
+///
+/// The current native Backward Euler implementation supports the Dense matrix
+/// layout. `SolverOptions` selects the symbolic frontend and Lambdify/AOT
+/// execution route; unsupported combinations are rejected. Construction
+/// validates the problem, while symbolic callback generation remains lazy
+/// until `solve()` or `continue_to()`.
 #[pyclass(name = "BackwardEulerSolver", module = "rustedscithe", unsendable)]
 pub struct BackwardEulerSolver {
     solver: BE,
@@ -340,10 +355,18 @@ pub struct BackwardEulerSolver {
     frontend: String,
     execution: String,
     aot_metadata: HashMap<String, String>,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl BackwardEulerSolver {
+    /// Configure a symbolic Backward Euler initial-value problem.
+    ///
+    /// Supply one right-hand-side expression per state variable. Optional
+    /// `parameters` declare value-only symbols and `parameter_values` bind
+    /// their initial values. `h` selects a fixed step when provided;
+    /// `tolerance` and `max_iterations` control the implicit step solve.
+    /// `options` selects the frontend, execution route and telemetry.
     #[new]
     #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, h=None, tolerance=1e-6, max_iterations=100, options=None, parameters=None, parameter_values=None))]
     #[allow(clippy::too_many_arguments)]
@@ -455,18 +478,22 @@ impl BackwardEulerSolver {
             native_options =
                 native_options.with_generated_backend_config(generated_config(&options)?);
         }
-        let mut solver = BE::try_new_with_options(native_options).map_err(map_be_error)?;
-        if !parameters.is_empty() {
-            let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
-            solver
-                .try_set_equation_parameters(Some(&parameter_refs))
-                .map_err(map_be_error)?;
-        }
-        if let Some(values) = parameter_values {
-            solver
-                .try_set_parameter_values(DVector::from_vec(values))
-                .map_err(map_be_error)?;
-        }
+        let route = format!("{}:{}", options.frontend(), options.execution());
+        let solver = catch_panic("construct", "backward_euler", &route, || {
+            let mut solver = BE::try_new_with_options(native_options).map_err(map_be_error)?;
+            if !parameters.is_empty() {
+                let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
+                solver
+                    .try_set_equation_parameters(Some(&parameter_refs))
+                    .map_err(map_be_error)?;
+            }
+            if let Some(values) = parameter_values {
+                solver
+                    .try_set_parameter_values(DVector::from_vec(values))
+                    .map_err(map_be_error)?;
+            }
+            Ok(solver)
+        })?;
         Ok(Self {
             solver,
             parameter_count: parameters.len(),
@@ -474,6 +501,7 @@ impl BackwardEulerSolver {
             frontend: options.frontend().to_owned(),
             execution: options.execution().to_owned(),
             aot_metadata: provenance_fields(&options),
+            panic_state: SolverPanicState::default(),
         })
     }
 
@@ -482,15 +510,30 @@ impl BackwardEulerSolver {
     /// Symbolic callback generation remains lazy and is performed by the
     /// first `solve()`/`continue_to()` call in the current BE core.
     pub fn validate(&self) -> PyResult<()> {
-        self.solver.try_check().map_err(map_be_error)
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("validate", "backward_euler", &route, || {
+            self.solver.try_check().map_err(map_be_error)
+        })
     }
 
+    /// Integrate the configured interval and return a detached trajectory.
+    ///
+    /// Symbolic callbacks are prepared lazily on the first solve. Callback or
+    /// numerical failures are reported as typed Python exceptions.
     pub fn solve(&mut self) -> PyResult<BackwardEulerSolution> {
-        self.solver.try_solve().map_err(map_be_error)?;
-        Ok(BackwardEulerSolution::from_solver(&self.solver))
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "backward_euler", &route, || {
+            self.solver.try_solve().map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
     }
 
     /// Continue from the latest accepted state, optionally rebinding values.
+    ///
+    /// This is a warm segment continuation, not a new initial-value problem.
+    /// Use `restart()` when both the initial state and interval should change.
     #[pyo3(signature=(t_end, parameter_values=None))]
     pub fn continue_to(
         &mut self,
@@ -498,8 +541,8 @@ impl BackwardEulerSolver {
         parameter_values: Option<Vec<f64>>,
     ) -> PyResult<BackwardEulerSolution> {
         validate_scalar(t_end, "t_end")?;
-        if let Some(values) = parameter_values {
-            finite_vector(&values, "parameter_values")?;
+        if let Some(values) = parameter_values.as_deref() {
+            finite_vector(values, "parameter_values")?;
             if values.len() != self.parameter_count {
                 return Err(InvalidConfigurationError::new_err(format!(
                     "expected {} parameter values, got {}",
@@ -507,15 +550,24 @@ impl BackwardEulerSolver {
                     values.len()
                 )));
             }
-            self.solver
-                .try_set_parameter_values(DVector::from_vec(values))
-                .map_err(map_be_error)?;
         }
-        self.solver.try_continue_to(t_end).map_err(map_be_error)?;
-        Ok(BackwardEulerSolution::from_solver(&self.solver))
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "backward_euler", &route, || {
+            if let Some(values) = parameter_values {
+                self.solver
+                    .try_set_parameter_values(DVector::from_vec(values))
+                    .map_err(map_be_error)?;
+            }
+            self.solver.try_continue_to(t_end).map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
     }
 
     /// Restart the numerical state while retaining prepared symbolic data.
+    ///
+    /// The new interval endpoints must differ and `y0` must match the state
+    /// dimension. The returned result describes the restarted segment.
     pub fn restart(
         &mut self,
         t0: f64,
@@ -525,16 +577,23 @@ impl BackwardEulerSolver {
         finite_vector(&y0, "y0")?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
-        self.solver
-            .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
-            .map_err(map_be_error)?;
-        self.solve()
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "backward_euler", &route, || {
+            self.solver
+                .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
+                .map_err(map_be_error)?;
+            self.solver.try_solve().map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
     }
 
+    /// Return the native integration status for the current solver state.
     pub fn status(&self) -> String {
         self.solver.get_status()
     }
 
+    /// Return the native compact statistics report for the latest integration segment.
     pub fn telemetry_report(&self) -> String {
         self.solver.statistics_report()
     }
@@ -554,6 +613,7 @@ impl BackwardEulerSolver {
     }
 
     #[getter]
+    /// Telemetry collection level configured on this solver.
     pub fn telemetry_mode(&self) -> &'static str {
         match self.telemetry_mode {
             BeTelemetryMode::Off => "off",
@@ -572,8 +632,9 @@ impl BackwardEulerSolver {
 }
 
 fn map_be_error(error: BeError) -> PyErr {
+    let native_kind = crate::errors::native_variant(&error);
     let message = error.to_string();
-    annotate(
+    crate::errors::annotate_native(
         match error {
             BeError::InvalidConfiguration(_) => InvalidConfigurationError::new_err(message),
             BeError::Backend(error) => map_backend_error(error),
@@ -586,6 +647,7 @@ fn map_be_error(error: BeError) -> PyErr {
         "solve",
         "backward_euler",
         "native",
+        &native_kind,
     )
 }
 

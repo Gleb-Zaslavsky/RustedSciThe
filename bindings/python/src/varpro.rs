@@ -13,11 +13,13 @@ use rustedscithe_core::numerical::optimization::varpro::symbolic::{
 };
 
 use crate::errors::{
-    InvalidConfigurationError, InvalidExpressionError, SolverError, annotate, catch_panic,
+    InvalidConfigurationError, InvalidExpressionError, SolverError, annotate_native, catch_panic,
+    native_variant,
 };
 use crate::expr::PyExpr;
 
 fn map_error(error: SymbolicVarProError) -> PyErr {
+    let native_kind = native_variant(&error);
     let message = error.to_string();
     let mapped = match error {
         SymbolicVarProError::XDataMissing
@@ -29,10 +31,14 @@ fn map_error(error: SymbolicVarProError) -> PyErr {
         | SymbolicVarProError::ProblemBuild(_) => InvalidConfigurationError::new_err(message),
         SymbolicVarProError::SolverFailed { .. } => SolverError::new_err(message),
     };
-    annotate(mapped, "solve", "varpro", "lambdify")
+    annotate_native(mapped, "solve", "varpro", "lambdify", &native_kind)
 }
 
-/// Detached result from one symbolic VarPro fit.
+/// Detached result from one symbolic variable-projection fit.
+///
+/// The solution maps named nonlinear parameters to fitted values. `best_fit` contains
+/// model values at the supplied data points, in their input order. The result does not
+/// retain the builder or symbolic expressions.
 #[pyclass(name = "VarProSolution", module = "rustedscithe")]
 pub struct VarProSolution {
     solution: HashMap<String, f64>,
@@ -62,24 +68,30 @@ impl VarProSolution {
 
 #[pymethods]
 impl VarProSolution {
+    /// Return fitted parameter values keyed by their declared names.
     pub fn solution(&self) -> HashMap<String, f64> {
         self.solution.clone()
     }
+    /// Return model values evaluated at the input sample points.
     pub fn best_fit(&self) -> Vec<f64> {
         self.best_fit.clone()
     }
     #[getter]
+    /// Return the coefficient of determination when defined by the data.
     pub fn r_squared(&self) -> Option<f64> {
         self.r_squared
     }
     #[getter]
+    /// Whether the native minimizer reported successful termination.
     pub fn successful(&self) -> bool {
         self.successful
     }
     #[getter]
+    /// Native minimizer termination label.
     pub fn termination(&self) -> &str {
         &self.termination
     }
+    /// Return a compact string-valued summary of fit status and quality.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
             ("successful".to_owned(), self.successful.to_string()),
@@ -93,7 +105,13 @@ impl VarProSolution {
     }
 }
 
-/// Fluent one-shot wrapper over `SymbolicVarProBuilder`.
+/// Fluent one-shot symbolic variable-projection fitter.
+///
+/// Build the problem by supplying named nonlinear parameters, initial values, data,
+/// and one basis expression per parameter. Optional invariant expressions can be
+/// added before solving. `solve()` consumes the builder; construct a new instance for
+/// another independent fit. This API is distinct from the reusable canonical
+/// `FittingSolver` lifecycle.
 #[pyclass(name = "VarProSolver", module = "rustedscithe")]
 pub struct VarProSolver {
     builder: Option<SymbolicVarProBuilder>,
@@ -115,20 +133,24 @@ impl VarProSolver {
 #[pymethods]
 impl VarProSolver {
     #[new]
+    /// Create an empty builder and declare the independent-variable name.
     pub fn new(x_name: String) -> Self {
         Self {
             builder: Some(SymbolicVarProBuilder::new(x_name)),
         }
     }
 
+    /// Declare the ordered names of nonlinear parameters to fit.
     pub fn with_parameters(&mut self, names: Vec<String>) -> PyResult<()> {
         self.update(|builder| builder.with_parameters(names))
     }
 
+    /// Set initial values corresponding to `with_parameters` order.
     pub fn with_initial_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
         self.update(|builder| builder.with_initial_parameters(values))
     }
 
+    /// Set paired independent-variable and observation vectors.
     pub fn with_data(&mut self, x_data: Vec<f64>, y_data: Vec<f64>) -> PyResult<()> {
         self.update(|builder| {
             builder.with_data(
@@ -138,10 +160,14 @@ impl VarProSolver {
         })
     }
 
+    /// Add a symbolic basis expression for a named parameter.
+    ///
+    /// Basis expressions define the linear-in-parameter portion of the model.
     pub fn with_basis(&mut self, parameter_name: String, expression: PyExpr) -> PyResult<()> {
         self.update(|builder| builder.with_basis_expr(parameter_name, expression.inner))
     }
 
+    /// Parse and add a basis expression for a named parameter.
     pub fn with_basis_str(&mut self, parameter_name: String, expression: &str) -> PyResult<()> {
         let expression =
             rustedscithe_core::symbolic::symbolic_engine::Expr::try_parse_expression(expression)
@@ -149,10 +175,12 @@ impl VarProSolver {
         self.update(|builder| builder.with_basis_expr(parameter_name, expression))
     }
 
+    /// Add a symbolic invariant or constraint expression to the fit definition.
     pub fn with_invariant(&mut self, expression: PyExpr) -> PyResult<()> {
         self.update(|builder| builder.with_invariant_expr(expression.inner))
     }
 
+    /// Parse and add an invariant or constraint expression to the fit definition.
     pub fn with_invariant_str(&mut self, expression: &str) -> PyResult<()> {
         let expression =
             rustedscithe_core::symbolic::symbolic_engine::Expr::try_parse_expression(expression)
@@ -160,6 +188,7 @@ impl VarProSolver {
         self.update(|builder| builder.with_invariant_expr(expression))
     }
 
+    /// Run the fit and consume this one-shot builder.
     pub fn solve(&mut self) -> PyResult<VarProSolution> {
         catch_panic("solve", "varpro", "lambdify", || {
             let builder = self.builder.take().ok_or_else(|| {
@@ -174,6 +203,7 @@ impl VarProSolver {
         })
     }
 
+    /// Return whether the builder has been consumed by `solve()`.
     pub fn is_solved(&self) -> bool {
         self.builder.is_none()
     }

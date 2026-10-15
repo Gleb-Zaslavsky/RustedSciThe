@@ -55,6 +55,24 @@ Continuation использует подготовленный символьн�
 `restart(...)`. Холодная AOT-компиляция может окупиться только на длинной
 серии, поэтому сравнивайте отдельно preparation, callback и full solve.
 
+В общем facade первый аргумент `create_ivp` выбирает семейство солвера, а
+контроллер LSODE2 задаётся отдельно. Это не позволяет спутать выбор солвера с
+режимом Adams/BDF:
+
+```python
+from rustedscithe import Expr, create_ivp
+
+y = Expr.variable("y")
+solver = create_ivp(
+    "lsode2", [-y], ["y"], "t", [1.0], 0.0, 0.2, 0.05,
+    controller="adams",  # также "bdf" или "auto"
+)
+result = solver.solve()
+```
+
+`"lsoda"` принимается как alias семейства LSODE2 для автоматического
+контроллера Adams/BDF. Аргумент `controller=` допустим только для LSODE2.
+
 ## BVP
 
 `solve_bvp("bvp_sci", ...)` и `solve_bvp("bvp_damp", ...)` имеют общий
@@ -92,3 +110,24 @@ Facade принимает NumPy-векторы и преобразует их п
 Примеры в `bindings/python/examples/` показывают Radau, BDF continuation,
 BVP_sci, nonlinear/fitting и batch-задачи. Они используют уже проверенную
 семантику основных Rust-гайдов, а не придумывают отдельные Python-алгоритмы.
+
+## Отдельные руководства по солверам
+
+Этот обзор намеренно краток. Подробные руководства сохраняют богатство
+настроек соответствующих native-солверов, но показывают Python-синтаксис:
+
+- [Radau5](RADAU_GUIDE_RU.md): жёсткие IVP, frontend/layout, output и телеметрия.
+- [BDF](BDF_GUIDE_RU.md): плотный BDF, порядок, callbacks и continuation.
+- [Backward Euler](BACKWARD_EULER_GUIDE_RU.md): фиксированный шаг и доступные
+  dense-маршруты исполнения.
+- [LSODE2](LSODE2_GUIDE_RU.md): контроллеры Adams/BDF, символьные маршруты,
+  matrix layout и политика параллельных callbacks.
+- [BVP_sci](BVP_SCI_GUIDE_RU.md): граничные невязки, Dense/Sparse/Banded,
+  SuperLU и AOT.
+- [BVP_Damp](BVP_DAMP_GUIDE_RU.md): наблюдения, bounds, уточнение сетки,
+  layout и символьные/AOT-маршруты.
+- [Нелинейные системы и fitting](NONLINEAR_FITTING_GUIDE_RU.md): root,
+  least-squares и fitting API.
+
+Подробно прокомментированные исполняемые Python-примеры собраны в
+[`examples/README.md`](../examples/README.md).

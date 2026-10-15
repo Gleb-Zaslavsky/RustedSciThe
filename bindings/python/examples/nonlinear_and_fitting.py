@@ -1,4 +1,10 @@
-"""Nonlinear-system and least-squares entry points with NumPy results."""
+"""Solve a scalar root and a small least-squares problem.
+
+The root equation ``x**2 - 4 = 0`` has roots +/-2; the initial guess is
+positive, so Newton should converge to +2. The fitting residual ``x - 2``
+has the exact minimizer 2. These two calls demonstrate distinct public
+problem types and their detached NumPy result/telemetry methods.
+"""
 
 from rustedscithe import Expr, SymbolicSystem, create_fit, create_nonlinear
 

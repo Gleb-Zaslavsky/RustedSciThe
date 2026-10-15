@@ -1,8 +1,11 @@
 """Black-box smoke tests for the documented Python contract."""
 
+import ast
+import inspect
 import json
 import math
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -13,26 +16,35 @@ import pytest
 from rustedscithe import (
     AotArtifactError,
     BvpError,
+    BvpDampSolution,
     BvpDampSolver,
+    BvpSciSolution,
     BvpSciSolver,
     BvpTaskResult,
     BdfCallbackSolver,
     BdfSolver,
+    BackwardEulerSolution,
     BackwardEulerSolver,
     CallbackError,
     ExhaustionError,
     Expr,
+    FittingSolution,
     InvalidConfigurationError,
     InvalidExpressionError,
     IvpTaskResult,
     FittingSolver,
     GavinFittingSolver,
+    GavinFittingSolution,
     Lsode2Solver,
+    Lsode2Solution,
+    NonlinearSolution,
     NonlinearSolver,
     PreparationError,
     PanicError,
+    PoisonedSolverError,
     RadauCallbackSolver,
     RadauSolver,
+    RadauSolution,
     SolverError,
     SolverOptions,
     SymbolicSystem,
@@ -41,6 +53,7 @@ from rustedscithe import (
     TelemetryError,
     UnsupportedOptionError,
     VarProSolver,
+    VarProSolution,
     capabilities,
 )
 
@@ -265,7 +278,7 @@ max_newton_iterations: 1
     )
     with pytest.raises(BvpError, match="callback") as captured:
         document.run_bvp()
-    assert captured.value.stage == "solve"
+    assert captured.value.stage == "task_run"
     assert captured.value.solver == "bvp_task"
     assert captured.value.route == "native"
 
@@ -938,6 +951,17 @@ def test_radau_callback_solver_supports_analytic_and_fd_jacobians():
             lambda _time, _state: [math.nan],
         ).solve([1.0])
 
+    def raising_residual(_time, _state):
+        raise LookupError("radau callback cause")
+
+    with pytest.raises(CallbackError, match="radau callback cause") as callback_error:
+        RadauCallbackSolver(1, 0.0, 0.2, 0.1, raising_residual).solve([1.0])
+    assert isinstance(callback_error.value.__cause__, LookupError)
+    assert str(callback_error.value.__cause__) == "radau callback cause"
+    assert callback_error.value.stage == "solve"
+    assert callback_error.value.solver == "radau5"
+    assert callback_error.value.route == "python_callback"
+
     with pytest.raises(UnsupportedOptionError, match="matrix_layout"):
         RadauCallbackSolver(
             1, 0.0, 0.2, 0.1, residual,
@@ -951,17 +975,20 @@ def test_radau_callback_solver_supports_analytic_and_fd_jacobians():
 
 def test_stiff_ivp_step_budget_is_exposed_as_typed_exhaustion():
     y = Expr.variable("y")
-    with pytest.raises(ExhaustionError):
+    with pytest.raises(ExhaustionError) as bdf_exhaustion:
         BdfSolver(
             [-y], ["y"], "t", [1.0], 0.0, 0.2, 0.1,
             max_steps=1,
         ).solve()
+    assert bdf_exhaustion.value.native_kind == "MaxStepsExceeded"
+    assert bdf_exhaustion.value.solver == "bdf"
 
-    with pytest.raises(ExhaustionError):
+    with pytest.raises(ExhaustionError) as radau_exhaustion:
         RadauSolver(
             [-y], ["y"], "t", 0.0, 0.2, 0.1,
             max_steps=1,
         ).solve([1.0])
+    assert radau_exhaustion.value.native_kind == "StepBudget"
 
 
 def test_bdf_callback_solver_supports_analytic_and_fd_jacobians():
@@ -1011,13 +1038,16 @@ def test_bdf_callback_solver_reports_typed_callback_failures():
         raise RuntimeError("callback boom")
 
     solver = BdfCallbackSolver(1, 0.0, 0.2, 0.1, [1.0], broken_residual)
-    with pytest.raises(CallbackError, match="callback boom"):
+    with pytest.raises(CallbackError, match="callback boom") as caught:
         solver.solve()
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert str(caught.value.__cause__) == "callback boom"
 
-    with pytest.raises(CallbackError, match="must return 1 finite values"):
+    with pytest.raises(CallbackError, match="must return 1 finite values") as malformed:
         BdfCallbackSolver(
             1, 0.0, 0.2, 0.1, [1.0], lambda _t, _state: [0.0, 1.0]
         ).solve()
+    assert malformed.value.__cause__ is None
 
     with pytest.raises(UnsupportedOptionError, match="does not use a symbolic frontend"):
         BdfCallbackSolver(
@@ -1869,8 +1899,10 @@ def test_lsode2_sparse_python_analytical_callbacks_and_typed_callback_failure():
         residual_callback=failing_residual,
         jacobian_callback=jacobian,
     )
-    with pytest.raises(CallbackError, match="callback fixture failure"):
+    with pytest.raises(CallbackError, match="callback fixture failure") as callback_error:
         failing.solve()
+    assert isinstance(callback_error.value.__cause__, RuntimeError)
+    assert str(callback_error.value.__cause__) == "callback fixture failure"
 
     with pytest.raises(InvalidConfigurationError, match="provided together"):
         Lsode2Solver(
@@ -1946,7 +1978,7 @@ def test_bvp_sci_direct_aot_preserves_typed_lifecycle_failure(tmp_path):
         aot_policy="require_prebuilt",
         aot_output_dir=str(tmp_path / "missing-aot"),
     )
-    with pytest.raises((AotArtifactError, PreparationError)):
+    with pytest.raises((AotArtifactError, PreparationError)) as failure:
         BvpSciSolver(
             [-y],
             ["y"],
@@ -1955,6 +1987,8 @@ def test_bvp_sci_direct_aot_preserves_typed_lifecycle_failure(tmp_path):
             [1.0, math.exp(-1.0)],
             options=options,
         )
+    assert failure.value.stage == "construct"
+    assert failure.value.solver == "bvp_sci"
 
 
 def test_bvp_sci_direct_atom_native_and_boundary_fd_routes_are_available():
@@ -2090,8 +2124,10 @@ def test_bvp_sci_direct_python_boundary_callback_failures_are_typed():
         [-y], ["y"], [], [0.0, 1.0], [1.0, math.exp(-1.0)],
         boundary_callback=failing_boundary,
     )
-    with pytest.raises(CallbackError, match="boundary fixture failure"):
+    with pytest.raises(CallbackError, match="boundary fixture failure") as callback_error:
         solver.solve()
+    assert isinstance(callback_error.value.__cause__, RuntimeError)
+    assert str(callback_error.value.__cause__) == "boundary fixture failure"
 
     with pytest.raises(InvalidConfigurationError, match="must be empty"):
         BvpSciSolver(
@@ -2334,3 +2370,333 @@ def test_public_panic_error_is_exported_for_guarded_native_failures():
     """The typed class is part of the public exception taxonomy."""
     assert issubclass(PanicError, Exception)
     assert issubclass(PanicError, __import__("rustedscithe").RustedSciTheError)
+    assert issubclass(PoisonedSolverError, SolverError)
+    assert issubclass(PoisonedSolverError, __import__("rustedscithe").RustedSciTheError)
+
+
+def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
+    """Rust API comments must survive PyO3 export and be useful via help()."""
+    documented = (
+        (SolverOptions, ("frontend", "execution", "telemetry")),
+        (BdfSolver, ("prepare", "solve", "restart", "continue_with_parameters")),
+        (BackwardEulerSolver, ("validate", "solve", "continue_to", "restart")),
+        (RadauSolver, ("prepare", "solve", "continue_with_parameters", "restart")),
+        (Lsode2Solver, ("prepare", "solve", "continue_with_parameters", "restart")),
+    )
+    for exposed_type, expected_terms in documented:
+        assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
+        for method_name in expected_terms:
+            method = getattr(exposed_type, method_name, None)
+            assert method is not None, f"{exposed_type.__name__}.{method_name} is not exposed"
+            assert method.__doc__ and len(method.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{method_name} lacks a Python-visible contract"
+            )
+
+
+def test_internal_native_helpers_are_not_exposed_as_python_methods():
+    """Panic-guard bypass helpers must remain private to the Rust wrapper."""
+    internal_methods = {
+        BdfSolver: ("solve_inner",),
+        BvpDampSolver: ("solve_inner", "detached_solution"),
+        NonlinearSolver: ("prepare_inner", "solve_inner"),
+        RadauSolver: ("solve_inner",),
+        RadauCallbackSolver: ("solve_checked",),
+    }
+    for exposed_type, names in internal_methods.items():
+        for name in names:
+            assert not hasattr(exposed_type, name), (
+                f"internal helper {exposed_type.__name__}.{name} leaked through PyO3"
+            )
+
+
+def test_bvp_pyo3_types_document_shapes_lifecycle_and_telemetry():
+    documented = (
+        (
+            BvpSciSolution,
+            ("values", "interval_residuals", "telemetry_counters", "telemetry_timings_ms", "sample"),
+        ),
+        (
+            BvpSciSolver,
+            ("set_parameters", "restart", "solve", "mesh", "parameters"),
+        ),
+        (
+            BvpDampSolution,
+            ("mesh", "values", "telemetry_counters", "telemetry_timings_ms", "write_solution_csv"),
+        ),
+        (
+            BvpDampSolver,
+            ("solve", "prepare", "solve_prepared", "set_parameters", "restart"),
+        ),
+    )
+    for exposed_type, method_names in documented:
+        assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
+        for method_name in method_names:
+            method = getattr(exposed_type, method_name)
+            assert method.__doc__ and len(method.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{method_name} needs a useful Python docstring"
+            )
+
+
+def test_callback_ivp_and_nonlinear_pyo3_docs_cover_public_contracts():
+    documented = (
+        (
+            BdfCallbackSolver,
+            ("prepare", "is_prepared", "solve", "restart", "telemetry_counters", "telemetry_report", "provenance"),
+        ),
+        (
+            RadauCallbackSolver,
+            ("solve", "continue_with_initial_state", "restart", "provenance"),
+        ),
+        (
+            NonlinearSolution,
+            ("solution", "residual", "telemetry_counters", "telemetry_timings_ms", "diagnostics"),
+        ),
+        (
+            NonlinearSolver,
+            ("variables", "backend", "frontend", "is_prepared", "prepare", "prepare_report", "solve"),
+        ),
+    )
+    for exposed_type, method_names in documented:
+        assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
+        for method_name in method_names:
+            method = getattr(exposed_type, method_name)
+            assert method.__doc__ and len(method.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{method_name} needs a useful Python docstring"
+            )
+
+
+def test_fitting_and_varpro_pyo3_docs_cover_lifecycle_results_and_telemetry():
+    documented = (
+        (FittingSolution, ("solution", "report", "diagnostics", "telemetry_counters", "telemetry_timings_ms")),
+        (FittingSolver, ("variables", "solve", "solve_with_parameters")),
+        (
+            GavinFittingSolution,
+            (
+                "parameters",
+                "parameter_standard_errors",
+                "fitted_value_standard_errors",
+                "parameter_correlation",
+                "preparation_report",
+                "telemetry_counters",
+                "telemetry_timings_ms",
+                "diagnostics",
+            ),
+        ),
+        (GavinFittingSolver, ("solve", "is_solved")),
+        (VarProSolution, ("solution", "best_fit", "diagnostics")),
+        (
+            VarProSolver,
+            (
+                "with_parameters",
+                "with_initial_parameters",
+                "with_data",
+                "with_basis",
+                "with_basis_str",
+                "with_invariant",
+                "with_invariant_str",
+                "solve",
+                "is_solved",
+            ),
+        ),
+    )
+    for exposed_type, method_names in documented:
+        assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
+        for method_name in method_names:
+            method = getattr(exposed_type, method_name)
+            assert method.__doc__ and len(method.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{method_name} needs a useful Python docstring"
+            )
+
+
+def test_task_and_remaining_ivp_api_docstrings_cover_inspection_surfaces():
+    documented = (
+        (
+            BackwardEulerSolution,
+            ("telemetry_counters", "telemetry_timings_ms"),
+        ),
+        (BackwardEulerSolver, ("status", "telemetry_report")),
+        (Lsode2Solution, ("telemetry_counters", "telemetry_timings_ms")),
+        (Lsode2Solver, ("provenance", "status", "telemetry_report")),
+        (RadauSolver, ("is_prepared",)),
+        (SolverOptions, ("as_dict", "band_lower", "band_upper", "sparse_factorization")),
+        (
+            BvpTaskResult,
+            (
+                "diagnostics",
+                "telemetry_counters",
+                "telemetry_report",
+                "telemetry_timings_ms",
+                "write_telemetry_report",
+            ),
+        ),
+        (
+            IvpTaskResult,
+            ("times", "states", "diagnostics", "has_continuation", "continuation_info"),
+        ),
+        (
+            TaskDocument,
+            ("parse", "from_file", "preview", "check", "route", "options", "run", "run_bvp"),
+        ),
+    )
+    for exposed_type, method_names in documented:
+        assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
+        for method_name in method_names:
+            method = getattr(exposed_type, method_name)
+            assert method.__doc__ and len(method.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{method_name} needs a useful Python docstring"
+            )
+
+    documented_properties = (
+        (BvpTaskResult, ("solver", "frontend", "execution", "matrix_layout", "status", "status_code")),
+        (IvpTaskResult, ("status", "status_code", "has_continuation")),
+    )
+    for exposed_type, property_names in documented_properties:
+        for property_name in property_names:
+            descriptor = exposed_type.__dict__[property_name]
+            assert descriptor.__doc__ and len(descriptor.__doc__.strip()) > 20, (
+                f"{exposed_type.__name__}.{property_name} needs a useful Python property docstring"
+            )
+
+
+def test_all_exported_native_public_members_have_docstrings():
+    """Every new public PyO3 class member must explain its Python contract."""
+    import rustedscithe
+
+    undocumented = []
+    for name, member in inspect.getmembers(rustedscithe):
+        if name.startswith("_"):
+            continue
+        if inspect.isfunction(member) and not (member.__doc__ and member.__doc__.strip()):
+            undocumented.append(f"{name} function")
+
+    for name, exposed_type in inspect.getmembers(rustedscithe, inspect.isclass):
+        if name.startswith("_") or exposed_type.__module__ != "rustedscithe":
+            continue
+        if not (exposed_type.__doc__ and exposed_type.__doc__.strip()):
+            undocumented.append(f"{name} class")
+        for member_name, member in inspect.getmembers(exposed_type):
+            if member_name.startswith("_"):
+                continue
+            if callable(member) and not (member.__doc__ and member.__doc__.strip()):
+                undocumented.append(f"{name}.{member_name}")
+        for member_name, descriptor in exposed_type.__dict__.items():
+            if member_name.startswith("_"):
+                continue
+            is_property = isinstance(descriptor, property) or type(descriptor).__name__ in {
+                "getset_descriptor",
+                "member_descriptor",
+            }
+            if is_property and not (descriptor.__doc__ and descriptor.__doc__.strip()):
+                undocumented.append(f"{name}.{member_name} property")
+
+    assert not undocumented, "Missing Python-facing documentation:\n" + "\n".join(undocumented)
+
+
+def test_python_type_stubs_parse_and_match_runtime_exports():
+    import rustedscithe
+    from rustedscithe import _native
+    from rustedscithe import facade
+
+    package_dir = Path(__file__).parents[1] / "python" / "rustedscithe"
+    native_stub = ast.parse((package_dir / "_native.pyi").read_text(encoding="utf-8"))
+    facade_stub = ast.parse((package_dir / "facade.pyi").read_text(encoding="utf-8"))
+    public_stub = ast.parse((package_dir / "__init__.pyi").read_text(encoding="utf-8"))
+
+    def declared_exports(module):
+        for statement in module.body:
+            if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in statement.targets
+            ):
+                return set(ast.literal_eval(statement.value))
+        raise AssertionError("type stub must declare an explicit __all__")
+
+    def declared_symbols(module):
+        return {
+            statement.name
+            for statement in module.body
+            if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    native_exports = set(name for name in dir(_native) if not name.startswith("_"))
+    assert declared_exports(native_stub) == native_exports
+    assert native_exports <= declared_symbols(native_stub)
+
+    native_stub_classes = {
+        statement.name: {
+            member.name
+            for member in statement.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        | {
+            member.target.id
+            for member in statement.body
+            if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name)
+        }
+        for statement in native_stub.body
+        if isinstance(statement, ast.ClassDef)
+    }
+    for name in native_exports:
+        exposed_type = getattr(_native, name)
+        if not inspect.isclass(exposed_type) or exposed_type.__module__ != "rustedscithe":
+            continue
+        declared_members = native_stub_classes[name]
+        for member_name, member in exposed_type.__dict__.items():
+            if member_name.startswith("_"):
+                continue
+            is_public = callable(member) or type(member).__name__ in {
+                "getset_descriptor",
+                "member_descriptor",
+            }
+            assert not is_public or member_name in declared_members, (
+                f"{name}.{member_name} is missing from _native.pyi"
+            )
+
+    facade_exports = {
+        "capabilities", "create_bvp", "create_fit", "create_ivp", "create_nonlinear",
+        "fit", "render_table", "run_task_batch", "run_task_batch_report", "solve_bvp",
+        "solve_ivp", "solve_nonlinear", "task", "write_table",
+    }
+    assert facade_exports <= declared_symbols(facade_stub)
+    facade_functions = {
+        name
+        for name, member in inspect.getmembers(facade, inspect.isfunction)
+        if not name.startswith("_")
+    }
+    assert facade_functions <= declared_symbols(facade_stub)
+    assert declared_exports(public_stub) == set(rustedscithe.__all__)
+
+
+def test_native_panic_poisoning_crosses_the_python_boundary():
+    """The test-only probe verifies metadata and the no-reuse contract end to end."""
+    from rustedscithe import _native
+
+    probe_type = getattr(_native, "_PanicProbeSolver", None)
+    if probe_type is None:
+        pytest.skip("rebuild with Cargo feature `test-panic-probe` to run this boundary test")
+
+    probe = probe_type()
+    with pytest.raises(PanicError) as caught:
+        probe.trigger_native_panic()
+    assert caught.value.stage == "solve"
+    assert caught.value.solver == "panic_probe"
+    assert caught.value.route == "test_only"
+    assert caught.value.solver_state == "discard"
+
+    with pytest.raises(PoisonedSolverError) as poisoned:
+        probe.retry()
+    assert poisoned.value.category == "poisoned_solver"
+
+
+def test_native_solver_guard_keeps_non_panic_failures_retryable():
+    """A typed solver error must not poison the wrapper instance."""
+    from rustedscithe import _native
+
+    probe_type = getattr(_native, "_PanicProbeSolver", None)
+    if probe_type is None:
+        pytest.skip("rebuild with Cargo feature `test-panic-probe` to run this boundary test")
+
+    probe = probe_type()
+    with pytest.raises(SolverError):
+        probe.fail_numerically()
+    assert probe.retry() is None

@@ -1,4 +1,11 @@
-"""BVP_sci symbolic boundary-value solve with a Sparse layout."""
+"""Solve ``y' = -y`` from a left boundary value with BVP_sci.
+
+The exact profile is ``exp(-x)``. This example asks the symbolic BVP_sci
+frontend to prepare a Sparse collocation system and retain dense output. The
+reported sample at the right endpoint should be close to ``exp(-1)``; Sparse
+is selected to demonstrate the route, not to claim it is fastest for every
+problem size or structure.
+"""
 
 import numpy as np
 
@@ -25,3 +32,4 @@ solution = solve_bvp(
 print("mesh shape:", solution.mesh_array().shape)
 print("values shape:", solution.values_array().shape)
 print("value at x=1:", solution.sample(1.0))
+print("exact y(1):", np.exp(-1.0))

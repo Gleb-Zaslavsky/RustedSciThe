@@ -1,0 +1,86 @@
+# LSODE2: руководство для Python
+
+LSODE2 — универсальный IVP-солвер для нежёстких и жёстких задач, а также для
+задач, где важна структура Sparse/Banded матриц. Автоматический контроллер
+может переключаться между семействами Adams и BDF. Это отдельный, более
+настраиваемый солвер, а не вариант небольших BDF/Radau wrappers.
+
+## Семейство солвера и контроллер
+
+В качестве семейства указывайте `"lsode2"`, а метод задавайте отдельно:
+`controller="adams"`, `"bdf"` или `"auto"`. `"lsoda"` — alias семейства для
+автоматического контроллера Adams/BDF. Не передавайте `"adams"` как имя
+семейства солвера.
+
+```python
+from rustedscithe import Expr, SolverOptions, create_ivp
+
+y = Expr.variable("y")
+rate = Expr.variable("rate")
+solver = create_ivp(
+    "lsode2", [-rate * y], ["y"], "t", [1.0], 0.0, 2.0, 0.05,
+    parameters=["rate"], parameter_values=[0.7], controller="auto",
+    options=SolverOptions(
+        frontend="atom_native", execution="lambdify",
+        matrix_layout="dense", execution_policy="sequential",
+        telemetry="timings",
+    ),
+    rtol=1e-8, atol=1e-10,
+)
+solution = solver.solve()
+print(solution.controller_mode, solution.final_state_array())
+```
+
+## Layout и символьные маршруты
+
+LSODE2 предоставляет подготовку ExprLegacy/AtomNative, Lambdify/AOT и
+линейные маршруты Dense/Sparse/Banded. Эти измерения независимы. Dense —
+естественный baseline для малых полностью связанных систем, Sparse или Banded
+могут лучше подойти при соответствующей структуре якобиана. Универсального
+победителя нет: сравнивайте одинаковые задачи и смотрите provenance и
+выбранный линейный решатель.
+
+Python-конструктор принимает ширины полосы явно; они не выводятся из
+уравнения автоматически:
+
+| Настройка | Python API | Примечание |
+| --- | --- | --- |
+| Контроллер | `method="bdf"`, `"adams"`, `"auto"` | `"lsoda"` — alias для `"auto"` |
+| Допуски | `rtol`, `atol` | Локальный контроль ошибки IVP |
+| Параметры | `parameters`, `parameter_values` | Имена и порядок совпадают с выражениями |
+| Ширины полосы | `band_lower`, `band_upper` | Для Banded обязательны оба значения |
+| Callbacks | `residual_callback`, `jacobian_callback` | Без Jacobian callback применяется FD |
+| Исполнение | `SolverOptions(execution=...)` | `lambdify` или `aot` |
+| Планирование | `SolverOptions(execution_policy=...)` | `sequential`, `parallel`, `auto` там, где поддержано |
+
+Прямой `Lsode2Solver` принимает `band_lower`/`band_upper`; другие адаптеры
+с общим layout-options могут использовать `SolverOptions.set_banded_width`.
+
+Wrapper также предоставляет native analytical residual/Jacobian callbacks
+для поддержанных layout. Они пересекают Python-границу и удерживают GIL;
+настройки worker-ов Rust не превращают Python callback в Rust-native код и не
+обещают масштабирование Python-потоков. Для горячего численного пути по
+возможности предпочитайте символьную подготовку.
+
+## Подготовка, continuation и restart
+
+`create_ivp` даёт явный lifecycle. `prepare()` один раз строит выбранный
+символьный маршрут. `continue_with_parameters(...)` продолжает от последней
+успешной конечной точки, а `restart(...)` предназначен для нового начального
+состояния. Не смешивайте warm continuation с серией независимых задач.
+
+## Телеметрия и AOT
+
+Читайте структурированные counters/timings и компактный отчёт результата.
+Временные scopes могут перекрываться и не всегда аддитивны. AOT поддерживает
+общий lifecycle BuildIfMissing, RequirePrebuilt и RebuildAlways, handoff между
+процессами и provenance. Холодная компиляция окупается лишь при повторной
+работе; измеряйте подготовку, callback и full solve отдельно.
+
+## Большие примеры
+
+`examples/lsode2_controller_matrix.py` сравнивает контроллеры на неизменной
+задаче. `examples/lsode2_lorenz.py` показывает нелинейную хаотическую систему
+из трёх переменных; `examples/lsode2_three_body.py` переносит 12-компонентную
+задачу гравитации из основного crate, включая символьные aliases расстояний.
+Это численные примеры, а не контролируемые бенчмарки.

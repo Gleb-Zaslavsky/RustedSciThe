@@ -39,8 +39,8 @@ use crate::contract::{
 use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError, BvpError,
     CallbackError, ExhaustionError, InvalidConfigurationError, InvalidExpressionError, PanicError,
-    PreparationError, RustedSciTheError, SolverError, TaskDocumentError, TelemetryError,
-    UnsupportedOptionError,
+    PoisonedSolverError, PreparationError, RustedSciTheError, SolverError, TaskDocumentError,
+    TelemetryError, UnsupportedOptionError,
 };
 use crate::expr::{PyExpr, constant, parse_expr, symbol};
 use crate::gavin::{GavinFittingSolution, GavinFittingSolver};
@@ -95,6 +95,8 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<TaskDocument>()?;
     module.add_class::<IvpTaskResult>()?;
     module.add_class::<BvpTaskResult>()?;
+    #[cfg(feature = "test-panic-probe")]
+    module.add_class::<crate::errors::PanicProbeSolver>()?;
 
     module.add_function(wrap_pyfunction!(parse_expr, module)?)?;
     module.add_function(wrap_pyfunction!(symbol, module)?)?;
@@ -127,6 +129,7 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("TelemetryError", TelemetryError::type_object(py))?;
     module.add("ExhaustionError", ExhaustionError::type_object(py))?;
     module.add("PanicError", PanicError::type_object(py))?;
+    module.add("PoisonedSolverError", PoisonedSolverError::type_object(py))?;
     Ok(())
 }
 

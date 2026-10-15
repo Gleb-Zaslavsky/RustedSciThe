@@ -1,4 +1,10 @@
-"""Run independent text tasks and render a compact failure-tolerant table."""
+"""Run independent text tasks and render a compact failure-tolerant table.
+
+The first document is a valid scalar BDF task. The second deliberately omits
+the required solver declaration. Batch execution should return one row per
+input and preserve the successful result even when another task fails; callers
+can inspect ``status`` and ``error_type`` instead of parsing terminal output.
+"""
 
 from rustedscithe import render_table, run_task_batch
 

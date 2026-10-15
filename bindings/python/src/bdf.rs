@@ -7,7 +7,7 @@
 //! different backend.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nalgebra::{DMatrix, DVector};
 use pyo3::prelude::*;
@@ -16,8 +16,8 @@ use pyo3::types::PyAny;
 use crate::aot::{generated_config, map_backend_error, provenance_fields, symbolic_backend};
 use crate::contract::SolverOptions;
 use crate::errors::{
-    CallbackError, ExhaustionError, InvalidConfigurationError, SolverError, UnsupportedOptionError,
-    annotate, catch_panic,
+    CallbackFailureState, ExhaustionError, InvalidConfigurationError, SolverError,
+    SolverPanicState, UnsupportedOptionError, catch_panic,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -25,20 +25,6 @@ use rustedscithe_core::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
 use rustedscithe_core::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
-
-type CallbackFailure = Arc<Mutex<Option<String>>>;
-
-fn record_callback_failure(failure: &CallbackFailure, message: String) {
-    if let Ok(mut slot) = failure.lock() {
-        if slot.is_none() {
-            *slot = Some(message);
-        }
-    }
-}
-
-fn take_callback_failure(failure: &CallbackFailure) -> Option<String> {
-    failure.lock().ok().and_then(|mut slot| slot.take())
-}
 
 /// Adapt Python callbacks to BDF's native callback ABI.
 ///
@@ -54,9 +40,9 @@ fn build_native_callbacks(
 ) -> PyResult<(
     Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>,
     Option<Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>>,
-    CallbackFailure,
+    CallbackFailureState,
 )> {
-    let failure = Arc::new(Mutex::new(None));
+    let failure = CallbackFailureState::default();
     Python::attach(|py| {
         if !residual.bind(py).is_callable() {
             return Err(InvalidConfigurationError::new_err(
@@ -72,7 +58,7 @@ fn build_native_callbacks(
         }
 
         let residual = residual.clone_ref(py);
-        let residual_failure = Arc::clone(&failure);
+        let residual_failure = failure.clone();
         let residual_callback: Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync> =
             Arc::new(move |time, state| {
                 let result = Python::attach(|py| -> PyResult<Vec<f64>> {
@@ -89,20 +75,18 @@ fn build_native_callbacks(
                         DVector::from_vec(values)
                     }
                     Ok(values) => {
-                        record_callback_failure(
-                            &residual_failure,
+                        residual_failure.record(
                             format!(
                                 "residual_callback must return {dimension} finite values, got {}",
                                 values.len()
                             ),
+                            None,
                         );
                         DVector::from_element(dimension, f64::NAN)
                     }
                     Err(error) => {
-                        record_callback_failure(
-                            &residual_failure,
-                            format!("residual_callback raised: {error}"),
-                        );
+                        residual_failure
+                            .record(format!("residual_callback raised: {error}"), Some(error));
                         DVector::from_element(dimension, f64::NAN)
                     }
                 }
@@ -110,7 +94,7 @@ fn build_native_callbacks(
 
         let jacobian_callback = jacobian.map(|jacobian| {
             let jacobian = jacobian.clone_ref(py);
-            let jacobian_failure = Arc::clone(&failure);
+            let jacobian_failure = failure.clone();
             let callback: Arc<
                 dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync,
             > = Arc::new(move |time, state| {
@@ -131,19 +115,19 @@ fn build_native_callbacks(
                         DMatrix::from_row_slice(dimension, dimension, &flat)
                     }
                     Ok(rows) => {
-                        record_callback_failure(
-                            &jacobian_failure,
+                        jacobian_failure.record(
                             format!(
                                 "jacobian_callback must return a {dimension}x{dimension} finite matrix, got {} rows",
                                 rows.len()
                             ),
+                            None,
                         );
                         DMatrix::from_element(dimension, dimension, f64::NAN)
                     }
                     Err(error) => {
-                        record_callback_failure(
-                            &jacobian_failure,
+                        jacobian_failure.record(
                             format!("jacobian_callback raised: {error}"),
+                            Some(error),
                         );
                         DMatrix::from_element(dimension, dimension, f64::NAN)
                     }
@@ -240,7 +224,8 @@ fn validate_route(
 }
 
 fn map_bdf_error(error: BdfSolveError) -> PyErr {
-    annotate(
+    let native_kind = crate::errors::native_variant(&error);
+    crate::errors::annotate_native(
         match error {
             BdfSolveError::Backend(error) => map_backend_error(error),
             BdfSolveError::Configuration(error) => {
@@ -257,6 +242,7 @@ fn map_bdf_error(error: BdfSolveError) -> PyErr {
         "solve",
         "bdf",
         "native",
+        &native_kind,
     )
 }
 
@@ -264,7 +250,9 @@ fn map_bdf_error(error: BdfSolveError) -> PyErr {
 ///
 /// The time/state vectors are copied at the solver boundary. A later
 /// continuation or restart therefore cannot mutate a result already returned
-/// to Python.
+/// to Python. `times()` and `states()` return Python lists, while
+/// `times_array()` and `states_array()` return owned NumPy arrays. The status,
+/// route provenance, counters and stage timings describe the completed solve.
 #[pyclass(name = "BdfSolution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct BdfSolution {
@@ -480,6 +468,7 @@ impl BdfSolution {
     }
 
     #[getter]
+    /// Telemetry collection level used for this solution snapshot.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }
@@ -563,6 +552,10 @@ impl BdfSolution {
 /// Construction validates the public contract but defers symbolic preparation
 /// until [`Self::prepare`] or [`Self::solve`]. This mirrors the native BDF
 /// lifecycle and makes cold preparation distinguishable from warm solving.
+/// Use [`SolverOptions`] to select frontend, Lambdify/AOT execution, matrix
+/// layout, callback execution policy, and telemetry. Declared parameter values
+/// can be rebound with `continue_with_parameters`; `restart` starts a new
+/// interval and initial state while retaining prepared symbolic callbacks.
 #[pyclass(name = "BdfSolver", module = "rustedscithe", unsendable)]
 pub struct BdfSolver {
     solver: ODEsolver,
@@ -575,10 +568,18 @@ pub struct BdfSolver {
     execution: String,
     execution_policy: String,
     aot_metadata: HashMap<String, String>,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl BdfSolver {
+    /// Configure a symbolic BDF initial-value problem.
+    ///
+    /// `expressions` contains one right-hand side per state variable. Optional
+    /// parameter symbols must have matching `parameter_values`. `y0`, `t0`,
+    /// and `t_end` define the initial condition and interval; `max_step`,
+    /// `rtol`, `atol`, `first_step`, `max_bdf_order`, and `max_steps` control
+    /// integration. `options` selects the symbolic and linear routes.
     #[new]
     #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, parameters=None, parameter_values=None, first_step=None, max_bdf_order=5, max_steps=1_000_000))]
     #[allow(clippy::too_many_arguments)]
@@ -748,8 +749,17 @@ impl BdfSolver {
             ));
         }
 
+        let route = format!(
+            "{}:{}:{}",
+            options.frontend(),
+            options.execution(),
+            options.execution_policy()
+        );
+        let solver = catch_panic("construct", "bdf", &route, || {
+            Ok(ODEsolver::new_with_options(native_options))
+        })?;
         Ok(Self {
-            solver: ODEsolver::new_with_options(native_options),
+            solver,
             parameter_count,
             first_step,
             max_bdf_order,
@@ -759,12 +769,23 @@ impl BdfSolver {
             execution: options.execution().to_owned(),
             execution_policy: options.execution_policy().to_owned(),
             aot_metadata: provenance_fields(&options),
+            panic_state: SolverPanicState::default(),
         })
     }
 
-    /// Perform symbolic preparation without integrating.
+    /// Prepare symbolic callbacks and backend state without integrating.
+    ///
+    /// Preparation is idempotent. Call this explicitly to separate setup
+    /// cost from `solve()`, or let `solve()` prepare lazily.
     pub fn prepare(&mut self) -> PyResult<()> {
-        self.solver.try_generate().map_err(map_backend_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "bdf", &route, || {
+            self.solver.try_generate().map_err(map_backend_error)
+        })
     }
 
     /// Whether the symbolic callbacks and numerical runtime are prepared.
@@ -772,14 +793,17 @@ impl BdfSolver {
         self.solver.is_backend_prepared()
     }
 
-    /// Integrate and return a detached result object.
+    /// Integrate the configured initial state and return a detached result.
+    ///
+    /// The result contains the accepted trajectory and telemetry snapshot.
+    /// Callback or numerical failures are raised as typed Python exceptions.
     pub fn solve(&mut self) -> PyResult<BdfSolution> {
-        catch_panic("solve", "bdf", "lambdify", || self.solve_inner())
-    }
-
-    fn solve_inner(&mut self) -> PyResult<BdfSolution> {
-        self.solver.try_solve().map_err(map_bdf_error)?;
-        Ok(BdfSolution::from_solver(&self.solver))
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", &route, || self.solve_inner())
     }
 
     /// Restart a prepared model with a new initial state and interval.
@@ -790,10 +814,17 @@ impl BdfSolver {
         finite_vector(&y0, "y0")?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
-        self.solver
-            .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
-            .map_err(map_bdf_error)?;
-        self.solve()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "bdf", &route, || {
+            self.solver
+                .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
+                .map_err(map_bdf_error)?;
+            self.solve_inner()
+        })
     }
 
     /// Continue from the latest accepted state with new parameter values.
@@ -819,10 +850,17 @@ impl BdfSolver {
             ));
         }
         validate_scalar(t_end, "t_end")?;
-        self.solver
-            .try_continue_with_parameter_values(DVector::from_vec(parameter_values), t_end)
-            .map_err(map_bdf_error)?;
-        self.solve()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "bdf", &route, || {
+            self.solver
+                .try_continue_with_parameter_values(DVector::from_vec(parameter_values), t_end)
+                .map_err(map_bdf_error)?;
+            self.solve_inner()
+        })
     }
 
     /// Current native status without exposing mutable solver internals.
@@ -860,6 +898,7 @@ impl BdfSolver {
 
     /// Selected telemetry mode, useful when reports are generated later.
     #[getter]
+    /// Telemetry collection level configured on this solver.
     pub fn telemetry_mode(&self) -> &'static str {
         match self.telemetry_mode {
             BdfTelemetryMode::Off => "off",
@@ -877,6 +916,13 @@ impl BdfSolver {
     }
 }
 
+impl BdfSolver {
+    fn solve_inner(&mut self) -> PyResult<BdfSolution> {
+        self.solver.try_solve().map_err(map_bdf_error)?;
+        Ok(BdfSolution::from_solver(&self.solver))
+    }
+}
+
 /// Dense native-callback BDF route.
 ///
 /// This is intentionally separate from [`BdfSolver`]. Symbolic BDF owns an
@@ -888,17 +934,28 @@ impl BdfSolver {
 #[pyclass(name = "BdfCallbackSolver", module = "rustedscithe", unsendable)]
 pub struct BdfCallbackSolver {
     solver: ODEsolver,
-    failure: CallbackFailure,
+    failure: CallbackFailureState,
     dimension: usize,
     telemetry_mode: String,
     jacobian_source: String,
     first_step: Option<f64>,
     max_bdf_order: usize,
     max_steps: usize,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl BdfCallbackSolver {
+    /// Configure a Dense BDF solve around Python numerical callbacks.
+    ///
+    /// `residual_callback(t, y)` must return a finite vector with
+    /// `state_dimension` entries. An optional `jacobian_callback(t, y)` must
+    /// return a finite square matrix in row-major nested-list form. When it is
+    /// omitted, the native BDF implementation constructs a finite-difference
+    /// Jacobian. Python callback routes are synchronous, sequential, Dense and
+    /// Lambdify-only; symbolic frontend or AOT settings are not applicable.
+    /// `y0`, interval and tolerance controls have the same meaning as in
+    /// [`BdfSolver`].
     #[new]
     #[pyo3(signature=(state_dimension, t0, t_end, max_step, y0, residual_callback, jacobian_callback=None, rtol=1e-6, atol=1e-8, options=None, first_step=None, max_bdf_order=5, max_steps=1_000_000))]
     #[allow(clippy::too_many_arguments)]
@@ -1039,33 +1096,37 @@ impl BdfCallbackSolver {
             first_step,
             max_bdf_order,
             max_steps,
+            panic_state: SolverPanicState::default(),
         })
     }
 
+    /// Prepare the native BDF runtime without taking an integration step.
     pub fn prepare(&mut self) -> PyResult<()> {
-        self.solver.try_generate().map_err(map_backend_error)
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "bdf", "callback", || {
+            self.solver.try_generate().map_err(map_backend_error)
+        })
     }
 
+    /// Whether the native numerical backend has been initialized.
     pub fn is_prepared(&self) -> bool {
         self.solver.is_backend_prepared()
     }
 
+    /// Integrate the configured interval and return a detached trajectory.
     pub fn solve(&mut self) -> PyResult<BdfSolution> {
-        catch_panic("solve", "bdf", "callback", || {
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", "callback", || {
             let result = self.solver.try_solve();
-            if let Some(failure) = take_callback_failure(&self.failure) {
-                return Err(annotate(
-                    CallbackError::new_err(failure),
-                    "solve",
-                    "bdf",
-                    "callback",
-                ));
+            if let Some(error) = self.failure.take_pyerr("solve", "bdf", "callback") {
+                return Err(error);
             }
             result.map_err(map_bdf_error)?;
             Ok(BdfSolution::from_solver(&self.solver))
         })
     }
 
+    /// Restart from a new state and interval, retaining the Python callbacks.
     pub fn restart(&mut self, t0: f64, y0: Vec<f64>, t_end: f64) -> PyResult<BdfSolution> {
         if y0.len() != self.dimension {
             return Err(InvalidConfigurationError::new_err(format!(
@@ -1082,24 +1143,31 @@ impl BdfCallbackSolver {
                 "t0 and t_end must differ",
             ));
         }
-        self.solver
-            .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
-            .map_err(map_bdf_error)?;
-        self.solve()
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "bdf", "callback", || {
+            self.solver
+                .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
+                .map_err(map_bdf_error)?;
+            self.solve()
+        })
     }
 
+    /// Return discrete native BDF counters for the latest lifecycle operation.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         BdfSolution::from_solver(&self.solver).telemetry_counters()
     }
 
+    /// Return native timing totals in milliseconds for the latest operation.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         BdfSolution::from_solver(&self.solver).telemetry_timings_ms()
     }
 
+    /// Render a compact human-readable telemetry snapshot.
     pub fn telemetry_report(&self) -> String {
         self.solver.statistics_report()
     }
 
+    /// Describe the fixed callback route and selected Jacobian source.
     pub fn provenance(&self) -> HashMap<String, String> {
         HashMap::from([
             ("solver".to_owned(), "bdf".to_owned()),
@@ -1120,6 +1188,7 @@ impl BdfCallbackSolver {
     }
 
     #[getter]
+    /// Telemetry collection level configured for callback evaluation.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }

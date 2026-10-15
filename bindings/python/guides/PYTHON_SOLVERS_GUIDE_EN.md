@@ -72,6 +72,24 @@ the original state. Use `restart(...)` when a new interval or initial state is
 intended. AOT may be slower for one cold solve and amortize over a longer
 series; measure preparation, callback and full-solve stages separately.
 
+The common facade selects the solver family with its first argument. LSODE2's
+controller is a separate keyword, so Adams or automatic mode is not confused
+with the choice of solver:
+
+```python
+from rustedscithe import Expr, create_ivp
+
+y = Expr.variable("y")
+solver = create_ivp(
+    "lsode2", [-y], ["y"], "t", [1.0], 0.0, 0.2, 0.05,
+    controller="adams",  # also "bdf" or "auto"
+)
+result = solver.solve()
+```
+
+`"lsoda"` is accepted as an LSODE2 solver-family alias for the automatic
+Adams/BDF controller. `controller=` is only valid for the LSODE2 route.
+
 ## BVP
 
 `solve_bvp("bvp_sci", ...)` and `solve_bvp("bvp_damp", ...)` share only the
@@ -111,3 +129,27 @@ Detached solutions expose structured mappings and compact report-file methods.
 task parser. Batch execution continues after failures and can be rendered with
 `render_table(...)`. The runnable examples in `bindings/python/examples/`
 cover Radau, BDF continuation, BVP_sci, nonlinear/fitting and task batches.
+
+## Per-solver guides
+
+The overview above is intentionally concise. Detailed guides preserve the
+configuration breadth of each native solver while translating code snippets
+to Python. Start with the relevant route:
+
+- [Radau5](RADAU_GUIDE_EN.md): stiff IVPs, frontend/layout selection, output
+  and telemetry.
+- [BDF](BDF_GUIDE_EN.md): dense-only BDF, order controls, callbacks and
+  continuation.
+- [Backward Euler](BACKWARD_EULER_GUIDE_EN.md): fixed-step semantics and
+  supported dense execution routes.
+- [LSODE2](LSODE2_GUIDE_EN.md): Adams/BDF controllers, symbolic routes,
+  matrix layouts and parallel callback policy.
+- [BVP_sci](BVP_SCI_GUIDE_EN.md): boundary residuals, dense/sparse/banded
+  layouts, SuperLU and AOT.
+- [BVP_Damp](BVP_DAMP_GUIDE_EN.md): observations, bounds, mesh refinement,
+  layout and symbolic/AOT choices.
+- [Nonlinear systems and fitting](NONLINEAR_FITTING_GUIDE_EN.md): root,
+  least-squares and fitting APIs.
+
+Runnable, commented Python scripts are indexed in
+[`examples/README.md`](../examples/README.md).

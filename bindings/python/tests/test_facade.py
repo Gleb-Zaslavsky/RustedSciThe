@@ -5,9 +5,11 @@ import math
 import numpy as np
 
 import pytest
+from rustedscithe import facade
 
 from rustedscithe import (
     Expr,
+    Lsode2Solver,
     SolverOptions,
     SymbolicSystem,
     create_bvp,
@@ -21,6 +23,34 @@ from rustedscithe import (
     solve_ivp,
     task,
 )
+
+
+def test_public_facade_helpers_document_lifecycle_and_failure_contracts():
+    public_helpers = (
+        facade.create_ivp,
+        facade.solve_ivp,
+        facade.create_bvp,
+        facade.solve_bvp,
+        facade.create_nonlinear,
+        facade.solve_nonlinear,
+        facade.create_fit,
+        facade.fit,
+        facade.task,
+        facade.capabilities,
+        facade.render_table,
+        facade.write_table,
+        facade.run_task_batch,
+        facade.run_task_batch_report,
+    )
+    for helper in public_helpers:
+        assert helper.__doc__ is not None
+        assert len(helper.__doc__.strip()) >= 120, helper.__name__
+        assert "Returns" in helper.__doc__ or "Raises" in helper.__doc__
+
+    assert "controller" in facade.create_ivp.__doc__
+    assert "one-shot" in facade.solve_ivp.__doc__
+    assert "boundary-data" in facade.create_bvp.__doc__
+    assert "TaskDocumentError" in facade.task.__doc__
 
 
 def test_facade_normalizes_ivp_creation_without_hiding_native_lifecycle():
@@ -79,6 +109,42 @@ y0: 1.0
 """
     )
     assert "solver" in document.preview().lower()
+
+
+@pytest.mark.parametrize(
+    ("controller", "expected_mode"),
+    [
+        ("bdf", "bdf_only"),
+        ("adams", "adams_only"),
+        ("auto", "automatic_adams_bdf"),
+    ],
+)
+def test_facade_lsode2_selects_controller_separately_from_solver_family(
+    controller, expected_mode
+):
+    y = Expr.variable("y")
+    solver = create_ivp(
+        "lsode2",
+        [-y],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.1,
+        0.05,
+        controller=controller,
+    )
+
+    assert isinstance(solver, Lsode2Solver)
+    result = solver.solve()
+    assert result.status.startswith("finished")
+    assert result.controller_mode == expected_mode
+
+    with pytest.raises(ValueError, match="only supported by the LSODE2"):
+        create_ivp(
+            "bdf", [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            controller="adams",
+        )
 
 
 def test_facade_batch_and_table_keep_later_tasks_after_failure(tmp_path):

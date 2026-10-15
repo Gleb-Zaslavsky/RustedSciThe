@@ -16,6 +16,7 @@ SolverOptions = _native.SolverOptions
 TaskDocument = _native.TaskDocument
 BvpSciSolver = _native.BvpSciSolver
 BvpDampSolver = _native.BvpDampSolver
+Lsode2Solver = _native.Lsode2Solver
 
 
 def _owned_sequence(value: Any) -> Any:
@@ -52,33 +53,81 @@ def create_ivp(
     parameters: list[str] | None = None,
     parameter_values: ArrayLike | None = None,
     options: SolverOptions | None = None,
+    controller: str | None = None,
     **solver_options: Any,
 ) -> Any:
-    """Construct a native IVP solver with one common Python signature."""
+    """Construct a native IVP solver with one common Python signature.
+
+    This convenience function normalizes solver-family names and forwards
+    solver-specific options to the native adapter. It does not erase native
+    lifecycle differences: call ``prepare()`` and ``solve()`` on the returned
+    object when reuse, restart, or continuation is required.
+
+    Parameters
+    ----------
+    method:
+        Solver family: ``"bdf"``, ``"radau5"``, ``"backward_euler"`` or
+        ``"lsode2"``. ``"radau"``, ``"be"`` and ``"lsode"`` are accepted
+        aliases.
+    expressions, state_variables, time_variable:
+        Symbolic right-hand sides and their ordered state/time names.
+    y0:
+        Initial state. NumPy-like arrays are converted to owned native vectors.
+        Radau accepts the value here for API symmetry but binds it at ``solve``.
+    t0, t_end, max_step:
+        Integration interval and maximum step size, in the model's time units.
+    parameters, parameter_values:
+        Optional ordered parameter schema and current numeric values.
+    options:
+        Optional ``SolverOptions`` for frontend, execution, layout, callback
+        scheduling and telemetry. Solver-specific keywords remain available
+        through ``solver_options``.
+    controller:
+        LSODE2 controller only: ``"bdf"``, ``"adams"`` or ``"auto"``. This
+        is separate from ``method``, which selects the solver family.
+
+    Returns
+    -------
+    Any
+        The selected native solver wrapper; its concrete class depends on
+        ``method`` and retains that solver's prepared/restart/continuation API.
+
+    Raises
+    ------
+    ValueError
+        If the family is unknown or ``controller`` is supplied to a solver
+        other than LSODE2. Native configuration failures retain their typed
+        RustedSciThe exception class.
+    """
 
     family = _method_name(method)
     if family == "bdf":
+        if controller is not None:
+            raise ValueError("controller is only supported by the LSODE2 route")
         return _native.BdfSolver(
             expressions, state_variables, time_variable, _owned_sequence(y0), t0, t_end, max_step,
             options=options, parameters=parameters,
             parameter_values=_owned_sequence(parameter_values), **solver_options,
         )
     if family == "radau5":
+        if controller is not None:
+            raise ValueError("controller is only supported by the LSODE2 route")
         # Radau owns y0 at solve time; it is not part of symbolic preparation.
         return _native.RadauSolver(
             expressions, state_variables, time_variable, t0, t_end, max_step,
             options=options, parameters=parameters, **solver_options,
         )
     if family == "backward_euler":
+        if controller is not None:
+            raise ValueError("controller is only supported by the LSODE2 route")
         return _native.BackwardEulerSolver(
             expressions, state_variables, time_variable, _owned_sequence(y0), t0, t_end,
             h=max_step, options=options, parameters=parameters,
             parameter_values=_owned_sequence(parameter_values), **solver_options,
         )
-    lsode_method = solver_options.pop("method", "bdf")
-    return _native.Lsode2PythonSolver(
+    return Lsode2Solver(
         expressions, state_variables, time_variable, _owned_sequence(y0), t0, t_end, max_step,
-        options=options, method=lsode_method, parameters=parameters,
+        options=options, method=(controller if controller is not None else "bdf"), parameters=parameters,
         parameter_values=_owned_sequence(parameter_values), **solver_options,
     )
 
@@ -96,14 +145,34 @@ def solve_ivp(
     parameters: list[str] | None = None,
     parameter_values: ArrayLike | None = None,
     options: SolverOptions | None = None,
+    controller: str | None = None,
     **solver_options: Any,
 ) -> Any:
-    """Construct and execute one IVP through the native lifecycle."""
+    """Solve one IVP and return the solver's detached native result.
+
+    Arguments have the same meaning as :func:`create_ivp`. This helper is for
+    one-shot solves; use ``create_ivp`` when you need explicit preparation,
+    continuation or restart. For Radau, ``y0`` is passed to ``solve`` because
+    the native solver binds its initial state at execution time. For other
+    families it is retained by the constructed solver.
+
+    Returns
+    -------
+    Any
+        A detached solver-specific solution containing trajectory data and
+        the telemetry snapshot selected in ``options``.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed symbolic preparation, callback, numerical, exhaustion or AOT
+        lifecycle failure from the native solver.
+    """
 
     solver = create_ivp(
         method, expressions, state_variables, time_variable, y0, t0, t_end,
         max_step, parameters=parameters, parameter_values=parameter_values,
-        options=options, **solver_options,
+        options=options, controller=controller, **solver_options,
     )
     if _method_name(method) == "radau5":
         return solver.solve(_owned_sequence(y0), _owned_sequence(parameter_values))
@@ -138,9 +207,42 @@ def create_bvp(
 ) -> Any:
     """Construct a BVP solver while preserving native solver options.
 
-    ``boundary_data`` is a list of boundary expressions for ``bvp_sci`` and a
-    ``{state: [(position, value), ...]}`` mapping for ``bvp_damp``. Remaining
-    keyword arguments are forwarded unchanged to the selected native adapter.
+    The two solver families intentionally retain different boundary-data
+    contracts. ``bvp_sci`` accepts an ordered list of symbolic boundary
+    residuals (using its native ``ya_<state>``/``yb_<state>`` symbols), while
+    ``bvp_damp`` accepts a mapping from state name to ``(position, value)``
+    observations. ``options`` and remaining keywords are forwarded to the
+    selected adapter, so native layout/frontend controls are not hidden.
+
+    Parameters
+    ----------
+    method:
+        ``"bvp_sci"``/``"scipy"`` or ``"bvp_damp"``/``"damped"``.
+    expressions, state_variables:
+        Ordered symbolic RHS expressions and state names.
+    boundary_data:
+        Solver-specific boundary expressions or observation mapping as above.
+    mesh:
+        Initial strictly increasing mesh; array-like inputs are copied before
+        entering Rust.
+    initial_state:
+        Initial state values on the mesh, in the selected solver's native
+        expected shape.
+    options:
+        Optional common ``SolverOptions``. Family-specific keywords are passed
+        unchanged through ``solver_options``.
+
+    Returns
+    -------
+    Any
+        A native BVP solver object. Call ``solve()`` to compute the solution;
+        retain the solver when using its supported continuation/restart API.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not recognized. Native validation and solve failures
+        use typed RustedSciThe exceptions.
     """
 
     family = _bvp_method_name(method)
@@ -167,7 +269,24 @@ def solve_bvp(
     options: SolverOptions | None = None,
     **solver_options: Any,
 ) -> Any:
-    """Construct and execute one BVP through its native lifecycle."""
+    """Solve one BVP using the selected native solver family.
+
+    The input contract matches :func:`create_bvp`; this convenience function
+    immediately calls ``solve()`` and returns the detached solution. Use
+    :func:`create_bvp` when solver state must be retained for later native
+    lifecycle operations.
+
+    Returns
+    -------
+    Any
+        A solver-specific result with mesh/state data and native diagnostics.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed preparation, configuration, callback, linear-solver or
+        convergence failure.
+    """
 
     solver = create_bvp(
         method,
@@ -189,14 +308,48 @@ def solve_nonlinear(
     parameters: ArrayLike | None = None,
     **solver_options: Any,
 ) -> Any:
-    """Create and solve a square nonlinear system natively."""
+    """Create and solve a square symbolic nonlinear system.
+
+    ``system`` is prepared through the native nonlinear frontend and the
+    initial guess is copied from any NumPy-like input. Pass solver controls
+    such as ``method``, ``frontend``, ``execution_policy``, ``tolerance`` and
+    ``max_iterations`` as keywords; use :func:`create_nonlinear` if the
+    prepared solver must be reused.
+
+    Returns
+    -------
+    Any
+        A detached native nonlinear-solve result with solution and diagnostics.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed configuration, preparation, callback, numerical or exhaustion
+        failure from the native solver.
+    """
 
     solver = create_nonlinear(system, **solver_options)
     return solver.solve(_owned_sequence(initial_guess), _owned_sequence(parameters))
 
 
 def create_nonlinear(system: SymbolicSystem, **solver_options: Any) -> Any:
-    """Construct a prepared-capable nonlinear solver without solving it."""
+    """Construct a nonlinear solver while leaving preparation explicit.
+
+    Native options are forwarded unchanged. Call ``prepare()`` before repeated
+    solves when you want to make symbolic setup explicit, then use the solver's
+    parameter-binding methods for subsequent numeric problems.
+
+    Returns
+    -------
+    Any
+        The native ``NonlinearSolver`` wrapper with its preparation and
+        telemetry methods.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed configuration or symbolic preparation failure.
+    """
 
     return _native.NonlinearSolver(system, **solver_options)
 
@@ -208,7 +361,26 @@ def fit(
     parameters: ArrayLike | None = None,
     **solver_options: Any,
 ) -> Any:
-    """Create and solve a symbolic least-squares problem natively."""
+    """Solve a symbolic least-squares fitting problem.
+
+    ``equations`` are residual expressions, not model predictions paired with
+    an implicit observation vector. The initial guess and optional bound
+    parameters are copied from array-like inputs. Method, frontend, bounds,
+    tolerances, telemetry and iteration controls are forwarded to the native
+    fitting solver. Use :func:`create_fit` for explicit preparation or repeated
+    parameter-bound solves.
+
+    Returns
+    -------
+    Any
+        A native fitting result with fitted values, termination and telemetry.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed invalid-problem, preparation, callback, numerical or budget
+        exhaustion failure.
+    """
 
     solver = create_fit(equations, _owned_sequence(initial_guess), **solver_options)
     return solver.solve() if parameters is None else solver.solve_with_parameters(_owned_sequence(parameters))
@@ -219,7 +391,24 @@ def create_fit(
     initial_guess: ArrayLike,
     **solver_options: Any,
 ) -> Any:
-    """Construct a symbolic fitting solver while retaining its native API."""
+    """Construct the native symbolic least-squares fitting solver.
+
+    Expressions and solver configuration are retained by the Rust object;
+    Python does not build a duplicate symbolic tree. Call ``prepare()`` and
+    ``solve()`` according to the native lifecycle. Solver-specific keywords
+    are forwarded to ``FittingSolver`` without imposing a reduced facade API.
+
+    Returns
+    -------
+    Any
+        A native fitting solver with preparation, solve, telemetry and
+        parameter-rebind methods.
+
+    Raises
+    ------
+    RustedSciTheError
+        Typed validation or symbolic preparation failure.
+    """
 
     return _native.FittingSolver(
         equations,
@@ -229,7 +418,19 @@ def create_fit(
 
 
 def task(source_or_path: str | Path) -> TaskDocument:
-    """Parse a task document from text or a filesystem path."""
+    """Parse a native task document from inline text or a file path.
+
+    A string containing a newline is always treated as document text. A
+    newline-free string is treated as a path only when it names an existing
+    file; otherwise it is parsed as inline input. ``Path`` objects are checked
+    as files first. Parsing does not execute the task; call ``preview()``,
+    ``check()`` or the matching run method on the returned document.
+
+    Raises
+    ------
+    TaskDocumentError
+        Syntax, semantic validation, file access or unsupported-route failure.
+    """
 
     raw = str(source_or_path)
     if isinstance(source_or_path, Path) or ("\n" not in raw and "\r" not in raw):
@@ -240,7 +441,18 @@ def task(source_or_path: str | Path) -> TaskDocument:
 
 
 def capabilities(solver: str) -> Any:
-    """Forward the canonical capability descriptor from the extension."""
+    """Return the native capability descriptor for a solver family.
+
+    Use this before constructing a solver when configuration is selected
+    dynamically. The descriptor reports supported frontends, execution routes,
+    layouts, callbacks, continuation and parallel policies; it is authoritative
+    for the Python wrapper as well as the Rust API.
+
+    Raises
+    ------
+    ValueError
+        If ``solver`` is not a recognized family name.
+    """
 
     return _native.capabilities(solver)
 
@@ -251,6 +463,21 @@ def render_table(rows: Iterable[Mapping[str, Any]], columns: Iterable[str] | Non
     The function is intentionally dependency-free and accepts detached scalar
     values, so it can be used in a long-running batch even when an optional
     plotting or reporting package is unavailable.
+
+    Parameters
+    ----------
+    rows:
+        Iterable of mappings. Values are converted with ``str``; nested solver
+        objects should be reduced to scalar diagnostics by the caller.
+    columns:
+        Optional explicit column order. If omitted, keys from the first row
+        define the order. Missing values render as empty strings.
+
+    Returns
+    -------
+    str
+        An ASCII table, or an empty string when ``rows`` or the selected
+        columns are empty.
     """
 
     materialized = [dict(row) for row in rows]
@@ -267,7 +494,18 @@ def render_table(rows: Iterable[Mapping[str, Any]], columns: Iterable[str] | Non
 
 
 def write_table(path: str | Path, rows: Iterable[Mapping[str, Any]], columns: Iterable[str] | None = None) -> None:
-    """Write one compact table and nothing else to ``path``."""
+    """Write a compact deterministic ASCII table to ``path``.
+
+    The file contains only the rendered table; this helper does not redirect
+    stdout/stderr or capture native compiler output. ``columns`` fixes column
+    order and missing row values render as empty cells. Parent directories are
+    not created automatically.
+
+    Raises
+    ------
+    OSError
+        If the destination cannot be written.
+    """
 
     Path(path).write_text(render_table(rows, columns), encoding="utf-8")
 
@@ -282,6 +520,14 @@ def run_task_batch(
     A failed task never prevents later tasks when ``continue_on_error`` is
     true. The returned row preserves the Python exception class so callers can
     route parser, BVP and solver failures without matching message text.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One row per input, preserving the result object on success and the
+        exception class/message on failure. When ``continue_on_error`` is
+        false, the failing row is appended internally and the exception is
+        re-raised instead of returning the partial batch.
     """
 
     rows: list[dict[str, Any]] = []
@@ -336,6 +582,18 @@ def run_task_batch_report(
     this report deliberately contains only stable routing/status fields. It
     is therefore safe to write as a small Markdown/ASCII artifact without
     serializing trajectories or capturing compiler output.
+
+    Returns
+    -------
+    str
+        The compact table text, including an empty string for an empty batch.
+
+    Raises
+    ------
+    OSError
+        If ``path`` is supplied and the table cannot be written. Task failures
+        remain rows when ``continue_on_error`` is true; otherwise the first
+        task exception is re-raised by :func:`run_task_batch`.
     """
 
     rows = run_task_batch(sources, continue_on_error=continue_on_error)

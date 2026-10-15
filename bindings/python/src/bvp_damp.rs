@@ -35,8 +35,8 @@ use rustedscithe_core::symbolic::codegen::codegen_provider_api::MatrixBackend;
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    InvalidConfigurationError, PreparationError, SolverError, UnsupportedOptionError, annotate,
-    catch_panic,
+    InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    UnsupportedOptionError, annotate_native, catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -66,8 +66,9 @@ fn validate_names(names: &[String], label: &str, allow_empty: bool) -> PyResult<
 }
 
 fn map_native_error(error: BvpBackendIntegrationError) -> PyErr {
+    let native_kind = native_variant(&error);
     let message = error.to_string();
-    annotate(
+    annotate_native(
         match error {
             BvpBackendIntegrationError::InvalidProblem { .. }
             | BvpBackendIntegrationError::InvalidSolverConfiguration { .. }
@@ -89,6 +90,7 @@ fn map_native_error(error: BvpBackendIntegrationError) -> PyErr {
         "solve",
         "bvp_damp",
         "native",
+        &native_kind,
     )
 }
 
@@ -435,6 +437,8 @@ fn options_for_solver(
     Ok(solver_options)
 }
 
+/// Convert Python's `[node][state]` initial guess into the core's
+/// `[state, node]` nalgebra matrix without changing node/state ordering.
 fn flatten_node_major(
     initial_state: Vec<f64>,
     nodes: usize,
@@ -459,6 +463,8 @@ fn flatten_node_major(
     Ok(matrix)
 }
 
+/// Copy the core's `[state, node]` matrix back to detached Python
+/// `[node][state]` rows, matching the public BVP result convention.
 fn detached_values(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
     (0..matrix.ncols())
         .map(|node| {
@@ -524,6 +530,12 @@ fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<
 }
 
 /// Detached result for one BVP_Damp solve.
+///
+/// The mesh and values are copied out of the mutable native solver. Values
+/// retain BVP_Damp's state-major orientation `(state_dimension, mesh_nodes)`;
+/// use the NumPy accessors when this layout is more convenient for numerical
+/// postprocessing. Telemetry and file-export methods operate only on this
+/// detached snapshot and do not rerun the solver.
 #[pyclass(name = "BvpDampSolution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct BvpDampSolution {
@@ -537,10 +549,12 @@ pub struct BvpDampSolution {
 
 #[pymethods]
 impl BvpDampSolution {
+    /// Return the detached mesh coordinates in increasing order.
     pub fn mesh(&self) -> Vec<f64> {
         self.mesh.clone()
     }
 
+    /// Return states in native BVP_Damp orientation: `(state, mesh_node)`.
     pub fn values(&self) -> Vec<Vec<f64>> {
         self.values.clone()
     }
@@ -556,19 +570,23 @@ impl BvpDampSolution {
     }
 
     #[getter]
+    /// Values of declared model parameters for this detached solution.
     pub fn parameters(&self) -> Vec<f64> {
         self.parameters.clone()
     }
 
     #[getter]
+    /// Native solver status captured when this solution was produced.
     pub fn status(&self) -> &str {
         &self.status
     }
 
+    /// Return the counter snapshot collected during this solve.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
     }
 
+    /// Return stage timings in milliseconds for this solve.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -591,6 +609,7 @@ impl BvpDampSolution {
         ])
     }
 
+    /// Render counters and millisecond timings as one compact text report.
     pub fn telemetry_report(&self) -> String {
         let mut counters = self.counters.iter().collect::<Vec<_>>();
         counters.sort_by_key(|(name, _)| *name);
@@ -612,6 +631,7 @@ impl BvpDampSolution {
         )
     }
 
+    /// Write the compact telemetry report to `path` without solver log output.
     pub fn write_telemetry_report(&self, path: &str) -> PyResult<()> {
         write_report(path, &self.telemetry_report())
     }
@@ -690,6 +710,13 @@ impl BvpDampSolution {
 }
 
 /// Direct Python adapter for the native damped Newton BVP solver.
+///
+/// Boundary conditions map each state name to `(mesh_index, value)` pairs;
+/// the initial state is node-major with shape `(mesh_nodes, state_dimension)`.
+/// Solver controls such as refinement scheme, damping limits, linear solver,
+/// bounds, logging and telemetry are forwarded to the native BVP_Damp API.
+/// Use `prepare()` and `solve_prepared()` for an explicit prepared lifecycle,
+/// then rebind values or restart the iterate without rebuilding the model.
 #[pyclass(name = "BvpDampSolver", module = "rustedscithe", unsendable)]
 pub struct BvpDampSolver {
     solver: NRBVP,
@@ -698,10 +725,21 @@ pub struct BvpDampSolver {
     matrix_layout: String,
     bandwidth: Option<(usize, usize)>,
     prepared: bool,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl BvpDampSolver {
+    /// Build a damped-Newton BVP from equations, boundary observations and an
+    /// initial mesh guess.
+    ///
+    /// `expressions` has one derivative RHS per state variable. Every boundary
+    /// condition key must name a state; its pairs select constrained mesh
+    /// nodes. `parameters`/`parameter_values` declare and bind symbolic input
+    /// values. `options` selects frontend, execution and matrix layout. The
+    /// remaining keyword options forward native refinement, damping, logging,
+    /// bounds and linear-solver policies; unsupported combinations fail
+    /// explicitly rather than silently falling back.
     #[new]
     #[pyo3(signature=(expressions, state_variables, boundary_conditions, mesh, initial_state, *, parameters=None, parameter_values=None, options=None, independent_variable="x", scheme="forward", strategy="damped", tolerance=1e-6, max_iterations=25, max_jacobian_refreshes=None, max_damping_iterations=None, damping_factor=None, max_refinements=None, grid_method=None, grid_parameters=None, linear_sys_method=None, loglevel=None, logging_mode="off", logging_max_events=256, banded_linear_solver=None, banded_fallback=None, iterative_refinement_steps=0, bounds=None))]
     #[allow(clippy::too_many_arguments)]
@@ -893,31 +931,40 @@ impl BvpDampSolver {
             iterative_refinement_steps,
         )?;
         let initial_guess = flatten_node_major(initial_state, mesh.len(), state_variables.len())?;
-        let mut solver = NRBVP::new_with_options(
-            expressions
-                .into_iter()
-                .map(|expression| expression.inner)
-                .collect(),
-            initial_guess,
-            state_variables,
-            independent_variable.to_owned(),
-            boundary_conditions,
-            mesh[0],
-            mesh.last().copied().ok_or_else(|| {
-                InvalidConfigurationError::new_err("mesh must contain at least two nodes")
-            })?,
-            mesh.len(),
-            damp_options,
+        let route = format!(
+            "{}:{}:{}",
+            options.frontend(),
+            options.execution(),
+            options.matrix_layout()
         );
-        if !parameters.is_empty() {
-            let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
-            solver
-                .try_set_params(Some(parameter_refs.as_slice()))
-                .map_err(map_native_error)?;
-            solver
-                .try_set_param_values(Some(parameter_values))
-                .map_err(map_native_error)?;
-        }
+        let solver = catch_panic("construct", "bvp_damp", &route, || {
+            let mut solver = NRBVP::new_with_options(
+                expressions
+                    .into_iter()
+                    .map(|expression| expression.inner)
+                    .collect(),
+                initial_guess,
+                state_variables,
+                independent_variable.to_owned(),
+                boundary_conditions,
+                mesh[0],
+                mesh.last().copied().ok_or_else(|| {
+                    InvalidConfigurationError::new_err("mesh must contain at least two nodes")
+                })?,
+                mesh.len(),
+                damp_options,
+            );
+            if !parameters.is_empty() {
+                let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
+                solver
+                    .try_set_params(Some(parameter_refs.as_slice()))
+                    .map_err(map_native_error)?;
+                solver
+                    .try_set_param_values(Some(parameter_values))
+                    .map_err(map_native_error)?;
+            }
+            Ok(solver)
+        })?;
         Ok(Self {
             solver,
             frontend: options.frontend().to_owned(),
@@ -925,26 +972,18 @@ impl BvpDampSolver {
             matrix_layout: options.matrix_layout().to_owned(),
             bandwidth,
             prepared: false,
+            panic_state: SolverPanicState::default(),
         })
     }
 
+    /// Solve the BVP and return detached values plus telemetry.
     pub fn solve(&mut self) -> PyResult<BvpDampSolution> {
-        catch_panic("solve", "bvp_damp", "lambdify", || self.solve_inner())
-    }
-
-    fn solve_inner(&mut self) -> PyResult<BvpDampSolution> {
-        if self.bandwidth.is_some() {
-            self.solver
-                .try_eq_generate(None, self.bandwidth)
-                .map_err(map_native_error)?;
-            self.solver
-                .try_solver_prepared()
-                .map_err(map_native_error)?;
-        } else {
-            self.solver.try_solve().map_err(map_native_error)?;
-        }
-        self.prepared = true;
-        self.detached_solution()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bvp_damp", &route, || self.solve_inner())
     }
 
     /// Prepare symbolic callbacks and the selected runtime without solving.
@@ -953,20 +992,34 @@ impl BvpDampSolver {
     /// subsequent `set_parameters` calls can update numeric bindings without
     /// rebuilding the symbolic graph.
     pub fn prepare(&mut self) -> PyResult<()> {
-        self.solver
-            .try_eq_generate(None, self.bandwidth)
-            .map_err(map_native_error)?;
-        self.prepared = true;
-        Ok(())
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "bvp_damp", &route, || {
+            self.solver
+                .try_eq_generate(None, self.bandwidth)
+                .map_err(map_native_error)?;
+            self.prepared = true;
+            Ok(())
+        })
     }
 
     /// Solve using callbacks prepared by [`Self::prepare`].
     pub fn solve_prepared(&mut self) -> PyResult<BvpDampSolution> {
-        self.solver
-            .try_solver_prepared()
-            .map_err(map_native_error)?;
-        self.prepared = true;
-        self.detached_solution()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bvp_damp", &route, || {
+            self.solver
+                .try_solver_prepared()
+                .map_err(map_native_error)?;
+            self.prepared = true;
+            self.detached_solution()
+        })
     }
 
     /// Replace numeric parameter values while retaining the prepared graph.
@@ -979,9 +1032,16 @@ impl BvpDampSolver {
                 values.len()
             )));
         }
-        self.solver
-            .try_set_param_values(Some(values))
-            .map_err(map_native_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "bvp_damp", &route, || {
+            self.solver
+                .try_set_param_values(Some(values))
+                .map_err(map_native_error)
+        })
     }
 
     /// Reset the Newton initial guess while retaining prepared callbacks.
@@ -989,41 +1049,60 @@ impl BvpDampSolver {
     pub fn restart(&mut self, initial_state: Vec<f64>) -> PyResult<()> {
         let initial_guess =
             flatten_node_major(initial_state, self.solver.n_steps, self.solver.values.len())?;
-        self.solver
-            .try_set_initial_guess(initial_guess)
-            .map_err(map_native_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "bvp_damp", &route, || {
+            self.solver
+                .try_set_initial_guess(initial_guess)
+                .map_err(map_native_error)
+        })
     }
 
     /// Install a warm-start iterate without invalidating prepared callbacks.
     pub fn set_prepared_iterate(&mut self, initial_state: Vec<f64>) -> PyResult<()> {
         let iterate =
             flatten_node_major(initial_state, self.solver.n_steps, self.solver.values.len())?;
-        self.solver
-            .try_set_prepared_iterate(iterate)
-            .map_err(map_native_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "bvp_damp", &route, || {
+            self.solver
+                .try_set_prepared_iterate(iterate)
+                .map_err(map_native_error)
+        })
     }
 
     #[getter]
+    /// Declared value-only parameter names, in binding order.
     pub fn parameter_names(&self) -> Vec<String> {
         self.solver.param_names.clone()
     }
 
     #[getter]
+    /// Current values corresponding to `parameter_names`.
     pub fn parameter_values(&self) -> Vec<f64> {
         self.solver.param_values.clone().unwrap_or_default()
     }
 
     #[getter]
+    /// Symbolic frontend selected for the prepared BVP problem.
     pub fn frontend(&self) -> &str {
         &self.frontend
     }
 
     #[getter]
+    /// Runtime route selected for the prepared BVP problem.
     pub fn execution(&self) -> &str {
         &self.execution
     }
 
     #[getter]
+    /// Linear-system layout selected for the BVP solver.
     pub fn matrix_layout(&self) -> &str {
         &self.matrix_layout
     }
@@ -1046,6 +1125,23 @@ impl BvpDampSolver {
         ]);
         values.insert("prepared".to_owned(), self.prepared.to_string());
         values
+    }
+}
+
+impl BvpDampSolver {
+    fn solve_inner(&mut self) -> PyResult<BvpDampSolution> {
+        if self.bandwidth.is_some() {
+            self.solver
+                .try_eq_generate(None, self.bandwidth)
+                .map_err(map_native_error)?;
+            self.solver
+                .try_solver_prepared()
+                .map_err(map_native_error)?;
+        } else {
+            self.solver.try_solve().map_err(map_native_error)?;
+        }
+        self.prepared = true;
+        self.detached_solution()
     }
 
     fn detached_solution(&self) -> PyResult<BvpDampSolution> {

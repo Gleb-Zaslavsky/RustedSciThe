@@ -9,7 +9,7 @@
 //! generated artifact.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nalgebra::DVector;
 use pyo3::prelude::*;
@@ -33,25 +33,11 @@ use rustedscithe_core::symbolic::symbolic_ivp_generated::{
 use crate::contract::SolverOptions;
 use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError,
-    CallbackError, InvalidConfigurationError, PreparationError, SolverError,
-    UnsupportedOptionError, annotate,
+    CallbackFailureState, InvalidConfigurationError, PreparationError, SolverError,
+    SolverPanicState, UnsupportedOptionError, annotate, catch_panic,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
-
-type CallbackFailure = Arc<Mutex<Option<String>>>;
-
-fn record_callback_failure(failure: &CallbackFailure, message: String) {
-    if let Ok(mut slot) = failure.lock() {
-        if slot.is_none() {
-            *slot = Some(message);
-        }
-    }
-}
-
-fn take_callback_failure(failure: &CallbackFailure) -> Option<String> {
-    failure.lock().ok().and_then(|mut slot| slot.take())
-}
 
 /// Adapt Python callbacks to LSODE2's `Send + Sync` Rust callback contract.
 ///
@@ -66,9 +52,9 @@ fn build_python_callbacks(
     dimension: usize,
 ) -> PyResult<(
     rustedscithe_core::numerical::LSODE2::Lsode2AnalyticalCallbacks,
-    CallbackFailure,
+    CallbackFailureState,
 )> {
-    let failure = Arc::new(Mutex::new(None));
+    let failure = CallbackFailureState::default();
     Python::attach(|py| {
         if !residual.bind(py).is_callable() || !jacobian.bind(py).is_callable() {
             return Err(InvalidConfigurationError::new_err(
@@ -77,8 +63,8 @@ fn build_python_callbacks(
         }
         let residual = residual.clone_ref(py);
         let jacobian = jacobian.clone_ref(py);
-        let residual_failure = Arc::clone(&failure);
-        let jacobian_failure = Arc::clone(&failure);
+        let residual_failure = failure.clone();
+        let jacobian_failure = failure.clone();
 
         let residual_callback = move |time: f64, state: &DVector<f64>| -> DVector<f64> {
             let result = Python::attach(|py| -> PyResult<Vec<f64>> {
@@ -90,20 +76,18 @@ fn build_python_callbacks(
                     DVector::from_vec(values)
                 }
                 Ok(values) => {
-                    record_callback_failure(
-                        &residual_failure,
+                    residual_failure.record(
                         format!(
                             "residual_callback must return {dimension} finite values, got {}",
                             values.len()
                         ),
+                        None,
                     );
                     DVector::from_element(dimension, f64::NAN)
                 }
                 Err(error) => {
-                    record_callback_failure(
-                        &residual_failure,
-                        format!("residual_callback raised: {error}"),
-                    );
+                    residual_failure
+                        .record(format!("residual_callback raised: {error}"), Some(error));
                     DVector::from_element(dimension, f64::NAN)
                 }
             }
@@ -125,20 +109,18 @@ fn build_python_callbacks(
                     nalgebra::DMatrix::from_row_slice(dimension, dimension, &flat)
                 }
                 Ok(rows) => {
-                    record_callback_failure(
-                        &jacobian_failure,
+                    jacobian_failure.record(
                         format!(
                             "jacobian_callback must return a {dimension}x{dimension} finite matrix, got {} rows",
                             rows.len()
                         ),
+                        None,
                     );
                     nalgebra::DMatrix::from_element(dimension, dimension, f64::NAN)
                 }
                 Err(error) => {
-                    record_callback_failure(
-                        &jacobian_failure,
-                        format!("jacobian_callback raised: {error}"),
-                    );
+                    jacobian_failure
+                        .record(format!("jacobian_callback raised: {error}"), Some(error));
                     nalgebra::DMatrix::from_element(dimension, dimension, f64::NAN)
                 }
             }
@@ -356,7 +338,8 @@ fn validate_expression_symbols(
 }
 
 fn map_lsode2_error(error: Lsode2Error) -> PyErr {
-    annotate(
+    let native_kind = crate::errors::native_variant(&error);
+    crate::errors::annotate_native(
         match error {
             Lsode2Error::UnsupportedBackend(message) => UnsupportedOptionError::new_err(message),
             Lsode2Error::InvalidConfig(message) => InvalidConfigurationError::new_err(message),
@@ -366,6 +349,7 @@ fn map_lsode2_error(error: Lsode2Error) -> PyErr {
         "solve",
         "lsode2",
         "native",
+        &native_kind,
     )
 }
 
@@ -407,6 +391,10 @@ fn map_ivp_backend_error(error: IvpBackendError) -> PyErr {
 }
 
 /// Detached LSODE2 trajectory and stage-aware telemetry snapshot.
+///
+/// The result records the selected and executed controller family, switching
+/// diagnostics, detached trajectory, and native telemetry. Arrays returned by
+/// NumPy accessors own their storage and do not borrow the solver.
 #[pyclass(name = "Lsode2Solution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct Lsode2Solution {
@@ -628,11 +616,13 @@ impl Lsode2Solution {
     }
 
     #[getter]
+    /// Native integration status captured for this trajectory.
     pub fn status(&self) -> &str {
         &self.status
     }
 
     #[getter]
+    /// LSODE2 method/controller alias used for this solve.
     pub fn method(&self) -> &str {
         &self.method
     }
@@ -663,29 +653,35 @@ impl Lsode2Solution {
     }
 
     #[getter]
+    /// Whether automatic controller switching used its fallback path.
     pub fn switch_uses_fallback(&self) -> bool {
         self.switch_uses_fallback
     }
 
     #[getter]
+    /// Final accepted time, or `None` if no output point was produced.
     pub fn final_time(&self) -> Option<f64> {
         self.times.last().copied()
     }
 
     #[getter]
+    /// Final state vector, or `None` if no output point was produced.
     pub fn final_state(&self) -> Option<Vec<f64>> {
         self.states.last().cloned()
     }
 
     #[getter]
+    /// Telemetry collection level captured for this solution.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }
 
+    /// Return discrete solver counters; the map is empty when collection is off.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
     }
 
+    /// Return measured stage durations in milliseconds, if timing telemetry was enabled.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -779,6 +775,13 @@ impl Lsode2Solution {
 }
 
 /// Prepared LSODE2 symbolic IVP adapter.
+///
+/// Select `method="bdf"`, `"adams"`, or `"auto"` independently from the
+/// symbolic frontend, execution route, matrix layout and callback execution
+/// policy in [`SolverOptions`]. The adapter supports symbolic equations and
+/// optional native residual/Jacobian callbacks. `prepare()` builds the
+/// selected route without stepping; parameter continuation reuses it, while
+/// `restart()` changes the initial state and interval.
 #[pyclass(name = "Lsode2Solver", module = "rustedscithe", unsendable)]
 pub struct Lsode2PythonSolver {
     solver: Lsode2Solver,
@@ -798,11 +801,20 @@ pub struct Lsode2PythonSolver {
     // than silently falling back to the original initial condition.
     last_time: Option<f64>,
     last_state: Option<Vec<f64>>,
-    callback_failure: Option<CallbackFailure>,
+    callback_failure: Option<CallbackFailureState>,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl Lsode2PythonSolver {
+    /// Configure an LSODE2 initial-value problem and controller family.
+    ///
+    /// Provide one RHS expression per state variable, initial state `y0`,
+    /// interval `[t0, t_end]`, and step/tolerance controls. `method` selects
+    /// the native BDF, Adams or automatic controller. `options` independently
+    /// selects frontend, execution route, layout, policy and telemetry.
+    /// Optional callback arguments provide a residual and, when available, an
+    /// analytical Jacobian; omit the Jacobian to use the native fallback.
     #[new]
     #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, method="bdf", band_lower=None, band_upper=None, parameters=None, parameter_values=None, residual_callback=None, jacobian_callback=None))]
     #[allow(clippy::too_many_arguments)]
@@ -977,7 +989,15 @@ impl Lsode2PythonSolver {
         if let Some((callbacks, _)) = &callback_pair {
             config = config.with_analytical_callback_bundle(callbacks.clone());
         }
-        let solver = Lsode2Solver::new(config).map_err(map_lsode2_error)?;
+        let route = format!(
+            "{}:{}:{}",
+            options.frontend(),
+            options.execution(),
+            options.matrix_layout()
+        );
+        let solver = catch_panic("construct", "lsode2", &route, || {
+            Lsode2Solver::new(config).map_err(map_lsode2_error)
+        })?;
         Ok(Self {
             solver,
             parameter_count,
@@ -995,55 +1015,84 @@ impl Lsode2PythonSolver {
             last_time: None,
             last_state: None,
             callback_failure: callback_pair.map(|(_, failure)| failure),
+            panic_state: SolverPanicState::default(),
         })
     }
 
     /// Prepare symbolic callbacks and linear backend wiring without solving.
+    /// Prepare the selected symbolic or callback route without integrating.
+    ///
+    /// Preparation can be called explicitly to measure setup separately;
+    /// later solve and continuation calls reuse the prepared backend.
     pub fn prepare(&mut self) -> PyResult<()> {
-        self.solver.prepare().map_err(map_lsode2_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "lsode2", &route, || {
+            self.solver.prepare().map_err(map_lsode2_error)
+        })
     }
 
     #[getter]
+    /// Whether symbolic preparation has completed successfully.
     pub fn is_prepared(&self) -> bool {
         self.solver.is_prepared()
     }
 
+    /// Integrate the configured initial-value problem and return its trajectory.
     pub fn solve(&mut self) -> PyResult<Lsode2Solution> {
-        if let Some(failure) = &self.callback_failure {
-            let _ = take_callback_failure(failure);
-        }
-        if let Err(error) = self.solver.solve_with_summary() {
-            if let Some(failure) = self
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "lsode2", &route, || {
+            if let Some(failure) = &self.callback_failure {
+                failure.clear();
+            }
+            if let Err(error) = self.solver.solve_with_summary() {
+                if let Some(callback_error) = self
+                    .callback_failure
+                    .as_ref()
+                    .and_then(|failure| failure.take_pyerr("solve", "lsode2", &route))
+                {
+                    return Err(callback_error);
+                }
+                return Err(map_lsode2_error(error));
+            }
+            if let Some(callback_error) = self
                 .callback_failure
                 .as_ref()
-                .and_then(take_callback_failure)
+                .and_then(|failure| failure.take_pyerr("solve", "lsode2", &route))
             {
-                return Err(CallbackError::new_err(failure));
+                return Err(callback_error);
             }
-            return Err(map_lsode2_error(error));
-        }
-        if let Some(failure) = self
-            .callback_failure
-            .as_ref()
-            .and_then(take_callback_failure)
-        {
-            return Err(CallbackError::new_err(failure));
-        }
-        let solution = Lsode2Solution::from_solver(&self.solver);
-        self.last_time = solution.final_time();
-        self.last_state = solution.final_state();
-        Ok(solution)
+            let solution = Lsode2Solution::from_solver(&self.solver);
+            self.last_time = solution.final_time();
+            self.last_state = solution.final_state();
+            Ok(solution)
+        })
     }
 
     /// Restart integration without repeating symbolic preparation.
+    /// Start a new segment from `y0` over `[t0, t_end]` using prepared callbacks.
     pub fn restart(&mut self, t0: f64, y0: Vec<f64>, t_end: f64) -> PyResult<Lsode2Solution> {
         finite_vector(&y0, "y0")?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
-        self.solver
-            .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
-            .map_err(map_lsode2_error)?;
-        self.solve()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "lsode2", &route, || {
+            self.solver
+                .try_restart_with_initial_state(t0, DVector::from_vec(y0), t_end)
+                .map_err(map_lsode2_error)?;
+            self.solve()
+        })
     }
 
     /// Rebind declared parameters and continue from the last successful state.
@@ -1051,6 +1100,10 @@ impl Lsode2PythonSolver {
     /// This is deliberately different from [`Self::restart`]: symbolic
     /// preparation and its compiled callbacks remain alive, while the
     /// numerical trajectory starts at the previous solution endpoint.
+    /// Rebind declared parameters and continue from the last successful state.
+    ///
+    /// Continuation begins at the last accepted endpoint, not the original
+    /// `y0`; use `restart()` to provide a new state or interval.
     pub fn continue_with_parameters(
         &mut self,
         parameter_values: Vec<f64>,
@@ -1080,19 +1133,28 @@ impl Lsode2PythonSolver {
         }
         finite_vector(&parameter_values, "parameter_values")?;
         validate_scalar(t_end, "t_end")?;
-        self.solver
-            .set_parameter_values(DVector::from_vec(parameter_values))
-            .map_err(map_lsode2_error)?;
-        self.solver
-            .try_restart_with_initial_state(start_time, DVector::from_vec(start_state), t_end)
-            .map_err(map_lsode2_error)?;
-        self.solve()
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "lsode2", &route, || {
+            self.solver
+                .set_parameter_values(DVector::from_vec(parameter_values))
+                .map_err(map_lsode2_error)?;
+            self.solver
+                .try_restart_with_initial_state(start_time, DVector::from_vec(start_state), t_end)
+                .map_err(map_lsode2_error)?;
+            self.solve()
+        })
     }
 
+    /// Return the native integration status for the current solver state.
     pub fn status(&self) -> String {
         self.solver.status().to_owned()
     }
 
+    /// Return a compact deterministic report of controller state and collected telemetry.
     pub fn telemetry_report(&self) -> String {
         let summary = self.solver.summary();
         let algorithm = summary.algorithm;
@@ -1124,6 +1186,7 @@ impl Lsode2PythonSolver {
         )
     }
 
+    /// Return route and controller metadata needed to reproduce this solver configuration.
     pub fn provenance(&self) -> HashMap<String, String> {
         let algorithm = self.solver.algorithm_snapshot();
         HashMap::from([
@@ -1184,6 +1247,7 @@ impl Lsode2PythonSolver {
     }
 
     #[getter]
+    /// Telemetry collection level configured on this solver.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }

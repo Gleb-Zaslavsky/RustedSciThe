@@ -379,35 +379,42 @@ impl BvpTaskResult {
     }
 
     #[getter]
+    /// Selected solver family, such as `bvp_sci` or `bvp_damp`.
     pub fn solver(&self) -> &str {
         &self.solver
     }
 
     #[getter]
+    /// Symbolic frontend used by the task route.
     pub fn frontend(&self) -> &str {
         &self.frontend
     }
 
     #[getter]
+    /// Runtime execution route, such as Lambdify or AOT.
     pub fn execution(&self) -> &str {
         &self.execution
     }
 
     #[getter]
+    /// Linear-system layout used by the selected BVP backend.
     pub fn matrix_layout(&self) -> &str {
         &self.matrix_layout
     }
 
     #[getter]
+    /// Human-readable task execution status.
     pub fn status(&self) -> &str {
         &self.status
     }
 
     #[getter]
+    /// Stable machine-readable task status code.
     pub fn status_code(&self) -> &str {
         &self.status_code
     }
 
+    /// Return a compact summary of the chosen route, status and final mesh shape.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
             ("solver".to_owned(), self.solver.clone()),
@@ -439,6 +446,7 @@ impl BvpTaskResult {
         self.continuation.segment_data.clone()
     }
 
+    /// Return available linear-backend counters; unavailable counters are omitted.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         let mut counters = HashMap::new();
         for (name, value) in [
@@ -460,10 +468,12 @@ impl BvpTaskResult {
         counters
     }
 
+    /// Return captured BVP stage timings in milliseconds.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.telemetry.timings_ms.clone()
     }
 
+    /// Render a compact report of selected route, backend counters and telemetry scope.
     pub fn telemetry_report(&self) -> String {
         format!(
             "BVP task telemetry\nsolver={}; frontend={}; execution={}; layout={}; mode={}; sparse_backend={}; superlu_fallbacks={}; superlu_factorizations={}; linear_factorizations={}; linear_solves={}",
@@ -488,6 +498,7 @@ impl BvpTaskResult {
         )
     }
 
+    /// Write only the compact telemetry report to a UTF-8 text file.
     pub fn write_telemetry_report(&self, path: &str) -> PyResult<()> {
         crate::telemetry::write_report(path, &self.telemetry_report())
     }
@@ -506,11 +517,13 @@ impl IvpTaskResult {
     }
 
     #[getter]
+    /// Human-readable solver status, or `None` when the task result has no status.
     pub fn status(&self) -> Option<String> {
         self.status.clone()
     }
 
     #[getter]
+    /// Stable machine-readable status code, or `None` when unavailable.
     pub fn status_code(&self) -> Option<String> {
         self.status_code.clone()
     }
@@ -546,6 +559,7 @@ impl IvpTaskResult {
     }
 
     #[getter]
+    /// Whether the parsed task executed a continuation series.
     pub fn has_continuation(&self) -> bool {
         self.continuation.is_some()
     }

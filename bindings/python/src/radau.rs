@@ -9,7 +9,7 @@
 //! fallback is rejected with a typed capability error.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nalgebra::{DMatrix, DVector};
 use pyo3::prelude::*;
@@ -24,25 +24,11 @@ use rustedscithe_core::numerical::Radau::api::{
 use crate::aot::{generated_config, provenance_fields};
 use crate::contract::SolverOptions;
 use crate::errors::{
-    CallbackError, ExhaustionError, InvalidConfigurationError, PreparationError, SolverError,
-    UnsupportedOptionError, annotate, catch_panic,
+    CallbackFailureState, ExhaustionError, InvalidConfigurationError, PreparationError,
+    SolverError, SolverPanicState, UnsupportedOptionError, annotate_native, catch_panic,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
-
-type CallbackFailure = Arc<Mutex<Option<String>>>;
-
-fn record_callback_failure(failure: &CallbackFailure, message: String) {
-    if let Ok(mut slot) = failure.lock() {
-        if slot.is_none() {
-            *slot = Some(message);
-        }
-    }
-}
-
-fn take_callback_failure(failure: &CallbackFailure) -> Option<String> {
-    failure.lock().ok().and_then(|mut slot| slot.take())
-}
 
 /// Adapt Python callbacks to the native Radau callback ABI.
 ///
@@ -57,9 +43,9 @@ fn build_native_callbacks(
 ) -> PyResult<(
     Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync>,
     Option<Arc<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync>>,
-    CallbackFailure,
+    CallbackFailureState,
 )> {
-    let failure = Arc::new(Mutex::new(None));
+    let failure = CallbackFailureState::default();
     Python::attach(|py| {
         if !residual.bind(py).is_callable() {
             return Err(InvalidConfigurationError::new_err(
@@ -74,7 +60,7 @@ fn build_native_callbacks(
             }
         }
         let residual = residual.clone_ref(py);
-        let residual_failure = Arc::clone(&failure);
+        let residual_failure = failure.clone();
         let residual_callback: Arc<dyn Fn(f64, &DVector<f64>) -> DVector<f64> + Send + Sync> =
             Arc::new(move |time, state| {
                 let result = Python::attach(|py| -> PyResult<Vec<f64>> {
@@ -90,20 +76,18 @@ fn build_native_callbacks(
                         DVector::from_vec(values)
                     }
                     Ok(values) => {
-                        record_callback_failure(
-                            &residual_failure,
+                        residual_failure.record(
                             format!(
                                 "residual_callback must return {dimension} finite values, got {}",
                                 values.len()
                             ),
+                            None,
                         );
                         DVector::from_element(dimension, f64::NAN)
                     }
                     Err(error) => {
-                        record_callback_failure(
-                            &residual_failure,
-                            format!("residual_callback raised: {error}"),
-                        );
+                        residual_failure
+                            .record(format!("residual_callback raised: {error}"), Some(error));
                         DVector::from_element(dimension, f64::NAN)
                     }
                 }
@@ -111,7 +95,7 @@ fn build_native_callbacks(
 
         let jacobian_callback = jacobian.map(|jacobian| {
             let jacobian = jacobian.clone_ref(py);
-            let jacobian_failure = Arc::clone(&failure);
+            let jacobian_failure = failure.clone();
             let callback: Arc<
                 dyn Fn(f64, &DVector<f64>) -> DMatrix<f64> + Send + Sync,
             > = Arc::new(move |time, state| {
@@ -132,19 +116,19 @@ fn build_native_callbacks(
                         DMatrix::from_row_slice(dimension, dimension, &flat)
                     }
                     Ok(rows) => {
-                        record_callback_failure(
-                            &jacobian_failure,
+                        jacobian_failure.record(
                             format!(
                                 "jacobian_callback must return a {dimension}x{dimension} finite matrix, got {} rows",
                                 rows.len()
                             ),
+                            None,
                         );
                         DMatrix::from_element(dimension, dimension, f64::NAN)
                     }
                     Err(error) => {
-                        record_callback_failure(
-                            &jacobian_failure,
+                        jacobian_failure.record(
                             format!("jacobian_callback raised: {error}"),
+                            Some(error),
                         );
                         DMatrix::from_element(dimension, dimension, f64::NAN)
                     }
@@ -262,8 +246,9 @@ fn validate_route(
 }
 
 fn map_radau_error(error: RadauError) -> PyErr {
+    let native_kind = format!("{:?}", error.kind());
     let message = error.to_string();
-    annotate(
+    annotate_native(
         match error.kind() {
             RadauErrorKind::Configuration => InvalidConfigurationError::new_err(message),
             RadauErrorKind::Unsupported => UnsupportedOptionError::new_err(message),
@@ -281,6 +266,7 @@ fn map_radau_error(error: RadauError) -> PyErr {
         "solve",
         "radau5",
         "native",
+        &native_kind,
     )
 }
 
@@ -314,6 +300,11 @@ fn validate_expression_symbols(
 }
 
 /// Detached Radau result exposed at the Python boundary.
+///
+/// The default output policy stores only the terminal state. Configure
+/// `output="dense"` on [`RadauSolver`] to enable interpolation through
+/// `sample(time)`. The result also owns the native counter/timing snapshot and
+/// AOT artifact identities for the completed segment.
 #[pyclass(name = "RadauSolution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct RadauSolution {
@@ -358,11 +349,13 @@ impl RadauSolution {
 #[pymethods]
 impl RadauSolution {
     #[getter]
+    /// Terminal integration time of this detached solution.
     pub fn final_time(&self) -> f64 {
         self.final_time
     }
 
     #[getter]
+    /// State vector at `final_time`.
     pub fn final_state(&self) -> Vec<f64> {
         self.final_state.clone()
     }
@@ -373,21 +366,25 @@ impl RadauSolution {
     }
 
     #[getter]
+    /// Total attempted integration steps, including rejected attempts.
     pub fn attempts(&self) -> usize {
         self.attempts
     }
 
     #[getter]
+    /// Number of accepted integration steps.
     pub fn accepted_steps(&self) -> usize {
         self.accepted_steps
     }
 
     #[getter]
+    /// Number of rejected integration steps.
     pub fn rejected_steps(&self) -> usize {
         self.rejected_steps
     }
 
     #[getter]
+    /// Telemetry collection level captured for this solution.
     pub fn telemetry_mode(&self) -> &str {
         &self.telemetry_mode
     }
@@ -453,7 +450,9 @@ impl RadauSolution {
 
     /// Evaluate dense output when the solver was configured with `output='dense'`.
     pub fn sample(&self, time: f64) -> PyResult<Vec<f64>> {
-        self.native.sample(time).map_err(map_radau_error)
+        catch_panic("postprocess", "radau5", "dense_output", || {
+            self.native.sample(time).map_err(map_radau_error)
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -466,7 +465,15 @@ impl RadauSolution {
     }
 }
 
-/// Prepared symbolic Radau model for the first Python solver route.
+/// Prepared symbolic Radau model.
+///
+/// The solver implements the fixed fifth-order Radau method. Use
+/// [`SolverOptions`] to select ExprLegacy/AtomNative, Lambdify/AOT,
+/// Dense/Sparse/Banded layout, callback execution policy and telemetry.
+/// Symbolic preparation is explicit through `prepare()` or lazy through
+/// `solve()`. An optional explicit Jacobian is supplied as a flattened
+/// row-major sequence of `n * n` expressions; when omitted, the native
+/// finite-difference route is used.
 #[pyclass(name = "RadauSolver", module = "rustedscithe", unsendable)]
 pub struct RadauSolver {
     pending_problem: Option<RadauProblem>,
@@ -479,10 +486,19 @@ pub struct RadauSolver {
     execution_policy: String,
     matrix_layout: String,
     aot_metadata: HashMap<String, String>,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl RadauSolver {
+    /// Configure a Radau initial-value problem.
+    ///
+    /// `expressions` contains one RHS expression per state variable.
+    /// `t0`/`t_end`, `max_step`, `rtol`, and `atol` define the integration
+    /// problem; `first_step` can override automatic initial-step selection.
+    /// `max_steps`, `max_newton_iterations`, and `max_retries` bound work.
+    /// Set `output="dense"` to retain interpolation data; otherwise only the
+    /// final state is returned. `jacobian`, if supplied, is row-major.
     #[new]
     #[pyo3(signature=(expressions, state_variables, time_variable, t0, t_end, max_step, rtol=1e-3, atol=1e-6, options=None, parameters=None, jacobian=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12))]
     #[allow(clippy::too_many_arguments)]
@@ -665,61 +681,61 @@ impl RadauSolver {
             execution_policy: options.execution_policy().to_owned(),
             matrix_layout: options.matrix_layout().to_owned(),
             aot_metadata: provenance_fields(&options),
+            panic_state: SolverPanicState::default(),
         })
     }
 
-    /// Prepare symbolic callbacks without integrating.
+    /// Prepare symbolic callbacks and the selected linear backend.
+    ///
+    /// Preparation is idempotent and does not advance the solution. Calling
+    /// this separately makes preparation cost observable independently.
     pub fn prepare(&mut self) -> PyResult<()> {
         if self.solver.is_some() {
             return Ok(());
         }
-        let problem = self.pending_problem.take().ok_or_else(|| {
-            InvalidConfigurationError::new_err("Radau problem has already been consumed")
-        })?;
-        self.solver =
-            Some(CoreRadauSolver::prepare(problem, self.config.clone()).map_err(map_radau_error)?);
-        Ok(())
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "radau5", &route, || {
+            let problem = self.pending_problem.as_ref().cloned().ok_or_else(|| {
+                InvalidConfigurationError::new_err("Radau problem has already been consumed")
+            })?;
+            let prepared =
+                CoreRadauSolver::prepare(problem, self.config.clone()).map_err(map_radau_error)?;
+            self.solver = Some(prepared);
+            self.pending_problem = None;
+            Ok(())
+        })
     }
 
+    /// Return whether symbolic callbacks and the selected linear backend are prepared.
     pub fn is_prepared(&self) -> bool {
         self.solver.is_some()
     }
 
     /// Solve one initial state, optionally binding declared value-only parameters.
+    ///
+    /// The method prepares lazily if needed and returns the terminal result
+    /// plus telemetry. For repeated parameter values, use
+    /// `continue_with_parameters()` to retain prepared symbolic callbacks.
     #[pyo3(signature=(y0, parameters=None))]
     pub fn solve(&mut self, y0: Vec<f64>, parameters: Option<Vec<f64>>) -> PyResult<RadauSolution> {
-        catch_panic("solve", "radau5", "lambdify", || {
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "radau5", &route, || {
             self.solve_inner(y0, parameters)
         })
     }
 
-    fn solve_inner(
-        &mut self,
-        y0: Vec<f64>,
-        parameters: Option<Vec<f64>>,
-    ) -> PyResult<RadauSolution> {
-        finite_vector(&y0, "y0")?;
-        if let Some(parameters) = parameters.as_deref() {
-            finite_vector(parameters, "parameters")?;
-        }
-        self.prepare()?;
-        let parameters = parameters.unwrap_or_default();
-        if parameters.len() != self.parameter_count {
-            return Err(InvalidConfigurationError::new_err(format!(
-                "expected {} parameter values, got {}",
-                self.parameter_count,
-                parameters.len()
-            )));
-        }
-        self.solver
-            .as_mut()
-            .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
-            .solve_with_parameters(&y0, &parameters)
-            .map(RadauSolution::from_native)
-            .map_err(map_radau_error)
-    }
-
     /// Reuse prepared callbacks for another parameter segment.
+    ///
+    /// `y0` is the initial state for this segment and `parameters` must match
+    /// the declared parameter count. The returned solution is detached.
     pub fn continue_with_parameters(
         &mut self,
         y0: Vec<f64>,
@@ -727,32 +743,49 @@ impl RadauSolver {
     ) -> PyResult<RadauSolution> {
         finite_vector(&y0, "y0")?;
         finite_vector(&parameters, "parameters")?;
-        self.prepare()?;
-        if parameters.len() != self.parameter_count {
-            return Err(InvalidConfigurationError::new_err(format!(
-                "expected {} parameter values, got {}",
-                self.parameter_count,
-                parameters.len()
-            )));
-        }
-        self.solver
-            .as_mut()
-            .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
-            .continue_with_parameters(&y0, &parameters)
-            .map(RadauSolution::from_native)
-            .map_err(map_radau_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "radau5", &route, || {
+            self.prepare()?;
+            if parameters.len() != self.parameter_count {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "expected {} parameter values, got {}",
+                    self.parameter_count,
+                    parameters.len()
+                )));
+            }
+            self.solver
+                .as_mut()
+                .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
+                .continue_with_parameters(&y0, &parameters)
+                .map(RadauSolution::from_native)
+                .map_err(map_radau_error)
+        })
     }
 
     /// Change the interval while retaining prepared symbolic callbacks.
+    ///
+    /// This changes the configured integration bounds, not the initial state;
+    /// pass the desired state to `solve()` or continuation.
     pub fn restart(&mut self, t0: f64, t_end: f64) -> PyResult<()> {
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
-        self.prepare()?;
-        self.solver
-            .as_mut()
-            .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
-            .restart(t0, t_end)
-            .map_err(map_radau_error)
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "radau5", &route, || {
+            self.prepare()?;
+            self.solver
+                .as_mut()
+                .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
+                .restart(t0, t_end)
+                .map_err(map_radau_error)
+        })
     }
 
     /// Stable route metadata needed to reproduce this Python-side solve.
@@ -785,6 +818,7 @@ impl RadauSolver {
     }
 
     #[getter]
+    /// Telemetry collection level configured on this solver.
     pub fn telemetry_mode(&self) -> &'static str {
         match self.telemetry_mode {
             RadauTelemetryMode::Off => "off",
@@ -802,24 +836,63 @@ impl RadauSolver {
     }
 }
 
+impl RadauSolver {
+    fn solve_inner(
+        &mut self,
+        y0: Vec<f64>,
+        parameters: Option<Vec<f64>>,
+    ) -> PyResult<RadauSolution> {
+        finite_vector(&y0, "y0")?;
+        if let Some(parameters) = parameters.as_deref() {
+            finite_vector(parameters, "parameters")?;
+        }
+        self.prepare()?;
+        let parameters = parameters.unwrap_or_default();
+        if parameters.len() != self.parameter_count {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected {} parameter values, got {}",
+                self.parameter_count,
+                parameters.len()
+            )));
+        }
+        self.solver
+            .as_mut()
+            .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
+            .solve_with_parameters(&y0, &parameters)
+            .map(RadauSolution::from_native)
+            .map_err(map_radau_error)
+    }
+}
+
 /// Dense Radau route backed by Python-owned residual and Jacobian callbacks.
 ///
 /// This is intentionally separate from [`RadauSolver`]: symbolic expressions
 /// have a preparation/lifecycle contract, while callbacks are already
 /// prepared by the caller. The Jacobian is optional; when omitted, the native
-/// Radau core performs its component-wise finite-difference fallback.
+/// Radau core performs its component-wise finite-difference fallback. This
+/// route is Dense, sequential and callback-only; it does not perform symbolic
+/// preparation or AOT compilation.
 #[pyclass(name = "RadauCallbackSolver", module = "rustedscithe", unsendable)]
 pub struct RadauCallbackSolver {
     solver: RadauNativeSolver,
-    failure: CallbackFailure,
+    failure: CallbackFailureState,
     dimension: usize,
     telemetry_mode: String,
     jacobian_source: String,
     config: RadauConfig,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl RadauCallbackSolver {
+    /// Configure a Dense Radau solve using Python residual and Jacobian
+    /// callbacks.
+    ///
+    /// `residual_callback(t, y)` returns a finite vector of length
+    /// `state_dimension`; optional `jacobian_callback(t, y)` returns a finite
+    /// square row-major matrix. If omitted, Radau uses its native finite-
+    /// difference Jacobian. Callback execution is synchronous and sequential.
+    /// Choose `output="dense"` to allow `RadauSolution.sample()`.
     #[new]
     #[pyo3(signature=(state_dimension, t0, t_end, max_step, residual_callback, jacobian_callback=None, rtol=1e-3, atol=1e-6, options=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12))]
     #[allow(clippy::too_many_arguments)]
@@ -940,16 +1013,26 @@ impl RadauCallbackSolver {
         // `RadauNativeSolver::prepare` accepts concrete closures. Keep the
         // erased callback storage private to this adapter and add one tiny
         // forwarding closure at the Rust/Python boundary.
-        let solver = if let Some(jacobian) = jacobian {
-            let residual_callback = move |time: f64, state: &DVector<f64>| residual(time, state);
-            let jacobian_callback = move |time: f64, state: &DVector<f64>| jacobian(time, state);
-            RadauNativeSolver::prepare(config.clone(), residual_callback, Some(jacobian_callback))
-        } else {
-            let residual_callback = move |time: f64, state: &DVector<f64>| residual(time, state);
-            let no_jacobian: Option<fn(f64, &DVector<f64>) -> DMatrix<f64>> = None;
-            RadauNativeSolver::prepare(config.clone(), residual_callback, no_jacobian)
-        }
-        .map_err(map_radau_error)?;
+        let solver = catch_panic("construct", "radau5", "python_callback:dense", || {
+            let solver = if let Some(jacobian) = jacobian {
+                let residual_callback =
+                    move |time: f64, state: &DVector<f64>| residual(time, state);
+                let jacobian_callback =
+                    move |time: f64, state: &DVector<f64>| jacobian(time, state);
+                RadauNativeSolver::prepare(
+                    config.clone(),
+                    residual_callback,
+                    Some(jacobian_callback),
+                )
+            } else {
+                let residual_callback =
+                    move |time: f64, state: &DVector<f64>| residual(time, state);
+                let no_jacobian: Option<fn(f64, &DVector<f64>) -> DMatrix<f64>> = None;
+                RadauNativeSolver::prepare(config.clone(), residual_callback, no_jacobian)
+            }
+            .map_err(map_radau_error)?;
+            Ok(solver)
+        })?;
         Ok(Self {
             solver,
             failure,
@@ -962,36 +1045,28 @@ impl RadauCallbackSolver {
             }
             .to_owned(),
             config,
+            panic_state: SolverPanicState::default(),
         })
     }
 
     #[getter]
+    /// This callback adapter is immediately usable and has no separate prepare phase.
     pub fn is_prepared(&self) -> bool {
         true
     }
 
-    fn solve_checked(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
-        if y0.len() != self.dimension {
-            return Err(InvalidConfigurationError::new_err(format!(
-                "expected y0 with {} values, got {}",
-                self.dimension,
-                y0.len()
-            )));
-        }
-        finite_vector(&y0, "y0")?;
-        let result = self.solver.solve(&y0);
-        if let Some(failure) = take_callback_failure(&self.failure) {
-            return Err(CallbackError::new_err(failure));
-        }
-        result
-            .map(RadauSolution::from_native)
-            .map_err(map_radau_error)
-    }
-
+    /// Integrate from `y0` and return the terminal result and telemetry.
     pub fn solve(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
-        self.solve_checked(y0)
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "radau5", "python_callback", || {
+            self.solve_checked(y0)
+        })
     }
 
+    /// Continue the existing interval from a new initial state.
+    ///
+    /// The callback bindings and configured tolerances are retained. Use
+    /// `restart()` first if the time interval also needs to change.
     pub fn continue_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
         if y0.len() != self.dimension {
             return Err(InvalidConfigurationError::new_err(format!(
@@ -1001,15 +1076,22 @@ impl RadauCallbackSolver {
             )));
         }
         finite_vector(&y0, "y0")?;
-        let result = self.solver.continue_with_initial_state(&y0);
-        if let Some(failure) = take_callback_failure(&self.failure) {
-            return Err(CallbackError::new_err(failure));
-        }
-        result
-            .map(RadauSolution::from_native)
-            .map_err(map_radau_error)
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "radau5", "python_callback", || {
+            let result = self.solver.continue_with_initial_state(&y0);
+            if let Some(error) =
+                self.failure
+                    .take_pyerr("continuation", "radau5", "python_callback")
+            {
+                return Err(error);
+            }
+            result
+                .map(RadauSolution::from_native)
+                .map_err(map_radau_error)
+        })
     }
 
+    /// Replace the integration interval while retaining callbacks and policy.
     pub fn restart(&mut self, t0: f64, t_end: f64) -> PyResult<()> {
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
@@ -1018,12 +1100,16 @@ impl RadauCallbackSolver {
                 "t0 and t_end must differ",
             ));
         }
-        self.solver.restart(t0, t_end).map_err(map_radau_error)?;
-        self.config.t0 = t0;
-        self.config.t_bound = t_end;
-        Ok(())
+        let panic_state = self.panic_state.clone();
+        panic_state.run("restart", "radau5", "python_callback", || {
+            self.solver.restart(t0, t_end).map_err(map_radau_error)?;
+            self.config.t0 = t0;
+            self.config.t_bound = t_end;
+            Ok(())
+        })
     }
 
+    /// Describe the fixed Dense callback route and Jacobian source.
     pub fn provenance(&self) -> HashMap<String, String> {
         HashMap::from([
             ("solver".to_owned(), "radau5".to_owned()),
@@ -1056,6 +1142,29 @@ impl RadauCallbackSolver {
             "RadauCallbackSolver(prepared=true, state_dimension={}, jacobian='{}')",
             self.dimension, self.jacobian_source
         )
+    }
+}
+
+impl RadauCallbackSolver {
+    fn solve_checked(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
+        if y0.len() != self.dimension {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected y0 with {} values, got {}",
+                self.dimension,
+                y0.len()
+            )));
+        }
+        finite_vector(&y0, "y0")?;
+        let result = self.solver.solve(&y0);
+        if let Some(error) = self
+            .failure
+            .take_pyerr("solve", "radau5", "python_callback")
+        {
+            return Err(error);
+        }
+        result
+            .map(RadauSolution::from_native)
+            .map_err(map_radau_error)
     }
 }
 

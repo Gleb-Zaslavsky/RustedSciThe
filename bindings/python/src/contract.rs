@@ -230,6 +230,18 @@ pub struct SolverOptions {
 
 #[pymethods]
 impl SolverOptions {
+    /// Create shared options for a concrete solver wrapper.
+    ///
+    /// Values are normalized case-insensitively. Defaults are
+    /// `frontend="expr_legacy"`, `execution="lambdify"`,
+    /// `matrix_layout="dense"`, `execution_policy="sequential"`, and
+    /// `telemetry="timings"`. These are independent choices; a solver rejects
+    /// combinations it does not support instead of silently ignoring them.
+    /// AOT-specific arguments are meaningful only with `execution="aot"`.
+    ///
+    /// Common spellings include `expr_legacy`/`expr` and
+    /// `atom_native`/`atom_view`; `lambdify`/`aot`; `dense`/`sparse`/`banded`;
+    /// `sequential`/`parallel`/`auto`; and `off`/`counters`/`timings`.
     #[new]
     #[pyo3(signature = (*, frontend=None, execution=None, matrix_layout=None, execution_policy=None, telemetry=None, aot_policy=None, aot_toolchain=None, aot_profile=None, aot_output_dir=None))]
     pub fn new(
@@ -294,54 +306,64 @@ impl SolverOptions {
         })
     }
 
+    /// Symbolic route: `expr_legacy` or `atom_native`.
     #[getter]
     pub(crate) fn frontend(&self) -> &str {
         &self.frontend
     }
 
+    /// Numerical callback route: `lambdify` or `aot`.
     #[getter]
     pub(crate) fn execution(&self) -> &str {
         &self.execution
     }
 
+    /// Linear-system layout requested from the selected solver.
     #[getter]
     pub(crate) fn matrix_layout(&self) -> &str {
         &self.matrix_layout
     }
 
+    /// Callback execution policy: sequential, parallel, or automatic.
     #[getter]
     pub(crate) fn execution_policy(&self) -> &str {
         &self.execution_policy
     }
 
+    /// Telemetry level: off, counters, or timings.
     #[getter]
     pub(crate) fn telemetry(&self) -> &str {
         &self.telemetry
     }
 
     #[getter]
+    /// AOT artifact lifecycle policy selected for generated execution.
     pub(crate) fn aot_policy(&self) -> &str {
         &self.aot_policy
     }
 
     #[getter]
+    /// Compiler/toolchain name requested for AOT generation.
     pub(crate) fn aot_toolchain(&self) -> &str {
         &self.aot_toolchain
     }
 
     #[getter]
+    /// AOT build optimization profile (`debug` or `release`).
     pub(crate) fn aot_profile(&self) -> &str {
         &self.aot_profile
     }
 
     #[getter]
+    /// Optional directory used for generated AOT artifacts.
     pub(crate) fn aot_output_dir(&self) -> Option<&str> {
         self.aot_output_dir.as_deref()
     }
 
     /// Configure the durable registry file shared by an AOT producer and
     /// consumer. It is opt-in so existing constructor call sites remain
-    /// source-compatible.
+    /// source-compatible. This process-isolated handoff setting is rejected
+    /// for a Lambdify route.
     pub fn set_aot_handoff_path(&mut self, path: Option<&str>) -> PyResult<()> {
         self.aot_handoff_path = match path {
             Some(value) if value.trim().is_empty() => {
@@ -356,6 +378,7 @@ impl SolverOptions {
     }
 
     #[getter]
+    /// Optional registry path for process-isolated AOT artifact handoff.
     pub(crate) fn aot_handoff_path(&self) -> Option<&str> {
         self.aot_handoff_path.as_deref()
     }
@@ -389,19 +412,26 @@ impl SolverOptions {
         Ok(())
     }
 
+    /// Return the selected sparse factorization policy label.
     pub(crate) fn sparse_factorization(&self) -> &str {
         &self.sparse_factorization
     }
 
+    /// Return the lower half-bandwidth, or `None` if no band width was configured.
     pub(crate) fn band_lower(&self) -> Option<usize> {
         self.band_lower
     }
 
+    /// Return the upper half-bandwidth, or `None` if no band width was configured.
     pub(crate) fn band_upper(&self) -> Option<usize> {
         self.band_upper
     }
 
     /// Validate common options against a concrete solver capability set.
+    ///
+    /// Use a registered name such as `bdf`, `radau`, or `bvp_sci`. This checks
+    /// common route dimensions; solver-specific numeric settings are checked
+    /// by that solver's constructor.
     pub fn validate_for(&self, solver: &str) -> PyResult<()> {
         self.validate_aot_options()?;
         let capabilities = capabilities_for(solver)?;
@@ -442,6 +472,10 @@ impl SolverOptions {
         Ok(())
     }
 
+    /// Return explicitly configured options as strings, omitting unset values.
+    ///
+    /// This is a normalized inspection snapshot, not a serialization format or
+    /// an alternate way to configure a solver.
     fn as_dict(&self) -> HashMap<String, String> {
         let mut values = HashMap::from([
             ("frontend".to_owned(), self.frontend.clone()),
@@ -505,16 +539,19 @@ pub struct SolverCapabilities {
 #[pymethods]
 impl SolverCapabilities {
     #[getter]
+    /// Canonical name of the solver family described by this capability record.
     pub(crate) fn solver(&self) -> &str {
         &self.solver
     }
 
     #[getter]
+    /// Symbolic frontends supported by the solver.
     pub(crate) fn frontends(&self) -> Vec<String> {
         self.frontends.clone()
     }
 
     #[getter]
+    /// Runtime execution routes supported by the solver.
     pub(crate) fn executions(&self) -> Vec<String> {
         self.executions.clone()
     }
@@ -528,21 +565,25 @@ impl SolverCapabilities {
     }
 
     #[getter]
+    /// Matrix layouts supported by the solver.
     pub(crate) fn layouts(&self) -> Vec<String> {
         self.layouts.clone()
     }
 
     #[getter]
+    /// Callback execution policies supported by the solver.
     pub(crate) fn policies(&self) -> Vec<String> {
         self.policies.clone()
     }
 
     #[getter]
+    /// Whether the solver supports parameter continuation.
     pub(crate) fn supports_continuation(&self) -> bool {
         self.supports_continuation
     }
 
     #[getter]
+    /// Whether analytical residual/Jacobian callback input is supported.
     pub(crate) fn supports_analytical_callbacks(&self) -> bool {
         self.supports_analytical_callbacks
     }

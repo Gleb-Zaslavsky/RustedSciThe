@@ -487,9 +487,10 @@ their native symbolic builders; they are not presented as prepared models.
   iteration budgets before creating a solver for the initial BDF, Radau5 and
   Backward Euler adapters; keep the checks covered by Python contract tests.
 - [x] Ensure Rust panics cannot cross the Python ABI. PyO3's outer trampoline
-  remains the final safety net; high-level task, Gavin, VarPro and callback-BDF
-  operations now add a typed `PanicError` boundary with `stage`, `solver`,
-  `route` and `category` metadata.
+  remains the final safety net; public prepare/solve/restart/continuation paths
+  for BDF, Backward Euler, LSODE2, Radau, BVP_sci, BVP_Damp, nonlinear systems
+  and fitting now add a typed `PanicError` boundary with `stage`, `solver`,
+  `route` and `category` metadata where a native operation can panic.
 - [x] Add a representative failure/telemetry matrix for callback, configuration,
   exhaustion and telemetry-off/counters/timings paths. Constructor-only failures
   still need a later pass to attach solver context consistently.
@@ -805,3 +806,297 @@ matching wheel exists.
   and typed-error smoke tests on every published platform wheel.
 - [ ] The release has a matching sdist, reproducible metadata, documented
   optional dependencies and a recorded release report.
+
+## 14. Post-publication audit and next work (2026-10-15)
+
+Windows `0.1.1` has been published and clean-installed successfully. This is
+the current Windows-first milestone, not evidence that every facade route or
+failure mode is complete. Linux wheels remain explicitly deferred and are not
+a blocker for stabilizing the published Windows package.
+
+### 14.1 Facade contract and correctness
+
+- [ ] Audit every public Python facade route against the native solver API:
+  method selection, option forwarding, defaults, return values and errors.
+- [x] Clarify the LSODE2 API distinction between the solver family and its
+  internal controller method. The facade uses `method` for the solver family
+  and a separate `controller` keyword for LSODE2; facade regression coverage
+  verifies the BDF, Adams and automatic controller modes.
+- [ ] Add or complete facade tests for each exposed IVP, BVP, nonlinear-system
+  and fitting route, including Expr/Atom selection and supported frontend,
+  layout and continuation settings.
+- [ ] Reconcile README, guides, examples and facade behavior. The stale claim
+  that Python LSODE2 rejected Adams/Auto has been corrected in the README and
+  both solver guides; continue the full documentation/API audit.
+- [ ] Reconcile stale wrapper TODO items with intentional native-core policy:
+  BDF remains Dense-only by design; do not treat Sparse/Banded BDF as a Python
+  binding omission. Keep Frozen paths clearly marked as deferred/stubbed.
+
+### 14.2 Error boundaries, panic safety and diagnostics
+
+- [x] Add typed panic boundaries to public preparation, solve, restart and
+  continuation operations for BDF, Backward Euler, LSODE2, Radau, BVP_sci,
+  BVP_Damp, nonlinear systems and fitting where the underlying Rust call may
+  panic. Preserve stage, solver and route metadata in `PanicError`.
+- [x] Guard constructor-time native setup for BDF, Backward Euler, LSODE2,
+  Radau callback, BVP_sci, BVP_Damp and symbolic fitting; add panic metadata
+  `solver_state="discard"` and document the conservative no-reuse policy.
+- [x] Define the post-panic contract conservatively: native state may be
+  partially mutated, so callers must discard the solver and construct a new
+  one. `PanicError.solver_state` reports `"discard"`; it is not a promise that
+  the Python object can recover.
+- [x] Enforce the discard contract on guarded mutable solver wrappers: a caught
+  panic poisons that instance, and later lifecycle calls raise the typed
+  `PoisonedSolverError`; ordinary numerical/configuration errors remain
+  retryable.
+- [x] Audit public solver lifecycle methods, constructors, postprocessing and
+  less-common PyO3 accessors. Native operations that can mutate or execute
+  solver work run behind the typed panic boundary; read-only detached getters
+  and NumPy copies do not call back into native solver state and intentionally
+  remain unguarded.
+- [x] Exercise the Python exception boundary and no-reuse behavior using the
+  private `_PanicProbeSolver` test class behind the non-default
+  `test-panic-probe` Cargo feature. The test checks panic metadata, poisoning,
+  and retryability of ordinary typed errors; it is not part of the stable
+  facade or default/published builds.
+- [x] Remove internal `solve_inner`, `prepare_inner`, `solve_checked` and
+  detached-result helper functions from PyO3 method blocks for BDF, Radau,
+  BVP_Damp and nonlinear wrappers. These helpers were accidentally callable
+  from Python and could bypass the intended public panic guard. A regression
+  test now asserts that these implementation details are not exported.
+- [ ] Inject a panic through a representative production numerical wrapper.
+  No public solver currently exposes a deterministic safe panic trigger; do
+  not add a production panic hook merely to satisfy this test. The shared
+  guard's direct Rust unit test remains available but `cargo test --lib`
+  cannot link on this Windows setup without `python3.lib`.
+- [x] Preserve Python callback exceptions as `CallbackError.__cause__` across
+  BDF, Radau, LSODE2 and BVP_sci callback adapters. Shape/finiteness failures
+  remain typed callback errors without inventing an underlying cause.
+- [x] Preserve a machine-readable `native_kind` for the principal native
+  BDF, BE, LSODE2, Radau, BVP_sci, BVP_Damp, nonlinear, least-squares, Gavin,
+  VarPro and shared IVP AOT error mappings. Keep typed Python exception classes
+  as the primary contract; `native_kind` supplements them without parsing
+  display text. Least-squares iteration/evaluation budget failures now map to
+  `ExhaustionError`, consistent with the other solver budget APIs.
+- [x] Make operation-boundary metadata authoritative for ordinary errors as
+  well as panics. Shared native error mappers may classify exception types and
+  `native_kind`, but `catch_panic` now reattaches the exact public `stage`,
+  `solver` and `route` at construct/prepare/solve/restart/continuation and task
+  boundaries. A regression test confirms this does not lose `native_kind`.
+- [x] Add Rust API comments documenting detached NumPy ownership, row-major
+  matrix conversion and BVP node/state ordering at the non-obvious conversion
+  boundaries.
+- [ ] Exercise failure and telemetry behavior from an installed wheel, not
+  only from the workspace build. Report optional-tool skips explicitly.
+  Progress (2026-10-15): built the current source as a Windows CPython-ABI3
+  wheel, installed it in a fresh CPython 3.14 / NumPy 2.5.4 venv, and ran the
+  failure/telemetry/AOT/callback subset: 29 passed, 2 test-only panic-probe
+  cases skipped because the wheel correctly omits the non-default test
+  feature. Import path was under the temporary venv's `site-packages`, not the
+  checkout. This is a local source wheel, not the immutable published PyPI
+  artifact; the production-wheel gate below remains open.
+- [ ] Run the Rust binding crate's unit test for panic metadata when a Windows
+  `python3.lib` is available; `cargo test --lib` currently reaches link and
+  fails because that library is absent, while the extension build succeeds.
+
+### 14.3 GIL, ownership and concurrency contract
+
+- [x] Document the current conservative contract: native calls are synchronous
+  and retain the GIL; the wrapper transfers work to Rust and returns results.
+  Concurrent calls on one mutable solver instance are unsupported.
+- [x] Keep parallelism in the Rust core. The Python wrapper does not schedule
+  multiple solves or release the GIL; Rust execution policies may use native
+  worker threads inside one solve. No core ownership/synchronization refactor
+  will be made solely to accommodate Python GIL release.
+- [x] Verify the attempted symbolic BDF detach is not supported by its current
+  ownership model: `dyn BdfLinearFactorization` lacks a `Send` contract and
+  BDF telemetry uses `Rc<Cell<_>>`; LSODE2 and BVP_Damp also contain
+  single-owner `Rc`/`RefCell` state. The experiment was reverted. Do not add
+  `unsafe impl Send` or change core synchronization for the wrapper.
+- [x] Explicitly distinguish native callback worker policies from Python
+  thread scalability; the README documents that they are not equivalent and
+  that Python-thread scalability is outside the wrapper's contract.
+
+### 14.4 Installed-package validation
+
+- [x] Validate failure, callback, telemetry and AOT behavior from a clean
+  installation of the current source-built Windows wheel. The targeted run
+  passed `29` tests; the two skips require the intentionally unpublished
+  `test-panic-probe` feature. This does not replace validation of the exact
+  corrected wheel after it is published.
+
+- [x] Install the locally built Windows wheel from the fixed sdist into a
+  fresh temporary environment and run the complete Python binding suite:
+  `90 passed` on CPython 3.14 / NumPy 2.5.4.
+- [x] Run the complete suite against the exact production PyPI `0.1.1` wheel
+  in a clean CPython 3.14 / NumPy 2.5.4 environment: 87 passed, 3 failed. All
+  three failures exposed the stale facade lookup `_native.Lsode2PythonSolver`;
+  the published extension exports `Lsode2Solver`. The source fix is present in
+  the working tree, not in immutable `0.1.1`.
+- [ ] After publishing a corrected version, rerun the complete suite against
+  that exact production wheel and require zero failures. Do not treat the
+  `0.1.1` run above as a passing release gate.
+- [ ] Cover representative single solves, prepared reuse, restart with new
+  initial data, parameter continuation, long-series behavior and typed failure
+  paths. Check that optional AOT/compiler cases are either exercised or
+  clearly reported as skipped.
+- [ ] Check the supported CPython range for the published ABI3 wheel and record
+  the exact interpreter, NumPy, Rust package and artifact versions.
+- [ ] Keep native Python-versus-Rust parity gates for BVP_sci visible as an
+  open validation item; do not imply that package smoke tests establish that
+  numerical parity.
+- [ ] Keep Linux build, wheel and clean-install validation in the deferred
+  platform section; begin it only after the Windows contract is stable.
+
+### 14.5 Packaging and release automation
+
+- [x] Harden `scripts/build_publication.ps1`: check `$LASTEXITCODE` after every
+  native tool (`maturin`, `tar`, `pip`, `twine`) rather than relying only on
+  PowerShell error preferences. The helper was exercised through a full sdist
+  and wheel build from the source archive.
+- [x] Ensure the helper cannot select stale artifacts: it uses a unique
+  default output path, rejects a non-empty explicit output directory, and
+  validates exact package/version artifacts and uniqueness.
+- [x] Verify that the Python-specific README is present in the fixed sdist and
+  wheel metadata. Public PyPI metadata for `0.1.1` was separately checked in
+  the publication milestone above.
+- [ ] Complete Trusted Publishing and immutable-tag release gates from
+  section 13 before automating production uploads. Never store a long-lived
+  PyPI token in the repository.
+- [ ] Define and document the release rollback/yank and replacement-version
+  process before the next production release.
+
+### 14.6 Python typing, documentation and measured overhead
+
+- [x] Add stable `_native.pyi`, `facade.pyi` and package `__init__.pyi` stubs.
+  They describe the native exported classes/methods/properties, NumPy array
+  outputs, solver-family unions and convenience helpers. A runtime contract
+  test compares native/root exports and verifies that every public native
+  member has a stub declaration. A Windows ABI3 wheel inspection confirms all
+  three stubs and `py.typed` are included.
+- [x] Pin a development type checker and validate representative consumer
+  snippets locally. Mypy is pinned as the `dev` extra, strict mode is
+  configured, and `tests/typing_consumer.py` exercises the public Radau
+  facade, options, detached NumPy output and telemetry. Overloads preserve
+  concrete solver/result types for literal IVP method names while dynamic
+  strings retain the documented union. The strict check passed locally on
+  Windows with mypy 2.4.0; `scripts/check_types.ps1` is the repeatable entry
+  point. CI wiring remains open because this repository currently has no
+  checked-in GitHub Actions workflow.
+- [ ] Improve return and option typing for NumPy arrays, prepared models,
+  telemetry reports and solver results without promising unsupported shapes.
+  Initial stubs now use concrete solver/result unions and `NDArray[np.float64]`
+  for matrix accessors; some flexible `**solver_options: Any` convenience
+  arguments remain intentionally broad until a stricter shared options model
+  can preserve the native solver-specific API.
+- [x] Audit docstrings on every public Python facade function, solver class,
+  constructor, option and result property. Explain units, defaults, supported
+  frontend/layout combinations, lifecycle effects and typed failures so
+  `help()` is useful without reading Rust source. Runtime reflection now checks
+  exported functions, class docs, callable methods and PyO3 properties, with
+  focused contract coverage for solver/task lifecycle details.
+- [x] Expand all public convenience-facade helper docstrings with route
+  semantics, array ownership, lifecycle behavior, return values and typed
+  failure expectations. Add a contract test that prevents the helpers from
+  regressing to one-line descriptions. Native PyO3 class/constructor/property
+  docstrings remain part of the broader audit above.
+- [ ] Expand Rust doc comments on exported PyO3 types and non-obvious boundary
+  conversions; keep Python-facing terminology consistent with the facade.
+- [x] Expand Python-visible PyO3 class, constructor and lifecycle docstrings
+  for SolverOptions plus BDF, Backward Euler, Radau and LSODE2 solver/result
+  types. Clarify independent configuration dimensions, array ownership,
+  explicit/lazy preparation, continuation origin, restart semantics and
+  numerical controls. Add a runtime contract test that checks the exported
+  `__doc__` strings; the full suite passed with `92 passed, 2 skipped` on
+  2026-10-15. This closes only the core IVP slice; the full public-type and
+  property audit remains open.
+- [x] Complete the runtime docstring inventory across all currently exported
+  Python classes, methods, properties and module functions. Task result status,
+  continuation and telemetry fields, SolverOptions inspection surfaces,
+  capability metadata and the remaining IVP solver properties are documented.
+  A generic regression test fails when a new exported member lacks a docstring;
+  the full suite passed with `98 passed, 2 skipped` on 2026-10-15. Rust-side
+  comments for boundary conversions remain tracked separately above.
+- [x] Complete the first BVP docstring slice for BVP_sci and BVP_Damp solver
+  and result classes. Document their distinct boundary-input contracts,
+  node/state array orientations, continuation/restart behavior and telemetry
+  accessors; a runtime test checks the Python-visible descriptions. The full
+  suite passed with `94 passed, 2 skipped` on 2026-10-15, and a runtime scan
+  found no undocumented methods on these four BVP classes.
+- [x] Document all currently exposed methods on the BDF and Radau Python
+  callback solvers and the symbolic nonlinear solver/result. Clarify callback
+  shapes, finite-difference fallback, Dense/sequential restrictions, method
+  configuration, bounds, preparation, detached results and telemetry. Runtime
+  scan found no missing method docstrings in these four classes; the full suite
+  passed with `95 passed, 2 skipped` on 2026-10-15.
+- [x] Document the canonical fitting, Gavin fitting and VarPro PyO3 surfaces.
+  Clarify prepared parameter rebinding versus one-shot builder lifecycle,
+  parameter/sample ordering, returned uncertainty and fit diagnostics, and
+  disabled-versus-enabled telemetry. Add a runtime docstring contract test;
+  introspection found no undocumented callable methods on these six classes,
+  and the full suite passed with `96 passed, 2 skipped` on 2026-10-15.
+- [x] Expand `examples/` into a runnable Python example-guide collection,
+  adapted from representative IVP, BVP, nonlinear and fitting tasks in the
+  core examples. The collection now has 19 indexed scripts including stiff
+  Robertson chemistry, chaotic Lorenz dynamics, the 12-state three-body
+  problem, BVP frontend/layout comparisons, continuation, callbacks, tasks
+  and compiler-backed AOT. Each script explains the mathematical setup,
+  options and expected interpretation; examples explicitly avoid presenting
+  route-print timings as benchmark evidence.
+- [x] Add an example index with per-solver RU/EN guide links and runnable
+  coverage for every exposed family. Existing LSODE2 BDF/Adams/Auto,
+  Backward Euler refinement, BDF AOT, callbacks and BVP_Damp observations are
+  retained. New scripts cover Radau ExprLegacy/AtomNative x
+  Dense/Sparse/Banded (plus a separate TCC AOT route), BDF Robertson, LSODE2
+  Lorenz and three-body workloads, BVP_sci matched frontend/layout routes,
+  and BVP_Damp matched frontend/layout routes. The latter passed all six
+  combinations with exact profile error zero. The Radau and BDF AOT examples
+  completed real TCC build/link/solve paths. A new BVP_sci example compares
+  Lambdify/AOT on the same Sparse/AtomNative problem and passed with matching
+  profiles and exact-solution error below `4e-10`. All 19 scripts passed the
+  individual Python smoke pass on 2026-10-15.
+- [x] Verify the facade documentation contract and current Python suite after
+  these additions: `93 passed, 2 skipped`; the skips are the private
+  panic-probe cases requiring the non-default test feature.
+- [x] Make the Python example set self-explanatory: task context,
+  expected numerical values/interpretation, solver and route rationale, and
+  continuation or telemetry notes where relevant. The expanded scripts retain
+  the original Rust examples intact and are linked from the dedicated index.
+  Continue adding scenario-specific explanations as the collection grows.
+- [x] Add paired Python-native RU/EN solver-family guides and cross-link them
+  from the overview and example index. The set covers Radau, BDF, Backward
+  Euler, LSODE2, BVP_sci, BVP_Damp, and nonlinear systems/fitting. The Python
+  guides retain each native family's algorithm/configuration distinctions,
+  while converting examples to facade syntax and stating wrapper-only limits
+  (including deferred Frozen BVP_Damp and the one-observation-per-unknown
+  BVP_Damp boundary contract). The common RU/EN overview remains intact.
+- [ ] Measure wrapper overhead separately from numerical-core time: Python/Rust
+  crossings, input/output conversion, callback calls, preparation, one solve
+  and continuation. Use representative workloads and report medians; do not
+  label a core benchmark as end-to-end Python performance.
+- [ ] Defer broader expression conveniences and additional solver surfaces
+  until the current public contract is typed, documented and validated.
+
+### 14.7 Agreed execution order
+
+1. [x] Complete the current RU/EN solver-family guide and Python example-guide
+   expansion from existing core workloads. All 19 indexed scripts and the
+   full suite (including opt-in panic probes) passed locally on 2026-10-15:
+   the default editable build reports `99 passed, 2 skipped`, and the
+   test-only `test-panic-probe` build reports `101 passed`.
+2. [x] Audit constructors and less-common PyO3 methods; define and test solver
+   object behavior after a caught panic. Lifecycle methods are guarded while
+   detached read-only accessors remain intentionally unguarded; operation
+   boundaries now set exact stage/solver/route metadata and regression tests
+   cover stale native-map context. Rust doc comments describe ownership and
+   layout at Rust/NumPy conversions.
+3. [x] Build and validate the `0.1.2` Windows candidate from sdist. The clean
+   CPython 3.14 / NumPy 2.5.4 install passed `99 passed, 2 skipped`; sdist and
+   wheel passed `twine check`. Artifact SHA-256 hashes are in
+   `PUBLICATION_GUIDE.md`. This is local evidence, not yet a PyPI release.
+4. [ ] Upload the exact candidate files to TestPyPI, clean-install
+   `rustedscithe==0.1.2`, then run the same full contract suite outside the
+   checkout. If clean, publish those exact hashes to production PyPI and test
+   the production installation.
+5. Return to the remaining items in this entire **Post-publication audit and
+   next work** section; the release steps above do not close the broader audit.

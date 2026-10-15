@@ -101,6 +101,32 @@ when the test harness requires it.
   installed successfully with the Python-specific README.
 - [x] Windows-first `0.1.1` sdist and wheel uploaded to production PyPI and
   clean installed from the public index.
+- [x] Windows `0.1.2` release wheel built with Maturin's explicit `release`
+  profile; editable builds remain on `dev`.
+- [x] `0.1.2` release wheel installed and smoke-tested in a clean CPython 3.14
+  environment; production PyPI hashes match the locally verified artifacts.
+
+### Windows release 0.1.2
+
+Release evidence (2026-10-15): the sdist was rebuilt and the Windows
+`cp310-abi3-win_amd64` wheel was rebuilt from that sdist. The wheel build log
+confirmed Maturin's `release` profile from `pyproject.toml`; editable builds
+use `dev`. Both artifacts passed `twine check`. The exact release wheel was
+installed in a clean CPython 3.14 / NumPy 2.5.4 environment outside the
+checkout and passed the `Expr` import/evaluation smoke test. After upload, the
+PyPI JSON hashes were checked against these local files and a fresh venv
+successfully imported both `rustedscithe` and its native `_native.pyd` module.
+An earlier pre-release `0.1.2` candidate had a full Python contract result of
+`99 passed, 2 skipped`; its artifacts were superseded and were not uploaded to
+production. The README metadata check confirms the Python README, not the core
+Rust README, is embedded. The build used core version `0.4.24`.
+
+Published artifact hashes:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `rustedscithe-0.1.2.tar.gz` | `3db8d959ffa1b786ffc7e93cf548ca142bcf66786daa4123121c28de3e657fc` |
+| `rustedscithe-0.1.2-cp310-abi3-win_amd64.whl` | `5cdf42657c253ab347be4726d43f3b4c4ad539b6b4f521bd6ff5ce7b7d1859d7` |
 
 Recorded Windows toolchain for this evidence: Rust/Cargo `1.98.1`, Python
 `3.14.6`, NumPy `2.5.4`, PyO3 `0.27.2`, maturin `1.15.0`, twine `7.0.0`,
@@ -196,7 +222,7 @@ if necessary:
 ```powershell
 $ErrorActionPreference = "Stop"
 $python = (Resolve-Path .\.venv-gavin-win\Scripts\python.exe).Path
-$dist = (Resolve-Path .\bindings\python\target\publication-20261015).Path
+$dist = (Resolve-Path .\bindings\python\target\publication-0.1.2-release-fixed).Path
 $sdist = (Get-ChildItem $dist -Filter "*.tar.gz").FullName
 $wheel = (Get-ChildItem (Join-Path $dist "wheels-from-sdist") -Filter "*.whl").FullName
 
@@ -216,7 +242,7 @@ $smokePython = Join-Path $smoke "Scripts/python.exe"
 & $smokePython -m pip install --no-cache-dir `
   --index-url https://test.pypi.org/simple/ `
   --extra-index-url https://pypi.org/simple/ `
-  rustedscithe==0.1.1
+  rustedscithe==0.1.2
 & $smokePython -c "import numpy, rustedscithe; from rustedscithe import Expr; print(rustedscithe.__file__); print(numpy.__version__); print(Expr.parse('x^2 + 1'))"
 ```
 
@@ -230,7 +256,7 @@ production:
 PyPI release files cannot be replaced under the same version. If an upload or
 metadata mistake is found after publication, increment the package version,
 rebuild both artifacts, rerun the gates and publish a new release instead of
-reusing `0.1.1`.
+reusing an already-published version.
 
 For later CI publication, prefer Trusted Publishing or a short-lived scoped
 credential; never commit a long-lived upload token.

@@ -29,14 +29,15 @@ use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
 };
 
 use crate::errors::{
-    InvalidConfigurationError, PreparationError, SolverError, UnsupportedOptionError, annotate,
-    catch_panic,
+    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    UnsupportedOptionError, annotate_native, catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
 use crate::system::SymbolicSystem;
 
 fn map_solve_error(error: SolveError) -> PyErr {
-    annotate(
+    let native_kind = native_variant(&error);
+    annotate_native(
         match error {
             SolveError::DimensionMismatch { .. }
             | SolveError::InvalidConfig(_)
@@ -63,11 +64,13 @@ fn map_solve_error(error: SolveError) -> PyErr {
         "solve",
         "nonlinear_system",
         "lambdify",
+        &native_kind,
     )
 }
 
 fn map_least_squares_error(error: LeastSquaresError) -> PyErr {
-    annotate(
+    let native_kind = native_variant(&error);
+    annotate_native(
         match error {
             LeastSquaresError::InvalidConfiguration { .. }
             | LeastSquaresError::InvalidLogLevel(_)
@@ -79,17 +82,20 @@ fn map_least_squares_error(error: LeastSquaresError) -> PyErr {
                 InvalidConfigurationError::new_err(error.to_string())
             }
             LeastSquaresError::Problem(source) => map_solve_error(source),
+            LeastSquaresError::MaxEvaluationsReached { .. }
+            | LeastSquaresError::MaxIterationsReached { .. } => {
+                ExhaustionError::new_err(error.to_string())
+            }
             LeastSquaresError::CallbackFailed { .. }
             | LeastSquaresError::DomainViolation
-            | LeastSquaresError::NumericalBreakdown { .. }
-            | LeastSquaresError::MaxEvaluationsReached { .. }
-            | LeastSquaresError::MaxIterationsReached { .. } => {
+            | LeastSquaresError::NumericalBreakdown { .. } => {
                 SolverError::new_err(error.to_string())
             }
         },
         "solve",
         "least_squares",
         "lambdify",
+        &native_kind,
     )
 }
 
@@ -611,6 +617,10 @@ fn statistics_timings(statistics: &SolveStatistics) -> HashMap<String, f64> {
 }
 
 /// Detached result of one square nonlinear-system solve.
+///
+/// The solution and residual are copied from native solver storage. List and
+/// NumPy accessors expose both vectors; termination, residual norm, iteration
+/// count and telemetry describe the completed solve.
 #[pyclass(name = "NonlinearSolution", module = "rustedscithe")]
 pub struct NonlinearSolution {
     solution: Vec<f64>,
@@ -623,9 +633,11 @@ pub struct NonlinearSolution {
 
 #[pymethods]
 impl NonlinearSolution {
+    /// Return the solved variable vector as a Python list.
     pub fn solution(&self) -> Vec<f64> {
         self.solution.clone()
     }
+    /// Return the residual vector evaluated at the returned solution.
     pub fn residual(&self) -> Vec<f64> {
         self.residual.clone()
     }
@@ -640,23 +652,29 @@ impl NonlinearSolution {
         crate::numpy_support::vector(py, &self.residual)
     }
     #[getter]
+    /// Euclidean norm of the final residual vector.
     pub fn residual_norm(&self) -> f64 {
         self.residual_norm
     }
     #[getter]
+    /// Number of nonlinear iterations performed.
     pub fn iterations(&self) -> usize {
         self.iterations
     }
     #[getter]
+    /// Native termination reason as a stable display string.
     pub fn termination(&self) -> &str {
         &self.termination
     }
+    /// Return discrete nonlinear-solver counters.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         statistics_counters(&self.statistics)
     }
+    /// Return timing totals in milliseconds for the completed solve.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         statistics_timings(&self.statistics)
     }
+    /// Return a compact mapping of termination, residual norm and iteration count.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
             ("termination".into(), self.termination.clone()),
@@ -667,6 +685,13 @@ impl NonlinearSolution {
 }
 
 /// Prepared symbolic square nonlinear-system solver.
+///
+/// Build the equation set with [`SymbolicSystem`], then select a native method
+/// such as Newton, damped Newton, Levenberg-Marquardt or the supported
+/// least-squares method. The symbolic frontend and sequential/parallel/auto
+/// callback policy are selected independently. `prepare()` builds the
+/// symbolic route once; `solve()` accepts a fresh initial guess and may bind
+/// parameter values for that solve. Telemetry and logging are opt-in.
 #[pyclass(name = "NonlinearSolver", module = "rustedscithe")]
 pub struct NonlinearSolver {
     /// Original expressions retained so preparation can be requested explicitly
@@ -687,10 +712,18 @@ pub struct NonlinearSolver {
     bounds: Option<Bounds>,
     telemetry: bool,
     logging: Option<EngineLogLevel>,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl NonlinearSolver {
+    /// Configure the numerical method and symbolic route for a square system.
+    ///
+    /// Optional `method_options` and `method_flags` are validated against the
+    /// selected method at construction. `bounds` constrain the unknowns;
+    /// `parameters` declare value-only equation symbols. `telemetry` controls
+    /// preparation diagnostics (`off`, `counters`, or detailed timings where
+    /// supported), while `loglevel="off"` keeps solver logging disabled.
     #[new]
     #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution_policy="sequential", min_work=1, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
     pub fn new(
@@ -771,18 +804,23 @@ impl NonlinearSolver {
                 "off" | "none"
             ),
             logging: parse_log_level(loglevel)?,
+            panic_state: SolverPanicState::default(),
         })
     }
 
+    /// Return the ordered unknown names associated with the symbolic system.
     pub fn variables(&self) -> Vec<String> {
         self.variables.clone()
     }
+    /// Return the numerical callback backend (`lambdify` for this API).
     pub fn backend(&self) -> String {
         "lambdify".to_owned()
     }
+    /// Return the selected symbolic frontend name.
     pub fn frontend(&self) -> String {
         self.frontend.as_str().to_owned()
     }
+    /// Whether symbolic differentiation and callback preparation have run.
     pub fn is_prepared(&self) -> bool {
         self.prepared.is_some()
     }
@@ -790,6 +828,42 @@ impl NonlinearSolver {
     /// Build the symbolic backend once. Repeated calls are intentionally cheap
     /// and do not repeat differentiation or lambdification.
     pub fn prepare(&mut self) -> PyResult<()> {
+        if self.prepared.is_some() {
+            return Ok(());
+        }
+        let route = format!("{}:{:?}", self.frontend.as_str(), self.execution_policy);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "nonlinear", &route, || self.prepare_inner())
+    }
+
+    /// Return preparation diagnostics; raises `PreparationError` before prepare.
+    pub fn prepare_report(&self) -> PyResult<String> {
+        self.prepared
+            .as_ref()
+            .map(|prepared| format!("{:?}", prepared.preparation_report()))
+            .ok_or_else(|| PreparationError::new_err("nonlinear solver has not been prepared"))
+    }
+
+    /// Solve from `initial_guess`, optionally overriding bound parameter values.
+    ///
+    /// The prepared expression graph is reused across calls. The returned
+    /// solution is detached and includes residual, termination and telemetry.
+    #[pyo3(signature=(initial_guess, parameters=None))]
+    pub fn solve(
+        &mut self,
+        initial_guess: Vec<f64>,
+        parameters: Option<Vec<f64>>,
+    ) -> PyResult<NonlinearSolution> {
+        let route = format!("{}:{:?}", self.frontend.as_str(), self.execution_policy);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "nonlinear", &route, || {
+            self.solve_inner(initial_guess, parameters)
+        })
+    }
+}
+
+impl NonlinearSolver {
+    fn prepare_inner(&mut self) -> PyResult<()> {
         if self.prepared.is_some() {
             return Ok(());
         }
@@ -811,24 +885,6 @@ impl NonlinearSolver {
                 .map_err(map_solve_error)?,
         );
         Ok(())
-    }
-
-    pub fn prepare_report(&self) -> PyResult<String> {
-        self.prepared
-            .as_ref()
-            .map(|prepared| format!("{:?}", prepared.preparation_report()))
-            .ok_or_else(|| PreparationError::new_err("nonlinear solver has not been prepared"))
-    }
-
-    #[pyo3(signature=(initial_guess, parameters=None))]
-    pub fn solve(
-        &mut self,
-        initial_guess: Vec<f64>,
-        parameters: Option<Vec<f64>>,
-    ) -> PyResult<NonlinearSolution> {
-        catch_panic("solve", "nonlinear", "lambdify", || {
-            self.solve_inner(initial_guess, parameters)
-        })
     }
 
     fn solve_inner(
@@ -886,6 +942,7 @@ pub struct FittingSolution {
 
 #[pymethods]
 impl FittingSolution {
+    /// Return a copy of the fitted unknown vector in declared variable order.
     pub fn solution(&self) -> Vec<f64> {
         self.solution.clone()
     }
@@ -894,17 +951,21 @@ impl FittingSolution {
     pub fn solution_array<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f64>> {
         crate::numpy_support::vector(py, &self.solution)
     }
+    /// Return the solver termination label as a human-readable string.
     pub fn report(&self) -> &str {
         &self.report
     }
     #[getter]
+    /// Objective value reported by the least-squares solver.
     pub fn objective_function(&self) -> f64 {
         self.objective_function
     }
     #[getter]
+    /// Termination reason for this fit.
     pub fn termination(&self) -> &str {
         &self.termination
     }
+    /// Return a compact string-valued summary of the fit and iteration counts.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
             ("termination".into(), self.termination.clone()),
@@ -919,24 +980,46 @@ impl FittingSolution {
             ),
         ])
     }
+    /// Return discrete solver counters; an empty map means collection was disabled.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         statistics_counters(&self.statistics)
     }
+    /// Return stage timings in milliseconds; an empty map means collection was disabled.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         statistics_timings(&self.statistics)
     }
 }
 
-/// Builder-style symbolic fitting wrapper over `Nonlinear_systems::least_squares`.
+/// Prepared symbolic least-squares solver backed by `Nonlinear_systems::least_squares`.
+///
+/// Construction declares equations, unknowns and fixed parameters, performs symbolic
+/// preparation once, and stores the reusable prepared model. Call `solve()` for the
+/// initial parameter set and `solve_with_parameters(values)` to rebind the declared
+/// parameters without rebuilding the symbolic problem. Results are detached snapshots.
+///
+/// The default symbolic frontend is ExprLegacy; AtomView can be selected explicitly.
+/// Execution policy, solver tolerances, scaling, positive-domain restrictions,
+/// telemetry and logging are independently configurable.
 #[pyclass(name = "FittingSolver", module = "rustedscithe")]
 pub struct FittingSolver {
     inner: SymbolicLeastSquaresSolver,
+    panic_state: SolverPanicState,
 }
 
 #[pymethods]
 impl FittingSolver {
     #[new]
     #[pyo3(signature=(equations, initial_guess, variables=None, parameters=None, frontend="expr_legacy", execution_policy="sequential", min_work=1, telemetry="off", tolerance=None, f_tolerance=None, g_tolerance=None, max_iterations=None, scale_diag=None, loglevel="off", positive_variables=None))]
+    /// Prepare a symbolic least-squares problem.
+    ///
+    /// `equations` are residual expressions, `initial_guess` follows `variables`,
+    /// and `parameters` are fixed values that may later be changed by continuation.
+    /// `frontend` accepts `expr_legacy` or `atom_native`; `execution_policy` accepts
+    /// `sequential`, `parallel`, or `auto` (parallel execution uses `min_work`).
+    /// Telemetry accepts `off`, `counters`, or `detailed`. Optional tolerances and
+    /// iteration/scaling controls are passed to the native least-squares solver.
+    /// `positive_variables` rejects trial values outside the positive domain.
+    /// Logging is disabled by default; `loglevel` selects its native verbosity.
     pub fn new(
         equations: Vec<PyExpr>,
         initial_guess: Vec<f64>,
@@ -1000,47 +1083,77 @@ impl FittingSolver {
                 .set_positive_variables(&names)
                 .map_err(map_solve_error)?;
         }
-        inner = inner.try_build().map_err(map_least_squares_error)?;
-        Ok(Self { inner })
+        inner = catch_panic(
+            "construct",
+            "fitting",
+            "prepared_symbolic_least_squares",
+            || inner.try_build().map_err(map_least_squares_error),
+        )?;
+        Ok(Self {
+            inner,
+            panic_state: SolverPanicState::default(),
+        })
     }
 
+    /// Return the ordered names of the unknown variables.
     pub fn variables(&self) -> Vec<String> {
         self.inner.values.clone()
     }
+    /// Solve once using the parameter values supplied at construction.
     pub fn solve(&mut self) -> PyResult<FittingSolution> {
-        let report = self.inner.try_solve().map_err(map_least_squares_error)?;
-        let solution = self
-            .inner
-            .result
-            .as_ref()
-            .map(|value| value.iter().copied().collect())
-            .unwrap_or_default();
-        Ok(FittingSolution {
-            solution,
-            report: format!("{:?}", report.termination),
-            objective_function: report.objective_function,
-            termination: format!("{:?}", report.termination),
-            statistics: report.statistics,
-        })
+        let panic_state = self.panic_state.clone();
+        panic_state.run(
+            "solve",
+            "fitting",
+            "prepared_symbolic_least_squares",
+            || {
+                let report = self.inner.try_solve().map_err(map_least_squares_error)?;
+                let solution = self
+                    .inner
+                    .result
+                    .as_ref()
+                    .map(|value| value.iter().copied().collect())
+                    .unwrap_or_default();
+                Ok(FittingSolution {
+                    solution,
+                    report: format!("{:?}", report.termination),
+                    objective_function: report.objective_function,
+                    termination: format!("{:?}", report.termination),
+                    statistics: report.statistics,
+                })
+            },
+        )
     }
 
+    /// Re-solve after rebinding all declared parameters in declaration order.
+    ///
+    /// The prepared symbolic model is reused; `parameters` must have the same
+    /// length and ordering as the constructor's `parameters` argument.
     pub fn solve_with_parameters(&mut self, parameters: Vec<f64>) -> PyResult<FittingSolution> {
-        let report = self
-            .inner
-            .try_solve_with_params(parameters)
-            .map_err(map_least_squares_error)?;
-        let solution = self
-            .inner
-            .result
-            .as_ref()
-            .map(|value| value.iter().copied().collect())
-            .unwrap_or_default();
-        Ok(FittingSolution {
-            solution,
-            report: format!("{:?}", report.termination),
-            objective_function: report.objective_function,
-            termination: format!("{:?}", report.termination),
-            statistics: report.statistics,
-        })
+        let panic_state = self.panic_state.clone();
+        panic_state.run(
+            "continuation",
+            "fitting",
+            "prepared_symbolic_least_squares",
+            || {
+                let report = self
+                    .inner
+                    .try_solve_with_params(parameters)
+                    .map_err(map_least_squares_error)?;
+                let solution = self
+                    .inner
+                    .result
+                    .as_ref()
+                    .map(|value| value.iter().copied().collect())
+                    .unwrap_or_default();
+                Ok(FittingSolution {
+                    solution,
+                    report: format!("{:?}", report.termination),
+                    objective_function: report.objective_function,
+                    termination: format!("{:?}", report.termination),
+                    statistics: report.statistics,
+                })
+            },
+        )
     }
 }

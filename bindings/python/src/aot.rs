@@ -17,7 +17,7 @@ use rustedscithe_core::symbolic::symbolic_ivp_generated::{
 use crate::contract::SolverOptions;
 use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError,
-    InvalidConfigurationError, PreparationError,
+    InvalidConfigurationError, PreparationError, annotate_native, native_variant,
 };
 
 /// Build the shared native AOT configuration from validated Python options.
@@ -84,7 +84,8 @@ pub(crate) fn provenance_fields(options: &SolverOptions) -> HashMap<String, Stri
 
 /// Preserve the native AOT lifecycle class as a Python exception.
 pub(crate) fn map_backend_error(error: IvpBackendError) -> pyo3::PyErr {
-    match error {
+    let native_kind = native_variant(&error);
+    let mapped = match error {
         IvpBackendError::AotArtifactMissing { message }
         | IvpBackendError::AotArtifactNotBuilt { message } => AotArtifactError::new_err(message),
         IvpBackendError::AotRuntimeUnavailable { message } => AotLinkError::new_err(message),
@@ -110,7 +111,8 @@ pub(crate) fn map_backend_error(error: IvpBackendError) -> pyo3::PyErr {
             }
         }
         other => PreparationError::new_err(other.to_string()),
-    }
+    };
+    annotate_native(mapped, "preparation", "ivp_backend", "aot", &native_kind)
 }
 
 /// The Python facade exposes only the two symbolic routes currently accepted
