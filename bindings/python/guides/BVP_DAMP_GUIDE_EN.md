@@ -59,6 +59,13 @@ rebinding. Its mesh must be uniform. Damping controls, bounds, adaptive grid
 refinement, and explicit Banded widths are not part of this native route and
 are not accepted as if they had an effect. The prepared API currently supports
 parameter rebinding, but not replacing the initial guess or interval in place.
+One route is intentionally rejected: fixed-mesh Naive/Frozen with
+`frontend="atom_native"`, `execution="aot"` and `matrix_layout="dense"`.
+That native combination currently reaches an incompatible vector ABI and
+panics, so the Python adapter raises `UnsupportedOptionError` before entering
+the solver. ExprLegacy Dense AOT and AtomNative Sparse/Banded AOT are covered
+by route tests. Fixed-mesh AOT exposes numerical telemetry but not the shared
+AOT lifecycle counters; use provenance to confirm the selected execution.
 
 ```python
 from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
@@ -84,8 +91,10 @@ The supported policies are `Frozen_naive` (reuse after the first Jacobian),
 threshold), `at_low_speed` (one speed-rate threshold no greater than 1), and
 `complex` (`[period, norm_threshold, speed_rate]`). `policy_parameters` is
 omitted for `Frozen_naive` and otherwise follows the listed shape. The class
-reports the chosen policy through `provenance()` and returns the same detached
-solution telemetry contract as the other BVP_Damp routes.
+retains the native public spelling `at_high_morm`; `morm` is not a separate
+quantity or policy. It reports the chosen policy through `provenance()` and
+returns the same detached solution telemetry contract as the other BVP_Damp
+routes.
 
 ```python
 from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
@@ -109,7 +118,7 @@ The direct constructor exposes the main numerical and structural controls:
 
 | Area | Python keyword(s) | Notes |
 | --- | --- | --- |
-| Discretization | `scheme="forward"` or `"trapezoid"` | Selects the first-order scheme |
+| Discretization | `scheme="forward"` or `"trapezoid"` | Selects forward Euler or the trapezoidal rule; the schemes have different accuracy and stability properties |
 | Strategy | `BvpDampSolver`, `BvpDampNaiveSolver` or `BvpDampFrozenSolver` | Each selects a separate native algorithm; none is silently mapped to another |
 | Nonlinear work | `tolerance`, `max_iterations`, `max_jacobian_refreshes`, `max_damping_iterations`, `damping_factor` | Newton/damping policy |
 | Mesh | `max_refinements`, `grid_method`, `grid_parameters` | `grid_parameters` must match the selected method |

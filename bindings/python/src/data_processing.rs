@@ -21,6 +21,11 @@ use rustedscithe_core::numerical::data_processing::{
 
 use crate::errors::{InvalidConfigurationError, SolverError, annotate, catch_panic};
 
+/// Materialize an owned Rust vector from a read-only NumPy view.
+///
+/// Iteration rather than a raw slice also supports non-contiguous and
+/// negatively-strided NumPy inputs; the numerical core never retains a borrow
+/// into Python-managed array memory.
 fn owned_series(input: &PyReadonlyArray1<'_, f64>, name: &str) -> PyResult<Vec<f64>> {
     let values: Vec<f64> = input.as_array().iter().copied().collect();
     if values.is_empty() {

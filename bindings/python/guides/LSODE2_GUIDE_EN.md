@@ -45,7 +45,7 @@ they are not inferred from an equation:
 
 | Control | Python API | Notes |
 | --- | --- | --- |
-| Controller | `method="bdf"`, `"adams"`, `"auto"` | `"lsoda"` aliases `"auto"` |
+| Controller | `create_ivp(..., controller=...)` | `"bdf"`, `"adams"` or `"auto"`; `"lsoda"` defaults to `"auto"` |
 | Tolerances | `rtol`, `atol` | Local error control for the IVP solver |
 | Parameters | `parameters`, `parameter_values` | Names and order must match the expressions |
 | Banded widths | `band_lower`, `band_upper` | Both are required only with Banded layout |
@@ -53,8 +53,11 @@ they are not inferred from an equation:
 | Execution | `SolverOptions(execution=...)` | `lambdify` or `aot` |
 | Scheduling | `SolverOptions(execution_policy=...)` | `sequential`, `parallel` or `auto` where supported |
 
-The direct `Lsode2Solver` adapter accepts `band_lower`/`band_upper` constructor
-keywords or `SolverOptions.set_banded_width(lower, upper)`. If both forms are
+The direct `Lsode2Solver` adapter accepts the controller as its `method`
+constructor argument; the common `create_ivp` facade calls the same setting
+`controller` because its `method` argument selects the solver family. The
+direct adapter also accepts `band_lower`/`band_upper` constructor keywords or
+`SolverOptions.set_banded_width(lower, upper)`. If both width forms are
 provided, matching values are accepted and conflicting values raise a typed
 configuration error. Widths are rejected for non-Banded layouts.
 

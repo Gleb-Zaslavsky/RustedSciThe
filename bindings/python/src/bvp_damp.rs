@@ -1003,8 +1003,10 @@ impl BvpDampSolution {
 
 /// Direct Python adapter for the native damped Newton BVP solver.
 ///
-/// Boundary conditions map each state name to `(mesh_index, value)` pairs;
-/// the initial state is node-major with shape `(mesh_nodes, state_dimension)`.
+/// Boundary conditions map each state name to `(endpoint_index, value)` pairs,
+/// where endpoint index is `0` (left) or `1` (right). `initial_state` is a
+/// flattened node-major vector corresponding to shape
+/// `(mesh_nodes, state_dimension)`; the adapter reshapes it for the core.
 /// Solver controls such as refinement scheme, damping limits, linear solver,
 /// bounds, logging and telemetry are forwarded to the native BVP_Damp API.
 /// Use `prepare()` and `solve_prepared()` for an explicit prepared lifecycle,
@@ -1026,9 +1028,12 @@ impl BvpDampSolver {
     /// initial mesh guess.
     ///
     /// `expressions` has one derivative RHS per state variable. Every boundary
-    /// condition key must name a state; its pairs select constrained mesh
-    /// nodes. `parameters`/`parameter_values` declare and bind symbolic input
-    /// values. `options` selects frontend, execution and matrix layout. The
+    /// condition key must name a state; its pairs select endpoint `0` (left)
+    /// or `1` (right) and its value. `initial_state` is flattened in node-major
+    /// order, so each node's state values appear consecutively. The binding
+    /// reshapes it into the core's state-major matrix. `parameters`/
+    /// `parameter_values` declare and bind symbolic input values. `options`
+    /// selects frontend, execution and matrix layout. The
     /// remaining keyword options forward native refinement, damping, logging,
     /// bounds and linear-solver policies; unsupported combinations fail
     /// explicitly rather than silently falling back.
@@ -1620,6 +1625,17 @@ impl BvpDampNaiveSolver {
         };
         options.validate_for("bvp_damp")?;
         let (method, _) = matrix_backend(options.matrix_layout())?;
+        // The fixed-mesh native callback path currently expects nalgebra's
+        // dense-vector ABI here; reject the known AtomNative+AOT+Dense
+        // mismatch before it can panic across the Python boundary.
+        if options.frontend() == "atom_native"
+            && options.execution() == "aot"
+            && options.matrix_layout() == "dense"
+        {
+            return Err(UnsupportedOptionError::new_err(
+                "fixed-mesh BVP_Damp Naive/Frozen does not support the AtomNative+AOT+Dense route; use ExprLegacy+AOT, AtomNative+Lambdify, or a supported structured AOT layout",
+            ));
+        }
         if options.band_lower().is_some() || options.band_upper().is_some() {
             return Err(UnsupportedOptionError::new_err(
                 "BVP_Damp Naive infers its band structure from the generated Jacobian and does not consume explicit band widths",

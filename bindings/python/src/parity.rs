@@ -166,6 +166,7 @@ fn radau_wrapper_matches_native_dense_expr_legacy_solution_and_counters() {
             1_000_000,
             6,
             12,
+            None,
         )
         .expect("wrapper construction")
     });

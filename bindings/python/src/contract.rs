@@ -550,6 +550,10 @@ impl SolverOptions {
             ("aot_policy".to_owned(), self.aot_policy.clone()),
             ("aot_toolchain".to_owned(), self.aot_toolchain.clone()),
             ("aot_profile".to_owned(), self.aot_profile.clone()),
+            (
+                "sparse_factorization".to_owned(),
+                self.sparse_factorization.clone(),
+            ),
         ]);
         if let Some(output_dir) = &self.aot_output_dir {
             values.insert("aot_output_dir".to_owned(), output_dir.clone());

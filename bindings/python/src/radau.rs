@@ -581,6 +581,7 @@ pub struct RadauSolver {
     config: RadauConfig,
     solver: Option<CoreRadauSolver>,
     parameter_count: usize,
+    default_parameter_values: Vec<f64>,
     telemetry_mode: RadauTelemetryMode,
     frontend: String,
     execution: String,
@@ -600,8 +601,10 @@ impl RadauSolver {
     /// `max_steps`, `max_newton_iterations`, and `max_retries` bound work.
     /// Set `output="dense"` to retain interpolation data; otherwise only the
     /// final state is returned. `jacobian`, if supplied, is row-major.
+    /// Optional `parameter_values` become the default binding for `solve()`;
+    /// an explicit parameter vector passed to `solve()` overrides them.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, time_variable, t0, t_end, max_step, rtol=1e-3, atol=1e-6, options=None, parameters=None, jacobian=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12))]
+    #[pyo3(signature=(expressions, state_variables, time_variable, t0, t_end, max_step, rtol=1e-3, atol=1e-6, options=None, parameters=None, jacobian=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12, parameter_values=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -620,6 +623,7 @@ impl RadauSolver {
         max_steps: usize,
         max_newton_iterations: usize,
         max_retries: usize,
+        parameter_values: Option<Vec<f64>>,
     ) -> PyResult<Self> {
         validate_names(&state_variables, "state_variables", false)?;
         if expressions.len() != state_variables.len() {
@@ -641,6 +645,20 @@ impl RadauSolver {
         }
         let parameters = parameters.unwrap_or_default();
         validate_names(&parameters, "parameters", true)?;
+        let default_parameter_values = match parameter_values {
+            Some(values) => {
+                if values.len() != parameters.len() {
+                    return Err(InvalidConfigurationError::new_err(format!(
+                        "expected {} parameter values, got {}",
+                        parameters.len(),
+                        values.len()
+                    )));
+                }
+                finite_vector(&values, "parameter_values")?;
+                values
+            }
+            None => Vec::new(),
+        };
         if parameters
             .iter()
             .any(|name| name == &time_variable || state_variables.iter().any(|state| state == name))
@@ -777,6 +795,7 @@ impl RadauSolver {
             config,
             solver: None,
             parameter_count,
+            default_parameter_values,
             telemetry_mode,
             frontend: options.frontend().to_owned(),
             execution: options.execution().to_owned(),
@@ -950,7 +969,7 @@ impl RadauSolver {
             finite_vector(parameters, "parameters")?;
         }
         self.prepare()?;
-        let parameters = parameters.unwrap_or_default();
+        let parameters = parameters.unwrap_or_else(|| self.default_parameter_values.clone());
         if parameters.len() != self.parameter_count {
             return Err(InvalidConfigurationError::new_err(format!(
                 "expected {} parameter values, got {}",

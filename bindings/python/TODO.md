@@ -997,18 +997,48 @@ a blocker for stabilizing the published Windows package.
 
 ### 14.1 Facade contract and correctness
 
-- [ ] Audit every public Python facade route against the native solver API:
-  method selection, option forwarding, defaults, return values and errors.
+- [x] Audit solver-family semantic forwarding and defaults in the Python
+  convenience facade. Family aliases, LSODE2 controller selection, IVP
+  parameter binding, BVP family-specific boundary inputs, direct native option
+  forwarding, one-shot solve results and typed rejection paths were checked
+  against the concrete PyO3 constructors. The common
+  `create_ivp(..., parameter_values=...)` keyword had been silently dropped for
+  Radau; the binding now retains it as the default solve-time vector, validates
+  length/finiteness, and allows an explicit `solve()` vector to override it.
+  `solve_ivp` avoids a second conversion of that vector. The BVP type audit
+  found stale `_native.pyi` declarations: BVP_Damp `boundary_conditions`,
+  flattened node-major `initial_state`, `grid_parameters`, and mutating
+  `restart()` return; BVP_sci `restart()` likewise takes a flat vector and
+  returns `None`. Stubs and Rust API comments now match the runtime contract.
+  `typing_consumer.py` checks concrete constructor forwarding, while the
+  installed-stub contract asserts the BVP restart argument and return shapes.
+  Verification: strict mypy passed; focused Python facade/contract tests
+  passed (`254 passed, 2 skipped`). The separately tracked route-combination
+  matrix was closed in the 2026-10-17 follow-up below; it was not an unresolved
+  facade-forwarding audit.
 - [x] Clarify the LSODE2 API distinction between the solver family and its
   internal controller method. The facade uses `method` for the solver family
   and a separate `controller` keyword for LSODE2; facade regression coverage
   verifies the BDF, Adams and automatic controller modes.
-- [ ] Add or complete facade tests for each exposed IVP, BVP, nonlinear-system
-  and fitting route, including Expr/Atom selection and supported frontend,
-  layout and continuation settings.
-- [ ] Reconcile README, guides, examples and facade behavior. The stale claim
-  that Python LSODE2 rejected Adams/Auto has been corrected in the README and
-  both solver guides; continue the full documentation/API audit.
+- [x] Complete the route-combination contract matrix across IVP, BVP,
+  nonlinear-system and fitting facades. It now covers AtomNative+AOT Dense for
+  each stiff IVP adapter; Radau/LSODE2 sparse and banded AOT for both symbolic
+  frontends; every nonlinear method/frontend pair plus both AOT frontends;
+  the main BVP_Damp frontend/execution/layout product; and fixed-mesh
+  Naive/Frozen frontend/layout products with Lambdify and supported AOT paths.
+  Existing BVP_sci matrices, method-specific UniversalFitting routes, and
+  explicit unsupported-route/error checks remain part of the contract suite.
+  Fixed-mesh BVP_Damp `AtomNative+AOT+Dense` exposed a native vector-ABI panic;
+  the binding now rejects that exact route as `UnsupportedOptionError` and the
+  RU/EN guide explains the limitation. Fixed-mesh AOT does not export lifecycle
+  counters, so its tests use route provenance plus numerical telemetry rather
+  than asserting unavailable counters. Verification is recorded in section
+  20.3.
+- [x] Reconcile README, RU/EN guides, examples and facade behavior. The stale
+  LSODE2 Adams/Auto claim is fixed; the overview/capability description, solver
+  guides and the 38-script example index were audited against current facade
+  behavior. The bilingual guide corrections and example-audit evidence are in
+  section 20.3. Any future API change must update these surfaces together.
 - [x] Reconcile wrapper TODO items with intentional native-core policy: BDF
   remains Dense-only by design; Sparse/Banded BDF are not Python omissions.
   ShootingBVP is now exposed by `PyShootingBvpSolver` with native telemetry,
@@ -1171,12 +1201,19 @@ a blocker for stabilizing the published Windows package.
   Windows with mypy 2.4.0; `scripts/check_types.ps1` is the repeatable entry
   point. CI wiring remains open because this repository currently has no
   checked-in GitHub Actions workflow.
-- [ ] Improve return and option typing for NumPy arrays, prepared models,
+- [x] Improve return and option typing for NumPy arrays, prepared models,
   telemetry reports and solver results without promising unsupported shapes.
-  Initial stubs now use concrete solver/result unions and `NDArray[np.float64]`
-  for matrix accessors; some flexible `**solver_options: Any` convenience
-  arguments remain intentionally broad until a stricter shared options model
-  can preserve the native solver-specific API.
+  Initial stubs use concrete solver/result unions and `NDArray[np.float64]`
+  for matrix accessors. Family-selecting convenience helpers intentionally
+  retain `**solver_options: Any`: the accepted option names and types vary by
+  solver, while the public concrete solver constructors retain complete
+  typed signatures. The RU/EN solver guides now state this distinction and
+  direct users needing mypy/IDE checking of individual settings to the
+  corresponding concrete class. A shared `Unpack[TypedDict]` facade contract
+  is explicitly outside the 0.1.4 release scope: it would duplicate a large,
+  evolving set of native constructor options and require an extra typing
+  dependency for the supported Python 3.10 floor. Revisit only with a
+  generated or otherwise single-source option schema.
 - [x] Audit docstrings on every public Python facade function, solver class,
   constructor, option and result property. Explain units, defaults, supported
   frontend/layout combinations, lifecycle effects and typed failures so
@@ -1487,9 +1524,10 @@ release timing checks belong at the end.
   contract test now checks the structured child error and public `RuntimeError`;
   the new test passes against the checkout build. Re-run it against the next
   exact release wheel before marking the installed-wheel gate complete.
-- [ ] Validate the final installed wheel, dependency closure and example corpus;
-  record full-suite results separately from an import smoke test. Keep existing
-  production-wheel validation debt visible while extending these capabilities.
+- [ ] Validate the final installed `0.1.4` wheel and dependency closure; record
+  full-suite results separately from an import smoke test. The 38-script
+  example corpus audit and Windows headless smoke are complete in section
+  20.3; this remaining item is specifically the final immutable release wheel.
 
 Remaining implementation order: opt-in desktop lifecycle and wheel-delivery
 decision; definite/numerical integration policy; review advanced symbolic
@@ -1640,9 +1678,10 @@ capabilities as accidental omissions.
 - [x] Run the animation worker child-discovery test against the exact
   production `0.1.3` wheel from outside the checkout (`1 passed`). Interactive
   desktop playback is already smoke-tested on Windows.
-- [ ] Run the deterministic renderer-initialization failure test against the
-  next exact installed wheel. The test fixture is implemented; GIF/video/
-  notebook export remains deferred.
+- [x] Run the deterministic renderer-initialization failure test against the
+  local `0.1.4` release wheel in clean CPython 3.14 and 3.10 environments
+  (`1 passed` each). The invalid WGPU backend is returned as a Python
+  `RuntimeError`; GIF/video/notebook export remains deferred.
 - [x] Consolidate the remaining Windows ABI3 interpreter-range and release
   recovery gates in section 20.1. CPython 3.10 validation and release recovery
   are complete; immutable-tag automation remains open. Linux/macOS stay deferred until the preceding
@@ -1733,10 +1772,17 @@ Windows/Linux artifact gates follow once those are stable.
 - [x] Exercise animation child-module discovery from the exact installed
   production wheel. The clean-child test passes (`1 passed`) and preserves a
   structured error when its input file is missing.
-- [ ] Exercise renderer-initialization failure from the next installed wheel.
-  The checkout contract test passes: invalid backend selection is reported as
-  a Python `RuntimeError` with Bevy's adapter failure message; the child does
-  not silently report success. Exact wheel confirmation is pending.
+- [x] Exercise renderer-initialization failure from the exact local `0.1.4`
+  installed wheel. Clean CPython 3.14 and 3.10 runs each passed (`1 passed`);
+  invalid backend selection returns a Python `RuntimeError` with Bevy's
+  adapter failure message rather than a successful child exit.
+- [x] Re-run direct binding-crate Rust unit tests with the Windows Python
+  development import library. `cargo test --manifest-path
+  bindings/python/Cargo.toml --lib --no-default-features` passed (`24 passed`)
+  when `PYO3_PYTHON` selected the venv interpreter and its base directory was
+  added to `PATH`; without the latter, linking succeeded but Windows could not
+  load the runtime DLL (`STATUS_DLL_NOT_FOUND`). The exact repeatable command is
+  recorded in `PUBLICATION_GUIDE.md`.
 - [x] Document recovery for a defective PyPI release: preserve artifact
   evidence, yank only for severe defects, increment the version, rebuild and
   retest exact artifacts, and announce the replacement. See
@@ -1853,11 +1899,14 @@ current binding now adds `evaluation_scope`, `evaluation_counter_note`, and
 scope-consistent `evaluation_*` counters/timings while preserving legacy keys.
 The LSODE2 boundary benchmark consumes the new effective keys and never maps a
 missing key to zero. The editable extension passed the targeted and complete
-Python contract suite (`258 passed, 2 skipped`), and mypy passed. A direct
-`cargo test` attempt could not link test binaries because the selected Windows
-Python installation lacks `python3.lib`; `maturin develop` built and installed
-the extension successfully through the extension-module path. Exact
-installed-wheel verification of the additive API belongs to `0.1.4`.
+Python contract suite (`258 passed, 2 skipped`), and mypy passed. The initial
+direct `cargo test` attempt was inconclusive because the selected Windows
+Python runtime directory was not on `PATH`; the test binary linked but failed
+to load the Python DLL. Follow-up on 2026-10-17 set `PYO3_PYTHON` and added the
+interpreter base directory to `PATH`; the binding-crate Rust unit-test gate
+then passed (`24 passed`). The repeatable command is recorded in
+`PUBLICATION_GUIDE.md`. Exact installed-wheel verification of the additive API
+belongs to the `0.1.4` release candidate.
 
 Boundary-harness correctness follow-up (2026-10-17): replaced counter
 lookups that defaulted missing keys to zero with route-qualified required-key
@@ -1894,11 +1943,13 @@ amortization conclusions remain open.
   Cartesian product. `SolverCapabilities.sparse_factorization_policies`
   distinguishes BVP_sci StandardFaer, opt-in SuperLU and experimental reusable
   Faer policies from the generic Sparse matrix layout.
-- [ ] Reconcile the full public capability matrix, `.pyi` stubs, guides and examples
-  against the native-backed facade for each solver route, frontend, layout,
-  execution mode, lifecycle, telemetry mode and typed error. Keep capability
-  metadata truthful and reject unsupported combinations rather than silently
-  applying defaults.
+- [x] Reconcile the public capability matrix and `.pyi` surface against the
+  native-backed facade for solver routes, frontend/layout/execution axes,
+  lifecycle, telemetry and typed errors. Keep unsupported combinations
+  explicit rather than silently applying defaults. The installed-wheel test
+  now checks exports, public members, and constructor signatures/default shape
+  against the wheel's own stubs; route-specific behavioral tests exercise the
+  advertised and rejected combinations.
 - [x] Extend the capability contract to describe standalone Gavin and VarPro
   routes and the method-specific `UniversalFitting` selector without presenting
   a union of method axes as a supported Cartesian product. Canonical queries
@@ -1945,21 +1996,33 @@ amortization conclusions remain open.
   `Literal` aliases matching the runtime accepted values, including accepted
   hyphenated frontend spellings and logging levels; validate both stubs and
   the downstream consumer example with the checked-in mypy script.
-- [ ] Audit all remaining solver rows and public examples against native
-  constructor parameters, especially method-specific controls and logging.
-  Live PyO3 signatures were compared with the stubs for the current solver
-  classes; no constructor-parameter mismatch was found in that pass. The
-  remaining audit is semantic forwarding/defaults and complete guide/example
-  coverage, not a known broken signature.
-- [ ] Keep the Python examples community-facing and representative of the Rust
-  corpus. The current inventory is 38 Python scripts versus 82 `.rs` files
-  directly under core `examples/` (the Rust total includes distinct route
-  guides; RU duplicates and task documents are separate). Do not chase a raw
-  file-count ratio: maintain a route/workload checklist by solver and add
-  meaningful missing scenarios. The latest pass added LSODE2 AOT continuation
-  and nonlinear AtomNative AOT examples; all 38 scripts compile, and five
-  representative route scripts ran successfully. Continue smoke-running new
-  examples and verify compiler-backed examples separately.
+- [x] Audit native constructor parameters and default presence for every class
+  with a constructor in `_native.pyi`, especially method-specific controls and
+  logging. The wheel contract compares runtime names, positional/keyword-only
+  kinds and required/defaulted status; all 22 constructors match. Route tests
+  exercise forwarding and rejection. The `0.1.4` audit found and fixed one
+  inspection-snapshot omission (`sparse_factorization` in
+  `SolverOptions.as_dict()`), with default and configured-value regression
+  coverage.
+- [x] Audit narrative RU/EN guides against the advertised capability axes and
+  every non-obvious solver setting/logging/telemetry control. This pass fixed
+  four misleading descriptions: LSODE2's `controller` keyword on `create_ivp`
+  versus the direct class's `method`; ShootingBVP's distinct `counters` and
+  `timings` modes; the forward-Euler versus trapezoidal BVP_Damp schemes; and
+  the preserved native spelling `at_high_morm`. Backward Euler's exact
+  `continue_to`/`restart` semantics and fixed-step retention are now explicit
+  in both languages. Capability metadata remains authoritative for cross-axis
+  restrictions.
+- [x] Audit the Python example corpus for mathematical setup, rationale for
+  route/frontend/layout/policy choices, result checks, optional-tool behavior
+  and index coverage. The 38-script inventory covers the supported solver
+  families, AOT and Lambdify routes, callbacks, continuation, layouts, fitting,
+  symbolic math, data processing and animation; it is route/workload coverage,
+  not an attempt to match the raw Rust-example file count. All 38 scripts
+  passed a Windows headless smoke run, including compiler-backed examples and
+  animations with `--no-animate`; `compileall` and the example-index/docstring
+  contract passed. Future examples must preserve these rationale and smoke
+  checks.
 - [x] Add a regression check that the example index has exact one-to-one
   coverage of the current 38 scripts and that each script starts with a useful
   explanatory module docstring. The index and inventory match; all headers pass
@@ -2040,17 +2103,25 @@ amortization conclusions remain open.
 - [x] Resolve the dense-output/result contract without forcing a false common
   interpolation API: generic Python solver guide now documents shared detached
   NumPy conventions and route-specific sampling support.
-- [ ] Add Rust doc comments for the remaining non-obvious PyO3/NumPy
-  conversions and audit flexible convenience-option typing beyond
-  `SolverOptions`.
+- [x] Audit non-obvious PyO3/NumPy conversions and resolve flexible facade
+  option typing. Shared owned-output conversions document detachment and
+  shape behavior; Lambdify batch evaluation documents its zero-copy contiguous
+  row path and strided-row fallback; data-processing input conversion now
+  explains why iteration materializes a Rust-owned vector; the BVP numerical
+  callback route documents its intentional GIL-bound owned-sequence copies.
+  The convenience facade's broad `Any` kwargs are a documented, deliberate
+  dynamic-dispatch boundary, not a missing native option: concrete solver
+  constructors and their stubs are the fully typed route. A more elaborate
+  typed facade schema is deferred until it can be generated from one source.
 - [x] Narrow the Python convenience-facade annotations that previously
   returned `Any`: IVP, BVP, nonlinear and fitting helpers now expose native
   solver/result unions. Add BVP `Literal` overloads so `bvp_sci`/`scipy` accepts
   residual sequences while `bvp_damp`/`damped` accepts endpoint-observation
   mappings and each literal returns its concrete solver/result type. A strict
-  downstream mypy consumer covers both BVP routes and the LSODE2 literal; the
-  remaining flexible `**solver_options: Any` surface still needs a considered
-  solver-specific typing design rather than a false universal options type.
+  downstream mypy consumer covers both BVP routes and the LSODE2 literal.
+  Remaining dynamic `**solver_options: Any` kwargs are documented as an
+  intentional limitation; concrete constructors expose the complete typed
+  solver-specific option surface.
 - [x] Record intentional non-exposure explicitly: square-system positive
   domains and Python callbacks lack the corresponding safe native contract;
   VarPro remains ExprLegacy/sequential; BE preparation remains lazy; generic
@@ -2102,7 +2173,8 @@ API audit finding (2026-10-17): the standalone Gavin PyO3 docstrings claimed
 that `automatic` callback execution was selectable, while the native adapter
 correctly rejects `execution_policy="auto"`. Corrected both descriptions to
 the actual sequential/parallel contract and added a typed-rejection test. The
-full constructor/default/forwarding audit and route matrix remain open.
+remaining constructor/default/forwarding audit and route matrix recorded here
+were subsequently closed by the entries below.
 
 Follow-up: live capability probing confirmed that the public capability
 registry had no route-specific descriptors for Gavin, VarPro or
@@ -2154,11 +2226,63 @@ break-even near 105k rebinds. Full tables and interpretation are in
 `PYTHON_BOUNDARY_STORY_TESTS.md`; these are local release-wheel boundary
 measurements, not published-PyPI evidence or Rust-core performance claims.
 
+Installed-wheel contract follow-up (2026-10-17): the `.pyi` contract test now
+resolves stubs beside the imported package, so an installed-wheel run checks
+the wheel payload rather than checkout copies. API review found that
+`SolverOptions.as_dict()` omitted the configured sparse-factorization policy;
+the snapshot now includes it, with checks for both `standard_faer` and an
+explicit `superlu` selection. The stub gate also compares parameter names,
+positional/keyword-only kinds and default presence for all 22 exposed native
+constructors; no mismatch was found. Rebuilt local `0.1.4` wheel SHA-256:
+`3509A4B79F1922E0DCED61DF24CFE8C33C763A22F52E61568EACDDE484FEF9E6`.
+The exact wheel passed `pip check`, the installed-package/stub contract suite
+(`259 passed, 2 skipped`) plus the separate slow BVP_Damp story (`1 passed`)
+on CPython 3.14.6 / NumPy 2.5.4 and CPython 3.10.20 / NumPy 2.2.6, and the
+isolated renderer failure test (`1 passed`) on both interpreters. These are
+local Windows artifact gates;
+TestPyPI/production and Linux gates remain separate. The explicit §14.1
+route-combination matrix is closed in the follow-up below; generic
+forwarding/default auditing, the narrative RU/EN guide and 38-example audit
+are also closed in section 20.3.
+
+API parity follow-up (2026-10-17): closed the remaining NumPy/PyO3 comment and
+convenience-option typing items in sections 14.6 and 20.3. Added rationale for
+owned NumPy input materialization and GIL-bound numerical BVP callback copies;
+the family-selecting facade's dynamic kwargs are explicitly out of the 0.1.4
+scope, while concrete public constructors remain fully typed. RU/EN guides
+explain that tradeoff. Validation: strict mypy consumer `Success`, native Rust
+binding unit tests `24 passed`, and focused Python facade/contract tests `254
+passed, 2 skipped`. Immutable-source and artifact gates remain open; the
+worktree is modified and no final release artifacts were built.
+
+Route-matrix follow-up (2026-10-17): targeted execution passed for all four
+stiff IVP AtomNative+AOT Dense routes, the eight Radau/LSODE2 structured-AOT
+frontend/layout intersections, both nonlinear AOT frontends, all 12 main
+BVP_Damp frontend/execution/layout combinations, and 12 fixed-mesh
+Naive/Frozen AOT frontend/layout combinations (10 execute successfully; the
+two AtomNative+AOT+Dense cases assert typed rejection). The first experiment
+found the underlying native panic and led to the narrow preflight guard. The
+full Python binding suite then passed (`299 passed, 2 skipped`), strict mypy
+passed for the package and consumer (`6 source files`), and native Rust
+binding unit tests passed (`24 passed`). `git diff --check` passed. A whole-file
+`rustfmt --check` still reports pre-existing formatting differences elsewhere
+in `src/bvp_damp.rs`; the new guard itself is formatted, and the Rust module
+compiled successfully through the editable maturin build.
+
 ### 20.4 Linux and coordinated 0.1.4 release (after 20.1-20.3)
 
-- [ ] Build the Windows wheel, Linux manylinux2014 x86_64 wheel and sdist for
-  `0.1.4` from the same immutable release source. Do not treat `0.1.3` as a
-  cross-platform release or try to append Linux to it.
+- [ ] Freeze a clean immutable release source (commit/tag) only after the
+  remaining non-cosmetic debts are closed; record its commit, tag, package/core
+  versions and toolchains. The current worktree is not frozen and must not be
+  used as final release evidence.
+- [ ] From that exact source, build the `0.1.4` sdist and Windows
+  `cp310-abi3-win_amd64` release wheel. Inspect the sdist README and file
+  manifest, run `twine check`, record hashes, then install the rebuilt wheel
+  and run the contract suite on CPython 3.10 and the newest supported CPython.
+  The previous local wheel result is candidate evidence, not a substitute.
+- [ ] Build the Linux manylinux2014 x86_64 wheel from the exact same immutable
+  source/sdist; do not alter source files between platform builds. Do not treat
+  `0.1.3` as a cross-platform release or try to append Linux to it.
 - [ ] Install the exact Linux wheel in clean supported CPython environments,
   run the supported contract suite, and verify NumPy/native-extension imports
   and optional-tool behavior.
@@ -2168,3 +2292,8 @@ measurements, not published-PyPI evidence or Rust-core performance claims.
   record SHA-256 hashes and clean-install evidence for each platform. Update
   supported-platform claims only after the corresponding installed-wheel gate
   passes.
+
+The Windows Rust unit-test link gate is already closed for the current
+candidate (`24 passed`); see section 20.1 and `PUBLICATION_GUIDE.md`. Re-run it
+after source freeze only if the Rust/PyO3 binding code changes before the final
+tag.

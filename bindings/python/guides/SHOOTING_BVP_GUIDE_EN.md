@@ -65,12 +65,12 @@ the selected native IVP adapter remains responsible for validating each key.
 
 ## Telemetry and Logging
 
-Telemetry is disabled with `SolverOptions(telemetry="off")`. `counters` and
-`timings` both request the native ShootingBVP snapshot because the core exposes
-them together. The returned `solution.telemetry` distinguishes secant updates,
-boundary residual evaluations and IVP solves, and reports residual-IVP,
-final-IVP, secant-phase and total solve milliseconds. `preparation_ms` is the
-separate symbolic preparation wall time.
+Telemetry is disabled with `SolverOptions(telemetry="off")`. `counters` collects
+secant updates, boundary residual evaluations and IVP solves without timing
+instrumentation; `timings` collects residual-IVP, final-IVP, secant-phase and
+total solve durations without discrete counters; `detailed` collects both.
+The returned `solution.telemetry` contains only the channels requested by the
+selected mode. `preparation_ms` is a separate symbolic-preparation wall time.
 
 Rust logging is independently disabled by default. Enable it with
 `options.set_logging_level("info")` (or `error`, `warn`, `debug`). The core

@@ -279,7 +279,9 @@ def create_ivp(
         ODE_api2 nonstiff methods this is the native fixed starting step size;
         other solver families interpret it according to their own contracts.
     parameters, parameter_values:
-        Optional ordered parameter schema and current numeric values.
+        Optional ordered parameter schema and current numeric values. Radau
+        retains these values as the default for later ``solver.solve(y0)``;
+        an explicit vector passed to ``solve`` overrides that default.
     options:
         Optional ``SolverOptions`` for frontend, execution, layout, callback
         scheduling and telemetry. Solver-specific keywords remain available
@@ -329,7 +331,8 @@ def create_ivp(
         # Radau owns y0 at solve time; it is not part of symbolic preparation.
         return _native.RadauSolver(
             expressions, state_variables, time_variable, t0, t_end, max_step,
-            options=options, parameters=parameters, **solver_options,
+            options=options, parameters=parameters,
+            parameter_values=_owned_sequence(parameter_values), **solver_options,
         )
     if family == "backward_euler":
         if controller is not None:
@@ -395,7 +398,9 @@ def solve_ivp(
         options=options, controller=controller, **solver_options,
     )
     if _method_name(method) == "radau5":
-        return solver.solve(_owned_sequence(y0), _owned_sequence(parameter_values))
+        # Radau retains constructor-bound values; avoid converting and copying
+        # the same parameter vector a second time for this one-shot solve.
+        return solver.solve(_owned_sequence(y0))
     return solver.solve()
 
 

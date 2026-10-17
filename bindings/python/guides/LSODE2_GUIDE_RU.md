@@ -45,7 +45,7 @@ Python-конструктор принимает ширины полосы яв�
 
 | Настройка | Python API | Примечание |
 | --- | --- | --- |
-| Контроллер | `method="bdf"`, `"adams"`, `"auto"` | `"lsoda"` — alias для `"auto"` |
+| Контроллер | `create_ivp(..., controller=...)` | `"bdf"`, `"adams"` или `"auto"`; для `"lsoda"` по умолчанию выбирается `"auto"` |
 | Допуски | `rtol`, `atol` | Локальный контроль ошибки IVP |
 | Параметры | `parameters`, `parameter_values` | Имена и порядок совпадают с выражениями |
 | Ширины полосы | `band_lower`, `band_upper` | Для Banded обязательны оба значения |
@@ -53,8 +53,11 @@ Python-конструктор принимает ширины полосы яв�
 | Исполнение | `SolverOptions(execution=...)` | `lambdify` или `aot` |
 | Планирование | `SolverOptions(execution_policy=...)` | `sequential`, `parallel`, `auto` там, где поддержано |
 
-`Lsode2Solver` принимает `band_lower`/`band_upper` как аргументы конструктора
-или через `SolverOptions.set_banded_width(lower, upper)`. Если заданы обе формы,
+`Lsode2Solver` принимает контроллер через аргумент конструктора `method`;
+общая фабрика `create_ivp` называет эту настройку `controller`, потому что её
+аргумент `method` выбирает семейство солвера. Сам `Lsode2Solver` принимает
+`band_lower`/`band_upper` как аргументы конструктора или через
+`SolverOptions.set_banded_width(lower, upper)`. Если заданы обе формы ширин,
 значения должны совпадать, иначе возвращается типизированная ошибка
 конфигурации. Ширины отклоняются для layout, отличного от Banded.
 

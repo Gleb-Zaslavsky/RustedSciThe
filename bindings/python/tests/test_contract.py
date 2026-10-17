@@ -2695,6 +2695,123 @@ def test_backward_euler_supports_atom_native_and_dense_aot():
     assert aot.provenance()["execution"] == "aot"
 
 
+@pytest.mark.parametrize("solver_name", ["bdf", "radau", "backward_euler", "lsode2"])
+def test_ivp_atom_native_dense_aot_cross_family_contract(tmp_path, solver_name):
+    """Exercise the AtomNative+AOT intersection for every stiff IVP adapter."""
+    compiler = shutil.which("tcc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("AtomNative AOT route needs tcc or gcc")
+    toolchain = (
+        "tcc" if Path(compiler).name.lower() in {"tcc", "tcc.exe"} else "gcc"
+    )
+    state_name = f"aot_atom_{solver_name}_y"
+    y = Expr.variable(state_name)
+    options = SolverOptions(
+        frontend="atom_native",
+        execution="aot",
+        matrix_layout="dense",
+        aot_policy="build_if_missing",
+        aot_toolchain=toolchain,
+        aot_profile="debug",
+        aot_output_dir=str(tmp_path / solver_name),
+        telemetry="counters",
+    )
+
+    if solver_name == "bdf":
+        solver = BdfSolver(
+            [-y], [state_name], "t", [1.0], 0.0, 0.1, 0.05, options=options
+        )
+        solution = solver.solve()
+        end_time = solution.times()[-1]
+        final_state = solution.states()[-1][0]
+    elif solver_name == "radau":
+        solver = RadauSolver(
+            [-y], [state_name], "t", 0.0, 0.1, 0.05, options=options
+        )
+        solution = solver.solve([1.0])
+        end_time = solution.final_time
+        final_state = solution.final_state[0]
+    elif solver_name == "backward_euler":
+        solver = BackwardEulerSolver(
+            [-y], [state_name], "t", [1.0], 0.0, 0.1, h=0.05, options=options
+        )
+        solution = solver.solve()
+        end_time = solution.times()[-1]
+        final_state = solution.states()[-1][0]
+    else:
+        solver = Lsode2Solver(
+            [-y], [state_name], "t", [1.0], 0.0, 0.1, 0.05, options=options
+        )
+        solution = solver.solve()
+        end_time = solution.final_time
+        final_state = solution.final_state[0]
+
+    assert end_time == pytest.approx(0.1)
+    assert final_state == pytest.approx(math.exp(-0.1), rel=5e-3)
+    assert solver.provenance()["frontend"] == "atom_native"
+    assert solver.provenance()["execution"] == "aot"
+    assert solution.telemetry_counters()["aot_build_attempts"] >= 1
+
+
+@pytest.mark.parametrize("solver_name", ["radau", "lsode2"])
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("layout", ["sparse", "banded"])
+def test_ivp_structured_aot_frontend_contract(tmp_path, solver_name, frontend, layout):
+    """Exercise the supported structured-AOT intersections for IVP routes."""
+    compiler = shutil.which("tcc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("structured IVP AOT route needs tcc or gcc")
+    toolchain = (
+        "tcc" if Path(compiler).name.lower() in {"tcc", "tcc.exe"} else "gcc"
+    )
+    y_name = f"structured_aot_{solver_name}_{frontend}_{layout}_y"
+    z_name = f"structured_aot_{solver_name}_{frontend}_{layout}_z"
+    y = Expr.variable(y_name)
+    z = Expr.variable(z_name)
+    rhs = [-y, -2.0 * z]
+    state_names = [y_name, z_name]
+    options = SolverOptions(
+        frontend=frontend,
+        execution="aot",
+        matrix_layout=layout,
+        aot_policy="build_if_missing",
+        aot_toolchain=toolchain,
+        aot_profile="debug",
+        aot_output_dir=str(tmp_path / f"{solver_name}-{frontend}-{layout}"),
+        telemetry="counters",
+    )
+    if layout == "banded":
+        options.set_banded_width(1, 1)
+
+    if solver_name == "radau":
+        solver = RadauSolver(
+            rhs, state_names, "t", 0.0, 0.1, 0.05,
+            options=options,
+            jacobian=[
+                Expr.constant(-1.0), Expr.constant(0.0),
+                Expr.constant(0.0), Expr.constant(-2.0),
+            ],
+        )
+        solution = solver.solve([1.0, 1.0])
+        end_time = solution.final_time
+        final_state = solution.final_state
+    else:
+        solver = Lsode2Solver(
+            rhs, state_names, "t", [1.0, 1.0], 0.0, 0.1, 0.05, options=options
+        )
+        solution = solver.solve()
+        end_time = solution.final_time
+        final_state = solution.final_state
+
+    assert end_time == pytest.approx(0.1)
+    assert final_state[0] == pytest.approx(math.exp(-0.1), rel=5e-3)
+    assert final_state[1] == pytest.approx(math.exp(-0.2), rel=5e-3)
+    assert solver.provenance()["frontend"] == frontend
+    assert solver.provenance()["execution"] == "aot"
+    assert solver.provenance()["matrix_layout"] == layout
+    assert solution.telemetry_counters()["aot_build_attempts"] >= 1
+
+
 def test_telemetry_off_is_reported_as_unmeasured_for_radau_and_backward_euler():
     y = Expr.variable("y")
 
@@ -2809,6 +2926,7 @@ def test_solver_contract_separates_frontend_route_and_layout():
 def test_backend_specific_options_are_rejected_when_the_route_cannot_consume_them():
     y = Expr.variable("y_backend_options")
 
+    assert SolverOptions().as_dict()["sparse_factorization"] == "standard_faer"
     dense_with_width = SolverOptions()
     dense_with_width.set_banded_width(1, 1)
     with pytest.raises(UnsupportedOptionError, match="only valid for matrix_layout='banded'"):
@@ -2819,6 +2937,7 @@ def test_backend_specific_options_are_rejected_when_the_route_cannot_consume_the
 
     sparse_factorization = SolverOptions(matrix_layout="sparse")
     sparse_factorization.set_sparse_factorization("superlu")
+    assert sparse_factorization.as_dict()["sparse_factorization"] == "superlu"
     with pytest.raises(UnsupportedOptionError, match="only by the BVP_sci Sparse route"):
         Lsode2Solver(
             [-y], ["y_backend_options"], "t", [1.0], 0.0, 0.1, 0.05,
@@ -3537,10 +3656,12 @@ def test_bvp_sci_numerical_callback_route_rejects_mixed_and_non_dense_options():
         BvpSciSolver(**base, options=handoff_options)
 
 
-def test_nonlinear_dense_aot_uses_native_generated_backend(tmp_path):
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+def test_nonlinear_dense_aot_uses_native_generated_backend(tmp_path, frontend):
     x = Expr.variable("x")
     solver = NonlinearSolver(
         SymbolicSystem([x * x - 2.0], ["x"]),
+        frontend=frontend,
         execution="aot",
         aot_policy="build_if_missing",
         aot_profile="debug",
@@ -3827,6 +3948,119 @@ def test_bvp_damp_direct_dense_builder_returns_detached_solution_and_telemetry(c
     if storage:
         assert solution.telemetry_storage_is_estimated() is True
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("layout", ["dense", "sparse", "banded"])
+@pytest.mark.parametrize("execution", ["lambdify", "aot"])
+def test_bvp_damp_facade_frontend_execution_layout_matrix(
+    frontend, layout, execution
+):
+    """Gate the main damped route across its advertised symbolic axes."""
+    aot_toolchain = None
+    if execution == "aot":
+        compiler = shutil.which("tcc") or shutil.which("gcc")
+        if compiler is None:
+            pytest.skip("BVP_Damp AOT route needs tcc or gcc")
+        aot_toolchain = (
+            "tcc" if Path(compiler).name.lower() in {"tcc", "tcc.exe"} else "gcc"
+        )
+
+    options = SolverOptions(
+        frontend=frontend,
+        execution=execution,
+        matrix_layout=layout,
+        execution_policy="sequential",
+        telemetry="counters",
+        aot_toolchain=aot_toolchain,
+    )
+    if layout == "banded":
+        options.set_banded_width(1, 1)
+
+    mesh = np.linspace(0.0, 1.0, 5)
+    solver = python_facade.create_bvp(
+        "bvp_damp",
+        [Expr.constant(1.0)],
+        ["y"],
+        {"y": [(0, 0.0)]},
+        mesh,
+        np.zeros(mesh.size),
+        options=options,
+        bounds={"y": (-2.0, 2.0)},
+        max_iterations=8,
+    )
+    solution = solver.solve()
+
+    assert solver.frontend == frontend
+    assert solver.execution == execution
+    assert solver.matrix_layout == layout
+    assert solution.status == "finished"
+    assert solution.mesh()[0] == pytest.approx(0.0)
+    assert solution.mesh()[-1] == pytest.approx(1.0)
+    assert solution.values()[0][-1] == pytest.approx(1.0, abs=1e-7)
+    assert solution.telemetry_counters()["linear_solves"] > 0
+
+
+@pytest.mark.parametrize("strategy", ["naive", "frozen"])
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("layout", ["dense", "sparse", "banded"])
+def test_bvp_damp_fixed_mesh_aot_frontend_layout_matrix(
+    strategy, frontend, layout, tmp_path
+):
+    """Cover AOT intersections for fixed-mesh BVP_Damp strategies."""
+    compiler = shutil.which("tcc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("BVP_Damp AOT route needs tcc or gcc")
+    toolchain = (
+        "tcc" if Path(compiler).name.lower() in {"tcc", "tcc.exe"} else "gcc"
+    )
+    rate = Expr.variable(f"fixed_aot_{strategy}_{frontend}_{layout}_rate")
+    options = SolverOptions(
+        frontend=frontend,
+        execution="aot",
+        matrix_layout=layout,
+        aot_policy="build_if_missing",
+        aot_toolchain=toolchain,
+        aot_profile="debug",
+        telemetry="counters",
+    )
+
+    common = (
+        [rate],
+        ["y"],
+        {"y": [(0, 0.0)]},
+        [0.0, 0.5, 1.0],
+        [0.0, 0.0, 0.0],
+    )
+    kwargs = {
+        "parameters": [str(rate)],
+        "parameter_values": [1.0],
+        "options": options,
+    }
+    if frontend == "atom_native" and layout == "dense":
+        with pytest.raises(UnsupportedOptionError, match=r"AtomNative\+AOT\+Dense"):
+            if strategy == "naive":
+                BvpDampNaiveSolver(*common, **kwargs)
+            else:
+                BvpDampFrozenSolver(
+                    *common, **kwargs, policy="Frozen_naive"
+                )
+        return
+
+    if strategy == "naive":
+        solver = BvpDampNaiveSolver(*common, **kwargs)
+    else:
+        solver = BvpDampFrozenSolver(
+            *common, **kwargs, policy="Frozen_naive"
+        )
+
+    solution = solver.solve()
+    assert solver.frontend == frontend
+    assert solver.execution == "aot"
+    assert solver.matrix_layout == layout
+    assert solver.provenance()["execution"] == "aot"
+    assert solution.values()[0][-1] == pytest.approx(1.0, abs=1e-7)
+    assert solution.telemetry_counters()["linear_solves"] >= 1
 
 
 @pytest.mark.parametrize(
@@ -4553,7 +4787,9 @@ def test_python_type_stubs_parse_and_match_runtime_exports():
     from rustedscithe import _native
     from rustedscithe import facade
 
-    package_dir = Path(__file__).parents[1] / "python" / "rustedscithe"
+    # Resolve stubs beside the imported package rather than from the checkout.
+    # This makes the same test validate the actual installed wheel payload.
+    package_dir = Path(rustedscithe.__file__).resolve().parent
     native_stub = ast.parse((package_dir / "_native.pyi").read_text(encoding="utf-8"))
     facade_stub = ast.parse((package_dir / "facade.pyi").read_text(encoding="utf-8"))
     public_stub = ast.parse((package_dir / "__init__.pyi").read_text(encoding="utf-8"))
@@ -4592,6 +4828,45 @@ def test_python_type_stubs_parse_and_match_runtime_exports():
         for statement in native_stub.body
         if isinstance(statement, ast.ClassDef)
     }
+    native_stub_nodes = {
+        statement.name: statement
+        for statement in native_stub.body
+        if isinstance(statement, ast.ClassDef)
+    }
+    damp_constructor = next(
+        member
+        for member in native_stub_nodes["BvpDampSolver"].body
+        if isinstance(member, ast.FunctionDef) and member.name == "__init__"
+    )
+    damp_argument_types = {
+        argument.arg: ast.unparse(argument.annotation)
+        for argument in damp_constructor.args.args + damp_constructor.args.kwonlyargs
+        if argument.annotation is not None
+    }
+    assert damp_argument_types["boundary_conditions"] == (
+        "Mapping[str, Sequence[tuple[int, float]]]"
+    )
+    assert damp_argument_types["initial_state"] == "Sequence[float]"
+    assert damp_argument_types["grid_parameters"] == "Sequence[float] | None"
+    damp_restart = next(
+        member
+        for member in native_stub_nodes["BvpDampSolver"].body
+        if isinstance(member, ast.FunctionDef) and member.name == "restart"
+    )
+    assert ast.unparse(damp_restart.returns) == "None"
+    sci_restart = next(
+        member
+        for member in native_stub_nodes["BvpSciSolver"].body
+        if isinstance(member, ast.FunctionDef) and member.name == "restart"
+    )
+    sci_restart_types = {
+        argument.arg: ast.unparse(argument.annotation)
+        for argument in sci_restart.args.args
+        if argument.annotation is not None
+    }
+    assert sci_restart_types["initial_state"] == "Sequence[float]"
+    assert ast.unparse(sci_restart.returns) == "None"
+
     for name in native_exports:
         exposed_type = getattr(_native, name)
         if not inspect.isclass(exposed_type) or exposed_type.__module__ != "rustedscithe":
@@ -4606,6 +4881,54 @@ def test_python_type_stubs_parse_and_match_runtime_exports():
             }
             assert not is_public or member_name in declared_members, (
                 f"{name}.{member_name} is missing from _native.pyi"
+            )
+
+        constructor = next(
+            (
+                member
+                for member in native_stub_nodes[name].body
+                if isinstance(member, ast.FunctionDef) and member.name == "__init__"
+            ),
+            None,
+        )
+        if constructor is not None:
+            runtime_parameters = inspect.signature(exposed_type).parameters.values()
+            runtime_contract = [
+                (
+                    parameter.name,
+                    "keyword_only"
+                    if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+                    else "positional",
+                    parameter.default is inspect.Parameter.empty,
+                )
+                for parameter in runtime_parameters
+            ]
+
+            stub_args = constructor.args
+            positional_names = [
+                argument.arg for argument in stub_args.args if argument.arg != "self"
+            ]
+            default_count = len(stub_args.defaults)
+            positional_default_names = set(
+                positional_names[len(positional_names) - default_count :]
+                if default_count
+                else ()
+            )
+            stub_contract = [
+                (name, "positional", name not in positional_default_names)
+                for name in positional_names
+            ]
+            stub_contract.extend(
+                (
+                    argument.arg,
+                    "keyword_only",
+                    default is None,
+                )
+                for argument, default in zip(stub_args.kwonlyargs, stub_args.kw_defaults)
+            )
+            assert runtime_contract == stub_contract, (
+                f"{name} constructor differs between the installed PyO3 API and _native.pyi: "
+                f"runtime={runtime_contract}, stub={stub_contract}"
             )
 
     facade_exports = {

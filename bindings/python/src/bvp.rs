@@ -1278,8 +1278,9 @@ impl BvpSciSolver {
     ///
     /// `expressions` contains one ODE RHS per state variable and
     /// `boundary_expressions` contains the endpoint residual equations.
-    /// `mesh` must be strictly increasing; `initial_state` is node-major with
-    /// shape `(mesh_nodes, state_dimension)`. Optional parameter symbols and
+    /// `mesh` must be strictly increasing; `initial_state` is a flat vector in
+    /// node-major order, representing shape `(mesh_nodes, state_dimension)`.
+    /// Optional parameter symbols and
     /// values enable continuation. Symbolic RHS expressions use ExprLegacy or
     /// AtomView with Lambdify/AOT. For an already-numerical RHS, pass an empty
     /// `expressions` list, select `frontend="numerical"` and
@@ -1572,6 +1573,9 @@ impl BvpSciSolver {
         let callback_failure = CallbackFailureState::default();
         if let Some(callback) = rhs_callback {
             let rhs_failure = callback_failure.clone();
+            // Python callbacks run under the GIL and receive owned Python
+            // sequences. These copies are confined to the explicitly selected
+            // Numerical callback route; symbolic routes stay entirely native.
             let mut numerical = BvpSciNumericalPlan::new(
                 state_dimension,
                 parameter_dimension,
@@ -1822,8 +1826,8 @@ impl BvpSciSolver {
         })
     }
 
-    /// Replace the mesh and node-major initial guess without rebuilding the
-    /// symbolic model. The new mesh must be strictly increasing.
+    /// Replace the mesh and flat node-major initial guess without rebuilding
+    /// the symbolic model. The new mesh must be strictly increasing.
     pub fn restart(&mut self, mesh: Vec<f64>, initial_state: Vec<f64>) -> PyResult<()> {
         if mesh.len() < 2 || !mesh.windows(2).all(|pair| pair[1] > pair[0]) {
             return Err(InvalidConfigurationError::new_err(

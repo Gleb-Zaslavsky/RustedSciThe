@@ -108,6 +108,16 @@ are rejected. Its fixed-step loop stops after reaching or crossing `t_end`,
 so the final time can overshoot by less than one step. Stiff methods continue
 to use their dedicated solver APIs.
 
+### Convenience facade typing
+
+The family-selecting helpers intentionally accept solver-specific keywords
+through `**solver_options`: valid names and types differ substantially
+between BDF, Radau, LSODE2 and the nonstiff adapter. Runtime validation is
+route-aware and rejects unsupported options rather than silently ignoring
+them. For complete IDE/mypy checking of every solver setting, construct the
+corresponding public class directly (for example `BdfSolver` or
+`RadauSolver`); their `.pyi` signatures mirror the native constructor.
+
 ## BVP
 
 `solve_bvp("bvp_sci", ...)` and `solve_bvp("bvp_damp", ...)` share only the

@@ -119,7 +119,8 @@ mocked subprocess response.
 - [x] wheel installed outside the checkout in a clean temporary venv.
 - [x] installed-wheel NumPy and `Expr` import smoke test passed.
 - [x] Python contract suite passed: `87 passed`.
-- [ ] Rust unit-test link gate with the installed Python development library.
+- [x] Rust unit-test link gate with the installed Python development library
+  (closed for the `0.1.4` candidate on 2026-10-17; details below).
 - [x] Initial Windows TestPyPI `0.1.0` upload and clean install passed; it is
   staging-only because its PyPI description used the core README.
 - [x] Corrected Windows `0.1.1` artifacts uploaded to TestPyPI and clean
@@ -130,6 +131,14 @@ mocked subprocess response.
   profile; editable builds remain on `dev`.
 - [x] `0.1.2` release wheel installed and smoke-tested in a clean CPython 3.14
   environment; production PyPI hashes match the locally verified artifacts.
+
+The Rust unit-test link gate listed above was still open in the 2026-10-15
+snapshot. It was closed on 2026-10-17 for the `0.1.4` candidate: all 24
+binding-crate unit tests passed after setting `PYO3_PYTHON` and adding the
+selected interpreter's base directory to `PATH`. See the repeatable command
+and explanation in the Windows section below, and the active evidence in
+`TODO.md` section 20.1. This does not replace the final immutable-source build
+and installed-wheel gates.
 
 ### Windows release 0.1.2
 
@@ -182,6 +191,23 @@ confirms the advertised `cp310-abi3` lower bound on Windows x64.
 | `rustedscithe-0.1.3.tar.gz` | `56fabd8c036373b0b42b4a4f9f1db966703ece168be01c2ed0b0139901b139c6` |
 | `rustedscithe-0.1.3-cp310-abi3-win_amd64.whl` | `604bc1302725389eb7396fd368de6cf24cabe67f2afb1a53b27c78fbd65e7a13` |
 
+Windows Rust-link follow-up (2026-10-17): the previously unchecked direct
+binding-crate test gate is now verified with the CPython 3.14 development
+import libraries. Set both `PYO3_PYTHON` and `PATH`: the import library lets
+the test executable link, while the Python base directory lets Windows load
+the runtime DLL when the executable starts. The first run with only
+`PYO3_PYTHON` compiled successfully but exited with `STATUS_DLL_NOT_FOUND`;
+adding the base directory to `PATH` resolved it. The binding crate's 24 unit
+tests passed:
+
+```powershell
+$python = (Resolve-Path .\.venv-gavin-win\Scripts\python.exe).Path
+$pythonBase = & $python -c "import sys; print(sys.base_prefix)"
+$env:PYO3_PYTHON = $python
+$env:PATH = "$pythonBase;$env:PATH"
+cargo test --manifest-path bindings/python/Cargo.toml --lib --no-default-features
+```
+
 ## Linux
 
 **Release gate:** the published `0.1.3` release is Windows-only. Package
@@ -193,6 +219,67 @@ the complete artifact set on TestPyPI, and publish the set together. Do not
 attempt to append Linux to
 `0.1.3`. The older `0.1.3` instructions below are retained only as release
 history and diagnostic guidance.
+
+### Codex handoff for a Linux VS Code session
+
+When continuing this release from Codex in VS Code on Linux, start a fresh
+chat with the context below. The Linux commands and release gates remain the
+source of truth in this guide; this handoff is project context, not permission
+to publish:
+
+```text
+We are preparing the separate Python package in bindings/python for a future
+coordinated rustedscithe 0.1.4 release. The core Rust crate and the Python
+binding are maintained in the same repository, but the Python package has its
+own version, build, tests and PyPI artifacts.
+
+First inspect bindings/python/PUBLICATION_GUIDE.md, bindings/python/TODO.md,
+git status, the current branch/tag, package versions, and the available build
+artifacts. Do not assume that notes from an earlier Codex session describe the
+current checkout. Report any mismatch before building.
+
+The only production release so far is 0.1.3 and it is Windows-only. The target
+is to publish 0.1.4 as one coordinated release: Windows and Linux wheels plus
+one sdist, all from the same immutable release source. Do not try to add a
+Linux wheel to 0.1.3. Do not call 0.1.4 release-ready while non-cosmetic items
+in the Python TODO remain open.
+
+For Linux, follow the manylinux2014 x86_64 procedure in the Linux section of
+PUBLICATION_GUIDE.md. Build from the exact corrected sdist, inside the official
+Maturin manylinux container; record the resolved image digest and artifact
+SHA-256 hashes. Verify the cp310-abi3 manylinux tag, run twine check and
+auditwheel show, then clean-install and run the documented contract tests
+outside the checkout with PYTHONPATH unset. A host-tagged linux_x86_64 wheel
+is not an acceptable substitute. This procedure does not establish aarch64
+support.
+
+Before the build, identify the Linux distribution and check whether tcc, gcc,
+zig and gnuplot are available. Also inspect the repository's dependency
+checker and documentation for the exact SuperLU bridge expected by this
+checkout. SuperLU is an optional shared-library dependency, not a PATH
+executable; check both the system library cache and the configured
+SUPERLU_LIBRARY path, and do not treat the absence of SuperLU as a blocker for
+the default Python wheel. If a tool needed for a requested check is missing,
+give the user distribution-appropriate installation commands. Do not install
+packages or change system configuration without the user's confirmation.
+
+Use TestPyPI first. Confirm verbose pip output selected the Linux manylinux
+wheel (not an sdist build), and run the clean-install smoke and test suite.
+Do not upload to production unless the user explicitly asks after reviewing
+the TestPyPI results. Never request, print, store, or commit PyPI tokens.
+
+Do not change numerical algorithms or weaken tests to get a wheel through.
+If a gate fails, stop before upload, preserve the full diagnostic output,
+identify whether it is packaging, platform, environment, or code related, and
+report the exact command, wheel tag, Python/glibc versions, and failure.
+
+At each checkpoint report: source commit/tag and dirty status; Python,
+Rust/Cargo, Maturin and container versions/digest; wheel and sdist filenames,
+tags and hashes; twine/auditwheel results; clean-install paths and versions;
+test totals; results for tcc/gcc/zig/gnuplot/SuperLU availability; and which
+release checklist items remain open. Ask before making release-source changes
+or uploading artifacts.
+```
 
 ### Prerequisites
 

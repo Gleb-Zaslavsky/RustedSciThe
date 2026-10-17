@@ -50,6 +50,13 @@ BVP_sci.
 Banded не относятся к этому native маршруту и не принимаются как будто влияют
 на решение. Prepared API поддерживает перепривязку параметров, но пока не
 замену начального приближения или интервала на месте.
+Одно сочетание намеренно отклоняется: fixed-mesh Naive/Frozen с
+`frontend="atom_native"`, `execution="aot"` и `matrix_layout="dense"`.
+Сейчас этот native-маршрут доходит до несовместимого vector ABI и вызывает
+panic, поэтому Python-адаптер заранее выдаёт `UnsupportedOptionError`.
+ExprLegacy Dense AOT и AtomNative Sparse/Banded AOT проверены отдельными
+route-тестами. Fixed-mesh AOT предоставляет численную телеметрию, но не общие
+AOT lifecycle-счётчики; выбранный маршрут проверяйте через `provenance()`.
 
 ```python
 from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
@@ -77,7 +84,9 @@ native-политикой его повторного использования
 (`[period, norm_threshold, speed_rate]`). Для `Frozen_naive` параметр
 `policy_parameters` не задаётся; для остальных он соответствует указанной
 форме. Выбранная политика доступна через `provenance()`, а результат содержит
-тот же detached telemetry contract, что и другие BVP_Damp-маршруты.
+тот же detached telemetry contract, что и другие BVP_Damp-маршруты. Публичный
+ключ `at_high_morm` сохраняет написание нативного API; `morm` здесь не отдельная
+величина или стратегия.
 
 ```python
 from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
@@ -112,7 +121,7 @@ iterative refinement и bounds передаются прямым wrapper-ом в
 
 | Область | Python keyword(s) | Примечание |
 | --- | --- | --- |
-| Дискретизация | `scheme="forward"` или `"trapezoid"` | Выбор схемы первого порядка |
+| Дискретизация | `scheme="forward"` или `"trapezoid"` | Выбор явной схемы Эйлера или трапециевидного правила; у них разные свойства точности и устойчивости |
 | Стратегия | `BvpDampSolver`, `BvpDampNaiveSolver` или `BvpDampFrozenSolver` | Каждый выбирает отдельный native-алгоритм; один не подменяется другим |
 | Нелинейный шаг | `tolerance`, `max_iterations`, `max_jacobian_refreshes`, `max_damping_iterations`, `damping_factor` | Newton/damping policy |
 | Сетка | `max_refinements`, `grid_method`, `grid_parameters` | Число параметров зависит от выбранного метода |

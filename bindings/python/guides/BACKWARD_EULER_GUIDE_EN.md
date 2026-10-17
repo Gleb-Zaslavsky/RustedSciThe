@@ -40,6 +40,11 @@ the fixed step or changing the interval.
 `h` is the fixed integration step, `tolerance` controls the nonlinear solve,
 and `max_iterations` bounds its work. Do not interpret the Newton tolerance
 as the global integration error. Use owned NumPy arrays for detached results.
+`continue_to(t_end, parameter_values=None)` advances from the last accepted
+state and retains the configured fixed step; it is a warm segment, not a fresh
+solve. `restart(t0, y0, t_end)` replaces the integration state and interval
+while keeping the prepared callbacks and fixed step. To change `h` or the
+equation structure, construct a new solver.
 
 ## AOT and diagnostics
 

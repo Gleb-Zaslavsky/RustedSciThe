@@ -9,6 +9,7 @@ from rustedscithe import facade
 
 from rustedscithe import (
     Expr,
+    InvalidConfigurationError,
     Lsode2Solver,
     SolverOptions,
     SymbolicSystem,
@@ -159,6 +160,61 @@ def test_facade_lsoda_alias_selects_automatic_controller_by_default():
         "lsoda", [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05, controller="adams"
     )
     assert pinned.solve().controller_mode == "adams_only"
+
+
+def test_facade_radau_forwards_default_parameter_values_and_allows_override():
+    y = Expr.variable("y")
+    rate = Expr.variable("rate")
+    solver = create_ivp(
+        "radau",
+        [-rate * y],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.05,
+        parameters=["rate"],
+        parameter_values=np.array([2.0]),
+    )
+
+    default_solution = solver.solve([1.0])
+    assert default_solution.final_state[0] == pytest.approx(math.exp(-0.4), rel=2e-6)
+
+    override_solution = solver.solve([1.0], [1.0])
+    assert override_solution.final_state[0] == pytest.approx(math.exp(-0.2), rel=2e-6)
+
+    one_shot = solve_ivp(
+        "radau",
+        [-rate * y],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.05,
+        parameters=["rate"],
+        parameter_values=[2.0],
+    )
+    assert one_shot.final_state[0] == pytest.approx(math.exp(-0.4), rel=2e-6)
+
+
+def test_facade_radau_rejects_mismatched_default_parameter_values():
+    y = Expr.variable("y")
+    rate = Expr.variable("rate")
+    with pytest.raises(InvalidConfigurationError, match="expected 1 parameter values, got 2"):
+        create_ivp(
+            "radau",
+            [-rate * y],
+            ["y"],
+            "t",
+            [1.0],
+            0.0,
+            0.2,
+            0.05,
+            parameters=["rate"],
+            parameter_values=[1.0, 2.0],
+        )
 
 
 def test_facade_batch_and_table_keep_later_tasks_after_failure(tmp_path):

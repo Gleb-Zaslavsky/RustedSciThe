@@ -68,3 +68,32 @@ def configured_bvp_routes() -> tuple[BvpSciSolver, BvpDampSolver]:
         "bvp_damp", [expression], ["y"], {"y": [(0, 1.0)]}, mesh, initial
     )
     return scipy_like, damped
+
+
+def configured_native_bvp_damp() -> BvpDampSolver:
+    """Check native BVP_Damp tuple constraints and flattened node-major input."""
+    expression = Expr.constant(0.0)
+    damped = BvpDampSolver(
+        [expression],
+        ["y"],
+        {"y": [(0, 1.0)]},
+        [0.0, 0.5, 1.0],
+        [1.0, 1.0, 1.0],
+        grid_method="easy",
+        grid_parameters=[0.5],
+        max_refinements=1,
+        bounds={"y": (-2.0, 2.0)},
+    )
+    damped.restart([1.0, 1.0, 1.0])
+    return damped
+
+
+def configured_native_bvp_sci() -> BvpSciSolver:
+    """Check the native BVP_sci restart contract uses a flat node-major vector."""
+    expression = Expr.constant(0.0)
+    mesh = [0.0, 0.5, 1.0]
+    solver = BvpSciSolver(
+        [expression], ["y"], [Expr.parse("ya_y - 1")], mesh, [1.0, 1.0, 1.0]
+    )
+    solver.restart(mesh, [1.0, 1.0, 1.0])
+    return solver
